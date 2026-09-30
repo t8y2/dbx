@@ -12,7 +12,7 @@ use mongodb::bson::{oid::ObjectId, Bson, DateTime, Decimal128, Document};
 use serde::{Deserialize, Serialize};
 
 use crate::connection::{task_client_session_id, AppState, PoolKind};
-use crate::csv_export::{push_csv_field, CsvQuoteMode};
+use crate::csv_export::{push_csv_field, strip_formula_guard, CsvQuoteMode};
 use crate::db::agent_driver::{AgentCapability, PooledAgentClient};
 use crate::db::mongo_driver::{
     self, document_to_canonical_extended_json, for_each_find_document, insert_bson_documents,
@@ -416,6 +416,7 @@ fn normalize_cell(value: &str, trim: bool) -> &str {
 
 fn csv_cell_text(value: &str, config: &CsvParseConfig) -> Option<String> {
     let value = normalize_cell(value, config.trim).trim_start_matches('\u{feff}');
+    let value = strip_formula_guard(value);
     if value.is_empty() {
         None
     } else {
@@ -427,7 +428,8 @@ fn unique_headers(headers: &[String]) -> Result<Vec<String>, MongoImportIssue> {
     let mut seen = HashSet::new();
     let mut names = Vec::with_capacity(headers.len());
     for (index, header) in headers.iter().enumerate() {
-        let name = header.trim().trim_start_matches('\u{feff}').to_string();
+        // 表头也走导出侧的公式中和（'-total 之类），剥离后才还原字段名
+        let name = strip_formula_guard(header.trim().trim_start_matches('\u{feff}')).to_string();
         if name.is_empty() {
             return Err(MongoImportIssue::new("EMPTY_HEADER", format!("CSV header at column {} is empty", index + 1))
                 .with_row(1));
@@ -2186,8 +2188,9 @@ fn json_at_field_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'
 fn push_csv_json_value(out: &mut String, value: Option<&serde_json::Value>) {
     match value {
         None | Some(serde_json::Value::Null) => {}
-        // Deliberately no spreadsheet formula guard: prefixing `'` to values starting with
-        // `= + - @` would make reimport see a different string than was exported.
+        // Spreadsheet formula guard applies in push_csv_field and is stripped back on
+        // import by strip_formula_guard (see csv_cell_text), so reimport still sees
+        // exactly the string that was exported.
         Some(serde_json::Value::String(value)) => push_csv_field(out, value, CsvQuoteMode::Necessary),
         Some(serde_json::Value::Bool(value)) => out.push_str(if *value { "true" } else { "false" }),
         Some(serde_json::Value::Number(value)) => out.push_str(&value.to_string()),
@@ -3725,6 +3728,10 @@ mod tests {
             "timestamp": Bson::Timestamp(Timestamp { time: 1234567890, increment: 1 }),
             "phonePrefix": "+86",
             "formula": "=SUM(A1:A10)",
+            "phoneLiteral": "'+8613800000000",
+            "doubledApostrophe": "''-edge",
+            "spacedFormula": " =cmd",
+            "-note": "header round trip",
             "numericString": "12345",
             "dateString": "2021-01-01T00:00:00Z",
         }];
@@ -3761,6 +3768,13 @@ mod tests {
         assert_eq!(doc.get_str("name").unwrap(), "Alice");
         assert_eq!(doc.get_str("phonePrefix").unwrap(), "+86");
         assert_eq!(doc.get_str("formula").unwrap(), "=SUM(A1:A10)");
+
+        // Guard round-trips: guarded formula text, escaped literal apostrophes ('' on
+        // export, one stripped on import), and the leading-space OWASP bypass
+        assert_eq!(doc.get_str("phoneLiteral").unwrap(), "'+8613800000000");
+        assert_eq!(doc.get_str("doubledApostrophe").unwrap(), "''-edge");
+        assert_eq!(doc.get_str("spacedFormula").unwrap(), " =cmd");
+        assert_eq!(doc.get_str("-note").unwrap(), "header round trip");
 
         // Numbers: Int32 stable, Int64 may become Int64 or Decimal128 depending on value
         assert_eq!(doc.get_i32("age").unwrap(), 30);

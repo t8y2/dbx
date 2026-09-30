@@ -583,6 +583,20 @@ export interface PluginMenusContribution {
 }
 
 /**
+ * Declares that the plugin sidecar speaks the optional MCP tool bridge
+ * (`mcp/tools` + `mcp/call`) and opts its tools into the host's automatic
+ * surfaces: the built-in AI agent and the external `dbx` MCP server. Both
+ * default to true; the Plugin Center switch still overrides the AI surface.
+ */
+export interface PluginMcpContribution {
+  type: "mcp";
+  id: string;
+  description?: string;
+  ai_tools?: boolean;
+  external_tools?: boolean;
+}
+
+/**
  * Contribution types the host renders through the plugin's own UI entrypoint in
  * a plugin tab. A `workbench` is launched from the sidebar, the plugin center,
  * or `host.openWorkbench`; a `result-view` is launched from the query-result
@@ -592,7 +606,7 @@ export interface PluginMenusContribution {
  */
 export type PluginUiContribution = PluginWorkbenchContribution | PluginResultViewContribution;
 
-export type PluginContribution = PluginConnectionProviderContribution | PluginWorkbenchContribution | PluginFilesystemProviderContribution | PluginContextMenuContribution | PluginResultViewContribution | PluginCommandContribution | PluginMenusContribution;
+export type PluginContribution = PluginConnectionProviderContribution | PluginWorkbenchContribution | PluginFilesystemProviderContribution | PluginContextMenuContribution | PluginResultViewContribution | PluginCommandContribution | PluginMenusContribution | PluginMcpContribution;
 
 export interface PluginEngines {
   dbx: string;
@@ -1426,6 +1440,8 @@ export interface QueryResultRun {
   resultPageSql?: string;
   resultPageLimit?: number;
   resultPageOffset?: number;
+  resultExecutedPageLimit?: number;
+  resultExecutedPageOffset?: number;
   resultCountSql?: string;
   resultTotalRowCount?: number;
   resultTotalRowCountLoading?: boolean;
@@ -1557,6 +1573,7 @@ export type TreeNodeType =
   | "event-trigger"
   | "object-browser"
   | "user-admin"
+  | "xugu-user-admin"
   | "dameng-users"
   | "dameng-roles"
   | "dameng-job-admin"
@@ -1768,6 +1785,7 @@ export interface TableStructureEditorDraft {
   originalMysqlAutoIncrementValue?: string;
   mysqlTableEngine?: string;
   originalMysqlTableEngine?: string;
+  physicalOptions?: import("@/lib/table/tablePhysicalOptions").TablePhysicalOptionsDraft;
   tableOwner?: string;
   originalTableOwner?: string;
   columns: import("@/lib/table/tableStructureEditorSql").EditableStructureColumn[];
@@ -1897,6 +1915,15 @@ export interface QueryTab {
   resultPageSql?: string;
   resultPageLimit?: number;
   resultPageOffset?: number;
+  /**
+   * Pagination of the execution that actually produced (or extended) the
+   * displayed result. `resultPageLimit`/`resultPageOffset` deliberately stay on
+   * the logical first page so a later refresh never re-runs only the appended
+   * tail segment; this pair mirrors the segment that ran instead, which the grid
+   * needs to show the SQL behind the current rows after "load all".
+   */
+  resultExecutedPageLimit?: number;
+  resultExecutedPageOffset?: number;
   resultCountSql?: string;
   resultTotalRowCount?: number;
   resultTotalRowCountLoading?: boolean;
@@ -1985,6 +2012,7 @@ export interface QueryTab {
     | "objects"
     | "structure"
     | "users"
+    | "xugu-users"
     | "dameng-users"
     | "dameng-roles"
     | "dameng-jobs"

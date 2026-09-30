@@ -4872,6 +4872,10 @@ fn postgres_indexes_for_relations_query_tiers() -> [&'static str; 2] {
 // `COALESCE(name, text)` resolves to `name`, so PostgreSQL silently truncates an
 // expression key part to 63 bytes (NAMEDATALEN - 1) and the rebuilt CREATE INDEX
 // becomes invalid SQL (#9988).
+// `constraint_backed` must require the constraint to be owned by the index's own
+// relation: a FOREIGN KEY stores the referenced table's unique index in
+// `conindid`, so matching on `conindid` alone marked that standalone index as
+// constraint-backed and dropped it from generated DDL (#10484).
 fn postgres_indexes_for_relations_sql() -> &'static str {
     "SELECT t.oid::bigint AS relid, i.relname AS index_name, \
              array_agg(COALESCE(a.attname::text, pg_get_indexdef(ix.indexrelid, k.n::int, false)) ORDER BY k.n) AS columns, \
@@ -4885,7 +4889,7 @@ fn postgres_indexes_for_relations_sql() -> &'static str {
              obj_description(i.oid, 'pg_class') AS index_comment, \
              array_agg(a.attname IS NULL ORDER BY k.n) AS key_is_expression, \
              array_agg(ix.indoption[(k.n - 1)::int] ORDER BY k.n) FILTER (WHERE k.n <= ix.indnkeyatts) AS key_options, \
-             EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.oid) AS constraint_backed \
+             EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.oid AND con.conrelid = ix.indrelid AND con.contype IN ('p', 'u', 'x')) AS constraint_backed \
              FROM pg_index ix \
              JOIN pg_class t ON t.oid = ix.indrelid \
              JOIN pg_class i ON i.oid = ix.indexrelid \
@@ -4942,7 +4946,7 @@ fn postgres_indexes_for_relations_compat_sql() -> &'static str {
                ORDER BY pos.n \
              ) AS key_is_expression, \
              string_to_array(ix.indoption::text, ' ')::smallint[] AS key_options, \
-             EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.oid) AS constraint_backed \
+             EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.oid AND con.conrelid = ix.indrelid AND con.contype IN ('p', 'u', 'x')) AS constraint_backed \
              FROM pg_index ix \
              JOIN pg_class t ON t.oid = ix.indrelid \
              JOIN pg_class i ON i.oid = ix.indexrelid \
@@ -7353,22 +7357,47 @@ pub async fn get_custom_type_details(pool: &Pool, schema: &str, name: &str) -> R
     })
 }
 
+/// Row/size estimates for the object browser, per schema.
+///
+/// `pg_class.reltuples` only moves when ANALYZE (or autovacuum) rewrites it, so a
+/// table that was written to — or never analyzed at all — keeps reporting its
+/// last known count, often `0` (#10461). `pg_stat_user_tables.n_live_tup` is the
+/// statistics collector's live estimate: it tracks DML within seconds and still
+/// avoids a `COUNT(*)` scan, which is what the UI promises in its column hint.
+const POSTGRES_OBJECT_STATISTICS_SQL: &str = "SELECT c.relname, \
+        GREATEST(COALESCE(s.n_live_tup, c.reltuples), 0)::bigint AS estimated_rows, \
+        pg_catalog.pg_total_relation_size(c.oid)::bigint AS total_bytes \
+ FROM pg_catalog.pg_class c \
+ JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+ LEFT JOIN pg_catalog.pg_stat_user_tables s ON s.relid = c.oid \
+ WHERE n.nspname = $1 AND c.relkind IN ('r','m','f','p') \
+ ORDER BY c.relname";
+
+/// Some Postgres-compatible engines do not expose `pg_stat_user_tables`; fall
+/// back to the ANALYZE-time estimate rather than dropping the columns entirely.
+const POSTGRES_OBJECT_STATISTICS_FALLBACK_SQL: &str = "SELECT c.relname, \
+        GREATEST(c.reltuples, 0)::bigint AS estimated_rows, \
+        pg_catalog.pg_total_relation_size(c.oid)::bigint AS total_bytes \
+ FROM pg_catalog.pg_class c \
+ JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+ WHERE n.nspname = $1 AND c.relkind IN ('r','m','f','p') \
+ ORDER BY c.relname";
+
 pub async fn list_object_statistics(pool: &Pool, schema: &str) -> Result<Vec<ObjectStatistics>, String> {
     let schema = if schema.is_empty() { "public" } else { schema };
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let rows = postgres_query_cached(
-        &client,
-        "SELECT c.relname, \
-                GREATEST(c.reltuples, 0)::bigint AS estimated_rows, \
-                pg_catalog.pg_total_relation_size(c.oid)::bigint AS total_bytes \
-         FROM pg_catalog.pg_class c \
-         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-         WHERE n.nspname = $1 AND c.relkind IN ('r','m','f','p') \
-         ORDER BY c.relname",
-        &[&schema],
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let rows = match postgres_query_cached(&client, POSTGRES_OBJECT_STATISTICS_SQL, &[&schema]).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            log::warn!(
+                "[postgres][object-statistics] live tuple estimate unavailable, falling back to reltuples: {}",
+                pg_error_to_string(error)
+            );
+            postgres_query_cached(&client, POSTGRES_OBJECT_STATISTICS_FALLBACK_SQL, &[&schema])
+                .await
+                .map_err(|e| e.to_string())?
+        }
+    };
     Ok(rows
         .iter()
         .map(|row| ObjectStatistics {
@@ -8996,6 +9025,10 @@ async fn execute_query_with_max_rows_inner(
 // `COALESCE(name, text)` resolves to `name`, so PostgreSQL silently truncates an
 // expression key part to 63 bytes (NAMEDATALEN - 1) and the rebuilt CREATE INDEX
 // becomes invalid SQL (#9988).
+// `constraint_backed` must require the constraint to be owned by the index's own
+// relation: a FOREIGN KEY stores the referenced table's unique index in
+// `conindid`, so matching on `conindid` alone marked that standalone index as
+// constraint-backed and dropped it from generated DDL (#10484).
 const POSTGRES_INDEXES_SQL: &str = "SELECT i.relname AS index_name, \
              array_agg(COALESCE(a.attname::text, pg_get_indexdef(ix.indexrelid, k.n::int, false)) ORDER BY k.n) AS columns, \
              array_agg(CASE WHEN oc.opcdefault THEN NULL ELSE quote_ident(opcns.nspname) || '.' || quote_ident(oc.opcname) END ORDER BY k.n) AS column_opclasses, \
@@ -9008,7 +9041,7 @@ const POSTGRES_INDEXES_SQL: &str = "SELECT i.relname AS index_name, \
              obj_description(i.oid, 'pg_class') AS index_comment, \
              array_agg(a.attname IS NULL ORDER BY k.n) AS key_is_expression, \
              array_agg(ix.indoption[(k.n - 1)::int] ORDER BY k.n) FILTER (WHERE k.n <= ix.indnkeyatts) AS key_options, \
-             EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.oid) AS constraint_backed \
+             EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.oid AND con.conrelid = ix.indrelid AND con.contype IN ('p', 'u', 'x')) AS constraint_backed \
              FROM pg_index ix \
              JOIN pg_class t ON t.oid = ix.indrelid \
              JOIN pg_class i ON i.oid = ix.indexrelid \
@@ -9064,7 +9097,7 @@ const POSTGRES_INDEXES_COMPAT_SQL: &str = "SELECT i.relname AS index_name, \
                ORDER BY pos.n \
              ) AS key_is_expression, \
              string_to_array(ix.indoption::text, ' ')::smallint[] AS key_options, \
-             EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.oid) AS constraint_backed \
+             EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.oid AND con.conrelid = ix.indrelid AND con.contype IN ('p', 'u', 'x')) AS constraint_backed \
              FROM pg_index ix \
              JOIN pg_class t ON t.oid = ix.indrelid \
              JOIN pg_class i ON i.oid = ix.indexrelid \
@@ -14193,7 +14226,12 @@ mod tests {
         ] {
             assert!(sql.contains("ix.indisunique AND ix.indisvalid"));
             assert!(sql.contains("AS constraint_backed"));
-            assert!(sql.contains("con.conindid = i.oid"));
+            // A foreign key's `conindid` is the referenced table's unique index, so the
+            // ownership check also requires the constraint to live on the same relation
+            // and to be an index-owning kind (#10484).
+            assert!(
+                sql.contains("con.conindid = i.oid AND con.conrelid = ix.indrelid AND con.contype IN ('p', 'u', 'x')")
+            );
         }
     }
 
@@ -15634,5 +15672,23 @@ mod tests {
         assert_eq!(parse_pg_partition_bound("NOT A BOUND"), None);
         // `IN` must not match the start of `INTO`.
         assert_eq!(parse_pg_partition_bound("FOR VALUES INTO (1)"), None);
+    }
+
+    #[test]
+    fn object_statistics_prefers_live_tuples_and_keeps_a_reltuples_fallback() {
+        // #10461: `reltuples` lags behind DML, so the live estimate must win when
+        // `pg_stat_user_tables` is available...
+        assert!(POSTGRES_OBJECT_STATISTICS_SQL.contains("pg_catalog.pg_stat_user_tables"));
+        assert!(POSTGRES_OBJECT_STATISTICS_SQL.contains("COALESCE(s.n_live_tup, c.reltuples)"));
+        // ...while an engine without that view still reports counts.
+        assert!(!POSTGRES_OBJECT_STATISTICS_FALLBACK_SQL.contains("pg_stat_user_tables"));
+        assert!(POSTGRES_OBJECT_STATISTICS_FALLBACK_SQL.contains("GREATEST(c.reltuples, 0)"));
+        for sql in [POSTGRES_OBJECT_STATISTICS_SQL, POSTGRES_OBJECT_STATISTICS_FALLBACK_SQL] {
+            // Both queries must keep the same projection so the row mapping stays valid.
+            assert!(sql.contains("AS estimated_rows"));
+            assert!(sql.contains("AS total_bytes"));
+            assert!(sql.contains("c.relkind IN ('r','m','f','p')"));
+            assert!(sql.contains("WHERE n.nspname = $1"));
+        }
     }
 }

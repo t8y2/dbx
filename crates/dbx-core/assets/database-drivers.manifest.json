@@ -1907,6 +1907,50 @@
       }
     },
     {
+      "dbType": "transwarp",
+      "label": "星环Inceptor",
+      "dialect": "Transwarp",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "transwarp",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 52,
+      "driverProfiles": [
+        {
+          "profile": "transwarp-inceptor",
+          "agentKey": "transwarp",
+          "label": "星环Inceptor",
+          "storeVisible": false
+        }
+      ],
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 10000,
+      "traits": {
+        "schemaAware": true
+      },
+      "supportLevel": "operate",
+      "capabilities": {
+        "queryExecution": true,
+        "metadataBrowse": true,
+        "objectBrowser": true,
+        "objectSource": true,
+        "schemaSearch": true,
+        "diagram": false,
+        "tableDataEdit": true,
+        "tableStructureEdit": true,
+        "tableImport": true,
+        "dataTransfer": true,
+        "sqlFileExecution": true,
+        "databaseCreate": true,
+        "fieldLineage": false,
+        "sqlExplain": false,
+        "userAdmin": false,
+        "driverManagement": true
+      }
+    },
+    {
       "dbType": "kyuubi",
       "label": "Apache Kyuubi",
       "runtimeMode": "agent",
@@ -2000,11 +2044,11 @@
         "diagram": true,
         "tableDataEdit": true,
         "tableStructureEdit": false,
-        "tableImport": false,
-        "dataTransfer": false,
+        "tableImport": true,
+        "dataTransfer": true,
         "sqlFileExecution": true,
         "databaseCreate": false,
-        "fieldLineage": false,
+        "fieldLineage": true,
         "sqlExplain": false,
         "userAdmin": false,
         "driverManagement": true
@@ -2072,6 +2116,46 @@
         "tableImport": false,
         "dataTransfer": false,
         "sqlFileExecution": true,
+        "databaseCreate": false,
+        "fieldLineage": false,
+        "sqlExplain": false,
+        "userAdmin": false,
+        "driverManagement": true
+      }
+    },
+    {
+      "dbType": "nebula",
+      "label": "NebulaGraph",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "nebula",
+      "driverProfiles": [
+        {
+          "profile": "nebula-v3",
+          "agentKey": "nebula",
+          "label": "NebulaGraph 3.x",
+          "storeVisible": false
+        }
+      ],
+      "driverStoreVisible": true,
+      "driverStoreOrder": 53,
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 9669,
+      "supportLevel": "browse",
+      "capabilities": {
+        "queryExecution": true,
+        "metadataBrowse": true,
+        "objectBrowser": true,
+        "objectSource": true,
+        "schemaSearch": false,
+        "diagram": false,
+        "tableDataEdit": false,
+        "tableStructureEdit": false,
+        "tableImport": false,
+        "dataTransfer": false,
+        "sqlFileExecution": false,
         "databaseCreate": false,
         "fieldLineage": false,
         "sqlExplain": false,

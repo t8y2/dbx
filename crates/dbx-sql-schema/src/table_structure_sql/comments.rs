@@ -1,6 +1,7 @@
 use super::dialect::{capabilities_for, database_label, dialect_label, StructureDialect};
 use super::types::TableStructureSqlOptions;
 use super::util::{clean, qualified_table, quote_string};
+use crate::models::connection::DatabaseType;
 
 pub(super) fn build_table_comment_sql(options: &TableStructureSqlOptions, warnings: &mut Vec<String>) -> Vec<String> {
     let capabilities = capabilities_for(options.database_type, options.driver_profile.as_deref());
@@ -19,6 +20,9 @@ pub(super) fn build_table_comment_sql(options: &TableStructureSqlOptions, warnin
     let dialect = capabilities.dialect;
     let table = qualified_table(dialect, options.schema.as_deref(), &options.table_name);
     let quoted = quote_string(&clean(new_comment));
+    if options.database_type == Some(DatabaseType::Transwarp) {
+        return vec![format!("ALTER TABLE {table} SET TBLPROPERTIES ('comment' = {quoted});")];
+    }
     match dialect {
         StructureDialect::Mysql | StructureDialect::GaussdbM => {
             vec![format!("ALTER TABLE {table} COMMENT = {quoted};")]

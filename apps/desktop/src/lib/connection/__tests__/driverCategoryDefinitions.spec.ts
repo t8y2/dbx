@@ -110,6 +110,7 @@ describe("AGENT_DRIVER_CATEGORY_MAP integrity", () => {
       "oceanbase-oracle",
       "oscar",
       "sundb",
+      "transwarp",
       "uxdb",
       "vastbase",
       "xugu",
@@ -124,6 +125,7 @@ describe("AGENT_DRIVER_CATEGORY_MAP integrity", () => {
       "mongodb",
       // graph_ai
       "neo4j",
+      "nebula",
       // timeseries
       "influxdb",
       "iotdb",

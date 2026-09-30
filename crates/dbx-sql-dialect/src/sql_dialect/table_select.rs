@@ -200,6 +200,9 @@ pub fn build_table_data_select_sql_with_database(
     if database_type == Some(DatabaseType::Neo4j) {
         return build_neo4j_table_select_sql(&options, limit);
     }
+    if database_type == Some(DatabaseType::Nebula) {
+        return build_nebula_table_select_sql(&options, limit);
+    }
     if database_type == Some(DatabaseType::Salesforce) {
         return build_salesforce_table_select_sql(&options, limit);
     }
@@ -782,7 +785,13 @@ pub(super) fn build_select_columns(
     // natively and users can narrow the projection by editing the SQL.
     if !matches!(
         database_type,
-        Some(DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo)
+        Some(
+            DatabaseType::Hive
+                | DatabaseType::Kyuubi
+                | DatabaseType::Impala
+                | DatabaseType::Argo
+                | DatabaseType::Transwarp
+        )
     ) {
         return "*".to_string();
     }
@@ -873,6 +882,38 @@ pub(super) fn build_db2_table_select_page_sql(
     )
 }
 
+/// Neo4j 5.0 replaced `id()` with `elementId()`, and servers before that only know `id()`, so the
+/// generated Cypher has to pick the spelling the connected server accepts. An unknown version keeps
+/// `elementId()`, which is what every caller without connection metadata got before.
+pub fn neo4j_element_id_function(server_version: Option<&str>) -> &'static str {
+    match neo4j_major_version(server_version) {
+        Some(major) if major < NEO4J_ELEMENT_ID_MIN_MAJOR_VERSION => NEO4J_LEGACY_ELEMENT_ID_FUNCTION,
+        _ => "elementId",
+    }
+}
+
+/// The identity function Neo4j used before 5.0. Unlike `elementId()`, which returns a string, it
+/// returns the node's internal `Integer` id, so callers comparing a value read from a grid have to
+/// compare numbers.
+pub const NEO4J_LEGACY_ELEMENT_ID_FUNCTION: &str = "id";
+
+/// Extracts the leading `major` from version strings such as `4.4.44`, `Neo4j/5.26.0` or
+/// `Neo4j/2025.01.0`. The product name itself contains a digit ("Neo4j"), so only a token that
+/// *starts* with digits counts as the version. Anything without one is treated as unknown.
+fn neo4j_major_version(server_version: Option<&str>) -> Option<u32> {
+    let version = server_version?.trim();
+    version.split(|character: char| !character.is_ascii_alphanumeric()).find_map(|token| {
+        let digits: String = token.chars().take_while(char::is_ascii_digit).collect();
+        if digits.is_empty() {
+            None
+        } else {
+            digits.parse().ok()
+        }
+    })
+}
+
+const NEO4J_ELEMENT_ID_MIN_MAJOR_VERSION: u32 = 5;
+
 pub(super) fn build_neo4j_table_select_sql(options: &TableDataSelectSqlOptions, limit: usize) -> String {
     let label = quote_table_identifier(Some(DatabaseType::Neo4j), &options.table_name);
     let predicate = normalize_where_input(options.where_input.as_deref());
@@ -891,13 +932,55 @@ pub(super) fn build_neo4j_table_select_sql(options: &TableDataSelectSqlOptions, 
             .join(", ")
     };
     let returns = format!(
-        "elementId(n) AS {}, {returned_columns}",
+        "{}(n) AS {}, {returned_columns}",
+        neo4j_element_id_function(options.server_version.as_deref()),
         quote_table_identifier(Some(DatabaseType::Neo4j), DBX_NEO4J_ELEMENT_ID_COLUMN)
     );
     let order_by = options.order_by.as_deref().filter(|order| !order.trim().is_empty());
     let order = order_by.map(|order_by| format!(" ORDER BY {order_by}")).unwrap_or_default();
     let skip = options.offset.filter(|offset| *offset > 0).map(|offset| format!(" SKIP {offset}")).unwrap_or_default();
     format!("MATCH (n:{label}){where_clause} RETURN {returns}{order}{skip} LIMIT {limit};")
+}
+
+fn build_nebula_table_select_sql(options: &TableDataSelectSqlOptions, limit: usize) -> String {
+    let quote = |name: &str| quote_table_identifier(Some(DatabaseType::Nebula), name);
+    let kind = quote(&options.table_name);
+    let is_edge = options.table_type.as_deref().is_some_and(|kind| kind.eq_ignore_ascii_case("VIEW"));
+    let (pattern, identity, projection) = if is_edge {
+        let projection = if options.columns.is_empty() {
+            "e AS `edge`".to_string()
+        } else {
+            options
+                .columns
+                .iter()
+                .map(|column| format!("e.{} AS {}", quote(column), quote(column)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        (format!("MATCH ()-[e:{kind}]->()"), "src(e) AS `_src`, dst(e) AS `_dst`, rank(e) AS `_rank`", projection)
+    } else {
+        let projection = if options.columns.is_empty() {
+            "v AS `vertex`".to_string()
+        } else {
+            options
+                .columns
+                .iter()
+                .map(|column| format!("v.{kind}.{} AS {}", quote(column), quote(column)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        (format!("MATCH (v:{kind})"), "id(v) AS `_vid`", projection)
+    };
+    let predicate = normalize_where_input(options.where_input.as_deref());
+    let where_clause = if predicate.is_empty() { String::new() } else { format!(" WHERE {predicate}") };
+    let order = options
+        .order_by
+        .as_deref()
+        .filter(|order| !order.trim().is_empty())
+        .map(|order| format!(" ORDER BY {order}"))
+        .unwrap_or_default();
+    let skip = options.offset.filter(|offset| *offset > 0).map(|offset| format!(" SKIP {offset}")).unwrap_or_default();
+    format!("{pattern}{where_clause} RETURN {identity}, {projection}{order}{skip} LIMIT {limit};")
 }
 
 /// Salesforce's `FIELDS(ALL)` selector is only legal with a LIMIT of 200 or less.
@@ -979,6 +1062,7 @@ mod tests {
             database_type: Some(database_type),
             driver_profile: None,
             identifier_quote: None,
+            server_version: None,
             schema: None,
             table_name: table.to_string(),
             catalog: catalog.map(|c| c.to_string()),

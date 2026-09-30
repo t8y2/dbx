@@ -44,9 +44,14 @@ test("stable Rust, Agent and overall gates always inspect selected upstream resu
     ["ci", "all", ["rust", "agents", "frontend", "packages", "windows-standard-check", "windows-win7-bundle", "duckdb-windows-driver", "nix-packaging"]],
   ]) {
     const content = job(name);
-    assert.match(content, /if: always\(\)/);
+    // A superseded run must not leave a failing gate behind: when the workflow is
+    // cancelled the selected upstream jobs are cancelled too, and `always()` alone
+    // would still run the gate and report those cancellations as failures.
+    assert.match(content, /if: always\(\) && !cancelled\(\)/);
     assert.ok(content.includes(`node .github/scripts/ci-gate.mjs ${mode}`));
     assert.ok(content.includes("${{ toJSON(needs) }}"));
+    assert.ok(content.includes("uses: actions/checkout@v7"));
+    assert.doesNotMatch(content, /actions\/setup-node|name: Setup Node\.js/);
     for (const dependency of dependencies) assert.match(content, new RegExp(`^      - ${dependency}$`, "m"));
   }
 });
@@ -167,7 +172,12 @@ test("Windows compatibility jobs cache Rust compilation without wrapping C or C+
 test("the planner uses the exact event base and preserves a single workflow cancellation scope", () => {
   const changes = job("changes");
   assert.ok(changes.includes("github.event.pull_request.base.sha || github.event.before"));
+  assert.ok(changes.includes('git fetch --no-tags --depth=1 origin "$BASE_SHA"'));
+  assert.ok(changes.includes("base: ${{ steps.change-base.outputs.sha }}"));
+  assert.ok(changes.includes("BASE_SHA: ${{ steps.change-base.outputs.sha }}"));
   assert.ok(changes.includes("node .github/scripts/ci-plan.mjs"));
+  assert.doesNotMatch(changes, /fetch-depth:\s*0/);
+  assert.doesNotMatch(changes, /dtolnay\/rust-toolchain/);
   for (const flag of ["rust", "rust_full", "rust_matrix", "agents", "agent_go", "agent_rust", "agent_integration", "plan"]) {
     assert.ok(changes.includes(`steps.plan.outputs.${flag}`));
   }

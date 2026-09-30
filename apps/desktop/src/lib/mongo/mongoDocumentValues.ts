@@ -103,7 +103,41 @@ export function mongoShellDateToExtendedJson(value: unknown): unknown {
   if (typeof value !== "string") return value;
   const match = value.trim().match(MONGO_SHELL_DATE_PATTERN);
   if (!match) return value;
-  return { $date: match[2] };
+  return { $date: normalizeMongoDateInput(match[2] ?? "") ?? match[2] };
+}
+
+/** `2025-04-01 19:46:03`, `2025/04/01`, `2025-04-01T19:46` … : a date with no zone, as people read one off a screen. */
+const MONGO_LOCAL_DATE_PATTERN = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[T ](\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3})\d*)?)?)?$/;
+/** The one spelling the server's `$date` parser accepts, kept as written. */
+const MONGO_RFC3339_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+/**
+ * Turns the date text a person types into the RFC 3339 string `$date` requires.
+ *
+ * The server accepts nothing else, but people paste what they see: a grid cell
+ * shows `2025-04-01 19:46:03`, a log line `2025-04-01`. Those name no zone, so
+ * they are read as local time, the way the person reads them, and sent as UTC.
+ * Text that already spells RFC 3339 is kept as written; any other spelling the
+ * platform can parse is canonicalised. Returns null when the text is no date.
+ */
+export function normalizeMongoDateInput(text: string): string | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  if (MONGO_RFC3339_DATE_PATTERN.test(trimmed) && !Number.isNaN(Date.parse(trimmed))) return trimmed;
+
+  const local = MONGO_LOCAL_DATE_PATTERN.exec(trimmed);
+  if (local) {
+    const [, year = "", month = "", day = "", hour = "0", minute = "0", second = "0", fraction = "0"] = local;
+    const parts = [Number(year), Number(month), Number(day), Number(hour), Number(minute), Number(second), Number(fraction.padEnd(3, "0"))] as const;
+    const date = new Date(parts[0], parts[1] - 1, parts[2], parts[3], parts[4], parts[5], parts[6]);
+    // `new Date(2025, 1, 30)` rolls over into March; a day that does not exist is a typo, not a date.
+    const exists = date.getFullYear() === parts[0] && date.getMonth() === parts[1] - 1 && date.getDate() === parts[2];
+    if (!exists || parts[3] > 23 || parts[4] > 59 || parts[5] > 59) return null;
+    return date.toISOString();
+  }
+
+  const parsed = Date.parse(trimmed);
+  return Number.isNaN(parsed) ? null : new Date(parsed).toISOString();
 }
 
 export function parseMongoDocumentInputValue(raw: MongoInputValue): unknown {
@@ -143,6 +177,93 @@ export function mongoDocumentDisplayValue(value: unknown): unknown {
   if (value && typeof value === "object" && !Array.isArray(value)) {
     const object = value as Record<string, unknown>;
     if (Object.keys(object).length === 1 && typeof object.$numberLong === "string") return `NumberLong(${JSON.stringify(object.$numberLong)})`;
+  }
+  return value;
+}
+
+/**
+ * Strings that are already shell-style BSON display literals. The driver ships
+ * dates as `ISODate("…")` text and the grid renders other typed scalars the same
+ * way, so inside arrays and subdocuments they must stay verbatim instead of
+ * being re-quoted (which produced the escaped `ISODate(\"…\")` mess).
+ */
+const MONGO_SHELL_DISPLAY_LITERAL_PATTERN = /^(?:ISODate|new Date|ObjectId|NumberLong|NumberInt|NumberDouble|NumberDecimal)\(\s*(["']).+\1\s*\)$/;
+
+/**
+ * Renders a browser/extended-JSON BSON value the way mongosh prints it, so an
+ * array cell reads `[ObjectId("…"), ISODate("…")]` instead of the internal
+ * `[{"$oid":"…"},"ISODate(\\\"…\\\")"]` encoding. Display-only: edit, copy and
+ * save paths keep the original JSON representation untouched.
+ */
+export function mongoDocumentDisplayText(value: unknown): string {
+  if (value === null || value === undefined) return "null";
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (typeof value === "string") return MONGO_SHELL_DISPLAY_LITERAL_PATTERN.test(value) ? value : JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((item) => mongoDocumentDisplayText(item)).join(", ")}]`;
+  if (typeof value === "object") {
+    const object = value as Record<string, unknown>;
+    const wrapper = mongoShellWrapperDisplayText(object);
+    if (wrapper !== undefined) return wrapper;
+    return `{${Object.entries(object)
+      .map(([key, item]) => `${JSON.stringify(key)}: ${mongoDocumentDisplayText(item)}`)
+      .join(", ")}}`;
+  }
+  return JSON.stringify(String(value));
+}
+
+function mongoShellWrapperDisplayText(object: Record<string, unknown>): string | undefined {
+  const keys = Object.keys(object);
+  if (keys.length !== 1) return undefined;
+  const inner = object[keys[0] ?? ""];
+  switch (keys[0]) {
+    case "$oid":
+      return typeof inner === "string" ? `ObjectId(${JSON.stringify(inner)})` : undefined;
+    case "$numberLong":
+      return typeof inner === "string" ? `NumberLong(${JSON.stringify(inner)})` : undefined;
+    case "$numberInt":
+      return typeof inner === "string" ? `NumberInt(${JSON.stringify(inner)})` : undefined;
+    case "$numberDouble":
+      return typeof inner === "string" ? `NumberDouble(${JSON.stringify(inner)})` : undefined;
+    case "$numberDecimal":
+      return typeof inner === "string" ? `NumberDecimal(${JSON.stringify(inner)})` : undefined;
+    case "$date":
+      return mongoShellDateWrapperDisplayText(inner);
+    case "$minKey":
+      return "MinKey()";
+    case "$maxKey":
+      return "MaxKey()";
+    default:
+      return undefined;
+  }
+}
+
+function mongoShellDateWrapperDisplayText(inner: unknown): string | undefined {
+  if (typeof inner === "string") return `ISODate(${JSON.stringify(inner)})`;
+  if (inner && typeof inner === "object" && !Array.isArray(inner)) {
+    const long = (inner as Record<string, unknown>).$numberLong;
+    if (typeof long === "string" && /^-?\d+$/.test(long)) {
+      const millis = Number(long);
+      // Dates beyond the JS Date range cannot round-trip through toISOString();
+      // fall back to the raw wrapper instead of throwing past the grid formatter.
+      if (Number.isFinite(millis) && Math.abs(millis) <= 8.64e15) {
+        return `ISODate(${JSON.stringify(new Date(millis).toISOString())})`;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Relaxed Extended JSON for read-only document previews: the browser form keeps
+ * dates as `ISODate("…")` strings, and the preview must show them as
+ * `{"$date": "…"}` like MongoDB Compass instead of escaped shell text.
+ */
+export function mongoDocumentRelaxedExtendedJson(value: unknown): unknown {
+  const date = mongoShellDateToExtendedJson(value);
+  if (date !== value) return date;
+  if (Array.isArray(value)) return value.map((item) => mongoDocumentRelaxedExtendedJson(item));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, mongoDocumentRelaxedExtendedJson(item)]));
   }
   return value;
 }
@@ -195,14 +316,19 @@ export function mongoDocumentGridDisplayText(value: unknown, formatter?: ColumnF
 }
 
 function formatMongoDocumentGridJson(json: string, formatter: ColumnFormatterConfig | undefined): string {
-  if (formatter?.kind !== "datetime" || !validMongoDisplayTimeZone(formatter.timezone)) return json;
+  let value: unknown;
   try {
-    const transformed = formatMongoDocumentDates(JSON.parse(json), formatter);
-    if (!transformed.changed) return json;
-    return typeof transformed.value === "string" ? transformed.value : JSON.stringify(transformed.value);
+    value = JSON.parse(json);
   } catch {
     return json;
   }
+  if (formatter?.kind === "datetime" && validMongoDisplayTimeZone(formatter.timezone)) {
+    const transformed = formatMongoDocumentDates(value, formatter);
+    if (transformed.changed) return typeof transformed.value === "string" ? transformed.value : mongoDocumentDisplayText(transformed.value);
+  }
+  // Shell-style structure text keeps BSON types inside arrays/subdocuments
+  // readable (`[ObjectId("…"), ISODate("…")]`) instead of raw JSON wrappers.
+  return mongoDocumentDisplayText(value);
 }
 
 function validMongoDisplayTimeZone(timeZone: string | undefined): boolean {
@@ -454,7 +580,8 @@ export function mongoDocumentIdForGrid(value: unknown): MongoInputValue {
   return JSON.stringify(value);
 }
 
-function isMongoExtendedJsonId(value: unknown): value is Record<string, unknown> {
+/** A single typed scalar wrapper (`{$oid}` / `{$numberLong}`) the grid shows compactly. */
+export function isMongoExtendedJsonId(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const object = value as Record<string, unknown>;
   const keys = Object.keys(object);

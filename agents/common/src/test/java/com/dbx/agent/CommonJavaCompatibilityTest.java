@@ -7,10 +7,11 @@ import com.google.gson.JsonParser;
 import org.junit.jupiter.api.Test;
 
 import java.sql.Connection;
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.PipedInputStream;
+import java.io.PipedOutputStream;
 import java.io.PrintStream;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
@@ -289,27 +290,55 @@ class CommonJavaCompatibilityTest {
     }
 
     @Test
-    void multiSessionServerKeepsProtocolOutputWhenGlobalStdoutChanges() {
+    void multiSessionServerUsesUtf8ProtocolWhenGlobalStdoutChanges() throws Exception {
         synchronized (System.class) {
             InputStream originalInput = System.in;
             PrintStream originalOutput = System.out;
             ByteArrayOutputStream protocolBytes = new ByteArrayOutputStream();
             ByteArrayOutputStream redirectedBytes = new ByteArrayOutputStream();
-            try (PrintStream protocolOutput = new PrintStream(protocolBytes, true, StandardCharsets.UTF_8);
-                 PrintStream redirectedOutput = new PrintStream(redirectedBytes, true, StandardCharsets.UTF_8)) {
+            try (PrintStream protocolOutput = new PrintStream(protocolBytes, true, java.nio.charset.Charset.forName("GBK"));
+                 PrintStream redirectedOutput = new PrintStream(redirectedBytes, true, StandardCharsets.UTF_8);
+                 PipedInputStream requestInput = new PipedInputStream();
+                 PipedOutputStream requestWriter = new PipedOutputStream(requestInput)) {
                 System.setOut(protocolOutput);
-                MultiSessionJsonRpcServer server = new MultiSessionJsonRpcServer(MinimalAgent::new);
-                System.setIn(new ByteArrayInputStream(
-                    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"shutdown\",\"params\":{}}\n"
-                        .getBytes(StandardCharsets.UTF_8)
-                ));
+                MultiSessionJsonRpcServer server = MultiSessionJsonRpcServer.forSessionHandlers(() -> new SessionRpcHandler() {
+                    @Override
+                    public Object connect(JsonObject params) {
+                        return Collections.singletonMap("label", "dbx\u4e2d\u6587");
+                    }
+
+                    @Override
+                    public Object handle(String method, JsonObject params) {
+                        return Collections.singletonMap("ok", true);
+                    }
+
+                    @Override
+                    public void close() {
+                    }
+                });
+                System.setIn(requestInput);
                 System.setOut(redirectedOutput);
-
-                server.run();
-
-                String protocol = protocolBytes.toString(StandardCharsets.UTF_8);
-                assertTrue(protocol.contains("{\"ready\":true}"), protocol);
-                assertTrue(protocol.contains("\"id\":1"), protocol);
+                Thread runner = new Thread(server::run, "dbx-utf8-protocol-test");
+                runner.setDaemon(true);
+                runner.start();
+                try {
+                    requestWriter.write("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"test_connection\",\"params\":{}}\n"
+                        .getBytes(StandardCharsets.UTF_8));
+                    requestWriter.flush();
+                    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                    while (!protocolBytes.toString(StandardCharsets.UTF_8).contains("dbx\u4e2d\u6587")
+                        && runner.isAlive() && System.nanoTime() < deadline) {
+                        Thread.sleep(10);
+                    }
+                    String protocol = protocolBytes.toString(StandardCharsets.UTF_8);
+                    assertTrue(protocol.contains("{\"ready\":true}"), protocol);
+                    assertTrue(protocol.contains("\"id\":1"), protocol);
+                    assertTrue(protocol.contains("dbx\u4e2d\u6587"), protocol);
+                } finally {
+                    requestWriter.close();
+                    runner.join(TimeUnit.SECONDS.toMillis(5));
+                }
+                assertFalse(runner.isAlive(), "Protocol server did not stop after input closed");
                 assertEquals("", redirectedBytes.toString(StandardCharsets.UTF_8));
             } finally {
                 System.setIn(originalInput);
@@ -594,6 +623,33 @@ class CommonJavaCompatibilityTest {
                 "CREATE INDEX \"orders_name_idx\" ON \"public\".\"orders\" (\"name\");",
             ddl
         );
+    }
+
+    @Test
+    void buildsPostgresIndexDdlWithPerKeyOrderingOptions() {
+        IndexInfo index = new IndexInfo(
+            "orders_id_order_idx",
+            Arrays.asList("id", "created_at"),
+            false,
+            false,
+            null,
+            "btree",
+            null,
+            null
+        );
+        index.setKey_options(Arrays.asList(0, 3));
+
+        String ddl = DdlBuilder.buildTableDdl(
+            "public",
+            "orders",
+            Collections.singletonList(new ColumnInfo("id", "bigint", false, null, false)),
+            Collections.singletonList(index),
+            Collections.emptyList()
+        );
+
+        assertTrue(ddl.contains(
+            "USING btree (\"id\" ASC NULLS LAST, \"created_at\" DESC NULLS FIRST)"
+        ));
     }
 
     @Test

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import { Check, ChevronDown, Copy, Eye, Loader2, Map, Plus, RefreshCcw, RotateCcw, Rows3, Save, TableProperties, Trash2, Upload } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -46,6 +46,18 @@ const props = defineProps<{
 }>();
 
 const autoRefreshIntervals = computed(() => (props.autoRefresh ? dataGridToolbarIntervalOptions(props.autoRefresh.intervalOptions, props.autoRefresh.intervalSeconds) : []));
+
+// Each dropdown is wrapped in a Tooltip so its button keeps a hover hint, but a
+// TooltipTrigger claims the popper anchor for its own popper root. Pointing the
+// menu at the button element directly keeps the surface positioned on screen.
+const autoRefreshTriggerRef = ref<HTMLElement | { $el?: HTMLElement }>();
+const exportTriggerRef = ref<HTMLElement | { $el?: HTMLElement }>();
+
+function toolbarTriggerElement(trigger: HTMLElement | { $el?: HTMLElement } | undefined): HTMLElement | undefined {
+  if (!trigger) return undefined;
+  return trigger instanceof HTMLElement ? trigger : trigger.$el;
+}
+
 const visibleActionOrder = computed<DataGridToolbarActionKey[]>(() => {
   const visibility: Record<DataGridToolbarActionKey, boolean> = {
     refresh: isDataGridToolbarCapabilityVisible(props.refresh),
@@ -94,22 +106,27 @@ function actionLabelClass(action: DataGridToolbarActionKey) {
     </Tooltip>
 
     <DropdownMenu v-if="isDataGridToolbarCapabilityVisible(autoRefresh)">
-      <DropdownMenuTrigger as-child>
-        <Button
-          variant="ghost"
-          size="sm"
-          data-toolbar-action="autoRefresh"
-          :class="[...actionButtonClass('autoRefresh'), autoRefresh?.enabled ? 'bg-primary/10 text-primary hover:bg-primary/15' : 'text-muted-foreground hover:text-foreground']"
-          :disabled="isDataGridToolbarCapabilityDisabled(autoRefresh)"
-          :title="autoRefresh?.label"
-          :aria-label="autoRefresh?.label"
-          :aria-pressed="autoRefresh?.enabled"
-        >
-          <DataGridAutoRefreshClock :enabled="autoRefresh?.enabled === true" :interval-seconds="autoRefresh?.intervalSeconds" :sweep-key="autoRefresh?.sweepKey" />
-          <span class="data-grid-topbar-action-label" :class="actionLabelClass('autoRefresh')">{{ autoRefresh?.enabled ? `${autoRefresh.intervalSeconds}s` : autoRefresh?.shortLabel }}</span>
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" class="w-40">
+      <Tooltip>
+        <TooltipTrigger as-child>
+          <DropdownMenuTrigger as-child>
+            <Button
+              ref="autoRefreshTriggerRef"
+              variant="ghost"
+              size="sm"
+              data-toolbar-action="autoRefresh"
+              :class="[...actionButtonClass('autoRefresh'), autoRefresh?.enabled ? 'bg-primary/10 text-primary hover:bg-primary/15' : 'text-muted-foreground hover:text-foreground']"
+              :disabled="isDataGridToolbarCapabilityDisabled(autoRefresh)"
+              :aria-label="autoRefresh?.label"
+              :aria-pressed="autoRefresh?.enabled"
+            >
+              <DataGridAutoRefreshClock :enabled="autoRefresh?.enabled === true" :interval-seconds="autoRefresh?.intervalSeconds" :sweep-key="autoRefresh?.sweepKey" />
+              <span class="data-grid-topbar-action-label" :class="actionLabelClass('autoRefresh')">{{ autoRefresh?.enabled ? `${autoRefresh.intervalSeconds}s` : autoRefresh?.shortLabel }}</span>
+            </Button>
+          </DropdownMenuTrigger>
+        </TooltipTrigger>
+        <TooltipContent side="bottom">{{ autoRefresh?.label ?? autoRefresh?.shortLabel }}</TooltipContent>
+      </Tooltip>
+      <DropdownMenuContent :reference="toolbarTriggerElement(autoRefreshTriggerRef)" align="end" class="w-40">
         <DropdownMenuItem class="gap-2" :disabled="autoRefresh?.disabled" @select="void toggleDataGridToolbarAutoRefresh(autoRefresh)">
           <Check v-if="autoRefresh?.enabled" class="h-3.5 w-3.5" />
           <span v-else class="h-3.5 w-3.5" />
@@ -196,7 +213,7 @@ function actionLabelClass(action: DataGridToolbarActionKey) {
       <Tooltip>
         <TooltipTrigger as-child>
           <DropdownMenuTrigger as-child>
-            <Button data-toolbar-action="exportData" variant="ghost" size="sm" :class="actionButtonClass('exportData')" :disabled="exportData?.disabled || !exportData?.items.length">
+            <Button ref="exportTriggerRef" data-toolbar-action="exportData" variant="ghost" size="sm" :class="actionButtonClass('exportData')" :disabled="exportData?.disabled || !exportData?.items.length">
               <Upload class="data-grid-topbar-action-icon h-3 w-3" />
               <span class="data-grid-topbar-action-label" :class="actionLabelClass('exportData')">{{ exportData?.label }}</span>
             </Button>
@@ -204,7 +221,7 @@ function actionLabelClass(action: DataGridToolbarActionKey) {
         </TooltipTrigger>
         <TooltipContent side="bottom">{{ exportData?.label }}</TooltipContent>
       </Tooltip>
-      <DropdownMenuContent align="end" class="min-w-52">
+      <DropdownMenuContent :reference="toolbarTriggerElement(exportTriggerRef)" align="end" class="min-w-52">
         <template v-for="item in exportData?.items ?? []" :key="item.value">
           <DropdownMenuSeparator v-if="item.separatorBefore" />
           <DropdownMenuItem :disabled="item.disabled" @select="void selectDataGridToolbarExportItem(exportData, item.value)">

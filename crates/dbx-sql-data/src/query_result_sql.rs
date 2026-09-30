@@ -335,6 +335,9 @@ pub fn build_count_query_sql(options: CountQuerySqlOptions) -> QuerySqlBuildResu
     if unsupported_pagination_type(options.database_type) {
         return err("unsupported");
     }
+    if options.database_type == Some(DatabaseType::Cassandra) {
+        return err("unsupported");
+    }
     let (execution_hint, statement) = split_leading_execution_hint(&statement, options.database_type);
     // A locking clause does not affect cardinality and cannot appear inside
     // every dialect's derived-table count query. PostgreSQL permits pagination
@@ -556,6 +559,7 @@ fn unsupported_pagination_type(database_type: Option<DatabaseType>) -> bool {
         database_type,
         Some(
             DatabaseType::Neo4j
+                | DatabaseType::Nebula
                 | DatabaseType::MongoDb
                 | DatabaseType::Redis
                 | DatabaseType::Salesforce
@@ -4782,6 +4786,25 @@ WHERE u.id = picked.id;
 
         assert!(plan.use_agent_result_session);
         assert_eq!(plan.page_offset, Some(200));
+    }
+
+    #[test]
+    fn cassandra_offset_jump_keeps_agent_result_session_without_sql_pagination() {
+        let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: "SELECT * FROM events".to_string(),
+            query_base_sql: "SELECT * FROM events".to_string(),
+            database_type: Some(DatabaseType::Cassandra),
+            pagination: QueryPagination { limit: 100, offset: 200, session_id: None },
+            use_agent_cursor: true,
+            first_page_uses_actual_sql: false,
+        });
+
+        assert_eq!(plan.sql_to_execute, "SELECT * FROM events;");
+        assert_eq!(plan.page_limit, Some(100));
+        assert_eq!(plan.page_offset, Some(200));
+        assert!(plan.page_sql.is_some());
+        assert!(plan.count_sql.is_none());
+        assert!(plan.use_agent_result_session);
     }
 
     #[test]

@@ -420,6 +420,11 @@ export const forgetWebdavSavedPassword = forward("forgetWebdavSavedPassword");
 export const webdavSyncSecretsStatus = forward("webdavSyncSecretsStatus");
 export const saveWebdavSyncSecretsPreference = forward("saveWebdavSyncSecretsPreference");
 export const forgetWebdavSyncSecretsPassphrase = forward("forgetWebdavSyncSecretsPassphrase");
+export const cloudSyncLocalCatalog = forward("cloudSyncLocalCatalog");
+export const localBackupExport = forward("localBackupExport");
+export const localBackupInspect = forward("localBackupInspect");
+export const localBackupImport = forward("localBackupImport");
+export const webdavSyncInspect = forward("webdavSyncInspect");
 export const webdavSyncUpload = forward("webdavSyncUpload");
 export const webdavSyncDownload = forward("webdavSyncDownload");
 export const snippetSyncTest = forward("snippetSyncTest");
@@ -427,6 +432,7 @@ export const snippetTokenStatus = forward("snippetTokenStatus");
 export const saveSnippetSavedToken = forward("saveSnippetSavedToken");
 export const forgetSnippetSavedToken = forward("forgetSnippetSavedToken");
 export const snippetSyncSettings = forward("snippetSyncSettings");
+export const snippetSyncInspect = forward("snippetSyncInspect");
 export const saveSnippetSyncId = forward("saveSnippetSyncId");
 export const retrySnippetLegacyCleanup = forward("retrySnippetLegacyCleanup");
 export const snippetSyncUpload = forward("snippetSyncUpload");
@@ -996,6 +1002,10 @@ export type {
   WebDavConfig,
   WebDavPasswordStatus,
   WebDavSyncSummary,
+  SyncCatalogItem,
+  PluginUiStorageItemRef,
+  SyncSelection,
+  SyncSnapshotCatalog,
   WebDavDownloadResult,
   SnippetProvider,
   SnippetSyncConfig,

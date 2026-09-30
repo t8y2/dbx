@@ -56,6 +56,7 @@ pub fn is_schema_aware(database_type: DatabaseType) -> bool {
             | DatabaseType::Kyuubi
             | DatabaseType::Impala
             | DatabaseType::Argo
+            | DatabaseType::Transwarp
             | DatabaseType::Spark
             | DatabaseType::Db2
             | DatabaseType::Informix
@@ -101,6 +102,11 @@ pub fn uses_single_row_insert_statements(database_type: DatabaseType) -> bool {
 pub fn pagination_strategy(database_type: Option<DatabaseType>, context: PaginationContext) -> TablePaginationStrategy {
     match database_type {
         Some(DatabaseType::Jdbc) => TablePaginationStrategy::AgentMaxRows,
+        Some(DatabaseType::Cassandra)
+            if matches!(context, PaginationContext::TablePreview | PaginationContext::UserQuery) =>
+        {
+            TablePaginationStrategy::AgentMaxRows
+        }
         Some(DatabaseType::Oracle) if matches!(context, PaginationContext::TablePreview) => {
             TablePaginationStrategy::Rownum
         }

@@ -3,8 +3,12 @@ import { computed, nextTick, onMounted, ref, watch } from "vue";
 import type { FocusOutsideEvent, PointerDownOutsideEvent } from "reka-ui";
 import { CalendarClock, ChevronDown, ChevronUp, CircleSlash } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
+import { isSaveShortcut } from "@/lib/editor/keyboardShortcuts";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { formatTemporalInputValue, hostTimezoneOffsetSuffix, parseTemporalInputValue, stepTemporalInputValue, temporalOffsetSuffix, type TemporalCellEditorKind } from "@/lib/dataGrid/dataGridTemporalEditor";
+
+const settingsStore = useSettingsStore();
 
 const props = withDefaults(
   defineProps<{
@@ -28,6 +32,7 @@ const emit = defineEmits<{
   "update:modelValue": [value: string];
   commit: [];
   cancel: [];
+  save: [];
 }>();
 
 const open = ref(false);
@@ -102,6 +107,10 @@ function setOpen(value: boolean) {
 
 function setModelValue(value: string, normalize = false) {
   const nextValue = normalize ? (props.normalizeValue?.(value) ?? value) : value;
+  // 用户重新输入即解除 closeHandled 闩锁：值编辑器面板里同一实例持续挂载，
+  // 失焦/关板提交（#10667）要求闩锁只覆盖「本次已提交」，否则首次提交后
+  // 后续编辑的 blur 永远不再提交。网格实例提交即卸载，复位对其无影响。
+  closeHandled = false;
   localValue.value = nextValue;
   emit("update:modelValue", nextValue);
 }
@@ -206,6 +215,14 @@ function finishCommit() {
   closeHandled = true;
   isCommitting = true;
   emit("commit");
+  // 值编辑器面板用 commitValueEditorEdit 保持同一实例不卸载（以便连续编辑），
+  // isCommitting 若一直闩锁，第二次 ctrl+s/Enter 会在上面的短路处被吞掉（#10515）。
+  // 本 tick 内仍防重入；下一个微任务复位，让持续挂载的实例可再次提交。
+  // closeHandled 不按时间复位——它标记「本次编辑已收尾」，避免提交后的 blur
+  // 再触发一次；用户重新输入时在 setModelValue 里解除（#10667）。
+  nextTick(() => {
+    isCommitting = false;
+  });
 }
 
 function finishCancel() {
@@ -213,9 +230,21 @@ function finishCancel() {
   closeHandled = true;
   isCommitting = true;
   emit("cancel");
+  nextTick(() => {
+    isCommitting = false;
+  });
 }
 
 function onKeydown(event: KeyboardEvent) {
+  // 编辑器的 keydown 一律 stop 掉，因此网格上的保存快捷键不会冒泡过去；
+  // 这里必须自己识别并转发，否则 datetime/date/time 单元格编辑期间按 Ctrl/Cmd+S 会被静默丢弃。
+  if (isSaveShortcut(event, settingsStore.editorSettings.shortcuts)) {
+    event.preventDefault();
+    flushInputValue(event.target);
+    finishCommit();
+    emit("save");
+    return;
+  }
   if (event.key === "Enter") {
     event.preventDefault();
     flushInputValue(event.target);

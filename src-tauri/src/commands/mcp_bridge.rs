@@ -340,6 +340,8 @@ async fn read_bridge_request(stream: &mut tokio::net::TcpStream) -> Option<Strin
             let end = scanned + pos + BRIDGE_HEADER_TERMINATOR.len();
             header_end = Some(end);
             content_length = parse_content_length(&String::from_utf8_lossy(&buf[..end]));
+            // The same read may already contain the complete body (or no body).
+            continue;
         } else {
             scanned = buf.len().saturating_sub(BRIDGE_HEADER_TERMINATOR.len() - 1);
         }
@@ -513,6 +515,77 @@ mod tests {
         client.write_all(&bytes[4096..]).await.unwrap();
         let parsed = reader.await.unwrap();
         assert!(parsed.ends_with(&body), "body must arrive complete, not truncated");
+    }
+
+    async fn wait_for_queued_request(stream: &tokio::net::TcpStream, expected_len: usize) {
+        let mut queued = vec![0u8; expected_len];
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if stream.peek(&mut queued).await.unwrap() >= expected_len {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("request bytes must be queued before the reader starts");
+    }
+
+    async fn read_complete_request_while_writer_stays_open(request: &[u8]) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (mut server, _) = listener.accept().await.unwrap();
+        use tokio::io::AsyncWriteExt;
+        client.write_all(request).await.unwrap();
+        wait_for_queued_request(&server, request.len()).await;
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), read_bridge_request(&mut server))
+            .await
+            .expect("complete request must not wait for another read")
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn bridge_reads_complete_small_request_while_writer_stays_open() {
+        let request = b"POST /x HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 2\r\n\r\n{}";
+
+        assert_eq!(read_complete_request_while_writer_stays_open(request).await.as_bytes(), request);
+    }
+
+    #[tokio::test]
+    async fn bridge_reads_zero_length_body_while_writer_stays_open() {
+        let request = b"POST /x HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\r\n";
+
+        assert_eq!(read_complete_request_while_writer_stays_open(request).await.as_bytes(), request);
+    }
+
+    #[tokio::test]
+    async fn bridge_reads_complete_body_in_fragment_that_finishes_header_delimiter() {
+        let first = b"POST /x HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 2\r\n\r";
+        let last = b"\n{}";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (mut server, _) = listener.accept().await.unwrap();
+        use tokio::io::AsyncWriteExt;
+        client.write_all(first).await.unwrap();
+        wait_for_queued_request(&server, first.len()).await;
+        let mut reader = Box::pin(read_bridge_request(&mut server));
+        // Consume the queued prefix before providing the delimiter's final bytes.
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(reader.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        client.write_all(last).await.unwrap();
+
+        let parsed = tokio::time::timeout(std::time::Duration::from_secs(1), reader)
+            .await
+            .expect("complete final fragment must not wait for another read")
+            .unwrap();
+        let expected = [first.as_slice(), last.as_slice()].concat();
+        assert_eq!(parsed.as_bytes(), expected);
     }
 
     #[test]

@@ -1454,6 +1454,12 @@ mod tests {
     }
 }
 
+fn route_external_commands(
+    main_handler: impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static,
+) -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
+    dbx_tauri_consul::route(dbx_tauri_schema::route(main_handler))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Metadata/completion command chains nest very large async futures and can
@@ -1773,7 +1779,31 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            // Anchor the plugin-file drop consent on the Rust side: paths are
+            // registered for the webview that physically received the drop,
+            // and plugin_file_open_dropped consumes them there. Folders are
+            // granted as themselves and expand to their contained files at
+            // open time. Renderer-side drop events stay display-only; they
+            // cannot mint file access.
+            if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+                let dropped: Vec<String> = paths
+                    .iter()
+                    .filter(|path| path.is_file() || path.is_dir())
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect();
+                if !dropped.is_empty() {
+                    if let Some(state) = window.try_state::<commands::plugin_file::PluginFileState>() {
+                        state.register_dropped_paths(window.label(), dropped);
+                    }
+                }
+                return;
+            }
             if let tauri::WindowEvent::Destroyed = event {
+                // A webview that no longer exists must not leave drop grants
+                // behind for a future renderer to claim.
+                if let Some(state) = window.try_state::<commands::plugin_file::PluginFileState>() {
+                    state.clear_dropped_paths(window.label());
+                }
                 if let Some(tab_id) = window.label().strip_prefix("detached-tab-") {
                     let _ = window.emit("dbx:detached-tab-lost", serde_json::json!({ "tabId": tab_id }));
                 }
@@ -1804,7 +1834,7 @@ pub fn run() {
                 request_app_close(app, "settings");
             }
         })
-        .invoke_handler(migration_gate::guard_handler(dbx_tauri_consul::route(tauri::generate_handler![
+        .invoke_handler(migration_gate::guard_handler(route_external_commands(tauri::generate_handler![
             commands::ai::ai_complete,
             commands::ai::ai_stream,
             commands::ai::ai_agent_stream,
@@ -1850,6 +1880,8 @@ pub fn run() {
             commands::app_settings::save_mcp_history_retention_limit,
             commands::app_settings::load_max_retries,
             commands::app_settings::save_max_retries,
+            commands::app_settings::load_app_appearance_settings,
+            commands::app_settings::update_app_appearance_settings,
             commands::app_settings::set_app_locale,
             commands::app_settings::complete_app_close,
             commands::app_settings::mark_frontend_ready,
@@ -1902,6 +1934,8 @@ pub fn run() {
             commands::cloud_sync::forget_webdav_sync_secrets_passphrase,
             commands::cloud_sync::webdav_sync_upload,
             commands::cloud_sync::webdav_sync_download,
+            commands::cloud_sync::webdav_sync_inspect,
+            commands::cloud_sync::cloud_sync_local_catalog,
             commands::cloud_sync::snippet_sync_test,
             commands::cloud_sync::snippet_token_status,
             commands::cloud_sync::save_snippet_saved_token,
@@ -1911,6 +1945,10 @@ pub fn run() {
             commands::cloud_sync::retry_snippet_legacy_cleanup,
             commands::cloud_sync::snippet_sync_upload,
             commands::cloud_sync::snippet_sync_download,
+            commands::cloud_sync::snippet_sync_inspect,
+            commands::local_backup::local_backup_export,
+            commands::local_backup::local_backup_inspect,
+            commands::local_backup::local_backup_import,
             commands::connection::test_connection,
             commands::connection::test_connection_with_info,
             commands::connection::test_ssh_tunnel,
@@ -1944,7 +1982,9 @@ pub fn run() {
             commands::connection::save_table_vgroups,
             commands::connection::load_table_vgroups,
             commands::connection::delete_table_vgroups_for_connection,
-            commands::plugin_file::plugin_file_open,
+            commands::plugin_file::plugin_file_open_dropped,
+            commands::plugin_file::plugin_file_pick_files,
+            commands::plugin_file::plugin_file_save_as,
             commands::plugin_file::plugin_file_read,
             commands::plugin_file::plugin_file_write,
             commands::plugin_file::plugin_file_close,
@@ -1997,54 +2037,6 @@ pub fn run() {
             commands::plugins::install_jdbc_plugin,
             commands::plugins::install_jdbc_plugin_local,
             commands::plugins::uninstall_jdbc_plugin,
-            commands::schema::list_databases,
-            commands::schema::list_database_metadata,
-            commands::schema::list_database_storage,
-            commands::schema::list_xugu_tablespaces,
-            commands::schema::get_sqlserver_completion_context,
-            commands::schema::list_doris_catalogs,
-            commands::schema::list_doris_catalog_databases,
-            commands::schema::list_sqlserver_linked_servers,
-            commands::schema::list_sqlserver_linked_server_catalogs,
-            commands::schema::list_sqlserver_linked_server_schemas,
-            commands::schema::list_sqlserver_linked_server_tables,
-            commands::schema::list_tables,
-            commands::schema::get_table_comment,
-            commands::schema::get_mysql_table_auto_increment,
-            commands::schema::list_objects,
-            commands::schema::list_object_statistics,
-            commands::schema::list_completion_objects,
-            commands::schema::completion_assistant_search,
-            commands::schema::get_object_source,
-            commands::schema::get_event_info,
-            commands::schema::get_custom_type_details,
-            commands::schema::list_schemas,
-            commands::schema::list_schema_infos,
-            commands::schema::list_data_types,
-            commands::schema::get_columns,
-            commands::schema::get_plugin_table_metadata,
-            commands::schema::get_all_columns,
-            commands::schema::get_sqlserver_column_metadata,
-            commands::schema::list_indexes,
-            commands::schema::list_reference_key_columns,
-            commands::schema::list_reference_keys,
-            commands::schema::list_foreign_keys,
-            commands::schema::list_triggers,
-            commands::schema::list_constraints,
-            commands::schema::list_partitions,
-            commands::schema::get_table_partition_status,
-            commands::schema::get_table_partitioning,
-            commands::schema::list_invalid_indexes,
-            commands::schema::list_subpartitions,
-            commands::schema::get_table_ddl,
-            commands::schema::list_functions,
-            commands::schema::list_sequences,
-            commands::schema::list_rules,
-            commands::schema::list_owners,
-            commands::schema::get_table_owner,
-            commands::schema::list_extensions,
-            commands::schema::list_available_extensions,
-            commands::schema::list_event_triggers,
             commands::schema_diff::prepare_schema_diff,
             commands::schema_diff::generate_schema_sync_sql,
             commands::schema_diff::generate_schema_sync_plan,

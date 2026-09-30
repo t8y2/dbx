@@ -28,6 +28,25 @@ describe("HiveServer2-compatible driver installation", () => {
   });
 });
 
+describe("Transwarp driver installation", () => {
+  it("routes the single Inceptor profile to the shared Agent package", () => {
+    const profile = "transwarp-inceptor";
+    expect(agentDriverInstallKey("transwarp", profile)).toBe("transwarp");
+    expect(showAgentDriverInstallHint("transwarp", [], profile)).toBe(true);
+    expect(showAgentDriverInstallHint("transwarp", [{ db_type: "transwarp", installed: true }], profile)).toBe(false);
+    expect(driverStoreFocusForInstallError("transwarp driver is not installed. Please install it from the Driver Manager.", "transwarp", profile)).toEqual({ target: "driver", driver: "transwarp" });
+  });
+});
+
+describe("NebulaGraph driver installation", () => {
+  it("routes the v3 profile and legacy connections to the same Agent package", () => {
+    for (const profile of [undefined, "nebula", "nebula-v3"]) {
+      expect(agentDriverInstallKey("nebula", profile)).toBe("nebula");
+      expect(showAgentDriverInstallHint("nebula", [{ db_type: "nebula", installed: true }], profile)).toBe(false);
+    }
+  });
+});
+
 describe("shouldApplyDriverStoreFocus", () => {
   it("applies when the driver first appears after a list load", () => {
     expect(shouldApplyDriverStoreFocus(null, "driver:mysql", false)).toBe(true);

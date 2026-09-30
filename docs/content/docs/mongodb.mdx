@@ -38,7 +38,7 @@ MongoDB totals may be estimated. In actively changing collections, the count and
 
 ## Filters and Commands
 
-Build field filters in the document browser or use shell-style commands in a MongoDB query tab. Completion can suggest collections, fields, query operators, update operators, aggregation stages, and cursor methods.
+Build field filters in the document browser or use shell-style commands in a MongoDB query tab. A date filter value accepts `2025-04-01 19:46:03` or `2025-04-01` as well as RFC 3339; text without a time zone is read in your local zone. Completion can suggest databases, collections, fields, query operators, update operators, aggregation stages, and cursor methods.
 
 Examples:
 
@@ -53,7 +53,7 @@ db.orders.aggregate([
 ])
 ```
 
-Use `use <database>` to switch the MongoDB query context.
+Use `use <database>` to switch the MongoDB query context. The database name is completed after `use ` and inside `db.getSiblingDB("…")`.
 
 ## Grid Editing
 

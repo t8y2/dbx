@@ -97,4 +97,10 @@ describe("useDataGridEditor save SQL database qualification", () => {
     await createEditor(false).saveChanges();
     expect(mocks.prepareDataGridSave.mock.calls[1]![0]).toMatchObject({ includeDatabaseName: false });
   });
+
+  it("forwards the connected server version so saved statements match the read SQL (#10503)", async () => {
+    mocks.getConfig.mockReturnValue({ database_info: { productVersion: "Neo4j/4.4.44" } });
+    await createEditor(false).saveChanges();
+    expect(mocks.prepareDataGridSave.mock.calls[0]![0]).toMatchObject({ serverVersion: "Neo4j/4.4.44" });
+  });
 });

@@ -35,6 +35,7 @@ export type ShortcutActionId =
   | "editTableStructure"
   | "copyCurrentRow"
   | "deleteCurrentRow"
+  | "focusWhere"
   | "goToColumn"
   | "goToFirstPage"
   | "goToPreviousPage"
@@ -354,6 +355,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutDeleteCurrentRow",
     scope: "grid",
     defaultShortcut: "Delete",
+  },
+  {
+    id: "focusWhere",
+    labelKey: "settings.shortcutFocusWhere",
+    scope: "grid",
+    defaultShortcut: "",
   },
   {
     id: "goToColumn",

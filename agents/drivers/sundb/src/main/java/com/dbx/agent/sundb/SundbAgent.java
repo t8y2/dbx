@@ -33,7 +33,7 @@ import java.util.Set;
 public final class SundbAgent extends AbstractJdbcAgent {
     @Override
     protected String driverClass() {
-        return "com.sundb.jdbc.SundbDriver";
+        return "csii.sundb.jdbc.SundbDriver";
     }
 
     @Override

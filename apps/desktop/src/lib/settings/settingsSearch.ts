@@ -45,7 +45,7 @@ export interface SettingsSearchEntry {
 }
 
 export interface SettingsSearchRoute {
-  syncMethodTab?: "webdav" | "snippet";
+  syncMethodTab?: "webdav" | "snippet" | "local";
 }
 
 export type Translate = (key: string) => string;
@@ -142,6 +142,8 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "editor-word-wrap", category: "editor", titleKey: "settings.wordWrap", descriptionKey: "settings.wordWrapDescription", targetId: "editor" },
   { id: "editor-vim", category: "editor", titleKey: "settings.vimMode", descriptionKey: "settings.vimModeDescription", targetId: "editor" },
   { id: "editor-brackets", category: "editor", titleKey: "settings.autoCloseBrackets", descriptionKey: "settings.autoCloseBracketsDescription", targetId: "editor" },
+  { id: "editor-source-paste-restore", category: "editor", titleKey: "settings.restoreSqlFromSourcePaste", descriptionKey: "settings.restoreSqlFromSourcePasteDescription", targetId: "editor" },
+  { id: "editor-double-click-string", category: "editor", titleKey: "settings.doubleClickStringSelectionMode", descriptionKey: "settings.doubleClickStringSelectionModeDescription", targetId: "editor" },
   { id: "editor-completion-spacing", category: "editor", titleKey: "settings.insertSpaceAfterCompletion", descriptionKey: "settings.insertSpaceAfterCompletionDescription", targetId: "editor" },
   { id: "editor-sqlserver-space-completion", category: "editor", titleKey: "settings.sqlServerSpaceConfirmsCompletion", descriptionKey: "settings.sqlServerSpaceConfirmsCompletionDescription", targetId: "editor", visible: sqlServerSpaceCompletionVisible },
   { id: "editor-completion-trigger-mode", category: "editor", titleKey: "settings.completionTriggerMode", descriptionKey: "settings.completionTriggerModeDescription", targetId: "editor" },
@@ -187,6 +189,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "appearance-corners", category: "appearance", titleKey: "settings.cornerStyle", targetId: "appearance" },
   { id: "appearance-layout", category: "appearance", titleKey: "settings.appLayout", targetId: "appearance" },
   { id: "appearance-tab-layout", category: "appearance", titleKey: "settings.tabLayout", targetId: "appearance" },
+  { id: "appearance-connection-tab-colors", category: "appearance", titleKey: "settings.colorizeConnectionTabs", descriptionKey: "settings.colorizeConnectionTabsDescription", targetId: "appearance" },
   { id: "appearance-icons", category: "appearance", titleKey: "settings.iconTheme", targetId: "appearance", visible: desktopOnly },
   { id: "appearance-tray", category: "appearance", titleKey: "settings.showTrayIcon", descriptionKey: "settings.showTrayIconDescription", targetId: "appearance", visible: desktopOnly },
   { id: "appearance-quit", category: "appearance", titleKey: "settings.quitOnClose", descriptionKey: "settings.quitOnCloseDescription", targetId: "appearance", visible: desktopOnly },
@@ -199,6 +202,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "navigation-object-display", category: "navigation", titleKey: "settings.sidebarObjectDisplay", targetId: "navigation" },
   { id: "navigation-object-info", category: "navigation", titleKey: "settings.sidebarObjectInfoMode", descriptionKey: "settings.sidebarObjectInfoModeDescription", targetId: "navigation" },
   { id: "navigation-table-search", category: "navigation", titleKey: "settings.sidebarTableSearchEnabled", descriptionKey: "settings.sidebarTableSearchEnabledDescription", targetId: "navigation" },
+  { id: "navigation-search-opened-databases-only", category: "navigation", titleKey: "settings.sidebarSearchOpenedDatabasesOnly", descriptionKey: "settings.sidebarSearchOpenedDatabasesOnlyDescription", targetId: "navigation" },
   { id: "navigation-active-node", category: "navigation", titleKey: "settings.autoSelectActiveSidebarNode", descriptionKey: "settings.autoSelectActiveSidebarNodeDescription", targetId: "navigation" },
   { id: "navigation-browse-objects-on-database-activation", category: "navigation", titleKey: "settings.sidebarBrowseObjectsOnDatabaseActivation", descriptionKey: "settings.sidebarBrowseObjectsOnDatabaseActivationDescription", targetId: "navigation" },
   { id: "navigation-tabs-restore", category: "navigation", titleKey: "settings.openTabsRestoreMode", descriptionKey: "settings.openTabsRestoreModeDescription", targetId: "navigation" },
@@ -273,9 +277,12 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "sync-snippet-provider", category: "sync", titleKey: "settings.syncSnippetProvider", targetId: "sync-snippet", route: { syncMethodTab: "snippet" }, visible: desktopOnly },
   { id: "sync-snippet-id", category: "sync", titleKey: "settings.syncSnippetId", targetId: "sync-snippet", route: { syncMethodTab: "snippet" }, visible: desktopOnly },
   { id: "sync-snippet-token", category: "sync", titleKey: "settings.syncSnippetToken", targetId: "sync-snippet", route: { syncMethodTab: "snippet" }, visible: desktopOnly },
+  { id: "sync-local-backup", category: "sync", titleKey: "settings.localBackupTitle", descriptionKey: "settings.localBackupDescription", targetId: "sync-local", route: { syncMethodTab: "local" }, visible: desktopOnly },
   { id: "sync-secrets", category: "sync", titleKey: "settings.syncSecrets", targetId: "sync" },
   { id: "sync-secrets-passphrase", category: "sync", titleKey: "settings.syncSecretsPassphrase", targetId: "sync" },
   { id: "ai-config", category: "ai", titleKey: "ai.configList", targetId: "ai" },
+  { id: "ai-conversation-font-family", category: "ai", titleKey: "ai.conversationFontFamily", descriptionKey: "ai.conversationTypographyDescription", targetId: "ai-typography" },
+  { id: "ai-conversation-font-size", category: "ai", titleKey: "ai.conversationFontSize", descriptionKey: "ai.conversationTypographyDescription", targetId: "ai-typography" },
   { id: "ai-prompts", category: "ai", titleKey: "ai.promptTemplates", descriptionKey: "ai.promptTemplatesDescription", targetId: "ai" },
   { id: "ai-default-mode", category: "ai", titleKey: "ai.defaultAiMode", descriptionKey: "ai.defaultAiModeDescription", targetId: "ai" },
   { id: "ai-default-auto-routing", category: "ai", titleKey: "ai.defaultAutoRouting", descriptionKey: "ai.defaultAutoRoutingDescription", targetId: "ai" },

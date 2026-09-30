@@ -10,14 +10,15 @@ const mocks = vi.hoisted(() => ({
   subscribePluginEvents: vi.fn(),
   repushPluginConnection: vi.fn(),
   reopenPluginConnection: vi.fn(),
-  openPluginLocalFile: vi.fn(),
+  openDroppedPluginLocalFiles: vi.fn(),
   readPluginLocalFileChunk: vi.fn(),
   writePluginLocalFileChunk: vi.fn(),
   closePluginLocalFile: vi.fn(),
+  openPluginWorkbench: vi.fn(),
 }));
 
 vi.mock("@/lib/backend/tauri", () => ({
-  openPluginLocalFile: mocks.openPluginLocalFile,
+  openDroppedPluginLocalFiles: mocks.openDroppedPluginLocalFiles,
   readPluginLocalFileChunk: mocks.readPluginLocalFileChunk,
   writePluginLocalFileChunk: mocks.writePluginLocalFileChunk,
   closePluginLocalFile: mocks.closePluginLocalFile,
@@ -41,6 +42,7 @@ vi.mock("@/stores/connectionStore", () => ({
     reopenPluginConnection: mocks.reopenPluginConnection,
   }),
 }));
+vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({ openPluginWorkbench: mocks.openPluginWorkbench }) }));
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ locale: ref("en"), t: (key: string) => key }) }));
 
 import PluginWorkbenchHost from "./PluginWorkbenchHost.vue";
@@ -75,6 +77,7 @@ describe("PluginWorkbenchHost initialization", () => {
     vi.stubGlobal("getComputedStyle", () => Object.assign([], { getPropertyValue: () => "" }));
     mocks.readPluginUiEntry.mockResolvedValue({ dataBase64: btoa("<!doctype html><html><body></body></html>"), contentType: "text/html" });
     mocks.subscribePluginEvents.mockResolvedValue(vi.fn());
+    mocks.closePluginLocalFile.mockResolvedValue(undefined);
     mocks.repushPluginConnection.mockReset().mockResolvedValue(undefined);
     mocks.reopenPluginConnection.mockResolvedValue(undefined);
     root = document.createElement("div");
@@ -148,7 +151,7 @@ describe("PluginWorkbenchHost initialization", () => {
     const { frame, postMessage } = await mountHost();
     const elementFromPoint = vi.spyOn(document, "elementFromPoint").mockReturnValue(frame);
     // The Rust registry hands out uuid strings; the `t` prefix stays opaque.
-    mocks.openPluginLocalFile.mockResolvedValue({ handleId: "0d9f6d26-9e0e-4b1f-8f9a-2b6d3c5a7e81", name: "a.txt", size: 3, contentType: "text/plain", write: false });
+    mocks.openDroppedPluginLocalFiles.mockResolvedValue({ dropId: "drop-0001", truncated: false, files: [{ handleId: "0d9f6d26-9e0e-4b1f-8f9a-2b6d3c5a7e81", name: "a.txt", size: 3, contentType: "text/plain", write: false }] });
 
     const claimed = !document.dispatchEvent(
       new CustomEvent("dbx:tauri-file-drop", {
@@ -162,7 +165,102 @@ describe("PluginWorkbenchHost initialization", () => {
       const posted = postMessage.mock.calls.map(([message]) => message as Record<string, unknown>);
       expect(posted.some((message) => message.type === "filedrop" && (message.files as Array<Record<string, unknown>>)?.some((file) => file.handleId === "t0d9f6d26-9e0e-4b1f-8f9a-2b6d3c5a7e81" && file.name === "a.txt"))).toBe(true);
     });
-    expect(mocks.openPluginLocalFile).toHaveBeenCalledWith("sample", "/tmp/a.txt", false);
+    expect(mocks.openDroppedPluginLocalFiles).toHaveBeenCalledWith("sample", ["/tmp/a.txt"]);
+    elementFromPoint.mockRestore();
+  });
+
+  it("forwards a dropped folder as the files the Rust side expanded it to", async () => {
+    const { frame, postMessage } = await mountHost();
+    const elementFromPoint = vi.spyOn(document, "elementFromPoint").mockReturnValue(frame);
+    mocks.openDroppedPluginLocalFiles.mockResolvedValue({
+      dropId: "drop-0002",
+      truncated: true,
+      files: [
+        { handleId: "0d9f6d26-9e0e-4b1f-8f9a-2b6d3c5a7e81", name: "a.txt", size: 1, contentType: "text/plain", write: false, relativePath: "folder/a.txt" },
+        { handleId: "1d9f6d26-9e0e-4b1f-8f9a-2b6d3c5a7e81", name: "nested.csv", size: 2, contentType: "text/csv", write: false, relativePath: "folder/nested/nested.csv" },
+      ],
+    });
+
+    document.dispatchEvent(
+      new CustomEvent("dbx:tauri-file-drop", {
+        detail: { type: "drop", paths: ["/tmp/folder"], position: { x: 200, y: 200 } },
+        cancelable: true,
+      }),
+    );
+
+    await vi.waitFor(() => {
+      const posted = postMessage.mock.calls.map(([message]) => message as Record<string, unknown>);
+      const filedrop = posted.find((message) => message.type === "filedrop");
+      expect((filedrop?.files as Array<Record<string, unknown>>)?.map((file) => file.relativePath)).toEqual(["folder/a.txt", "folder/nested/nested.csv"]);
+      expect(filedrop?.dropId).toBe("drop-0002");
+      expect(filedrop?.truncated).toBe(true);
+    });
+    expect(mocks.openDroppedPluginLocalFiles).toHaveBeenCalledWith("sample", ["/tmp/folder"]);
+    elementFromPoint.mockRestore();
+  });
+
+  it("does not forward a filedrop when no dropped path could be opened", async () => {
+    const { frame, postMessage } = await mountHost();
+    const elementFromPoint = vi.spyOn(document, "elementFromPoint").mockReturnValue(frame);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    mocks.openDroppedPluginLocalFiles.mockResolvedValue({ dropId: "drop-0003", truncated: false, files: [] });
+
+    const claimed = !document.dispatchEvent(
+      new CustomEvent("dbx:tauri-file-drop", {
+        detail: { type: "drop", paths: ["/tmp/gone"], position: { x: 200, y: 200 } },
+        cancelable: true,
+      }),
+    );
+
+    expect(claimed).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(postMessage.mock.calls.some(([message]) => (message as Record<string, unknown>).type === "filedrop")).toBe(false);
+    expect(consoleError).toHaveBeenCalled();
+    consoleError.mockRestore();
+    elementFromPoint.mockRestore();
+  });
+
+  it("sweeps opened drop entries when the workbench unmounts", async () => {
+    const { frame, postMessage } = await mountHost();
+    const elementFromPoint = vi.spyOn(document, "elementFromPoint").mockReturnValue(frame);
+    mocks.openDroppedPluginLocalFiles.mockResolvedValue({ dropId: "drop-0004", truncated: false, files: [{ handleId: "0d9f6d26-9e0e-4b1f-8f9a-2b6d3c5a7e81", name: "a.txt", size: 1, contentType: "text/plain", write: false }] });
+    document.dispatchEvent(
+      new CustomEvent("dbx:tauri-file-drop", {
+        detail: { type: "drop", paths: ["/tmp/a.txt"], position: { x: 200, y: 200 } },
+        cancelable: true,
+      }),
+    );
+    await vi.waitFor(() => expect(postMessage.mock.calls.some(([message]) => (message as Record<string, unknown>).type === "filedrop")).toBe(true));
+
+    app?.unmount();
+    app = undefined;
+    // Teardown closes exactly the handles this instance opened — never an
+    // owner-wide sweep, which would kill a sibling workbench's handles.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mocks.closePluginLocalFile).toHaveBeenCalledWith("sample", "0d9f6d26-9e0e-4b1f-8f9a-2b6d3c5a7e81");
+    elementFromPoint.mockRestore();
+  });
+
+  it("retires an in-flight drop whose expansion lands after unmount", async () => {
+    const { frame, postMessage } = await mountHost();
+    const elementFromPoint = vi.spyOn(document, "elementFromPoint").mockReturnValue(frame);
+    let resolveOpen!: (result: unknown) => void;
+    mocks.openDroppedPluginLocalFiles.mockReturnValue(new Promise((resolve) => (resolveOpen = resolve)));
+
+    document.dispatchEvent(
+      new CustomEvent("dbx:tauri-file-drop", {
+        detail: { type: "drop", paths: ["/tmp/folder"], position: { x: 200, y: 200 } },
+        cancelable: true,
+      }),
+    );
+    // The expansion is still in flight when the workbench tears down.
+    app?.unmount();
+    app = undefined;
+    resolveOpen({ dropId: "drop-late", truncated: false, files: [{ handleId: "0d9f6d26-9e0e-4b1f-8f9a-2b6d3c5a7e81", name: "late.txt", size: 1, contentType: "text/plain", write: false }] });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(mocks.closePluginLocalFile).toHaveBeenCalledWith("sample", "0d9f6d26-9e0e-4b1f-8f9a-2b6d3c5a7e81");
+    expect(postMessage.mock.calls.some(([message]) => (message as Record<string, unknown>).type === "filedrop")).toBe(false);
     elementFromPoint.mockRestore();
   });
 
@@ -180,7 +278,7 @@ describe("PluginWorkbenchHost initialization", () => {
     expect(claimed).toBe(false);
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(postMessage).not.toHaveBeenCalled();
-    expect(mocks.openPluginLocalFile).not.toHaveBeenCalled();
+    expect(mocks.openDroppedPluginLocalFiles).not.toHaveBeenCalled();
     elementFromPoint.mockRestore();
   });
 

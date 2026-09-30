@@ -3,6 +3,9 @@
 // and result aggregation so partial failures can be reported without aborting the batch.
 
 export interface BatchItemOutcome {
+  // Item identity, kept alongside the label so a caller can map a failure back to the item it came
+  // from (retire a stale per-item banner, for instance) instead of string-matching the name.
+  id: string;
   name: string;
   ok: boolean;
   error?: string;
@@ -11,25 +14,29 @@ export interface BatchItemOutcome {
 export interface BatchOutcome {
   results: BatchItemOutcome[];
   succeeded: string[];
-  failed: { name: string; error: string }[];
+  failed: { id: string; name: string; error: string }[];
 }
 
 /**
  * Run `action` over `items` sequentially, recording per-item success/failure. A failing item is
  * captured and the batch continues; nothing is rolled back. `nameOf` supplies a human label used
- * in the summary. `onProgress` fires after every item (success or failure) so callers can render
- * live "(current/total)" progress. Empty input yields an empty outcome.
+ * in the summary and `idOf` the machine identity of the item. `onProgress` fires after every item
+ * (success or failure) so callers can render live "(current/total)" progress. Empty input yields
+ * an empty outcome.
  */
-export async function runBatch<T>(items: readonly T[], nameOf: (item: T) => string, action: (item: T) => Promise<void>, onProgress?: (completed: number, total: number) => void): Promise<BatchOutcome> {
+export async function runBatch<T>(items: readonly T[], nameOf: (item: T) => string, action: (item: T) => Promise<void>, idOf: (item: T) => string, onProgress?: (completed: number, total: number) => void): Promise<BatchOutcome> {
   const results: BatchItemOutcome[] = [];
   let completed = 0;
   for (const item of items) {
+    // Identity (and label) are read before the action runs: a failed action may leave the item in a
+    // state it can no longer be identified from, and the failure still has to name its own item.
+    const id = idOf(item);
     const name = nameOf(item);
     try {
       await action(item);
-      results.push({ name, ok: true });
+      results.push({ id, name, ok: true });
     } catch (cause) {
-      results.push({ name, ok: false, error: cause instanceof Error ? cause.message : String(cause) });
+      results.push({ id, name, ok: false, error: cause instanceof Error ? cause.message : String(cause) });
     }
     completed += 1;
     onProgress?.(completed, items.length);
@@ -37,7 +44,7 @@ export async function runBatch<T>(items: readonly T[], nameOf: (item: T) => stri
   return {
     results,
     succeeded: results.filter((result) => result.ok).map((result) => result.name),
-    failed: results.filter((result) => !result.ok).map((result) => ({ name: result.name, error: result.error ?? "" })),
+    failed: results.filter((result) => !result.ok).map((result) => ({ id: result.id, name: result.name, error: result.error ?? "" })),
   };
 }
 

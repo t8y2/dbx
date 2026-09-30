@@ -1,8 +1,9 @@
 import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, sqlFormatterOptions, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
 import { formatSqlLayout, type SqlLayoutOptions } from "@/lib/sql/layout";
 import { looksLikeXml } from "@/lib/sql/autoFormat";
+import { compressCypherText, formatCypherText } from "@/lib/sql/cypherFormatter";
 
-export type SqlFormatDialect = "mysql" | "postgres" | "sqlite" | "sqlserver" | "oracle" | "clickhouse" | "dameng" | "duckdb" | "generic";
+export type SqlFormatDialect = "mysql" | "postgres" | "sqlite" | "sqlserver" | "oracle" | "clickhouse" | "dameng" | "duckdb" | "cypher" | "generic";
 
 export const MAX_SQL_FORMAT_CHARS = 1_000_000;
 
@@ -87,6 +88,8 @@ export function sqlFormatDialectForDbType(dbType: string | null | undefined): Sq
       return "dameng";
     case "duckdb":
       return "duckdb";
+    case "neo4j":
+      return "cypher";
     default:
       return "generic";
   }
@@ -340,9 +343,11 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
     throw new UnsupportedStructuredInputError("xml");
   }
 
+  const normalizedSettings = normalizeSqlFormatterSettings(settings);
+  if (dialect === "cypher") return formatCypherText(sql, normalizedSettings);
+
   const sqlFormatter = await import("sql-formatter");
   const { format, formatDialect } = sqlFormatter;
-  const normalizedSettings = normalizeSqlFormatterSettings(settings);
   const options = sqlFormatterOptions(normalizedSettings);
   const language = formatterLanguage(dialect);
   const emptyLineProtection = normalizedSettings.preserveEmptyLines ? protectEmptyLines(sql) : null;
@@ -733,6 +738,7 @@ export type SqlCompressDialect = SqlFormatDialect;
  */
 export function compressSqlText(sql: string, dialect: SqlCompressDialect = "generic"): string {
   if (!sql.trim()) return sql;
+  if (dialect === "cypher") return compressCypherText(sql);
 
   const len = sql.length;
   let out = "";

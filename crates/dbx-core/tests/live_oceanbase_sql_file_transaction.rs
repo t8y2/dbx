@@ -65,7 +65,7 @@ async fn live_oceanbase_sql_files_commit_rollback_failure_and_cancel() {
         query(&state, "file-writer", &database, &format!("INSERT INTO {table} VALUES (1, 10)")).await?;
         let mut request = SqlFileRequest {
             execution_id: "live-manual-file".to_string(), connection_id: "file-writer".to_string(),
-            database: database.clone(), file_path: String::new(), continue_on_error: false,
+            database: database.clone(), schema: None, file_path: String::new(), continue_on_error: false,
             selected_tables: None, part_cooldown_ms: 0, skip_relational_constraints: false, txn_session_id: None,
         };
         let first = directory.path().join("first.sql");

@@ -12,6 +12,7 @@ export interface StatementRange {
 
 export interface QueryEditorSurfaceHandle {
   focusSearch(target?: Element | null): boolean;
+  focusWhere(): boolean;
   openGoToColumn(): boolean;
   refreshData(target?: Element | null): boolean;
   toggleResultsPane(): boolean;

@@ -11,21 +11,27 @@ vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: vi.fn(() => false
 vi.mock("@/lib/backend/platform", () => ({ isMacOS: vi.fn(() => false) }));
 const cleanups: Array<() => void> = [];
 
+/** Lets the drag park's frame-deferred restore run. */
+const nextFrame = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
 afterEach(() => {
   for (const cleanup of cleanups.splice(0).reverse()) cleanup();
   vi.restoreAllMocks();
 });
 
-function createHarness(readOnly = false) {
+const LONG_DOC = Array.from({ length: 60 }, (_, index) => `select column_${index} from table_${index} where id = ${index};`).join("\n");
+
+function createHarness(readOnly = false, options: { doc?: string; selection?: { anchor: number; head: number } } = {}) {
+  const doc = options.doc ?? "abc def ghi";
   const host = document.createElement("div");
   document.body.append(host);
-  const view = new EditorView({ parent: host, state: EditorState.create({ doc: "abc def ghi", selection: { anchor: 4, head: 7 } }) });
+  const view = new EditorView({ parent: host, state: EditorState.create({ doc, selection: options.selection ?? { anchor: 4, head: 7 } }) });
   const position = vi.spyOn(view, "posAtCoords").mockReturnValue(5);
   vi.spyOn(view, "coordsAtPos").mockReturnValue({ left: 50, right: 51, top: 20, bottom: 38 });
   vi.spyOn(view, "focus").mockImplementation(() => {});
   const emit = vi.fn();
   const clearTableNavigationHover = vi.fn();
-  const pointer = useQueryEditorPointer({ props: { modelValue: "abc def ghi", readOnly }, clearTableNavigationHover, emit });
+  const pointer = useQueryEditorPointer({ props: { modelValue: doc, readOnly }, clearTableNavigationHover, emit });
   const start = (init: MouseEventInit = {}) => {
     const event = new MouseEvent("mousedown", { button: 0, detail: 1, clientX: 10, clientY: 10, cancelable: true, ...init });
     Object.defineProperty(event, "target", { value: view.contentDOM });
@@ -39,6 +45,21 @@ function createHarness(readOnly = false) {
     host.remove();
   });
   return { host, view, position, emit, clearTableNavigationHover, pointer, start, move, release };
+}
+
+/**
+ * Dispatches a mousedown the editor's own mouse-selection handler would try to
+ * hit-test, which happy-dom cannot answer. The capture listener runs after the
+ * guard under test and stops the event before CodeMirror sees it.
+ */
+function dispatchEditorMouseDown(view: EditorView, init: MouseEventInit = {}) {
+  const block = (event: Event) => event.stopImmediatePropagation();
+  view.contentDOM.addEventListener("mousedown", block, true);
+  try {
+    view.contentDOM.dispatchEvent(new MouseEvent("mousedown", { button: 0, bubbles: true, ...init }));
+  } finally {
+    view.contentDOM.removeEventListener("mousedown", block, true);
+  }
 }
 
 describe("QueryEditor pointer ownership", () => {
@@ -62,6 +83,43 @@ describe("QueryEditor pointer ownership", () => {
     expect(view.state.selection.main.anchor).toBe(6);
     expect(view.state.selection.main.empty).toBe(true);
     expect(emit).toHaveBeenCalledWith("closeColumnPanel");
+    expect(document.querySelector(".dbx-editor-selection-drop-cursor")).toBeNull();
+  });
+
+  it("keeps a click that drifts past the drag threshold on the selection a caret move", () => {
+    const { view, position, start, move, release } = createHarness();
+    expect(start().handled).toBe(true);
+    position.mockReturnValue(6);
+    move({ clientX: 20 });
+    expect(document.querySelector(".dbx-editor-selection-drop-cursor")).toBeNull();
+    expect(view.contentDOM.style.cursor).toBe("");
+    release({ clientX: 20 });
+    expect(view.state.doc.toString()).toBe("abc def ghi");
+    expect(view.state.selection.main.anchor).toBe(6);
+    expect(view.state.selection.main.empty).toBe(true);
+  });
+
+  it("keeps the selection when a drag is carried out and brought back onto it", () => {
+    const { view, position, start, move, release } = createHarness();
+    start();
+    position.mockReturnValue(11);
+    move();
+    expect(view.contentDOM.style.cursor).toBe("move");
+    position.mockReturnValue(6);
+    release();
+    expect(view.state.doc.toString()).toBe("abc def ghi");
+    expect([view.state.selection.main.from, view.state.selection.main.to]).toEqual([4, 7]);
+  });
+
+  it("drops the move cursor when the window loses focus mid-drag", () => {
+    const { view, position, start, move } = createHarness();
+    start();
+    position.mockReturnValue(11);
+    move();
+    expect(view.contentDOM.style.cursor).toBe("move");
+    expect(document.querySelector(".dbx-editor-selection-drop-cursor")).not.toBeNull();
+    window.dispatchEvent(new Event("blur"));
+    expect(view.contentDOM.style.cursor).toBe("");
     expect(document.querySelector(".dbx-editor-selection-drop-cursor")).toBeNull();
   });
 
@@ -110,6 +168,99 @@ describe("QueryEditor pointer ownership", () => {
     pointer.dispose();
     view.scrollDOM.dispatchEvent(new MouseEvent("mousedown", { clientX: 95, clientY: 20, bubbles: true }));
     expect(bubble).toHaveBeenCalledOnce();
+  });
+
+  it("parks a long selection for the length of a drag and restores it on release", async () => {
+    const { view, pointer } = createHarness(false, { doc: LONG_DOC, selection: { anchor: 0, head: 1200 } });
+    const anchorInsideContent = () => view.contentDOM.contains(document.getSelection()?.anchorNode ?? null);
+    document.getSelection()!.collapse(view.contentDOM, 0);
+
+    pointer.registerEditorNativeSelectionDragGuard(view);
+    dispatchEditorMouseDown(view);
+    expect(anchorInsideContent()).toBe(false);
+
+    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    // The restore waits a microtask so a collapse dispatched in the same task
+    // replaces the selection instead of being overwritten by it.
+    await nextFrame();
+    expect(anchorInsideContent()).toBe(true);
+  });
+
+  it("leaves a short selection alone while dragging", () => {
+    const { view, pointer } = createHarness();
+    document.getSelection()!.collapse(view.contentDOM, 0);
+    pointer.registerEditorNativeSelectionDragGuard(view);
+
+    dispatchEditorMouseDown(view);
+    expect(view.contentDOM.contains(document.getSelection()?.anchorNode ?? null)).toBe(true);
+
+    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+  });
+
+  it("does not start a parking window for gestures outside the editor content", () => {
+    const { view, pointer } = createHarness(false, { doc: LONG_DOC, selection: { anchor: 0, head: 1200 } });
+    document.getSelection()!.collapse(view.contentDOM, 0);
+    pointer.registerEditorNativeSelectionDragGuard(view);
+
+    view.scrollDOM.dispatchEvent(new MouseEvent("mousedown", { button: 0, bubbles: true }));
+    expect(view.contentDOM.contains(document.getSelection()?.anchorNode ?? null)).toBe(true);
+  });
+
+  it("stops the parking window when the pointer comes back with the button already up", async () => {
+    const { view, pointer } = createHarness(false, { doc: LONG_DOC, selection: { anchor: 0, head: 1200 } });
+    document.getSelection()!.collapse(view.contentDOM, 0);
+    pointer.registerEditorNativeSelectionDragGuard(view);
+
+    dispatchEditorMouseDown(view);
+    expect(view.contentDOM.contains(document.getSelection()?.anchorNode ?? null)).toBe(false);
+
+    document.dispatchEvent(new MouseEvent("mousemove", { buttons: 0, bubbles: true }));
+    await nextFrame();
+    expect(view.contentDOM.contains(document.getSelection()?.anchorNode ?? null)).toBe(true);
+  });
+
+  it("replaces drag parking listeners and removes them on disposal", () => {
+    const { view, pointer } = createHarness(false, { doc: LONG_DOC, selection: { anchor: 0, head: 1200 } });
+    document.getSelection()!.collapse(view.contentDOM, 0);
+    pointer.registerEditorNativeSelectionDragGuard(view);
+    pointer.registerEditorNativeSelectionDragGuard(view);
+    pointer.dispose();
+
+    dispatchEditorMouseDown(view);
+    expect(view.contentDOM.contains(document.getSelection()?.anchorNode ?? null)).toBe(true);
+  });
+
+  it("cancels the browser's own drag session for the length of the gesture", () => {
+    const { view, pointer } = createHarness(false, { doc: LONG_DOC, selection: { anchor: 0, head: 1200 } });
+    document.getSelection()!.collapse(view.contentDOM, 0);
+    pointer.registerEditorNativeSelectionDragGuard(view);
+    dispatchEditorMouseDown(view);
+
+    const during = new Event("dragstart", { bubbles: true, cancelable: true });
+    view.contentDOM.dispatchEvent(during);
+    expect(during.defaultPrevented).toBe(true);
+
+    // The gesture is over, so the browser may drag again.
+    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    const after = new Event("dragstart", { bubbles: true, cancelable: true });
+    view.contentDOM.dispatchEvent(after);
+    expect(after.defaultPrevented).toBe(false);
+  });
+
+  it("ends the parking window on the first non-modifier key so typing never lands inside a parked gesture", async () => {
+    const { view, pointer } = createHarness(false, { doc: LONG_DOC, selection: { anchor: 0, head: 1200 } });
+    document.getSelection()!.collapse(view.contentDOM, 0);
+    pointer.registerEditorNativeSelectionDragGuard(view);
+
+    dispatchEditorMouseDown(view);
+    expect(view.contentDOM.contains(document.getSelection()?.anchorNode ?? null)).toBe(false);
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Shift", bubbles: true }));
+    expect(view.contentDOM.contains(document.getSelection()?.anchorNode ?? null)).toBe(false);
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true }));
+    await nextFrame();
+    expect(view.contentDOM.contains(document.getSelection()?.anchorNode ?? null)).toBe(true);
   });
 
   it("prevents native macOS Tauri scrollbar focus changes outside editor content", () => {

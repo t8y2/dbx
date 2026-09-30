@@ -562,6 +562,8 @@ export function redisValueCollectionScanCursor(value: RedisValue): number | unde
 export function redisValueSize(value: RedisValue): number {
   switch (value.data.kind) {
     case "string":
+    // kvrocks 位图与字符串一样按字节计长度
+    case "bitmap":
       return value.data.total_bytes ?? decodeRedisBlob(value.data.content).byteLength;
     case "json":
       return new TextEncoder().encode(redisJsonValueText(value.data)).byteLength;
@@ -580,6 +582,9 @@ export function redisValueSize(value: RedisValue): number {
 export function redisValuePreview(value: RedisValue): string {
   switch (value.data.kind) {
     case "string":
+      return previewText(redisBlobRawText(value.data.content));
+    case "bitmap":
+      // kvrocks 位图的 GET 结果就是字节内容，预览方式与字符串一致
       return previewText(redisBlobRawText(value.data.content));
     case "json":
       return previewText(redisJsonValueText(value.data));

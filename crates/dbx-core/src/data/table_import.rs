@@ -5,6 +5,7 @@ use std::io::{BufRead, BufReader, Read as IoRead, Seek, SeekFrom, Write as IoWri
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use calamine::{
@@ -24,6 +25,7 @@ use sqlparser::dialect::{GenericDialect, MsSqlDialect, MySqlDialect, OracleDiale
 use sqlparser::parser::Parser;
 
 use crate::connection::{task_client_session_id, AppState, PoolKind};
+use crate::db;
 use crate::models::connection::DatabaseType;
 use crate::sql::SqlParsingOptions;
 use crate::sql_file_import::{SqlFileStreamDecoder, StreamingSqlFileSplitter};
@@ -75,6 +77,16 @@ const SQLSERVER_BULK_ROW_MEMORY_BYTES: usize = 16 * 1024 * 1024;
 
 pub fn table_import_client_session_id(import_id: &str) -> String {
     task_client_session_id("table-import", import_id)
+}
+
+/// Execution id registered with `RunningQueries` for the whole duration of an import.
+///
+/// Background pool maintenance (the keepalive probe, connection health refresh, idle
+/// reclamation) consults `is_pool_active` before touching a pool. An import keeps a
+/// connection checked out for the entire run — a session-scoped pool has exactly one
+/// connection — so without this registration the pool looks idle while it is in use.
+fn table_import_execution_id(import_id: &str) -> String {
+    format!("table-import-exec:{import_id}")
 }
 
 #[derive(Debug, Clone)]
@@ -135,6 +147,7 @@ pub enum TableImportSourceFormat {
     Json,
     Excel,
     Sql,
+    Parquet,
 }
 
 impl TableImportSourceFormat {
@@ -146,6 +159,7 @@ impl TableImportSourceFormat {
             TableImportSourceFormat::Json => "json",
             TableImportSourceFormat::Excel => "excel",
             TableImportSourceFormat::Sql => "sql",
+            TableImportSourceFormat::Parquet => "parquet",
         }
     }
 
@@ -198,6 +212,7 @@ impl TableImportTextEncoding {
 #[serde(rename_all = "camelCase")]
 pub struct TableImportParseOptions {
     pub delimiter: Option<String>,
+    pub decimal_separator: Option<String>,
     pub encoding: Option<TableImportTextEncoding>,
     pub has_header: Option<bool>,
     pub title_row: Option<usize>,
@@ -205,6 +220,10 @@ pub struct TableImportParseOptions {
     pub last_data_row: Option<usize>,
     pub trim_values: Option<bool>,
     pub empty_string_as_null: Option<bool>,
+    /// 分隔文本里代表 NULL 的字面量。缺省表示使用与导出端一致的默认字面量（`\N`）；
+    /// 显式配置空串表示关闭字面量，退回「空字段即 NULL」的旧行为。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub null_literal: Option<String>,
     pub sheet_name: Option<String>,
     pub sheet_index: Option<usize>,
     pub json_shape: Option<TableImportJsonShape>,
@@ -217,6 +236,7 @@ impl Default for TableImportParseOptions {
     fn default() -> Self {
         Self {
             delimiter: None,
+            decimal_separator: None,
             encoding: Some(TableImportTextEncoding::Auto),
             has_header: None,
             title_row: None,
@@ -224,6 +244,7 @@ impl Default for TableImportParseOptions {
             last_data_row: None,
             trim_values: Some(false),
             empty_string_as_null: Some(true),
+            null_literal: None,
             sheet_name: None,
             sheet_index: None,
             json_shape: Some(TableImportJsonShape::Auto),
@@ -236,6 +257,10 @@ impl Default for TableImportParseOptions {
 #[serde(rename_all = "camelCase")]
 pub struct TableImportPreviewRequest {
     pub file_path: String,
+    #[serde(default)]
+    pub connection_id: Option<String>,
+    #[serde(default)]
+    pub database: Option<String>,
     #[serde(default)]
     pub source_ref: Option<String>,
     #[serde(default)]
@@ -447,6 +472,7 @@ pub enum ImportFileKind {
     Json,
     Xlsx,
     Sql,
+    Parquet,
 }
 
 impl ImportFileKind {
@@ -458,6 +484,7 @@ impl ImportFileKind {
             ImportFileKind::Json => "json",
             ImportFileKind::Xlsx => "xlsx",
             ImportFileKind::Sql => "sql",
+            ImportFileKind::Parquet => "parquet",
         }
     }
 }
@@ -476,6 +503,8 @@ pub fn import_file_kind(path: &str) -> Result<ImportFileKind, String> {
         Ok(ImportFileKind::Xlsx)
     } else if lower.ends_with(".sql") {
         Ok(ImportFileKind::Sql)
+    } else if lower.ends_with(".parquet") {
+        Ok(ImportFileKind::Parquet)
     } else {
         Err("Unsupported import file type".to_string())
     }
@@ -489,6 +518,7 @@ pub fn source_format_for_path(path: &str) -> Result<TableImportSourceFormat, Str
         ImportFileKind::Json => TableImportSourceFormat::Json,
         ImportFileKind::Xlsx => TableImportSourceFormat::Excel,
         ImportFileKind::Sql => TableImportSourceFormat::Sql,
+        ImportFileKind::Parquet => TableImportSourceFormat::Parquet,
     })
 }
 
@@ -499,6 +529,117 @@ pub fn effective_source_format(
     source_format
         .or_else(|| source_format_for_path(path).ok())
         .ok_or_else(|| "Unsupported import file type".to_string())
+}
+
+#[cfg(feature = "duckdb-sidecar")]
+#[derive(Clone)]
+struct DuckDbImportContext {
+    client: Arc<db::duckdb_worker_process::DuckDbWorkerClient>,
+    database: Option<String>,
+    query_timeout: Option<Duration>,
+}
+
+#[cfg(not(feature = "duckdb-sidecar"))]
+#[derive(Clone)]
+struct DuckDbImportContext;
+
+#[cfg(feature = "duckdb-sidecar")]
+impl DuckDbImportContext {
+    async fn execute(&self, sql: String, max_rows: Option<usize>) -> Result<db::QueryResult, String> {
+        self.client.execute(self.database.clone(), sql, max_rows, None, self.query_timeout).await
+    }
+
+    async fn execute_preserving_insertion_order(
+        &self,
+        sql: String,
+        max_rows: Option<usize>,
+    ) -> Result<db::QueryResult, String> {
+        // Each Parquet page is an independent query. Ask the worker to scope
+        // DuckDB's order-preservation setting to that request so OFFSET refers
+        // to the same source order even when the connection configured it off.
+        self.client
+            .execute_preserving_insertion_order(self.database.clone(), sql, max_rows, None, self.query_timeout)
+            .await
+    }
+}
+
+#[cfg(feature = "duckdb-sidecar")]
+async fn duckdb_import_context_for_pool(
+    state: &AppState,
+    pool_key: &str,
+    database: &str,
+) -> Result<DuckDbImportContext, String> {
+    let pool = state.pool_handle(pool_key).await.ok_or_else(|| "Connection pool not found".to_string())?;
+    let client = match pool {
+        PoolKind::DuckDbWorker(client) => client,
+        _ => return Err("Parquet import requires a DuckDB connection".to_string()),
+    };
+    let query_timeout = crate::query::operation_budget_for_pool_key(state, pool_key, None).await.query_timeout;
+    Ok(DuckDbImportContext {
+        client,
+        database: (!database.trim().is_empty()).then_some(database.to_string()),
+        query_timeout,
+    })
+}
+
+async fn duckdb_import_context_for_source(
+    state: &AppState,
+    pool_key: &str,
+    db_type: &DatabaseType,
+    database: &str,
+    source_format: TableImportSourceFormat,
+) -> Result<Option<DuckDbImportContext>, String> {
+    if source_format != TableImportSourceFormat::Parquet {
+        return Ok(None);
+    }
+    if *db_type != DatabaseType::DuckDb {
+        return Err("Parquet import is only supported for DuckDB connections".to_string());
+    }
+    #[cfg(feature = "duckdb-sidecar")]
+    {
+        return duckdb_import_context_for_pool(state, pool_key, database).await.map(Some);
+    }
+    #[cfg(not(feature = "duckdb-sidecar"))]
+    {
+        let _ = (state, pool_key, database);
+        Err("DuckDB worker support is not compiled in this build".to_string())
+    }
+}
+
+fn duckdb_sql_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn duckdb_parquet_scan_sql(path: &str, limit: usize, offset: Option<usize>) -> String {
+    let mut sql = format!("SELECT * FROM read_parquet({}) LIMIT {}", duckdb_sql_string_literal(path), limit);
+    if let Some(offset) = offset {
+        sql.push_str(&format!(" OFFSET {offset}"));
+    }
+    sql
+}
+
+fn duckdb_parquet_count_sql(path: &str) -> String {
+    format!("SELECT COUNT(*) AS dbx_total_rows FROM read_parquet({})", duckdb_sql_string_literal(path))
+}
+
+fn duckdb_count_result(result: &db::QueryResult) -> Result<usize, String> {
+    let value = result
+        .rows
+        .first()
+        .and_then(|row| row.first())
+        .ok_or_else(|| "DuckDB Parquet row-count query returned no result".to_string())?;
+    match value {
+        serde_json::Value::Number(number) => number
+            .as_u64()
+            .and_then(|count| usize::try_from(count).ok())
+            .ok_or_else(|| "DuckDB Parquet row count is outside the supported range".to_string()),
+        serde_json::Value::String(value) => value
+            .parse::<u64>()
+            .ok()
+            .and_then(|count| usize::try_from(count).ok())
+            .ok_or_else(|| "DuckDB Parquet row count is outside the supported range".to_string()),
+        _ => Err("DuckDB Parquet row-count query returned an invalid value".to_string()),
+    }
 }
 
 pub fn normalize_header(value: &str, index: usize) -> String {
@@ -528,12 +669,25 @@ fn unique_import_headers(headers: impl IntoIterator<Item = String>) -> Vec<Strin
         .collect()
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct DelimitedParseConfig {
     pub delimiter: u8,
+    pub decimal_separator: char,
     pub trim_values: bool,
     pub empty_string_as_null: bool,
+    /// 命中的字段按 NULL 处理；`None` 表示不按字面量识别 NULL。
+    pub null_literal: Option<String>,
     pub row_range: ImportRowRange,
+}
+
+/// 分隔文本里 NULL 字面量的默认值：与导出端共用 [`dbx_formats::csv_export::DEFAULT_CSV_NULL_LITERAL`]，
+/// 因此 DBX 自己导出的 CSV 默认即可无损导入。
+fn effective_delimited_null_literal(raw: Option<&str>) -> Option<String> {
+    match raw {
+        None => Some(dbx_formats::csv_export::DEFAULT_CSV_NULL_LITERAL.to_string()),
+        // 显式空串 = 关闭字面量
+        Some(raw) => dbx_formats::csv_export::csv_null_literal(raw).map(str::to_string),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -584,10 +738,21 @@ pub fn effective_delimited_config(
         }
     };
 
+    let null_literal = effective_delimited_null_literal(options.null_literal.as_deref());
+    let decimal_separator = match options.decimal_separator.as_deref() {
+        None | Some(".") => '.',
+        Some(",") => ',',
+        _ => return Err("Decimal separator must be '.' or ','".to_string()),
+    };
+
     Ok(DelimitedParseConfig {
         delimiter,
+        decimal_separator,
         trim_values: options.trim_values.unwrap_or(false),
-        empty_string_as_null: options.empty_string_as_null.unwrap_or(true),
+        // 配了 NULL 字面量时空字段一律是空串：否则字面量刚把 NULL 和空串分开，
+        // 这里又会把空串重新当成 NULL。
+        empty_string_as_null: null_literal.is_none() && options.empty_string_as_null.unwrap_or(true),
+        null_literal,
         row_range: effective_import_row_range(options)?,
     })
 }
@@ -611,23 +776,38 @@ fn unwrap_csv_force_text(value: &str) -> &str {
     inner
 }
 
-pub fn csv_value_with_config(value: &str, config: DelimitedParseConfig) -> serde_json::Value {
+pub fn csv_value_with_config(value: &str, config: &DelimitedParseConfig) -> serde_json::Value {
     let value = if config.trim_values { value.trim() } else { value };
     let value = unwrap_csv_force_text(value);
+    // 字面量优先：命中即为 NULL，空字段则原样保留为空字符串。
+    if config.null_literal.as_deref() == Some(value) {
+        return serde_json::Value::Null;
+    }
     if config.empty_string_as_null && value.is_empty() {
         serde_json::Value::Null
     } else {
-        serde_json::Value::String(value.to_string())
+        static COMMA_DECIMAL: OnceLock<regex::Regex> = OnceLock::new();
+        let is_comma_decimal = config.decimal_separator == ','
+            && value.contains(',')
+            && COMMA_DECIMAL
+                .get_or_init(|| {
+                    regex::Regex::new(r"^[+-]?(?:[0-9]+(?:,[0-9]*)?|,[0-9]+)(?:[eE][+-]?[0-9]+)?$").unwrap()
+                })
+                .is_match(value);
+        let normalized = if is_comma_decimal { value.replace(',', ".") } else { value.to_string() };
+        serde_json::Value::String(normalized)
     }
 }
 
 pub fn csv_value(value: &str) -> serde_json::Value {
     csv_value_with_config(
         value,
-        DelimitedParseConfig {
+        &DelimitedParseConfig {
             delimiter: b',',
+            decimal_separator: '.',
             trim_values: false,
             empty_string_as_null: true,
+            null_literal: None,
             row_range: ImportRowRange { title_row: Some(1), data_start_row: 2, last_data_row: None },
         },
     )
@@ -966,7 +1146,7 @@ fn open_delimited_csv_reader_with_progress(
 
 pub fn parse_delimited_reader<R: std::io::Read>(
     reader: R,
-    config: DelimitedParseConfig,
+    config: &DelimitedParseConfig,
     preview_limit: usize,
 ) -> Result<ParsedImportFile, String> {
     parse_decoded_delimited_reader(reader, config, preview_limit, TableImportTextEncoding::Utf8)
@@ -974,7 +1154,7 @@ pub fn parse_delimited_reader<R: std::io::Read>(
 
 fn parse_decoded_delimited_reader<R: IoRead>(
     reader: R,
-    config: DelimitedParseConfig,
+    config: &DelimitedParseConfig,
     preview_limit: usize,
     effective_encoding: TableImportTextEncoding,
 ) -> Result<ParsedImportFile, String> {
@@ -991,7 +1171,12 @@ pub fn parse_delimited_bytes_with_options(
 ) -> Result<ParsedImportFile, String> {
     let (encoding, bom_len) = resolve_text_encoding_from_bytes(bytes, options.encoding)?;
     let reader = StrictTranscodingReader::new(std::io::Cursor::new(&bytes[bom_len..]), encoding)?;
-    parse_decoded_delimited_reader(reader, effective_delimited_config(source_format, options)?, preview_limit, encoding)
+    parse_decoded_delimited_reader(
+        reader,
+        &effective_delimited_config(source_format, options)?,
+        preview_limit,
+        encoding,
+    )
 }
 
 pub fn parse_delimited_file_with_options(
@@ -1009,7 +1194,7 @@ pub fn parse_delimited_file_with_options(
             explicit_options.encoding = Some(encoding);
             let (reader, config, encoding) =
                 open_delimited_csv_reader_with_progress(path, source_format, &explicit_options, |_| {})?;
-            return parse_csv_reader(reader, config, preview_limit, encoding);
+            return parse_csv_reader(reader, &config, preview_limit, encoding);
         }
 
         for encoding in [TableImportTextEncoding::Utf8, TableImportTextEncoding::Gbk] {
@@ -1017,7 +1202,7 @@ pub fn parse_delimited_file_with_options(
             explicit_options.encoding = Some(encoding);
             let (reader, config, encoding) =
                 open_delimited_csv_reader_with_progress(path, source_format, &explicit_options, |_| {})?;
-            match parse_csv_reader(reader, config, preview_limit, encoding) {
+            match parse_csv_reader(reader, &config, preview_limit, encoding) {
                 Ok(parsed) => return Ok(parsed),
                 Err(error) if error.starts_with("Invalid byte sequence for ") => continue,
                 Err(error) => return Err(error),
@@ -1027,12 +1212,12 @@ pub fn parse_delimited_file_with_options(
     }
 
     let (reader, config, encoding) = open_delimited_csv_reader_with_progress(path, source_format, options, |_| {})?;
-    parse_csv_reader(reader, config, preview_limit, encoding)
+    parse_csv_reader(reader, &config, preview_limit, encoding)
 }
 
 fn parse_csv_reader<R: IoRead>(
     mut reader: csv::Reader<R>,
-    config: DelimitedParseConfig,
+    config: &DelimitedParseConfig,
     preview_limit: usize,
     effective_encoding: TableImportTextEncoding,
 ) -> Result<ParsedImportFile, String> {
@@ -1041,7 +1226,7 @@ fn parse_csv_reader<R: IoRead>(
 
 fn parse_csv_reader_bounded<R: IoRead>(
     mut reader: csv::Reader<R>,
-    config: DelimitedParseConfig,
+    config: &DelimitedParseConfig,
     preview_limit: usize,
     effective_encoding: TableImportTextEncoding,
 ) -> Result<ParsedImportFile, String> {
@@ -1050,7 +1235,7 @@ fn parse_csv_reader_bounded<R: IoRead>(
 
 fn parse_csv_reader_inner<R: IoRead>(
     reader: &mut csv::Reader<R>,
-    config: DelimitedParseConfig,
+    config: &DelimitedParseConfig,
     preview_limit: usize,
     effective_encoding: TableImportTextEncoding,
     count_all_rows: bool,
@@ -1113,7 +1298,7 @@ fn parse_delimited_preview_file_with_options(
             explicit_options.encoding = Some(encoding);
             let (reader, config, encoding) =
                 open_delimited_csv_reader_with_progress(path, source_format, &explicit_options, |_| {})?;
-            return parse_csv_reader_bounded(reader, config, preview_limit, encoding);
+            return parse_csv_reader_bounded(reader, &config, preview_limit, encoding);
         }
 
         for encoding in [TableImportTextEncoding::Utf8, TableImportTextEncoding::Gbk] {
@@ -1121,7 +1306,7 @@ fn parse_delimited_preview_file_with_options(
             explicit_options.encoding = Some(encoding);
             let (reader, config, encoding) =
                 open_delimited_csv_reader_with_progress(path, source_format, &explicit_options, |_| {})?;
-            match parse_csv_reader_bounded(reader, config, preview_limit, encoding) {
+            match parse_csv_reader_bounded(reader, &config, preview_limit, encoding) {
                 Ok(parsed) => return Ok(parsed),
                 Err(error) if error.starts_with("Invalid byte sequence for ") => continue,
                 Err(error) => return Err(error),
@@ -1131,7 +1316,7 @@ fn parse_delimited_preview_file_with_options(
     }
 
     let (reader, config, encoding) = open_delimited_csv_reader_with_progress(path, source_format, options, |_| {})?;
-    parse_csv_reader_bounded(reader, config, preview_limit, encoding)
+    parse_csv_reader_bounded(reader, &config, preview_limit, encoding)
 }
 
 pub fn parse_csv_bytes(bytes: &[u8], preview_limit: usize) -> Result<ParsedImportFile, String> {
@@ -2172,10 +2357,99 @@ fn stream_json_rows_to_channel(
 ///
 /// 分隔文本与 Excel 仍然先把行解析进内存；`.sql` 脚本与 JSON 改用流式行来源
 /// 增量产出，内存不再随文件体积增长，因此二者都没有 100 MB 的体积上限。
+// Keep Parquet decoding in the DuckDB worker so compression and logical/nested type handling
+// stay identical to normal DuckDB queries; the import pipeline only owns mapping and writes.
+#[cfg(feature = "duckdb-sidecar")]
+struct DuckDbParquetRowStream {
+    context: DuckDbImportContext,
+    file_path: String,
+    columns: Vec<String>,
+    total_rows: usize,
+    next_offset: usize,
+    pending: Option<Vec<Vec<serde_json::Value>>>,
+}
+
+#[cfg(feature = "duckdb-sidecar")]
+impl DuckDbParquetRowStream {
+    async fn open(context: DuckDbImportContext, file_path: &str, batch_size: usize) -> Result<Self, String> {
+        let total_rows = duckdb_count_result(&context.execute(duckdb_parquet_count_sql(file_path), Some(1)).await?)?;
+        if total_rows == 0 {
+            return Err("Parquet file has no rows".to_string());
+        }
+        let first_batch_size = batch_size.max(1);
+        let first = context
+            .execute_preserving_insertion_order(
+                duckdb_parquet_scan_sql(file_path, first_batch_size, None),
+                Some(first_batch_size),
+            )
+            .await?;
+        if total_rows > 0 && first.rows.is_empty() {
+            return Err("DuckDB Parquet scan returned no rows for a non-empty file".to_string());
+        }
+        Ok(Self {
+            context,
+            file_path: file_path.to_string(),
+            columns: first.columns,
+            total_rows,
+            next_offset: first.rows.len(),
+            pending: (!first.rows.is_empty()).then_some(first.rows),
+        })
+    }
+
+    fn columns(&self) -> Vec<String> {
+        self.columns.clone()
+    }
+
+    fn total_rows(&self) -> usize {
+        self.total_rows
+    }
+
+    async fn next_batch(&mut self, max_rows: usize) -> Result<Option<Vec<Vec<serde_json::Value>>>, String> {
+        if let Some(rows) = self.pending.take() {
+            return Ok(Some(rows));
+        }
+        if self.next_offset >= self.total_rows {
+            return Ok(None);
+        }
+        let limit = max_rows.max(1);
+        // The worker protocol exposes bounded query results but no cursor API. LIMIT/OFFSET keeps
+        // each response bounded and lets the existing import writer retain its batch semantics.
+        let result = self
+            .context
+            .execute_preserving_insertion_order(
+                duckdb_parquet_scan_sql(&self.file_path, limit, Some(self.next_offset)),
+                Some(limit),
+            )
+            .await?;
+        if result.rows.is_empty() {
+            return Err(format!(
+                "DuckDB Parquet scan ended before the expected row count (read {}, expected {})",
+                self.next_offset, self.total_rows
+            ));
+        }
+        self.next_offset = self.next_offset.saturating_add(result.rows.len());
+        Ok(Some(result.rows))
+    }
+}
+
 enum ImportRowSource {
-    Materialized { columns: Vec<String>, rows: std::vec::IntoIter<Vec<serde_json::Value>>, total_rows: usize },
-    Sql { stream: Box<SqlImportRowStream>, bytes_read: Arc<AtomicU64>, pending: Option<Vec<Vec<serde_json::Value>>> },
-    Json { stream: Box<JsonImportRowStream> },
+    Materialized {
+        columns: Vec<String>,
+        rows: std::vec::IntoIter<Vec<serde_json::Value>>,
+        total_rows: usize,
+    },
+    Sql {
+        stream: Box<SqlImportRowStream>,
+        bytes_read: Arc<AtomicU64>,
+        pending: Option<Vec<Vec<serde_json::Value>>>,
+    },
+    Json {
+        stream: Box<JsonImportRowStream>,
+    },
+    #[cfg(feature = "duckdb-sidecar")]
+    DuckDb {
+        stream: Box<DuckDbParquetRowStream>,
+    },
 }
 
 impl ImportRowSource {
@@ -2189,6 +2463,7 @@ impl ImportRowSource {
         parse_options: &TableImportParseOptions,
         text_source_columns: HashSet<String>,
         first_batch_rows: usize,
+        duckdb_context: Option<DuckDbImportContext>,
     ) -> Result<Self, String> {
         if source_format == TableImportSourceFormat::Sql {
             let bytes_read = Arc::new(AtomicU64::new(0));
@@ -2199,6 +2474,12 @@ impl ImportRowSource {
         if source_format == TableImportSourceFormat::Json {
             let stream = JsonImportRowStream::open(file_path, parse_options, first_batch_rows).await?;
             return Ok(Self::Json { stream: Box::new(stream) });
+        }
+        #[cfg(feature = "duckdb-sidecar")]
+        if source_format == TableImportSourceFormat::Parquet {
+            let context = duckdb_context.ok_or_else(|| "Parquet import requires a DuckDB connection".to_string())?;
+            let stream = DuckDbParquetRowStream::open(context, file_path, first_batch_rows).await?;
+            return Ok(Self::DuckDb { stream: Box::new(stream) });
         }
         let parsed = parse_import_file_with_options_and_text_columns(
             file_path,
@@ -2218,6 +2499,8 @@ impl ImportRowSource {
                 stream.columns().ok_or_else(|| "No INSERT statements found in SQL file".to_string())
             }
             Self::Json { stream, .. } => Ok(stream.columns.clone()),
+            #[cfg(feature = "duckdb-sidecar")]
+            Self::DuckDb { stream } => Ok(stream.columns()),
         }
     }
 
@@ -2226,6 +2509,8 @@ impl ImportRowSource {
             Self::Materialized { total_rows, .. } => *total_rows,
             Self::Sql { stream, .. } => stream.total_rows(),
             Self::Json { stream, .. } => stream.total_rows,
+            #[cfg(feature = "duckdb-sidecar")]
+            Self::DuckDb { stream } => stream.total_rows(),
         }
     }
 
@@ -2243,6 +2528,8 @@ impl ImportRowSource {
             Self::Materialized { .. } => total_bytes,
             Self::Sql { bytes_read, .. } => bytes_read.load(Ordering::Relaxed).min(total_bytes),
             Self::Json { stream, .. } => stream.bytes_read.load(Ordering::Relaxed).min(total_bytes),
+            #[cfg(feature = "duckdb-sidecar")]
+            Self::DuckDb { .. } => total_bytes,
         }
     }
 
@@ -2259,6 +2546,8 @@ impl ImportRowSource {
                 stream.next_batch(max_rows).await
             }
             Self::Json { stream, .. } => stream.receiver.recv().await.transpose(),
+            #[cfg(feature = "duckdb-sidecar")]
+            Self::DuckDb { stream } => stream.next_batch(max_rows).await,
         }
     }
 }
@@ -4178,7 +4467,11 @@ pub fn parse_xlsx_file(path: &str, preview_limit: usize) -> Result<ParsedImportF
 
 fn ensure_non_streaming_file_size(path: &str, format: TableImportSourceFormat) -> Result<(), String> {
     // 分隔文本、SQL 脚本与 JSON 都是流式解析，内存占用不随文件体积增长，没有体积上限。
-    if format.is_delimited() || format == TableImportSourceFormat::Sql || format == TableImportSourceFormat::Json {
+    if format.is_delimited()
+        || format == TableImportSourceFormat::Sql
+        || format == TableImportSourceFormat::Json
+        || format == TableImportSourceFormat::Parquet
+    {
         return Ok(());
     }
     let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
@@ -4247,6 +4540,7 @@ async fn parse_import_file_with_options_and_text_columns(
             .await
             .map_err(|e| e.to_string())?
         }
+        TableImportSourceFormat::Parquet => Err("Parquet import requires a DuckDB connection".to_string()),
     }
 }
 
@@ -4289,6 +4583,52 @@ async fn parse_import_preview_file_with_options(
         Vec::new()
     };
     Ok((parsed, true, sheets))
+}
+
+#[cfg(feature = "duckdb-sidecar")]
+async fn parse_duckdb_parquet_preview(
+    context: &DuckDbImportContext,
+    path: &str,
+    preview_limit: usize,
+) -> Result<ParsedImportFile, String> {
+    let total_rows = duckdb_count_result(&context.execute(duckdb_parquet_count_sql(path), Some(1)).await?)?;
+    if total_rows == 0 {
+        return Err("Parquet file has no rows".to_string());
+    }
+    let preview_limit = preview_limit.max(1);
+    let result = context
+        .execute_preserving_insertion_order(duckdb_parquet_scan_sql(path, preview_limit, None), Some(preview_limit))
+        .await?;
+    if result.columns.is_empty() {
+        return Err("Parquet file has no columns".to_string());
+    }
+    if total_rows > 0 && result.rows.is_empty() {
+        return Err("DuckDB Parquet scan returned no rows for a non-empty file".to_string());
+    }
+    Ok(ParsedImportFile { columns: result.columns, rows: result.rows, total_rows, effective_encoding: None })
+}
+
+async fn parse_import_preview_file_with_context(
+    path: &str,
+    format: TableImportSourceFormat,
+    options: &TableImportParseOptions,
+    preview_limit: usize,
+    duckdb_context: Option<&DuckDbImportContext>,
+) -> Result<(ParsedImportFile, bool, Vec<String>), String> {
+    if format == TableImportSourceFormat::Parquet {
+        #[cfg(feature = "duckdb-sidecar")]
+        {
+            let context = duckdb_context.ok_or_else(|| "Parquet import requires a DuckDB connection".to_string())?;
+            let parsed = parse_duckdb_parquet_preview(context, path, preview_limit).await?;
+            return Ok((parsed, true, Vec::new()));
+        }
+        #[cfg(not(feature = "duckdb-sidecar"))]
+        {
+            let _ = (path, options, preview_limit, duckdb_context);
+            return Err("DuckDB worker support is not compiled in this build".to_string());
+        }
+    }
+    parse_import_preview_file_with_options(path, format, options, preview_limit).await
 }
 
 pub async fn parse_import_file(path: &str, preview_limit: usize) -> Result<ParsedImportFile, String> {
@@ -4579,9 +4919,9 @@ fn effective_import_batch_size(db_type: &DatabaseType, requested: usize) -> usiz
     // Some backends impose stricter limits than the UI batch setting; clamp here so every
     // import path, including streaming producers, uses the same safe value.
     let max_rows = match db_type {
-        DatabaseType::Oracle => MAX_ORACLE_IMPORT_BATCH_ROWS,
-        DatabaseType::OceanbaseOracle | DatabaseType::Iris => 1,
-        DatabaseType::CloudflareD1 => 100,
+        DatabaseType::Oracle | DatabaseType::OceanbaseOracle => MAX_ORACLE_IMPORT_BATCH_ROWS,
+        DatabaseType::Iris => 1,
+        DatabaseType::CloudflareD1 | DatabaseType::Transwarp => 100,
         DatabaseType::SqlServer => 1000,
         DatabaseType::Sqlite => SQLITE_APPEND_COMMIT_ROWS,
         _ => usize::MAX,
@@ -4891,9 +5231,10 @@ fn infer_column_type(rows: &[Vec<serde_json::Value>], source_index: usize) -> Im
 fn text_data_type(db_type: &DatabaseType) -> &'static str {
     match db_type {
         DatabaseType::SqlServer => "NVARCHAR(MAX)",
-        DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng => "CLOB",
+        DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng | DatabaseType::Db2 => "CLOB",
         DatabaseType::ClickHouse => "String",
         DatabaseType::Hive
+        | DatabaseType::Transwarp
         | DatabaseType::Kyuubi
         | DatabaseType::Trino
         | DatabaseType::PrestoSql
@@ -6013,7 +6354,7 @@ fn import_cancelled_progress(
 fn delimited_record_to_row(
     record: &csv::StringRecord,
     columns_len: usize,
-    config: DelimitedParseConfig,
+    config: &DelimitedParseConfig,
 ) -> Vec<serde_json::Value> {
     (0..columns_len)
         .map(|index| {
@@ -6024,7 +6365,7 @@ fn delimited_record_to_row(
 
 fn delimited_columns_and_first_record<R: std::io::Read>(
     reader: &mut csv::Reader<R>,
-    config: DelimitedParseConfig,
+    config: &DelimitedParseConfig,
 ) -> Result<(Vec<String>, Option<csv::StringRecord>), String> {
     let mut columns = Vec::new();
     for (index, record) in reader.records().enumerate() {
@@ -6073,7 +6414,7 @@ fn stream_delimited_rows_to_channel(
     // Keep CSV parsing off the async executor while the bounded channel prevents unbounded
     // accumulation when the database consumer is under load.
     let (mut reader, config, _) = open_delimited_csv_reader_with_progress(path, source_format, options, |_| {})?;
-    let (columns, first_record) = delimited_columns_and_first_record(&mut reader, config)?;
+    let (columns, first_record) = delimited_columns_and_first_record(&mut reader, &config)?;
     sender
         .blocking_send(Ok(DelimitedStreamMessage::Header(columns.clone())))
         .map_err(|_| "Delimited import consumer closed before the stream started".to_string())?;
@@ -6096,7 +6437,7 @@ fn stream_delimited_rows_to_channel(
         if config.row_range.last_data_row.is_some_and(|last| source_row_number > last) {
             break;
         }
-        pending_rows.push(delimited_record_to_row(&record, columns.len(), config));
+        pending_rows.push(delimited_record_to_row(&record, columns.len(), &config));
         if pending_rows.len() >= batch_size {
             sender
                 .blocking_send(Ok(DelimitedStreamMessage::Rows {
@@ -6164,15 +6505,17 @@ fn validated_prepared_import_source(
     })
 }
 
-pub async fn preview_table_import_file_with_request(
+async fn preview_table_import_file_with_context(
     request: TableImportPreviewRequest,
+    duckdb_context: Option<&DuckDbImportContext>,
 ) -> Result<TableImportPreview, String> {
     let format = effective_source_format(&request.file_path, request.source_format)?;
-    let (parsed, total_rows_exact, sheets) = parse_import_preview_file_with_options(
+    let (parsed, total_rows_exact, sheets) = parse_import_preview_file_with_context(
         &request.file_path,
         format,
         &request.parse_options,
         request.preview_limit.unwrap_or(DEFAULT_PREVIEW_LIMIT),
+        duckdb_context,
     )
     .await?;
     let metadata = tokio::fs::metadata(&request.file_path).await.map_err(|e| e.to_string())?;
@@ -6198,9 +6541,50 @@ pub async fn preview_table_import_file_with_request(
     })
 }
 
+pub async fn preview_table_import_file_with_request(
+    request: TableImportPreviewRequest,
+) -> Result<TableImportPreview, String> {
+    preview_table_import_file_with_context(request, None).await
+}
+
+pub async fn preview_table_import_file_with_state(
+    state: &AppState,
+    request: TableImportPreviewRequest,
+) -> Result<TableImportPreview, String> {
+    let format = effective_source_format(&request.file_path, request.source_format)?;
+    if format != TableImportSourceFormat::Parquet {
+        return preview_table_import_file_with_request(request).await;
+    }
+    let connection_id = request
+        .connection_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "Parquet import preview requires a DuckDB connection".to_string())?
+        .to_string();
+    let db_type = crate::transfer::get_db_type(state, &connection_id).await?;
+    if db_type != DatabaseType::DuckDb {
+        return Err("Parquet import is only supported for DuckDB connections".to_string());
+    }
+    let database = request.database.clone().filter(|value| !value.trim().is_empty());
+    let client_session_id = format!("table-import-preview-{}", uuid::Uuid::new_v4());
+    let pool_key =
+        state.get_or_create_pool_for_session(&connection_id, database.as_deref(), Some(&client_session_id)).await?;
+    let context =
+        duckdb_import_context_for_source(state, &pool_key, &db_type, database.as_deref().unwrap_or_default(), format)
+            .await;
+    let result = match context {
+        Ok(context) => preview_table_import_file_with_context(request, context.as_ref()).await,
+        Err(error) => Err(error),
+    };
+    let _ = state.detach_client_session_pool(&connection_id, database.as_deref(), &client_session_id).await;
+    result
+}
+
 pub async fn preview_table_import_file_core(file_path: &str) -> Result<TableImportPreview, String> {
     preview_table_import_file_with_request(TableImportPreviewRequest {
         file_path: file_path.to_string(),
+        connection_id: None,
+        database: None,
         source_ref: None,
         source_format: None,
         parse_options: TableImportParseOptions::default(),
@@ -6709,6 +7093,16 @@ where
     let mut db_write_ms = 0u128;
     let mut statement_count = 0usize;
     let batch_size = if request.batch_size == 0 { DEFAULT_BATCH_SIZE } else { request.batch_size };
+    // Mark the import's pool busy for the whole run. A session-scoped pool keeps a single
+    // connection, and the transactional batch path holds it for an entire chunk, so the
+    // keepalive probe cannot check out a connection on time. Without this registration the
+    // probe treats that healthy-but-busy pool as dead, invalidates it, and the next chunk
+    // fails with "Connection not found for transaction".
+    let import_execution_id = table_import_execution_id(&request.import_id);
+    let _import_activity = state.running_queries.register(import_execution_id.clone());
+    state.running_queries.set_pool_key(&import_execution_id, pool_key);
+    state.touch_pool_activity(pool_key).await;
+    let _activity_touch = state.pool_activity_touch(pool_key);
     let kingbase_oracle_mode = kingbase_oracle_compatibility_mode(state, pool_key, db_type).await;
     let conflict_policy = request.effective_conflict_policy();
     if let Err(error) = validate_update_existing_target(conflict_policy, db_type, request.create_table) {
@@ -6731,6 +7125,11 @@ where
             format!("Import source is no longer available: {error}"),
         ));
     }
+    let duckdb_context =
+        match duckdb_import_context_for_source(state, pool_key, db_type, &request.database, source_format).await {
+            Ok(context) => context,
+            Err(error) => return Err(emit_import_error(&mut progress_callback, request, 0, 0, started_at, error)),
+        };
     let import_sql_hard_limit = mysql_import_sql_hard_limit(state, pool_key).await;
     let prepared_source = validated_prepared_import_source(request, source_format);
     let prepared_source_total_exact =
@@ -6831,11 +7230,12 @@ where
         {
             prepared
         } else {
-            match parse_import_preview_file_with_options(
+            match parse_import_preview_file_with_context(
                 &request.file_path,
                 source_format,
                 &import_parse_options,
                 CREATE_TABLE_INFERENCE_ROWS,
+                duckdb_context.as_ref(),
             )
             .await
             {
@@ -7769,6 +8169,7 @@ where
         &import_parse_options,
         text_source_columns,
         effective_batch_size,
+        duckdb_context.clone(),
     )
     .await
     {
@@ -8054,6 +8455,30 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().starts_with("dbx-xlsx-shared-"))
             .map(|entry| entry.path())
             .collect()
+    }
+
+    #[test]
+    fn parquet_extension_maps_to_the_duckdb_source_format() {
+        assert_eq!(source_format_for_path("sales.PARQUET").unwrap(), TableImportSourceFormat::Parquet);
+        assert_eq!(import_file_kind("sales.parquet").unwrap(), ImportFileKind::Parquet);
+    }
+
+    #[test]
+    fn parquet_scan_sql_escapes_paths_and_adds_offset_after_limit() {
+        let sql = duckdb_parquet_scan_sql(r"C:\data\customer's.parquet", 250, Some(500));
+
+        assert_eq!(sql, "SELECT * FROM read_parquet('C:\\data\\customer''s.parquet') LIMIT 250 OFFSET 500");
+    }
+
+    #[test]
+    fn parquet_source_size_is_not_rejected_by_the_materialized_file_limit() {
+        let path =
+            std::env::temp_dir().join(format!("dbx-table-import-parquet-limit-{}.parquet", uuid::Uuid::new_v4()));
+        let file = File::create(&path).unwrap();
+        file.set_len(MAX_NON_STREAMING_IMPORT_BYTES + 1).unwrap();
+
+        ensure_non_streaming_file_size(&path.to_string_lossy(), TableImportSourceFormat::Parquet).unwrap();
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -9020,10 +9445,91 @@ mod tests {
             parsed.rows[1],
             vec![
                 serde_json::Value::String("2".to_string()),
-                serde_json::Value::Null,
+                // 默认 NULL 字面量生效后，空字段保留为空字符串，只有字面量才是 NULL
+                serde_json::Value::String(String::new()),
                 serde_json::Value::String("false".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn effective_delimited_config_shares_the_export_null_literal_by_default() {
+        let config =
+            effective_delimited_config(TableImportSourceFormat::Csv, &TableImportParseOptions::default()).unwrap();
+        assert_eq!(config.null_literal.as_deref(), Some(dbx_formats::csv_export::DEFAULT_CSV_NULL_LITERAL));
+        assert!(!config.empty_string_as_null, "NULL 字面量生效时不再把空字段当作 NULL");
+
+        // 显式空串 = 关闭字面量，退回「空字段即 NULL」的旧行为
+        let legacy =
+            TableImportParseOptions { null_literal: Some(String::new()), ..TableImportParseOptions::default() };
+        let config = effective_delimited_config(TableImportSourceFormat::Csv, &legacy).unwrap();
+        assert_eq!(config.null_literal, None);
+        assert!(config.empty_string_as_null);
+    }
+
+    #[test]
+    fn csv_null_literal_separates_null_from_an_empty_string() {
+        // `\N` 是 NULL；`""` 与裸空字段都是空字符串
+        let parsed = parse_csv_bytes(b"id,name\n1,\\N\n2,\"\"\n3,\n", 10).unwrap();
+
+        assert_eq!(parsed.total_rows, 3);
+        assert_eq!(parsed.rows[0][1], serde_json::Value::Null);
+        assert_eq!(parsed.rows[1][1], serde_json::json!(""));
+        assert_eq!(parsed.rows[2][1], serde_json::json!(""));
+    }
+
+    #[test]
+    fn tsv_export_with_null_literal_round_trips_through_the_importer() {
+        // 导出端（push_tsv_row + 默认字面量）写出的 TSV，按 TSV 规则导入：
+        // NULL 仍是 NULL、空字符串仍是空字符串
+        let mut text = String::from("id\tnote\n");
+        dbx_formats::csv_export::push_tsv_row(
+            &mut text,
+            &[serde_json::json!(1), serde_json::Value::Null],
+            Some(dbx_formats::csv_export::DEFAULT_CSV_NULL_LITERAL),
+        );
+        text.push('\n');
+        dbx_formats::csv_export::push_tsv_row(
+            &mut text,
+            &[serde_json::json!(2), serde_json::json!("")],
+            Some(dbx_formats::csv_export::DEFAULT_CSV_NULL_LITERAL),
+        );
+
+        let parsed = parse_delimited_bytes_with_options(
+            text.as_bytes(),
+            TableImportSourceFormat::Tsv,
+            &TableImportParseOptions::default(),
+            10,
+        )
+        .unwrap();
+        assert_eq!(parsed.rows[0][1], serde_json::Value::Null);
+        assert_eq!(parsed.rows[1][1], serde_json::json!(""));
+    }
+
+    #[test]
+    fn csv_null_literal_can_be_replaced_or_disabled() {
+        let custom =
+            TableImportParseOptions { null_literal: Some("(null)".to_string()), ..TableImportParseOptions::default() };
+        let parsed =
+            parse_delimited_bytes_with_options(b"id,name\n1,(null)\n2,\n", TableImportSourceFormat::Csv, &custom, 10)
+                .unwrap();
+        assert_eq!(parsed.rows[0][1], serde_json::Value::Null);
+        assert_eq!(parsed.rows[1][1], serde_json::json!(""));
+
+        let legacy =
+            TableImportParseOptions { null_literal: Some(String::new()), ..TableImportParseOptions::default() };
+        let parsed =
+            parse_delimited_bytes_with_options(b"id,name\n1,\n2,Ada\n", TableImportSourceFormat::Csv, &legacy, 10)
+                .unwrap();
+        assert_eq!(parsed.rows[0][1], serde_json::Value::Null);
+        assert_eq!(parsed.rows[1][1], serde_json::json!("Ada"));
+    }
+
+    #[test]
+    fn csv_null_literal_is_not_reported_as_a_missing_value() {
+        // 字面量只按整字段匹配：夹带空格的 `\N ` 不是 NULL，避免误伤真实数据
+        let parsed = parse_csv_bytes(b"id,name\n1, \\N \n", 10).unwrap();
+        assert_eq!(parsed.rows[0][1], serde_json::json!(" \\N "));
     }
 
     #[test]
@@ -9248,6 +9754,8 @@ mod tests {
 
         let preview = preview_table_import_file_with_request(TableImportPreviewRequest {
             file_path: path.to_string_lossy().to_string(),
+            connection_id: None,
+            database: None,
             source_ref: None,
             source_format: Some(TableImportSourceFormat::Csv),
             parse_options: TableImportParseOptions::default(),
@@ -9273,7 +9781,7 @@ mod tests {
         let config =
             effective_delimited_config(TableImportSourceFormat::Csv, &TableImportParseOptions::default()).unwrap();
 
-        let preview = parse_csv_reader_bounded(reader, config, 1, TableImportTextEncoding::Utf8).unwrap();
+        let preview = parse_csv_reader_bounded(reader, &config, 1, TableImportTextEncoding::Utf8).unwrap();
 
         assert_eq!(preview.columns, vec!["id", "name"]);
         assert_eq!(preview.rows, vec![vec![serde_json::json!("1"), serde_json::json!("Ada")]]);
@@ -9381,6 +9889,82 @@ mod tests {
     }
 
     #[test]
+    fn comma_decimal_separator_matches_preview_and_streamed_rows() {
+        let huge = format!("{},25", "9".repeat(400));
+        let bytes = format!("amount;note\n12,50;part,number\n-0,25;\\N\n1,2e3;\n1.234,50;plain\n{huge};large\n");
+        let path = std::env::temp_dir().join(format!("dbx-comma-decimal-{}.csv", uuid::Uuid::new_v4()));
+        std::fs::write(&path, &bytes).unwrap();
+        let options = TableImportParseOptions {
+            delimiter: Some(";".into()),
+            decimal_separator: Some(",".into()),
+            encoding: Some(TableImportTextEncoding::Utf8),
+            ..TableImportParseOptions::default()
+        };
+        let preview =
+            parse_delimited_bytes_with_options(bytes.as_bytes(), TableImportSourceFormat::Delimited, &options, 10)
+                .unwrap();
+        assert_eq!(
+            preview.rows,
+            vec![
+                vec![serde_json::json!("12.50"), serde_json::json!("part,number")],
+                vec![serde_json::json!("-0.25"), serde_json::Value::Null],
+                vec![serde_json::json!("1.2e3"), serde_json::json!("")],
+                vec![serde_json::json!("1.234,50"), serde_json::json!("plain")],
+                vec![serde_json::json!(huge.replace(',', ".")), serde_json::json!("large")],
+            ]
+        );
+
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(16);
+        stream_delimited_rows_to_channel(
+            &path.to_string_lossy(),
+            TableImportSourceFormat::Delimited,
+            &options,
+            2,
+            sender,
+        )
+        .unwrap();
+        let rows = std::iter::from_fn(|| receiver.blocking_recv())
+            .map(|message| message.unwrap())
+            .filter_map(|message| match message {
+                DelimitedStreamMessage::Rows { rows, .. } => Some(rows),
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(rows, preview.rows);
+
+        let default = parse_delimited_bytes_with_options(
+            bytes.as_bytes(),
+            TableImportSourceFormat::Delimited,
+            &TableImportParseOptions { delimiter: Some(";".into()), ..TableImportParseOptions::default() },
+            10,
+        )
+        .unwrap();
+        assert_eq!(default.rows[0][0], serde_json::json!("12,50"));
+
+        for (format, bytes) in [
+            (TableImportSourceFormat::Csv, &b"amount,note\n\"12,50\",plain\n"[..]),
+            (TableImportSourceFormat::Tsv, &b"amount\tnote\n12,50\tplain\n"[..]),
+        ] {
+            let parsed = parse_delimited_bytes_with_options(
+                bytes,
+                format,
+                &TableImportParseOptions { decimal_separator: Some(",".into()), ..TableImportParseOptions::default() },
+                10,
+            )
+            .unwrap();
+            assert_eq!(parsed.rows[0], vec![serde_json::json!("12.50"), serde_json::json!("plain")]);
+        }
+        let invalid = effective_delimited_config(
+            TableImportSourceFormat::Csv,
+            &TableImportParseOptions { decimal_separator: Some(";".into()), ..TableImportParseOptions::default() },
+        )
+        .unwrap_err();
+        assert!(invalid.contains("Decimal separator"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn parses_delimited_text_without_header_and_trims_values() {
         let options = TableImportParseOptions {
             delimiter: Some("|".to_string()),
@@ -9400,7 +9984,9 @@ mod tests {
         assert_eq!(parsed.columns, vec!["column_1", "column_2"]);
         assert_eq!(parsed.total_rows, 2);
         assert_eq!(parsed.rows[0], vec![serde_json::json!("1"), serde_json::json!("Ada")]);
-        assert_eq!(parsed.rows[1], vec![serde_json::json!("2"), serde_json::Value::Null]);
+        // 默认 NULL 字面量生效时，显式打开的「空字符串作为 NULL」不再接管空字段：
+        // 否则字面量刚把 NULL 和空串分开，这里又会把空串重新写成 NULL。
+        assert_eq!(parsed.rows[1], vec![serde_json::json!("2"), serde_json::json!("")]);
     }
 
     #[test]
@@ -11450,6 +12036,29 @@ mod tests {
     }
 
     #[test]
+    fn db2_create_table_plan_uses_clob_for_inferred_text() {
+        let data = ParsedImportFile {
+            columns: vec!["id".to_string(), "notes".to_string()],
+            rows: vec![vec![serde_json::json!(1), serde_json::json!("long text")]],
+            total_rows: 1,
+            effective_encoding: None,
+        };
+        let mappings = data
+            .columns
+            .iter()
+            .map(|column| TableImportColumnMapping {
+                source_column: column.clone(),
+                target_column: column.clone(),
+                target_data_type: None,
+            })
+            .collect::<Vec<_>>();
+
+        let plan = build_import_create_table_plan(&data, &mappings, "events", "APP", &DatabaseType::Db2).unwrap();
+
+        assert_eq!(plan.sql, "CREATE TABLE \"APP\".\"events\" (\n  \"id\" BIGINT,\n  \"notes\" CLOB\n)");
+    }
+
+    #[test]
     fn create_table_plan_uses_sqlserver_float_for_inferred_decimals() {
         let data = ParsedImportFile {
             columns: vec![
@@ -11617,6 +12226,101 @@ mod tests {
     }
 
     #[test]
+    fn db2_import_uses_schema_qualified_multi_row_insert() {
+        let mappings = vec![
+            TableImportColumnMapping {
+                source_column: "id".to_string(),
+                target_column: "ID".to_string(),
+                target_data_type: None,
+            },
+            TableImportColumnMapping {
+                source_column: "name".to_string(),
+                target_column: "NAME".to_string(),
+                target_data_type: None,
+            },
+        ];
+        let data = ParsedImportFile {
+            columns: vec!["id".to_string(), "name".to_string()],
+            rows: vec![
+                vec![serde_json::json!(1), serde_json::json!("Ada")],
+                vec![serde_json::json!(2), serde_json::json!("Grace")],
+            ],
+            total_rows: 2,
+            effective_encoding: None,
+        };
+
+        let batches = build_import_insert_batches(
+            &data,
+            &mappings,
+            &[("ID".to_string(), "BIGINT".to_string()), ("NAME".to_string(), "VARCHAR(128)".to_string())],
+            "USERS",
+            "APP",
+            &DatabaseType::Db2,
+            500,
+        )
+        .unwrap();
+
+        assert_eq!(
+            batches,
+            vec![ImportSqlBatch {
+                sql: "INSERT INTO \"APP\".\"USERS\" (\"ID\", \"NAME\") VALUES\n(1, 'Ada'),\n(2, 'Grace')".to_string(),
+                row_count: 2,
+            }]
+        );
+    }
+
+    #[test]
+    fn transwarp_import_batches_preserve_values_across_multiple_statements() {
+        let mappings = vec!["id", "label", "payload"]
+            .into_iter()
+            .map(|name| TableImportColumnMapping {
+                source_column: name.to_string(),
+                target_column: name.to_string(),
+                target_data_type: None,
+            })
+            .collect::<Vec<_>>();
+        let data = ParsedImportFile {
+            columns: vec!["id".into(), "label".into(), "payload".into()],
+            rows: (0..205)
+                .map(|index| {
+                    vec![
+                        serde_json::json!(index),
+                        if index == 101 { serde_json::Value::Null } else { serde_json::json!("dbx\u{4e2d}\u{6587}'s") },
+                        serde_json::json!(r#"{"key":[1,2]}"#),
+                    ]
+                })
+                .collect(),
+            total_rows: 205,
+            effective_encoding: None,
+        };
+        let batches =
+            build_import_insert_batches(&data, &mappings, &[], "events", "analytics", &DatabaseType::Transwarp, 500)
+                .unwrap();
+        assert_eq!(batches.iter().map(|batch| batch.row_count).collect::<Vec<_>>(), vec![100, 100, 5]);
+        assert!(batches.iter().all(|batch| batch
+            .sql
+            .starts_with("INSERT INTO `analytics`.`events` (`id`, `label`, `payload`)\nSELECT ")));
+        assert!(batches[0].sql.contains("dbx\u{4e2d}\u{6587}''s"));
+        assert!(batches[1].sql.contains("SELECT 101, NULL"));
+        assert!(batches[2].sql.contains("SELECT 204,"));
+    }
+
+    #[test]
+    fn starrocks_csv_json_array_import_uses_typed_json_expression() {
+        let plan = CompiledImportPlan {
+            mapped_source_indexes: vec![0],
+            target_columns: vec!["organization_path".to_string()],
+            column_types: vec![Some("array<json>".to_string())],
+        };
+        let rows = vec![vec![serde_json::json!(r#"[{"lvl1_org_code":"50001963","nested":{"enabled":true}}]"#)]];
+
+        assert_eq!(
+            import_value_rows_sql(&rows, &plan, &DatabaseType::StarRocks, false, None),
+            vec![r#"(CAST(PARSE_JSON('[{"lvl1_org_code":"50001963","nested":{"enabled":true}}]') AS ARRAY<JSON>))"#]
+        );
+    }
+
+    #[test]
     fn import_conflict_policy_keeps_default_and_skip_sql_unchanged() {
         let plan = CompiledImportPlan {
             mapped_source_indexes: vec![0, 1],
@@ -11734,9 +12438,61 @@ mod tests {
     }
 
     #[test]
+    fn oceanbase_oracle_import_batches_rows_through_insert_all() {
+        let mappings = vec![TableImportColumnMapping {
+            source_column: "id".to_string(),
+            target_column: "id".to_string(),
+            target_data_type: None,
+        }];
+        let data = ParsedImportFile {
+            columns: vec!["id".to_string()],
+            rows: vec![vec![serde_json::json!(1)], vec![serde_json::json!(2)], vec![serde_json::json!(3)]],
+            total_rows: 3,
+            effective_encoding: None,
+        };
+
+        let batches =
+            build_import_insert_batches(&data, &mappings, &[], "items", "SQLUSER", &DatabaseType::OceanbaseOracle, 100)
+                .unwrap();
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(
+            batches[0].sql,
+            "INSERT ALL\nINTO \"SQLUSER\".\"items\" (\"id\") VALUES (1)\nINTO \"SQLUSER\".\"items\" (\"id\") VALUES (2)\nINTO \"SQLUSER\".\"items\" (\"id\") VALUES (3)\nSELECT 1 FROM dual"
+        );
+        assert_eq!(batches[0].row_count, 3);
+    }
+
+    #[test]
+    fn oceanbase_oracle_import_keeps_single_row_values_statement() {
+        let mappings = vec![TableImportColumnMapping {
+            source_column: "id".to_string(),
+            target_column: "id".to_string(),
+            target_data_type: None,
+        }];
+        let data = ParsedImportFile {
+            columns: vec!["id".to_string()],
+            rows: vec![vec![serde_json::json!(1)]],
+            total_rows: 1,
+            effective_encoding: None,
+        };
+
+        let batches =
+            build_import_insert_batches(&data, &mappings, &[], "items", "SQLUSER", &DatabaseType::OceanbaseOracle, 100)
+                .unwrap();
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].sql, "INSERT INTO \"SQLUSER\".\"items\" (\"id\") VALUES\n(1)");
+        assert_eq!(batches[0].row_count, 1);
+    }
+
+    #[test]
     fn import_batch_row_limits_match_database_dialects() {
         assert_eq!(effective_import_batch_size(&DatabaseType::Oracle, 1000), 500);
-        assert_eq!(effective_import_batch_size(&DatabaseType::OceanbaseOracle, 1000), 1);
+        // OceanBase's Oracle mode shares the INSERT ALL template with Oracle, so the
+        // importer may batch rows instead of issuing one INSERT per row.
+        assert_eq!(effective_import_batch_size(&DatabaseType::OceanbaseOracle, 1000), 500);
+        assert_eq!(effective_import_batch_size(&DatabaseType::OceanbaseOracle, 1), 1);
         assert_eq!(effective_import_batch_size(&DatabaseType::Iris, 1000), 1);
         assert_eq!(effective_import_batch_size(&DatabaseType::CloudflareD1, 1000), 100);
         assert_eq!(effective_import_batch_size(&DatabaseType::SqlServer, 1001), 1000);
@@ -12682,6 +13438,100 @@ mod tests {
         );
     }
 
+    // A session-scoped pool keeps a single connection, and the transactional batch path holds
+    // it for a whole chunk, so the keepalive probe cannot check out a connection while the
+    // import is running. The import must therefore advertise its pool as busy for its whole
+    // run; otherwise the probe invalidates the healthy pool and the next chunk fails with
+    // "Connection not found for transaction".
+    #[tokio::test]
+    async fn truncate_import_marks_its_pool_active_until_it_finishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let connection_id = "sqlite-truncate-activity";
+        let pool_key = format!("{connection_id}:session:import");
+        let database_path = dir.path().join("target.db");
+        let sqlite = crate::db::sqlite::connect_path_create_if_missing(database_path.to_str().unwrap()).await.unwrap();
+        crate::db::sqlite::execute_query(&sqlite, "CREATE TABLE items (id INTEGER, name TEXT)").await.unwrap();
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(pool_key.clone(), PoolKind::Sqlite(sqlite.clone()));
+            })
+            .await;
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": connection_id,
+            "name": "SQLite truncate activity test",
+            "db_type": "sqlite",
+            "host": "",
+            "port": 0,
+            "username": "",
+            "password": "",
+            "database": database_path.to_string_lossy()
+        }))
+        .unwrap();
+        state.configs.write().await.insert(connection_id.to_string(), config);
+        let data_path = dir.path().join("rows.txt");
+        std::fs::write(&data_path, b"id%name\n1%Ada\n2%Grace\n3%Linus\n").unwrap();
+        let request = TableImportRequest {
+            import_id: "sqlite-truncate-activity".to_string(),
+            connection_id: connection_id.to_string(),
+            database: String::new(),
+            schema: String::new(),
+            table: "items".to_string(),
+            file_path: data_path.to_string_lossy().to_string(),
+            source_ref: None,
+            source_format: Some(TableImportSourceFormat::Delimited),
+            parse_options: TableImportParseOptions {
+                delimiter: Some("%".to_string()),
+                ..TableImportParseOptions::default()
+            },
+            mappings: vec![
+                TableImportColumnMapping {
+                    source_column: "id".to_string(),
+                    target_column: "id".to_string(),
+                    target_data_type: None,
+                },
+                TableImportColumnMapping {
+                    source_column: "name".to_string(),
+                    target_column: "name".to_string(),
+                    target_data_type: None,
+                },
+            ],
+            mode: TableImportMode::Truncate,
+            create_table: false,
+            batch_size: 2,
+            date_time_format: None,
+            prepared_source: None,
+            skip_duplicate_rows: false,
+            conflict_policy: None,
+            retain_source: false,
+        };
+
+        let mut active_during_import = Vec::new();
+        let summary = import_table_file_core(
+            &state,
+            &request,
+            &DatabaseType::Sqlite,
+            &pool_key,
+            |_| Box::pin(async { false }),
+            |progress| {
+                active_during_import.push((progress.status, state.running_queries.is_pool_active(&pool_key)));
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(summary.rows_imported, 3);
+        assert!(!active_during_import.is_empty(), "the import must report progress while it owns the pool");
+        for (status, active) in &active_during_import {
+            assert!(active, "progress event {status:?} happened while the import's pool was idle to sweeps");
+        }
+        assert!(
+            !state.running_queries.is_pool_active(&pool_key),
+            "the import must release its pool registration when it finishes"
+        );
+    }
+
     #[tokio::test]
     async fn sqlite_update_existing_import_counts_updated_rows_once() {
         let dir = tempfile::tempdir().unwrap();
@@ -12778,6 +13628,8 @@ mod tests {
         let path = std::env::temp_dir().join(format!("dbx-missing-import-{}.csv", uuid::Uuid::new_v4()));
         let error = preview_table_import_file_with_request(TableImportPreviewRequest {
             file_path: path.to_string_lossy().to_string(),
+            connection_id: None,
+            database: None,
             source_ref: Some("missing".to_string()),
             source_format: Some(TableImportSourceFormat::Csv),
             parse_options: TableImportParseOptions::default(),

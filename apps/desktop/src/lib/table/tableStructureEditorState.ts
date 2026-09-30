@@ -52,6 +52,21 @@ export function structureColumnCommentsForCopy(columns: readonly Pick<EditableSt
   return comments;
 }
 
+/**
+ * Column name handed to the DDL builder for a draft column.
+ *
+ * MySQL rejects identifiers that end with a space (ERROR 1166 "Incorrect column
+ * name"), so a pasted name carrying a stray trailing space produced an
+ * unexecutable `ALTER TABLE ... CHANGE COLUMN ...` statement that the editor
+ * still previewed as executable. Only the trailing whitespace is dropped:
+ * leading spaces are legal in a backtick-quoted identifier and are kept, both
+ * for a name the user typed (`#9654`) and for a metadata name, which is passed
+ * through byte-exact so that an unrelated edit never turns into a bogus rename.
+ */
+export function draftColumnNameForSql(name: string, originalName?: string | null): string {
+  return originalName === name ? name : name.trimEnd();
+}
+
 export function hasExistingColumnTypeChange(columns: readonly EditableStructureColumn[]): boolean {
   return columns.some((column) => !!column.original && !column.markedForDrop && column.dataType !== column.original.data_type);
 }
@@ -1297,9 +1312,30 @@ export function splitDataType(raw: string): { baseType: string; params: string }
   return { baseType, params };
 }
 
+function splitPostgresTemporalDataType(raw: string): { baseType: string; params: string } | null {
+  // format_type() places the precision before the time-zone qualifier. Keep
+  // that qualifier in the base selector so editing only the precision cannot
+  // silently turn timestamptz into timestamp. The anchored built-in names
+  // deliberately exclude domains and schema-qualified custom types.
+  const match = raw.trim().match(/^(TIME|TIMESTAMP|TIMETZ|TIMESTAMPTZ)\s*\(([^()]*)\)(?:\s+((?:WITH|WITHOUT)\s+TIME\s+ZONE))?((?:\s*\[\])*)$/i);
+  if (!match) return null;
+  const typeName = match[1]!;
+  const qualifier = match[3]?.replace(/\s+/g, " ");
+  if (qualifier && !/^(?:TIME|TIMESTAMP)$/i.test(typeName)) return null;
+  const arraySuffix = (match[4] ?? "").replace(/\s+/g, "");
+  return {
+    baseType: `${typeName}${qualifier ? ` ${qualifier}` : ""}${arraySuffix}`,
+    params: match[2]!.trim(),
+  };
+}
+
 function splitDataTypeForDatabase(dbType: DatabaseType | undefined, raw: string): { baseType: string; params: string } {
   if (dbType === "duckdb") {
     const parsed = splitDuckdbScalarDataType(raw);
+    if (parsed) return parsed;
+  }
+  if (dbType === "postgres") {
+    const parsed = splitPostgresTemporalDataType(raw);
     if (parsed) return parsed;
   }
   if (dbType === "xugu") {
@@ -1465,6 +1501,10 @@ function combineQualifiedTemporalType(baseType: string, params: string, dbType: 
   if (dbType === "duckdb") {
     const match = baseType.trim().match(/^(TIMESTAMP)\s+WITHOUT\s+TIME\s+ZONE$/i);
     return match ? (params ? `${match[1]}(${params}) WITHOUT TIME ZONE` : baseType.trim()) : null;
+  }
+  if (dbType === "postgres") {
+    const match = baseType.trim().match(/^(TIME|TIMESTAMP)\s+((?:WITH|WITHOUT)\s+TIME\s+ZONE)$/i);
+    return match ? (params ? `${match[1]}(${params}) ${match[2]!.replace(/\s+/g, " ")}` : baseType.trim()) : null;
   }
   if (dbType !== "xugu") return null;
   const match = baseType.trim().match(/^(TIME|TIMESTAMP)\s+WITH\s+TIME\s+ZONE$/i);

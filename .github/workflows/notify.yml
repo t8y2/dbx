@@ -175,7 +175,9 @@ jobs:
             -d "$(jq -n --arg text "$MSG_CONTENT" '{msg_type: "text", content: {text: $text}}')"
 
       - name: Send to QQ group
-        if: steps.msg.outputs.skip != 'true'
+        # PR 合并通知不再发 QQ 群，QQ 群仅保留 release 正式发布通知
+        # if: steps.msg.outputs.skip != 'true'
+        if: steps.msg.outputs.skip != 'true' && github.event_name != 'pull_request_target'
         env:
           SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           HOST: ${{ secrets.DEPLOY_HOST }}

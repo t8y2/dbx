@@ -4,6 +4,7 @@ import type { useConnectionStore } from "@/stores/connectionStore";
 import type { QueryEditorProps, CompletionMetadataScope } from "./queryEditorTypes";
 import * as api from "@/lib/backend/api";
 import type { SqlParameterOptions } from "@/lib/sql/sqlParameters";
+import { createSqlDiagnosticAnalysisWorker } from "@/lib/sql/sqlDiagnosticAnalysisWorker";
 
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
@@ -70,12 +71,13 @@ interface QueryEditorDiagnosticsOptions {
   semanticCompletionEnabled: boolean;
   maxCompletionTables: number;
   unknownObjectHighlightEnabled: boolean;
-  fullFeaturesEnabled?: () => boolean;
+  boundedAnalysisEnabled?: () => boolean;
   runtime: QueryEditorDiagnosticsRuntime;
   metadata: QueryEditorDiagnosticMetadata;
 }
 
 export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions) {
+  const diagnosticAnalysisWorker = createSqlDiagnosticAnalysisWorker();
   const { props, view, settingsStore, connectionStore, sqlDriverProfile, sqlStatementParameterOptions, sqlBehaviorDialect, runtime, metadata } = options;
   const SEMANTIC_SQL_COMPLETION_ENABLED = options.semanticCompletionEnabled;
   const MAX_COMPLETION_TABLES = options.maxCompletionTables;
@@ -181,6 +183,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
   }
 
   function clearScheduledSemanticDiagnostics() {
+    diagnosticAnalysisWorker.dispose();
     semanticDiagnosticRunId++;
     if (semanticDiagnosticTimer) clearTimeout(semanticDiagnosticTimer);
     semanticDiagnosticTimer = null;
@@ -188,12 +191,13 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
   }
 
   function invalidateSemanticDiagnosticsForDocumentChange() {
+    diagnosticAnalysisWorker.cancel();
     semanticDiagnosticRunId++;
     semanticDiagnostics = [];
   }
 
   function shouldSkipSqlSemanticDiagnostics() {
-    return options.fullFeaturesEnabled?.() === false || props.databaseType === "victoriametrics" || props.databaseType === "salesforce" || (props.databaseType !== "redis" && props.databaseType !== "mongodb" && !settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled);
+    return props.databaseType === "victoriametrics" || props.databaseType === "salesforce" || (props.databaseType !== "redis" && props.databaseType !== "mongodb" && !settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled);
   }
 
   function rangesOverlap(left: { from: number; to: number }, right: { from: number; to: number }): boolean {
@@ -322,7 +326,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
     return kind === "cte" || kind === "subquery" || kind === "table_function";
   }
 
-  async function refreshSemanticDiagnostics(options: { preserveOutsideRanges?: boolean } = {}) {
+  async function refreshSemanticDiagnostics(refreshOptions: { preserveOutsideRanges?: boolean } = {}) {
     const currentView = view.value;
     const runId = ++semanticDiagnosticRunId;
     if (!currentView || !props.connectionId || props.database == null) {
@@ -349,7 +353,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
       // Redis has no SQL semantics; run command-name / arity / quote / danger checks instead.
       if (!shouldRunRedisDiagnostics(sql, currentView.state.selection.main.head)) {
         scheduleSemanticDiagnostics(900, {
-          preserveOutsideRanges: options.preserveOutsideRanges,
+          preserveOutsideRanges: refreshOptions.preserveOutsideRanges,
         });
         return;
       }
@@ -360,35 +364,38 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
       setSemanticDiagnostics([]);
       return;
     }
-    if (!shouldRunSqlSemanticDiagnostics(sql, currentView.state.selection.main.head, { databaseType: props.databaseType })) {
+    const visibleRanges = currentView.visibleRanges.length > 0 ? currentView.visibleRanges : [currentView.viewport];
+    const backgroundAnalysis = options.boundedAnalysisEnabled?.() === true;
+    const prepared = backgroundAnalysis ? (await diagnosticAnalysisWorker.analyze({ sql, cursor: currentView.state.selection.main.head, databaseType: props.databaseType, driverProfile: sqlDriverProfile.value, parameterOptions: sqlStatementParameterOptions(), visibleRanges }))?.document : undefined;
+    if (runId !== semanticDiagnosticRunId || (backgroundAnalysis && !prepared)) return;
+    if (!(prepared?.shouldRun ?? shouldRunSqlSemanticDiagnostics(sql, currentView.state.selection.main.head, { databaseType: props.databaseType }))) {
       scheduleSemanticDiagnostics(1200, {
-        preserveOutsideRanges: options.preserveOutsideRanges,
+        preserveOutsideRanges: refreshOptions.preserveOutsideRanges,
       });
       return;
     }
-    if (runtime.codeMirrorCompletionStatus?.(currentView.state) && isSqlSemanticDiagnosticInputContext(sql, currentView.state.selection.main.head, { databaseType: props.databaseType })) {
+    if (runtime.codeMirrorCompletionStatus?.(currentView.state) && (prepared?.inputContext ?? isSqlSemanticDiagnosticInputContext(sql, currentView.state.selection.main.head, { databaseType: props.databaseType }))) {
       scheduleSemanticDiagnostics(900, {
-        preserveOutsideRanges: options.preserveOutsideRanges,
+        preserveOutsideRanges: refreshOptions.preserveOutsideRanges,
       });
       return;
     }
 
-    const visibleRanges = currentView.visibleRanges.length > 0 ? currentView.visibleRanges : [currentView.viewport];
-    if (props.databaseType !== "sqlserver") {
+    if (!prepared && props.databaseType !== "sqlserver") {
       runtime.executableStatementRangeCache = executableStatementRangeCacheForDoc(runtime.executableStatementRangeCache, currentView.state.doc, props.databaseType, sqlStatementParameterOptions());
     }
-    const diagnosticRanges = sqlSemanticDiagnosticRangesForViewport(sql, visibleRanges, props.databaseType, props.databaseType === "sqlserver" ? undefined : runtime.executableStatementRangeCache?.ranges, sqlStatementParameterOptions());
+    const diagnosticRanges = prepared?.diagnosticRanges ?? sqlSemanticDiagnosticRangesForViewport(sql, visibleRanges, props.databaseType, props.databaseType === "sqlserver" ? undefined : runtime.executableStatementRangeCache?.ranges, sqlStatementParameterOptions());
     // SQL Server routine batches are excluded from `diagnosticRanges` (see
     // `sqlServerRoutineDefinitionRangesForViewport`), so they are recomputed here
     // and stay part of the replaced range set below.
-    const sqlServerRoutineRanges = props.databaseType === "sqlserver" ? sqlServerRoutineDefinitionRangesForViewport(sql, visibleRanges) : [];
+    const sqlServerRoutineRanges = prepared?.sqlServerRoutineRanges ?? (props.databaseType === "sqlserver" ? sqlServerRoutineDefinitionRangesForViewport(sql, visibleRanges) : []);
     if (diagnosticRanges.length === 0 && sqlServerRoutineRanges.length === 0) {
-      if (!options.preserveOutsideRanges) setSemanticDiagnostics([]);
+      if (!refreshOptions.preserveOutsideRanges) setSemanticDiagnostics([]);
       return;
     }
 
     const nextDiagnostics: SqlSemanticDiagnostic[] = [];
-    const oracleSyntaxDiagnostics = buildOracleSyntaxDiagnostics(sql, props.databaseType);
+    const oracleSyntaxDiagnostics = prepared?.oracleSyntaxDiagnostics ?? buildOracleSyntaxDiagnostics(sql, props.databaseType);
     nextDiagnostics.push(
       ...oracleSyntaxDiagnostics.filter((diagnostic) => {
         const diagnosticRange = sqlTextSpanToRange(sql, diagnostic.span);
@@ -398,10 +405,10 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
     // The analyzer never sees routine batches (the MsSql grammar cannot parse their
     // parameter list), so run the token-based routine syntax rules instead of leaving
     // a stored procedure without any check at all (dbx#9315).
-    for (const range of sqlServerRoutineRanges) {
-      nextDiagnostics.push(...offsetSqlSemanticDiagnostics(buildSqlServerRoutineSyntaxDiagnostics(range.sql, props.databaseType), range, sql));
+    for (const [index, range] of sqlServerRoutineRanges.entries()) {
+      nextDiagnostics.push(...offsetSqlSemanticDiagnostics(prepared?.sqlServerRoutineDiagnostics[index] ?? buildSqlServerRoutineSyntaxDiagnostics(range.sql, props.databaseType), range, sql));
     }
-    const mysqlRoutineAnalysis = props.databaseType === "mysql" && supportsMysqlRoutineSyntaxDiagnostics(sqlDriverProfile.value) ? analyzeMysqlRoutineSyntax(sql) : null;
+    const mysqlRoutineAnalysis = prepared ? prepared.mysqlRoutineAnalysis : props.databaseType === "mysql" && supportsMysqlRoutineSyntaxDiagnostics(sqlDriverProfile.value) ? analyzeMysqlRoutineSyntax(sql) : null;
     if (mysqlRoutineAnalysis) {
       nextDiagnostics.push(
         ...mysqlRoutineAnalysis.diagnostics.filter((diagnostic) => {
@@ -424,13 +431,20 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
         if (runId !== semanticDiagnosticRunId) return;
 
         const semanticCursor = Math.max(0, Math.min(currentView.state.selection.main.head - range.from, range.sql.length));
-        const semanticModel = SEMANTIC_SQL_COMPLETION_ENABLED
-          ? buildSqlSemanticModel(range.sql, semanticCursor, {
-              databaseType: props.databaseType,
-              dialect: sqlBehaviorDialect(),
-            })
-          : null;
-        const semanticAnalysis = semanticModel ? mergeSqlSemanticReferenceAnalysis(analysis, semanticModel) : analysis;
+        const semanticModel =
+          SEMANTIC_SQL_COMPLETION_ENABLED && !backgroundAnalysis
+            ? buildSqlSemanticModel(range.sql, semanticCursor, {
+                databaseType: props.databaseType,
+                dialect: sqlBehaviorDialect(),
+              })
+            : null;
+        const semanticAnalysis =
+          SEMANTIC_SQL_COMPLETION_ENABLED && backgroundAnalysis
+            ? (await diagnosticAnalysisWorker.analyze({ sql: range.sql, cursor: semanticCursor, databaseType: props.databaseType, dialect: sqlBehaviorDialect(), visibleRanges: [], referenceAnalysis: analysis }))?.referenceAnalysis
+            : semanticModel
+              ? mergeSqlSemanticReferenceAnalysis(analysis, semanticModel)
+              : analysis;
+        if (!semanticAnalysis || runId !== semanticDiagnosticRunId) return;
         const metadataScope = semanticDiagnosticMetadataScope(sql, range);
         const scopedAnalysis = {
           ...semanticAnalysis,
@@ -465,7 +479,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
         if (diagnostic) nextDiagnostics.push(...offsetSqlSemanticDiagnostics([diagnostic], range, sql));
       }
     }
-    if (options.preserveOutsideRanges) {
+    if (refreshOptions.preserveOutsideRanges) {
       replaceSemanticDiagnosticsInRanges(nextDiagnostics, [...diagnosticRanges, ...sqlServerRoutineRanges], sql);
     } else {
       setSemanticDiagnostics(nextDiagnostics.sort(compareSqlSemanticDiagnostics));

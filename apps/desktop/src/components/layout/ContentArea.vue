@@ -123,6 +123,7 @@ const DatabaseBrowser = defineAsyncComponent(() => import("@/components/objects/
 const ObjectBrowser = defineAsyncComponent(() => import("@/components/objects/ObjectBrowser.vue"));
 const TableStructureEditor = defineAsyncComponent(() => import("@/components/structure/TableStructureEditor.vue"));
 const DatabaseUserAdmin = defineAsyncComponent(() => import("@/components/admin/DatabaseUserAdmin.vue"));
+const XuguUserPermissions = defineAsyncComponent(() => import("@/components/admin/XuguUserPermissions.vue"));
 const ProcessListPanel = defineAsyncComponent(() => import("@/components/admin/ProcessListPanel.vue"));
 const SqlServerActivityTracePanel = defineAsyncComponent(() => import("@/components/admin/SqlServerActivityTracePanel.vue"));
 const MySqlDashboard = defineAsyncComponent(() => import("@/components/admin/MySqlDashboard.vue"));
@@ -199,6 +200,7 @@ import { isAiRedisConsoleTarget, type AiConversationBinding } from "@/lib/ai/aiC
 type DataGridHandle = DataGridColumnLayoutHandle & {
   onToolbarRefresh: () => Promise<void> | void;
   focusSearch: (target?: Element | null) => boolean;
+  focusWhere: () => boolean;
   openGoToColumn: () => boolean;
   openCellDetailSearch: () => boolean;
   nullColumnsHidden: boolean;
@@ -1159,6 +1161,11 @@ function focusSearch(target: Element | null = null): boolean {
   return dataGridRef.value?.focusSearch(target) ?? false;
 }
 
+function focusWhere(): boolean {
+  if (props.activeTab.mode !== "data") return false;
+  return dataGridRef.value?.focusWhere() ?? false;
+}
+
 function openGoToColumn(): boolean {
   if (props.activeTab.mode !== "data") return false;
   return dataGridRef.value?.openGoToColumn() ?? false;
@@ -1623,6 +1630,7 @@ function locateExecutionSummaryError(item: ExecutionSummaryItem) {
 
 defineExpose({
   focusSearch,
+  focusWhere,
   openGoToColumn,
   refreshData,
   toggleResultsPane,
@@ -2351,6 +2359,8 @@ defineExpose({
                 :table-info-tab="activeTab.tableInfoTab"
                 :page-offset="activeTab.resultPageOffset"
                 :page-limit="activeTab.resultPageLimit"
+                :executed-page-offset="activeTab.resultExecutedPageOffset"
+                :executed-page-limit="activeTab.resultExecutedPageLimit"
                 :count-sql="activeTab.resultCountSql"
                 :count-total-rows="activeTab.resultCountSql ? () => queryStore.countTabResultRows(activeTab.id) : undefined"
                 :total-row-count="activeTab.resultTotalRowCount"
@@ -2801,6 +2811,8 @@ defineExpose({
           :auto-show-table-info="settingsStore.editorSettings.tableInfoDrawerPinned"
           :page-offset="activeTab.resultPageOffset"
           :page-limit="activeTab.resultPageLimit"
+          :executed-page-offset="activeTab.resultExecutedPageOffset"
+          :executed-page-limit="activeTab.resultExecutedPageLimit"
           :total-row-count="activeTab.resultTotalRowCount"
           :total-row-count-is-exact="activeTab.resultTotalRowCount !== undefined || activeTab.result.total_is_exact !== false"
           :total-row-count-loading="activeTab.resultTotalRowCountLoading"
@@ -3082,6 +3094,10 @@ defineExpose({
 
     <template v-else-if="activeTab.mode === 'users' && activeConnection">
       <DatabaseUserAdmin :key="activeTab.id" :connection="activeConnection" />
+    </template>
+
+    <template v-else-if="activeTab.mode === 'xugu-users' && activeConnection">
+      <XuguUserPermissions :key="activeTab.id" :connection="activeConnection" />
     </template>
 
     <template v-else-if="activeTab.mode === 'processlist' && activeConnection">

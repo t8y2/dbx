@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const listeners = new Map<string, (event: { payload: unknown }) => void>();
 const unlisten = vi.fn();
+const reloadFromDisk = vi.fn();
 let listenerRegistrationBarrier: Promise<void> | null = null;
 const listen = vi.fn(async (event: string, handler: (event: { payload: unknown }) => void) => {
   await listenerRegistrationBarrier;
@@ -14,7 +15,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 vi.mock("@/stores/connectionStore", () => ({
-  useConnectionStore: () => ({ connections: [], initFromDisk: vi.fn(), getConfig: vi.fn(), ensureConnected: vi.fn() }),
+  useConnectionStore: () => ({ connections: [], initFromDisk: vi.fn(), reloadFromDisk, getConfig: vi.fn(), ensureConnected: vi.fn() }),
 }));
 
 vi.mock("@/stores/queryStore", () => ({
@@ -28,6 +29,7 @@ describe("useTauriEvents", () => {
     listeners.clear();
     listen.mockClear();
     unlisten.mockClear();
+    reloadFromDisk.mockClear();
     listenerRegistrationBarrier = null;
   });
 
@@ -60,6 +62,8 @@ describe("useTauriEvents", () => {
 
     expect(setupResolved).toBe(true);
     expect(listeners.has("dbx-open-connection-links")).toBe(true);
+    await listeners.get("mcp-reload-connections")!({ payload: undefined });
+    expect(reloadFromDisk).toHaveBeenCalledOnce();
   });
 
   it("routes the native macOS close-tab menu event to the active surface", async () => {

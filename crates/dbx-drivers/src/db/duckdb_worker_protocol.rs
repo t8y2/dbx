@@ -116,6 +116,13 @@ pub struct DuckDbWorkerExecuteParams {
     pub database: Option<String>,
     #[serde(default)]
     pub max_rows: Option<usize>,
+    /// Temporarily preserve source row order while executing this query.
+    ///
+    /// Parquet imports page through the same file with LIMIT/OFFSET. The
+    /// worker must opt into stable insertion order for every page when a
+    /// connection init script disabled DuckDB's default.
+    #[serde(default)]
+    pub preserve_insertion_order: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

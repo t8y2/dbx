@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { goAgents, integrationCases, rustGroups } from "./ci-config.mjs";
-import { changedPaths, planCi } from "./ci-plan.mjs";
+import { cargoMetadata, changedPaths, planCi } from "./ci-plan.mjs";
 import { rustCommand } from "./ci-rust.mjs";
 import { gateFailures } from "./ci-gate.mjs";
 import { assertCoverage, parseCoverage } from "./ci-rust-coverage.mjs";
@@ -40,6 +40,18 @@ const metadata = {
 };
 const plan = (files, options = {}) => planCi({ files, metadata, root, ...options });
 const groups = (result) => result.rust_matrix.include.map((entry) => entry.group);
+
+test("the planner uses the runner stable Cargo only for metadata", () => {
+  let invocation;
+  const result = cargoMetadata("/workspace", (command, args, options) => {
+    invocation = { command, args, options };
+    return '{"packages":[],"workspace_members":[]}';
+  });
+  assert.deepEqual(result, { packages: [], workspace_members: [] });
+  assert.equal(invocation.command, "cargo");
+  assert.deepEqual(invocation.args, ["+stable", "metadata", "--locked", "--offline", "--no-deps", "--format-version", "1"]);
+  assert.equal(invocation.options.cwd, "/workspace");
+});
 // Keep the gate fixtures in sync with ci-gate.mjs routedJobs. Both Windows jobs
 // share the windows_win7_bundle routing output.
 const routedJobs = { frontend: "frontend", packages: "packages", "github-scripts": "github_scripts",
@@ -81,7 +93,7 @@ for (const file of ["Cargo.toml", "Cargo.lock", ".cargo/config.toml", "rust-tool
     const result = plan([file]);
     assert.deepEqual(groups(result), ["workspace"]);
     assert.equal(result.rust_full, true);
-    assert.equal(result.agent_go.include.length, 10);
+    assert.equal(result.agent_go.include.length, goAgents.length);
     assert.equal(result.agent_rust.include.length, 2);
     assert.equal(result.agent_integration.include.length, 16);
     assert.equal(result.agent_java, true);
@@ -138,12 +150,12 @@ test("shared Agent inputs and unknown native modules never silently lose coverag
   for (const file of ["agents/common/src/main/java/Protocol.java", "agents/scripts/validate_agents.py", "agents/build.gradle",
     "agents/drivers/new-driver/main.go", "crates/dbx-driver-agent/assets/agent-protocol-v2.json", ".github/workflows/agents-release.yml"]) {
     const result = plan([file]);
-    assert.equal(result.agent_go.include.length, 10, file);
+    assert.equal(result.agent_go.include.length, goAgents.length, file);
     assert.equal(result.agent_integration.include.length, 16, file);
     assert.equal(result.agent_java, true, file);
   }
   const fallback = plan(["future-agent-filter-input"], { agentsChanged: true });
-  assert.equal(fallback.agent_go.include.length, 10);
+  assert.equal(fallback.agent_go.include.length, goAgents.length);
   assert.equal(fallback.agent_integration.include.length, 16);
   assert.equal(fallback.agent_java, true);
 });

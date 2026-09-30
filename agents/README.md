@@ -31,9 +31,11 @@ Each agent runs as a standalone process and communicates with DBX via stdin/stdo
 | snowflake | Snowflake | Snowflake JDBC |
 | trino | Trino (Presto) | Trino JDBC |
 | hive | Apache Hive | Native Go HS2 agent |
+| transwarp | Transwarp Inceptor | Bundled vendor JDBC agent |
 | db2 | IBM DB2 | DB2 JDBC |
 | informix | IBM Informix | Informix JDBC |
 | neo4j | Neo4j | Official Neo4j Go Driver native agent |
+| nebula | NebulaGraph 3.x | Official NebulaGraph Go Client native agent |
 | cassandra | Apache Cassandra 2.1+ | Apache cassandra-gocql-driver native agent |
 | bigquery | Google BigQuery | BigQuery JDBC |
 | spanner | Google Cloud Spanner | Google Cloud Spanner JDBC |

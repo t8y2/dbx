@@ -630,6 +630,14 @@ pub struct AiChatMessage {
     /// actionable after the conversation itself is rebound (#9902).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_binding: Option<AiChatSourceBinding>,
+    /// Footprint of a turn that carried a context selection (#10058): the
+    /// selection text is session-only (up to 12 000 chars, and conversation
+    /// records are synced), so only the fact that one existed is persisted, and
+    /// a reloaded transcript can still tell the model the content is gone
+    /// instead of showing an empty turn. Absent on records written before the
+    /// field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selections_omitted: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

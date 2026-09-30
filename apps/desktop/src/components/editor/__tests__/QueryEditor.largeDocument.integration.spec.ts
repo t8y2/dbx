@@ -6,12 +6,15 @@ import { createI18n } from "vue-i18n";
 import { language } from "@codemirror/language";
 import { EditorView } from "@codemirror/view";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { QUERY_EDITOR_FULL_FEATURE_MAX_DOCUMENT_LENGTH } from "@/lib/editor/queryEditorLargeDocument";
+import { QUERY_EDITOR_FULL_FEATURE_MAX_DOCUMENT_LENGTH, QUERY_EDITOR_FULL_FEATURE_MAX_LINE_COUNT } from "@/lib/editor/queryEditorLargeDocument";
 import type { QueryEditorProps } from "../queryEditorTypes";
 
 const analysisProbe = vi.hoisted(() => ({
   documentLengths: [] as number[],
+  documentLineCounts: [] as number[],
+  backgroundDocuments: [] as string[],
   failAtLength: Number.POSITIVE_INFINITY,
+  failAtLineCount: Number.POSITIVE_INFINITY,
 }));
 
 vi.mock("@/lib/sql/executableStatementRangeCache", async (importOriginal) => {
@@ -19,9 +22,37 @@ vi.mock("@/lib/sql/executableStatementRangeCache", async (importOriginal) => {
   return {
     ...actual,
     executableStatementRangeCacheForDoc: (...args: Parameters<typeof actual.executableStatementRangeCacheForDoc>) => {
+      if (args[0]?.doc === args[1]) return actual.executableStatementRangeCacheForDoc(...args);
       analysisProbe.documentLengths.push(args[1].length);
-      if (args[1].length >= analysisProbe.failAtLength) throw new Error("unbounded statement analysis");
+      analysisProbe.documentLineCounts.push(args[1].lines);
+      if (args[1].length >= analysisProbe.failAtLength || args[1].lines >= analysisProbe.failAtLineCount) throw new Error("unbounded statement analysis");
       return actual.executableStatementRangeCacheForDoc(...args);
+    },
+  };
+});
+
+vi.mock("@/lib/sql/sqlStatementAnalysisWorker", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/sql/executableStatementRangeCache")>("@/lib/sql/executableStatementRangeCache");
+  const { Text } = await import("@codemirror/state");
+  return {
+    createSqlStatementAnalysisWorker: () => {
+      let generation = 0;
+      return {
+        async analyze(request: import("@/lib/sql/sqlStatementAnalysis").SqlStatementAnalysisRequest) {
+          const current = ++generation;
+          analysisProbe.backgroundDocuments.push(request.sql);
+          await Promise.resolve();
+          if (current !== generation) return null;
+          const { doc: _doc, ...result } = actual.executableStatementRangeCacheForDoc(null, Text.of(request.sql.split("\n")), request.databaseType, request.parameterOptions);
+          return result;
+        },
+        cancel() {
+          generation++;
+        },
+        dispose() {
+          generation++;
+        },
+      };
     },
   };
 });
@@ -50,7 +81,10 @@ const cleanups: Array<() => void> = [];
 
 beforeEach(() => {
   analysisProbe.documentLengths = [];
+  analysisProbe.documentLineCounts = [];
+  analysisProbe.backgroundDocuments = [];
   analysisProbe.failAtLength = Number.POSITIVE_INFINITY;
+  analysisProbe.failAtLineCount = Number.POSITIVE_INFINITY;
 });
 
 afterEach(() => {
@@ -103,6 +137,40 @@ describe("QueryEditor large document mode", () => {
     expect(view.state.doc.toString()).toBe(source);
   });
 
+  it("keeps SQL language features while bounding statement analysis above the line budget", async () => {
+    const lineCount = QUERY_EDITOR_FULL_FEATURE_MAX_LINE_COUNT + 1;
+    const source = Array.from({ length: lineCount }, (_, index) => `SELECT ${index};`).join("\n");
+    expect(source.length).toBeLessThan(QUERY_EDITOR_FULL_FEATURE_MAX_DOCUMENT_LENGTH);
+    analysisProbe.failAtLineCount = lineCount;
+
+    const { host, view } = await mountEditor(source);
+
+    expect(host.firstElementChild?.getAttribute("data-large-document-mode")).toBe("true");
+    expect(analysisProbe.documentLineCounts).not.toContain(lineCount);
+    expect(view.state.facet(language)).not.toBeNull();
+    expect(analysisProbe.backgroundDocuments).toContain(source);
+  });
+
+  it("enters bounded mode when typing crosses the line budget", async () => {
+    const source = Array.from({ length: QUERY_EDITOR_FULL_FEATURE_MAX_LINE_COUNT }, (_, index) => `SELECT ${index};`).join("\n");
+    const { host, view } = await mountEditor(source);
+    analysisProbe.documentLengths = [];
+    analysisProbe.documentLineCounts = [];
+
+    view.dispatch({
+      changes: { from: view.state.doc.length, insert: "\nS" },
+      selection: { anchor: view.state.doc.length + 2 },
+      userEvent: "input.type",
+    });
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    expect(host.firstElementChild?.getAttribute("data-large-document-mode")).toBe("true");
+    expect(view.state.doc.lines).toBe(QUERY_EDITOR_FULL_FEATURE_MAX_LINE_COUNT + 1);
+    expect(view.state.facet(language)).not.toBeNull();
+    expect(analysisProbe.documentLineCounts).not.toContain(QUERY_EDITOR_FULL_FEATURE_MAX_LINE_COUNT + 1);
+  });
+
   it("keeps a realistically large package editable and searchable without full-document analysis", async () => {
     const source = oraclePackage(4_000);
     expect(source.length).toBeGreaterThan(QUERY_EDITOR_FULL_FEATURE_MAX_DOCUMENT_LENGTH);
@@ -112,7 +180,7 @@ describe("QueryEditor large document mode", () => {
 
     expect(host.firstElementChild?.getAttribute("data-large-document-mode")).toBe("true");
     expect(analysisProbe.documentLengths).not.toContain(source.length);
-    expect(view.state.facet(language)).toBeNull();
+    expect(view.state.facet(language)).not.toBeNull();
     expect(view.state.doc.toString()).toBe(source);
     expect(view.state.readOnly).toBe(false);
     expect(view.state.sliceDoc(0, 24)).toBe(source.slice(0, 24));
@@ -136,5 +204,19 @@ describe("QueryEditor large document mode", () => {
     expect(view.state.doc.toString()).toBe(source);
     expect(view.state.readOnly).toBe(true);
     expect(view.contentDOM.getAttribute("contenteditable")).toBe("false");
+  });
+
+  it("returns to the ordinary path after shrinking and preserves undo", async () => {
+    const source = Array.from({ length: 2_001 }, (_, index) => `SELECT ${index};`).join("\n");
+    const { host, view } = await mountEditor(source);
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: "SELECT 1;" }, userEvent: "input" });
+    await nextTick();
+    expect(host.firstElementChild?.hasAttribute("data-large-document-mode")).toBe(false);
+    expect(view.state.facet(language)).not.toBeNull();
+    const { undo } = await import("@codemirror/commands");
+    expect(undo(view)).toBe(true);
+    await nextTick();
+    expect(view.state.doc.toString()).toBe(source);
+    expect(host.firstElementChild?.getAttribute("data-large-document-mode")).toBe("true");
   });
 });

@@ -325,10 +325,12 @@ macro_rules! agent_connection_pool_database_type {
             | DatabaseType::Kyuubi
             | DatabaseType::Impala
             | DatabaseType::Argo
+            | DatabaseType::Transwarp
             | DatabaseType::Spark
             | DatabaseType::Db2
             | DatabaseType::Informix
             | DatabaseType::Neo4j
+            | DatabaseType::Nebula
             | DatabaseType::Cassandra
             | DatabaseType::Bigquery
             | DatabaseType::Spanner
@@ -1795,10 +1797,20 @@ impl AppState {
         let env = self.external_driver_runtime_env(driver_id)?;
         let session = self.plugins.start_driver_session_for_connection(driver_id, env, &config.name).await?;
         let params = serde_json::json!({ "connection": config });
-        session
+        let result = session
             .invoke_with_timeout::<serde_json::Value>("connect", params, Some(external_driver_connect_timeout(config)))
-            .await?;
-        Ok(PoolKind::ExternalDriver { driver_id: driver_id.to_string(), config: Arc::new(config.clone()), session })
+            .await;
+        match result {
+            Ok(_) => Ok(PoolKind::ExternalDriver {
+                driver_id: driver_id.to_string(),
+                config: Arc::new(config.clone()),
+                session,
+            }),
+            Err(error) => {
+                session.shutdown().await;
+                Err(error)
+            }
+        }
     }
 
     pub async fn test_sqlserver_connection(
@@ -2177,6 +2189,12 @@ impl AppState {
                     match result {
                         Ok(Ok(())) => {}
                         Ok(Err(err)) => {
+                            if !keepalive_failure_proves_pool_dead(&err.to_string()) {
+                                log::debug!(
+                                    "Connection keepalive for '{key}' could not check out a connection; keeping the busy pool: {err}"
+                                );
+                                continue;
+                            }
                             log::warn!("Connection keepalive failed for '{key}': {err}; invalidating pool");
                             let replace_runtime =
                                 err.recovery_decision().is_some_and(RecoveryDecision::replaces_runtime);
@@ -5935,6 +5953,18 @@ impl From<String> for KeepaliveError {
     }
 }
 
+/// Whether a failed keepalive probe is evidence that the pool is dead.
+///
+/// A probe that ran out of its checkout budget because every connection is in use reports
+/// pool saturation, which says nothing about the health of the pooled connections. That is
+/// the normal state of a session-scoped pool (a single connection) while a batch import or
+/// transfer holds a long transaction on it. Invalidating the pool there used to abort the
+/// running operation with "Connection not found for transaction" instead of letting it
+/// finish. Every other probe failure keeps the invalidate-and-reconnect behaviour.
+fn keepalive_failure_proves_pool_dead(error: &str) -> bool {
+    !crate::query::is_pool_saturation_error(error)
+}
+
 impl KeepaliveTarget {
     fn matches_pool(&self, pool: &PoolKind) -> bool {
         match (self, pool) {
@@ -6912,8 +6942,8 @@ mod tests {
         connection_probe_endpoints, connection_remote_endpoint, connection_url_for_endpoint,
         database_connection_config, database_connection_config_with_catalog,
         gaussdb_identifier_quote_from_query_result, gaussdb_m_jdbc_config_for_endpoint, gaussdb_uses_m_jdbc_driver,
-        kafka_single_loopback_bootstrap_endpoint, metadata_connection_config, metadata_pool_database,
-        mysql_metadata_fallback_url, mysql_pool_setup_queries, oceanbase_mysql_setup_queries,
+        kafka_single_loopback_bootstrap_endpoint, keepalive_failure_proves_pool_dead, metadata_connection_config,
+        metadata_pool_database, mysql_metadata_fallback_url, mysql_pool_setup_queries, oceanbase_mysql_setup_queries,
         prestosql_jdbc_config_for_endpoint, redacted_connection_url_for_endpoint, redis_sentinel_transport_id,
         redis_sentinel_transport_prefix, sqlserver_legacy_agent_config, sqlserver_legacy_driver_error,
         sqlserver_uses_legacy_driver, task_client_session_id, transport_layers_through_last_ssh,
@@ -8079,6 +8109,17 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn plugin_process_exists(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
     #[tokio::test]
     async fn app_state_uses_explicit_agent_dir() {
         let dir = std::env::temp_dir().join(format!("dbx-core-agent-dir-test-{}", uuid::Uuid::new_v4()));
@@ -8342,6 +8383,106 @@ mod tests {
         server.abort();
         let _ = tokio::time::timeout(Duration::from_secs(1), pool.disconnect()).await;
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn keepalive_probe_keeps_a_busy_pool_but_invalidates_a_dead_one() {
+        // Every connection is checked out: the probe learned nothing about pool health, so the
+        // pool must survive. Invalidating it here aborts whatever holds the connection — a
+        // truncate import reports "Connection not found for transaction" on its next chunk.
+        assert!(!keepalive_failure_proves_pool_dead(
+            "MySQL connection pool checkout timed out [stage=wait, timeout_ms=10000]"
+        ));
+        // A checkout failure while creating a connection is still evidence the pool is dead.
+        assert!(keepalive_failure_proves_pool_dead(
+            "MySQL connection pool checkout failed [stage=create]: connection refused"
+        ));
+        assert!(keepalive_failure_proves_pool_dead(
+            "MySQL connection pool checkout timed out [stage=create, timeout_ms=10000]"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn external_driver_pool_shuts_down_sidecar_when_connect_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_dir = dir.path().join("plugins").join("sample.jdbc");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let executable = plugin_dir.join("plugin.sh");
+        let pid_file = dir.path().join("plugin.pid");
+        std::fs::write(
+            &executable,
+            format!(
+                r#"#!/bin/sh
+printf '%s' "$$" > '{}'
+IFS= read -r connect
+connect_id=$(printf '%s' "$connect" | sed -E 's/.*"id":([0-9]+).*/\1/')
+printf '{{"jsonrpc":"2.0","id":%s,"error":{{"message":"fake connect failed"}}}}\n' "$connect_id"
+sleep 30
+"#,
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+        std::fs::write(
+            plugin_dir.join("manifest.json"),
+            serde_json::json!({
+                "id": "sample.jdbc",
+                "name": "Sample JDBC",
+                "version": "1.0.0",
+                "protocol_version": 1,
+                "executable": "plugin.sh",
+                "drivers": [{
+                    "id": "jdbc",
+                    "label": "JDBC",
+                    "kind": "external",
+                    "database_type": "jdbc"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_dir_and_app_version(storage, dir.path().join("plugins"), "0.6.0");
+        let mut config = mysql_config(None);
+        config.name = "Fake JDBC".to_string();
+        config.db_type = DatabaseType::Jdbc;
+        config.connection_string = Some("jdbc:fake://127.0.0.1/example".to_string());
+
+        let error = match state.external_driver_pool("jdbc", &config).await {
+            Ok(_) => panic!("fake connect should fail"),
+            Err(error) => error,
+        };
+        assert_eq!(error, "fake connect failed");
+
+        let pid = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Ok(contents) = std::fs::read_to_string(&pid_file) {
+                    if let Ok(pid) = contents.parse::<u32>() {
+                        break pid;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("fake sidecar should write its pid");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if !plugin_process_exists(pid) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("failed external-driver connect must terminate its sidecar");
     }
 
     #[tokio::test]
@@ -8651,6 +8792,21 @@ mod tests {
         let scoped = database_connection_config(&config, Some("analytics"));
 
         assert_eq!(scoped.database.as_deref(), Some("ORCL"));
+    }
+
+    #[test]
+    fn connection_root_schema_databases_keep_the_configured_database() {
+        for database_type in [DatabaseType::Oracle, DatabaseType::Dameng, DatabaseType::OceanbaseOracle] {
+            let mut config = mysql_config(Some("tenant_service"));
+            config.db_type = database_type;
+
+            let scoped = database_connection_config(&config, Some("APP"));
+
+            assert_eq!(scoped.database.as_deref(), Some("tenant_service"));
+        }
+
+        let mysql = database_connection_config(&mysql_config(Some("tenant_service")), Some("analytics"));
+        assert_eq!(mysql.database.as_deref(), Some("analytics"));
     }
 
     #[test]

@@ -470,11 +470,23 @@ func indexesFromMetadata(metadata *gocql.TableMetadata) []indexInfo {
 }
 
 func (s *server) getTableDDL(schema, table string) (string, error) {
-	metadata, err := s.tableMetadata(schema, table)
+	keyspace, err := s.keyspaceMetadata(schema)
 	if err != nil {
 		return "", err
 	}
-	return tableDDLFromMetadata(schema, table, metadata)
+	return schemaObjectDDLFromMetadata(schema, table, keyspace, func() (string, error) {
+		return s.getMaterializedViewDDL(schema, table)
+	})
+}
+
+func schemaObjectDDLFromMetadata(schema, table string, keyspace *gocql.KeyspaceMetadata, materializedViewDDL func() (string, error)) (string, error) {
+	if keyspace.MaterializedViews[table] != nil {
+		return materializedViewDDL()
+	}
+	if metadata := keyspace.Tables[table]; metadata != nil {
+		return tableDDLFromMetadata(schema, table, metadata)
+	}
+	return "", fmt.Errorf("Cassandra table not found: %s.%s", schema, table)
 }
 
 func tableDDLFromMetadata(schema, table string, metadata *gocql.TableMetadata) (string, error) {

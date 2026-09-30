@@ -56,6 +56,7 @@ const DRIVER_DATABASE_ALIASES = {
   kafka: "mq",
   "kingbase-go": "kingbase",
   "neo4j-go": "neo4j",
+  "nebula-go": "nebula",
   "oracle-10g": "oracle",
   "oracle-go": "oracle",
   "oracle-legacy": "oracle",

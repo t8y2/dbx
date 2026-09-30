@@ -21,6 +21,7 @@ NATIVE_ONLY_AGENT_MODULES = {
     "kingbase": "drivers/kingbase-go",
     "iotdb": "drivers/iotdb",
     "neo4j": "drivers/neo4j-go",
+    "nebula": "drivers/nebula-go",
     "vastbase": "drivers/vastbase-go",
     "tdengine": "drivers/tdengine",
     "xugu": "drivers/xugu",

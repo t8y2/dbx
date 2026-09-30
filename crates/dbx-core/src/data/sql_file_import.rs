@@ -589,7 +589,7 @@ async fn set_relational_constraints_enabled(
         &request.connection_id,
         &request.database,
         sql,
-        None,
+        request.schema.as_deref(),
         Some(token.clone()),
         QueryExecutionOptions::default(),
     )
@@ -604,10 +604,13 @@ async fn sql_file_transaction_schema(state: &AppState, request: &SqlFileRequest)
     let sessions = state.transaction_sessions.read().await;
     let session =
         sessions.get(session_id).ok_or("SQL file transaction session not found; no statements were retried")?;
-    if session.connection_id != request.connection_id || session.database != request.database {
+    if session.connection_id != request.connection_id
+        || session.database != request.database
+        || request.schema.as_ref().is_some_and(|schema| session.schema.as_ref() != Some(schema))
+    {
         return Err("SQL file target does not match its manual transaction".to_string());
     }
-    Ok(session.schema.clone())
+    Ok(request.schema.clone().or_else(|| session.schema.clone()))
 }
 
 async fn with_sql_file_transaction<T>(
@@ -856,6 +859,8 @@ async fn execute_sql_file_paths_inner(
     let mut prev_success_count = 0usize;
     let mut prev_failure_count = 0usize;
     let mut prev_affected_rows = 0u64;
+    let mut splitter = Some(StreamingSqlFileSplitter::new(database_type, options));
+    let mut pending_statements = Vec::with_capacity(SQL_FILE_STATEMENT_BATCH_SIZE);
     let import_result = async {
         for (file_index, file_path) in file_paths.iter().enumerate() {
             let file_name = file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
@@ -881,8 +886,6 @@ async fn execute_sql_file_paths_inner(
                 });
             }
 
-            let mut splitter = StreamingSqlFileSplitter::new(database_type, options);
-            let mut pending_statements = Vec::with_capacity(SQL_FILE_STATEMENT_BATCH_SIZE);
             let normalize_mysql_binary_literals = import_target.as_ref().is_some_and(|target| {
                 crate::sql::is_mysql_compatible_import_target(&target.db_type, target.driver_profile.as_deref())
             });
@@ -941,7 +944,10 @@ async fn execute_sql_file_paths_inner(
                     "",
                     None,
                 ));
-                let mut next_statements = splitter.push_chunk(&chunk);
+                let mut next_statements = splitter
+                    .as_mut()
+                    .expect("splitter is only taken by finish() on the last file, after this loop exits")
+                    .push_chunk(&chunk);
                 if let Some(filter) = restore_filter.as_mut() {
                     if let Err(error) = filter_restore_statements(
                         &mut next_statements,
@@ -979,23 +985,27 @@ async fn execute_sql_file_paths_inner(
                 .await?;
             }
 
-            let mut next_statements = splitter.finish();
-            if let Some(filter) = restore_filter.as_mut() {
-                if let Err(error) = filter_restore_statements(
-                    &mut next_statements,
-                    filter,
-                    request.selected_tables.as_deref().unwrap_or_default(),
-                ) {
-                    emit(sql_file_execution_error_progress(
-                        &request.execution_id,
-                        started_at,
-                        &progress,
-                        error.clone(),
-                    ));
-                    return Err(error);
+            let is_last_file = file_index + 1 == file_count;
+            if is_last_file {
+                let mut next_statements =
+                    splitter.take().expect("splitter is only taken once, on the last file").finish();
+                if let Some(filter) = restore_filter.as_mut() {
+                    if let Err(error) = filter_restore_statements(
+                        &mut next_statements,
+                        filter,
+                        request.selected_tables.as_deref().unwrap_or_default(),
+                    ) {
+                        emit(sql_file_execution_error_progress(
+                            &request.execution_id,
+                            started_at,
+                            &progress,
+                            error.clone(),
+                        ));
+                        return Err(error);
+                    }
                 }
+                pending_statements.extend(next_statements);
             }
-            pending_statements.extend(next_statements);
             execute_sql_file_statement_batch(
                 state,
                 request,
@@ -2585,7 +2595,7 @@ async fn execute_sql_file_statement(
         &request.connection_id,
         &request.database,
         sql,
-        None,
+        request.schema.as_deref(),
         Some(child_token),
         QueryExecutionOptions { execution_id: Some(execution_id), timeout_secs, ..Default::default() },
     )
@@ -2697,6 +2707,7 @@ mod tests {
             execution_id: "file-missing-session".to_string(),
             connection_id: "unconfigured".to_string(),
             database: String::new(),
+            schema: None,
             file_path: String::new(),
             continue_on_error: false,
             selected_tables: None,
@@ -3049,6 +3060,7 @@ mod tests {
                 execution_id: "file-progress".to_string(),
                 connection_id: "unconfigured".to_string(),
                 database: String::new(),
+                schema: None,
                 file_path: path.to_string_lossy().to_string(),
                 continue_on_error: false,
                 selected_tables: None,
@@ -3181,6 +3193,20 @@ mod tests {
         assert_eq!(statements.len(), 2);
         assert_eq!(statements[0], "CREATE PROCEDURE dbo.demo AS\nBEGIN\n  SELECT 1;\n  SELECT 2;\nEND");
         assert_eq!(statements[1], "SELECT 3;");
+    }
+
+    #[test]
+    fn streaming_sqlserver_splitter_keeps_split_json_literal_across_parts() {
+        let part_one = "INSERT INTO [dbo].[VersionValue] ([value]) VALUES (N'{\"materialOrSymbolMate";
+        let part_two = "rialId\":\"9625a891-3682-4151-acdb-6480db860033\",\"label\":\"B\\\\u1ebb ch\\\\u00e2n/Th\\\\u1eb3ng/\",\"quote\":\"it''s valid\"}');\n";
+        let expected = format!("{part_one}{part_two}").trim().to_string();
+        let mut splitter = StreamingSqlFileSplitter::new(Some(DatabaseType::SqlServer), SqlParsingOptions::default());
+
+        assert!(splitter.push_chunk(part_one).is_empty());
+        assert!(splitter.push_chunk(part_two).is_empty());
+        let statements = splitter.finish().into_iter().map(|statement| statement.sql).collect::<Vec<_>>();
+
+        assert_eq!(statements, vec![expected]);
     }
 
     #[test]
@@ -3467,6 +3493,7 @@ mod tests {
             execution_id: "gauss-stop-on-error".to_string(),
             connection_id: "gauss-stream".to_string(),
             database: String::new(),
+            schema: None,
             file_path: path.to_string_lossy().to_string(),
             continue_on_error: true,
             selected_tables: None,

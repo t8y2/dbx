@@ -314,6 +314,7 @@ async fn live_postgres_create_partitioned_table_executes() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
         table_collation: None,

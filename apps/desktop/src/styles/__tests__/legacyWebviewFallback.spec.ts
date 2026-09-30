@@ -34,6 +34,7 @@ const mainSource = readFileSync(new URL("../../main.ts", import.meta.url), "utf8
 const tabPresentationSource = readFileSync(new URL("../../lib/tabs/tabPresentation.ts", import.meta.url), "utf8");
 const editorGroupTabBarSource = readFileSync(new URL("../../components/layout/EditorGroupTabBar.vue", import.meta.url), "utf8");
 const appTabBarCssSource = readFileSync(new URL("../../components/layout/appTabBar.css", import.meta.url), "utf8");
+const schemaDiffDialogSource = readFileSync(new URL("../../components/diff/SchemaDiffDialog.vue", import.meta.url), "utf8");
 
 describe("legacy WebView CSS fallbacks", () => {
   it("keeps globals.css balanced and free of min-width media wrappers", () => {
@@ -545,6 +546,34 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(globalsCss).not.toContain("-webkit-transform: scale(1.45);");
     expect(globalsCss).not.toContain("transform: scale(1.45);");
     expect(globalsCss).toContain('html.dbx-legacy-webview input[type="number"]:not([class*="appearance-none"]):disabled::-webkit-inner-spin-button');
+  });
+
+  it("keeps the schema diff dialog inline sizing working in legacy WebViews", () => {
+    // The shared DialogContent base carries max-w-sm, whose legacy !important cap
+    // outranks the dialog's inline width/max-width styles: the normal state then
+    // renders at its min-w floor and the maximize toggle collapses to 24rem wide.
+    // The rescue rules must sit after the max-w-* caps to win by source order.
+    const fallbackStart = globalsCss.indexOf("html.dbx-legacy-webview .sm\\:block");
+    const splitpanesStart = globalsCss.indexOf("/* Splitpanes */");
+    const fallback = globalsCss.slice(fallbackStart, splitpanesStart);
+    const maxWsmCap = fallback.indexOf('html.dbx-legacy-webview [data-slot="dialog-content"][class~="max-w-sm"]');
+    const normalRule = fallback.indexOf('html.dbx-legacy-webview [data-slot="dialog-content"].dbx-schema-diff-dialog {');
+    const maximizedRule = fallback.indexOf('html.dbx-legacy-webview [data-slot="dialog-content"].dbx-schema-diff-dialog.dbx-dialog-maximized {');
+
+    expect(fallbackStart).toBeGreaterThan(-1);
+    expect(splitpanesStart).toBeGreaterThan(fallbackStart);
+    expect(maxWsmCap).toBeGreaterThan(-1);
+    expect(normalRule).toBeGreaterThan(maxWsmCap);
+    expect(maximizedRule).toBeGreaterThan(normalRule);
+    expect(fallback.slice(normalRule, maximizedRule)).toContain("max-width: calc(100vw - 2rem) !important;");
+    expect(fallback.slice(normalRule, maximizedRule)).toContain("max-height: calc(var(--dbx-viewport-height) - 2rem) !important;");
+    expect(fallback.slice(maximizedRule)).toContain("width: calc(100vw - 2rem) !important;");
+    expect(fallback.slice(maximizedRule)).toContain("height: calc(var(--dbx-viewport-height) - 2rem) !important;");
+    expect(fallback.slice(maximizedRule)).toContain("max-width: none !important;");
+    expect(fallback.slice(maximizedRule)).toContain("max-height: none !important;");
+    expect(fallback.slice(maximizedRule)).toContain("border-radius: 0 !important;");
+    expect(schemaDiffDialogSource).toContain("'flex flex-col overflow-hidden dbx-schema-diff-dialog'");
+    expect(schemaDiffDialogSource).toContain("isMaximized ? 'dbx-dialog-maximized min-w-0' : 'min-w-[800px] resize'");
   });
 
   it("keeps settings field stacks spaced in legacy WebViews", () => {

@@ -913,7 +913,7 @@ test("selected query result CSV export keeps the existing in-memory path", async
   assert.equal(apiMock.exportQueryResultCsv.mock.calls[0][3], "necessary");
 });
 
-test("selected query result CSV export formats only typed temporal columns", async () => {
+test("selected query result CSV export formats typed temporal columns without a formula wrapper", async () => {
   useSettingsStore().updateEditorSettings({ globalDateTimeExportFormat: "YYYY/M/D HH:mm:ss" });
   const rawDateTime = "2024-02-25 13:02:15";
   const { composable } = buildExportHarness({
@@ -924,8 +924,8 @@ test("selected query result CSV export formats only typed temporal columns", asy
 
   await composable.exportCsv([1]);
 
-  // Temporal columns are wrapped as `="..."` so spreadsheet apps keep them as text; plain columns are untouched.
-  assert.deepEqual(apiMock.exportQueryResultCsv.mock.calls[0][2], [['="2024/2/25 13:02:15"', rawDateTime]]);
+  // Temporal columns use the configured export format; plain columns are untouched.
+  assert.deepEqual(apiMock.exportQueryResultCsv.mock.calls[0][2], [["2024/2/25 13:02:15", rawDateTime]]);
 });
 
 test("selected query result XLSX export uses the current source label as the sheet name", async () => {

@@ -96,7 +96,7 @@ import { openQueryResultArchiveFile } from "@/lib/query/queryResultArchiveFile";
 import { activeTabExternalSqlFileTarget, rememberExternalSqlFileTarget, resolveExternalSqlFileTarget, resolveExternalSqlFileTargetForActiveTab, unassociatedExternalSqlFileTarget, type ExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
 import { externalSqlFileOpenErrorMessage, externalSqlEditorMaxBytes, isSqlFilePath, readBrowserSqlFile, sqlFileTitleFromPath } from "@/lib/sql/sqlFileOpen";
 import type { ConnectionConfig, DatabaseType, ObjectBrowserFilter, ObjectSourceKind, QueryTab, TabOutputView, TreeNode } from "@/types/database";
-import type { PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
+import { OPEN_PLUGIN_SETTINGS, type PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 import { parsePluginInstallDeepLink } from "@/lib/plugins/pluginInstallDeepLink";
 import { createFrontendPluginRegistry } from "@/lib/plugins/frontendPlugin";
 import { parseConnectionDeepLink, parseConnectionDeepLinkUpdate, type ConnectionDeepLinkDraft, type ConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLink";
@@ -111,6 +111,7 @@ import {
   isExecuteSqlInNewResultTabShortcut,
   isExecuteSqlShortcut,
   isFocusSearchShortcut,
+  isFocusWhereShortcut,
   isGoToColumnShortcut,
   isModRShortcut,
   handleTabHistoryNavigationShortcut,
@@ -162,7 +163,8 @@ import { countActiveUpdateBlockingTasks } from "@/lib/app/appUpdateTaskGuard";
 import { initSavedSqlEditorPositions } from "@/lib/app/savedSqlEditorPosition";
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import { objectBrowserTablesToAiTreeNodes } from "@/lib/ai/objectBrowserToAiTargets";
-import type { AiConversationBinding } from "@/lib/ai/aiConversationBinding";
+import { aiTargetFromTab, type AiConversationBinding } from "@/lib/ai/aiConversationBinding";
+import type { AiExternalContextRequest } from "@/lib/ai/aiExternalContext";
 import { isSchemaAware, isSingleDatabase, supportsConnectionQueryActions, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 import { codeMirrorSqlDialect, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { canFormatSqlForDatabaseType, formatSqlForEditing, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
@@ -206,11 +208,9 @@ const QueryEditorObjectSourceDialog = defineAsyncComponent(() => import("@/compo
 
 type AiAssistantHandle = {
   openPluginConversation: (request: AiPluginConversationRequest) => void;
+  /** Single entry point for AI triggers outside the panel (#10058 R1/R3). */
+  openExternalContext: (request: AiExternalContextRequest) => void;
   triggerAction: (action: AiAction, instruction?: string) => void;
-  setPrompt: (text: string) => void;
-  addTableMention: (target: { schema?: string; table: string }, binding?: AiConversationBinding) => void;
-  /** Retarget the conversation on its own, for entries that add no mention. */
-  bindConversation: (binding: AiConversationBinding) => Promise<void>;
   clearContextReferences: () => void;
   focusSearch: () => boolean;
   /** Opens a conversation by id (used by the background-run toast, §9). */
@@ -1276,6 +1276,8 @@ function openPluginCenterPage(focus?: PluginCenterFocus | null) {
   activateMainContentSurface("pluginCenter");
 }
 
+provide(OPEN_PLUGIN_SETTINGS, () => openPluginCenterPage({ section: "settings" }));
+
 function closePluginCenterPage() {
   pluginCenterTabOpen.value = false;
   pluginCenterFocus.value = null;
@@ -1758,14 +1760,53 @@ function invokeWhenAiReady(invoke: (handle: AiAssistantHandle) => void) {
   });
 }
 
-function fixWithAi(errorMessage: string) {
-  openRightSidebarPanel("ai");
-  invokeWhenAiReady((handle) => handle.triggerAction("fix", errorMessage));
+/**
+ * Namespace an editor-triggered AI request must bind to (#10058 R1).
+ *
+ * Resolved from the tab the gesture came from — not from the tab that happens to
+ * be active — so a right-click in a background SQL editor still lands on its own
+ * connection. `null` when the tab's connection is gone (a SQL tab survives its
+ * connection being deleted): the panel then degrades to an unbound chat and says
+ * so instead of reusing whatever the current conversation was bound to (R6).
+ */
+function editorAiTarget(tabId?: string): AiConversationBinding | null {
+  // An explicit tabId that no longer resolves must NOT fall back to the active
+  // tab: the gesture belongs to a closed editor, and binding it to whatever is
+  // open now would attribute the request to the wrong namespace.
+  const tab = tabId ? queryStore.tabs.find((candidate) => candidate.id === tabId) : activeTab.value;
+  return aiTargetFromTab(tab, (connectionId) => !!connectionStore.getConfig(connectionId));
 }
 
-function sendSelectionToAi(sql: string) {
+function fixWithAi(tabId: string, errorMessage: string) {
   openRightSidebarPanel("ai");
-  invokeWhenAiReady((handle) => handle.setPrompt(sql));
+  invokeWhenAiReady((handle) =>
+    handle.openExternalContext({
+      target: editorAiTarget(tabId),
+      action: "fix",
+      instruction: errorMessage,
+      unresolvedKey: "ai.externalTargetUnavailable",
+    }),
+  );
+}
+
+/**
+ * "Send to AI" from the SQL editor (#10058).
+ *
+ * The selected SQL becomes composer *context* — a removable chip — and the input
+ * box stays empty for the user's own request. It used to be pasted into the
+ * composer as prompt text, which made data look like an instruction and left it
+ * unbounded.
+ */
+function sendSelectionToAi(tabId: string, sql: string) {
+  const tab = queryStore.tabs.find((candidate) => candidate.id === tabId);
+  openRightSidebarPanel("ai");
+  invokeWhenAiReady((handle) => {
+    handle.openExternalContext({
+      target: editorAiTarget(tabId),
+      selections: [{ source: "editor", label: tab?.title, content: sql }],
+      unresolvedKey: "ai.externalTargetUnavailable",
+    });
+  });
 }
 
 let addToAiRequestId = 0;
@@ -1803,17 +1844,18 @@ async function addToAi(nodesInput: TreeNode | TreeNode[]) {
 
     // The *conversation* is retargeted, not the editor: asking about a table must
     // not move the workspace's active connection or steal/create a tab (#9902).
-    // The previous connection's mentions are cleared inside applyExternalBinding().
+    // Which conversation is decided by the same rule the editor entry uses
+    // (#10058 R3): same namespace reuses the shown chat (no-op), another
+    // namespace opens a new chat bound to this one instead of rewriting it.
     const binding: AiConversationBinding = { connectionId: node.connectionId, database: target.database, schema: target.schema };
     const tableMentions = nodes.filter((entry) => entry.type === "table" && !!entry.label).map((entry) => ({ schema: entry.schema, table: entry.label }));
 
     openRightSidebarPanel("ai");
     invokeWhenAiReady((handle) => {
-      // Applied independently of the mentions: "Ask AI" on a *connection* or
-      // *database* node carries a target but adds no table mention, and it still
-      // has to retarget the conversation (#9902).
-      void handle.bindConversation(binding);
-      for (const mention of tableMentions) handle.addTableMention(mention, binding);
+      // Mentions and target travel together: "Ask AI" on a *connection* or
+      // *database* node carries a target but adds no mention, and it still has
+      // to move the chat (#9902).
+      handle.openExternalContext({ target: binding, tableMentions });
     });
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
@@ -3706,6 +3748,14 @@ async function handleKeydown(e: KeyboardEvent) {
 
   const shortcuts = settingsStore.editorSettings.shortcuts;
   if (showTabSwitcher.value) return;
+  if (isFocusWhereShortcut(e, shortcuts) && !showSettingsPage.value && !showPluginCenter.value && !showDriverStore.value) {
+    const target = e.target instanceof Element ? e.target : null;
+    if (!target?.closest('[role="dialog"], [role="alertdialog"]') && contentAreaRef.value?.focusWhere()) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+  }
   // Grid-scoped shortcuts normally win inside DataGrid. Keep that precedence
   // for a data tab even when focus is in a sibling input, where the grid's
   // local listener intentionally leaves native editing untouched.
@@ -3857,7 +3907,7 @@ async function handleKeydown(e: KeyboardEvent) {
   if (activeTab.value?.mode === "query" && isSendSelectionToAiShortcut(e, shortcuts) && e.target instanceof Element && e.target.closest("[data-query-editor-root]")) {
     e.preventDefault();
     e.stopPropagation();
-    if (selectedSql.value.trim()) sendSelectionToAi(selectedSql.value);
+    if (selectedSql.value.trim()) sendSelectionToAi(activeTab.value.id, selectedSql.value);
     return;
   }
   if (isModRShortcut(e) && refreshActivePluginWorkbench()) {
@@ -4375,10 +4425,10 @@ onUnmounted(() => {
                         if (tabId === queryStore.activeTabId) previewChangesAvailable = value;
                       }
                     "
-                    @fix-with-ai="(_tabId: string, message: string) => fixWithAi(message)"
+                    @fix-with-ai="(tabId: string, message: string) => fixWithAi(tabId, message)"
                     @send-selection-to-ai="
                       (tabId: string, sql: string) => {
-                        if (tabId === queryStore.activeTabId) sendSelectionToAi(sql);
+                        if (tabId === queryStore.activeTabId) sendSelectionToAi(tabId, sql);
                       }
                     "
                     @execute="(tabId: string, override?: SqlExecutionOverride) => tryExecute(override, { tabId })"

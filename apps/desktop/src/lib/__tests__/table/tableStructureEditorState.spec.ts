@@ -13,6 +13,7 @@ import {
   dataTypeLengthUnitValue,
   DATA_TYPE_OPTIONS,
   defaultNewColumnDataType,
+  draftColumnNameForSql,
   getDataTypeLengthUnitOptions,
   getDefaultLengthForType,
   hasExistingColumnTypeChange,
@@ -199,6 +200,49 @@ describe("tableStructureEditorState", () => {
       expect(combineDataTypeForDatabase("duckdb", "custom_type", "10")).toBe("custom_type(10)");
       expect(combineDataTypeForDatabase("duckdb", "DECIMAL", "39,0")).toBe("DECIMAL(39,0)");
       expect(combineDataTypeForDatabase("duckdb", "VARCHAR", "-1")).toBe("VARCHAR(-1)");
+    });
+  });
+
+  describe("PostgreSQL temporal precision", () => {
+    it("keeps the time-zone qualifier returned by PostgreSQL metadata", () => {
+      const drafts = createColumnDrafts(
+        [
+          { name: "with_tz", data_type: "timestamp(6) with time zone", is_nullable: true, column_default: null, is_primary_key: false },
+          { name: "without_tz", data_type: "timestamp(6) without time zone", is_nullable: true, column_default: null, is_primary_key: false },
+        ],
+        "postgres",
+      );
+
+      expect(drafts.map((column) => column.dataType)).toEqual(["timestamp(6) with time zone", "timestamp(6) without time zone"]);
+      expect(drafts.map((column) => column.original?.data_type)).toEqual(drafts.map((column) => column.dataType));
+      expect(hasExistingColumnTypeChange(drafts)).toBe(false);
+      expect(dataTypeBaseInputValue("postgres", drafts[0]!.dataType)).toBe("timestamp with time zone");
+      expect(dataTypeBaseInputValue("postgres", drafts[1]!.dataType)).toBe("timestamp without time zone");
+      expect(dataTypeLengthInputValue("postgres", drafts[0]!.dataType)).toBe("6");
+      expect(dataTypeLengthInputValue("postgres", drafts[1]!.dataType)).toBe("6");
+      expect(combineDataTypeForDatabase("postgres", dataTypeBaseInputValue("postgres", drafts[0]!.dataType), "3")).toBe("timestamp(3) with time zone");
+      expect(combineDataTypeForDatabase("postgres", dataTypeBaseInputValue("postgres", drafts[1]!.dataType), "3")).toBe("timestamp(3) without time zone");
+    });
+
+    it("rebuilds qualified timestamp precision without changing time-zone semantics", () => {
+      expect(combineDataTypeForDatabase("postgres", "timestamp with time zone", "3")).toBe("timestamp(3) with time zone");
+      expect(combineDataTypeForDatabase("postgres", "timestamp without time zone", "3")).toBe("timestamp(3) without time zone");
+      expect(combineDataTypeForDatabase("postgres", "timestamptz", "3")).toBe("timestamptz(3)");
+      expect(combineDataTypeForDatabase("postgres", "timestamp", "3")).toBe("timestamp(3)");
+    });
+
+    it("does not reinterpret temporal arrays, domains, or user-defined types as scalar timestamps", () => {
+      expect(dataTypeBaseInputValue("postgres", "timestamp(6) with time zone[]")).toBe("timestamp with time zone[]");
+      expect(dataTypeLengthInputValue("postgres", "timestamp(6) with time zone[]")).toBe("");
+      expect(dataTypeBaseInputValue("postgres", "timestamptz(6)[][]")).toBe("timestamptz[][]");
+      expect(dataTypeLengthInputValue("postgres", "timestamptz(6)[][]")).toBe("");
+
+      const metadataTypes = ["audit.timestamp_domain", 'audit."timestamp"', "custom_timestamp(6)"];
+      const drafts = createColumnDrafts(
+        metadataTypes.map((dataType, index) => ({ name: `custom_${index}`, data_type: dataType, is_nullable: true, column_default: null, is_primary_key: false })),
+        "postgres",
+      );
+      expect(drafts.map((column) => column.dataType)).toEqual(metadataTypes);
     });
   });
 
@@ -994,5 +1038,27 @@ describe("structureColumnCommentsForCopy", () => {
       { name: "  ", comment: "没有字段名", markedForDrop: false },
     ]);
     expect(comments.size).toBe(0);
+  });
+});
+
+describe("draftColumnNameForSql", () => {
+  // MySQL rejects identifiers that end with a space (ERROR 1166), so a name the
+  // user pasted with a trailing space must not reach the DDL builder as typed.
+  it("drops the trailing whitespace of a name the user typed", () => {
+    expect(draftColumnNameForSql("device_app_face_status ", "app_auth_status")).toBe("device_app_face_status");
+    expect(draftColumnNameForSql("display_name\t", "name")).toBe("display_name");
+    expect(draftColumnNameForSql("new_column\n  ")).toBe("new_column");
+  });
+
+  // #9654: leading spaces are legal inside a backtick-quoted identifier, so the
+  // user's spelling is kept for a new column and for a metadata name alike.
+  it("keeps leading spaces of a name the user typed", () => {
+    expect(draftColumnNameForSql("  content1")).toBe("  content1");
+  });
+
+  it("keeps an untouched metadata name byte-exact so whitespace is never read as a rename", () => {
+    expect(draftColumnNameForSql("  content1", "  content1")).toBe("  content1");
+    expect(draftColumnNameForSql("content1 ", "content1 ")).toBe("content1 ");
+    expect(draftColumnNameForSql("plain", "plain")).toBe("plain");
   });
 });

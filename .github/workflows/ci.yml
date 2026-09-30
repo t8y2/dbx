@@ -132,14 +132,10 @@ jobs:
       - frontend-checks
       - frontend-typecheck
       - frontend-test
-    if: always()
+    if: always() && !cancelled()
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - name: Setup Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: 22.13.0
       - name: Check selected frontend jobs
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
@@ -936,14 +932,10 @@ jobs:
       - fast-checks
       - rust-fmt-clippy
       - rust-test
-    if: always()
+    if: always() && !cancelled()
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - name: Setup Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: 22.13.0
       - name: Check selected rust jobs
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
@@ -1059,12 +1051,24 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          fetch-depth: 1
+
+      - name: Fetch change base
+        id: change-base
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]]; then
+            exit 0
+          fi
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          echo "sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Detect changed areas
         uses: dorny/paths-filter@v4
         id: filter
         with:
+          base: ${{ steps.change-base.outputs.sha }}
           filters: |
             frontend:
               - 'apps/desktop/**'
@@ -1182,12 +1186,10 @@ jobs:
               - '.github/workflows/ci.yml'
               - 'apps/desktop/src/types/database.ts'
               - 'crates/dbx-core/assets/database-drivers.manifest.json'
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.97.1
       - name: Plan dependency-aware CI jobs
         id: plan
         env:
-          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          BASE_SHA: ${{ steps.change-base.outputs.sha }}
           RUST_CHANGED: ${{ steps.filter.outputs.rust }}
           AGENTS_CHANGED: ${{ steps.filter.outputs.agents }}
         run: node .github/scripts/ci-plan.mjs
@@ -1201,14 +1203,10 @@ jobs:
       - agent-rust
       - agent-go
       - agent-integration
-    if: always()
+    if: always() && !cancelled()
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - name: Setup Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: 22.13.0
       - name: Check selected agents jobs
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
@@ -1484,14 +1482,10 @@ jobs:
       - jdbc
       - offline-jdbc-release
       - nix-packaging
-    if: always()
+    if: always() && !cancelled()
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - name: Setup Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: 22.13.0
       - name: Check selected all jobs
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}

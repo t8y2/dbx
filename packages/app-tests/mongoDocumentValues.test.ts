@@ -10,6 +10,7 @@ import {
   formatMongoShellLiteral,
   MONGO_DOCUMENT_GRID_NULL,
   mongoDocumentDisplayValue,
+  mongoDocumentDisplayText,
   mongoDocumentGridDisplayText,
   mongoDocumentGridClipboardText,
   mongoDocumentGridEditorText,
@@ -18,6 +19,7 @@ import {
   mongoDocumentGridValue,
   mongoDocumentGridColumnTypes,
   mongoDocumentIdForGrid,
+  mongoDocumentRelaxedExtendedJson,
   parseMongoDocumentInputValue,
   serializeMongoDocumentId,
 } from "../../apps/desktop/src/lib/mongo/mongoDocumentValues.ts";
@@ -60,6 +62,10 @@ test("parses Mongo shell ISODate literals as extended JSON dates", () => {
 });
 
 test("preserves date-shaped Mongo strings instead of guessing Date", () => {
+  // A shell date literal written the way a grid cell shows it is read as local time and sent as UTC.
+  assert.deepEqual(parseMongoDocumentInputValue('ISODate("2025-04-01 19:46:03")'), { $date: new Date(2025, 3, 1, 19, 46, 3).toISOString() });
+  assert.deepEqual(parseMongoDocumentInputValue('new Date("2025-04-01")'), { $date: new Date(2025, 3, 1).toISOString() });
+  // Bare text stays text: only the literal marks a date.
   assert.equal(parseMongoDocumentInputValue("2025-08-14 02:25:43.718"), "2025-08-14 02:25:43.718");
   assert.equal(parseMongoDocumentInputValue("2025-04-01 19:46:03"), "2025-04-01 19:46:03");
   assert.equal(parseMongoDocumentInputValue('"2025-08-14 02:25:43.718"'), "2025-08-14 02:25:43.718");
@@ -342,6 +348,28 @@ test("keeps normal Mongo values readable and unsafe Int64 editable", () => {
   assert.equal(mongoDocumentDisplayValue('ISODate("2026-07-14T00:00:00Z")'), 'ISODate("2026-07-14T00:00:00Z")');
   assert.equal(mongoDocumentDisplayValue({ $numberLong: "9007199254740993" }), 'NumberLong("9007199254740993")');
   assert.deepEqual(parseMongoDocumentInputValue('NumberLong("9007199254740993")'), { $numberLong: "9007199254740993" });
+});
+
+test("renders Mongo structures as shell-style literals like mongosh", () => {
+  assert.equal(mongoDocumentDisplayText({ $oid: "6743e4bfa3f6f84bc3fff6c8" }), 'ObjectId("6743e4bfa3f6f84bc3fff6c8")');
+  assert.equal(mongoDocumentDisplayText({ $numberLong: "2326645729978441729" }), 'NumberLong("2326645729978441729")');
+  assert.equal(mongoDocumentDisplayText({ $numberInt: "42" }), 'NumberInt("42")');
+  assert.equal(mongoDocumentDisplayText({ $date: "2026-06-10T13:59:31.287Z" }), 'ISODate("2026-06-10T13:59:31.287Z")');
+  assert.equal(mongoDocumentDisplayText({ $date: { $numberLong: "1781099971287" } }), 'ISODate("2026-06-10T13:59:31.287Z")');
+  assert.equal(mongoDocumentDisplayText({ $minKey: 1 }), "MinKey()");
+  assert.equal(mongoDocumentDisplayText(['ISODate("2026-06-10T13:59:31.287Z")', { $oid: "507f1f77bcf86cd799439011" }, 2]), '[ISODate("2026-06-10T13:59:31.287Z"), ObjectId("507f1f77bcf86cd799439011"), 2]');
+  assert.equal(mongoDocumentDisplayText({ note: "[1,2]", nested: [[1], []] }), '{"note": "[1,2]", "nested": [[1], []]}');
+  assert.equal(mongoDocumentDisplayText({ $binary: { base64: "AQI=", subType: "00" } }), '{"$binary": {"base64": "AQI=", "subType": "00"}}');
+});
+
+test("converts browser-form dates to relaxed Extended JSON for document previews", () => {
+  assert.deepEqual(mongoDocumentRelaxedExtendedJson({ at: 'ISODate("2026-06-10T13:59:31.287Z")', keep: "ISODate-ish text" }), {
+    at: { $date: "2026-06-10T13:59:31.287Z" },
+    keep: "ISODate-ish text",
+  });
+  assert.deepEqual(mongoDocumentRelaxedExtendedJson({ items: [{ by: { $oid: "507f1f77bcf86cd799439011" }, at: 'new Date("2026-06-10T13:59:31.287Z")' }] }), {
+    items: [{ by: { $oid: "507f1f77bcf86cd799439011" }, at: { $date: "2026-06-10T13:59:31.287Z" } }],
+  });
 });
 
 test("builds edits for Int32, Double, Date, and unsafe Int64", () => {

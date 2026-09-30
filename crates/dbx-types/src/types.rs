@@ -408,6 +408,20 @@ pub struct SpatialColumn {
     pub srid: Option<u32>,
 }
 
+/// Stable identity for one column selected for SQL INSERT export.
+///
+/// `source_index` preserves duplicate result labels. `name` and
+/// `name_occurrence` let paginated exports recover the same identity when a
+/// driver reports later-page metadata in a different order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlExportColumnSelection {
+    pub source_index: usize,
+    pub name: String,
+    #[serde(default)]
+    pub name_occurrence: usize,
+}
+
 #[derive(Debug, Default)]
 pub struct SpatialColumnBuilder {
     // column_index -> first non-null srid seen (sticky once set)

@@ -212,6 +212,9 @@ export function connectionUrlPlaceholder(dbType: DatabaseType, driverProfile?: s
     case "mongodb":
       return "mongodb://user:password@host:port/database";
 
+    case "nebula":
+      return "nebula://root:password@graphd:9669/space";
+
     case "dynamodb":
       return "https://dynamodb.us-east-1.amazonaws.com";
 
@@ -264,6 +267,9 @@ export function connectionUrlPlaceholder(dbType: DatabaseType, driverProfile?: s
 
     case "iris":
       return driverProfile === "cache" ? "cache://user:password@host:port/namespace" : "iris://user:password@host:port/namespace";
+
+    case "transwarp":
+      return "jdbc:inceptor2://host:10000/default";
 
     case "influxdb":
       return "influxdb://user:password@host:port/database";

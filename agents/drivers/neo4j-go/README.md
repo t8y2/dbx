@@ -12,6 +12,13 @@ This module replaces the Neo4j JDBC Agent with the official Neo4j Go Driver.
 
 ## Compatibility
 
+- `neo4j://` (routing) is the default scheme. When a server reports that cluster
+  routing is unavailable — Bolt 3 servers such as Neo4j 3.5, which never expose
+  the routing procedure — the agent retries the same target with a direct
+  `bolt://` connection. An explicit `scheme` parameter still wins, including the
+  TLS variants (`bolt+s` / `bolt+ssc`).
+- Servers that negotiate Bolt 3 or older only expose the default database, so
+  the agent does not send a database name for them (the driver rejects it).
 - Neo4j databases are discovered with `SHOW DATABASES`, with the configured database retained as a fallback for Community-compatible servers such as Memgraph.
 - Node labels use `CALL db.labels()`.
 - Properties use `db.schema.nodeTypeProperties()` with a sampled-node fallback.
@@ -34,3 +41,7 @@ DBX_NEO4J_USER=neo4j \
 DBX_NEO4J_PASSWORD=password \
 go test -run TestLiveNeo4jAgent
 ```
+
+`TestLiveNeo4jAgentSingleInstanceRoutingFallback` uses the default routing
+scheme on purpose, so it exercises the direct-connection fallback; run it
+against a single-instance server that cannot route (for example Neo4j 3.5).

@@ -54,6 +54,7 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   },
   { feature: "offline Agent export", keys: ["driverStore.offlineExport*"] },
   { feature: "offline Agent import", keys: ["driverStore.offlineImport*", "driverStore.offlineJreImport*"] },
+  { feature: "driver runtime connection-owned message (#10412)", keys: ["driverStore.runtimeControlConnectionOwned"], translated: true },
   { feature: "multi-database execution and export progress", keys: ["multiDbExecute.*", "exportProgress.*"], locales: ["en", "zh-CN"] },
   { feature: "process list batch terminate", keys: under("processList", ["batchTerminate", "batchTerminateTitle", "batchTerminateConfirm", "batchTerminateRunning", "batchTerminateSummary"]) },
   { feature: "cached result fallback", keys: ["grid.cachedResultUnavailable", "grid.reexecuteQuery"] },
@@ -62,6 +63,7 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   { feature: "SQLite table rebuild notice", keys: ["structureEditor.sqliteRebuildNotice"] },
   { feature: "custom types", keys: ["customType.kinds.composite", "customType.tabs.properties", "customType.members.empty", "customType.properties.empty", "customType.ddl.empty", "customType.ddl.incomplete", "contextMenu.viewDetails"], translated: true },
   { feature: "Dameng object compilation", keys: ["contextMenu.compileObjectFailedTitle", "contextMenu.compileObjectFailedMessage"], locales: EXCEPT_AZ_TR, translated: true },
+  { feature: "SunDB bundled JDBC driver (#10732)", keys: ["connection.sundbCustomDriverHint"], translated: true },
   { feature: "user administration Host change", keys: ["userAdmin.changeHost", "userAdmin.newHost"], translated: true },
   { feature: "plugin batch actions", keys: ["pluginPlatform.batchDuplicateSources", "pluginPlatform.batchRefreshFailed"], locales: EXCEPT_AZ_TR },
   { feature: "plugin marketplace sorting (#10078)", keys: under("pluginPlatform", ["sortBy", "sortByName", "sortByRecentlyUpdated", "sortByRecentlyListed", "sortByUpdatesFirst"]), locales: EXCEPT_AZ_TR, translated: true },
@@ -74,6 +76,7 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   { feature: "sidebar search skip hint", keys: ["sidebar.searchConnectionSkipped"] },
   { feature: "PostgreSQL legacy TLS", keys: ["connection.postgresLegacyTls", "connection.postgresLegacyTlsHint"] },
   { feature: "settings search sections", keys: ["settings.syncWebDavWebDescription", "settings.performanceSection"] },
+  { feature: "local backup selection", keys: ["settings.localBackupSecretsPassphraseRequiredHint", "settings.localBackupPathLabel", "settings.localBackupPathUnset", "settings.localBackupChoosePath", "settings.localBackupPathRequired"], translated: true },
   { feature: "SQL table completion schema qualification (#9219)", keys: ["settings.tableCompletionSchemaQualification*"], translated: true },
   { feature: "Redis batch expiration", keys: under("redis", ["batchExpiry", "batchExpiryTitle", "batchExpirySelected", "batchExpiryApply", "batchExpirySuccess", "batchExpiryPartial"]) },
   {

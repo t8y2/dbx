@@ -190,6 +190,10 @@ const totalAdded = computed(() => batchResults.value.reduce((sum, item) => sum +
 const totalRemoved = computed(() => batchResults.value.reduce((sum, item) => sum + item.removed, 0));
 const totalModified = computed(() => batchResults.value.reduce((sum, item) => sum + item.modified, 0));
 const hasResults = computed(() => batchResults.value.length > 0);
+// A compare reads both sides up to a fixed row budget, so a table larger than that budget
+// is reported through `*Truncated`. Surfacing it here keeps a partial diff from looking
+// like a complete one.
+const truncatedResults = computed(() => batchResults.value.filter((item) => item.sourceTruncated || item.targetTruncated));
 const visibleKinds = computed(() => [...(showAdded.value ? (["added"] as DiffKind[]) : []), ...(showRemoved.value ? (["removed"] as DiffKind[]) : []), ...(showModified.value ? (["modified"] as DiffKind[]) : [])]);
 const selectedAddedCount = computed(() => selectedDiffCount("added"));
 const selectedRemovedCount = computed(() => selectedDiffCount("removed"));
@@ -1276,6 +1280,23 @@ onBeforeUnmount(() => {
               <div class="text-xs text-muted-foreground">{{ selectedSummary }}</div>
             </div>
 
+            <div v-if="truncatedResults.length" class="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-700 space-y-1 dark:text-amber-400">
+              <div class="text-sm font-medium">{{ t("dataCompare.truncatedTitle") }}</div>
+              <div>{{ t("dataCompare.truncatedHint") }}</div>
+              <ul class="list-disc space-y-0.5 pl-4">
+                <li v-for="item in truncatedResults" :key="`truncated-${item.sourceTable}:${item.targetTable}`">
+                  {{
+                    t("dataCompare.truncatedTable", {
+                      table: item.sourceTable,
+                      source: item.sourceRowCount,
+                      target: item.targetRowCount,
+                      budget: item.rowBudget,
+                    })
+                  }}
+                </li>
+              </ul>
+            </div>
+
             <div class="rounded-lg border p-3 space-y-3">
               <div class="flex flex-wrap items-center gap-2">
                 <Button size="sm" variant="outline" class="h-7 text-xs" :class="showAdded ? 'border-primary' : ''" @click="showAdded = !showAdded"> {{ t("diff.added") }} · {{ totalAdded }} </Button>
@@ -1349,6 +1370,9 @@ onBeforeUnmount(() => {
                                 target: item.targetRowCount,
                               })
                             }}
+                          </div>
+                          <div v-if="item.sourceTruncated || item.targetTruncated" class="mt-1 text-amber-700 dark:text-amber-400">
+                            {{ t("dataCompare.truncatedBadge", { budget: item.rowBudget }) }}
                           </div>
                           <div class="mt-1">
                             {{ t("dataCompare.keyColumnsInline", { columns: item.keyColumns.join(", ") }) }}

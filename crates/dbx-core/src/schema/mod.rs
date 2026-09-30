@@ -12481,6 +12481,32 @@ mod ddl_tests {
     }
 
     #[test]
+    fn postgres_table_ddl_preserves_btree_key_order_and_nulls_position() {
+        let id = column("id", "bigint");
+        let indexes = vec![db::IndexInfo {
+            name: "users_id_order_idx".to_string(),
+            columns: vec!["id".to_string(), "id".to_string()],
+            is_unique: false,
+            is_primary: false,
+            filter: None,
+            index_type: Some("btree".to_string()),
+            included_columns: None,
+            comment: None,
+            key_is_expression: vec![false, false],
+            column_opclasses: vec![None, None],
+            key_options: vec![0, 3],
+            constraint_backed: false,
+        }];
+
+        let ddl = render_postgres_table_ddl("public", "users", &[id], &indexes, &[], None);
+
+        assert!(
+            ddl.contains("USING btree (\"id\" ASC NULLS LAST, \"id\" DESC NULLS FIRST)"),
+            "expected per-key ordering and NULLS placement, got: {ddl}"
+        );
+    }
+
+    #[test]
     fn postgres_table_ddl_renders_partition_children_and_subpartitions() {
         let mut id = column("id", "integer");
         id.is_primary_key = true;
@@ -14770,6 +14796,15 @@ fn render_postgres_table_ddl_with_constraints_and_partition_info(
                 // lives inside the expression text, so there is no duplication risk.
                 if let Some(opclass) = idx.column_opclasses.get(i).and_then(|o| o.as_deref()) {
                     col.push_str(&format!(" {opclass}"));
+                }
+                if idx.index_type.as_deref().is_some_and(|index_type| index_type.eq_ignore_ascii_case("btree")) {
+                    if let Some(options) = idx.key_options.get(i) {
+                        col.push_str(&format!(
+                            " {} NULLS {}",
+                            if options & 1 != 0 { "DESC" } else { "ASC" },
+                            if options & 2 != 0 { "FIRST" } else { "LAST" }
+                        ));
+                    }
                 }
                 col
             })

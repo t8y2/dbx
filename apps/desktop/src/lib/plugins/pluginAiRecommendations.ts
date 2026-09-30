@@ -78,6 +78,26 @@ export function interpolatePluginAiRecommendation(item: PluginAiRecommendation, 
 }
 
 /**
+ * Shared `{{path}}` interpolation (same prototype-safe resolution as
+ * recommendations) for non-recommendation templates such as command
+ * `instance_key` scoping. Returns null when any placeholder cannot be
+ * resolved to a scalar — callers decide the fallback (recommendations drop
+ * the item; instance keys fall back to the literal template).
+ */
+export function interpolatePluginTemplate(value: string, context: Record<string, unknown>): string | null {
+  let unresolved = false;
+  const interpolated = value.replace(PLACEHOLDER, (_match, path: string) => {
+    const resolved = contextValueText(readContextPath(context, path));
+    if (resolved === undefined) {
+      unresolved = true;
+      return "";
+    }
+    return resolved;
+  });
+  return unresolved ? null : interpolated;
+}
+
+/**
  * Resolve, order, and cap a list of recommendations for a context.
  * The input is never mutated and the result contains fresh objects.
  */

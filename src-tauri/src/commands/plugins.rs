@@ -255,6 +255,7 @@ pub async fn rollback_plugin(
 #[tauri::command]
 pub async fn uninstall_plugin(
     state: State<'_, Arc<AppState>>,
+    file_state: State<'_, crate::commands::plugin_file::PluginFileState>,
     plugin_id: String,
 ) -> Result<Vec<InstalledPluginInfo>, String> {
     let dependent_connections = state
@@ -282,6 +283,11 @@ pub async fn uninstall_plugin(
     // Stops the runtime and uninstalls the store under one lifecycle update lease, so a plugin
     // call cannot re-activate the sidecar (and re-lock its container) in between.
     state.plugin_host.uninstall_plugin(&plugin_id).await?;
+    // Past every validation and the runtime teardown: retire the plugin's
+    // remaining file handles and drop entries — nothing else will close them.
+    // (Before this point an Err return must leave a still-installed plugin's
+    // workbenches fully functional.)
+    crate::commands::plugin_file::close_all_plugin_files(&file_state, &plugin_id);
     // A reinstall must ask for AI tool access and data grants again.
     if let Err(error) = state.storage.forget_plugin_permissions(&plugin_id).await {
         log::warn!("Failed to clear permissions of uninstalled plugin {plugin_id}: {error}");
@@ -304,7 +310,14 @@ pub async fn list_active_plugins(state: State<'_, Arc<AppState>>) -> Result<Vec<
 }
 
 #[tauri::command]
-pub async fn stop_plugin(state: State<'_, Arc<AppState>>, plugin_id: String) -> Result<(), String> {
+pub async fn stop_plugin(
+    state: State<'_, Arc<AppState>>,
+    file_state: State<'_, crate::commands::plugin_file::PluginFileState>,
+    plugin_id: String,
+) -> Result<(), String> {
+    // The plugin's workbenches are going away with its runtime; without this
+    // sweep, handles it never closed would pin the shared registry quota.
+    crate::commands::plugin_file::close_all_plugin_files(&file_state, &plugin_id);
     state.plugin_host.stop(&plugin_id).await;
     Ok(())
 }

@@ -372,6 +372,15 @@ pub(super) fn build_mysql_existing_column_clause(column: &EditableStructureColum
     format!("{operation}{position_clause}")
 }
 
+pub(super) fn build_transwarp_existing_column_clause(column: &EditableStructureColumn) -> String {
+    let original_name = column.original.as_ref().map(|original| original.name.as_str()).unwrap_or(&column.name);
+    format!(
+        "CHANGE {} {}",
+        quote_ident(StructureDialect::Mysql, original_name),
+        column_definition(StructureDialect::Mysql, column)
+    )
+}
+
 pub(super) fn build_doris_existing_column_sql(
     table: &str,
     column: &EditableStructureColumn,

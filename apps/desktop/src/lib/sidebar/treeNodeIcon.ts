@@ -89,6 +89,8 @@ export function getTreeNodeIconInfo(node: TreeNode): TreeNodeIconInfo | null {
       return { icon: TableProperties, colorClass: "text-primary" };
     case "user-admin":
       return { icon: UsersRound, colorClass: "text-primary" };
+    case "xugu-user-admin":
+      return { icon: ShieldCheck, colorClass: "text-primary" };
     case "dameng-users":
       return { icon: UsersRound, colorClass: "text-primary" };
     case "dameng-roles":

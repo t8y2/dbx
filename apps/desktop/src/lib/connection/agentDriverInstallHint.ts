@@ -1,5 +1,6 @@
 import type { DatabaseType } from "@/types/database";
 import { supportsDriverManagement } from "@/lib/database/databaseCapabilities";
+import { databaseManifestEntry } from "@/lib/database/databaseDriverManifest";
 
 export interface AgentDriverInstallState {
   db_type: string;
@@ -37,6 +38,11 @@ export function agentDriverInstallKey(dbType: DatabaseType | undefined, driverPr
   if (dbType === "kyuubi" || dbType === "impala") return "hive";
   if (dbType === "oracle") return "oracle";
   if (dbType === "h2") return "h2";
+  if (dbType === "transwarp") return "transwarp";
+  if (dbType === "nebula") {
+    const entry = databaseManifestEntry(dbType);
+    return entry?.driverProfiles?.find((profile) => profile.profile === driverProfile)?.agentKey ?? entry?.agentKey;
+  }
   if (dbType === "mongodb") return "mongodb";
   if (dbType === "dameng") return "dameng";
   if (dbType === "gbase") return driverProfile === "gbase8s" ? "gbase8s" : "gbase8a";

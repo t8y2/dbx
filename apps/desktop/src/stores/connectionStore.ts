@@ -589,7 +589,7 @@ export const useConnectionStore = defineStore("connection", () => {
     schema?: string;
     tableName?: string;
   } | null>(null);
-  const sqlFileSource = ref<{ connectionId: string; database: string; filePath?: string; preview?: SqlFilePreview } | null>(null);
+  const sqlFileSource = ref<{ connectionId: string; database: string; schema?: string; filePath?: string; preview?: SqlFilePreview } | null>(null);
   const diagramSource = ref<{
     connectionId: string;
     database: string;
@@ -1671,6 +1671,7 @@ export const useConnectionStore = defineStore("connection", () => {
       informix: "Informix",
       phoenix: "Apache Phoenix",
       neo4j: "Neo4j",
+      nebula: "NebulaGraph",
       cassandra: "Cassandra",
       bigquery: "BigQuery",
       spanner: "Cloud Spanner",
@@ -1823,7 +1824,7 @@ export const useConnectionStore = defineStore("connection", () => {
     // as metadata children, withConnectionUtilityNodes would keep the old copies
     // AND append fresh ones on every useCachedChildren pass, duplicating the
     // 用户/角色 menus once per refresh cycle.
-    return node.type === "oracle-db-links" || node.type === "user-admin" || node.type === "dameng-users" || node.type === "dameng-roles" || node.type === "dameng-job-admin" || node.type === "group-tablespaces" || node.type === "saved-sql-root";
+    return node.type === "oracle-db-links" || node.type === "user-admin" || node.type === "xugu-user-admin" || node.type === "dameng-users" || node.type === "dameng-roles" || node.type === "dameng-job-admin" || node.type === "group-tablespaces" || node.type === "saved-sql-root";
   }
 
   function connectionMetadataChildren(children: TreeNode[] | undefined): TreeNode[] {
@@ -2091,6 +2092,20 @@ export const useConnectionStore = defineStore("connection", () => {
     };
   }
 
+  function buildXuguUserAdminNode(connectionId: string, existingConnectionNode?: TreeNode): TreeNode | undefined {
+    const config = getConfig(connectionId);
+    if (effectiveDatabaseTypeForConnection(config) !== "xugu") return undefined;
+    const existing = existingConnectionNode?.children?.find((child) => child.type === "xugu-user-admin");
+    return {
+      id: `${connectionId}:__xugu_user_admin`,
+      label: "tree.xuguUserPermissions",
+      type: "xugu-user-admin",
+      connectionId,
+      database: config?.database || "",
+      isExpanded: existing?.isExpanded ?? false,
+    };
+  }
+
   function buildDamengUserNode(connectionId: string, existingConnectionNode?: TreeNode): TreeNode | undefined {
     const config = getConfig(connectionId);
     if (effectiveDatabaseTypeForConnection(config) !== "dameng") return undefined;
@@ -2199,11 +2214,12 @@ export const useConnectionStore = defineStore("connection", () => {
   function withConnectionUtilityNodes(connectionId: string, children: TreeNode[], existingConnectionNode?: TreeNode): TreeNode[] {
     const nonUtilityChildren = connectionMetadataChildren(children);
     const userAdminNode = buildUserAdminNode(connectionId, existingConnectionNode);
+    const xuguUserAdminNode = buildXuguUserAdminNode(connectionId, existingConnectionNode);
     const damengUserNode = buildDamengUserNode(connectionId, existingConnectionNode);
     const damengRoleNode = buildDamengRoleNode(connectionId, existingConnectionNode);
     const damengJobAdminNode = buildDamengJobAdminNode(connectionId, existingConnectionNode);
     const xuguTablespacesNode = buildXuguTablespacesNode(connectionId, existingConnectionNode);
-    return [...nonUtilityChildren, buildOracleDatabaseLinksNode(connectionId, existingConnectionNode), userAdminNode, damengUserNode, damengRoleNode, damengJobAdminNode, xuguTablespacesNode].filter(Boolean) as TreeNode[];
+    return [...nonUtilityChildren, buildOracleDatabaseLinksNode(connectionId, existingConnectionNode), userAdminNode, xuguUserAdminNode, damengUserNode, damengRoleNode, damengJobAdminNode, xuguTablespacesNode].filter(Boolean) as TreeNode[];
   }
 
   function withSavedSqlRoot(connectionId: string, children: TreeNode[], existingConnectionNode?: TreeNode): TreeNode[] {
@@ -2496,9 +2512,14 @@ export const useConnectionStore = defineStore("connection", () => {
   function invalidateConnectionMetadataLifetime(connectionId: string, database?: string) {
     invalidateMetadataCaches({ connectionId, database });
     bumpMetadataGeneration(connectionId, database);
-    void import("@/stores/queryStore").then(({ useQueryStore }) => {
-      useQueryStore().staleConnectionDataTabMetadata(connectionId, database);
-    });
+    // 该 import 是「稍后清理 freshness」的尽力而为路径：断开连接后数据标签页的
+    // tableMeta 不再算 warm cache，晚一点清也安全。因此这里必须吞掉失败，避免
+    // chunk 加载失败（或测试环境已销毁）变成未处理的拒绝。
+    void import("@/stores/queryStore")
+      .then(({ useQueryStore }) => {
+        useQueryStore().staleConnectionDataTabMetadata(connectionId, database);
+      })
+      .catch(() => undefined);
   }
 
   function invalidateMetadataCaches(match: MetadataCacheInvalidation): number {
@@ -4030,6 +4051,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const idx = connections.value.findIndex((c) => c.id === config.id);
     if (idx < 0) return;
     const previousConfig = normalizeConnection(connections.value[idx]);
+    const previousDatabase = previousConfig.database ?? "";
     const runtimeConfigChanged = connectionConfigFingerprint(previousConfig) !== connectionConfigFingerprint(config);
     const shouldReconnectPlugin = runtimeConfigChanged && previousConfig.db_type === "plugin" && config.db_type === "plugin" && connectedIds.value.has(config.id);
     const nextConnections = [...connections.value];
@@ -4041,6 +4063,11 @@ export const useConnectionStore = defineStore("connection", () => {
     rebuildTreeNodes();
     if (!runtimeConfigChanged) return;
     clearEtcdAccessCapabilities(config.id);
+    // Tabs opened before this edit keep whatever database they were created
+    // with (queryStore snapshots it onto the tab); re-point the ones still on
+    // the old default so their query executor stops running against it (#7905).
+    const { useQueryStore } = await import("@/stores/queryStore");
+    useQueryStore().syncTabsDatabaseForConnectionEdit(config.id, previousDatabase, config.database ?? "");
     clearPrimaryVisibleObjectNames(config.id);
     connectedIds.value.delete(config.id);
     clearSidebarStorageCaches(config.id);
@@ -4258,7 +4285,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   // 显式勾选 + 通配符模式一并保存（#7164）：模式对之后新建的库持续生效
-  async function setVisibleDatabaseFilter(connectionId: string, databaseNames: string[], patterns: string[]) {
+  async function setVisibleDatabaseFilter(connectionId: string, databaseNames: string[] | undefined, patterns: string[]) {
     const config = getConfig(connectionId);
     if (!config) return;
     const normalizedPatterns = patterns.map((pattern) => pattern.trim()).filter((pattern) => pattern !== "");
@@ -4267,7 +4294,8 @@ export const useConnectionStore = defineStore("connection", () => {
     const nextConnections = [...connections.value];
     nextConnections[idx] = {
       ...nextConnections[idx],
-      visible_databases: normalizeVisibleDatabaseSelection(databaseNames, databaseNames),
+      // 空名单等于"一个库都不显示"，只可能是误写；弹窗层的"全选"已折算成 undefined。
+      visible_databases: databaseNames && databaseNames.length > 0 ? normalizeVisibleDatabaseSelection(databaseNames, databaseNames) : undefined,
       visible_database_patterns: normalizedPatterns.length > 0 ? normalizedPatterns : undefined,
     };
     await persistConnections(nextConnections);
@@ -9842,14 +9870,18 @@ export const useConnectionStore = defineStore("connection", () => {
 
     if (isTauriRuntime()) {
       const { open } = await import("@tauri-apps/plugin-dialog");
-      const { readTextFile } = await import("@tauri-apps/plugin-fs");
+      const { readFile } = await import("@tauri-apps/plugin-fs");
+      const { decodeImportFileText } = await import("@/lib/common/decodeText");
       const path = await open({
         filters: source === "navicat" ? [{ name: "Navicat Connection Export", extensions: ["ncx", "xml"] }] : [{ name: "DBX JSON", extensions: ["json"] }],
         multiple: false,
       });
       if (!path) return null;
-      content = await readTextFile(path as string);
+      // Raw bytes: Navicat 17 macOS exports can be UTF-16 (#10666), which
+      // readTextFile would reject as invalid UTF-8.
+      content = decodeImportFileText(await readFile(path as string));
     } else {
+      const { decodeImportFileText } = await import("@/lib/common/decodeText");
       content = await new Promise<string>((resolve, reject) => {
         const input = document.createElement("input");
         input.type = "file";
@@ -9860,10 +9892,10 @@ export const useConnectionStore = defineStore("connection", () => {
             reject(new Error("No file selected"));
             return;
           }
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result as string);
-          reader.onerror = () => reject(reader.error);
-          reader.readAsText(file);
+          file
+            .arrayBuffer()
+            .then((buffer) => resolve(decodeImportFileText(buffer)))
+            .catch(reject);
         };
         input.click();
       });
@@ -9995,6 +10027,13 @@ export const useConnectionStore = defineStore("connection", () => {
     updateLayoutAndRebuild(reconciledLayout);
   }
 
+  async function reloadFromDisk() {
+    // An external change may arrive after an in-flight reload read its snapshot.
+    // Wait for it, then read again instead of joining that stale snapshot.
+    await initFromDiskPromise;
+    await initFromDisk();
+  }
+
   async function initFromDisk() {
     // Connection normalization and timeout migration depend on persisted global
     // settings. Startup helpers may initialize connections before App.initApp().
@@ -10067,6 +10106,7 @@ export const useConnectionStore = defineStore("connection", () => {
     replacePinnedTreeNode,
     removeTreeNode,
     refreshAllTree,
+    reloadFromDisk,
     collapseAllTreeNodes,
     refreshSidebarObjectPagination,
     refreshTreeNode,

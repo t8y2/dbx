@@ -135,6 +135,7 @@ const errorMessage = ref("");
 const wizardStep = ref<TableImportWizardStep>("source");
 const fileInput = ref<HTMLInputElement | null>(null);
 const delimiter = ref(",");
+const decimalSeparator = ref<"." | ",">(".");
 const textEncoding = ref<api.TableImportTextEncoding>("auto");
 const titleRow = ref(1);
 const dataStartRow = ref(2);
@@ -162,6 +163,7 @@ const formatOptions: Array<{ value: api.TableImportSourceFormat; icon: any; labe
   { value: "json", icon: FileJson, labelKey: "tableImport.formatJson", descriptionKey: "tableImport.formatJsonDescription" },
   { value: "excel", icon: FileSpreadsheet, labelKey: "tableImport.formatExcel", descriptionKey: "tableImport.formatExcelDescription" },
   { value: "sql", icon: FileCode, labelKey: "tableImport.formatSql", descriptionKey: "tableImport.formatSqlDescription" },
+  { value: "parquet", icon: FileText, labelKey: "tableImport.formatParquet", descriptionKey: "tableImport.formatParquetDescription" },
 ];
 
 const encodingOptions = TABLE_IMPORT_ENCODING_OPTIONS;
@@ -176,6 +178,9 @@ const wizardSteps: Array<{ value: TableImportWizardStep; labelKey: string }> = [
 
 const selectedConnection = computed(() => (props.prefillConnectionId ? store.getConfig(props.prefillConnectionId) : undefined));
 const structureDatabaseType = computed(() => tableStructureDatabaseTypeForConnection(selectedConnection.value));
+const supportsDuckDbParquetImport = computed(() => structureDatabaseType.value === "duckdb");
+const availableFormatOptions = computed(() => formatOptions.filter((format) => format.value !== "parquet" || supportsDuckDbParquetImport.value));
+const importFileExtensions = computed(() => ["csv", "tsv", "txt", "json", "xlsx", "xlsm", "xls", "sql", ...(supportsDuckDbParquetImport.value ? ["parquet"] : [])]);
 // Mirrors the conflict SQL dispatch in transfer.rs. Other dialects must keep
 // ordinary INSERT/error behavior instead of approximating an upsert.
 const IMPORT_CONFLICT_DATABASE_TYPES = new Set<DatabaseType>(["postgres", "kingbase", "opengauss", "sqlite", "cloudflare-d1", "duckdb", "mysql", "doris", "starrocks"]);
@@ -393,6 +398,7 @@ function resetState() {
   activeTaskIndex.value = 0;
   sourceFormat.value = "csv";
   delimiter.value = ",";
+  decimalSeparator.value = ".";
   textEncoding.value = "auto";
   titleRow.value = 1;
   dataStartRow.value = 2;
@@ -426,6 +432,7 @@ function detectFormat(name: string): api.TableImportSourceFormat {
   if (lower.endsWith(".json")) return "json";
   if (lower.endsWith(".xls") || lower.endsWith(".xlsx") || lower.endsWith(".xlsm")) return "excel";
   if (lower.endsWith(".sql")) return "sql";
+  if (lower.endsWith(".parquet")) return "parquet";
   return "csv";
 }
 
@@ -460,6 +467,7 @@ function taskParseOptions(format: api.TableImportSourceFormat, sheetName = ""): 
   return buildTableImportParseOptions({
     format,
     delimiter: delimiter.value,
+    decimalSeparator: decimalSeparator.value,
     textEncoding: textEncoding.value,
     titleRow: titleRow.value,
     dataStartRow: dataStartRow.value,
@@ -671,6 +679,8 @@ async function loadTargetColumns() {
 async function previewSelectedImportFile(fileOrPath: string | File) {
   const input = importPreviewInput(uploadedImportSourceFromPreview(preview.value), fileOrPath);
   return api.previewTableImportFile(input.fileOrPath, {
+    connectionId: props.prefillConnectionId,
+    database: props.prefillDatabase || "",
     sourceRef: input.sourceRef,
     sourceFormat: sourceFormat.value,
     parseOptions: parseOptions.value,
@@ -704,6 +714,13 @@ async function loadPreview(fileOrPath = selectedSource.value) {
 }
 
 function assignSelectedSource(source: string | File) {
+  const detectedFormat = detectFormat(typeof source === "string" ? source : source.name);
+  if (detectedFormat === "parquet" && !supportsDuckDbParquetImport.value) {
+    selectedSource.value = null;
+    preview.value = null;
+    errorMessage.value = t("tableImport.parquetOnlyDuckdb");
+    return;
+  }
   batchTasks.value = [];
   selectedSource.value = source;
   preview.value = null;
@@ -712,7 +729,7 @@ function assignSelectedSource(source: string | File) {
   progress.value = null;
   errorMessage.value = "";
   const name = typeof source === "string" ? source : source.name;
-  sourceFormat.value = detectFormat(name);
+  sourceFormat.value = detectedFormat;
   emptyStringAsNull.value = defaultTableImportEmptyStringAsNull(sourceFormat.value);
   if (!newTableName.value.trim()) {
     newTableName.value = suggestedTableName(name);
@@ -750,11 +767,18 @@ async function prepareBatchSources(sources: ImportSource[]) {
   const tasks: BatchImportTask[] = [];
   const usedNames = new Set<string>();
   const formats = sources.map((source) => detectFormat(sourceName(source)));
-  emptyStringAsNull.value = formats.length && formats.every((format) => format === formats[0]) ? defaultTableImportEmptyStringAsNull(formats[0]!) : true;
+  if (formats.includes("parquet") && !supportsDuckDbParquetImport.value) {
+    errorMessage.value = t("tableImport.parquetOnlyDuckdb");
+    loadingPreview.value = false;
+    return;
+  }
+  emptyStringAsNull.value = formats.length && formats.every((format) => format === formats[0]) ? defaultTableImportEmptyStringAsNull(formats[0]!) : defaultTableImportEmptyStringAsNull(formats[0] ?? "csv");
   try {
     for (const [index, source] of sources.entries()) {
       const format = formats[index]!;
       const initialPreview = await api.previewTableImportFile(source, {
+        connectionId: props.prefillConnectionId,
+        database: props.prefillDatabase || "",
         sourceFormat: format,
         parseOptions: taskParseOptions(format),
         previewLimit: Math.max(1, Number(previewLimit.value) || 50),
@@ -765,6 +789,8 @@ async function prepareBatchSources(sources: ImportSource[]) {
         const effectiveSheetName = sheetName && sheetName === initialPreview.sheets?.[0] ? "" : sheetName;
         const taskPreview = effectiveSheetName
           ? await api.previewTableImportFile(input.fileOrPath, {
+              connectionId: props.prefillConnectionId,
+              database: props.prefillDatabase || "",
               sourceRef: input.sourceRef,
               sourceFormat: format,
               parseOptions: taskParseOptions(format, effectiveSheetName),
@@ -809,11 +835,12 @@ async function selectFile() {
   const selected = await open({
     multiple: targetMode.value === "create",
     filters: [
-      { name: "Data files", extensions: ["csv", "tsv", "txt", "json", "xlsx", "xlsm", "xls", "sql"] },
+      { name: "Data files", extensions: importFileExtensions.value },
       { name: "Text", extensions: ["csv", "tsv", "txt"] },
       { name: "JSON", extensions: ["json"] },
       { name: "Excel", extensions: ["xlsx", "xlsm", "xls"] },
       { name: "SQL", extensions: ["sql"] },
+      ...(supportsDuckDbParquetImport.value ? [{ name: "Parquet", extensions: ["parquet"] }] : []),
     ],
   });
   if (!selected) return;
@@ -1156,6 +1183,8 @@ async function reloadBatchPreviewsForEncoding() {
       if (!isDelimitedFormat(task.format) && task.format !== "sql") continue;
       const input = importPreviewInput(uploadedImportSourceFromPreview(task.preview), task.source);
       const nextPreview = await api.previewTableImportFile(input.fileOrPath, {
+        connectionId: props.prefillConnectionId,
+        database: props.prefillDatabase || "",
         sourceRef: input.sourceRef,
         sourceFormat: task.format,
         parseOptions: taskParseOptions(task.format, task.sheetName),
@@ -1197,7 +1226,7 @@ watch(
 onBeforeUnmount(stopDialogDrag);
 
 watch([sourceFormat, delimiter, titleRow, dataStartRow, lastDataRow, trimValues, emptyStringAsNull, selectedSheet, jsonShape, previewLimit], schedulePreviewReload);
-watch(textEncoding, schedulePreviewReloadAfterEncodingChange);
+watch([textEncoding, decimalSeparator], schedulePreviewReloadAfterEncodingChange);
 watch([newTableName, columnMapping, columnDataTypes], saveActiveBatchTask, { deep: true });
 watch(wizardStep, (step) => {
   if (step !== "mapping") closeDataTypePicker();
@@ -1254,7 +1283,7 @@ watch(rawProgressPercent, (percent) => {
 
       <div class="min-h-0 flex-1 space-y-4 overflow-y-auto py-2 pr-1">
         <div class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
-          <input ref="fileInput" type="file" accept=".csv,.tsv,.txt,.json,.xlsx,.xlsm,.xls,.sql" :multiple="targetMode === 'create'" class="hidden" @change="handleFileInputChange" />
+          <input ref="fileInput" type="file" :accept="importFileExtensions.map((extension) => `.${extension}`).join(',')" :multiple="targetMode === 'create'" class="hidden" @change="handleFileInputChange" />
           <div class="flex h-10 min-w-0 items-center gap-2 rounded-md border bg-muted/20 px-3">
             <span class="shrink-0 text-xs text-muted-foreground">{{ t("tableImport.target") }}</span>
             <span class="min-w-0 truncate text-sm font-medium">
@@ -1329,8 +1358,15 @@ watch(rawProgressPercent, (percent) => {
               {{ t("tableImport.selectFile") }}
             </Button>
           </div>
-          <div class="grid grid-cols-6 gap-2">
-            <button v-for="format in formatOptions" :key="format.value" type="button" class="min-h-20 rounded-md border px-3 py-2 text-left" :class="sourceFormat === format.value ? 'border-primary bg-primary/5' : 'hover:bg-muted/30'" @click="sourceFormat = format.value">
+          <div
+            data-testid="table-import-format-options"
+            class="grid grid-cols-2 gap-2 sm:grid-cols-3"
+            :class="{
+              'lg:grid-cols-6': availableFormatOptions.length === 6,
+              'lg:grid-cols-7': availableFormatOptions.length === 7,
+            }"
+          >
+            <button v-for="format in availableFormatOptions" :key="format.value" type="button" class="min-h-20 rounded-md border px-3 py-2 text-left" :class="sourceFormat === format.value ? 'border-primary bg-primary/5' : 'hover:bg-muted/30'" @click="sourceFormat = format.value">
               <component :is="format.icon" class="mb-2 h-4 w-4 text-muted-foreground" />
               <div class="text-xs font-medium">{{ t(format.labelKey) }}</div>
               <div class="mt-1 text-[11px] leading-snug text-muted-foreground">{{ t(format.descriptionKey) }}</div>
@@ -1347,7 +1383,7 @@ watch(rawProgressPercent, (percent) => {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem v-for="format in formatOptions" :key="format.value" :value="format.value">
+                  <SelectItem v-for="format in availableFormatOptions" :key="format.value" :value="format.value">
                     {{ t(format.labelKey) }}
                   </SelectItem>
                 </SelectContent>
@@ -1401,7 +1437,7 @@ watch(rawProgressPercent, (percent) => {
             </div>
           </div>
 
-          <div v-if="sourceFormat === 'csv' || sourceFormat === 'tsv' || sourceFormat === 'delimited'" class="grid grid-cols-5 gap-3 rounded-md border p-3">
+          <div v-if="sourceFormat === 'csv' || sourceFormat === 'tsv' || sourceFormat === 'delimited'" class="grid grid-cols-2 gap-3 rounded-md border p-3 md:grid-cols-3 xl:grid-cols-6">
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.encoding") }}</Label>
               <Select :model-value="textEncoding" @update:model-value="(value: any) => (textEncoding = value)">
@@ -1423,6 +1459,18 @@ watch(rawProgressPercent, (percent) => {
               <Input v-model="delimiter" :disabled="sourceFormat !== 'delimited'" class="h-8 text-xs font-mono" />
             </div>
             <div class="space-y-1.5">
+              <Label class="text-xs">{{ t("tableImport.decimalSeparator") }}</Label>
+              <Select v-model="decimalSeparator">
+                <SelectTrigger class="h-8 text-xs font-mono" :aria-label="t('tableImport.decimalSeparator')">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value=".">.</SelectItem>
+                  <SelectItem value=",">,</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.titleRow") }}</Label>
               <Input v-model.number="titleRow" type="number" min="0" class="h-8 text-xs" />
             </div>
@@ -1438,10 +1486,13 @@ watch(rawProgressPercent, (percent) => {
               <input v-model="trimValues" type="checkbox" class="h-3.5 w-3.5 accent-primary" />
               {{ t("tableImport.trimValues") }}
             </label>
-            <label class="flex items-center gap-2 text-xs">
-              <input v-model="emptyStringAsNull" type="checkbox" class="h-3.5 w-3.5 accent-primary" />
-              {{ t("tableImport.emptyStringAsNull") }}
-            </label>
+            <div class="space-y-1">
+              <label class="flex items-center gap-2 text-xs">
+                <input v-model="emptyStringAsNull" type="checkbox" class="h-3.5 w-3.5 accent-primary" />
+                {{ t("tableImport.emptyStringAsNull") }}
+              </label>
+              <p class="text-[11px] text-muted-foreground">{{ t("tableImport.emptyStringAsNullHint") }}</p>
+            </div>
           </div>
 
           <div v-else-if="sourceFormat === 'sql'" class="grid grid-cols-5 gap-3 rounded-md border p-3">

@@ -1,5 +1,28 @@
 export const LEGACY_WEBVIEW_CLASS = "dbx-legacy-webview";
 
+/**
+ * Verdict recorded by the inline probe in index.html, which runs before this bundle loads.
+ * Reading it keeps a single source of truth, so the "upgrade your engine" notice and the
+ * `dbx-legacy-webview` fallback layer can never disagree. Unlike the probes below, the inline
+ * one also covers `@layer`, which is what decides whether the shell can be styled at all.
+ */
+export type WebViewCompatTier = "ok" | "degraded" | "fatal";
+
+export interface WebViewCompatReport {
+  tier: WebViewCompatTier;
+  missing: string[];
+  engine: string;
+  platform: string;
+  desktop: boolean;
+  bypassed: boolean;
+}
+
+declare global {
+  interface Window {
+    __DBX_WEBVIEW_COMPAT__?: WebViewCompatReport;
+  }
+}
+
 type CssSupportCheck = {
   name: string;
   property?: string;
@@ -39,8 +62,28 @@ function supports(check: CssSupportCheck): boolean {
   }
 }
 
+export function webViewCompatReport(): WebViewCompatReport | undefined {
+  if (typeof window === "undefined") return undefined;
+  const report = window.__DBX_WEBVIEW_COMPAT__;
+  if (!report || typeof report.tier !== "string" || !Array.isArray(report.missing)) return undefined;
+  return report;
+}
+
 export function missingLegacyWebViewCapabilities(): string[] {
+  const report = webViewCompatReport();
+  if (report) return [...report.missing];
+
   return MODERN_CSS_FEATURES.filter((feature) => !supports(feature)).map((feature) => feature.name);
+}
+
+/**
+ * True when the startup notice is blocking the app: the engine drops the whole layered
+ * stylesheet, so mounting the shell would replace a readable message with an unstyled UI.
+ * A user who chose "continue anyway" is not blocked again until the next session.
+ */
+export function isBlockingCompatFailure(): boolean {
+  const report = webViewCompatReport();
+  return report?.tier === "fatal" && report.bypassed !== true;
 }
 
 /**

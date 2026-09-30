@@ -237,6 +237,8 @@ pub struct TableStructureSqlOptions {
     pub original_table_comment: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mysql_engine: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transwarp_create: Option<TranswarpCreateTableOptions>,
     /// MySQL only: the table's current default collation
     /// (`information_schema.TABLES.TABLE_COLLATION`). A column whose collation
     /// merely matches it inherits the table default, so its `CHARACTER SET` /
@@ -257,6 +259,21 @@ pub struct TableStructureSqlOptions {
     /// `StructureDialect::Mysql` so that DDL is generated with MySQL syntax.
     #[serde(default)]
     pub is_gaussdb_m_mode: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranswarpCreateTableOptions {
+    #[serde(default)]
+    pub partition_columns: Vec<String>,
+    #[serde(default)]
+    pub bucket_columns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_format: Option<String>,
+    #[serde(default)]
+    pub transactional: bool,
 }
 
 /// Options for `build_table_partition_operation_sql`.

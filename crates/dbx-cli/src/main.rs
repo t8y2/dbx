@@ -66,6 +66,7 @@ const BRIDGE_REQUIRED_TYPES: &[&str] = &[
     "informix",
     "iris",
     "neo4j",
+    "nebula",
     "cassandra",
     "bigquery",
     "spanner",

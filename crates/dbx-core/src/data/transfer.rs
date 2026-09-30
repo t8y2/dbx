@@ -17,6 +17,7 @@ use futures::{SinkExt, StreamExt};
 #[path = "transfer/rebuild_tests.rs"]
 mod rebuild_tests;
 
+mod db2;
 mod ddl_plan;
 
 use crate::connection::{config_for_pool_key, AppState, PoolKind};
@@ -27,7 +28,8 @@ use crate::models::connection::{ConnectionConfig, DatabaseType};
 use crate::object_source_sql::{build_executable_object_source_statements, EditableObjectSourceSqlInput};
 use crate::query::{
     agent_execute_query_params, is_dbx_query_timeout_error, pool_error_action, query_timeout_duration,
-    wait_for_query_opt, PoolErrorAction, QueryExecutionOptions, StreamProgressClock, AGENT_PROTOCOL_MAX_ROWS,
+    should_discard_pool_after_query_timeout, wait_for_query_opt, PoolErrorAction, QueryExecutionOptions,
+    StreamProgressClock, AGENT_PROTOCOL_MAX_ROWS,
 };
 use crate::sql::{split_sql_statements, split_sql_statements_for_database};
 use crate::sql_dialect::{
@@ -120,7 +122,8 @@ impl SqlBatchLimits {
     pub(crate) fn for_database(db_type: &DatabaseType, requested_max_rows: usize) -> Self {
         let max_rows = requested_max_rows.max(1).min(match db_type {
             DatabaseType::SqlServer => MAX_SQLSERVER_INSERT_ROWS,
-            DatabaseType::Oracle => MAX_ORACLE_INSERT_ALL_ROWS,
+            DatabaseType::Oracle | DatabaseType::OceanbaseOracle => MAX_ORACLE_INSERT_ALL_ROWS,
+            DatabaseType::Transwarp => 100,
             _ => usize::MAX,
         });
         let target_sql_bytes = match db_type {
@@ -1919,9 +1922,9 @@ async fn execute_transfer_write_statement(
         crate::query::check_read_only_for_connection(state, target_pool_key, sql).await?;
         let (_, _, _, query_timeout_secs) = transfer_pool_context(state, target_pool_key).await;
         let query_timeout = query_timeout_duration(query_timeout_secs);
-        let pool_handle = state.pool_handle(target_pool_key).await;
-        let client = match pool_handle.as_ref() {
-            Some(PoolKind::SqlServer(client)) => client.clone(),
+        let pool = ensure_transfer_statement_pool(state, target_pool_key).await?;
+        let client = match &pool {
+            PoolKind::SqlServer(client) => client.clone(),
             _ => return Err("SQL Server connection not found".to_string()),
         };
         let mut client = client.lock().await;
@@ -2924,6 +2927,9 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
             }
         },
         serde_json::Value::Number(n) => {
+            if *db_type == DatabaseType::Db2 {
+                return db2::numeric_literal(&n.to_string(), column_type);
+            }
             if let Some(integer_literal) = normalize_integer_literal(&n.to_string(), db_type, column_type) {
                 return integer_literal;
             }
@@ -2939,6 +2945,12 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
             }
         }
         serde_json::Value::String(s) => {
+            if *db_type == DatabaseType::Db2 {
+                return db2::string_literal(s, column_type);
+            }
+            if let Some(json_array_literal) = format_starrocks_json_array_sql_literal(s, db_type, column_type) {
+                return json_array_literal;
+            }
             if let Some(integer_literal) = normalize_integer_literal(s, db_type, column_type) {
                 return integer_literal;
             }
@@ -2995,17 +3007,45 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
             }
             match db_type {
                 DatabaseType::ClickHouse | DatabaseType::Databend => format_ch_array_sql_literal(arr),
+                DatabaseType::Db2 => db2::string_literal(&val.to_string(), None),
                 _ => format_pg_array_sql_literal(arr),
             }
         }
         _ => {
             let s = val.to_string();
+            if *db_type == DatabaseType::Db2 {
+                return db2::string_literal(&s, None);
+            }
             if *db_type == DatabaseType::H2 {
                 return quote_string_literal(&s);
             }
             format!("'{}'", s.replace('\\', "\\\\").replace('\'', "''"))
         }
     }
+}
+
+fn format_starrocks_json_array_sql_literal(
+    value: &str,
+    db_type: &DatabaseType,
+    column_type: Option<&str>,
+) -> Option<String> {
+    if *db_type != DatabaseType::StarRocks || !column_type.is_some_and(is_starrocks_json_array_type) {
+        return None;
+    }
+    let parsed = serde_json::from_str::<serde_json::Value>(value.trim()).ok()?;
+    if !parsed.is_array() {
+        return None;
+    }
+    let json = parsed.to_string().replace('\\', "\\\\").replace('\'', "''");
+    Some(format!("CAST(PARSE_JSON('{json}') AS ARRAY<JSON>)"))
+}
+
+fn is_starrocks_json_array_type(column_type: &str) -> bool {
+    column_type
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .collect::<String>()
+        .eq_ignore_ascii_case("array<json>")
 }
 
 fn is_mysql_bit_type(column_type: &str) -> bool {
@@ -3389,7 +3429,7 @@ fn oracle_char_length_params(params: &str) -> String {
 /// targets to `CLOB` for file imports; the transfer path did not (#9886).
 fn target_text_type(target_db: &DatabaseType) -> &'static str {
     match target_db {
-        DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng => "CLOB",
+        DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng | DatabaseType::Db2 => "CLOB",
         _ => "TEXT",
     }
 }
@@ -3397,6 +3437,11 @@ fn target_text_type(target_db: &DatabaseType) -> &'static str {
 pub fn map_column_type(source_type: &str, source_db: &DatabaseType, target_db: &DatabaseType) -> String {
     if source_db == target_db {
         return source_type.to_string();
+    }
+    if *target_db == DatabaseType::Db2 {
+        if let Some(mapped) = db2::map_column_type(source_type, source_db) {
+            return mapped;
+        }
     }
     let t = source_type.to_lowercase();
     let mut base = t.split('(').next().unwrap_or(&t).trim();
@@ -3412,7 +3457,29 @@ pub fn map_column_type(source_type: &str, source_db: &DatabaseType, target_db: &
     // Extract basic type, `bigint unsigned` -> `bigint`
     base = base.split(' ').next().unwrap_or(base).trim();
 
-    if matches!(target_db, DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo) {
+    // SQLite has no integer widths: every column whose declared type carries the
+    // `INT` substring — `INTEGER`, `INT`, `TINYINT`, `SMALLINT`, even the
+    // SQLite-only `UNSIGNED BIG INT` spelling — is stored as a full 64-bit signed
+    // integer (that is SQLite's documented INTEGER affinity rule). Routing those
+    // names through the 32-bit arms below builds a target column that cannot hold
+    // the source's own values, and the transfer then dies mid-batch instead of
+    // writing the row: SQL Server rejects the batch with code 248
+    // ("The conversion of the nvarchar value '...' overflowed an int column").
+    // rqlite, Turso and Cloudflare D1 are SQLite underneath and share the storage
+    // classes. Send integer-affinity columns down the 64-bit arm instead;
+    // Oracle-family targets keep `INTEGER`, which is already `NUMBER(38, 0)`.
+    if is_sqlite_transfer_dialect(source_db) && t.contains("int") {
+        base = if matches!(target_db, DatabaseType::Oracle | DatabaseType::OceanbaseOracle) {
+            "integer"
+        } else {
+            "bigint"
+        };
+    }
+
+    if matches!(
+        target_db,
+        DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo | DatabaseType::Transwarp
+    ) {
         return match base {
             "tinyint" => "TINYINT".into(),
             "smallint" | "int2" => "SMALLINT".into(),
@@ -3581,6 +3648,13 @@ pub fn map_column_type(source_type: &str, source_db: &DatabaseType, target_db: &
     }
 }
 
+/// SQLite and the databases that embed it (`rqlite`, Turso, Cloudflare D1) all
+/// use SQLite's storage classes, where any column with INTEGER affinity holds a
+/// 64-bit signed integer regardless of the width its declared type suggests.
+fn is_sqlite_transfer_dialect(db_type: &DatabaseType) -> bool {
+    matches!(db_type, DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1)
+}
+
 fn mysql_type_needs_key_prefix(mapped_type: &str) -> bool {
     let base = mapped_type.split('(').next().unwrap_or(mapped_type).trim().to_ascii_lowercase();
     matches!(
@@ -3657,7 +3731,11 @@ fn generate_create_table_ddl_with_column_quoting(
             if !c.is_nullable
                 && !matches!(
                     target_db,
-                    DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo
+                    DatabaseType::Hive
+                        | DatabaseType::Kyuubi
+                        | DatabaseType::Impala
+                        | DatabaseType::Argo
+                        | DatabaseType::Transwarp
                 )
             {
                 line.push_str(" NOT NULL");
@@ -3682,7 +3760,10 @@ fn generate_create_table_ddl_with_column_quoting(
     }
 
     let mut pks = Vec::with_capacity(columns.iter().filter(|c| c.is_primary_key).count());
-    if !matches!(target_db, DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo) {
+    if !matches!(
+        target_db,
+        DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo | DatabaseType::Transwarp
+    ) {
         for c in columns {
             if c.is_primary_key {
                 let qname = transfer_column_identifier(&c.name, target_db, quote_target_column_names);
@@ -3706,9 +3787,11 @@ fn generate_create_table_ddl_with_column_quoting(
     };
 
     let create_prefix = match target_db {
-        DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::SqlServer | DatabaseType::Dameng => {
-            "CREATE TABLE"
-        }
+        DatabaseType::Oracle
+        | DatabaseType::OceanbaseOracle
+        | DatabaseType::SqlServer
+        | DatabaseType::Dameng
+        | DatabaseType::Db2 => "CREATE TABLE",
         _ => "CREATE TABLE IF NOT EXISTS",
     };
 
@@ -3854,6 +3937,7 @@ pub(crate) fn generate_insert_typed_from_value_rows(
 struct InsertSqlTemplate {
     standard_prefix: String,
     oracle_into_prefix: Option<String>,
+    inceptor_select_prefix: Option<String>,
     xugu_multirow_values: bool,
 }
 
@@ -3893,8 +3977,15 @@ impl InsertSqlTemplate {
             };
         Self {
             standard_prefix: format!("INSERT INTO {full_table} ({col_list}){overriding} VALUES\n"),
-            oracle_into_prefix: matches!(db_type, DatabaseType::Oracle)
+            // OceanBase's Oracle mode rejects the comma-separated multi-row VALUES form
+            // just like Oracle itself, but it does implement Oracle's multi-table
+            // `INSERT ALL ... SELECT 1 FROM dual` syntax, so it shares this template.
+            // Without it the importer falls back to single-row INSERTs (one network
+            // round trip per row), which makes CSV imports orders of magnitude slower.
+            oracle_into_prefix: matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle)
                 .then(|| format!("INTO {full_table} ({col_list}) VALUES ")),
+            inceptor_select_prefix: (matches!(db_type, DatabaseType::Transwarp) && !columns.is_empty())
+                .then(|| format!("INSERT INTO {full_table} ({col_list})\n")),
             // Xugu accepts consecutive row constructors (`VALUES (...) (...)`) but rejects
             // the comma-separated multi-row form emitted by the generic template.
             xugu_multirow_values: matches!(db_type, DatabaseType::Xugu),
@@ -3904,6 +3995,22 @@ impl InsertSqlTemplate {
     fn build(&self, value_rows: &[String]) -> String {
         if value_rows.is_empty() {
             return String::new();
+        }
+        if let Some(prefix) = self.inceptor_select_prefix.as_deref() {
+            let mut sql = String::with_capacity(self.statement_bytes(
+                value_rows.iter().map(String::len).sum(),
+                value_rows.len(),
+                &DatabaseType::Transwarp,
+            ));
+            sql.push_str(prefix);
+            for (index, values) in value_rows.iter().enumerate() {
+                if index > 0 {
+                    sql.push_str("\nUNION ALL\n");
+                }
+                sql.push_str("SELECT ");
+                sql.push_str(values.strip_prefix('(').and_then(|row| row.strip_suffix(')')).unwrap_or(values));
+            }
+            return sql;
         }
         if let Some(into_prefix) = self.oracle_into_prefix.as_deref().filter(|_| value_rows.len() > 1) {
             let capacity = "INSERT ALL\n".len()
@@ -3943,6 +4050,12 @@ impl InsertSqlTemplate {
     }
 
     fn statement_bytes(&self, value_rows_bytes: usize, row_count: usize, db_type: &DatabaseType) -> usize {
+        if let Some(prefix) = self.inceptor_select_prefix.as_deref() {
+            return sql_text_bytes(prefix, db_type)
+                .saturating_add(value_rows_bytes.saturating_sub(2usize.saturating_mul(row_count)))
+                .saturating_add("SELECT ".len().saturating_mul(row_count))
+                .saturating_add("\nUNION ALL\n".len().saturating_mul(row_count.saturating_sub(1)));
+        }
         if let Some(into_prefix) = self.oracle_into_prefix.as_deref().filter(|_| row_count > 1) {
             return sql_text_bytes("INSERT ALL\n", db_type)
                 .saturating_add(sql_text_bytes(into_prefix, db_type).saturating_mul(row_count))
@@ -4367,8 +4480,18 @@ fn generate_upsert_typed_for_transfer(
 fn max_transfer_write_rows(db_type: &DatabaseType, mode: &TransferMode) -> usize {
     match (db_type, mode) {
         (DatabaseType::SqlServer, TransferMode::Append | TransferMode::Overwrite) => MAX_SQLSERVER_INSERT_ROWS,
-        (DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo, _) => 500,
+        (
+            DatabaseType::Hive
+            | DatabaseType::Kyuubi
+            | DatabaseType::Impala
+            | DatabaseType::Argo
+            | DatabaseType::Transwarp,
+            _,
+        ) => 500,
         (DatabaseType::Oracle, TransferMode::Append | TransferMode::Overwrite) => MAX_ORACLE_INSERT_ALL_ROWS,
+        // The INSERT ALL template is shared with OceanBase's Oracle mode, so its
+        // append/overwrite batches must clamp to the same per-statement row count.
+        (DatabaseType::OceanbaseOracle, TransferMode::Append | TransferMode::Overwrite) => MAX_ORACLE_INSERT_ALL_ROWS,
         (DatabaseType::Oracle, TransferMode::Upsert) => MAX_ORACLE_MERGE_ROWS,
         _ => usize::MAX,
     }
@@ -4524,6 +4647,8 @@ fn rewrite_transfer_source_table_ddl(
     } else if matches!((source_db_type, target_db_type), (DatabaseType::H2, DatabaseType::H2)) {
         let source_schema = if source_schema.trim().is_empty() { "PUBLIC" } else { source_schema };
         let target_schema = if target_schema.trim().is_empty() { "PUBLIC" } else { target_schema };
+        Some(rewrite_h2_schema_qualifier(sql, source_schema, target_schema))
+    } else if matches!((source_db_type, target_db_type), (DatabaseType::Db2, DatabaseType::Db2)) {
         Some(rewrite_h2_schema_qualifier(sql, source_schema, target_schema))
     } else if is_oracle_family_transfer_target(source_db_type) && is_oracle_family_transfer_target(target_db_type) {
         // Oracle-family sources return `DBMS_METADATA`-style DDL whose CREATE TABLE head
@@ -4787,7 +4912,7 @@ pub(crate) fn generate_insert_typed_sql_batches_from_value_rows_with_options(
 
     let max_rows = limits.max_rows.max(1).min(match db_type {
         DatabaseType::SqlServer => MAX_SQLSERVER_INSERT_ROWS,
-        DatabaseType::Oracle => MAX_ORACLE_INSERT_ALL_ROWS,
+        DatabaseType::Oracle | DatabaseType::OceanbaseOracle => MAX_ORACLE_INSERT_ALL_ROWS,
         _ => usize::MAX,
     });
     let target_sql_bytes = limits.target_sql_bytes.max(1);
@@ -4968,7 +5093,7 @@ fn generate_insert_sql_batches_from_value_rows(
 
     let max_rows = limits.max_rows.max(1).min(match db_type {
         DatabaseType::SqlServer => MAX_SQLSERVER_INSERT_ROWS,
-        DatabaseType::Oracle => MAX_ORACLE_INSERT_ALL_ROWS,
+        DatabaseType::Oracle | DatabaseType::OceanbaseOracle => MAX_ORACLE_INSERT_ALL_ROWS,
         _ => usize::MAX,
     });
     let target_sql_bytes = limits.target_sql_bytes.max(1);
@@ -5682,6 +5807,231 @@ fn advance_keyset_cursor(
     }
 }
 
+/// Column alias of the trailing `ctid` the windowed PostgreSQL read appends to
+/// the selected columns. It must not be spelled `ctid`: an output column with
+/// that name shadows the system column inside `ORDER BY`, which would sort each
+/// page as text instead of by physical position.
+const POSTGRES_CTID_ALIAS: &str = "dbx_row_ctid";
+
+/// Upper bound on the block window the PostgreSQL `ctid` fallback pages over.
+/// A larger window is estimated as a bigger slice of the table, and the planner
+/// stops choosing a Tid Range Scan for it.
+const POSTGRES_CTID_WINDOW_MAX_BLOCKS: u64 = 65_536;
+
+/// Pages a table must hold before a key-less PostgreSQL read switches from
+/// OFFSET paging to `ctid` windows. Below it the quadratic OFFSET scan is cheap
+/// enough that the extra catalog probe is not worth the behaviour change.
+const POSTGRES_CTID_PAGING_MIN_PAGES: u64 = 20;
+
+/// Physical layout of a source heap, used to size the first `ctid` window.
+struct PostgresCtidLayout {
+    total_blocks: u64,
+    rows_per_block: f64,
+}
+
+/// Paging state for the key-less PostgreSQL `ctid` fallback.
+///
+/// A `WHERE ctid > <last row>` cursor alone does not avoid the quadratic scan:
+/// PostgreSQL only turns that predicate into a Tid Range Scan when it expects a
+/// small range, and a bound anywhere inside a heap is estimated as a large part
+/// of it, so every page falls back to a sequential scan plus sort. Bounding the
+/// page with an upper `ctid` as well — a *window* of blocks — keeps the estimate
+/// proportional to the window, so each page reads only the blocks it needs.
+///
+/// Only plain heap tables qualify (see [`postgres_ctid_pager`]): a partitioned
+/// parent fans out to children whose `ctid`s overlap, so paging it by physical
+/// position could silently skip rows. Those keep OFFSET paging.
+struct PostgresCtidPager {
+    /// Cursor of the next page: the previous page's last `ctid`, or `None`
+    /// right after a window was consumed, when the next page restarts at the
+    /// current window's first block.
+    lower_bound: Option<String>,
+    /// First block covered by the window the next page reads.
+    window_start_block: u64,
+    /// Blocks each window covers, re-sized from the density actually observed.
+    window_blocks: u64,
+    /// Live block count of the relation when the transfer started.
+    total_blocks: u64,
+    /// Rows the pages of the window being read have returned so far.
+    rows_in_window: u64,
+}
+
+impl PostgresCtidPager {
+    fn new(layout: PostgresCtidLayout, page_rows: usize) -> Self {
+        Self {
+            lower_bound: None,
+            window_start_block: 0,
+            window_blocks: postgres_ctid_window_blocks(page_rows, layout.rows_per_block),
+            total_blocks: layout.total_blocks,
+            rows_in_window: 0,
+        }
+    }
+
+    fn window_end_block(&self) -> u64 {
+        self.window_start_block.saturating_add(self.window_blocks)
+    }
+
+    /// SQL for the next page: the selected columns plus the trailing `ctid` the
+    /// caller turns into the next cursor.
+    fn page_sql(&self, columns: &[String], table: &str, schema: &str, limit: usize) -> String {
+        let full_table = qualified_table(table, schema, &DatabaseType::Postgres, None);
+        let mut col_list = columns
+            .iter()
+            .map(|column| quote_identifier(column, &DatabaseType::Postgres))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !col_list.is_empty() {
+            col_list.push_str(", ");
+        }
+        let lower_bound = match self.lower_bound.as_deref() {
+            Some(bound) => format!("ctid > '{bound}'::tid"),
+            None => format!("ctid >= '({},0)'::tid", self.window_start_block),
+        };
+        format!(
+            "SELECT {col_list}ctid::text AS {POSTGRES_CTID_ALIAS} FROM {full_table} \
+             WHERE {lower_bound} AND ctid < '({},0)'::tid ORDER BY ctid LIMIT {limit}",
+            self.window_end_block()
+        )
+    }
+
+    /// Folds the page just read into the pager — dropping the trailing `ctid`
+    /// column from every row — and reports whether the heap was scanned to its
+    /// end. A full page stays inside the current window; a short one consumes
+    /// it and re-sizes the next window from the row density actually observed.
+    fn advance(&mut self, rows: &mut [Vec<serde_json::Value>], limit: usize) -> Result<bool, String> {
+        let page_rows = rows.len();
+        let mut last_ctid: Option<String> = None;
+        for row in rows.iter_mut() {
+            last_ctid = match row.pop() {
+                Some(serde_json::Value::String(cursor)) => Some(cursor),
+                _ => None,
+            };
+        }
+        self.rows_in_window = self.rows_in_window.saturating_add(page_rows as u64);
+
+        if limit > 0 && page_rows >= limit {
+            let Some(next) = last_ctid else {
+                return Err("ctid paging lost the row cursor".to_string());
+            };
+            if self.lower_bound.as_deref() == Some(next.as_str()) {
+                return Err("ctid paging did not advance past the last row".to_string());
+            }
+            self.lower_bound = Some(next);
+            return Ok(false);
+        }
+
+        self.window_start_block = self.window_end_block();
+        self.lower_bound = None;
+        if self.rows_in_window > 0 {
+            let rows_per_block = self.rows_in_window as f64 / self.window_blocks.max(1) as f64;
+            self.window_blocks = postgres_ctid_window_blocks(limit, rows_per_block);
+        }
+        self.rows_in_window = 0;
+        Ok(self.window_start_block >= self.total_blocks)
+    }
+}
+
+/// Blocks that hold roughly one page of rows at the given density. A window
+/// that runs short is re-sized from the density the transfer observes, so a
+/// stale `reltuples` only costs the first window.
+fn postgres_ctid_window_blocks(page_rows: usize, rows_per_block: f64) -> u64 {
+    let rows_per_block = if rows_per_block > 0.0 && rows_per_block.is_finite() { rows_per_block } else { 1.0 };
+    let blocks = (page_rows.max(1) as f64 / rows_per_block).ceil();
+    if !blocks.is_finite() || blocks < 1.0 {
+        return 1;
+    }
+    (blocks as u64).clamp(1, POSTGRES_CTID_WINDOW_MAX_BLOCKS)
+}
+
+/// Builds the `ctid` pager for a key-less PostgreSQL source table, or `None`
+/// when the relation cannot be paged by physical position.
+///
+/// Only plain heap tables qualify. A partitioned parent spreads `ctid`s over
+/// children that number their own blocks from zero, and a view or foreign table
+/// has no tuple identifiers at all; paging either one would silently drop rows,
+/// so both keep OFFSET paging. A traditional-inheritance parent has the same
+/// hazard: queries against it also return descendant rows, and every child
+/// numbers its `ctid`s from its own block zero. PostgreSQL rejects a user
+/// column named `ctid`, so the system column is always the one the pager reads.
+async fn postgres_ctid_pager(
+    state: &Arc<AppState>,
+    pool_key: &str,
+    schema: &str,
+    table: &str,
+    page_rows: usize,
+    row_count: u64,
+) -> Result<Option<PostgresCtidPager>, String> {
+    let sql = postgres_ctid_eligibility_sql(schema, table);
+    let result = execute_on_pool_with_max_rows(state, pool_key, &sql, Some(1)).await?;
+    let Some(row) = result.rows.first() else {
+        return Ok(None);
+    };
+    if row.get(3).and_then(json_value_bool) != Some(true) {
+        return Ok(None);
+    }
+    let total_blocks = row.first().and_then(json_value_u64).unwrap_or(0);
+    if total_blocks == 0 {
+        return Ok(None);
+    }
+    let reltuples = row.get(1).and_then(json_value_f64).unwrap_or(0.0);
+    let relpages = row.get(2).and_then(json_value_f64).unwrap_or(0.0);
+    // The exact row count sizes the first window even when the relation was
+    // never analyzed; `reltuples` only covers a count that failed.
+    let rows_per_block = if row_count > 0 {
+        row_count as f64 / total_blocks as f64
+    } else if reltuples > 0.0 && relpages > 0.0 {
+        reltuples / relpages
+    } else {
+        1.0
+    };
+    Ok(Some(PostgresCtidPager::new(PostgresCtidLayout { total_blocks, rows_per_block }, page_rows)))
+}
+
+/// Catalog probe for `postgres_ctid_pager`: heap size in 8K blocks, planner
+/// row/page estimates, and whether the relation is a plain heap table that is
+/// neither an inheritance child nor a traditional-inheritance parent (a parent
+/// also returns descendant rows whose `ctid`s restart from each child's block
+/// zero, so window bounds anchored on the parent's size would drop rows;
+/// partitioned parents are already excluded by `relkind = 'r'`).
+fn postgres_ctid_eligibility_sql(schema: &str, table: &str) -> String {
+    let scope = if schema.is_empty() {
+        format!("c.relname = {} AND pg_catalog.pg_table_is_visible(c.oid)", quote_string_literal(table))
+    } else {
+        format!("n.nspname = {} AND c.relname = {}", quote_string_literal(schema), quote_string_literal(table))
+    };
+    format!(
+        "SELECT pg_relation_size(c.oid) / 8192, c.reltuples, c.relpages, \
+         (c.relkind = 'r' \
+         AND NOT EXISTS (SELECT 1 FROM pg_inherits i WHERE i.inhrelid = c.oid) \
+         AND NOT EXISTS (SELECT 1 FROM pg_inherits p WHERE p.inhparent = c.oid)) \
+         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE {scope}"
+    )
+}
+
+fn json_value_bool(value: &serde_json::Value) -> Option<bool> {
+    match value {
+        serde_json::Value::Bool(value) => Some(*value),
+        serde_json::Value::String(value) => value.parse().ok(),
+        _ => None,
+    }
+}
+
+fn json_value_u64(value: &serde_json::Value) -> Option<u64> {
+    match value {
+        serde_json::Value::Number(number) => number.as_u64(),
+        serde_json::Value::String(value) => value.parse().ok(),
+        _ => None,
+    }
+}
+
+fn json_value_f64(value: &serde_json::Value) -> Option<f64> {
+    match value {
+        serde_json::Value::Number(number) => number.as_f64(),
+        serde_json::Value::String(value) => value.parse().ok(),
+        _ => None,
+    }
+}
+
 /// Whether a table copy may stream through the PostgreSQL COPY protocol
 /// (`COPY ... TO STDOUT` on the source piped into `COPY ... FROM STDIN` on the
 /// target) instead of the paged SELECT + multi-row INSERT loop.
@@ -6258,6 +6608,68 @@ fn transfer_pool_error_action(
     }
 }
 
+/// A structured Agent quarantine makes the current logical session unusable, but
+/// does not authorize replaying the operation whose outcome is unknown. Prepare a
+/// replacement only for later transfer work. Keep legacy/untyped failures and
+/// runtime replacement on their existing, more conservative paths.
+fn should_prepare_fresh_agent_transfer_session(db_type: Option<DatabaseType>, error: &str) -> bool {
+    if !db_type.is_some_and(|db_type| crate::database_capabilities::is_agent_type(&db_type)) {
+        return false;
+    }
+    matches!(
+        crate::db::agent_driver::try_agent_error_from_legacy(error),
+        Some(crate::db::agent_driver::AgentCallError::Structured { context, .. })
+            if context.session_disposition
+                == crate::db::agent_driver::AgentSessionDisposition::Quarantine
+    )
+}
+
+/// Whether a discarded transfer pool has to be replaced before the next statement runs.
+///
+/// Every error that reaches the `Discard` arm tears the pool down: the failed statement
+/// is never replayed (its outcome on the server is unknown), and a driver whose query
+/// timed out may still own a checked-out connection. The pool key, though, is shared by
+/// every table of the transfer, so leaving it missing turns one transient failure into a
+/// *misleading* "Connection not found" on the next table instead of that table running
+/// (or failing) on its own. Prepare a replacement for native drivers; agent/JDBC
+/// sessions keep their stricter rule, where recovery stays gated on the structured
+/// quarantine decision.
+fn should_reconnect_discarded_transfer_pool(db_type: Option<DatabaseType>) -> bool {
+    db_type.is_some_and(|db_type| !crate::database_capabilities::is_agent_type(&db_type))
+}
+
+/// Resolve the pool a transfer statement runs on, re-creating it when it is gone.
+///
+/// A bulk transfer lives for tens of minutes and shares one pool key across every table,
+/// so a pool that disappears between two statements used to abort the run with a
+/// misleading `Connection not found` that says nothing about the database being
+/// unreachable. The pool can legitimately be gone: `execute_on_pool_once` drops the pool
+/// of a driver whose query timed out, the connection keepalive tears down a pool whose
+/// ping failed or timed out, and every other transfer statement reuses the same key.
+/// Rebuilding it here is safe -- the statement has not run yet, so nothing is replayed --
+/// and keeps the transfer working on a fresh connection instead of failing the table.
+async fn ensure_transfer_statement_pool(state: &AppState, pool_key: &str) -> Result<PoolKind, String> {
+    if let Some(pool) = state.pool_handle(pool_key).await {
+        return Ok(pool);
+    }
+    let (connection_id, database, _, _) = transfer_pool_context(state, pool_key).await;
+    let Some(connection_id) = connection_id else {
+        return Err("Connection not found".to_string());
+    };
+    let catalog = catalog_from_pool_key(pool_key).map(str::to_string);
+    let client_session_id = client_session_id_from_pool_key(pool_key).map(str::to_string);
+    state
+        .get_or_create_pool_for_session_with_catalog(
+            &connection_id,
+            database.as_deref(),
+            catalog.as_deref(),
+            client_session_id.as_deref(),
+        )
+        .await
+        .map_err(|error| format!("Connection not found: {error}"))?;
+    state.pool_handle(pool_key).await.ok_or_else(|| "Connection not found".to_string())
+}
+
 async fn transfer_pool_context(
     state: &AppState,
     pool_key: &str,
@@ -6316,17 +6728,37 @@ async fn execute_on_pool_with_options(
                 // caller isn't handed a known-dead connection; this never retries
                 // the failed statement above, only prepares the pool for
                 // whichever statement runs next.
-                if pool_error_action(db_type, error) == PoolErrorAction::ReconnectAndRetry {
+                let prepare_agent_session = should_prepare_fresh_agent_transfer_session(db_type, error);
+                let reconnect_pool = should_reconnect_discarded_transfer_pool(db_type);
+                if reconnect_pool || prepare_agent_session {
                     if let Some(connection_id) = connection_id.as_deref() {
                         let catalog = catalog_from_pool_key(&current_pool_key).map(str::to_string);
-                        let _ = state
-                            .reconnect_pool_for_session_with_catalog(
-                                connection_id,
-                                database.as_deref(),
-                                catalog.as_deref(),
-                                client_session_id.as_deref(),
-                            )
-                            .await;
+                        let recovery = if prepare_agent_session {
+                            state
+                                .get_or_create_pool_for_session_with_catalog(
+                                    connection_id,
+                                    database.as_deref(),
+                                    catalog.as_deref(),
+                                    client_session_id.as_deref(),
+                                )
+                                .await
+                        } else {
+                            state
+                                .reconnect_pool_for_session_with_catalog(
+                                    connection_id,
+                                    database.as_deref(),
+                                    catalog.as_deref(),
+                                    client_session_id.as_deref(),
+                                )
+                                .await
+                        };
+                        if let Err(reconnect_error) = recovery {
+                            // Preserve the failed operation's original error and unknown
+                            // outcome. The replacement is only for later transfer work.
+                            log::warn!(
+                                "[transfer] failed to prepare a fresh pool after discarding '{current_pool_key}': {reconnect_error}"
+                            );
+                        }
                     }
                 }
                 return result;
@@ -6362,13 +6794,12 @@ async fn execute_on_pool_once(
     sql: &str,
     max_rows: Option<usize>,
 ) -> Result<db::QueryResult, String> {
-    let (_connection_id, _database, _db_type, query_timeout_secs) = transfer_pool_context(state, pool_key).await;
+    let (_connection_id, _database, db_type, query_timeout_secs) = transfer_pool_context(state, pool_key).await;
     let query_timeout = query_timeout_duration(query_timeout_secs);
 
     // Read-only check: block transfer operations in readonly mode.
     crate::query::check_read_only_for_connection(state, pool_key, sql).await?;
-    let pool_handle = state.pool_handle(pool_key).await;
-    let pool = pool_handle.as_ref().ok_or("Connection not found")?;
+    let pool = ensure_transfer_statement_pool(state, pool_key).await?;
 
     // Transfer reads run under the per-connection operation budget. Drivers that
     // expose an incremental result stream (MySQL, PostgreSQL, SQLite, SQL Server)
@@ -6378,7 +6809,7 @@ async fn execute_on_pool_once(
     // whose protocol returns the whole result in one shot — ClickHouse, InfluxDB,
     // the Agent/JDBC path, external drivers and the DuckDB sidecar worker — expose
     // no incremental progress, so they keep the plain wall-clock timeout.
-    let result = match pool {
+    let result = match &pool {
         PoolKind::Mysql(p, mode) => {
             let p = p.clone();
             let bare = *mode == crate::connection::MysqlMode::Bare;
@@ -6488,11 +6919,17 @@ async fn execute_on_pool_once(
         }
         _ => Err("Unsupported database type for transfer".to_string()),
     };
-    drop(pool_handle);
-    if result.as_ref().is_err_and(|error| is_transfer_query_timeout(error)) {
+    drop(pool);
+    if result.as_ref().is_err_and(|error| is_transfer_query_timeout(error))
+        && should_discard_pool_after_query_timeout(db_type)
+    {
         // A timed-out native driver future may still own a checked-out
         // connection. Discard the pool so a late server response cannot be
-        // reused by the next transfer statement.
+        // reused by the next transfer statement. Drivers that keep their pool on
+        // a timeout (`pool_error_action` -> `Keep`, e.g. the embedded SQLite
+        // worker) must not lose it here either: the pool key is shared by every
+        // table in the transfer, so dropping it would make all later tables fail
+        // with "Connection not found".
         state.remove_pool_by_key(pool_key).await;
     }
     result
@@ -8728,6 +9165,45 @@ struct HiveServerTransferCursor {
     session_id: Option<String>,
 }
 
+fn is_transwarp_complex_type(data_type: &str) -> bool {
+    matches!(
+        data_type.trim().split('<').next().unwrap_or("").trim().to_ascii_lowercase().as_str(),
+        "array" | "map" | "struct" | "uniontype"
+    )
+}
+
+fn should_use_transwarp_server_side_copy(
+    source_db_type: &DatabaseType,
+    content: &TransferContent,
+    columns: &[db::ColumnInfo],
+) -> bool {
+    *source_db_type == DatabaseType::Transwarp
+        && should_copy_data(content)
+        && columns.iter().any(|column| is_transwarp_complex_type(&column.data_type))
+}
+
+fn transwarp_server_side_copy_sql(
+    source_columns: &[String],
+    target_columns: &[String],
+    source_table: &str,
+    source_schema: &str,
+    target_table: &str,
+    target_schema: &str,
+    quote_target_columns: bool,
+) -> String {
+    let db_type = DatabaseType::Transwarp;
+    let source = qualified_table(source_table, source_schema, &db_type, None);
+    let target = qualified_table(target_table, target_schema, &db_type, None);
+    let source_columns =
+        source_columns.iter().map(|name| quote_identifier(name, &db_type)).collect::<Vec<_>>().join(", ");
+    let target_columns = target_columns
+        .iter()
+        .map(|name| transfer_column_identifier(name, &db_type, quote_target_columns))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("INSERT INTO {target} ({target_columns}) SELECT {source_columns} FROM {source}")
+}
+
 fn transfer_cursor_sql(
     columns: &[String],
     table: &str,
@@ -8738,6 +9214,19 @@ fn transfer_cursor_sql(
     let full_table = qualified_table(table, schema, db_type, catalog);
     let col_list = columns.iter().map(|column| quote_identifier(column, db_type)).collect::<Vec<_>>().join(", ");
     format!("SELECT {col_list} FROM {full_table}")
+}
+
+fn uses_agent_transfer_cursor(db_type: &DatabaseType) -> bool {
+    matches!(db_type, DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Transwarp | DatabaseType::Db2)
+}
+
+fn transfer_clear_table_sql(table: &str, schema: &str, db_type: &DatabaseType, catalog: Option<&str>) -> String {
+    let full_table = qualified_table(table, schema, db_type, catalog);
+    match db_type {
+        DatabaseType::Sqlite | DatabaseType::CloudflareD1 | DatabaseType::DuckDb => format!("DELETE FROM {full_table}"),
+        DatabaseType::Db2 => format!("TRUNCATE TABLE {full_table} IMMEDIATE"),
+        _ => format!("TRUNCATE TABLE {full_table}"),
+    }
 }
 
 async fn fetch_hive_server_transfer_batch(
@@ -8756,7 +9245,7 @@ async fn fetch_hive_server_transfer_batch(
     };
     let pool_handle = state.pool_handle(pool_key).await;
     let Some(PoolKind::Agent(client)) = pool_handle.as_ref() else {
-        return Err("Impala transfer requires an Agent connection".to_string());
+        return Err("Agent cursor transfer requires an Agent connection".to_string());
     };
     let client = client.clone();
 
@@ -9344,6 +9833,9 @@ async fn transfer_table_inner<F>(
 where
     F: FnMut(TransferProgress),
 {
+    if *target_db_type == DatabaseType::Db2 {
+        db2::validate_request(request)?;
+    }
     if is_mongodb_transfer_type(source_db_type) || is_mongodb_transfer_type(target_db_type) {
         return transfer_mongodb_table(
             state,
@@ -9546,6 +10038,26 @@ where
     };
     log::info!("[transfer] {} total_rows={:?}", table, total_rows);
 
+    let server_side_complex_copy =
+        should_use_transwarp_server_side_copy(source_db_type, &request.content, &writable_columns);
+    if server_side_complex_copy {
+        if *target_db_type != DatabaseType::Transwarp || request.source_connection_id != request.target_connection_id {
+            return Err(format!(
+                "Native Inceptor complex columns in '{table}' require source and target on the same Transwarp connection"
+            ));
+        }
+        let source_table =
+            qualified_table(table, &request.source_schema, source_db_type, request.source_catalog.as_deref());
+        let destination_table =
+            qualified_table(&target_table, &request.target_schema, target_db_type, request.target_catalog.as_deref());
+        if source_table.eq_ignore_ascii_case(&destination_table) {
+            return Err(format!("Cannot transfer native complex columns in '{table}' onto the same table"));
+        }
+        if total_rows.is_none() {
+            return Err(format!("Cannot count native complex rows in '{table}' before transfer"));
+        }
+    }
+
     // Create table on target if requested
     if request.create_table {
         create_transfer_target_table(
@@ -9615,6 +10127,14 @@ where
     // A preexisting target also needs its columns read, even for a data-only
     // transfer: the write SQL has to address the target's declared column
     // names, which can differ from the source in case (#9320).
+    //
+    // SQL Server belongs to the always-read set for its identity flags, not just
+    // for a preexisting target: a freshly created target reuses the source DDL
+    // (`can_reuse`), which carries the source's `IDENTITY` clause, so the new
+    // target is an identity target too. `writes_identity_insert_columns` decides
+    // whether the batch needs the `SET IDENTITY_INSERT` wrapper, and without the
+    // target metadata it stays false — SQL Server then rejects the explicit
+    // identity values with 544.
     let needs_target_columns = default_rows_only
         || target_table_preexisting
         || (request.mode == TransferMode::Upsert
@@ -9625,8 +10145,12 @@ where
                     | DatabaseType::Kyuubi
                     | DatabaseType::Impala
                     | DatabaseType::Argo
+                    | DatabaseType::Transwarp
             ))
-        || matches!(target_db_type, DatabaseType::Postgres | DatabaseType::Dameng | DatabaseType::H2);
+        || matches!(
+            target_db_type,
+            DatabaseType::Postgres | DatabaseType::Dameng | DatabaseType::H2 | DatabaseType::SqlServer
+        );
     let target_columns = if needs_target_columns {
         get_columns_for_transfer(
             state,
@@ -9691,18 +10215,45 @@ where
         col_names.clone()
     };
 
+    if *target_db_type == DatabaseType::Db2 {
+        let sql = db2::generated_columns_sql(&request.target_schema, &target_table, &write_col_names);
+        let generated_columns = execute_on_pool(state, target_pool_key, &sql)
+            .await
+            .map_err(|error| format!("Failed to inspect DB2 generated columns before transfer: {error}"))?;
+        db2::validate_generated_columns(&generated_columns.rows)?;
+    }
+
+    if server_side_complex_copy {
+        for (source_column, target_name) in writable_columns.iter().zip(&write_col_names) {
+            let Some(target_column) =
+                target_columns.iter().find(|column| column.name.eq_ignore_ascii_case(target_name))
+            else {
+                if target_table_preexisting {
+                    return Err(format!("Target table '{target_table}' is missing column '{target_name}'"));
+                }
+                continue;
+            };
+            if is_transwarp_complex_type(&source_column.data_type)
+                && !source_column.data_type.trim().eq_ignore_ascii_case(target_column.data_type.trim())
+            {
+                return Err(format!(
+                    "Native Inceptor column '{}' needs matching source and target types ({} vs {})",
+                    source_column.name, source_column.data_type, target_column.data_type
+                ));
+            }
+        }
+    }
+
     // Truncate target if overwrite mode (only when not rebuilding the table).
     // When drop_target_before_create is true, the target table was just created
     // and is already empty, so TRUNCATE is unnecessary.
     if request.mode == TransferMode::Overwrite && !request.drop_target_before_create {
-        let full_table =
-            qualified_table(&target_table, &request.target_schema, target_db_type, request.target_catalog.as_deref());
-        let truncate_sql = match target_db_type {
-            DatabaseType::Sqlite | DatabaseType::CloudflareD1 | DatabaseType::DuckDb => {
-                format!("DELETE FROM {full_table}")
-            }
-            _ => format!("TRUNCATE TABLE {full_table}"),
-        };
+        let truncate_sql = transfer_clear_table_sql(
+            &target_table,
+            &request.target_schema,
+            target_db_type,
+            request.target_catalog.as_deref(),
+        );
         execute_on_pool(state, target_pool_key, &truncate_sql).await.map_err(|e| format!("Failed to truncate: {e}"))?;
     }
 
@@ -9715,6 +10266,7 @@ where
                 | DatabaseType::Kyuubi
                 | DatabaseType::Impala
                 | DatabaseType::Argo
+                | DatabaseType::Transwarp
         ) {
             log::warn!("[transfer] upsert not supported for {:?}, falling back to append", target_db_type);
             (TransferMode::Append, vec![])
@@ -9742,6 +10294,37 @@ where
     let batch_size = if request.batch_size == 0 { 1000 } else { request.batch_size };
     let mut offset: u64 = 0;
     let mut total_transferred: u64 = 0;
+
+    if server_side_complex_copy {
+        if is_cancelled(&request.transfer_id).await {
+            return Err("Cancelled".to_string());
+        }
+        let sql = transwarp_server_side_copy_sql(
+            &col_names,
+            &write_col_names,
+            table,
+            &request.source_schema,
+            &target_table,
+            &request.target_schema,
+            request.quote_target_column_names,
+        );
+        execute_on_pool(state, target_pool_key, &sql)
+            .await
+            .map_err(|error| format!("Native Inceptor transfer failed for '{table}': {error}"))?;
+        let copied = total_rows.expect("complex transfer count validated");
+        progress_callback(TransferProgress {
+            transfer_id: request.transfer_id.clone(),
+            table: table.to_string(),
+            table_index,
+            total_tables,
+            rows_transferred: copied,
+            total_rows,
+            status: TransferStatus::Running,
+            error: None,
+            terminal: false,
+        });
+        return Ok(copied);
+    }
 
     // COPY fast path: PG-family append/overwrite transfers stream the whole
     // table through the COPY protocol instead of paged SELECT + multi-row
@@ -9825,9 +10408,10 @@ where
     // does not hold up mid-table.
     let mut keyset_indexes = transfer_keyset_column_indexes(&writable_columns, &primary_key_columns, source_db_type);
     let mut keyset_cursor: Vec<serde_json::Value> = Vec::new();
-    // A single Agent cursor keeps Kyuubi/Impala rows in one query execution.
+    // A single Agent cursor keeps Hive-family rows in one query execution. Inceptor
+    // rejects the generic LIMIT/OFFSET form, just like the other Agent cursor paths.
     // Re-running LIMIT/OFFSET pages is unstable for tables without a unique key.
-    let use_hive_server_cursor = matches!(source_db_type, DatabaseType::Kyuubi | DatabaseType::Impala);
+    let use_hive_server_cursor = uses_agent_transfer_cursor(source_db_type);
     let hive_server_transfer_sql = use_hive_server_cursor.then(|| {
         transfer_cursor_sql(
             &col_names,
@@ -9838,6 +10422,36 @@ where
         )
     });
     let mut hive_server_cursor = HiveServerTransferCursor::default();
+    // Key-less PostgreSQL heaps page by `ctid` windows instead of OFFSET: an
+    // OFFSET page re-reads every row before it, so a ten-million-row table gets
+    // slower as it runs and never finishes. Tables with a usable key keep the
+    // keyset cursor above, and the COPY fast path already covers the
+    // PostgreSQL-to-PostgreSQL case.
+    let mut ctid_pager = if copy_rows.is_none()
+        && keyset_indexes.is_none()
+        && !default_rows_only
+        && *source_db_type == DatabaseType::Postgres
+        && total_rows.is_some_and(|total| total > batch_size as u64 * POSTGRES_CTID_PAGING_MIN_PAGES)
+    {
+        match postgres_ctid_pager(
+            state,
+            source_pool_key,
+            &request.source_schema,
+            table,
+            batch_size,
+            total_rows.unwrap_or(0),
+        )
+        .await
+        {
+            Ok(pager) => pager,
+            Err(error) => {
+                log::warn!("[transfer] {table}: ctid paging unavailable ({error}); using OFFSET paging");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     let transfer_result: Result<(), String> = async {
         if copy_rows.is_some() {
@@ -9862,6 +10476,9 @@ where
                     .await?,
                     false,
                 )
+            } else if let Some(pager) = ctid_pager.as_ref() {
+                let sql = pager.page_sql(&col_names, table, &request.source_schema, batch_size);
+                (execute_on_pool_with_max_rows(state, source_pool_key, &sql, Some(batch_size)).await?, false)
             } else {
                 let sql = if default_rows_only {
                     // Preserve row multiplicity without reading generated values
@@ -9908,8 +10525,27 @@ where
             let row_count = result.rows.len();
 
             if row_count == 0 {
+                // A `ctid` window can be empty — its rows were deleted, or the
+                // previous page ended exactly on the window boundary — while
+                // the windows after it still hold rows, so only stop once the
+                // heap has been walked to its end.
+                let continue_windows = match ctid_pager.as_mut() {
+                    Some(pager) => !pager.advance(&mut result.rows, batch_size)?,
+                    None => false,
+                };
+                if continue_windows {
+                    continue;
+                }
                 break;
             }
+
+            // Drops the trailing `ctid` cursor column from every row before the
+            // rows reach the INSERT builder, and reports whether this page
+            // consumed the last window of the heap.
+            let ctid_scan_finished = match ctid_pager.as_mut() {
+                Some(pager) => Some(pager.advance(&mut result.rows, batch_size)?),
+                None => None,
+            };
 
             if let Some(indexes) = keyset_indexes.as_deref() {
                 match advance_keyset_cursor(&mut keyset_cursor, &result.rows, indexes, table)? {
@@ -9990,7 +10626,12 @@ where
                 terminal: false,
             });
 
-            if (use_hive_server_cursor && !has_more) || (!use_hive_server_cursor && row_count < batch_size) {
+            if ctid_pager.is_some() {
+                // A short `ctid` page only means the current window ran out.
+                if ctid_scan_finished == Some(true) {
+                    break;
+                }
+            } else if (use_hive_server_cursor && !has_more) || (!use_hive_server_cursor && row_count < batch_size) {
                 break;
             }
         }
@@ -10894,6 +11535,319 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn fake_transfer_agent_state(
+        error_category: &str,
+        error_message: &str,
+        vendor_code: i32,
+        fail_reopen: bool,
+    ) -> (AppState, std::path::PathBuf, std::path::PathBuf, String) {
+        fake_transfer_agent_state_with_proxy(error_category, error_message, vendor_code, fail_reopen, false).await
+    }
+
+    async fn fake_transfer_agent_state_with_proxy(
+        error_category: &str,
+        error_message: &str,
+        vendor_code: i32,
+        fail_reopen: bool,
+        use_proxy: bool,
+    ) -> (AppState, std::path::PathBuf, std::path::PathBuf, String) {
+        let dir = std::env::temp_dir().join(format!("dbx-transfer-agent-recovery-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_and_agent_dir_and_app_version(
+            storage,
+            dir.join("plugins"),
+            dir.join("agents"),
+            "0.0.0-test",
+        );
+        let script_path = dir.join("agent.py");
+        let trace_path = dir.join("trace.jsonl");
+        let trace_json = serde_json::to_string(&trace_path.to_string_lossy()).unwrap();
+        let category_json = serde_json::to_string(error_category).unwrap();
+        let message_json = serde_json::to_string(error_message).unwrap();
+        let fail_reopen = if fail_reopen { "True" } else { "False" };
+        std::fs::write(
+            &script_path,
+            format!(
+                r#"import json, pathlib, sys
+trace = pathlib.Path({trace_json})
+category = {category_json}
+message = {message_json}
+vendor_code = {vendor_code}
+fail_reopen = {fail_reopen}
+open_count = 0
+execute_count = 0
+
+def record(req):
+    with trace.open('a', encoding='utf-8') as output:
+        output.write(json.dumps({{
+            'method': req['method'],
+            'session': req.get('params', {{}}).get('agentSessionId'),
+            'sql': req.get('params', {{}}).get('sql')
+        }}) + '\n')
+
+def structured_error(req, *, error_category, error_message, error_vendor_code, disposition, stage, outcome, retryable):
+    return {{
+        'jsonrpc': '2.0',
+        'id': req['id'],
+        'error': {{
+            'code': -1,
+            'message': error_message,
+            'data': {{
+                'contractVersion': 1,
+                'category': error_category,
+                'retryable': retryable,
+                'sessionDisposition': disposition,
+                'stage': stage,
+                'operationOutcome': outcome,
+                'agentSessionId': req.get('params', {{}}).get('agentSessionId'),
+                'sqlState': 'HY000',
+                'vendorCode': error_vendor_code,
+                'exceptionClass': 'java.sql.SQLTransientConnectionException'
+            }}
+        }}
+    }}
+
+print(json.dumps({{'ready': True}}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    record(req)
+    method = req['method']
+    if method == 'handshake':
+        response = {{
+            'jsonrpc': '2.0',
+            'id': req['id'],
+            'result': {{
+                'protocolVersion': 2,
+                'agentProtocolVersion': 2,
+                'capabilities': ['multi_session', 'structured_error_v1', 'query']
+            }}
+        }}
+    elif method == 'open_session':
+        open_count += 1
+        if fail_reopen and open_count > 1:
+            response = structured_error(
+                req,
+                error_category='connection',
+                error_message='injected replacement open failure',
+                error_vendor_code=0,
+                disposition='keep',
+                stage='connect',
+                outcome='not_started',
+                retryable=True
+            )
+        else:
+            response = {{'jsonrpc': '2.0', 'id': req['id'], 'result': {{'ok': True}}}}
+    elif method == 'execute_query':
+        execute_count += 1
+        if execute_count == 1:
+            response = structured_error(
+                req,
+                error_category=category,
+                error_message=message,
+                error_vendor_code=vendor_code,
+                disposition='quarantine' if category != 'sql' else 'keep',
+                stage='execute',
+                outcome='unknown',
+                retryable=False
+            )
+        else:
+            response = {{
+                'jsonrpc': '2.0',
+                'id': req['id'],
+                'result': {{
+                    'columns': [], 'column_types': [], 'column_sortables': [], 'rows': [],
+                    'affected_rows': 1, 'execution_time_ms': 1, 'truncated': False,
+                    'session_id': None, 'has_more': False
+                }}
+            }}
+    else:
+        response = {{'jsonrpc': '2.0', 'id': req['id'], 'result': {{'ok': True}}}}
+    print(json.dumps(response), flush=True)
+"#
+            ),
+        )
+        .unwrap();
+
+        let launch_config = state.agent_manager.driver_launch_config_path("oceanbase-oracle");
+        std::fs::create_dir_all(launch_config.parent().unwrap()).unwrap();
+        std::fs::write(
+            launch_config,
+            serde_json::to_vec(&json!({
+                "command": if cfg!(windows) { "python" } else { "python3" },
+                "args": [script_path.to_string_lossy()],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut config = jdbc_transfer_config(
+            "jdbc:oceanbase://127.0.0.1:2883/tenant",
+            "com.oceanbase.jdbc.Driver",
+            "oceanbase-oracle",
+        );
+        config.id = "ob-transfer".to_string();
+        config.db_type = DatabaseType::OceanbaseOracle;
+        config.host = "127.0.0.1".to_string();
+        config.port = 2883;
+        config.database = Some("tenant".to_string());
+        config.keepalive_interval_secs = 0;
+        if use_proxy {
+            config.transport_layers = vec![crate::models::connection::TransportLayerConfig::Proxy(
+                crate::models::connection::ProxyTunnelConfig {
+                    profile_id: String::new(),
+                    id: "transfer-proxy".to_string(),
+                    name: String::new(),
+                    enabled: true,
+                    proxy_type: crate::models::connection::ProxyType::Socks5,
+                    host: "127.0.0.1".to_string(),
+                    port: 65000,
+                    username: String::new(),
+                    password: String::new(),
+                    test_target: None,
+                },
+            )];
+        }
+        state.configs.write().await.insert(config.id.clone(), config);
+
+        let pool_key =
+            state.get_or_create_pool_for_session("ob-transfer", Some("tenant"), Some("transfer-client")).await.unwrap();
+        assert!(pool_key.contains(":session:transfer-client"), "{pool_key}");
+        (state, dir, trace_path, pool_key)
+    }
+
+    fn fake_transfer_agent_trace(path: &std::path::Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(path).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect()
+    }
+
+    #[tokio::test]
+    async fn structured_agent_quarantine_prepares_a_fresh_session_without_replaying_the_failed_write() {
+        for (category, message, vendor_code) in [
+            ("connection", "OBE-01843: not a valid month", 1843),
+            (
+                "timeout",
+                "OBE-00600: internal error code, arguments: -4012, Timeout, query has reached the maximum query timeout",
+                600,
+            ),
+            ("canceled", "Query canceled", 0),
+        ] {
+            let (state, dir, trace_path, pool_key) =
+                fake_transfer_agent_state(category, message, vendor_code, false).await;
+
+            let first_sql = "INSERT INTO target_table VALUES (1)";
+            let first_error = execute_on_pool(&state, &pool_key, first_sql).await.unwrap_err();
+            let replacement_present = state.pool_handle(&pool_key).await.is_some();
+            let second_sql = "CREATE TABLE next_table (id NUMBER)";
+            let second_result = execute_on_pool(&state, &pool_key, second_sql).await;
+            let trace = fake_transfer_agent_trace(&trace_path);
+
+            state.shutdown(std::time::Duration::from_secs(1)).await;
+            let _ = std::fs::remove_dir_all(&dir);
+
+            assert!(first_error.contains(message), "{first_error}");
+            assert!(first_error.contains("\"sqlState\":\"HY000\""), "{first_error}");
+            assert!(first_error.contains(&format!("\"vendorCode\":{vendor_code}")), "{first_error}");
+            assert!(replacement_present, "replacement was not published under {pool_key}");
+            assert!(second_result.is_ok(), "next transfer operation did not get a fresh session: {second_result:?}");
+            let opens = trace.iter().filter(|entry| entry["method"] == "open_session").collect::<Vec<_>>();
+            let closes = trace.iter().filter(|entry| entry["method"] == "close_session").collect::<Vec<_>>();
+            let executes = trace.iter().filter(|entry| entry["method"] == "execute_query").collect::<Vec<_>>();
+            assert_eq!(opens.len(), 2, "trace: {trace:?}");
+            assert_eq!(closes.len(), 1, "trace: {trace:?}");
+            assert_eq!(executes.len(), 2, "trace: {trace:?}");
+            assert_eq!(executes.iter().filter(|entry| entry["sql"] == first_sql).count(), 1, "trace: {trace:?}");
+            assert_eq!(executes.iter().filter(|entry| entry["sql"] == second_sql).count(), 1, "trace: {trace:?}");
+            assert_eq!(closes[0]["session"], executes[0]["session"], "trace: {trace:?}");
+            assert_ne!(executes[0]["session"], executes[1]["session"], "trace: {trace:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn structured_agent_quarantine_preserves_shared_transport_and_manual_session() {
+        let (state, dir, trace_path, pool_key) =
+            fake_transfer_agent_state_with_proxy("connection", "OBE-01843: not a valid month", 1843, false, true).await;
+        let transport_key = "ob-transfer:transport:0";
+        let initial_port = state.proxy_tunnels.local_port(transport_key).await.unwrap();
+        let manual_pool_key = state
+            .get_or_create_pool_for_session("ob-transfer", Some("tenant"), Some("manual-txn-protected"))
+            .await
+            .unwrap();
+        let manual_pool = state.pool_handle(&manual_pool_key).await.unwrap();
+        let PoolKind::Agent(manual_client) = manual_pool else {
+            panic!("expected manual Agent session");
+        };
+        manual_client.lock().await.begin_manual_transaction::<serde_json::Value>(None).await.unwrap();
+
+        let failed_sql = "INSERT INTO target_table VALUES (1)";
+        let failed_result = execute_on_pool(&state, &pool_key, failed_sql).await;
+        let manual_still_routed = state.pool_handle(&manual_pool_key).await.is_some();
+        let retained_port = state.proxy_tunnels.local_port(transport_key).await;
+        let next_result = execute_on_pool(&state, &pool_key, "CREATE TABLE next_table (id NUMBER)").await;
+        let rollback_result = manual_client.lock().await.rollback_manual_transaction::<serde_json::Value>().await;
+        let trace = fake_transfer_agent_trace(&trace_path);
+
+        state.shutdown(std::time::Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(failed_result.unwrap_err().contains("OBE-01843"));
+        assert!(manual_still_routed, "recovery removed a sibling manual-transaction pool");
+        assert_eq!(retained_port, Some(initial_port), "recovery reset the shared transport");
+        assert!(next_result.is_ok(), "next transfer operation failed: {next_result:?}");
+        assert!(rollback_result.is_ok(), "manual transaction was lost: {rollback_result:?}");
+        let manual_session =
+            &trace.iter().find(|entry| entry["method"] == "begin_manual_transaction").unwrap()["session"];
+        assert!(trace.iter().all(|entry| entry["method"] != "close_session" || &entry["session"] != manual_session));
+        assert_eq!(
+            trace.iter().filter(|entry| entry["method"] == "execute_query" && entry["sql"] == failed_sql).count(),
+            1,
+            "failed write was replayed: {trace:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn structured_agent_sql_keep_reuses_the_session() {
+        let (state, dir, trace_path, pool_key) = fake_transfer_agent_state("sql", "syntax error", 900, false).await;
+
+        let first_sql = "INSERT INTO target_table VALUES (1)";
+        let first_error = execute_on_pool(&state, &pool_key, first_sql).await.unwrap_err();
+        let second_sql = "CREATE TABLE next_table (id NUMBER)";
+        let second_result = execute_on_pool(&state, &pool_key, second_sql).await;
+        let trace = fake_transfer_agent_trace(&trace_path);
+
+        state.shutdown(std::time::Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(first_error.contains("syntax error"), "{first_error}");
+        assert!(second_result.is_ok(), "{second_result:?}");
+        let opens = trace.iter().filter(|entry| entry["method"] == "open_session").collect::<Vec<_>>();
+        let closes = trace.iter().filter(|entry| entry["method"] == "close_session").collect::<Vec<_>>();
+        let executes = trace.iter().filter(|entry| entry["method"] == "execute_query").collect::<Vec<_>>();
+        assert_eq!(opens.len(), 1, "trace: {trace:?}");
+        assert!(closes.is_empty(), "trace: {trace:?}");
+        assert_eq!(executes.len(), 2, "trace: {trace:?}");
+        assert_eq!(executes[0]["session"], executes[1]["session"], "trace: {trace:?}");
+    }
+
+    #[tokio::test]
+    async fn structured_agent_quarantine_recreation_failure_preserves_the_original_error() {
+        let original_message = "OBE-01843: not a valid month";
+        let (state, dir, trace_path, pool_key) =
+            fake_transfer_agent_state("connection", original_message, 1843, true).await;
+
+        let first_error = execute_on_pool(&state, &pool_key, "INSERT INTO target_table VALUES (1)").await.unwrap_err();
+        let trace = fake_transfer_agent_trace(&trace_path);
+        let pool_missing = state.pool_handle(&pool_key).await.is_none();
+
+        state.shutdown(std::time::Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(first_error.contains(original_message), "{first_error}");
+        assert!(!first_error.contains("injected replacement open failure"), "{first_error}");
+        assert_eq!(trace.iter().filter(|entry| entry["method"] == "execute_query").count(), 1, "trace: {trace:?}");
+        assert_eq!(trace.iter().filter(|entry| entry["method"] == "open_session").count(), 2, "trace: {trace:?}");
+        assert!(pool_missing);
+    }
 
     #[test]
     fn transfer_query_timeout_errors_are_classified() {
@@ -15075,6 +16029,114 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
     }
 
     #[test]
+    fn postgres_ctid_eligibility_excludes_inheritance_children_and_parents() {
+        for sql in [postgres_ctid_eligibility_sql("", "events"), postgres_ctid_eligibility_sql("public", "events")] {
+            assert!(sql.contains("c.relkind = 'r'"), "only plain heap tables may page by ctid: {sql}");
+            assert!(sql.contains("i.inhrelid = c.oid"), "inheritance children restart ctid numbering per child: {sql}");
+            assert!(
+                sql.contains("p.inhparent = c.oid"),
+                "inheritance parents also return descendant rows and must keep OFFSET paging: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn postgres_ctid_page_sql_bounds_each_page_to_a_block_window() {
+        let cols = vec!["id".to_string(), "userName".to_string()];
+        let pager = PostgresCtidPager::new(PostgresCtidLayout { total_blocks: 5_000, rows_per_block: 100.0 }, 1000);
+
+        let first = pager.page_sql(&cols, "events", "public", 1000);
+        assert_eq!(
+            first,
+            "SELECT \"id\", \"userName\", ctid::text AS dbx_row_ctid FROM \"public\".\"events\" \
+             WHERE ctid >= '(0,0)'::tid AND ctid < '(10,0)'::tid ORDER BY ctid LIMIT 1000"
+        );
+        // The cursor column is aliased, so `ORDER BY ctid` still resolves to the
+        // system column instead of the text projection.
+        assert!(!first.contains("AS ctid"));
+
+        let mut pager = pager;
+        let mut rows = vec![vec![json!("(7,3)"), json!("(9,5)")]; 1000];
+        assert_eq!(pager.advance(&mut rows, 1000), Ok(false));
+        let second = pager.page_sql(&cols, "events", "public", 1000);
+        assert!(second.contains("WHERE ctid > '(9,5)'::tid AND ctid < '(10,0)'::tid"), "{second}");
+    }
+
+    #[test]
+    fn postgres_ctid_page_sql_handles_row_count_only_transfers() {
+        let pager = PostgresCtidPager::new(PostgresCtidLayout { total_blocks: 10, rows_per_block: 1.0 }, 1000);
+        let sql = pager.page_sql(&[], "events", "public", 1000);
+        assert!(sql.starts_with("SELECT ctid::text AS dbx_row_ctid FROM"), "{sql}");
+    }
+
+    #[test]
+    fn postgres_ctid_window_sizing_follows_row_density() {
+        // 1000 rows per page at 100 rows per block needs ten blocks.
+        assert_eq!(postgres_ctid_window_blocks(1000, 100.0), 10);
+        // A single row per block needs one block per row.
+        assert_eq!(postgres_ctid_window_blocks(1000, 1.0), 1000);
+        // Dense heaps never shrink below one block, and unknown density assumes
+        // the sparsest layout so the first window still fits one page.
+        assert_eq!(postgres_ctid_window_blocks(1000, 1_000_000.0), 1);
+        assert_eq!(postgres_ctid_window_blocks(1000, 0.0), 1000);
+        assert_eq!(postgres_ctid_window_blocks(1000, f64::NAN), 1000);
+        assert_eq!(postgres_ctid_window_blocks(0, 1.0), 1);
+    }
+
+    #[test]
+    fn postgres_ctid_pager_walks_windows_and_resizes_from_density() {
+        let mut pager = PostgresCtidPager::new(PostgresCtidLayout { total_blocks: 40, rows_per_block: 100.0 }, 1000);
+        assert_eq!(pager.window_end_block(), 10);
+
+        // A full page stays inside the window; the cursor column is dropped from
+        // every row before the INSERT builder sees it.
+        let mut rows = vec![vec![json!("(9,5)"), json!("(9,5)")]; 1000];
+        assert_eq!(pager.advance(&mut rows, 1000), Ok(false));
+        assert_eq!(pager.lower_bound.as_deref(), Some("(9,5)"));
+        assert!(rows.iter().all(|row| row.len() == 1));
+
+        // A short page consumes the window: the next page restarts at the next
+        // block, and the window is re-sized from the observed 150 rows/block.
+        let mut rows = vec![vec![json!("(9,9)")]; 500];
+        assert_eq!(pager.advance(&mut rows, 1000), Ok(false));
+        assert_eq!(pager.window_start_block, 10);
+        assert_eq!(pager.window_end_block(), 17);
+        assert_eq!(pager.lower_bound, None);
+
+        // Empty windows advance the scan instead of ending it.
+        let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
+        assert_eq!(pager.advance(&mut rows, 1000), Ok(false));
+        assert_eq!(pager.window_start_block, 17);
+
+        // The heap is finished only once a window past its last block was read.
+        let mut window_start = 17;
+        while window_start < 40 {
+            let mut rows = vec![vec![json!("(1,1)")]; 1];
+            let finished = pager.advance(&mut rows, 1000).expect("window advance");
+            window_start = pager.window_start_block;
+            if finished {
+                break;
+            }
+            assert!(window_start < 1_000_000, "ctid paging did not terminate");
+        }
+        assert!(pager.window_start_block >= 40);
+        assert_eq!(pager.advance(&mut Vec::new(), 1000), Ok(true));
+    }
+
+    #[test]
+    fn postgres_ctid_pager_rejects_a_stalled_cursor() {
+        let mut pager = PostgresCtidPager::new(PostgresCtidLayout { total_blocks: 100, rows_per_block: 1.0 }, 1000);
+        let mut rows = vec![vec![json!("(1,1)")]; 1000];
+        assert_eq!(pager.advance(&mut rows, 1000), Ok(false));
+        // Re-reading the same last row would loop forever.
+        let mut rows = vec![vec![json!("(1,1)")]; 1000];
+        assert!(pager.advance(&mut rows, 1000).is_err());
+        // A page that lost its cursor column cannot be resumed either.
+        let mut rows = vec![vec![serde_json::Value::Null]; 1000];
+        assert!(pager.advance(&mut rows, 1000).is_err());
+    }
+
+    #[test]
     fn copy_fast_path_requires_pg_compat_append_or_overwrite() {
         for mode in [TransferMode::Append, TransferMode::Overwrite] {
             assert!(transfer_copy_fast_path_supported(true, &mode, false));
@@ -16373,6 +17435,74 @@ SELECT 1 FROM dual"#
     }
 
     #[test]
+    fn oceanbase_oracle_multi_row_insert_uses_insert_all() {
+        // OceanBase's Oracle mode rejects multi-row VALUES but implements Oracle's
+        // INSERT ALL, so the import/transfer generators must batch through it instead
+        // of degrading to one INSERT per row.
+        let sql = generate_insert_typed(
+            &[String::from("id"), String::from("name")],
+            &[Some(String::from("number")), Some(String::from("varchar2(64)"))],
+            &[vec![json!(1), json!("Ada")], vec![json!(2), json!("O'Brien")]],
+            "INSTR_CATEGORY",
+            "APP",
+            &DatabaseType::OceanbaseOracle,
+            None,
+        );
+
+        assert_eq!(
+            sql,
+            r#"INSERT ALL
+INTO "APP"."INSTR_CATEGORY" ("id", "name") VALUES (1, 'Ada')
+INTO "APP"."INSTR_CATEGORY" ("id", "name") VALUES (2, 'O''Brien')
+SELECT 1 FROM dual"#
+        );
+        assert!(!sql.contains("),\n("));
+    }
+
+    #[test]
+    fn oceanbase_oracle_single_row_insert_keeps_values_shape() {
+        let sql = generate_insert_typed(
+            &[String::from("id"), String::from("name")],
+            &[Some(String::from("number")), Some(String::from("varchar2(64)"))],
+            &[vec![json!(1), json!("Ada")]],
+            "INSTR_CATEGORY",
+            "APP",
+            &DatabaseType::OceanbaseOracle,
+            None,
+        );
+
+        assert_eq!(
+            sql,
+            r#"INSERT INTO "APP"."INSTR_CATEGORY" ("id", "name") VALUES
+(1, 'Ada')"#
+        );
+    }
+
+    #[test]
+    fn oceanbase_oracle_transfer_write_batches_limit_insert_all_rows() {
+        let rows = (0..(MAX_ORACLE_INSERT_ALL_ROWS + 1)).map(|index| vec![json!(index)]).collect::<Vec<_>>();
+        let statements = generate_transfer_write_sql_batches(
+            &TransferMode::Append,
+            &[String::from("id")],
+            &[Some(String::from("number"))],
+            &rows,
+            "INSTR_CATEGORY",
+            "APP",
+            &DatabaseType::OceanbaseOracle,
+            &[],
+            None,
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(statements.len(), 2);
+        assert_eq!(statements[0].matches("\nINTO ").count(), MAX_ORACLE_INSERT_ALL_ROWS);
+        assert!(statements[0].starts_with("INSERT ALL\nINTO "));
+        assert!(statements[0].ends_with("SELECT 1 FROM dual"));
+    }
+
+    #[test]
     fn oracle_transfer_write_batches_limit_insert_all_rows() {
         let rows = (0..(MAX_ORACLE_INSERT_ALL_ROWS + 1)).map(|index| vec![json!(index)]).collect::<Vec<_>>();
         let statements = generate_transfer_write_sql_batches(
@@ -16845,6 +17975,73 @@ SELECT 1 FROM dual"#
     }
 
     #[test]
+    fn inceptor_insert_uses_select_for_ordinary_tables() {
+        assert_eq!(SqlBatchLimits::for_database(&DatabaseType::Transwarp, 500).max_rows, 100);
+        let sql = generate_insert_typed(
+            &[String::from("id"), String::from("label")],
+            &[Some(String::from("int")), Some(String::from("string"))],
+            &[vec![json!(1), json!("first")], vec![json!(2), json!("second")]],
+            "events",
+            "analytics",
+            &DatabaseType::Transwarp,
+            None,
+        );
+        assert_eq!(
+            sql,
+            "INSERT INTO `analytics`.`events` (`id`, `label`)\nSELECT 1, 'first'\nUNION ALL\nSELECT 2, 'second'"
+        );
+
+        let batches = generate_insert_typed_sql_batches(
+            &[String::from("id"), String::from("label")],
+            &[Some(String::from("int")), Some(String::from("string"))],
+            &[vec![json!(1), json!("first")], vec![json!(2), json!("second")]],
+            "events",
+            "analytics",
+            &DatabaseType::Transwarp,
+            None,
+            SqlBatchLimits { max_rows: 100, target_sql_bytes: 76, hard_sql_bytes: Some(76) },
+        )
+        .unwrap();
+        assert_eq!(batches.iter().map(|(_, rows)| *rows).sum::<usize>(), 2);
+        assert!(batches.iter().all(|(sql, _)| sql.len() <= 76 && sql.contains("\nSELECT ")));
+    }
+
+    #[test]
+    fn inceptor_native_complex_copy_uses_server_side_projection() {
+        assert!(is_transwarp_complex_type("ARRAY<INT>"));
+        assert!(is_transwarp_complex_type("map<string,int>"));
+        assert!(is_transwarp_complex_type("struct<a:int>"));
+        assert!(!is_transwarp_complex_type("STRING"));
+        let columns = vec![db::ColumnInfo { data_type: "ARRAY<INT>".into(), ..Default::default() }];
+        assert!(!should_use_transwarp_server_side_copy(
+            &DatabaseType::Transwarp,
+            &TransferContent::StructureOnly,
+            &columns,
+        ));
+        assert!(should_use_transwarp_server_side_copy(
+            &DatabaseType::Transwarp,
+            &TransferContent::StructureAndData,
+            &columns,
+        ));
+        assert!(should_use_transwarp_server_side_copy(&DatabaseType::Transwarp, &TransferContent::DataOnly, &columns,));
+        assert!(!should_use_transwarp_server_side_copy(
+            &DatabaseType::Hive,
+            &TransferContent::StructureAndData,
+            &columns,
+        ));
+        let sql = transwarp_server_side_copy_sql(
+            &["id".into(), "numbers".into(), "tags".into()],
+            &["id".into(), "numbers".into(), "tags".into()],
+            "events",
+            "source_db",
+            "events",
+            "target_db",
+            true,
+        );
+        assert_eq!(sql, "INSERT INTO `target_db`.`events` (`id`, `numbers`, `tags`) SELECT `id`, `numbers`, `tags` FROM `source_db`.`events`");
+    }
+
+    #[test]
     fn postgres_insert_can_skip_duplicate_rows() {
         let batches = generate_insert_typed_sql_batches_from_value_rows_with_options(
             &[String::from("id"), String::from("name")],
@@ -17037,6 +18234,23 @@ SELECT 1 FROM dual"#
             ),
             PoolErrorAction::Discard
         );
+    }
+
+    #[test]
+    fn fresh_transfer_session_preparation_is_scoped_to_structured_agent_quarantine() {
+        let quarantine = "Agent RPC error (-1): lost\nDBX_AGENT_ERROR_DATA:{\"contractVersion\":1,\"category\":\"connection\",\"retryable\":false,\"sessionDisposition\":\"quarantine\",\"stage\":\"execute\",\"operationOutcome\":\"unknown\"}";
+        let keep = "Agent RPC error (-1): syntax error\nDBX_AGENT_ERROR_DATA:{\"contractVersion\":1,\"category\":\"sql\",\"retryable\":false,\"sessionDisposition\":\"keep\",\"stage\":\"execute\",\"operationOutcome\":\"unknown\"}";
+        let replace_runtime = "Agent RPC error (-1): exhausted\nDBX_AGENT_ERROR_DATA:{\"contractVersion\":1,\"category\":\"resource\",\"retryable\":false,\"sessionDisposition\":\"replace_runtime\",\"stage\":\"execute\",\"operationOutcome\":\"unknown\"}";
+
+        assert!(should_prepare_fresh_agent_transfer_session(Some(DatabaseType::OceanbaseOracle), quarantine));
+        assert!(!should_prepare_fresh_agent_transfer_session(Some(DatabaseType::Jdbc), quarantine));
+        assert!(!should_prepare_fresh_agent_transfer_session(Some(DatabaseType::Postgres), quarantine));
+        assert!(!should_prepare_fresh_agent_transfer_session(Some(DatabaseType::OceanbaseOracle), keep));
+        assert!(!should_prepare_fresh_agent_transfer_session(Some(DatabaseType::OceanbaseOracle), replace_runtime));
+        assert!(!should_prepare_fresh_agent_transfer_session(
+            Some(DatabaseType::OceanbaseOracle),
+            "Agent RPC error (-1): legacy connection error"
+        ));
     }
 
     #[test]
@@ -17312,6 +18526,52 @@ SELECT 1 FROM dual"#
             map_column_type("bigint unsigned zerofill", &DatabaseType::Mysql, &DatabaseType::Postgres),
             "BIGINT"
         );
+    }
+
+    #[test]
+    fn map_column_type_keeps_mysql_and_duckdb_integer_widths() {
+        // The widening below is specific to SQLite's storage classes: MySQL's
+        // `int` really is 32-bit and DuckDB's `INTEGER` is 32-bit too, so their
+        // mappings must not change.
+        assert_eq!(map_column_type("int", &DatabaseType::Mysql, &DatabaseType::SqlServer), "INT");
+        assert_eq!(map_column_type("INTEGER", &DatabaseType::DuckDb, &DatabaseType::SqlServer), "INT");
+    }
+
+    #[test]
+    fn map_column_type_widens_sqlite_integer_affinity_columns() {
+        // User report (SQL Server data transfer): a SQLite `INTEGER` column was
+        // mapped onto SQL Server `INT`, and the first value above 2^31 killed the
+        // batch with code 248 ("... overflowed an int column"). SQLite stores every
+        // integer-affinity column — the declared name is not a width — in a 64-bit
+        // signed integer, so the mapping has to stay 64-bit wide.
+        for source in [DatabaseType::Sqlite, DatabaseType::Rqlite, DatabaseType::Turso, DatabaseType::CloudflareD1] {
+            assert_eq!(map_column_type("INTEGER", &source, &DatabaseType::SqlServer), "BIGINT");
+            assert_eq!(map_column_type("int", &source, &DatabaseType::SqlServer), "BIGINT");
+            assert_eq!(map_column_type("INT(11)", &source, &DatabaseType::SqlServer), "BIGINT");
+            assert_eq!(map_column_type("smallint", &source, &DatabaseType::SqlServer), "BIGINT");
+            assert_eq!(map_column_type("tinyint", &source, &DatabaseType::SqlServer), "BIGINT");
+            assert_eq!(map_column_type("BIGINT", &source, &DatabaseType::SqlServer), "BIGINT");
+            // SQLite's own affinity rule matches the `INT` substring anywhere in
+            // the declared type, which is why `UNSIGNED BIG INT` is an integer.
+            assert_eq!(map_column_type("UNSIGNED BIG INT", &source, &DatabaseType::SqlServer), "BIGINT");
+            assert_eq!(map_column_type("INTEGER", &source, &DatabaseType::Mysql), "BIGINT");
+            assert_eq!(map_column_type("INTEGER", &source, &DatabaseType::Postgres), "BIGINT");
+            assert_eq!(map_column_type("INTEGER", &source, &DatabaseType::Kingbase), "BIGINT");
+            assert_eq!(map_column_type("INTEGER", &source, &DatabaseType::Hive), "BIGINT");
+            // Oracle-family targets keep `INTEGER`, which is already NUMBER(38, 0)
+            // and covers the whole 64-bit range without a `BIGINT` spelling Oracle
+            // does not define.
+            assert_eq!(map_column_type("INTEGER", &source, &DatabaseType::Oracle), "INTEGER");
+            assert_eq!(map_column_type("INTEGER", &source, &DatabaseType::OceanbaseOracle), "INTEGER");
+            // Non-integer declared types keep their existing mapping.
+            assert_eq!(map_column_type("TEXT", &source, &DatabaseType::SqlServer), "TEXT");
+            assert_eq!(map_column_type("REAL", &source, &DatabaseType::SqlServer), "FLOAT");
+            assert_eq!(map_column_type("NUMERIC", &source, &DatabaseType::SqlServer), "NUMERIC");
+            assert_eq!(map_column_type("BLOB", &source, &DatabaseType::SqlServer), "VARBINARY(MAX)");
+        }
+        // A SQLite target is unchanged: it accepts any 64-bit value in `INTEGER`.
+        assert_eq!(map_column_type("int", &DatabaseType::Mysql, &DatabaseType::Sqlite), "INTEGER");
+        assert_eq!(map_column_type("bigint", &DatabaseType::Mysql, &DatabaseType::Sqlite), "BIGINT");
     }
 
     #[test]
@@ -17608,5 +18868,72 @@ CREATE INDEX items_name_idx ON public.items (id);"#;
         }
 
         assert_eq!(receiver.len(), TRANSFER_PROGRESS_CHANNEL_CAPACITY);
+    }
+
+    #[test]
+    fn discarded_transfer_pool_is_replaced_for_native_drivers() {
+        // Discarding a pool never replays the failed statement, but the rest of a
+        // multi-table transfer keeps reusing the same pool key, so the pool has to
+        // be replaced for later tables. Only agent/JDBC sessions are excluded: their
+        // recovery stays gated on the structured quarantine decision.
+        for db_type in [
+            DatabaseType::Mysql,
+            DatabaseType::Postgres,
+            DatabaseType::SqlServer,
+            DatabaseType::ClickHouse,
+            DatabaseType::Gaussdb,
+            DatabaseType::Sqlite,
+        ] {
+            assert!(
+                should_reconnect_discarded_transfer_pool(Some(db_type)),
+                "{db_type:?} must prepare a replacement pool for later tables"
+            );
+        }
+        for db_type in [DatabaseType::Oracle, DatabaseType::Dameng] {
+            assert!(
+                !should_reconnect_discarded_transfer_pool(Some(db_type)),
+                "{db_type:?} keeps the stricter agent session rule"
+            );
+        }
+        assert!(!should_reconnect_discarded_transfer_pool(None));
+    }
+
+    #[test]
+    fn every_discard_decision_leaves_a_usable_pool_behind() {
+        // Connection drops on a write are downgraded to Discard (the write is never
+        // replayed) and query timeouts tear the pool down too. Whatever produced the
+        // Discard, a native driver must still get a pool for the next table instead
+        // of the misleading "Connection not found" seen in the wild.
+        for (db_type, error) in [
+            (DatabaseType::Postgres, "connection reset by peer"),
+            (DatabaseType::Mysql, "Connection timed out"),
+            (DatabaseType::Postgres, "Query timed out after 30 seconds"),
+            (DatabaseType::Sqlite, "PostgreSQL schema.reset cleanup failed: schema.reset timed out after 3 seconds"),
+        ] {
+            assert_eq!(
+                transfer_pool_error_action(TransferExecutionSafety::WriteNoReplay, Some(db_type), error),
+                PoolErrorAction::Discard,
+                "{db_type:?} must discard its pool for: {error}"
+            );
+            assert!(
+                should_reconnect_discarded_transfer_pool(Some(db_type)),
+                "{db_type:?} must be handed a replacement pool after discarding"
+            );
+        }
+        // Errors that keep the pool never reach the reconnect branch.
+        assert_eq!(
+            transfer_pool_error_action(
+                TransferExecutionSafety::WriteNoReplay,
+                Some(DatabaseType::Postgres),
+                "duplicate key value violates unique constraint \"items_pkey\""
+            ),
+            PoolErrorAction::Keep
+        );
+        // Agent sessions only replace the session on a structured quarantine hint.
+        assert!(!should_prepare_fresh_agent_transfer_session(
+            Some(DatabaseType::Oracle),
+            "Query timed out after 30 seconds"
+        ));
+        assert!(!should_reconnect_discarded_transfer_pool(Some(DatabaseType::Oracle)));
     }
 }

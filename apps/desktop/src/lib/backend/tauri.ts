@@ -51,7 +51,7 @@ import { decodeMeilisearchDocumentPage, decodeMeilisearchSearchResult, type Meil
 import type { XuguTablespaceInfo } from "@/types/database";
 import type { CreatedKey, EnqueuedTaskSummary, KeyCreateInput, KeyListItem, KeyPage, KeyUpdateInput, MeilisearchCreateIndexInput, MeilisearchSystemOverview, MeilisearchTask, TaskListInput, TaskPage, TaskSelector } from "@/types/meilisearchManagement";
 import type { CsvQuoteMode } from "@/lib/export/csvQuoteMode";
-import type { SqlInsertDialect, SqlInsertMode } from "@/lib/export/sqlInsertMode";
+import type { SqlExportColumnSelection, SqlInsertDialect, SqlInsertMode } from "@/lib/export/sqlInsertMode";
 
 /** Normalize Tauri rejections once at the public backend boundary. */
 async function invokeBackend<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -389,6 +389,55 @@ export interface WebDavSyncSummary {
   appVersion?: string;
 }
 
+export interface SyncCatalogItem {
+  id: string;
+  label: string;
+}
+
+export interface PluginUiStorageItemRef {
+  pluginId: string;
+  key: string;
+  pluginName?: string;
+}
+
+export interface SyncSelection {
+  connections?: string[];
+  connectionSecrets?: string[];
+  tunnelProfiles?: string[];
+  tunnelSecrets?: string[];
+  savedSqlFolders?: string[];
+  savedSqlFiles?: string[];
+  desktopSettings?: string[];
+  editorSettings?: string[];
+  aiConfigs?: string[];
+  pluginUiStorage?: PluginUiStorageItemRef[];
+  sidebarLayout?: boolean;
+  pinnedTreeNodeIds?: boolean;
+  includeSecrets: boolean;
+  syncCredentials: boolean;
+}
+
+export interface SyncSnapshotCatalog {
+  exportedAt: string;
+  appVersion: string;
+  hasEncryptedSecrets: boolean;
+  connections: SyncCatalogItem[];
+  connectionSecrets: string[];
+  tunnelProfiles: SyncCatalogItem[];
+  tunnelSecrets: string[];
+  savedSqlFolders: SyncCatalogItem[];
+  savedSqlFiles: SyncCatalogItem[];
+  desktopSettings: SyncCatalogItem[];
+  editorSettings: SyncCatalogItem[];
+  aiConfigs: SyncCatalogItem[];
+  aiConfigsLocked: boolean;
+  pluginUiStorage: PluginUiStorageItemRef[];
+  pluginUiStorageLocked: boolean;
+  hasSidebarLayout: boolean;
+  hasPinnedTreeNodeIds: boolean;
+  selection?: SyncSelection;
+}
+
 export interface WebDavDownloadResult {
   summary: WebDavSyncSummary;
   editorSettings?: unknown;
@@ -397,6 +446,16 @@ export interface WebDavDownloadResult {
     encryptedSecretsPresent: boolean;
     secretsApplied: boolean;
   };
+}
+
+export interface LocalBackupImportResult {
+  editorSettings?: unknown;
+  desktopSettings: DesktopSettings;
+  applySummary: WebDavDownloadResult["applySummary"];
+}
+
+export interface LocalBackupExportSummary {
+  bytes: number;
 }
 
 export interface WebDavPasswordStatus {
@@ -1061,17 +1120,38 @@ export async function forgetWebdavSyncSecretsPassphrase(): Promise<void> {
   return invoke("forget_webdav_sync_secrets_passphrase");
 }
 
-export async function webdavSyncUpload(config: WebDavConfig, editorSettings?: unknown, secretsPassphrase?: string, includeSecrets = false): Promise<WebDavSyncSummary> {
+export async function cloudSyncLocalCatalog(editorSettings?: unknown): Promise<SyncSnapshotCatalog> {
+  return invoke("cloud_sync_local_catalog", { editorSettings });
+}
+
+export async function localBackupExport(path: string, editorSettings: unknown, secretsPassphrase: string | undefined, selection: SyncSelection): Promise<LocalBackupExportSummary> {
+  return invoke("local_backup_export", { path, editorSettings, secretsPassphrase, selection });
+}
+
+export async function localBackupInspect(path: string, secretsPassphrase?: string): Promise<SyncSnapshotCatalog> {
+  return invoke("local_backup_inspect", { path, secretsPassphrase });
+}
+
+export async function localBackupImport(path: string, secretsPassphrase: string | undefined, restoreSecrets: boolean, selection: SyncSelection): Promise<LocalBackupImportResult> {
+  return invoke("local_backup_import", { path, secretsPassphrase, restoreSecrets, selection });
+}
+
+export async function webdavSyncInspect(config: WebDavConfig, secretsPassphrase?: string): Promise<SyncSnapshotCatalog> {
+  return invoke("webdav_sync_inspect", { config, secretsPassphrase });
+}
+
+export async function webdavSyncUpload(config: WebDavConfig, editorSettings?: unknown, secretsPassphrase?: string, includeSecrets = false, selection?: SyncSelection): Promise<WebDavSyncSummary> {
   return invoke("webdav_sync_upload", {
     config,
     editorSettings,
     secretsPassphrase,
     includeSecrets,
+    selection,
   });
 }
 
-export async function webdavSyncDownload(config: WebDavConfig, secretsPassphrase?: string, restoreSecrets = true): Promise<WebDavDownloadResult> {
-  return invoke("webdav_sync_download", { config, secretsPassphrase, restoreSecrets });
+export async function webdavSyncDownload(config: WebDavConfig, secretsPassphrase?: string, restoreSecrets = true, selection?: SyncSelection): Promise<WebDavDownloadResult> {
+  return invoke("webdav_sync_download", { config, secretsPassphrase, restoreSecrets, selection });
 }
 
 export async function snippetSyncTest(config: SnippetSyncConfig): Promise<void> {
@@ -1102,18 +1182,23 @@ export async function retrySnippetLegacyCleanup(config: SnippetSyncConfig): Prom
   return invoke("retry_snippet_legacy_cleanup", { config });
 }
 
-export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string): Promise<SnippetSyncSummary> {
+export async function snippetSyncInspect(config: SnippetSyncConfig, snippetPassphrase?: string, secretsPassphrase?: string): Promise<SyncSnapshotCatalog> {
+  return invoke("snippet_sync_inspect", { config, snippetPassphrase, secretsPassphrase });
+}
+
+export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string, selection?: SyncSelection): Promise<SnippetSyncSummary> {
   return invoke("snippet_sync_upload", {
     config,
     editorSettings,
     snippetPassphrase,
     includeSecrets,
     secretsPassphrase,
+    selection,
   });
 }
 
-export async function snippetSyncDownload(config: SnippetSyncConfig, snippetPassphrase?: string, restoreSecrets = false, secretsPassphrase?: string): Promise<SnippetDownloadResult> {
-  return invoke("snippet_sync_download", { config, snippetPassphrase, restoreSecrets, secretsPassphrase });
+export async function snippetSyncDownload(config: SnippetSyncConfig, snippetPassphrase?: string, restoreSecrets = false, secretsPassphrase?: string, selection?: SyncSelection): Promise<SnippetDownloadResult> {
+  return invoke("snippet_sync_download", { config, snippetPassphrase, restoreSecrets, secretsPassphrase, selection });
 }
 
 export async function loadPinnedTreeNodeIds(): Promise<string[]> {
@@ -1254,6 +1339,13 @@ export interface AiChatMessage {
   failed?: boolean;
   /** Target frozen when this assistant turn started, retained for confirmation. */
   sourceBinding?: import("@/lib/ai/aiConversationBinding").AiConversationBinding;
+  /**
+   * Footprint of a turn that carried a context selection (#10058). The selection
+   * text is never persisted (it can be 12 000 chars and records are
+   * cloud-synced), so this boolean is all a reloaded transcript has left to say
+   * the turn was not empty. Absent on records written before the field existed.
+   */
+  selectionsOmitted?: boolean;
 }
 
 export interface AiConversation {
@@ -2644,6 +2736,8 @@ export interface PluginLocalFileHandle {
   size: number;
   contentType: string;
   write: boolean;
+  /** Only for files expanded out of a dropped folder: '/'-separated path relative to the dropped folder root. */
+  relativePath?: string;
 }
 
 export interface PluginLocalFileChunk {
@@ -2657,8 +2751,29 @@ export interface PluginLocalFileWriteResult {
   nextOffset: number;
 }
 
-export async function openPluginLocalFile(pluginId: string, path: string, write: boolean): Promise<PluginLocalFileHandle> {
-  return invoke("plugin_file_open", { pluginId, path, write });
+// The native open/save dialogs run on the Rust side: the host never passes
+// paths into the plugin-file registry, it only receives handles for what the
+// user picked. Only the OS drop flow goes through openDroppedPluginLocalFiles:
+// the Rust command accepts exactly the paths its own drop pipeline granted to
+// this webview (one open attempt per granted path); a granted folder expands
+// to its contained files on the Rust side, and `truncated` flags any cap
+// cutoff so partial delivery is visible to the plugin.
+export interface PluginDroppedFilesResult {
+  dropId: string;
+  files: PluginLocalFileHandle[];
+  truncated: boolean;
+}
+
+export async function openDroppedPluginLocalFiles(pluginId: string, paths: string[]): Promise<PluginDroppedFilesResult> {
+  return invoke("plugin_file_open_dropped", { pluginId, paths });
+}
+
+export async function pickPluginLocalFiles(pluginId: string, multiple: boolean): Promise<PluginLocalFileHandle[]> {
+  return invoke("plugin_file_pick_files", { pluginId, multiple });
+}
+
+export async function savePluginLocalFileAs(pluginId: string, defaultFileName: string): Promise<PluginLocalFileHandle | null> {
+  return invoke("plugin_file_save_as", { pluginId, defaultFileName });
 }
 
 export async function readPluginLocalFileChunk(pluginId: string, handleId: string, offset: number, length?: number): Promise<PluginLocalFileChunk> {
@@ -3106,7 +3221,8 @@ export interface RedisKeyInfo {
 
 export interface RedisDatabaseInfo {
   db: number;
-  keys: number;
+  /** 该库的键数量；服务端无法给出可信数量时（如 kvrocks 未执行过 DBSIZE SCAN）缺省。 */
+  keys?: number;
 }
 
 export type RedisBlobEncoding = "utf8" | "binary";
@@ -3210,7 +3326,11 @@ export type RedisValueData =
       scan_cursor?: number;
     }
   | { kind: "stream"; entries: RedisStreamEntry[]; total?: number; next_cursor?: string }
-  | { kind: "unknown" };
+  // kvrocks 把位图/HLL 实现为独立类型（TYPE 返回 bitmap / hyperloglog），
+  // 这里单独建模，避免落到 unknown 后界面显示不出值。
+  | { kind: "bitmap"; content: RedisBlob; total_bytes?: number; truncated?: boolean; set_bits?: number }
+  | { kind: "hyperloglog"; count?: number }
+  | { kind: "unknown"; redis_type: string };
 
 export interface RedisValue {
   key_display: string;
@@ -5199,6 +5319,7 @@ export interface SqlFileRequest {
   executionId: string;
   connectionId: string;
   database: string;
+  schema?: string;
   filePath: string;
   continueOnError: boolean;
   txnSessionId?: string;
@@ -5379,7 +5500,7 @@ export type TableImportMode = "append" | "truncate";
 export type TableImportConflictPolicy = "error" | "skip" | "updateExisting";
 export type TableImportStatus = "running" | "done" | "error" | "cancelled";
 export type TableImportPhase = "preparing" | "detectingEncoding" | "reading" | "writing" | "finalizing" | "done";
-export type TableImportSourceFormat = "csv" | "tsv" | "delimited" | "json" | "excel" | "sql";
+export type TableImportSourceFormat = "csv" | "tsv" | "delimited" | "json" | "excel" | "sql" | "parquet";
 export type TableImportJsonShape = "auto" | "objects" | "arrays";
 export type TableImportTextEncoding = "auto" | "utf8" | "gbk" | "utf16Le" | "utf16Be";
 
@@ -5391,6 +5512,7 @@ export interface TableImportColumnMapping {
 
 export interface TableImportParseOptions {
   delimiter?: string | null;
+  decimalSeparator?: string | null;
   encoding?: TableImportTextEncoding | null;
   hasHeader?: boolean | null;
   titleRow?: number | null;
@@ -5398,6 +5520,8 @@ export interface TableImportParseOptions {
   lastDataRow?: number | null;
   trimValues?: boolean | null;
   emptyStringAsNull?: boolean | null;
+  /** 分隔文本里代表 NULL 的字面量。缺省表示用后端默认值 `\N`；空串表示关闭字面量，退回「空字段即 NULL」。 */
+  nullLiteral?: string | null;
   sheetName?: string | null;
   sheetIndex?: number | null;
   jsonShape?: TableImportJsonShape | null;
@@ -5406,6 +5530,8 @@ export interface TableImportParseOptions {
 
 export interface TableImportPreviewRequest {
   filePath: string;
+  connectionId?: string | null;
+  database?: string | null;
   sourceRef?: string | null;
   sourceFormat?: TableImportSourceFormat | null;
   parseOptions?: TableImportParseOptions | null;
@@ -5791,7 +5917,10 @@ export interface TableExportRequest {
   insertMode?: SqlInsertMode;
   insertDialect?: SqlInsertDialect;
   csvQuoteMode?: CsvQuoteMode;
+  /** CSV 里 NULL 写成什么。缺省表示用后端默认值 `\N`；空串表示关闭字面量。 */
+  nullLiteral?: string;
   columns?: string[];
+  selectedColumns?: SqlExportColumnSelection[];
   columnTypes?: Array<string | null | undefined>;
   /** 与 `columns` 对齐的列 EXTRA 元数据（identity 等），用于 SQL INSERT 导出的 `SET IDENTITY_INSERT`。 */
   columnExtras?: Array<string | null | undefined>;
@@ -5820,6 +5949,8 @@ export interface TableCsvExportOptions {
   pageSize?: number;
   timeoutSecs?: number;
   csvQuoteMode?: CsvQuoteMode;
+  /** CSV 里 NULL 写成什么。缺省表示用后端默认值 `\N`；空串表示关闭字面量。 */
+  nullLiteral?: string;
 }
 
 export interface TableExportProgress {
@@ -5846,6 +5977,8 @@ export interface QueryResultExportRequest {
   format: "csv" | "xlsx" | "json" | "txt" | "sql";
   insertMode?: SqlInsertMode;
   csvQuoteMode?: CsvQuoteMode;
+  /** CSV 里 NULL 写成什么。缺省表示用后端默认值 `\N`；空串表示关闭字面量。 */
+  nullLiteral?: string;
   includeSqlSheet?: boolean;
   pageSize: number;
   rowLimit?: number | null;
@@ -5857,6 +5990,7 @@ export interface QueryResultExportRequest {
   dateTimeFormat?: string;
   exportTableName?: string;
   exportColumnTypes?: Array<string | null | undefined>;
+  selectedColumns?: SqlExportColumnSelection[];
   /**
    * 结果列对应的原表 EXTRA 元数据（identity 等）。后端据此为 SQL INSERT 导出
    * 补上 `SET IDENTITY_INSERT` 包裹，缺省表示未知。
@@ -6002,13 +6136,14 @@ export async function recordDatabaseExportDestination(directory: string): Promis
   await invoke("record_database_export_destination", { directory });
 }
 
-export async function exportQueryResultCsv(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[], csvQuoteMode: CsvQuoteMode = "all"): Promise<void> {
+export async function exportQueryResultCsv(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[], csvQuoteMode: CsvQuoteMode = "all", nullLiteral?: string): Promise<void> {
   return invoke("export_query_result_csv", {
     request: {
       filePath,
       columns,
       rows,
       csvQuoteMode,
+      ...(nullLiteral === undefined ? {} : { nullLiteral }),
     },
   });
 }

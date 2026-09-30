@@ -258,6 +258,7 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
     if (!visibleLargeValuePreviewActive || generation !== visibleLargeValuePreviewRequestedGeneration || options.result.value !== sourceResult) return;
     const sql = await buildTableSelectSql({
       databaseType: options.databaseType.value,
+      serverVersion: options.getConnectionConfig(options.connectionId.value!)?.database_info?.productVersion,
       identifierQuote: options.connectionIdentifierQuote(options.connectionId.value),
       database: tableMeta.database,
       schema: tableMeta.schema,
@@ -426,6 +427,7 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
     const selectedColumns = [...new Set([...tableMeta.primaryKeys, sourceColumn])];
     const sql = await buildTableSelectSql({
       databaseType: options.databaseType.value,
+      serverVersion: options.getConnectionConfig(options.connectionId.value!)?.database_info?.productVersion,
       identifierQuote: options.connectionIdentifierQuote(options.connectionId.value),
       database: tableMeta.database,
       schema: tableMeta.schema,

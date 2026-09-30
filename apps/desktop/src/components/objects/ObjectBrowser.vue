@@ -102,6 +102,7 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { generateDatabaseExportId } from "@/lib/export/databaseExport";
 import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, type XlsxExportOptions, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
 import { showSqlInsertModeDialog, type SqlInsertDialect, type SqlInsertMode } from "@/lib/export/sqlInsertMode";
+import { csvNullLiteralForMode } from "@/lib/export/csvNullMode";
 import { copyToClipboard, eventTargetAllowsAppClipboardShortcut } from "@/lib/common/clipboard";
 import {
   defaultPasteTableMode,
@@ -117,7 +118,6 @@ import {
 } from "@/lib/table/tableClipboard";
 import { buildSingleDdlExportFileContent } from "@/lib/export/ddlExport";
 import { fetchTableDataForExport } from "@/lib/table/tableDataExport";
-import { forceCsvTextForTemporalColumns } from "@/lib/dataGrid/columnFormatter";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { treeNodePinIdentity, type PinnedTreeNodeIdentity } from "@/lib/app/pinnedItems";
 import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
@@ -309,14 +309,12 @@ const effectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(
 const isGaussdbM = computed(() => effectiveDatabaseType.value === "gaussdb" && props.connection.driver_profile?.toLowerCase() === "gaussdb-m");
 const isVictoriaMetrics = computed(() => effectiveDatabaseType.value === "victoriametrics");
 const isMongodb = computed(() => props.connection.db_type === "mongodb");
-// Victoria Metrics reports series instead of rows and has no byte size to show;
-// every other engine (MongoDB collections included, via `collStats`) fills both
-// the row and size columns.
-const supportsObjectSizeStats = computed(() => !isVictoriaMetrics.value);
+// Neither VictoriaMetrics series nor NebulaGraph tag/edge metadata has table byte-size stats.
+const supportsObjectSizeStats = computed(() => !isVictoriaMetrics.value && effectiveDatabaseType.value !== "nebula");
 // The batch table toolbar (export/copy/truncate/empty/drop selected) is SQL-only:
 // MongoDB collections are not dropped or truncated through it.
-const supportsBatchTableActions = computed(() => !isVictoriaMetrics.value && !isMongodb.value);
-const showTableStatistics = computed(() => objectFilter.value === "all" || objectFilter.value === "tables");
+const supportsBatchTableActions = computed(() => !isVictoriaMetrics.value && !isMongodb.value && effectiveDatabaseType.value !== "nebula");
+const showTableStatistics = computed(() => effectiveDatabaseType.value !== "nebula" && (objectFilter.value === "all" || objectFilter.value === "tables"));
 const showObjectRowStats = computed(() => showTableStatistics.value);
 const showObjectSizeStats = computed(() => supportsObjectSizeStats.value && showTableStatistics.value);
 const objectRowsLabel = computed(() => t(isVictoriaMetrics.value ? "objects.series" : "objects.rows"));
@@ -616,7 +614,7 @@ watch(
   },
 );
 
-const showCheckboxColumn = computed(() => settingsStore.editorSettings.objectBrowserShowCheckbox || selectedTableCount.value > 0);
+const showCheckboxColumn = computed(() => supportsBatchTableActions.value && (settingsStore.editorSettings.objectBrowserShowCheckbox || selectedTableCount.value > 0));
 
 function toggleCheckboxColumn() {
   const next = !settingsStore.editorSettings.objectBrowserShowCheckbox;
@@ -1691,6 +1689,7 @@ async function openNewQuery(row: ObjectBrowserRow) {
     await buildTableSelectSql({
       databaseType: effectiveDatabaseType.value,
       driverProfile: props.connection.driver_profile,
+      serverVersion: props.connection.database_info?.productVersion,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
       catalog: props.catalog,
       database: props.database,
@@ -2290,16 +2289,31 @@ function tableDdlObjectType(type: ObjectBrowserRow["type"]): ObjectSourceKind | 
 }
 
 async function exportDataLegacy(row: ObjectBrowserRow, format: "json") {
+  const { connection, database, catalog } = props;
+  const { id: connectionId, db_type: databaseType, query_timeout_secs: timeoutSecs } = connection;
+  const exportDatabaseType = effectiveDatabaseType.value;
   try {
     const schema = row.schema || selectedSchema.value;
-    const queryColumns = props.connection.db_type === "neo4j" ? (await api.getColumns(props.connection.id, props.database, schema || props.database, row.name, props.catalog)).map((column) => column.name) : undefined;
+    const queryColumns = databaseType === "neo4j" ? (await api.getColumns(connectionId, database, schema || database, row.name, catalog)).map((column) => column.name) : undefined;
+    const useAgentCursor = databaseType === "cassandra";
+    const clientSessionId = useAgentCursor ? `table-export:${generateDatabaseExportId()}` : undefined;
     const result = await fetchTableDataForExport({
-      databaseType: effectiveDatabaseType.value,
-      identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
+      databaseType: exportDatabaseType,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(connectionId),
       schema,
       tableName: row.name,
       columns: queryColumns,
-      executePage: (sql) => api.executeQuery(props.connection.id, props.database, sql),
+      useAgentCursor,
+      executePage: (sql, cursorOptions) => (cursorOptions ? api.executeQuery(connectionId, database, sql, undefined, undefined, { ...cursorOptions, clientSessionId, catalog, timeoutSecs }) : api.executeQuery(connectionId, database, sql)),
+      closeCursor: useAgentCursor
+        ? async (sessionId) => {
+            try {
+              if (sessionId) await api.closeQuerySession(connectionId, database, sessionId, clientSessionId, catalog);
+            } finally {
+              await api.closeClientConnectionSession(connectionId, database, clientSessionId!, catalog);
+            }
+          }
+        : undefined,
     });
 
     if (format === "json") {
@@ -2408,7 +2422,7 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx" | "
         executePage: (sql) => api.executeQuery(props.connection.id, props.database, sql),
       });
       if (format === "csv") {
-        await api.exportQueryResultCsv(filePath, result.columns, forceCsvTextForTemporalColumns(result.rows, result.column_types ?? []), settingsStore.editorSettings.csvQuoteMode);
+        await api.exportQueryResultCsv(filePath, result.columns, result.rows, settingsStore.editorSettings.csvQuoteMode, csvNullLiteralForMode(settingsStore.editorSettings.csvNullMode));
       } else {
         const comments = result.columns.map((name) => columnInfos?.find((column) => column.name.toLocaleLowerCase() === name.toLocaleLowerCase())?.comment);
         const headerOverrides = buildXlsxHeaderOverrides(result.columns, comments, headerMode);
@@ -2448,6 +2462,7 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx" | "
       format,
       ...(format === "sql" ? { insertMode, insertDialect, splitMaxMb } : {}),
       csvQuoteMode: settingsStore.editorSettings.csvQuoteMode,
+      nullLiteral: csvNullLiteralForMode(settingsStore.editorSettings.csvNullMode),
       columns,
       columnComments: format === "xlsx" ? columnComments : undefined,
       autoFilter: format === "xlsx" ? autoFilter : undefined,
@@ -2558,7 +2573,7 @@ async function copySelectedTablesToClipboard() {
 }
 
 function canPasteTableClipboard(): boolean {
-  return !isVictoriaMetrics.value && !isMongodb.value && tableClipboardMatchesTarget(normalizedObjectBrowserTableClipboardEntries(), pasteTableTargetContext());
+  return supportsBatchTableActions.value && tableClipboardMatchesTarget(normalizedObjectBrowserTableClipboardEntries(), pasteTableTargetContext());
 }
 
 function normalizedObjectBrowserTableClipboardEntries() {
@@ -2650,7 +2665,7 @@ function openPasteTableDialog() {
 }
 
 function onObjectBrowserKeydown(event: KeyboardEvent) {
-  if (event.defaultPrevented) return;
+  if (event.defaultPrevented || !supportsBatchTableActions.value) return;
   if (eventTargetAllowsAppClipboardShortcut(event, "c")) {
     if (selectedTableCount.value === 0) return;
     event.preventDefault();
@@ -3125,6 +3140,9 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
     // Explicit refresh and metadata invalidation still bypass this branch.
     applyObjectBrowserRows(cached.rows);
     finishOnce();
+    // 行数/大小是随对象列表一起缓存的，直接返回缓存会让这两列一直停在上一次统计
+    // （#10461）。对象列表本身仍按上面的约定不动，只把统计信息在后台补一次。
+    if (cached.stale) void revalidateCachedObjectStatistics(request, cacheWriteToken);
     return;
   } else {
     // No scaffold: first load in this scope, cache invalidated by a DDL mutation,
@@ -3188,6 +3206,15 @@ async function loadObjectStatistics(request: ObjectBrowserRowsLoadHandle, cacheW
   } catch (e) {
     console.debug("[ObjectBrowser] table statistics unavailable", e);
   }
+}
+
+/**
+ * Refreshes only the table statistics for rows restored from a stale cache
+ * scaffold. The row list itself is intentionally left untouched, and failures
+ * stay silent because the statistics are decorative.
+ */
+async function revalidateCachedObjectStatistics(request: ObjectBrowserRowsLoadHandle, cacheWriteToken: ObjectBrowserRowsCacheWriteToken) {
+  await loadObjectStatistics(request, cacheWriteToken, undefined);
 }
 
 function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, cachedAt: number | undefined) {
@@ -3432,6 +3459,14 @@ function selectedBatchTableCountLabel(key: "batchDrop" | "batchTruncate" | "batc
 }
 
 function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
+  if (effectiveDatabaseType.value === "nebula") {
+    return [
+      { label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
+      { label: t("contextMenu.viewDdl"), action: () => openTableInfo(item, "ddl"), icon: FileCode },
+      { label: "", separator: true },
+      { label: t("contextMenu.copyName"), action: () => copyName(item), icon: Copy },
+    ];
+  }
   if (isVictoriaMetrics.value) {
     return [
       { label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
@@ -3500,6 +3535,14 @@ function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 }
 
 function getViewMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
+  if (effectiveDatabaseType.value === "nebula") {
+    return [
+      { label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
+      { label: t("contextMenu.viewDdl"), action: () => openTableInfo(item, "ddl"), icon: ScrollText },
+      { label: "", separator: true },
+      { label: t("contextMenu.copyName"), action: () => copyName(item), icon: Copy },
+    ];
+  }
   return [
     { label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
     { label: t("contextMenu.editView"), action: () => openSource(item), icon: PencilLine },
@@ -3679,7 +3722,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           <LayoutGrid class="h-3.5 w-3.5" />
         </button>
       </div>
-      <Button v-if="showInlineCheckboxToggle" variant="ghost" size="icon" class="h-7 w-7" :class="{ 'text-primary': settingsStore.editorSettings.objectBrowserShowCheckbox }" :title="t('objects.toggleCheckbox')" @click="toggleCheckboxColumn">
+      <Button v-if="showInlineCheckboxToggle && supportsBatchTableActions" variant="ghost" size="icon" class="h-7 w-7" :class="{ 'text-primary': settingsStore.editorSettings.objectBrowserShowCheckbox }" :title="t('objects.toggleCheckbox')" @click="toggleCheckboxColumn">
         <CheckSquare v-if="settingsStore.editorSettings.objectBrowserShowCheckbox" class="h-3.5 w-3.5" />
         <Square v-else class="h-3.5 w-3.5" />
       </Button>
@@ -3717,14 +3760,14 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           <LayoutGrid class="h-3.5 w-3.5" />
           {{ t("objects.viewGrid") }}
         </DropdownMenuItem>
-        <DropdownMenuCheckboxItem :model-value="settingsStore.editorSettings.objectBrowserShowCheckbox" @select.prevent @update:model-value="toggleCheckboxColumn()">{{ t("objects.toggleCheckbox") }}</DropdownMenuCheckboxItem>
+        <DropdownMenuCheckboxItem v-if="supportsBatchTableActions" :model-value="settingsStore.editorSettings.objectBrowserShowCheckbox" @select.prevent @update:model-value="toggleCheckboxColumn()">{{ t("objects.toggleCheckbox") }}</DropdownMenuCheckboxItem>
         <template v-if="showObjectFilter && toolbarTier >= 2">
           <DropdownMenuSeparator />
           <DropdownMenuCheckboxItem v-for="filter in objectFilters" :key="filter" :model-value="objectFilter === filter" @select.prevent @update:model-value="selectObjectFilter(filter)">{{ filterLabel(filter) }}</DropdownMenuCheckboxItem>
         </template>
       </ToolbarOverflowMenu>
     </div>
-    <div v-if="selectedTableCount > 0" class="flex h-9 shrink-0 items-center gap-2 overflow-x-auto border-b bg-muted/30 px-3 text-xs">
+    <div v-if="selectedTableCount > 0 && supportsBatchTableActions" class="flex h-9 shrink-0 items-center gap-2 overflow-x-auto border-b bg-muted/30 px-3 text-xs">
       <div class="min-w-0 flex-1 truncate text-muted-foreground">
         {{ t("objects.selectedTables", { count: selectedTableCount }) }}
       </div>

@@ -1,6 +1,67 @@
 import { describe, expect, it } from "vitest";
-import { canFormatSqlForDatabaseType, formatSqlForDisplay, formatSqlForEditing, formatSqlText, MAX_SQL_FORMAT_CHARS, sqlFormatDialectForDbType, UnsupportedStructuredInputError } from "@/lib/sql/sqlFormatter";
+import { canFormatSqlForDatabaseType, compressSqlText, formatSqlForDisplay, formatSqlForEditing, formatSqlText, MAX_SQL_FORMAT_CHARS, sqlFormatDialectForDbType, UnsupportedStructuredInputError } from "@/lib/sql/sqlFormatter";
 import { extractSqlParameters } from "@/lib/sql/sqlParameters";
+
+describe("Neo4j Cypher formatting", () => {
+  const reproduction = `MATCH (a:LibraryDomainOrganization) WHERE a.id= $id CALL apoc.path.expandConfig(a, {uniqueness:'RELATIONSHIP_GLOBAL', minLevel:0, maxLevel:-1, relationshipFilter:'HasLibrary>|HasLibraryParameter>' }) YIELD path UNWIND relationships(path) as r WITH DISTINCT r WITH r, startNode(r) as s, endNode(r) as e OPTIONAL MATCH (s)-[:panda_data_master_version_rel]-(so) OPTIONAL MATCH (e)-[:panda_data_master_version_rel]-(eo) WITH r, CASE WHEN s.classType = 'COMMON' OR s.classType = 'INTERFACE' THEN s WHEN type(r) = 'panda_data_master_version_rel' THEN null ELSE so END as sm OPTIONAL MATCH (sm)-[permission:panda_dataPermission]->(target) WHERE target:panda_member AND target.id IN $memberIds AND permission.permissionType IN ['OWNER','ACTIVE','PASSIVE'] RETURN type(r) as relationType, sm, [s, e] as endpoints`;
+
+  it("uses the Cypher path for Neo4j and formats the reported query shape", async () => {
+    expect(canFormatSqlForDatabaseType("neo4j")).toBe(true);
+    expect(sqlFormatDialectForDbType("neo4j")).toBe("cypher");
+
+    const formatted = await formatSqlForEditing(reproduction, sqlFormatDialectForDbType("neo4j"));
+
+    expect(formatted).not.toBe(reproduction);
+    expect(formatted).toContain("MATCH (a:LibraryDomainOrganization)");
+    expect(formatted).toContain("CALL apoc.path.expandConfig(a, {uniqueness: 'RELATIONSHIP_GLOBAL'");
+    expect(formatted).toContain("relationshipFilter: 'HasLibrary>|HasLibraryParameter>'");
+    expect(formatted).toContain("OPTIONAL MATCH (s)-[:panda_data_master_version_rel]-(so)");
+    expect(formatted).toContain("target:panda_member");
+    expect(formatted).toContain("IN ['OWNER', 'ACTIVE', 'PASSIVE']");
+    expect(formatted).toContain("$memberIds");
+    expect(formatted).toContain("RETURN type(r) AS relationType");
+    expect(formatted.split("\n").length).toBeGreaterThan(8);
+  });
+
+  it("keeps comments, strings, labels, map keys, parameters, and nested values opaque", async () => {
+    const source = `// MATCH and RETURN in this comment\nMATCH (n:CaseSensitive {match: 'RETURN WHERE', values: ['CALL', '$id']}) WHERE n.note = "WITH RETURN" RETURN n`;
+    const formatted = await formatSqlForEditing(source, "cypher");
+
+    expect(formatted).toContain("// MATCH and RETURN in this comment");
+    expect(formatted).toContain("(n:CaseSensitive {match: 'RETURN WHERE', values: ['CALL', '$id']})");
+    expect(formatted).toContain('n.note = "WITH RETURN"');
+  });
+
+  it("keeps block comments opaque", async () => {
+    const source = "/* RETURN MATCH {not: 'code'} */ MATCH (n:Person) RETURN n";
+    const formatted = await formatSqlForEditing(source, "cypher");
+
+    expect(formatted).toContain("/* RETURN MATCH {not: 'code'} */");
+    expect(formatted).toContain("MATCH (n:Person)");
+  });
+
+  it("formats a selected Cypher fragment with the same entry point", async () => {
+    const selected = "OPTIONAL MATCH (n:Person)-[:KNOWS]->(m) RETURN n, m";
+    const formatted = await formatSqlForEditing(selected, "cypher");
+
+    expect(formatted).toContain("OPTIONAL MATCH (n:Person)-[:KNOWS]->(m)");
+    expect(formatted).toContain("RETURN n,\n  m");
+  });
+
+  it("does not let a Cypher line comment swallow compressed query text", () => {
+    expect(compressSqlText("// keep the note\nMATCH (n:Person) RETURN n", "cypher")).toBe("MATCH (n:Person) RETURN n");
+  });
+
+  it("returns unsupported or incomplete Cypher unchanged", async () => {
+    const unsupported = "MATCH (n) RETURN n ≠ 1";
+    const incomplete = "MATCH (n RETURN n";
+    const incompleteParameter = "MATCH (n) RETURN ${id";
+
+    await expect(formatSqlForEditing(unsupported, "cypher")).resolves.toBe(unsupported);
+    await expect(formatSqlForEditing(incomplete, "cypher")).resolves.toBe(incomplete);
+    await expect(formatSqlForEditing(incompleteParameter, "cypher")).resolves.toBe(incompleteParameter);
+  });
+});
 
 describe("sqlFormatter", () => {
   it("disables SQL formatting for Redis and VictoriaMetrics queries", () => {

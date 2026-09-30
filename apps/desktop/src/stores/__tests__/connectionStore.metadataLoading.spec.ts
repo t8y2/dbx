@@ -2577,6 +2577,45 @@ describe("connectionStore metadata loading", () => {
     expect(store.isTreeNodeChildrenLoaded(test1Id)).toBe(true);
   });
 
+  it("adds the Xugu user-permissions utility only to Xugu connection roots", async () => {
+    const listDatabases = vi.fn().mockResolvedValue([{ name: "testdb", comment: null }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listDatabases,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const xugu = xuguConnection();
+    const mysql = mysqlConnection();
+    store.connections = [xugu, mysql];
+    store.connectedIds = new Set([xugu.id, mysql.id]);
+    store.treeNodes = [xugu, mysql].map((connection) => ({
+      id: connection.id,
+      label: connection.name,
+      type: "connection" as const,
+      connectionId: connection.id,
+      isExpanded: false,
+      children: [],
+    }));
+
+    await store.loadDatabases(xugu.id, { connectedOnly: true });
+    await store.loadDatabases(mysql.id, { connectedOnly: true });
+
+    const xuguRoot = store.treeNodes.find((node) => node.connectionId === xugu.id)!;
+    const mysqlRoot = store.treeNodes.find((node) => node.connectionId === mysql.id)!;
+    expect(xuguRoot.children?.filter((node) => node.type === "xugu-user-admin")).toHaveLength(1);
+    expect(mysqlRoot.children?.some((node) => node.type === "xugu-user-admin")).toBe(false);
+    expect(mysqlRoot.children?.some((node) => node.type === "user-admin")).toBe(true);
+  }, 15000);
+
   it("clears connection loading after disconnect even when metadata apply is skipped", async () => {
     let resolveDatabases!: (value: { name: string; comment: null }[]) => void;
     const listDatabases = vi.fn(

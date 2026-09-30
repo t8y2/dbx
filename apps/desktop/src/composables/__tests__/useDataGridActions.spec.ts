@@ -589,6 +589,99 @@ describe("useDataGridActions", () => {
     expect(mocks.executeTabSql).toHaveBeenCalledWith("tab-1", "SELECT * FROM public.users LIMIT 100 OFFSET 100", expect.objectContaining({ appendResult: { maxRows: 10_000 } }));
   });
 
+  it("budgets a load-all large-value preview against the rows the table still has", async () => {
+    const columns = [
+      { name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      ...Array.from({ length: 10 }, (_, index) => ({ name: `payload_${index}`, data_type: "varchar(64)", is_nullable: true, column_default: null, is_primary_key: false, extra: null })),
+    ];
+    const tab = tableDataTab({
+      resultTotalRowCount: 506,
+      resultPageLimit: 100,
+      resultPageOffset: 0,
+      result: {
+        columns: ["id", "payload_0"],
+        rows: Array.from({ length: 100 }, (_, index) => [index + 1, "19999386"]),
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+      tableMeta: { schema: "ads", tableName: "ads_platform_order_receiver", tableType: "TABLE", columns, primaryKeys: ["id"] },
+    });
+    mocks.buildTableSelectSql.mockResolvedValueOnce('SELECT * FROM "ads"."ads_platform_order_receiver" LIMIT 99900 OFFSET 100;');
+    mocks.tabs.push(tab);
+    const actions = useDataGridActions(computed(() => tab));
+
+    // "Load all" asks for the whole remaining table; the preview budget has to be
+    // spread over the 406 rows that can still arrive, not over the 99_900 asked for.
+    await actions.onPaginate(tab.id, 100, 99_900, "", undefined, true);
+
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ limit: 99_900, offset: 100, largeValuePreviewSize: 1033 }));
+    expect(mocks.executeTabSql).toHaveBeenCalledWith("tab-1", expect.any(String), expect.objectContaining({ pagination: { offset: 100, limit: 99_900, sessionId: undefined, clientSessionId: undefined } }));
+  });
+
+  it("continues the matching Cassandra table cursor and client session", async () => {
+    mocks.infiniteScroll = false;
+    mocks.getConfig.mockReturnValue({ id: "cassandra-1", db_type: "cassandra" });
+    mocks.buildTableSelectSql.mockResolvedValueOnce('SELECT * FROM "paged_rows";');
+    const active = tableDataTab({ id: "tab-a" });
+    const target = tableDataTab({
+      id: "tab-b",
+      connectionId: "cassandra-1",
+      resultPageLimit: 100,
+      resultPageOffset: 0,
+      resultClientSessionId: "tab-b",
+      result: {
+        columns: ["id"],
+        rows: Array.from({ length: 100 }, (_, index) => [index]),
+        affected_rows: 0,
+        execution_time_ms: 1,
+        session_id: "cassandra-page-1",
+        has_more: true,
+      },
+    });
+    mocks.tabs.push(active, target);
+    const actions = useDataGridActions(computed(() => active));
+
+    await actions.onPaginate(target.id, 100, 100);
+
+    expect(mocks.executeTabSql).toHaveBeenCalledWith(
+      "tab-b",
+      'SELECT * FROM "paged_rows";',
+      expect.objectContaining({
+        pagination: { offset: 100, limit: 100, sessionId: "cassandra-page-1", clientSessionId: "tab-b" },
+      }),
+    );
+  });
+
+  it("restarts Cassandra table cursors for jumps and page-size changes", async () => {
+    mocks.infiniteScroll = false;
+    mocks.getConfig.mockReturnValue({ id: "cassandra-1", db_type: "cassandra" });
+    mocks.buildTableSelectSql.mockResolvedValue('SELECT * FROM "paged_rows";');
+    const tab = tableDataTab({
+      connectionId: "cassandra-1",
+      resultPageLimit: 100,
+      resultPageOffset: 0,
+      resultClientSessionId: "tab-1",
+      result: {
+        columns: ["id"],
+        rows: Array.from({ length: 100 }, (_, index) => [index]),
+        affected_rows: 0,
+        execution_time_ms: 1,
+        session_id: "cassandra-page-1",
+        has_more: true,
+      },
+    });
+    mocks.tabs.push(tab);
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onPaginate(tab.id, 300, 100);
+    await actions.onPaginate(tab.id, 100, 50);
+
+    expect(mocks.executeTabSql.mock.calls.map((call) => call[2].pagination)).toEqual([
+      { offset: 300, limit: 100, sessionId: undefined, clientSessionId: undefined },
+      { offset: 100, limit: 50, sessionId: undefined, clientSessionId: undefined },
+    ]);
+  });
+
   it("ignores a stale structured order when its column was renamed", async () => {
     const tab = tableDataTab({
       resultSortColumn: "old_name",

@@ -34,6 +34,10 @@ const show = ref(false);
 const x = ref(0);
 const y = ref(0);
 const arrowOffset = ref<number>();
+// `nowrap` keeps short hints on one line. Anything wider than the surface cap
+// (max-w-xs) cannot stay on one line without spilling past the bubble, so the
+// content switches to wrapping once the single-line layout overflows (#10451).
+const wrapNowrapContent = ref(false);
 let timer: ReturnType<typeof setTimeout> | null = null;
 let closeTimer: ReturnType<typeof setTimeout> | null = null;
 let suppressOpenUntil = 0;
@@ -162,10 +166,25 @@ function fitPositionToViewport() {
   arrowOffset.value = props.side === "left" || props.side === "right" ? floatingArrowOffset(rect.height, shift.y) : floatingArrowOffset(rect.width, shift.x);
 }
 
+/**
+ * Detects a single-line tooltip whose text is wider than the surface. CSS
+ * cannot express "one line unless it does not fit", so the measurement decides
+ * between `whitespace-nowrap` and wrapping. Returns true when the caller must
+ * re-position after the text reflowed.
+ */
+function switchToWrappingWhenOverflowing(): boolean {
+  const tooltip = tooltipRef.value;
+  if (!tooltip || !props.nowrap || wrapNowrapContent.value) return false;
+  if (tooltip.scrollWidth - tooltip.clientWidth <= 1) return false;
+  wrapNowrapContent.value = true;
+  return true;
+}
+
 function close() {
   clearTimer();
   clearCloseTimer();
   show.value = false;
+  wrapNowrapContent.value = false;
   openSource = null;
   removeGlobalListeners();
 }
@@ -238,8 +257,15 @@ function open(source: "hover" | "focus") {
   if (source === "focus" ? !hasFocusVisible() : !isPointerActive()) return;
   updatePosition();
   openSource = source;
+  wrapNowrapContent.value = false;
   show.value = true;
-  void nextTick(fitPositionToViewport);
+  void nextTick(() => {
+    if (switchToWrappingWhenOverflowing()) {
+      void nextTick(fitPositionToViewport);
+      return;
+    }
+    fitPositionToViewport();
+  });
   addGlobalListeners();
 }
 
@@ -281,7 +307,7 @@ watch(
       v-if="show"
       ref="tooltipRef"
       class="fixed z-50 rounded-md text-xs"
-      :class="cn([tooltipSurfaceClass, slots.content ? '' : ['inline-flex w-fit max-w-xs items-center gap-1.5 px-3 py-1.5', nowrap ? 'whitespace-nowrap' : ''], tooltipTransformClass], contentClass)"
+      :class="cn([tooltipSurfaceClass, slots.content ? '' : ['inline-flex w-fit max-w-xs items-center gap-1.5 px-3 py-1.5', nowrap && !wrapNowrapContent ? 'whitespace-nowrap' : 'break-words'], tooltipTransformClass], contentClass)"
       :style="{ left: `${x}px`, top: `${y}px` }"
       role="tooltip"
       @mouseenter="clearCloseTimer"

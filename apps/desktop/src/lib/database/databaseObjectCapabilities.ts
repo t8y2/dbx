@@ -80,6 +80,7 @@ const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   // ArgoDB (Transwarp) shares the Hive agent; its catalog views
   // (system.procedures_v / system.functions_v) expose routines natively.
   ["argo", ROUTINE_OBJECTS],
+  ["transwarp", ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE_BODY"]],
   ["kyuubi", TABLE_VIEW_OBJECTS],
   ["impala", TABLE_VIEW_OBJECTS],
   ["spark", TABLE_VIEW_OBJECTS],
@@ -96,6 +97,7 @@ const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   ["tdengine", TABLE_VIEW_OBJECTS],
   ["iotdb", TABLE_VIEW_OBJECTS],
   ["neo4j", TABLE_VIEW_OBJECTS],
+  ["nebula", TABLE_VIEW_OBJECTS],
   // others
   ["influxdb", ["TABLE"]],
   ["influxdb3", ["TABLE"]],

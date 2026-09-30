@@ -59,6 +59,11 @@ describe("connectionUrlCopyFormats", () => {
     const formats = connectionUrlCopyFormats(config({ db_type: "hive", host: "hive.example.com", port: 10000, database: "dw" }));
     expect(formats).toEqual(["jdbcUrl", "jdbcUrlWithCredentials", "hostPort"]);
   });
+
+  it("uses semicolon options when copying an Inceptor JDBC URL", () => {
+    const transwarp = config({ db_type: "transwarp", host: "quark.example.com", port: 10000, database: "default", username: "", password: "", url_params: "fetchSize=500" });
+    expect(buildConnectionUrlCopy(transwarp, "jdbcUrl")).toBe("jdbc:inceptor2://quark.example.com:10000/default;fetchSize=500");
+  });
 });
 
 describe("buildConnectionUrlCopy standard URL", () => {

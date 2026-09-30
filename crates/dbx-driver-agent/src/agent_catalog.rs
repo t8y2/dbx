@@ -74,6 +74,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn transwarp_products_share_one_driver_package() {
+        for profile in [None, Some("transwarp-inceptor")] {
+            assert_eq!(agent_key(&DatabaseType::Transwarp, profile), Some("transwarp"));
+        }
+        assert_eq!(driver_store_entries().filter(|(key, _)| *key == "transwarp").count(), 1);
+        assert!(!driver_store_entries().any(|(key, _)| key.starts_with("transwarp-")));
+    }
+
+    #[test]
+    fn nebula_v3_profile_reuses_the_legacy_agent_package() {
+        for profile in [None, Some("nebula"), Some("nebula-v3")] {
+            assert_eq!(agent_key(&DatabaseType::Nebula, profile), Some("nebula"));
+        }
+        assert_eq!(driver_store_entries().filter(|(key, _)| *key == "nebula").count(), 1);
+        assert!(!driver_store_entries().any(|(key, _)| key == "nebula-v3"));
+    }
+
+    #[test]
     fn h2_profiles_share_the_same_agent() {
         assert_eq!(agent_key(&DatabaseType::H2, None), Some("h2"));
         assert_eq!(agent_key(&DatabaseType::H2, Some("h2")), Some("h2"));

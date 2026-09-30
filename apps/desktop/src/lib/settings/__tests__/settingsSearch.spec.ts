@@ -40,6 +40,11 @@ const translate = (key: string) => translations[key] ?? key;
 const allCategories = new Set(Object.keys(categoryLabels) as SettingsCategory[]);
 
 describe("settings search", () => {
+  it("finds connection tab colors by their Chinese label", () => {
+    const entries = resolveSettingsSearchEntries(SETTINGS_SEARCH_DEFINITIONS, { isWeb: false, visibleCategories: allCategories }, (key) => (key === "settings.colorizeConnectionTabs" ? "按连接颜色区分标签页" : key), categoryLabels);
+    expect(searchSettings(entries, "连接颜色", "zh-CN")).toEqual(expect.arrayContaining([expect.objectContaining({ id: "appearance-connection-tab-colors", category: "appearance", targetId: "appearance" })]));
+  });
+
   const definitions: readonly SettingsSearchDefinition[] = [
     { id: "font", category: "editor", titleKey: "font", descriptionKey: "fontDescription" },
     { id: "export", category: "data", titleKey: "export" },

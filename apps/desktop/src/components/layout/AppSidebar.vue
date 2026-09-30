@@ -87,6 +87,7 @@ const moveGroupItems = computed(() => [
 
 async function refreshTree() {
   try {
+    await connectionStore.reloadFromDisk();
     await connectionStore.refreshAllTree();
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);

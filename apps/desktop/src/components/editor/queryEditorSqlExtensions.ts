@@ -1,4 +1,5 @@
 import type { CompletionContext } from "@codemirror/autocomplete";
+import { syntaxTreeAvailable } from "@codemirror/language";
 import { type QueryCompletionOption } from "./useQueryEditorBatchSelection";
 import { type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { executableStatementRangeCacheForDoc, statementGutterStartIndexHasStartAt } from "@/lib/sql/executableStatementRangeCache";
@@ -50,11 +51,11 @@ interface QueryEditorSqlExtensionsOptions {
   currentExecutableStatementRange: (view: EditorViewType) => SqlTextRange | null;
   executeSqlStatementFromGutter: (view: EditorViewType, line: { from: number; to: number }, event: Event) => boolean;
   signatureHelpWindowChars: number;
-  fullFeaturesEnabled: () => boolean;
+  boundedAnalysisEnabled: () => boolean;
 }
 
 export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensionsOptions) {
-  const { props, runtime: codeMirrorRuntime, settingsStore, t, sqlBehaviorDialect, sqlDriverProfile, sqlStatementParameterOptions, queryEditorSelectionLanguage, cache, batchSelection, currentExecutableStatementRange, executeSqlStatementFromGutter, fullFeaturesEnabled } = options;
+  const { props, runtime: codeMirrorRuntime, settingsStore, t, sqlBehaviorDialect, sqlDriverProfile, sqlStatementParameterOptions, queryEditorSelectionLanguage, cache, batchSelection, currentExecutableStatementRange, executeSqlStatementFromGutter, boundedAnalysisEnabled } = options;
   const { EditorView, Decoration, StateField, StateEffect, GutterMarker, RangeSet, lineNumberMarkers, gutter, showTooltip, autocompletion, ViewPlugin, highlightingFor, syntaxTree, langSql, Prec, EditorState, ensureSyntaxTree, layer, RectangleMarker } = options.modules;
   const { provideSqlCompletions } = options.completion;
   const { renderBatchColumnSelectionActionMarker, renderBatchColumnSelectionCheckbox } = batchSelection;
@@ -74,7 +75,6 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
   });
 
   codeMirrorRuntime.buildSqlDiagnosticExtension = () => {
-    if (!fullFeaturesEnabled()) return [];
     const diagnosticEffect = codeMirrorRuntime.setSqlDiagnosticsEffect;
     const buildDecorations = (state: import("@codemirror/state").EditorState) => {
       const errorDecorations = sqlErrorDecorationRange(state).map((range) =>
@@ -243,7 +243,6 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
   codeMirrorRuntime.setStatementExecutionMarkersEffect = StateEffect.define<StatementExecutionMarker[]>();
 
   codeMirrorRuntime.buildRunStatementGutterExtension = () => {
-    if (!fullFeaturesEnabled()) return [];
     const effectType = codeMirrorRuntime.setStatementExecutionMarkersEffect!;
     const showRunButtons = !props.hideExecutionControls && settingsStore.editorSettings.showStatementRunButtons;
     const markersForState = (state: import("@codemirror/state").EditorState, markers: readonly StatementExecutionMarker[]) => {
@@ -294,7 +293,6 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
   };
 
   codeMirrorRuntime.buildSqlSignatureExtension = () => {
-    if (!fullFeaturesEnabled()) return [];
     return showTooltip.compute(["doc", "selection"], (currentState) => {
       const cursor = currentState.selection.main.head;
       // Signature detection only scans backward from the cursor, so window the
@@ -313,7 +311,6 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
   };
 
   codeMirrorRuntime.buildSqlCompletionExtension = () => {
-    if (!fullFeaturesEnabled()) return [];
     return autocompletion({
       activateOnTyping: true,
       defaultKeymap: false,
@@ -333,11 +330,9 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
   const shellLineCommentHighlightPlugin = createShellLineCommentHighlight({ ViewPlugin, Decoration, highlightingFor, syntaxTree });
 
   codeMirrorRuntime.buildSqlLanguageExtension = () => [
-    fullFeaturesEnabled()
-      ? langSql.sql({
-          dialect: createDbxCodeMirrorSqlDialect(langSql, props.syntaxDialect ?? props.dialect, props.databaseType, sqlDriverProfile.value),
-        })
-      : [],
+    langSql.sql({
+      dialect: createDbxCodeMirrorSqlDialect(langSql, props.syntaxDialect ?? props.dialect, props.databaseType, sqlDriverProfile.value),
+    }),
     // Non-SQL editors (MongoDB shell) keep the SQL grammar for highlighting, so override the
     // comment marker that toggleLineComment reads from language data.
     Prec.highest(EditorState.languageData.of(() => [{ commentTokens: queryEditorCommentTokens(props.databaseType) }])),
@@ -355,7 +350,6 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
   const refreshSqlSemanticHighlightEffect = StateEffect.define<null>();
 
   codeMirrorRuntime.buildSqlSemanticHighlightExtension = () => {
-    if (!fullFeaturesEnabled()) return [];
     return [
       createSqlAliasHighlights({ databaseType: props.databaseType, dialect: sqlBehaviorDialect(), enabled: queryEditorSelectionLanguage() === "sql" }),
       ViewPlugin.fromClass(
@@ -422,7 +416,7 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
             }
 
             const sql = this.cachedSql;
-            const shouldPrewarmFullDocument = this.cachedWindows.length === 0 && this.prewarmedDoc !== doc && sql.length <= MAX_FULL_DOCUMENT_SQL_SEMANTIC_HIGHLIGHT_LENGTH;
+            const shouldPrewarmFullDocument = !boundedAnalysisEnabled() && this.cachedWindows.length === 0 && this.prewarmedDoc !== doc && sql.length <= MAX_FULL_DOCUMENT_SQL_SEMANTIC_HIGHLIGHT_LENGTH;
             const windows: Array<{
               from: number;
               to: number;
@@ -451,7 +445,7 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
 
             if (pendingWindows.length > 0) {
               const requestedTo = Math.max(...pendingWindows.map((window) => window.to));
-              const tree = ensureSyntaxTree(currentView.state, requestedTo, requestedTo === sql.length ? 250 : 25);
+              const tree = boundedAnalysisEnabled() ? (syntaxTreeAvailable(currentView.state, requestedTo) ? syntaxTree(currentView.state) : null) : ensureSyntaxTree(currentView.state, requestedTo, requestedTo === sql.length ? 250 : 25);
               if (!tree) {
                 // The Lezer parse has not reached the pending windows yet (long
                 // documents). Keep the decorations that are still valid and let
@@ -508,12 +502,13 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
         if (view.state.selection.ranges.some((range) => !range.empty)) return null;
         const cursorPos = view.state.selection.main.head;
         const boundaries = statementBoundariesForState(view.state);
-        if (boundaries && !boundaries.fresh && boundaries.frameRange && cursorPos >= boundaries.frameRange.from && cursorPos <= boundaries.frameRange.to) {
+        if (!boundaries.fresh && boundaries.frameRange && cursorPos >= boundaries.frameRange.from && cursorPos <= boundaries.frameRange.to) {
           // Typing in progress: reuse the ChangeSet-shifted range instead of
           // re-parsing the whole document. The debounced refresh rebuilds and
           // repaints the exact frame once typing pauses.
           return { from: boundaries.frameRange.from, to: currentStatementFrameTo(view, { from: boundaries.frameRange.from, to: boundaries.frameRange.to, sql: "" }) };
         }
+        if (boundedAnalysisEnabled() && !boundaries.fresh) return null;
         let range = currentExecutableStatementRange(view);
         if (!range) {
           const cursorLine = view.state.doc.lineAt(cursorPos);

@@ -10,6 +10,7 @@ import { useQueryEditorCompletionMetadata } from "../useQueryEditorCompletionMet
 import type { QueryEditorProps } from "../queryEditorTypes";
 import type { RedisCommandDocumentation } from "@/lib/redis/redisCommandDocs";
 import type { SqlCompletionTable } from "@/lib/sql/sqlCompletion";
+import { analyzeSqlCompletion, type SqlCompletionAnalysisResult } from "@/lib/sql/sqlCompletionAnalysis";
 
 vi.mock("@/stores/connectionStore", () => ({ COMPLETION_METADATA_CONCURRENCY: 4 }));
 vi.mock("@/lib/backend/api", () => ({}));
@@ -31,7 +32,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function createHarness(overrides: Partial<QueryEditorProps> = {}) {
+function createHarness(overrides: Partial<QueryEditorProps> = {}, configureMetadata?: (metadata: ReturnType<typeof useQueryEditorCompletionMetadata>) => void) {
   const props = reactive<QueryEditorProps>({ modelValue: "SEL", databaseType: "mysql", dialect: "mysql", connectionId: "connection", database: "demo", ...overrides });
   const parent = document.createElement("div");
   document.body.append(parent);
@@ -65,6 +66,7 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}) {
   const connectionStore = store as unknown as Options["connectionStore"];
   const settings = reactive({ editorSettings: { completionTriggerMode: "positional", snippets: [], sqlFormatter: { keywordCase: "upper", functionCase: "upper" }, autoAliasTables: false, tableCompletionSchemaQualification: "collision", generateSqlQuoteIdentifiers: false } });
   const metadata = useQueryEditorCompletionMetadata({ props, view, connectionStore, sqlBehaviorDialect: () => props.dialect, remoteLatencyBudgetMs: 40, maxCompletionTables: 100, onDemandMinPrefix: 2, semanticCompletionEnabled: false });
+  configureMetadata?.(metadata);
   const startCompletion = vi.fn(() => true);
   const runtime: Options["runtime"] = { codeMirrorStartCompletion: startCompletion, codeMirrorInsertCompletionText: insertCompletionText, codeMirrorSnippetCompletion: snippetCompletion, codeMirrorCompletionStatus: () => null, imeCompositionActive: false };
   const batchSelection = {
@@ -102,6 +104,40 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}) {
 }
 
 describe("QueryEditor completion provider ownership", () => {
+  it.each(["cursor", "document", "view", "composition", "mode"])("rejects asynchronous analysis after a %s change", async (change) => {
+    let resolve!: (result: SqlCompletionAnalysisResult) => void;
+    const pending = new Promise<SqlCompletionAnalysisResult>((done) => {
+      resolve = done;
+    });
+    const { currentView, view, runtime, settings, completion, startCompletion } = createHarness({}, (metadata) => {
+      vi.spyOn(metadata, "getEditorSqlCompletionAnalysis").mockReturnValue(pending);
+    });
+    completion.scheduleDeferredCompletionTrigger(currentView, "L", "");
+    await vi.advanceTimersByTimeAsync(25);
+    expect(startCompletion).not.toHaveBeenCalled();
+    if (change === "cursor") currentView.dispatch({ selection: { anchor: 0 } });
+    if (change === "document") currentView.dispatch({ changes: { from: 0, insert: " " } });
+    if (change === "view") view.value = null;
+    if (change === "composition") runtime.imeCompositionActive = true;
+    if (change === "mode") settings.editorSettings.completionTriggerMode = "manual";
+    resolve(analyzeSqlCompletion({ sql: "SEL", cursor: 3, databaseType: "mysql", semanticCompletionEnabled: false }));
+    await vi.advanceTimersByTimeAsync(50);
+    expect(startCompletion).not.toHaveBeenCalled();
+  });
+
+  it("discards a provider result invalidated while background analysis is running", async () => {
+    let resolve!: (result: SqlCompletionAnalysisResult) => void;
+    const pending = new Promise<SqlCompletionAnalysisResult>((done) => {
+      resolve = done;
+    });
+    const { provide, completion } = createHarness({}, (metadata) => {
+      vi.spyOn(metadata, "getEditorSqlCompletionAnalysis").mockReturnValue(pending);
+    });
+    const result = provide();
+    completion.invalidateRequests();
+    resolve(analyzeSqlCompletion({ sql: "SEL", cursor: 3, databaseType: "mysql", semanticCompletionEnabled: false }));
+    await expect(result).resolves.toBeNull();
+  });
   it("keeps manual completion available while automatic completion is disabled", async () => {
     const { settings, provide, completion, currentView, startCompletion } = createHarness({ database: undefined });
     settings.editorSettings.completionTriggerMode = "manual";
@@ -217,6 +253,26 @@ describe("QueryEditor completion provider ownership", () => {
     completion.invalidateRequests();
     resolve([{ name: "users" }]);
     expect(await pending).toBeNull();
+  });
+
+  it("does not double the separator when a Mongo key is re-picked in front of an existing colon", async () => {
+    const accept = async (doc: string, cursor: number) => {
+      const { store, provide, currentView } = createHarness({ databaseType: "mongodb", modelValue: doc });
+      store.listMongoCompletionFields.mockResolvedValue([{ name: "name", type: "string" }]);
+      currentView.dispatch({ selection: { anchor: cursor } });
+      const result = await provide();
+      const option = result?.options.find((candidate) => candidate.label === "name");
+      expect(option, "the field is offered").toBeDefined();
+      (option!.apply as (view: EditorView, completion: unknown, from: number, to: number) => void)(currentView, option, result!.from, cursor);
+      return { doc: currentView.state.doc.toString(), cursor: currentView.state.selection.main.head };
+    };
+
+    // Editing the key of an existing entry: the colon already there is kept, not doubled.
+    expect(await accept("db.users.find({ na: 1 })", 18)).toEqual({ doc: "db.users.find({ name: 1 })", cursor: 20 });
+    expect(await accept("db.users.find({ na : 1 })", 18)).toEqual({ doc: "db.users.find({ name : 1 })", cursor: 20 });
+    // A fresh key still gets its separator.
+    expect(await accept("db.users.find({ na", 18)).toEqual({ doc: "db.users.find({ name: ", cursor: 22 });
+    expect(await accept("db.users.find({ na })", 18)).toEqual({ doc: "db.users.find({ name:  })", cursor: 22 });
   });
 
   it.each(["redis", "mongodb", "mysql"] as const)("does not query %s metadata without a connection", async (databaseType) => {

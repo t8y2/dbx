@@ -1439,7 +1439,7 @@ type SqlCompletionApplyDialect = "mysql" | "postgres" | "sqlserver" | "oracle" |
 // QueryEditor may use another dialect as a CodeMirror syntax fallback.
 // Completion apply text must still follow the connected database's identifier
 // folding and quoting rules.
-const MYSQL_LIKE_IDENTIFIER_DATABASES = new Set<DatabaseType>(["mysql", "clickhouse", "hive", "argo", "kyuubi", "impala", "spark", "databend", "tdengine", "access", "doris", "starrocks"]);
+const MYSQL_LIKE_IDENTIFIER_DATABASES = new Set<DatabaseType>(["mysql", "clickhouse", "hive", "argo", "transwarp", "kyuubi", "impala", "spark", "databend", "tdengine", "access", "doris", "starrocks"]);
 const POSTGRES_LIKE_IDENTIFIER_DATABASES = new Set<DatabaseType>(["postgres", "redshift", "gaussdb", "kingbase", "highgo", "uxdb", "vastbase", "kwdb", "opengauss"]);
 export const ORACLE_COMPAT_IDENTIFIER_DATABASES = new Set<DatabaseType>(["oracle", "oceanbase-oracle", "yashandb", "oscar", "xugu"]);
 const UPPER_FOLDING_IDENTIFIER_DATABASES = new Set<DatabaseType>(["dameng", "db2"]);
@@ -1474,6 +1474,7 @@ export interface SqlCompletionContext {
   prefix: string;
   replacementRange?: { start: number; end: number };
   preferredValueKeywords?: string[];
+  localVariables?: string[];
   qualifier?: string;
   qualifierParts?: string[];
   suggestTables: boolean;
@@ -1702,6 +1703,7 @@ class SqlCompletionProvider {
 
     const preferReferencedColumns = hasMatchingReferencedColumnPrefix(context, this.input.columnsByTable);
     this.items.push(...customSnippetItems);
+    this.items.push(...buildSqlServerLocalVariableItems(context));
     if (!pendingJoinKeyword && !context.exclusiveTableSuggestions && !context.exclusiveColumnSuggestions && !context.exclusiveRoutineSuggestions) {
       if (!preferReferencedColumns) {
         this.items.push(...buildSnippetItems(context.prefix, snippets.filter(shouldFormatBuiltinSnippet), this.input.keywordCase, this.databaseType));
@@ -1816,7 +1818,7 @@ class SqlCompletionProvider {
   }
 }
 
-export function shouldAutoOpenSqlCompletion(sql: string, cursor: number, options: SqlSemanticBuildOptions = {}): boolean {
+export function shouldAutoOpenSqlCompletion(sql: string, cursor: number, options: SqlSemanticBuildOptions = {}, precomputedContext?: SqlCompletionContext): boolean {
   if (getPostgresSequenceLiteralCompletionContext(sql, cursor, options.databaseType)) return true;
   if (isSqlCompletionSuppressedContext(sql, cursor, options)) return false;
   const previousChar = sql[cursor - 1];
@@ -1830,7 +1832,7 @@ export function shouldAutoOpenSqlCompletion(sql: string, cursor: number, options
   if (/\bon\s+$/i.test(beforeCursor)) return true;
   if (isAfterJoinModifierContext(beforeCursor, options.databaseType)) return true;
   if (/\bcall\s+(?:[A-Za-z_][\w$]*\.)?$/i.test(beforeCursor)) return true;
-  const context = getSqlCompletionContext(sql, cursor, options);
+  const context = precomputedContext ?? getSqlCompletionContext(sql, cursor, options);
   if (previousChar === "(" && (context.insertTable || context.preferredValueKeywords?.length)) return true;
   if (/[,;()[\]]/.test(previousChar)) return false;
   if (context.exclusiveTableSuggestions || context.exclusiveRoutineSuggestions || context.suggestTables) {
@@ -2556,8 +2558,9 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
   }
 
   // Check if we're in a context where columns are expected
-  const selectListColumnContext = isInSelectListContext(beforeCursor);
-  const inColumnContext = selectListColumnContext || isInColumnContext(beforeCursor, options.databaseType) || !!insertInfo;
+  const selectListScan = scanSelectListContext(beforeCursor);
+  const selectListColumnContext = selectListScan.inSelectList;
+  const inColumnContext = selectListColumnContext || selectListScan.inSelectListParens || isInColumnContext(beforeCursor, options.databaseType) || !!insertInfo;
   const inJoinConditionContext = isInJoinConditionContext(beforeCursor);
   const prioritizeSelectAliases = isInOrderOrGroupByContext(beforeCursor, options.databaseType);
   const inCallRoutineContext = isCallRoutineContext(beforeCursor);
@@ -2569,6 +2572,7 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
   const selectListWildcardAfterCursor = isStandaloneSelectWildcard(rawStatement, cursor - statementSpan.start, selectListColumnContext, statementKind, resolveSqlDialectId(options));
   const dataTypeContext = isCreateTableColumnTypeContext(beforeToken, options.databaseType);
   const preferredValueKeywords = sqlServerDatepartCompletionValues(beforeCursor, options.databaseType);
+  const localVariables = prefix.startsWith("@") ? collectSqlServerLocalVariables(sql, cursor, options) : undefined;
   const preferredKeywords = qualifier ? [] : preferredKeywordsForCompletion(beforeCursor, beforeToken, selectListColumnContext, exclusiveTableSuggestions, updateInfo, deleteInfo, options.databaseType);
   const contextKind = detectCompletionContextKind({
     qualifier,
@@ -2588,6 +2592,7 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
   return {
     prefix,
     preferredValueKeywords,
+    localVariables,
     qualifier: insertInfo ? undefined : qualifier,
     qualifierParts: insertInfo ? undefined : qualifierParts,
     suggestTables: insertInfo ? false : afterTableTrigger,
@@ -2623,6 +2628,109 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
     contextKind,
     dataTypeContext,
   };
+}
+
+const SQLSERVER_DECLARATION_BOUNDARY_KEYWORDS = new Set(["alter", "begin", "create", "declare", "delete", "drop", "end", "exec", "execute", "go", "if", "insert", "merge", "print", "raiserror", "return", "select", "set", "throw", "update", "while", "with"]);
+
+function collectSqlServerLocalVariables(sql: string, cursor: number, options: SqlSemanticBuildOptions): string[] | undefined {
+  if (resolveSqlDialectId(options) !== "sqlserver") return undefined;
+  const beforeCursor = sql.slice(0, Math.max(0, Math.min(cursor, sql.length)));
+  const allTokens = tokenizeSqlSemantic(beforeCursor, "sqlserver");
+  let batchStart = 0;
+  for (const token of allTokens) {
+    if (token.kind !== "word" || token.normalized !== "go") continue;
+    const lineStart = beforeCursor.lastIndexOf("\n", token.span.start - 1) + 1;
+    const lineEndIndex = beforeCursor.indexOf("\n", token.span.end);
+    const lineEnd = lineEndIndex < 0 ? beforeCursor.length : lineEndIndex;
+    if (/^\s*go(?:\s+\d+)?\s*$/i.test(beforeCursor.slice(lineStart, lineEnd))) {
+      batchStart = lineEndIndex < 0 ? lineEnd : lineEnd + 1;
+    }
+  }
+
+  const batchSql = beforeCursor.slice(batchStart);
+  const tokens = tokenizeSqlSemantic(batchSql, "sqlserver").filter((token) => token.kind !== "comment" && token.kind !== "string");
+  const variables: string[] = [];
+  const seen = new Set<string>();
+  const addVariable = (variable: string) => {
+    if (!/^@[A-Za-z_@$#][\w@$#]*$/u.test(variable) || variable.startsWith("@@")) return;
+    const key = variable.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    variables.push(variable);
+  };
+
+  collectSqlServerRoutineParameters(tokens, addVariable);
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const declare = tokens[index];
+    if (declare?.kind !== "word" || declare.normalized !== "declare") continue;
+    const declarationDepth = declare.depth;
+    let expectVariable = true;
+
+    for (let declarationIndex = index + 1; declarationIndex < tokens.length; declarationIndex += 1) {
+      const token = tokens[declarationIndex]!;
+      if (token.depth < declarationDepth || (token.depth === declarationDepth && token.text === ";")) break;
+      if (token.depth === declarationDepth && token.kind === "word" && SQLSERVER_DECLARATION_BOUNDARY_KEYWORDS.has(token.normalized) && sqlTokenStartsLine(batchSql, token.span.start)) {
+        break;
+      }
+      if (expectVariable) {
+        if (token.kind === "word" && /^@[A-Za-z_@$#][\w@$#]*$/u.test(token.text) && !token.text.startsWith("@@")) {
+          const next = tokens[declarationIndex + 1];
+          if (next && next.text !== "," && next.text !== ";") {
+            addVariable(token.text);
+          }
+          expectVariable = false;
+        }
+      } else if (token.depth === declarationDepth && token.text === ",") {
+        expectVariable = true;
+      }
+    }
+  }
+
+  return variables;
+}
+
+function collectSqlServerRoutineParameters(tokens: ReturnType<typeof tokenizeSqlSemantic>, addVariable: (variable: string) => void) {
+  for (let index = 0; index < tokens.length; index += 1) {
+    const start = tokens[index];
+    if (start?.kind !== "word" || (start.normalized !== "create" && start.normalized !== "alter")) continue;
+
+    let routineIndex = index + 1;
+    if (start.normalized === "create" && tokens[routineIndex]?.kind === "word" && tokens[routineIndex]?.normalized === "or" && tokens[routineIndex + 1]?.kind === "word" && tokens[routineIndex + 1]?.normalized === "alter") {
+      routineIndex += 2;
+    }
+    const routine = tokens[routineIndex];
+    if (routine?.kind !== "word" || !["proc", "procedure", "function"].includes(routine.normalized)) continue;
+
+    if (routine.normalized === "function") {
+      const openingIndex = tokens.findIndex((token, tokenIndex) => tokenIndex > routineIndex && token.kind === "punctuation" && token.text === "(" && token.depth === routine.depth);
+      if (openingIndex < 0) continue;
+      const openingDepth = tokens[openingIndex]!.depth;
+      for (let parameterIndex = openingIndex + 1; parameterIndex < tokens.length; parameterIndex += 1) {
+        const token = tokens[parameterIndex]!;
+        if (token.kind === "punctuation" && token.text === ")" && token.depth === openingDepth) break;
+        if (token.kind === "word" && token.depth === openingDepth + 1) addVariable(token.text);
+      }
+      continue;
+    }
+
+    for (let parameterIndex = routineIndex + 1; parameterIndex < tokens.length; parameterIndex += 1) {
+      const token = tokens[parameterIndex]!;
+      if (token.depth < routine.depth) break;
+      if (token.depth !== routine.depth || token.kind !== "word") continue;
+      if (token.normalized === "as") {
+        const previous = tokens[parameterIndex - 1];
+        if (previous?.kind === "word" && previous.text.startsWith("@") && !previous.text.startsWith("@@")) continue;
+        break;
+      }
+      addVariable(token.text);
+    }
+  }
+}
+
+function sqlTokenStartsLine(sql: string, position: number): boolean {
+  const lineStart = sql.lastIndexOf("\n", Math.max(0, position - 1)) + 1;
+  return sql.slice(lineStart, position).trim().length === 0;
 }
 
 function sqlServerDatepartCompletionValues(beforeCursor: string, databaseType?: DatabaseType): string[] | undefined {
@@ -2820,11 +2928,21 @@ function isInColumnContext(beforeCursor: string, databaseType?: DatabaseType): b
 }
 
 function isInSelectListContext(beforeCursor: string): boolean {
+  return scanSelectListContext(beforeCursor).inSelectList;
+}
+
+/**
+ * `inSelectList` is true when the cursor sits directly in an open SELECT list.
+ * `inSelectListParens` is true when it sits inside parentheses nested in one,
+ * such as a function argument: `SELECT a, SUM(|`.
+ */
+function scanSelectListContext(beforeCursor: string): { inSelectList: boolean; inSelectListParens: boolean } {
   let depth = 0;
   let inSingleQuote = false;
   let inDoubleQuote = false;
   let inBacktick = false;
   const selectOpenByDepth = new Map<number, boolean>();
+  const nestedInSelectByDepth = new Map<number, boolean>();
 
   for (let i = 0; i < beforeCursor.length; i++) {
     const ch = beforeCursor[i] ?? "";
@@ -2866,11 +2984,14 @@ function isInSelectListContext(beforeCursor: string): boolean {
       continue;
     }
     if (ch === "(") {
+      const inheritsSelectList = selectOpenByDepth.get(depth) === true || nestedInSelectByDepth.get(depth) === true;
       depth++;
+      nestedInSelectByDepth.set(depth, inheritsSelectList);
       continue;
     }
     if (ch === ")") {
       selectOpenByDepth.delete(depth);
+      nestedInSelectByDepth.delete(depth);
       depth = Math.max(0, depth - 1);
       continue;
     }
@@ -2881,13 +3002,15 @@ function isInSelectListContext(beforeCursor: string): boolean {
     const word = beforeCursor.slice(i, end).toLowerCase();
     if (word === "select") {
       selectOpenByDepth.set(depth, true);
+      nestedInSelectByDepth.delete(depth);
     } else if (word === "from") {
       selectOpenByDepth.set(depth, false);
+      nestedInSelectByDepth.delete(depth);
     }
     i = end - 1;
   }
 
-  return selectOpenByDepth.get(depth) === true;
+  return { inSelectList: selectOpenByDepth.get(depth) === true, inSelectListParens: nestedInSelectByDepth.get(depth) === true };
 }
 
 function isInJoinConditionContext(beforeCursor: string): boolean {
@@ -3176,7 +3299,7 @@ function lastTopLevelKeywordIndex(sql: string, keyword: string): number {
 // unquoted token as a table reference there is a false-positive risk. Everything else defaults
 // to Unicode support (MySQL/Postgres/SQL Server/SQLite/DuckDB and the many Chinese-vendor
 // engines this product supports legitimately use non-ASCII unquoted identifiers).
-const ASCII_ONLY_UNQUOTED_IDENTIFIER_DATABASES = new Set<DatabaseType>(["clickhouse", "snowflake", "bigquery", "hive", "argo", "spark", "trino", "prestosql", "impala", "db2", "teradata"]);
+const ASCII_ONLY_UNQUOTED_IDENTIFIER_DATABASES = new Set<DatabaseType>(["clickhouse", "snowflake", "bigquery", "hive", "argo", "transwarp", "spark", "trino", "prestosql", "impala", "db2", "teradata"]);
 
 // Dialects where a bare "--" needs trailing whitespace/EOL to start a comment, since MySQL
 // reserves unspaced "--" for double-negation (e.g. `SELECT 1--1`). Scoped to mysql itself plus
@@ -4279,6 +4402,17 @@ function buildPreferredKeywordItems(prefix: string, keywords: string[], keywordC
       label: applySqlKeywordCase(keyword, keywordCase),
       type: "keyword" as const,
       boost: computeBoost(keyword, prefix) + 6200 - index,
+    }));
+}
+
+function buildSqlServerLocalVariableItems(context: SqlCompletionContext): SqlCompletionItem[] {
+  return (context.localVariables ?? [])
+    .filter((variable) => matchesPrefix(variable, context.prefix))
+    .map((variable) => ({
+      label: variable,
+      type: "variable" as const,
+      detail: "local variable",
+      boost: computeBoost(variable, context.prefix) + 4_000,
     }));
 }
 

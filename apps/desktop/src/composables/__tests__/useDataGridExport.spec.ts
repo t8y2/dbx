@@ -13,6 +13,7 @@ import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS } from "@/lib/dataGrid/dataGridCopy
 import { clearDataGridClipboardCopy, parseDataGridClipboard } from "@/lib/dataGrid/dataGridClipboard";
 import { MONGO_DOCUMENT_GRID_NULL, mongoDocumentGridExternalValue } from "@/lib/mongo/mongoDocumentValues";
 import { saveTextFile } from "@/lib/export/saveTextFile";
+import { useSettingsStore } from "@/stores/settingsStore";
 
 const toast = vi.fn();
 
@@ -736,6 +737,27 @@ describe("useDataGridExport prepared row statements", () => {
     ]);
   });
 
+  it("copies a selected row as whole-row TSV across all visible columns on smart copy", async () => {
+    // Row selection only (no cell matrix): the Cmd+C smart path must copy the
+    // full row (#10573), not just a single cell.
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "1\tAda", mimeType: "text/tab-separated-values", fileExtension: "tsv", rowCount: 1, columnCount: 2 });
+    const state = createExportState(editableTable, ["id", "name"], undefined, undefined, undefined, [[1, "Ada"]], [1]);
+
+    await expect(state.copyWithPreference("smart")).resolves.toBe(true);
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        extractor: "tsv",
+        selectionKind: "rows",
+        rows: [[1, "Ada"]],
+        selectedColumnIndexes: [0, 1],
+      }),
+    );
+    expect(copyToClipboard).toHaveBeenCalledWith("1\tAda");
+    // The internal clipboard matrix keeps the row paste-able back into a new row.
+    expect(parseDataGridClipboard("1\tAda")).toEqual([["1", "Ada"]]);
+  });
+
   it("uses TSV (quotes only for separator/newline) for a multi-cell smart copy without relying on clipboard metadata", async () => {
     const rows = [
       [1, '{"msg":"success"}'],
@@ -780,8 +802,8 @@ describe("useDataGridExport prepared row statements", () => {
     expect(copyToClipboard).toHaveBeenCalledWith("2020-12-02 15:18:29");
   });
 
-  it("copies all rows with empty fields for NULL cells", async () => {
-    const text = "id\tname\n1\t\n2\tAda";
+  it("copies all rows with the null literal for NULL cells", async () => {
+    const text = "id\tname\n1\t\\N\n2\tAda";
     const state = createExportState(editableTable, ["id", "name"], undefined, undefined, undefined, [
       [1, null],
       [2, "Ada"],
@@ -790,6 +812,7 @@ describe("useDataGridExport prepared row statements", () => {
     await state.copyAll();
 
     expect(copyToClipboard).toHaveBeenCalledWith(text);
+    // 内部剪贴板按文本全等匹配保留逻辑矩阵：粘贴回网格时 NULL 语义无损还原
     expect(parseDataGridClipboard(text)).toEqual([
       ["id", "name"],
       ["1", null],
@@ -1672,7 +1695,7 @@ describe("useDataGridExport prepared row statements", () => {
     });
 
     await state.copyAll();
-    expect(copyToClipboard).toHaveBeenCalledWith("_id\tnullable\n1\t");
+    expect(copyToClipboard).toHaveBeenCalledWith("_id\tnullable\n1\t\\N");
 
     vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "", mimeType: "text/tab-separated-values", fileExtension: "tsv", rowCount: 1, columnCount: 1 });
     await expect(state.copyWithExtractor("tsv")).resolves.toBe(true);
@@ -1680,7 +1703,7 @@ describe("useDataGridExport prepared row statements", () => {
 
     setActivePinia(createPinia());
     await state.exportCurrentPageCsv();
-    expect(exportQueryResultCsv).toHaveBeenCalledWith(expect.any(String), ["_id", "nullable"], [["1", null]], expect.anything());
+    expect(exportQueryResultCsv).toHaveBeenCalledWith(expect.any(String), ["_id", "nullable"], [["1", null]], expect.anything(), expect.anything());
 
     const reservedString = MONGO_DOCUMENT_GRID_NULL;
     const fullExportState = createMongoExportState({
@@ -1699,7 +1722,22 @@ describe("useDataGridExport prepared row statements", () => {
     });
 
     await fullExportState.exportCsv();
-    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["_id", "value"], [["1", reservedString]], expect.anything());
+    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["_id", "value"], [["1", reservedString]], expect.anything(), expect.anything());
+  });
+
+  it("exports temporal CSV values without an Excel formula wrapper (#10694)", async () => {
+    setActivePinia(createPinia());
+    const timestamp = "2026-09-30 12:34:56.789";
+    const table: DataGridTableMeta = {
+      tableName: "events",
+      primaryKeys: [],
+      columns: [{ name: "created_at", data_type: "timestamp" }],
+    };
+    const state = createExportState(table, ["created_at"], undefined, [timestamp]);
+
+    await state.exportCurrentPageCsv();
+
+    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["created_at"], [[timestamp]], expect.anything(), expect.anything());
   });
 
   it("exports only visible Mongo columns from the full result set", async () => {
@@ -1722,7 +1760,7 @@ describe("useDataGridExport prepared row statements", () => {
 
     await state.exportCsv();
 
-    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["name"], [["Visible"], ["Other"]], expect.anything());
+    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["name"], [["Visible"], ["Other"]], expect.anything(), expect.anything());
   });
 
   it("applies visible Mongo columns when the complete result is already local", async () => {
@@ -1751,7 +1789,23 @@ describe("useDataGridExport prepared row statements", () => {
 
     await state.exportCsv();
 
-    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["name"], [["Visible"], ["Other"]], expect.anything());
+    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["name"], [["Visible"], ["Other"]], expect.anything(), expect.anything());
+  });
+
+  it("passes the CSV NULL setting to the export call", async () => {
+    setActivePinia(createPinia());
+    const state = createMongoExportState({
+      columns: ["name"],
+      item: { ...row(["Visible"]), sourceIndex: 0 },
+      mongoDocuments: [{ name: "Visible" }],
+    });
+
+    await state.exportCsv();
+    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["name"], [["Visible"]], expect.anything(), "\\N");
+
+    useSettingsStore().editorSettings.csvNullMode = "empty";
+    await state.exportCsv();
+    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["name"], [["Visible"]], expect.anything(), "");
   });
 
   it("exports missing Mongo fields as null while retaining explicit empty strings", async () => {

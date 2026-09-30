@@ -53,6 +53,7 @@ const APP_STATE_EDITOR_SETTINGS_KEY: &str = "editor_settings";
 const APP_STATE_OPEN_TABS_KEY: &str = "open_tabs";
 const APP_STATE_SAVED_SQL_EDITOR_POSITIONS_KEY: &str = "saved_sql_editor_positions";
 const APP_STATE_TRANSFER_TASK_LIBRARY_KEY: &str = "transfer_task_library";
+const APP_APPEARANCE_SETTINGS_KEY: &str = "app_appearance";
 const MCP_GLOBAL_POLICY_KEY: &str = "mcp_global_policy";
 const MCP_HTTP_SERVER_SETTINGS_KEY: &str = "mcp_http_server_settings";
 const WEB_MCP_SETTINGS_KEY: &str = "web_mcp_settings";
@@ -60,8 +61,14 @@ const MAX_RETRIES_KEY: &str = "max_retries";
 const HISTORY_RETENTION_LIMIT_KEY: &str = "history_retention_limit";
 const MCP_HISTORY_RETENTION_LIMIT_KEY: &str = "mcp_history_retention_limit";
 const SQL_FILE_UPLOAD_MAX_MB_KEY: &str = "sql_file_upload_max_mb";
-/// Plugin ids whose MCP tools the built-in AI agent may call.
+/// Plugin ids whose MCP tools the built-in AI agent may call. The opt-in
+/// list is the single source: a plugin contributes AI tools only after the
+/// user enabled it in the Plugin Center.
 const AI_PLUGIN_TOOL_PLUGINS_KEY: &str = "ai_plugin_tool_plugins";
+/// Plugin ids the user explicitly turned off in the Plugin Center; they stay
+/// excluded even if they reappear on the opt-in list, so a revocation
+/// survives restarts and plugin updates.
+const AI_PLUGIN_TOOL_DISABLED_PLUGINS_KEY: &str = "ai_plugin_tool_disabled_plugins";
 /// `{ pluginId: [connectionId, ...] }` — connections a plugin may read through
 /// the `host.data:read` Host API. Written only after an explicit user consent.
 const PLUGIN_DATA_GRANTS_KEY: &str = "plugin_data_grants";
@@ -200,6 +207,7 @@ pub struct Storage {
     /// round-trips to the OS credential store, so hydrating N stored secrets
     /// used to mean N credential-store accesses on the startup path.
     secret_codec_cache: Arc<Mutex<Option<CachedSecretCodec>>>,
+    migration_failure: Arc<Mutex<Option<MigrationFailure>>>,
 }
 
 /// Key material plus the digest of every key file it was resolved from.
@@ -207,6 +215,14 @@ struct CachedSecretCodec {
     codec: SecretCodec,
     key_files: Vec<(PathBuf, Option<[u8; 32]>)>,
 }
+
+#[derive(Clone)]
+struct MigrationFailure {
+    code: String,
+    backup_path: Option<String>,
+}
+
+const MIGRATION_LOCK_FILE: &str = ".dbx-secret-migration.lock";
 
 pub const SECRET_STORE_MIGRATION_ID: &str = "secret-store-v1";
 
@@ -319,19 +335,28 @@ pub struct MigrationReport {
 /// re-encryption inside the storage boundary.
 pub(crate) struct SyncImportPlan {
     pub connections: Vec<ConnectionConfig>,
+    pub merge_connections: bool,
     pub tunnel_profiles: Option<Vec<TransportLayerConfig>>,
     pub tunnel_secret_profiles: Option<Vec<TransportLayerConfig>>,
+    pub merge_tunnel_profiles: bool,
     pub sidebar_layout: Option<serde_json::Value>,
-    pub pinned_tree_node_ids: Vec<String>,
+    pub pinned_tree_node_ids: Option<Vec<String>>,
     pub saved_sql: SavedSqlLibrary,
+    pub merge_saved_sql: bool,
     pub desktop_settings: DesktopSettings,
+    pub desktop_settings_keys: Option<Vec<String>>,
     pub editor_settings: Option<serde_json::Value>,
+    pub merge_editor_settings: bool,
+    pub editor_settings_keys: Option<Vec<String>>,
     pub connection_secrets: Option<Vec<SyncImportSecret>>,
+    pub connection_secret_ids: Option<Vec<String>>,
+    pub preserve_local_connection_strings: Vec<String>,
     /// Keep destination plugin credentials when the transport payload
     /// intentionally omitted plugin secrets.
     pub preserve_plugin_secrets: bool,
     pub sync_credentials: Option<Vec<SyncImportCredential>>,
     pub ai_configs: Option<Vec<AiConfigItem>>,
+    pub merge_ai_configs: bool,
 }
 
 pub(crate) struct SyncImportSecret {
@@ -414,6 +439,47 @@ pub struct DesktopSettings {
     pub custom_ai_skill_root: Option<String>,
     #[serde(default = "default_sidebar_table_page_size")]
     pub sidebar_table_page_size: usize,
+}
+
+/// Appearance preferences are kept separately from device-specific desktop
+/// settings because they are renderer-owned and must be available before the
+/// frontend modules initialize. The optional fields also keep older databases
+/// compatible: an absent value means the frontend may use its legacy storage
+/// fallback and migrate it on first startup.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppAppearanceSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_palette: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_ui_colors: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_ui_colors_dark: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corner_style: Option<String>,
+}
+
+/// A partial appearance update. Patches are applied in one SQLite transaction
+/// so rapid controls cannot overwrite a value changed by another control.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppAppearanceSettingsPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_palette: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_ui_colors: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_ui_colors_dark: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corner_style: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1125,7 +1191,15 @@ fn migration_backup_paths(counts: &serde_json::Value) -> Result<Vec<String>, Str
 }
 
 fn migration_error_code(error: &str) -> &'static str {
-    if error.contains("MISSING_MANAGED_KEY") {
+    if error.contains("MIGRATION_STATE_WRITE_FAILED") {
+        "MIGRATION_STATE_WRITE_FAILED"
+    } else if error.contains("MIGRATION_RESTORE_FAILED") {
+        "MIGRATION_RESTORE_FAILED"
+    } else if error.contains("MIGRATION_INTERRUPTED") {
+        "MIGRATION_INTERRUPTED"
+    } else if error.contains("BACKUP_FAILED") {
+        "BACKUP_FAILED"
+    } else if error.contains("MISSING_MANAGED_KEY") {
         "MISSING_MANAGED_KEY"
     } else if error.contains("ENCRYPTED_DATA_KEY_MISSING") {
         "ENCRYPTED_DATA_KEY_MISSING"
@@ -1135,6 +1209,10 @@ fn migration_error_code(error: &str) -> &'static str {
         "SECRET_KEY_INVALID"
     } else if error.contains("KEY_FILE_UNAVAILABLE") {
         "KEY_FILE_UNAVAILABLE"
+    } else if error.contains("KEYRING_ACCESS_FAILED") {
+        "KEYRING_ACCESS_FAILED"
+    } else if error.contains("KEYRING_WRITE_FAILED") {
+        "KEYRING_WRITE_FAILED"
     } else if error.contains("MISSING_EXTERNAL_KEY") || error.contains("MISSING_PERSISTENT_KEY") {
         "MISSING_EXTERNAL_KEY"
     } else if error.contains("KEY_PROVIDER_UNAVAILABLE") {
@@ -1152,11 +1230,22 @@ fn migration_error_code(error: &str) -> &'static str {
 
 fn migration_safe_message(code: &str, _error: &str) -> String {
     match code {
+        "MIGRATION_STATE_WRITE_FAILED" => {
+            "Could not save the migration failure status; keep the backup and retry".to_string()
+        }
+        "MIGRATION_RESTORE_FAILED" => "Could not restore the database backup; keep the backup for recovery".to_string(),
+        "MIGRATION_INTERRUPTED" => "The previous migration was interrupted; keep the backup and retry".to_string(),
         "MISSING_MANAGED_KEY" => "A managed data-directory secret key is required".to_string(),
         "ENCRYPTED_DATA_KEY_MISSING" => "The key for existing encrypted data is missing".to_string(),
         "SECRET_KEY_MISMATCH" => "The configured secret key cannot decrypt existing data".to_string(),
         "SECRET_KEY_INVALID" => "The configured secret key is invalid".to_string(),
         "KEY_FILE_UNAVAILABLE" => "The configured secret key file is unavailable".to_string(),
+        "KEYRING_ACCESS_FAILED" => {
+            "The platform credential store refused access to the DBX secret-store key".to_string()
+        }
+        "KEYRING_WRITE_FAILED" => {
+            "DBX could not save the secret-store key in the platform credential store".to_string()
+        }
         "MISSING_EXTERNAL_KEY" => "An external secret key is required".to_string(),
         "BACKUP_FAILED" => "Could not create a migration backup".to_string(),
         "LEGACY_JSON_INVALID" => "A legacy configuration file could not be read".to_string(),
@@ -1212,6 +1301,7 @@ impl Storage {
             secret_key_policy: SecretKeyPolicy::PlatformDefault,
             secret_key_creation_allowed: true,
             secret_codec_cache: Arc::new(Mutex::new(None)),
+            migration_failure: Arc::new(Mutex::new(None)),
         };
         // Best-effort: switching journal mode is itself a lock-sensitive
         // operation, so a transient failure here (e.g. another process
@@ -1267,9 +1357,7 @@ impl Storage {
         // files are unchanged across the resolve. A pair taken after resolving
         // could combine a stale codec with fresh digests, which the use-time
         // digest check would then never reject.
-        if self.key_file_digests() == key_files {
-            self.cache_secret_codec(codec, key_files);
-        }
+        self.cache_secret_codec_if_unchanged(codec, key_files);
         Ok(codec)
     }
 
@@ -1289,6 +1377,14 @@ impl Storage {
     fn cache_secret_codec(&self, codec: SecretCodec, key_files: Vec<(PathBuf, Option<[u8; 32]>)>) {
         let entry = CachedSecretCodec { codec, key_files };
         *self.secret_codec_cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(entry);
+    }
+
+    fn cache_secret_codec_if_unchanged(&self, codec: SecretCodec, before: Vec<(PathBuf, Option<[u8; 32]>)>) {
+        if self.key_file_digests() == before {
+            self.cache_secret_codec(codec, before);
+        } else {
+            self.invalidate_secret_codec();
+        }
     }
 
     fn invalidate_secret_codec(&self) {
@@ -1432,7 +1528,20 @@ impl Storage {
 
     pub async fn inspect_data_migration(&self) -> Result<MigrationPreflight, String> {
         let files = self.legacy_json_files().await?;
-        let stored = self.load_migration_state().await?;
+        let mut stored = self.load_migration_state().await?;
+        let failure = self.migration_failure.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        if let Some(failure) = failure {
+            stored.state = MigrationState::Failed;
+            stored.error_message = Some(migration_safe_message(&failure.code, ""));
+            stored.error_code = Some(failure.code);
+            stored.backup_path = failure.backup_path.or(stored.backup_path);
+        } else if stored.state == MigrationState::Running && !self.migration_is_active()? {
+            // A process exit releases the lock. Report interruption without
+            // modifying the database during a status request.
+            stored.state = MigrationState::Failed;
+            stored.error_code = Some("MIGRATION_INTERRUPTED".to_string());
+            stored.error_message = Some(migration_safe_message("MIGRATION_INTERRUPTED", ""));
+        }
         let current_fingerprint = self.migration_source_fingerprint().await?;
         let cached_scan: Option<(i64, i64, i64, i64, i64, i64, i64)> =
             if stored.source_fingerprint.as_deref() == Some(current_fingerprint.as_str()) {
@@ -1524,6 +1633,7 @@ impl Storage {
         };
         // This probe is deliberately read-only. It must not create a keyring
         // entry, key file, or change permissions while displaying status.
+        let key_files_before = self.key_file_digests();
         let key_probe = self.resolve_secret_key(false);
         let mut key_provider_available = key_probe.is_ok();
         let database_plaintext_count = (plaintext + ai + tunnels).max(0) as usize;
@@ -1536,7 +1646,7 @@ impl Storage {
             && !matches!(self.secret_key_policy, SecretKeyPolicy::ExternalOnly)
             && encrypted == 0
             && (database_plaintext_count > 0 || sync_credentials > 0 || files.iter().any(|file| file.exists));
-        let mut key_error_code = key_probe.as_ref().err().cloned();
+        let mut key_error_code = key_probe.as_ref().err().map(|error| migration_error_code(error).to_string());
         if let Ok(resolved) = key_probe.as_ref() {
             if encrypted > 0 && self.validate_existing_encrypted_data(resolved.codec).await.is_err() {
                 key_provider_available = false;
@@ -1562,6 +1672,8 @@ impl Storage {
                 "SECRET_KEY_INVALID"
                     | "SECRET_KEY_MISMATCH"
                     | "KEY_FILE_UNAVAILABLE"
+                    | "KEYRING_ACCESS_FAILED"
+                    | "KEYRING_WRITE_FAILED"
                     | "MISSING_EXTERNAL_KEY"
                     | "ENCRYPTED_DATA_KEY_MISSING"
             )
@@ -1578,7 +1690,9 @@ impl Storage {
             None => MigrationKeyStatus::Unavailable,
         };
         let source_changed = stored.source_fingerprint.as_deref().is_some_and(|value| value != current_fingerprint);
-        let state = if fatal_key_error
+        let state = if matches!(stored.state, MigrationState::Failed | MigrationState::Running) {
+            stored.state.clone()
+        } else if fatal_key_error
             || missing_required_key
             || missing_existing_key
             || (has_legacy_data
@@ -1604,10 +1718,16 @@ impl Storage {
                 "SECRET_KEY_INVALID" => "The configured secret key is invalid",
                 "SECRET_KEY_MISMATCH" => "The configured secret key cannot decrypt existing data",
                 "KEY_FILE_UNAVAILABLE" => "The configured secret key file is unavailable",
+                "KEYRING_ACCESS_FAILED" => "The platform credential store refused access to the DBX secret-store key",
+                "KEYRING_WRITE_FAILED" => "DBX could not save the secret-store key in the platform credential store",
                 "MISSING_EXTERNAL_KEY" => "An external secret key is required",
                 _ => "The local secret provider is unavailable",
             };
             (Some(code), Some(message.to_string()))
+        } else if stored.state == MigrationState::Failed && stored.error_code.is_some() {
+            let code = migration_error_code(stored.error_code.as_deref().unwrap()).to_string();
+            let message = migration_safe_message(&code, "");
+            (Some(code), Some(message))
         } else if missing_required_key {
             (Some("MISSING_EXTERNAL_KEY".to_string()), Some("An external secret key is required".to_string()))
         } else if missing_existing_key {
@@ -1623,6 +1743,14 @@ impl Storage {
             .map(|resolved| resolved.source.as_str())
             .unwrap_or(SecretKeySource::Unavailable.as_str())
             .to_string();
+        // Reuse a successful read during the subsequent migration start. This
+        // keeps the read-only preflight and the first migration write from
+        // prompting the platform credential store twice in one action.
+        if key_provider_available {
+            if let Ok(resolved) = key_probe.as_ref() {
+                self.cache_secret_codec_if_unchanged(resolved.codec, key_files_before);
+            }
+        }
         let preflight = MigrationPreflight {
             migration_id: SECRET_STORE_MIGRATION_ID.to_string(),
             state,
@@ -1673,43 +1801,77 @@ impl Storage {
         .await
     }
 
-    pub async fn start_data_migration(&self) -> Result<MigrationReport, String> {
-        let lock = DATA_MIGRATION_LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await;
-        // Migration may create or replace key material, so the codec resolved
-        // for earlier reads must not be reused here.
-        self.invalidate_secret_codec();
-        let preflight = self.inspect_data_migration().await?;
-        if preflight.is_ready() {
-            return Ok(MigrationReport {
-                migration_id: SECRET_STORE_MIGRATION_ID.to_string(),
-                state: preflight.state,
-                backup_path: preflight.backup_path,
-                database_plaintext_count: 0,
-                legacy_json_files: Vec::new(),
-                verified_secret_count: 0,
-                error_code: None,
-                error_message: None,
-            });
+    fn migration_is_active(&self) -> Result<bool, String> {
+        let file =
+            match std::fs::OpenOptions::new().read(true).write(true).open(self.data_dir().join(MIGRATION_LOCK_FILE)) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                Err(_) => return Err("MIGRATION_LOCK_UNAVAILABLE".to_string()),
+            };
+        match fs2::FileExt::try_lock_exclusive(&file) {
+            Ok(()) => Ok(false), // Closing the handle releases the probe lock.
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(true),
+            Err(_) => Err("MIGRATION_LOCK_UNAVAILABLE".to_string()),
         }
-        if !preflight.key_provider_available && !preflight.key_creation_allowed {
-            let code = preflight.error_code.as_deref().unwrap_or("KEY_PROVIDER_UNAVAILABLE");
-            let error = code.to_string();
-            self.set_migration_state(MigrationState::Failed, None, Some(code), Some(&error), None).await?;
-            return Err(error);
+    }
+
+    fn lock_data_migration(&self) -> Result<std::fs::File, String> {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
         }
-        self.set_migration_state(MigrationState::Running, None, None, None, Some(&migration_counts_json(&preflight)))
-            .await?;
-        let backup_path = match self.create_migration_backup().await {
-            Ok(path) => path,
-            Err(error) => {
-                let _ = self
-                    .set_migration_state(MigrationState::Failed, None, Some("BACKUP_FAILED"), Some(&error), None)
-                    .await;
-                return Err(error);
+        let file = options
+            .open(self.data_dir().join(MIGRATION_LOCK_FILE))
+            .map_err(|_| "MIGRATION_LOCK_UNAVAILABLE".to_string())?;
+        fs2::FileExt::try_lock_exclusive(&file).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                "MIGRATION_IN_PROGRESS".to_string()
+            } else {
+                "MIGRATION_LOCK_UNAVAILABLE".to_string()
             }
-        };
-        self.set_migration_state(MigrationState::Running, Some(&backup_path), None, None, None).await?;
+        })?;
+        Ok(file)
+    }
+
+    pub async fn start_data_migration(&self) -> Result<MigrationReport, String> {
+        let _lock = DATA_MIGRATION_LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await;
+        let _file_lock = self.lock_data_migration()?;
+        *self.migration_failure.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        self.invalidate_secret_codec();
+        let mut backup_path: Option<String> = None;
+        let mut data_started = false;
         let result = async {
+            let preflight = self.inspect_data_migration().await?;
+            if preflight.is_ready() {
+                return Ok(MigrationReport {
+                    migration_id: SECRET_STORE_MIGRATION_ID.to_string(),
+                    state: preflight.state,
+                    backup_path: preflight.backup_path,
+                    database_plaintext_count: 0,
+                    legacy_json_files: Vec::new(),
+                    verified_secret_count: 0,
+                    error_code: None,
+                    error_message: None,
+                });
+            }
+            if !preflight.key_provider_available && !preflight.key_creation_allowed {
+                return Err(preflight.error_code.unwrap_or_else(|| "KEY_PROVIDER_UNAVAILABLE".to_string()));
+            }
+            self.set_migration_state(
+                MigrationState::Running,
+                None,
+                None,
+                None,
+                Some(&migration_counts_json(&preflight)),
+            )
+            .await?;
+            backup_path = Some(self.create_migration_backup().await.map_err(|_| "BACKUP_FAILED".to_string())?);
+            let backup_path = backup_path.as_deref().unwrap();
+            self.set_migration_state(MigrationState::Running, Some(backup_path), None, None, None).await?;
+            data_started = true;
             let codec = self.secret_codec(preflight.key_creation_allowed)?;
             self.run_database_legacy_migrations(&codec).await?;
             self.migrate_from_json_staged(self.data_dir()).await?;
@@ -1717,7 +1879,7 @@ impl Storage {
             let renamed = self.finalize_legacy_json_files().await?;
             self.set_migration_state(
                 MigrationState::Succeeded,
-                Some(&backup_path),
+                Some(backup_path),
                 None,
                 None,
                 Some(&{
@@ -1739,7 +1901,7 @@ impl Storage {
             Ok::<MigrationReport, String>(MigrationReport {
                 migration_id: SECRET_STORE_MIGRATION_ID.to_string(),
                 state: MigrationState::Succeeded,
-                backup_path: Some(backup_path.clone()),
+                backup_path: Some(backup_path.to_string()),
                 database_plaintext_count: preflight.database_plaintext_count,
                 legacy_json_files: renamed,
                 verified_secret_count: verified,
@@ -1748,24 +1910,37 @@ impl Storage {
             })
         }
         .await;
-        if let Err(error) = &result {
-            // Every database migration helper uses its own transaction. Restore
-            // the pre-migration SQLite snapshot if a later JSON parse, write,
-            // or verification step fails, so the live database is never left
-            // half-upgraded.
-            let _ = self.restore_database_backup(&backup_path).await;
-            let _ = self
-                .set_migration_state(
-                    MigrationState::Failed,
-                    Some(&backup_path),
-                    Some(migration_error_code(error)),
-                    Some(error),
-                    None,
-                )
-                .await;
+        match result {
+            Ok(report) => Ok(report),
+            Err(error) => {
+                self.invalidate_secret_codec();
+                let mut code = migration_error_code(&error).to_string();
+                if data_started {
+                    if let Some(path) = backup_path.as_deref() {
+                        if self.restore_database_backup(path).await.is_err() {
+                            code = "MIGRATION_RESTORE_FAILED".to_string();
+                        }
+                    }
+                }
+                if self
+                    .set_migration_state(MigrationState::Failed, backup_path.as_deref(), Some(&code), Some(&code), None)
+                    .await
+                    .is_err()
+                {
+                    code = "MIGRATION_STATE_WRITE_FAILED".to_string();
+                    // A read-only status request must still report the failed
+                    // action if SQLite cannot persist it. After process exit,
+                    // a retained running record is detected via the file lock.
+                    *self.migration_failure.lock().unwrap_or_else(|p| p.into_inner()) =
+                        Some(MigrationFailure { code: code.clone(), backup_path });
+                }
+                if code == "MIGRATION_STATE_WRITE_FAILED" || code == "MIGRATION_RESTORE_FAILED" {
+                    Err(code)
+                } else {
+                    Err(error)
+                }
+            }
         }
-        drop(lock);
-        result
     }
 
     pub async fn retry_data_migration(&self) -> Result<MigrationReport, String> {
@@ -1937,7 +2112,8 @@ impl Storage {
         }
         let counts_json = counts.to_string();
         let backup_path = backup_path.or(previous.backup_path);
-        let source_fingerprint = Some(self.migration_source_fingerprint().await?);
+        let source_fingerprint =
+            if state == "failed" { None } else { Some(self.migration_source_fingerprint().await?) };
         self.with_conn(move |conn| {
             conn.execute(
                 "INSERT INTO data_migrations (migration_id,state,source_fingerprint,counts_json,backup_path,error_code,error_message,started_at,completed_at)
@@ -4213,6 +4389,7 @@ impl Storage {
                 .optional()
                 .map_err(|e| e.to_string())?;
             let dedicated_keys = [
+                APP_APPEARANCE_SETTINGS_KEY,
                 MCP_GLOBAL_POLICY_KEY,
                 WEB_MCP_SETTINGS_KEY,
                 MAX_RETRIES_KEY,
@@ -4338,9 +4515,19 @@ impl Storage {
         Ok(normalized_string_list(settings.get(AI_PLUGIN_TOOL_PLUGINS_KEY)))
     }
 
+    /// Plugin ids the user explicitly turned off for the built-in AI agent.
+    /// Only records explicit revocations; combined with the enabled list and
+    /// the manifest `mcp` declarations it yields the effective AI tool set.
+    pub async fn load_ai_plugin_tool_disabled_plugin_ids(&self) -> Result<Vec<String>, String> {
+        let settings = self.load_app_settings_json().await?;
+        Ok(normalized_string_list(settings.get(AI_PLUGIN_TOOL_DISABLED_PLUGINS_KEY)))
+    }
+
     /// Enables or disables built-in AI access to one plugin's tools and returns
     /// the updated list. The read-modify-write runs inside one connection
-    /// closure so concurrent settings saves cannot drop the change.
+    /// closure so concurrent settings saves cannot drop the change. Disabling
+    /// also records the opt-out so a detection-enabled plugin (the default)
+    /// stays off across restarts and plugin updates.
     pub async fn set_ai_plugin_tool_plugin_enabled(
         &self,
         plugin_id: &str,
@@ -4352,8 +4539,19 @@ impl Storage {
             let mut plugin_ids = normalized_string_list(settings.get(AI_PLUGIN_TOOL_PLUGINS_KEY));
             plugin_ids.retain(|candidate| candidate != &plugin_id);
             if enabled {
-                plugin_ids.push(plugin_id);
+                plugin_ids.push(plugin_id.clone());
                 plugin_ids.sort();
+                // Re-enable after an explicit opt-out of a manifest-declared plugin.
+                let mut disabled = normalized_string_list(settings.get(AI_PLUGIN_TOOL_DISABLED_PLUGINS_KEY));
+                disabled.retain(|candidate| candidate != &plugin_id);
+                settings.insert(AI_PLUGIN_TOOL_DISABLED_PLUGINS_KEY.to_string(), serde_json::json!(disabled));
+            } else {
+                let mut disabled = normalized_string_list(settings.get(AI_PLUGIN_TOOL_DISABLED_PLUGINS_KEY));
+                if !disabled.contains(&plugin_id) {
+                    disabled.push(plugin_id.clone());
+                    disabled.sort();
+                }
+                settings.insert(AI_PLUGIN_TOOL_DISABLED_PLUGINS_KEY.to_string(), serde_json::json!(disabled));
             }
             settings.insert(AI_PLUGIN_TOOL_PLUGINS_KEY.to_string(), serde_json::json!(plugin_ids));
             write_app_settings_map(conn, &settings)?;
@@ -4418,6 +4616,9 @@ impl Storage {
             let mut plugin_ids = normalized_string_list(settings.get(AI_PLUGIN_TOOL_PLUGINS_KEY));
             plugin_ids.retain(|candidate| candidate != &plugin_id);
             settings.insert(AI_PLUGIN_TOOL_PLUGINS_KEY.to_string(), serde_json::json!(plugin_ids));
+            let mut disabled = normalized_string_list(settings.get(AI_PLUGIN_TOOL_DISABLED_PLUGINS_KEY));
+            disabled.retain(|candidate| candidate != &plugin_id);
+            settings.insert(AI_PLUGIN_TOOL_DISABLED_PLUGINS_KEY.to_string(), serde_json::json!(disabled));
             if let Some(serde_json::Value::Object(grants)) = settings.get_mut(PLUGIN_DATA_GRANTS_KEY) {
                 grants.remove(&plugin_id);
             }
@@ -4463,6 +4664,37 @@ impl Storage {
             app_settings.insert(WEB_MCP_SETTINGS_KEY.to_string(), value);
             persist_secret_in_tx(&tx, &codec, GLOBAL_SECRET_NAMESPACE, "web_mcp_token", &token)?;
             write_app_settings_map(&tx, &app_settings)?;
+            tx.commit().map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    pub async fn load_app_appearance_settings(&self) -> Result<AppAppearanceSettings, String> {
+        let settings = self.load_app_settings_json().await?;
+        match settings.get(APP_APPEARANCE_SETTINGS_KEY) {
+            Some(value) if !value.is_null() => serde_json::from_value(value.clone())
+                .map_err(|error| format!("invalid app appearance settings: {error}")),
+            _ => Ok(AppAppearanceSettings::default()),
+        }
+    }
+
+    pub async fn update_app_appearance_settings(&self, patch: &AppAppearanceSettingsPatch) -> Result<(), String> {
+        let patch = serde_json::to_value(patch).map_err(|error| error.to_string())?;
+        let patch = patch.as_object().cloned().ok_or_else(|| "app appearance patch must be an object".to_string())?;
+        self.with_conn(move |conn| {
+            let tx =
+                conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
+            let mut settings = app_settings_map_from_conn(&tx)?;
+            let mut appearance = match settings.remove(APP_APPEARANCE_SETTINGS_KEY) {
+                Some(value) if !value.is_null() => {
+                    serde_json::from_value::<serde_json::Map<String, serde_json::Value>>(value)
+                        .map_err(|error| format!("invalid app appearance settings: {error}"))?
+                }
+                _ => serde_json::Map::new(),
+            };
+            appearance.extend(patch);
+            settings.insert(APP_APPEARANCE_SETTINGS_KEY.to_string(), serde_json::Value::Object(appearance));
+            write_app_settings_map(&tx, &settings)?;
             tx.commit().map_err(|error| error.to_string())
         })
         .await
@@ -5924,25 +6156,47 @@ impl Storage {
         self.with_conn(move |conn| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
 
-            apply_sync_connections_in_tx(&tx, &codec, &plan.connections)?;
+            apply_sync_connections_in_tx(&tx, &codec, &plan.connections, plan.merge_connections)?;
             if let Some(profiles) = &plan.tunnel_profiles {
-                apply_sync_tunnel_profiles_in_tx(&tx, &codec, profiles, plan.tunnel_secret_profiles.as_deref())?;
+                apply_sync_tunnel_profiles_in_tx(
+                    &tx,
+                    &codec,
+                    profiles,
+                    plan.tunnel_secret_profiles.as_deref(),
+                    plan.merge_tunnel_profiles,
+                )?;
             }
             if let Some(layout) = &plan.sidebar_layout {
                 let json = serde_json::to_string(layout).map_err(|e| e.to_string())?;
                 tx.execute("INSERT OR REPLACE INTO sidebar_layout (id, layout_json) VALUES (1, ?1)", [json])
                     .map_err(|e| e.to_string())?;
             }
-            let pinned = serde_json::to_string(&plan.pinned_tree_node_ids).map_err(|e| e.to_string())?;
-            update_app_settings_key_in_tx(
-                &tx,
-                "pinned_tree_node_ids",
-                serde_json::from_str(&pinned).map_err(|e| e.to_string())?,
-            )?;
-            apply_saved_sql_in_tx(&tx, &plan.saved_sql)?;
-            apply_desktop_settings_in_tx(&tx, &plan.desktop_settings)?;
+            if let Some(pinned_tree_node_ids) = &plan.pinned_tree_node_ids {
+                let pinned = serde_json::to_string(pinned_tree_node_ids).map_err(|e| e.to_string())?;
+                update_app_settings_key_in_tx(
+                    &tx,
+                    "pinned_tree_node_ids",
+                    serde_json::from_str(&pinned).map_err(|e| e.to_string())?,
+                )?;
+            }
+            apply_saved_sql_in_tx(&tx, &plan.saved_sql, plan.merge_saved_sql)?;
+            apply_desktop_settings_in_tx(&tx, &plan.desktop_settings, plan.desktop_settings_keys.as_deref())?;
             if let Some(editor_settings) = &plan.editor_settings {
-                let value = serde_json::to_string(editor_settings).map_err(|e| e.to_string())?;
+                let mut value = editor_settings.clone();
+                if plan.merge_editor_settings {
+                    let current = tx
+                        .query_row(
+                            "SELECT value_json FROM app_state WHERE key = ?1",
+                            [APP_STATE_EDITOR_SETTINGS_KEY],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .optional()
+                        .map_err(|e| e.to_string())?
+                        .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+                        .unwrap_or_else(|| serde_json::json!({}));
+                    value = merge_json_object_fields(current, value, plan.editor_settings_keys.as_deref());
+                }
+                let value = serde_json::to_string(&value).map_err(|e| e.to_string())?;
                 tx.execute(
                     "INSERT OR REPLACE INTO app_state (key, value_json) VALUES (?1, ?2)",
                     params![APP_STATE_EDITOR_SETTINGS_KEY, value],
@@ -5950,10 +6204,15 @@ impl Storage {
                 .map_err(|e| e.to_string())?;
             }
             if let Some(ai_configs) = &plan.ai_configs {
-                apply_ai_configs_in_tx(&tx, &codec, ai_configs)?;
+                apply_ai_configs_in_tx(&tx, &codec, ai_configs, plan.merge_ai_configs)?;
             }
             if let Some(secrets) = &plan.connection_secrets {
-                clear_sync_connection_secrets_in_tx(&tx, &plan.connections, plan.preserve_plugin_secrets)?;
+                clear_sync_connection_secrets_in_tx(
+                    &tx,
+                    plan.connection_secret_ids.as_deref().unwrap_or(&[]),
+                    &plan.preserve_local_connection_strings,
+                    plan.preserve_plugin_secrets,
+                )?;
                 for secret in secrets {
                     if secret.secret.is_empty() {
                         continue;
@@ -7949,12 +8208,17 @@ fn apply_sync_connections_in_tx(
     tx: &Transaction<'_>,
     codec: &SecretCodec,
     configs: &[ConnectionConfig],
+    merge_existing: bool,
 ) -> Result<(), String> {
-    let replacement_ids = configs.iter().map(|config| config.id.clone()).collect::<HashSet<_>>();
-    let mut retained_ids = preserve_unreadable_connections_for_replacement(tx, &replacement_ids)?;
+    let mut retained_ids = if merge_existing {
+        Vec::new()
+    } else {
+        let replacement_ids = configs.iter().map(|config| config.id.clone()).collect::<HashSet<_>>();
+        preserve_unreadable_connections_for_replacement(tx, &replacement_ids)?
+    };
     for config in configs {
         let config = config.canonicalized();
-        if !config.save_password {
+        if !config.save_password && !merge_existing {
             persist_secret_in_tx(tx, codec, &config.id, "password", "")?;
             delete_secret_prefix_in_tx(tx, &config.id, NACOS_AUTH_SECRET_PREFIX)?;
         }
@@ -7965,29 +8229,51 @@ fn apply_sync_connections_in_tx(
         }
         let sanitized = sanitized_connection_config(&config);
         let json = serde_json::to_string(&sanitized).map_err(|e| e.to_string())?;
-        tx.execute("INSERT INTO connections (id, config_json) VALUES (?1, ?2)", params![config.id, json])
+        tx.execute("INSERT OR REPLACE INTO connections (id, config_json) VALUES (?1, ?2)", params![config.id, json])
             .map_err(|e| e.to_string())?;
     }
     retained_ids.extend(configs.iter().map(|config| config.id.clone()));
-    delete_unreferenced_connection_secrets_in_tx(tx, &retained_ids)
+    if merge_existing {
+        Ok(())
+    } else {
+        delete_unreferenced_connection_secrets_in_tx(tx, &retained_ids)
+    }
 }
 
 fn clear_sync_connection_secrets_in_tx(
     tx: &Transaction<'_>,
-    configs: &[ConnectionConfig],
+    connection_ids: &[String],
+    preserve_connection_strings: &[String],
     preserve_plugin_secrets: bool,
 ) -> Result<(), String> {
-    for config in configs {
-        if preserve_plugin_secrets {
+    let preserve_connection_strings = preserve_connection_strings.iter().map(String::as_str).collect::<HashSet<_>>();
+    for connection_id in connection_ids {
+        let preserve_connection_string = preserve_connection_strings.contains(connection_id.as_str());
+        if preserve_plugin_secrets && preserve_connection_string {
+            tx.execute(
+                "DELETE FROM connection_secrets
+                 WHERE connection_id = ?1
+                   AND key NOT LIKE 'plugin_connection.%'
+                   AND key <> 'connection_string'",
+                [connection_id],
+            )
+            .map_err(|e| e.to_string())?;
+        } else if preserve_plugin_secrets {
             tx.execute(
                 "DELETE FROM connection_secrets
                  WHERE connection_id = ?1
                    AND key NOT LIKE 'plugin_connection.%'",
-                [&config.id],
+                [connection_id],
+            )
+            .map_err(|e| e.to_string())?;
+        } else if preserve_connection_string {
+            tx.execute(
+                "DELETE FROM connection_secrets WHERE connection_id = ?1 AND key <> 'connection_string'",
+                [connection_id],
             )
             .map_err(|e| e.to_string())?;
         } else {
-            tx.execute("DELETE FROM connection_secrets WHERE connection_id = ?1", [&config.id])
+            tx.execute("DELETE FROM connection_secrets WHERE connection_id = ?1", [connection_id])
                 .map_err(|e| e.to_string())?;
         }
     }
@@ -7999,6 +8285,7 @@ fn apply_sync_tunnel_profiles_in_tx(
     codec: &SecretCodec,
     profiles: &[TransportLayerConfig],
     secret_profiles: Option<&[TransportLayerConfig]>,
+    merge_existing: bool,
 ) -> Result<(), String> {
     let mut existing = HashMap::<String, TransportLayerConfig>::new();
     let mut statement = tx.prepare("SELECT id, config_json FROM tunnel_profiles").map_err(|e| e.to_string())?;
@@ -8029,6 +8316,9 @@ fn apply_sync_tunnel_profiles_in_tx(
             Some(profile) => (profile, true),
             None => (profile.clone(), false),
         };
+        if let Some(previous) = existing.get(profile.id()) {
+            preserve_tunnel_profile_local_paths(&mut profile, previous);
+        }
         if !has_synced_secrets {
             if let Some(previous) = existing.get(profile.id()) {
                 merge_missing_tunnel_profile_secrets(&mut profile, previous);
@@ -8037,10 +8327,19 @@ fn apply_sync_tunnel_profiles_in_tx(
         effective.push(profile);
     }
 
-    tx.execute("DELETE FROM tunnel_profiles", []).map_err(|e| e.to_string())?;
-    tx.execute("DELETE FROM connection_secrets WHERE connection_id LIKE 'tunnel_profile.%'", [])
-        .map_err(|e| e.to_string())?;
+    if !merge_existing {
+        tx.execute("DELETE FROM tunnel_profiles", []).map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM connection_secrets WHERE connection_id LIKE 'tunnel_profile.%'", [])
+            .map_err(|e| e.to_string())?;
+    }
     for profile in effective {
+        if merge_existing {
+            tx.execute(
+                "DELETE FROM connection_secrets WHERE connection_id = ?1",
+                [format!("{TUNNEL_SECRET_NAMESPACE_PREFIX}{}", profile.id())],
+            )
+            .map_err(|e| e.to_string())?;
+        }
         let mut sanitized = profile.clone();
         sanitized.scrub_secrets();
         let json = serde_json::to_string(&sanitized).map_err(|e| e.to_string())?;
@@ -8059,14 +8358,64 @@ fn apply_sync_tunnel_profiles_in_tx(
     Ok(())
 }
 
-fn apply_ai_configs_in_tx(tx: &Transaction<'_>, codec: &SecretCodec, configs: &[AiConfigItem]) -> Result<(), String> {
-    tx.execute("DELETE FROM ai_configs", []).map_err(|e| e.to_string())?;
-    tx.execute("DELETE FROM ai_config", []).map_err(|e| e.to_string())?;
-    tx.execute("DELETE FROM ai_provider_configs", []).map_err(|e| e.to_string())?;
-    tx.execute("DELETE FROM connection_secrets WHERE connection_id LIKE 'ai_config.%'", [])
-        .map_err(|e| e.to_string())?;
+fn preserve_tunnel_profile_local_paths(remote: &mut TransportLayerConfig, local: &TransportLayerConfig) {
+    if let (TransportLayerConfig::Ssh(remote), TransportLayerConfig::Ssh(local)) = (remote, local) {
+        if remote.key_path.is_empty() {
+            remote.key_path.clone_from(&local.key_path);
+        }
+        if remote.ssh_agent_sock_path.is_empty() {
+            remote.ssh_agent_sock_path.clone_from(&local.ssh_agent_sock_path);
+        }
+    }
+}
+
+fn apply_ai_configs_in_tx(
+    tx: &Transaction<'_>,
+    codec: &SecretCodec,
+    configs: &[AiConfigItem],
+    merge_existing: bool,
+) -> Result<(), String> {
+    let existing_configs = {
+        let mut statement = tx.prepare("SELECT id, config_json FROM ai_configs").map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        let mut existing = HashMap::with_capacity(rows.len());
+        for (id, json) in rows {
+            let config: AiConfig = serde_json::from_str(&json).map_err(|error| error.to_string())?;
+            existing.insert(id, config);
+        }
+        existing
+    };
+    if !merge_existing {
+        tx.execute("DELETE FROM ai_configs", []).map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM ai_config", []).map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM ai_provider_configs", []).map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM connection_secrets WHERE connection_id LIKE 'ai_config.%'", [])
+            .map_err(|e| e.to_string())?;
+    }
     for item in configs {
-        let (sanitized, secrets) = split_ai_config_secrets(&item.config)?;
+        if merge_existing {
+            tx.execute("DELETE FROM connection_secrets WHERE connection_id = ?1", [format!("ai_config.{}", item.id)])
+                .map_err(|e| e.to_string())?;
+            if item.is_default {
+                tx.execute("UPDATE ai_configs SET is_default = 0", []).map_err(|e| e.to_string())?;
+            }
+        }
+        let mut config = item.config.clone();
+        clear_ai_config_device_paths(&mut config);
+        let local = existing_configs.get(&item.id).or_else(|| {
+            let mut matching_provider =
+                existing_configs.values().filter(|local| local.provider.as_str() == config.provider.as_str());
+            let candidate = matching_provider.next()?;
+            matching_provider.next().is_none().then_some(candidate)
+        });
+        if let Some(local) = local {
+            preserve_ai_config_device_paths(&mut config, local);
+        }
+        let (sanitized, secrets) = split_ai_config_secrets(&config)?;
         let json = serde_json::to_string(&sanitized).map_err(|e| e.to_string())?;
         let models_json = serde_json::to_string(&sanitized.models).map_err(|e| e.to_string())?;
         tx.execute(
@@ -8085,6 +8434,39 @@ fn apply_ai_configs_in_tx(tx: &Transaction<'_>, codec: &SecretCodec, configs: &[
         }
     }
     Ok(())
+}
+
+pub(crate) fn clear_ai_config_device_paths(config: &mut AiConfig) {
+    config.codex_cli_path = None;
+    config.claude_code_cli_path = None;
+    config.pi_agent_cli_path = None;
+    config.opencode_cli_path = None;
+    config.cursor_cli_path = None;
+    config.grok_cli_path = None;
+    config.codebuddy_cli_path = None;
+    config.qoder_cli_path = None;
+}
+
+fn preserve_ai_config_device_paths(remote: &mut AiConfig, local: &AiConfig) {
+    match (&remote.provider, &local.provider) {
+        (AiProvider::CodexCli, AiProvider::CodexCli) => remote.codex_cli_path.clone_from(&local.codex_cli_path),
+        (AiProvider::ClaudeCodeCli, AiProvider::ClaudeCodeCli) => {
+            remote.claude_code_cli_path.clone_from(&local.claude_code_cli_path)
+        }
+        (AiProvider::PiAgentCli, AiProvider::PiAgentCli) => {
+            remote.pi_agent_cli_path.clone_from(&local.pi_agent_cli_path)
+        }
+        (AiProvider::OpenCodeCli, AiProvider::OpenCodeCli) => {
+            remote.opencode_cli_path.clone_from(&local.opencode_cli_path)
+        }
+        (AiProvider::CursorCli, AiProvider::CursorCli) => remote.cursor_cli_path.clone_from(&local.cursor_cli_path),
+        (AiProvider::GrokCli, AiProvider::GrokCli) => remote.grok_cli_path.clone_from(&local.grok_cli_path),
+        (AiProvider::CodeBuddyCli, AiProvider::CodeBuddyCli) => {
+            remote.codebuddy_cli_path.clone_from(&local.codebuddy_cli_path)
+        }
+        (AiProvider::QoderCli, AiProvider::QoderCli) => remote.qoder_cli_path.clone_from(&local.qoder_cli_path),
+        _ => {}
+    }
 }
 
 fn update_app_settings_key_in_tx(tx: &Transaction<'_>, key: &str, value: serde_json::Value) -> Result<(), String> {
@@ -8107,7 +8489,27 @@ fn update_app_settings_key_in_tx(tx: &Transaction<'_>, key: &str, value: serde_j
     .map_err(|e| e.to_string())
 }
 
-fn apply_desktop_settings_in_tx(tx: &Transaction<'_>, settings: &DesktopSettings) -> Result<(), String> {
+fn merge_json_object_fields(
+    local: serde_json::Value,
+    remote: serde_json::Value,
+    selected_keys: Option<&[String]>,
+) -> serde_json::Value {
+    let Some(remote) = remote.as_object() else { return remote };
+    let mut merged = local.as_object().cloned().unwrap_or_default();
+    for (key, value) in remote {
+        if selected_keys.is_some_and(|keys| !keys.iter().any(|selected| selected == key)) {
+            continue;
+        }
+        merged.insert(key.clone(), value.clone());
+    }
+    serde_json::Value::Object(merged)
+}
+
+fn apply_desktop_settings_in_tx(
+    tx: &Transaction<'_>,
+    settings: &DesktopSettings,
+    selected_keys: Option<&[String]>,
+) -> Result<(), String> {
     let mut values = serde_json::Map::new();
     values.insert("show_tray_icon".to_string(), serde_json::Value::Bool(settings.show_tray_icon));
     values.insert("icon_theme".to_string(), serde_json::to_value(settings.icon_theme).map_err(|e| e.to_string())?);
@@ -8158,6 +8560,9 @@ fn apply_desktop_settings_in_tx(tx: &Transaction<'_>, settings: &DesktopSettings
         .transpose()?
         .unwrap_or_default();
     for (key, value) in values {
+        if selected_keys.is_some_and(|keys| !keys.iter().any(|selected| selected == &key)) {
+            continue;
+        }
         merged.insert(key, value);
     }
     tx.execute(
@@ -8168,19 +8573,34 @@ fn apply_desktop_settings_in_tx(tx: &Transaction<'_>, settings: &DesktopSettings
     .map_err(|e| e.to_string())
 }
 
-fn apply_saved_sql_in_tx(tx: &Transaction<'_>, library: &SavedSqlLibrary) -> Result<(), String> {
-    tx.execute("DELETE FROM saved_sql_files", []).map_err(|e| e.to_string())?;
-    tx.execute("DELETE FROM saved_sql_folders", []).map_err(|e| e.to_string())?;
+fn apply_saved_sql_in_tx(tx: &Transaction<'_>, library: &SavedSqlLibrary, merge_existing: bool) -> Result<(), String> {
+    let mut folder_ids = HashSet::with_capacity(library.folders.len());
+    for folder in &library.folders {
+        if !folder_ids.insert(folder.id.as_str()) {
+            return Err(format!("duplicate saved SQL folder id: {}", folder.id));
+        }
+    }
+    let mut file_ids = HashSet::with_capacity(library.files.len());
+    for file in &library.files {
+        if !file_ids.insert(file.id.as_str()) {
+            return Err(format!("duplicate saved SQL file id: {}", file.id));
+        }
+    }
+
+    if !merge_existing {
+        tx.execute("DELETE FROM saved_sql_files", []).map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM saved_sql_folders", []).map_err(|e| e.to_string())?;
+    }
     for folder in &library.folders {
         tx.execute(
-            "INSERT INTO saved_sql_folders (id, connection_id, parent_folder_id, name, order_index, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO saved_sql_folders (id, connection_id, parent_folder_id, name, order_index, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             params![folder.id, folder.connection_id, folder.parent_folder_id, folder.name, folder.order_index, folder.created_at, folder.updated_at],
         )
         .map_err(|e| e.to_string())?;
     }
     for file in &library.files {
         tx.execute(
-            "INSERT INTO saved_sql_files (id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO saved_sql_files (id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![file.id, file.connection_id, file.folder_id, file.name, file.database, file.catalog, file.schema, file.sql, file.order_index, file.open_count, file.opened_at, file.created_at, file.updated_at],
         )
         .map_err(|e| e.to_string())?;
@@ -8567,8 +8987,9 @@ fn map_from_sql_err(err: serde_json::Error) -> rusqlite::Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        maybe_import_user_data_db, DataDbImportResult, DesktopIconTheme, DesktopSettings, McpGlobalPolicy,
-        McpGlobalPolicyState, Storage, SyncImportPlan, KEEP_TERMINAL_AI_RUNS_PER_CONVERSATION, MCP_GLOBAL_POLICY_KEY,
+        maybe_import_user_data_db, AppAppearanceSettingsPatch, DataDbImportResult, DesktopIconTheme, DesktopSettings,
+        McpGlobalPolicy, McpGlobalPolicyState, Storage, SyncImportPlan, KEEP_TERMINAL_AI_RUNS_PER_CONVERSATION,
+        MCP_GLOBAL_POLICY_KEY,
     };
     use crate::ai::{
         AiActiveModelSelection, AiAssistantMode, AiChatMessage, AiChatSelectionState, AiConversation,
@@ -8874,7 +9295,8 @@ mod tests {
             .unwrap()
             .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
         let status = reopened.inspect_data_migration().await.unwrap();
-        assert_eq!(status.state, super::MigrationState::Running);
+        assert_eq!(status.state, super::MigrationState::Failed);
+        assert_eq!(status.error_code.as_deref(), Some("MIGRATION_INTERRUPTED"));
         assert!(!status.is_ready());
         reopened.retry_data_migration().await.unwrap();
         assert!(reopened.inspect_data_migration().await.unwrap().is_ready());
@@ -9216,6 +9638,7 @@ mod tests {
                 failed: None,
                 covered_messages: None,
                 source_binding: None,
+                selections_omitted: None,
             }],
             queued_input: None,
             created_at: updated_at.to_string(),
@@ -9532,6 +9955,29 @@ mod tests {
         assert_eq!(source.schema.as_deref(), Some("legacy"));
         let legacy: AiChatMessage = serde_json::from_str(r#"{"role":"assistant","content":"old reply"}"#).unwrap();
         assert!(legacy.source_binding.is_none());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    // #10058: a turn that carried a context selection keeps only a footprint in
+    // storage — the selection text is session-only. The record must round-trip
+    // that boolean, and a record written before the field existed must load.
+    #[tokio::test]
+    async fn ai_conversation_roundtrips_selection_omitted_footprint() {
+        let path = temp_db_path("ai-conversation-selection-footprint");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+
+        let mut conversation = ai_conversation("selection-conv", "0000");
+        conversation.messages[0].selections_omitted = Some(true);
+        storage.save_ai_conversation(&conversation).await.unwrap();
+
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        assert_eq!(loaded[0].messages[0].selections_omitted, Some(true));
+        // No selection text is stored alongside it, only the flag.
+        assert!(loaded[0].messages[0].mentions.is_none());
+
+        let legacy: AiChatMessage = serde_json::from_str(r#"{"role":"user","content":"old turn"}"#).unwrap();
+        assert!(legacy.selections_omitted.is_none());
 
         let _ = std::fs::remove_file(path);
     }
@@ -11225,6 +11671,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn app_appearance_settings_patch_roundtrips_and_survives_desktop_saves() {
+        let path = temp_db_path("app-appearance-settings");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+
+        storage
+            .update_app_appearance_settings(&AppAppearanceSettingsPatch {
+                locale: Some("zh-CN".to_string()),
+                theme_mode: Some("dark".to_string()),
+                theme_palette: Some("cobalt".to_string()),
+                custom_ui_colors: Some(serde_json::json!({ "background": "#123456" })),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            storage.load_app_appearance_settings().await.unwrap(),
+            super::AppAppearanceSettings {
+                locale: Some("zh-CN".to_string()),
+                theme_mode: Some("dark".to_string()),
+                theme_palette: Some("cobalt".to_string()),
+                custom_ui_colors: Some(serde_json::json!({ "background": "#123456" })),
+                ..Default::default()
+            }
+        );
+
+        storage.save_desktop_settings(&DesktopSettings::default()).await.unwrap();
+        assert_eq!(storage.load_app_appearance_settings().await.unwrap().theme_palette.as_deref(), Some("cobalt"));
+
+        storage
+            .update_app_appearance_settings(&AppAppearanceSettingsPatch {
+                corner_style: Some("small".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let updated = storage.load_app_appearance_settings().await.unwrap();
+        assert_eq!(updated.locale.as_deref(), Some("zh-CN"));
+        assert_eq!(updated.corner_style.as_deref(), Some("small"));
+    }
+
+    #[tokio::test]
     async fn mcp_global_policy_defaults_unconfigured_and_roundtrips_atomically() {
         let path = temp_db_path("mcp-global-policy");
         let storage = crate::persistence::test_storage::open(&path).await.unwrap();
@@ -11822,6 +12310,9 @@ mod tests {
 
         assert_eq!(storage.set_plugin_data_grant("io.dbx.chart", "conn-b", false).await.unwrap(), ["conn-a"]);
         assert_eq!(storage.set_ai_plugin_tool_plugin_enabled("io.dbx.kafka", false).await.unwrap(), ["io.dbx.ssh"]);
+        // Disabling records an explicit opt-out (manifest-declared plugins are
+        // enabled by default, so the opt-out must persist separately).
+        assert_eq!(storage.load_ai_plugin_tool_disabled_plugin_ids().await.unwrap(), ["io.dbx.kafka"]);
         assert!(storage.set_plugin_data_grant("io.dbx.chart", " ", true).await.is_err());
 
         storage.set_ai_plugin_tool_plugin_enabled("io.dbx.chart", true).await.unwrap();
@@ -11829,6 +12320,10 @@ mod tests {
         assert_eq!(storage.load_ai_plugin_tool_plugin_ids().await.unwrap(), ["io.dbx.ssh"]);
         assert!(storage.load_plugin_data_grants("io.dbx.chart").await.unwrap().is_empty());
         assert_eq!(storage.load_plugin_data_grants("io.dbx.other").await.unwrap(), ["conn-a"]);
+        // Re-enabling clears the recorded opt-out again.
+        storage.set_ai_plugin_tool_plugin_enabled("io.dbx.kafka", true).await.unwrap();
+        assert_eq!(storage.load_ai_plugin_tool_plugin_ids().await.unwrap(), ["io.dbx.kafka", "io.dbx.ssh"]);
+        assert!(storage.load_ai_plugin_tool_disabled_plugin_ids().await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -13402,10 +13897,12 @@ mod tests {
         incoming.url_params = Some("applicationName=dbx&sslmode=require".to_string());
         let plan = SyncImportPlan {
             connections: vec![incoming],
+            merge_connections: false,
             tunnel_profiles: Some(Vec::new()),
             tunnel_secret_profiles: None,
+            merge_tunnel_profiles: false,
             sidebar_layout: None,
-            pinned_tree_node_ids: Vec::new(),
+            pinned_tree_node_ids: Some(Vec::new()),
             saved_sql: SavedSqlLibrary {
                 folders: vec![
                     SavedSqlFolder {
@@ -13429,12 +13926,19 @@ mod tests {
                 ],
                 files: Vec::new(),
             },
+            merge_saved_sql: false,
             desktop_settings: settings,
+            desktop_settings_keys: None,
             editor_settings: None,
+            merge_editor_settings: false,
+            editor_settings_keys: None,
             connection_secrets: None,
+            connection_secret_ids: None,
+            preserve_local_connection_strings: Vec::new(),
             preserve_plugin_secrets: false,
             sync_credentials: None,
             ai_configs: None,
+            merge_ai_configs: false,
         };
         assert!(storage.apply_sync_import_transaction(plan).await.is_err());
         let connections = storage.load_connections().await.unwrap();
@@ -13450,6 +13954,16 @@ mod tests {
         assert!(super::migration_backup_paths(&invalid).is_err());
         let valid = serde_json::json!({"backupPaths": ["/tmp/dbx-secret-migration-a"]});
         assert_eq!(super::migration_backup_paths(&valid).unwrap(), vec!["/tmp/dbx-secret-migration-a"]);
+    }
+
+    #[test]
+    fn migration_errors_preserve_keyring_failure_classification() {
+        assert_eq!(super::migration_error_code("KEYRING_ACCESS_FAILED: item denied"), "KEYRING_ACCESS_FAILED");
+        assert_eq!(super::migration_error_code("KEYRING_WRITE_FAILED: item denied"), "KEYRING_WRITE_FAILED");
+        assert_eq!(
+            super::migration_safe_message("KEYRING_ACCESS_FAILED", "ignored"),
+            "The platform credential store refused access to the DBX secret-store key"
+        );
     }
 
     #[tokio::test]

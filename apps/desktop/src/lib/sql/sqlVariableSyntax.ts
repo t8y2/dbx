@@ -3,11 +3,11 @@
 // DBX runs two client-side substitution systems before sending SQL to a backend:
 // the placeholder parameter dialog (`sqlParameters.ts`, five syntaxes) and the
 // `@set name = value;` expansion (`sqlVariables.ts`). This module lets users opt
-// out of individual syntaxes per database type. Every toggle defaults to `true`,
-// so an empty/absent config reproduces the historical "always substitute" behaviour.
+// out of individual syntaxes per database type. SQL syntaxes default to `true`,
+// except Neo4j's `:label` patterns, which are not named parameters.
 //
 // Storage is sparse: only syntaxes explicitly turned off (`false`) are persisted,
-// keyed by database type. Anything not stored resolves to enabled.
+// keyed by database type. Unset values use the database-specific defaults.
 
 import type { DatabaseType } from "@/types/database";
 import type { SqlParameterSyntax } from "@/lib/sql/sqlParameters";
@@ -72,7 +72,7 @@ export function resolveSqlVariableSyntaxToggles(overrides: SqlVariableSyntaxOver
   const partial = dbType ? overrides?.[dbType] : undefined;
   return {
     positional: partial?.positional ?? true,
-    named: partial?.named ?? true,
+    named: dbType === "neo4j" || dbType === "nebula" ? false : (partial?.named ?? true),
     shell: partial?.shell ?? true,
     mybatis: partial?.mybatis ?? true,
     sqlserver: partial?.sqlserver ?? true,

@@ -8,6 +8,7 @@ use super::dialect::{capabilities_for, database_label, StructureDialect};
 use super::foreign_keys::build_foreign_key_sql_for_new_table;
 use super::indexes::build_create_index_statements;
 use super::mysql_engine::{append_mysql_table_option, validate_mysql_engine};
+use super::transwarp;
 use super::triggers::build_trigger_sql_for_new_table;
 use super::types::{TableStructureSqlOptions, TableStructureSqlResult};
 use super::util::{
@@ -63,6 +64,7 @@ pub(super) fn build_create_table_sql_with_partition_clause(
     }
     validate_columns(&active_columns, &mut warnings);
     validate_dameng_identity(&options, &active_columns, &mut warnings);
+    transwarp::validate_create_options(&options, &active_columns, &mut warnings);
     if !warnings.is_empty() {
         return TableStructureSqlResult { statements: Vec::new(), warnings };
     }
@@ -105,6 +107,9 @@ pub(super) fn build_create_table_sql_with_partition_clause(
     let mut column_definitions = Vec::new();
 
     for column in &active_columns {
+        if transwarp::is_partition_column(&options, column) {
+            continue;
+        }
         let mut data_type = column_data_type(dialect, column);
         // SQLite accepts AUTOINCREMENT only on an exact INTEGER PRIMARY KEY,
         // so integer-family aliases are normalized when auto-increment is on.
@@ -190,7 +195,8 @@ pub(super) fn build_create_table_sql_with_partition_clause(
         column_definitions.push(format!("PRIMARY KEY ({pk_list})"));
     }
 
-    let create_table = format!("CREATE TABLE {table} (\n  {}\n)", column_definitions.join(",\n  "));
+    let mut create_table = format!("CREATE TABLE {table} (\n  {}\n)", column_definitions.join(",\n  "));
+    create_table.push_str(&transwarp::create_table_suffix(&options, &active_columns, dialect));
     let create_table = match partition_clause {
         Some(clause) => format!("{create_table} {clause}"),
         None => create_table,
@@ -205,7 +211,7 @@ pub(super) fn build_create_table_sql_with_partition_clause(
 
     if capabilities.comment {
         let table_comment = clean(options.table_comment.as_deref().unwrap_or(""));
-        if !table_comment.is_empty() {
+        if !table_comment.is_empty() && options.database_type != Some(DatabaseType::Transwarp) {
             if matches!(dialect, StructureDialect::Mysql | StructureDialect::GaussdbM) {
                 if let Some(last) = statements.last_mut() {
                     append_mysql_table_option(last, &format!("COMMENT = {}", quote_string(&table_comment)));

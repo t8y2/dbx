@@ -4818,6 +4818,8 @@ test("data tab execution preserves pagination offset metadata", async () => {
     assert.equal(executeBody.schema, undefined);
     assert.equal(tab.resultPageLimit, 100);
     assert.equal(tab.resultPageOffset, 100);
+    assert.equal(tab.resultExecutedPageLimit, 100);
+    assert.equal(tab.resultExecutedPageOffset, 100);
     assert.deepEqual(tab.result?.rows, [[101]]);
   } finally {
     globalThis.fetch = originalFetch;
@@ -4881,6 +4883,8 @@ test("append pagination preserves existing rows and respects the memory cap", as
     assert.equal(tab.result?.has_more, false);
     assert.equal(tab.resultPageOffset, 0, "later refreshes must restart from the logical result origin");
     assert.equal(tab.resultPageLimit, 1000, "a short appended segment must preserve the base display page size");
+    assert.equal(tab.resultExecutedPageOffset, 1, "the SQL shown for the grid describes the appended segment");
+    assert.equal(tab.resultExecutedPageLimit, 2);
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();

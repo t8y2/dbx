@@ -57,6 +57,10 @@ pub struct SqlFileRequest {
     pub execution_id: String,
     pub connection_id: String,
     pub database: String,
+    /// Optional schema/session namespace for databases where it is distinct
+    /// from the database used to establish the connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
     pub file_path: String,
     pub continue_on_error: bool,
     /// Reuse a held manual transaction instead of committing through ordinary query execution.
@@ -274,6 +278,7 @@ impl SqlDialectProfile {
                 // Oracle for statement splitting so semicolons inside the procedure body are not
                 // misinterpreted as client-side statement terminators.
                 | DatabaseType::Argo
+                | DatabaseType::Transwarp
         )
     }
 }
@@ -1625,6 +1630,10 @@ fn first_sql_tokens(sql: &str, limit: usize) -> Vec<String> {
 }
 
 fn parse_delimiter_command(line: &str) -> Option<&str> {
+    let line = line.trim();
+    if line.eq_ignore_ascii_case("delimiter;") {
+        return Some(";");
+    }
     let bytes = line.as_bytes();
     let rest = if bytes.len() > 10
         && (bytes[..10].eq_ignore_ascii_case(b"delimiter ") || bytes[..10].eq_ignore_ascii_case(b"delimiter\t"))
@@ -2530,6 +2539,13 @@ struct OraclePlSqlBlock {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum OraclePlSqlToken {
     Word(String),
+    /// A double-quoted identifier (`"schema"."procedure"`). Kept as its own variant
+    /// instead of a [`Self::Word`]: the block detectors compare keywords, and a quoted
+    /// name must never satisfy `is_word` (a column called `"END"` is not the block end).
+    /// Dropping it entirely made `BEGIN "S"."P"(); END;` tokenize exactly like a
+    /// transaction `BEGIN;`, so the splitter cut the block at the inner semicolon and
+    /// the server rejected the truncated statement (#10434).
+    QuotedIdentifier,
     Semicolon,
 }
 
@@ -2742,6 +2758,7 @@ impl OraclePlSqlToken {
     fn from_sqlparser_token(token: Token) -> Option<Self> {
         match token {
             Token::Word(word) if word.quote_style.is_none() => Some(Self::Word(word.value.to_ascii_uppercase())),
+            Token::Word(_) => Some(Self::QuotedIdentifier),
             Token::SemiColon => Some(Self::Semicolon),
             _ => None,
         }
@@ -2754,7 +2771,7 @@ impl OraclePlSqlToken {
     fn as_word(&self) -> Option<&str> {
         match self {
             Self::Word(value) => Some(value),
-            Self::Semicolon => None,
+            Self::QuotedIdentifier | Self::Semicolon => None,
         }
     }
 
@@ -2834,6 +2851,7 @@ fn oracle_plsql_tokens_fallback(sql: &str) -> Vec<OraclePlSqlToken> {
                     break;
                 }
             }
+            tokens.push(OraclePlSqlToken::QuotedIdentifier);
             continue;
         }
 
@@ -2999,8 +3017,35 @@ mod tests {
         fuzzy_subsequence_match, optimize_sql_file_import_statements, prepare_sql_file_statement, split_sql_script,
         split_sql_statement_ranges_with_options, split_sql_statements_for_database, starts_with_executable_sql_keyword,
         starts_with_executable_sql_keyword_for_database, starts_with_oracle_style_routine_body, SqlDialectProfile,
-        SqlFileStatementAction, SqlParsingOptions, SqlStatementSplitter,
+        SqlFileRequest, SqlFileStatementAction, SqlParsingOptions, SqlStatementSplitter,
     };
+
+    #[test]
+    fn sql_file_request_schema_is_optional_and_round_trips_when_present() {
+        let legacy = serde_json::json!({
+            "executionId": "legacy",
+            "connectionId": "mysql-1",
+            "database": "app",
+            "filePath": "backup.sql",
+            "continueOnError": false
+        });
+        let legacy_request: SqlFileRequest = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy_request.schema, None);
+        assert!(serde_json::to_value(&legacy_request).unwrap().get("schema").is_none());
+
+        let with_schema = serde_json::json!({
+            "executionId": "oracle-schema",
+            "connectionId": "oceanbase-oracle-1",
+            "database": "tenant_service",
+            "schema": "APP",
+            "filePath": "restore.sql",
+            "continueOnError": false
+        });
+        let request: SqlFileRequest = serde_json::from_value(with_schema).unwrap();
+        assert_eq!(request.database, "tenant_service");
+        assert_eq!(request.schema.as_deref(), Some("APP"));
+        assert_eq!(serde_json::to_value(request).unwrap()["schema"], "APP");
+    }
 
     #[test]
     fn fuzzy_subsequence_match_matches_ordered_characters() {
@@ -3652,6 +3697,12 @@ SELECT 3;";
     }
 
     #[test]
+    fn delimiter_reset_without_whitespace() {
+        let sql = "DELIMITER //\nCREATE PROCEDURE foo() BEGIN SELECT 1; END//\nDELIMITER;\nCALL foo();";
+        assert_eq!(super::split_sql_statements(sql), vec!["CREATE PROCEDURE foo() BEGIN SELECT 1; END", "CALL foo()"]);
+    }
+
+    #[test]
     fn delimiter_case_insensitive() {
         let sql = "delimiter //\nSELECT 1//\ndelimiter ;\nSELECT 2;";
         assert_eq!(super::split_sql_statements(sql), vec!["SELECT 1", "SELECT 2"]);
@@ -3982,6 +4033,32 @@ END;";
     }
 
     #[test]
+    fn oracle_like_split_keeps_quoted_identifier_block_together_per_issue_10434() {
+        // `BEGIN "SCHEMA"."PROCEDURE"(); END;` is what the DM (Dameng) routine dialog
+        // generates. The double-quoted name used to be dropped from the token stream, so the
+        // block tokenized exactly like a transaction `BEGIN;` and was cut at its inner
+        // semicolon — the server then rejected the fragment with 42000 + vendorCode -2007
+        // ("第 2 行, 第 32 列[]附近出现错误: 语法分析出错").
+        let sql = "BEGIN\n  \"DLJPLAT\".\"用户表脱敏\"();\nEND;";
+        for db_type in [DatabaseType::Dameng, DatabaseType::Oracle, DatabaseType::Xugu, DatabaseType::Gaussdb] {
+            assert_eq!(split_sql_statements_for_database(sql, db_type), vec![sql.to_string()], "{db_type:?}");
+        }
+
+        // A quoted identifier that spells a block keyword is a name, not a block boundary.
+        let keyword_named = "BEGIN\n  INSERT INTO \"END\" VALUES (1);\nEND;";
+        assert_eq!(
+            split_sql_statements_for_database(keyword_named, DatabaseType::Dameng),
+            vec![keyword_named.to_string()]
+        );
+
+        // `BEGIN;` stays a transaction statement and still splits at its own terminator.
+        assert_eq!(
+            split_sql_statements_for_database("BEGIN; INSERT INTO t VALUES (1); COMMIT;", DatabaseType::Dameng),
+            vec!["BEGIN", "INSERT INTO t VALUES (1)", "COMMIT"]
+        );
+    }
+
+    #[test]
     fn argo_split_keeps_create_procedure_body_together() {
         // ArgoDB (Transwarp) accepts PL/SQL-style procedure definitions whose body contains
         // semicolons. The statement splitter must keep those semicolons inside the body rather
@@ -4031,6 +4108,7 @@ BEGIN
 END;";
 
         assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Argo), vec![sql.to_string()]);
+        assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Transwarp), vec![sql.to_string()]);
     }
 
     #[test]

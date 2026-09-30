@@ -1178,12 +1178,14 @@ impl ConnectionConfig {
             DatabaseType::Trino => format!("trino://{host}:{port}{db_part}"),
             DatabaseType::PrestoSql => format!("prestosql://{host}:{port}{db_part}"),
             DatabaseType::Hive | DatabaseType::Argo => format!("hive://{host}:{port}{db_part}"),
+            DatabaseType::Transwarp => format!("transwarp://{host}:{port}{db_part}"),
             DatabaseType::Kyuubi => format!("kyuubi://{host}:{port}{db_part}"),
             DatabaseType::Impala => format!("impala://{host}:{port}{db_part}"),
             DatabaseType::Spark => format!("spark://{host}:{port}{db_part}"),
             DatabaseType::Db2 => format!("db2://{host}:{port}{db_part}"),
             DatabaseType::Informix => format!("informix://{host}:{port}{db_part}"),
             DatabaseType::Neo4j => format!("neo4j://{host}:{port}{db_part}"),
+            DatabaseType::Nebula => format!("nebula://{host}:{port}{db_part}"),
             DatabaseType::Cassandra => format!("cassandra://{host}:{port}{db_part}"),
             DatabaseType::Bigquery => format!("bigquery://{host}/{db_part}"),
             DatabaseType::Spanner => self.spanner_display_url(&host, port),
@@ -1410,7 +1412,7 @@ impl ConnectionConfig {
             DatabaseType::PrestoSql => {
                 format!("prestosql://{}:{}@{host}:{port}{db_part}", username, password)
             }
-            DatabaseType::Hive | DatabaseType::Argo => {
+            DatabaseType::Hive | DatabaseType::Argo | DatabaseType::Transwarp => {
                 format!("hive://{}:{}@{host}:{port}{db_part}", username, password)
             }
             DatabaseType::Kyuubi => {
@@ -1440,6 +1442,9 @@ impl ConnectionConfig {
             }
             DatabaseType::Neo4j => {
                 format!("neo4j://{}:{}@{host}:{port}{db_part}", username, password)
+            }
+            DatabaseType::Nebula => {
+                format!("nebula://{}:{}@{host}:{port}{db_part}", username, password)
             }
             DatabaseType::Cassandra => {
                 format!("cassandra://{}:{}@{host}:{port}{db_part}", username, password)

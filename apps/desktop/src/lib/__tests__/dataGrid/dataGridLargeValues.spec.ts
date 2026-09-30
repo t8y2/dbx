@@ -10,6 +10,7 @@ import {
   TABLE_DATA_CELL_PREVIEW_SIZE,
   TABLE_DATA_PREVIEW_CONTENT_MAX_BYTES,
   tableDataLargeValuePreviewOptions,
+  tableDataPreviewRowBudget,
   tableDataVisiblePreviewContentBytes,
   tableDataVisiblePreviewRowRange,
 } from "@/lib/dataGrid/dataGridLargeValues";
@@ -77,6 +78,35 @@ describe("data grid large-value metadata", () => {
       const serializedBytes = new TextEncoder().encode(serializedContent).byteLength * previewCellCount;
       expect(serializedBytes).toBeLessThanOrEqual(TABLE_DATA_PREVIEW_CONTENT_MAX_BYTES);
     }
+  });
+
+  it("spreads the load-all byte budget over the rows the segment will really return", () => {
+    // Issue #10661: a 506-row table asked for a 99_900-row "load all" segment.
+    // Budgeting over the request instead of the remaining rows shrank every cell
+    // to four characters ("1999..."), so off-screen rows arrived already garbled.
+    const rowBudget = tableDataPreviewRowBudget({ limit: 99_900, offset: 100, expectedTotalRows: 506, loadedRowCount: 100 });
+    expect(rowBudget).toBe(406);
+
+    const columns = [column("id", "bigint", true), ...Array.from({ length: 10 }, (_, index) => column(`payload_${index}`, "varchar(64)"))];
+    const loadAll = tableDataLargeValuePreviewOptions("postgres", columns, ["id"], rowBudget);
+    const requested = tableDataLargeValuePreviewOptions("postgres", columns, ["id"], 99_900);
+    expect(loadAll).toMatchObject({ largeValuePreviewSize: 1033 });
+    expect(requested).toMatchObject({ largeValuePreviewSize: 4 });
+  });
+
+  it("keeps the requested limit when the real row count is unknown or unusable", () => {
+    // A normal page never shrinks the budget.
+    expect(tableDataPreviewRowBudget({ limit: 100, offset: 0, expectedTotalRows: 506, loadedRowCount: 100 })).toBe(100);
+    expect(tableDataPreviewRowBudget({ limit: 100, offset: 400, expectedTotalRows: 506, loadedRowCount: 400 })).toBe(100);
+    // Last short page may use the rows that can still arrive.
+    expect(tableDataPreviewRowBudget({ limit: 100, offset: 450, expectedTotalRows: 506, loadedRowCount: 450 })).toBe(56);
+    // No known total: keep the previous behaviour.
+    expect(tableDataPreviewRowBudget({ limit: 99_900, offset: 100, expectedTotalRows: undefined, loadedRowCount: 100 })).toBe(99_900);
+    // A total below the rows already on screen (e.g. an affected_rows hint of 1)
+    // must not balloon the preview budget.
+    expect(tableDataPreviewRowBudget({ limit: 99_900, offset: 100, expectedTotalRows: 1, loadedRowCount: 100 })).toBe(99_900);
+    expect(tableDataPreviewRowBudget({ limit: 99_900, offset: 100, expectedTotalRows: Number.NaN, loadedRowCount: 100 })).toBe(99_900);
+    expect(tableDataPreviewRowBudget({ limit: 99_900, offset: 506, expectedTotalRows: 506, loadedRowCount: 506 })).toBe(99_900);
   });
 
   it("selects the visible rows plus a bounded viewport buffer", () => {

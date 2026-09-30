@@ -6,7 +6,7 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
-import { tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
+import { tableDataLargeValuePreviewOptions, tableDataPreviewRowBudget } from "@/lib/dataGrid/dataGridLargeValues";
 import { elasticsearchCursorPageJumpRequestCount } from "@/lib/dataGrid/dataGridPagination";
 import { editablePrimaryKeys, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
@@ -23,6 +23,7 @@ import type { DataGridReloadIntent } from "@/lib/dataGrid/dataGridToolbar";
 import { continuousQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
 import { queryResultBaseSql, queryResultExecutionSql } from "@/lib/tabs/tabPresentation";
 import { sqlExecutionTargetCapabilities } from "@/lib/database/sqlExecutionTargetCapabilities";
+import { usesAgentCursorForTableData } from "@/lib/database/databaseDriverManifest";
 
 const DATA_TAB_METADATA_TTL_MS = TABLE_METADATA_CACHE_TTL_MS;
 
@@ -107,7 +108,8 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     return typeof limit === "number" && limit > 0 ? { limit, offset: 0 } : undefined;
   }
 
-  function buildTableSql(tab: QueryTab, options: { orderBy?: string; limit?: number; offset?: number; whereInput?: string } = {}): Promise<string> {
+  function buildTableSql(tab: QueryTab, options: { orderBy?: string; limit?: number; offset?: number; whereInput?: string; previewPageSize?: number } = {}): Promise<string> {
+    const { previewPageSize, ...sqlOptions } = options;
     const config = connectionStore.getConfig(tab.connectionId);
     const effectiveDbType = effectiveDatabaseTypeForConnection(config);
     const tableMeta = tableMetaForDataTab(tab);
@@ -117,10 +119,13 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     // 结果（可能是失败结果的 ["Error"]），进入 SQL 会生成非法投影；
     // 真实列缺失时省略 columns 让 builder 生成 SELECT *
     const realColumns = tab.tableMeta?.columns.length ? tab.tableMeta.columns : undefined;
-    const limit = options.limit ?? tableDataPageLimit(tab);
+    const limit = sqlOptions.limit ?? tableDataPageLimit(tab);
+    // The preview budget is a per-fetch byte budget, so it has to be spread over
+    // the rows this fetch returns rather than over the rows it asks for.
     return buildTableSelectSql({
       databaseType: effectiveDbType,
       driverProfile: config?.driver_profile,
+      serverVersion: config?.database_info?.productVersion,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(tab.connectionId),
       database: tableMeta?.database,
       schema: tableMeta?.schema,
@@ -129,12 +134,12 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       catalog: tableMeta?.catalog,
       columns: realColumns?.map((column) => column.name),
       primaryKeys,
-      ...tableDataLargeValuePreviewOptions(effectiveDbType, realColumns ?? [], primaryKeys, limit),
+      ...tableDataLargeValuePreviewOptions(effectiveDbType, realColumns ?? [], primaryKeys, previewPageSize ?? limit),
       includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
       includeRowId: useRowId,
       limit,
       injectDefaultTimeSeriesWhere: true,
-      ...options,
+      ...sqlOptions,
     });
   }
 
@@ -597,13 +602,23 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
 
     if (!tableMetaForDataTab(tab)) return;
     tab.whereInput = whereInput ?? "";
-    const sql = await buildTableSql(tab, { limit, offset, whereInput, orderBy: orderBy ?? tab.orderByInput });
+    const sql = await buildTableSql(tab, {
+      limit,
+      offset,
+      whereInput,
+      orderBy: orderBy ?? tab.orderByInput,
+      previewPageSize: tableDataPreviewRowBudget({
+        limit,
+        offset,
+        expectedTotalRows: tab.resultTotalRowCount,
+        loadedRowCount: tab.result?.rows.length ?? 0,
+      }),
+    });
     queryStore.updateSql(tab.id, sql);
     const expectedNextOffset = appendResult ? tab.result?.rows.length : (tab.resultPageOffset ?? 0) + (tab.resultPageLimit ?? limit);
     const continuesResultSession = offset === expectedNextOffset && limit === tab.resultPageLimit;
     const connection = useConnectionStore().getConfig(tab.connectionId);
-    const isSqlServerLegacy = connection?.db_type === "sqlserver" && connection.driver_profile?.trim().toLowerCase() === "sqlserver-legacy";
-    const sessionId = isSqlServerLegacy && tab.result?.has_more && tab.result.session_id && continuesResultSession ? tab.result.session_id : undefined;
+    const sessionId = usesAgentCursorForTableData(connection?.db_type, connection?.driver_profile) && tab.result?.has_more && tab.result.session_id && continuesResultSession ? tab.result.session_id : undefined;
     await queryStore.executeTabSql(tab.id, sql, {
       pagination: { offset, limit, sessionId, clientSessionId: sessionId ? tab.resultClientSessionId : undefined },
       ...appendOptions,

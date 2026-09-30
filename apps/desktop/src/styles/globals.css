@@ -1914,6 +1914,25 @@ html.dbx-legacy-webview [data-slot="dialog-content"][class*="max-w-[min(1080px"]
 html.dbx-legacy-webview [data-slot="dialog-content"][class*="max-w-[1800px]"] {
   max-width: 1800px !important;
 }
+
+/* The schema diff dialog sizes itself through inline width/height styles, which
+ * the max-w-sm !important cap above outranks in legacy WebViews — the dialog then
+ * renders at its min-w floor and the maximize toggle collapses to 24rem wide.
+ * Pin both states explicitly; these rules must stay after the max-w-* caps
+ * because they share specificity and win by source order. */
+html.dbx-legacy-webview [data-slot="dialog-content"].dbx-schema-diff-dialog {
+  max-width: calc(100vw - 2rem) !important;
+  max-height: calc(var(--dbx-viewport-height) - 2rem) !important;
+}
+
+html.dbx-legacy-webview [data-slot="dialog-content"].dbx-schema-diff-dialog.dbx-dialog-maximized {
+  width: calc(100vw - 2rem) !important;
+  height: calc(var(--dbx-viewport-height) - 2rem) !important;
+  max-width: none !important;
+  max-height: none !important;
+  border-radius: 0 !important;
+}
+
 html.dbx-legacy-webview [data-slot="dialog-content"].dbx-form-dialog {
   display: flex !important;
   flex-direction: column !important;

@@ -90,6 +90,7 @@ import { mysqlCleartextPasswordAuthEnabled, setMysqlCleartextPasswordAuthEnabled
 import { applyDamengSslUrlParams, damengSslFormConfig } from "@/lib/database/damengSslOptions";
 import { DAMENG_BUILTIN_DRIVER_PROFILE, DAMENG_CUSTOM_DRIVER_PROFILE, DAMENG_DEFAULT_JDBC_DRIVER_CLASS, damengCustomJdbcUrl, damengDriverModeForConfig, defaultDamengJdbcUrl, type DamengDriverMode } from "@/lib/database/damengDriverOptions";
 import { doltSystemTablesVisible, isDoltDriverProfile, setDoltSystemTablesVisible } from "@/lib/database/doltProfile";
+import { SUNDB_DEFAULT_JDBC_DRIVER_CLASS, sundbJdbcDriverClass } from "@/lib/database/sundbDriverOptions";
 import { DamengJvmSystemPropertyError, damengJvmSystemPropertiesText, parseDamengJvmSystemProperties } from "@/lib/database/damengJvmOptions";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { configuredDatabaseProductName, connectionConfigFingerprint, databaseInfoCopyText, databaseInfoRows, normalizeDatabaseConnectionInfo, type DatabaseInfoField } from "@/lib/connection/connectionDatabaseInfo";
@@ -103,7 +104,7 @@ import { consulAgentAddressesMatch } from "@/lib/consul/agentTarget";
 import { appendConnectionErrorHints, isJdbcMissingRuntimeDependencyError } from "@/lib/connection/connectionErrorHints";
 import { buildCassandraExternalConfig, cassandraTlsConfigFromExternalConfig, type CassandraTlsConfig } from "@/lib/connection/cassandraTlsOptions";
 import { savedMysqlTlsFormFields, supportsMysqlTlsOptions as mysqlTlsOptionsSupported, supportsMysqlTlsTab } from "@/lib/connection/mysqlTlsCapabilities";
-import { preventDialogDocumentSelectAll } from "@/lib/connection/dialogTextSelection";
+import { copyDialogPasswordFieldValue, preventDialogDocumentSelectAll } from "@/lib/connection/dialogTextSelection";
 import { postgresLegacyTlsEnabled, postgresTlsModeForForm, setPostgresLegacyTlsEnabled } from "@/lib/connection/postgresTlsMode";
 import { buildMqKafkaConnectionExtra, mqKafkaConnectionTarget, resolveMqKafkaConnectionSource, type MqKafkaConnectionSource } from "@/lib/connection/mqKafkaConnection";
 import { assertCompleteDatabaseCategories, databaseSelectionForCategory } from "@/lib/connection/databaseCategoryOptions";
@@ -147,10 +148,11 @@ import {
   Trash2,
 } from "@lucide/vue";
 import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleObjectFiltersNeedReset } from "@/lib/connection/connectionVisibleDatabases";
-import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, filterSchemaNamesForVisiblePicker, normalizeVisibleDatabaseSelection, buildDraftVisibleSchemasConnectionId, normalizeVisibleSchemaSelection } from "@/lib/database/visibleDatabases";
+import { resolveVisibleDatabaseSaveAction } from "@/components/sidebar/visibleDatabasesDialogState";
+import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, filterSchemaNamesForVisiblePicker, buildDraftVisibleSchemasConnectionId, normalizeVisibleSchemaSelection } from "@/lib/database/visibleDatabases";
 import { isSchemaAware, isSingleDatabase, supportsDataDictionary } from "@/lib/database/databaseFeatureSupport";
 import { normalizeConnectionScope, normalizeConnectionTimeouts } from "@/lib/connection/connectionSubmitNormalization";
-import { databaseConnectionFormKind } from "@/lib/database/databaseDriverManifest";
+import { databaseConnectionFormKind, databaseManifestEntry } from "@/lib/database/databaseDriverManifest";
 import VisibleSchemasDialog from "@/components/sidebar/VisibleSchemasDialog.vue";
 import CloudflareD1ConnectionFields from "@/components/connection/CloudflareD1ConnectionFields.vue";
 import SpannerConnectionFields from "@/components/connection/SpannerConnectionFields.vue";
@@ -1183,6 +1185,8 @@ const driverProfiles: Record<string, ConnectionProfileDefinition> = {
   ...CONNECTION_PROFILES,
   ...jdbcProductDriverProfiles(),
 };
+const nebulaDriverProfiles = databaseManifestEntry("nebula")?.driverProfiles ?? [];
+const nebulaDefaultDriverProfile = nebulaDriverProfiles[0]?.profile ?? "nebula";
 
 function profileForConfig(config: ConnectionConfig) {
   if (config.db_type === "plugin" && config.plugin_id && config.plugin_connection_provider) {
@@ -2803,7 +2807,7 @@ function applyProfile(val: string, preserveConnectionFields = false) {
   const previousDatabaseType = form.value.db_type;
   selectedType.value = val;
   form.value.db_type = profile.type;
-  form.value.driver_profile = val;
+  form.value.driver_profile = val === "nebula" ? nebulaDefaultDriverProfile : val;
   form.value.driver_label = isCustomCompatibleProfile() ? customDriverName.value.trim() || profile.label : profile.label;
   const preserveMeilisearchConfig = preserveConnectionFields && previousDatabaseType === "meilisearch" && profile.type === "meilisearch";
   if (profile.type !== "sqlserver" && !preserveMeilisearchConfig) {
@@ -2885,6 +2889,18 @@ function applyProfile(val: string, preserveConnectionFields = false) {
       jdbcDriverPathsInput.value = "";
       jdbcManualClasspathOpen.value = true;
     }
+    if (profile.type === "sundb") {
+      // The SunDB Agent bundles the vendor JDBC driver, so the connection works
+      // without a JAR; the classpath field is only an override for anyone who
+      // wants the Agent to load a newer vendor JAR in isolation.
+      form.value.connection_string = undefined;
+      form.value.jdbc_driver_class = SUNDB_DEFAULT_JDBC_DRIVER_CLASS;
+      form.value.jdbc_driver_paths = [];
+      jdbcDriverPathsInput.value = "";
+    }
+    if (profile.type === "transwarp") {
+      form.value.connection_string = undefined;
+    }
     if (profile.type === "spanner") {
       // Google Cloud endpoints carry no host; the local emulator is opted into
       // by typing host `localhost` and port 9010 explicitly.
@@ -2940,7 +2956,7 @@ function applyProfile(val: string, preserveConnectionFields = false) {
     if (profile.type === "salesforce") {
       resetSalesforceOAuthFields(form.value.external_config, form.value.password);
     }
-    resetHiveKerberosFields(profile.type === "hive" || profile.type === "argo" || profile.type === "kyuubi" || profile.type === "impala" ? form.value : undefined);
+    resetHiveKerberosFields(profile.type === "hive" || profile.type === "argo" || profile.type === "transwarp" || profile.type === "kyuubi" || profile.type === "impala" ? form.value : undefined);
   }
   if (profile.type === "meilisearch") {
     syncMeilisearchHostInput(form.value);
@@ -3091,7 +3107,7 @@ watch(
         sysdba: config.sysdba || isOracleSysUser(config),
         oracle_connection_type: config.oracle_connection_type || "service_name",
         connection_string: config.connection_string,
-        jdbc_driver_class: config.jdbc_driver_class,
+        jdbc_driver_class: config.db_type === "sundb" ? sundbJdbcDriverClass(config) : config.jdbc_driver_class,
         jdbc_driver_paths: config.jdbc_driver_paths || [],
         redis_connection_mode: config.redis_connection_mode || "standalone",
         redis_sentinel_master: config.redis_sentinel_master || "",
@@ -3174,7 +3190,7 @@ watch(
         resetSalesforceOAuthFields(undefined, undefined);
       }
       resetElasticsearchProxyFields(config.db_type === "elasticsearch" ? config.external_config : undefined);
-      resetHiveKerberosFields(config.db_type === "hive" || config.db_type === "argo" || config.db_type === "kyuubi" || config.db_type === "impala" ? config : undefined);
+      resetHiveKerberosFields(config.db_type === "hive" || config.db_type === "argo" || config.db_type === "transwarp" || config.db_type === "kyuubi" || config.db_type === "impala" ? config : undefined);
       resetDamengJvmOptions(config.db_type === "dameng" ? config : undefined);
       h2ConnectionMode.value = h2ConnectionModeForConfig(config);
       customColorInput.value = config.color || "";
@@ -3430,6 +3446,12 @@ function switchEtcdApiVersion(profile: "etcd" | "etcd-v2") {
   resetTestState();
 }
 
+function switchNebulaDriverProfile(profile: unknown) {
+  if (typeof profile !== "string" || !nebulaDriverProfiles.some((entry) => entry.profile === profile)) return;
+  form.value.driver_profile = profile;
+  resetTestState();
+}
+
 function switchH2DriverProfile(profile: "h2" | "h2-v1" | "h2-v2" | "h2-v3" | "h2-custom") {
   form.value.driver_profile = profile;
   if (profile === "h2-custom") {
@@ -3585,7 +3607,7 @@ function dbCategoryForOption(value: string): DbCategoryKey | undefined {
 
 const selectedDbIcon = computed(() => (isPluginConnection.value ? "plugin" : iconTypeMap[selectedType.value] || selectedProfile().icon || selectedType.value));
 function supportsNativeAgentJdbcDriverConfigType(dbType: DatabaseType): boolean {
-  return dbType === "prestosql" || dbType === "bigquery" || dbType === "dameng";
+  return dbType === "prestosql" || dbType === "bigquery" || dbType === "dameng" || dbType === "sundb";
 }
 
 const jdbcBackedDatabaseTypes = new Set<DatabaseType>(["jdbc", "prestosql", "bigquery"]);
@@ -3601,6 +3623,11 @@ const jdbcxHighPrivilegeExtensionsAllowed = computed({
   },
 });
 const supportsNativeAgentJdbcDriverConfig = computed(() => supportsNativeAgentJdbcDriverConfigType(form.value.db_type) && (form.value.db_type !== "dameng" || isDamengCustomDriver.value));
+const nativeAgentJdbcDriverHint = computed(() => {
+  if (form.value.db_type === "dameng") return t("connection.damengCustomDriverHint");
+  if (form.value.db_type === "sundb") return t("connection.sundbCustomDriverHint");
+  return t("connection.jdbcPluginHint");
+});
 const isH2FileMode = computed(() => form.value.db_type === "h2" && h2ConnectionMode.value === "file");
 const isH2CustomDriver = computed(() => form.value.db_type === "h2" && form.value.driver_profile === "h2-custom");
 const usesLocalFilePathInput = computed(() => isLocalFileTypeDb(form.value.db_type) && (form.value.db_type !== "h2" || isH2FileMode.value));
@@ -3646,11 +3673,12 @@ const tlsCapableDatabaseTypes = new Set<DatabaseType>([
   "influxdb",
   "victoriametrics",
   "cassandra",
+  "nebula",
   "zookeeper",
 ]);
 const supportsTlsToggle = computed(() => tlsCapableDatabaseTypes.has(form.value.db_type) || supportsMysqlTlsTab(form.value.db_type, selectedType.value));
 const supportsCaCertificatePath = computed(() => form.value.db_type === "clickhouse" || form.value.db_type === "victoriametrics");
-const supportsGenericUrlParams = computed(() => form.value.db_type !== "manticoresearch" && form.value.db_type !== "hbase");
+const supportsGenericUrlParams = computed(() => form.value.db_type !== "manticoresearch" && form.value.db_type !== "hbase" && form.value.db_type !== "nebula");
 const showGenericUrlParamsHint = computed(() => form.value.db_type === "mysql" || form.value.db_type === "doris" || form.value.db_type === "starrocks");
 const bareMysqlProfiles = new Set(["doris", "selectdb", "oceanbase"]);
 const supportsMysqlTlsOptions = computed(() => mysqlTlsOptionsSupported(form.value.db_type, selectedType.value));
@@ -4624,6 +4652,9 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
   } else {
     config = { ...formValueForSubmit(), id } as LegacyConnectionConfig;
   }
+  if (config.db_type === "nebula" && (!config.driver_profile || config.driver_profile === "nebula")) {
+    config.driver_profile = nebulaDefaultDriverProfile;
+  }
   config.database_info = undefined;
   config.database = normalizeStoredConnectionDatabase(config.db_type, config.database);
   config.note = config.note?.trim() || undefined;
@@ -4696,7 +4727,7 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.ssl = !!config.ssl || damengSsl.enabled;
     config.url_params = applyDamengSslUrlParams(config.url_params, config.ssl, damengSsl.sslFilesPath, damengSsl.sslKeystorePassword, damengSsl.sslProtocol);
   }
-  if (config.db_type === "hive" || config.db_type === "argo" || config.db_type === "kyuubi" || config.db_type === "impala") {
+  if (config.db_type === "hive" || config.db_type === "argo" || config.db_type === "transwarp" || config.db_type === "kyuubi" || config.db_type === "impala") {
     if (hiveAuthMode.value === "kerberos" && !hivePrincipal.value.trim()) {
       throw new Error(t("connection.hiveKerberosPrincipalRequired"));
     }
@@ -5057,6 +5088,13 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
       config.jdbc_driver_paths = [];
     }
   }
+  if (config.db_type === "sundb") {
+    // The SunDB Agent bundles the vendor driver; an empty classpath means the
+    // Agent resolves the driver class on its own classloader. A non-empty
+    // classpath still overrides it with a user-supplied JAR.
+    config.jdbc_driver_class = sundbJdbcDriverClass(config);
+    config.jdbc_driver_paths = parsedJdbcDriverPaths();
+  }
   if (jdbcBackedDatabaseTypes.has(config.db_type) || gaussdbConnectionMode(config) === "m-jdbc") {
     if (config.db_type === "jdbc") {
       if (config.driver_profile === "dremio") {
@@ -5090,6 +5128,10 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.jdbc_driver_paths = parsedJdbcDriverPaths();
   } else if (config.db_type === "gaussdb") {
     config.connection_string = undefined;
+    config.jdbc_driver_class = undefined;
+    config.jdbc_driver_paths = [];
+  }
+  if (config.db_type === "transwarp") {
     config.jdbc_driver_class = undefined;
     config.jdbc_driver_paths = [];
   }
@@ -5780,7 +5822,20 @@ function saveVisibleDatabaseSelection() {
       [key]: normalizeVisibleSchemaSelection([...visibleDatabaseSelection.value], visibleDatabaseNames.value),
     };
   } else {
-    form.value.visible_databases = normalizeVisibleDatabaseSelection([...visibleDatabaseSelection.value], visibleDatabaseNames.value);
+    // "全选"等价于不筛选：存成当时的库名快照会让之后新建的库永远看不到。
+    const action = resolveVisibleDatabaseSaveAction({
+      selection: visibleDatabaseSelection.value,
+      allNames: visibleDatabaseNames.value,
+      defaultVisibleNames: defaultListedVisibleDatabaseNames.value,
+      configured: form.value.visible_databases,
+      configuredPatterns: form.value.visible_database_patterns,
+      patterns: form.value.visible_database_patterns ?? [],
+    });
+    if (action.type === "clear") {
+      form.value.visible_databases = undefined;
+    } else if (action.type === "set") {
+      form.value.visible_databases = action.databaseNames;
+    }
   }
   showVisibleDatabasesDialog.value = false;
 }
@@ -6825,7 +6880,16 @@ function openExternalUrl(url: string) {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent :style="dialogContentStyle" class="connection-dialog-content" :class="connectionDialogContentClass" :data-wide="shouldUseWideConnectionDialog ? 'true' : undefined" @interact-outside.prevent @escape-key-down="handleDialogEscape" @keydown="preventDialogDocumentSelectAll">
+    <DialogContent
+      :style="dialogContentStyle"
+      class="connection-dialog-content"
+      :class="connectionDialogContentClass"
+      :data-wide="shouldUseWideConnectionDialog ? 'true' : undefined"
+      @interact-outside.prevent
+      @escape-key-down="handleDialogEscape"
+      @keydown="preventDialogDocumentSelectAll"
+      @copy="copyDialogPasswordFieldValue"
+    >
       <DialogHeader class="cursor-move select-none" @pointerdown="onDialogHeaderPointerDown" @pointermove="onDialogHeaderPointerMove" @pointerup="onDialogHeaderPointerEnd" @pointercancel="onDialogHeaderPointerEnd">
         <DialogTitle>{{ editingId ? t("connection.editTitle") : t("connection.title") }}</DialogTitle>
       </DialogHeader>
@@ -6999,6 +7063,20 @@ function openExternalUrl(url: string) {
                     <span class="min-w-0 flex-1 truncate text-sm text-left">{{ selectedProfile().label }}</span>
                     <Pencil class="h-3 w-3 text-muted-foreground" />
                   </button>
+                </div>
+
+                <div v-if="form.db_type === 'nebula'" class="grid grid-cols-4 items-center gap-4">
+                  <Label :class="connectionLabelClass">{{ t("connection.version") }}</Label>
+                  <div class="col-span-3">
+                    <Select :model-value="form.driver_profile === 'nebula' ? nebulaDefaultDriverProfile : form.driver_profile" @update:model-value="switchNebulaDriverProfile">
+                      <SelectTrigger class="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem v-for="profile in nebulaDriverProfiles" :key="profile.profile" :value="profile.profile">{{ profile.label }}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
                 </div>
 
                 <!-- OceanBase mode toggle -->
@@ -8880,7 +8958,7 @@ function openExternalUrl(url: string) {
                       <p class="col-span-3 text-xs text-muted-foreground">{{ t("connection.oracleTnsPathHint") }}</p>
                     </div>
 
-                    <template v-if="form.db_type === 'hive' || form.db_type === 'kyuubi' || form.db_type === 'impala'">
+                    <template v-if="form.db_type === 'hive' || form.db_type === 'transwarp' || form.db_type === 'kyuubi' || form.db_type === 'impala'">
                       <div class="grid grid-cols-4 items-center gap-4">
                         <Label :class="connectionLabelClass">{{ t("connection.hiveAuthMode") }}</Label>
                         <div class="col-span-3 grid h-8 grid-cols-2 overflow-hidden rounded-md border border-input bg-muted/30 p-0.5">
@@ -9023,7 +9101,9 @@ function openExternalUrl(url: string) {
                                             ? 'catalog=paimon_catalog'
                                             : form.db_type === 'cassandra'
                                               ? 'localdatacenter=dc1'
-                                              : 'sslmode=prefer'
+                                              : form.db_type === 'transwarp'
+                                                ? 'fetchSize=500;auth=noSasl'
+                                                : 'sslmode=prefer'
                           "
                         />
                         <p v-if="showGenericUrlParamsHint" class="text-xs leading-5 text-muted-foreground">
@@ -9097,7 +9177,7 @@ function openExternalUrl(url: string) {
                         <span />
                         <div class="col-span-3 space-y-2">
                           <p class="text-xs text-muted-foreground">
-                            {{ form.db_type === "dameng" ? t("connection.damengCustomDriverHint") : t("connection.jdbcPluginHint") }}
+                            {{ nativeAgentJdbcDriverHint }}
                           </p>
                           <div class="flex flex-wrap gap-2">
                             <Button type="button" variant="outline" size="sm" @click="emit('openDriverStore', { target: 'tab', tab: 'jdbc' })">
@@ -9290,7 +9370,7 @@ function openExternalUrl(url: string) {
                   </label>
                 </div>
 
-                <template v-if="form.db_type === 'etcd' || form.db_type === 'consul' || form.db_type === 'zookeeper' || form.db_type === 'elasticsearch' || form.db_type === 'easysearch'">
+                <template v-if="form.db_type === 'etcd' || form.db_type === 'consul' || form.db_type === 'zookeeper' || form.db_type === 'elasticsearch' || form.db_type === 'easysearch' || form.db_type === 'nebula'">
                   <div class="grid grid-cols-4 items-start gap-4">
                     <Label :class="connectionLabelSmallPaddedClass">
                       <span class="inline-flex items-center justify-end gap-1">
@@ -9343,7 +9423,7 @@ function openExternalUrl(url: string) {
                           <TooltipContent>{{ t("connection.etcdClientKeyBrowse") }}</TooltipContent>
                         </Tooltip>
                       </div>
-                      <p class="text-[11px] leading-4 text-muted-foreground">
+                      <p v-if="form.db_type !== 'nebula'" class="text-[11px] leading-4 text-muted-foreground">
                         {{ t("connection.etcdClientCertHint") }}
                       </p>
                     </div>

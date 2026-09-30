@@ -12,6 +12,20 @@ describe("resolveSqlVariableSyntaxToggles", () => {
     expect(resolveSqlVariableSyntaxToggles({ mysql: { shell: false } }, "postgres")).toEqual(DEFAULT_SQL_VARIABLE_SYNTAX_TOGGLES);
   });
 
+  it("disables SQL-style named parameters for Neo4j patterns", () => {
+    const toggles = resolveSqlVariableSyntaxToggles(undefined, "neo4j");
+    expect(toggles).toEqual({ ...DEFAULT_SQL_VARIABLE_SYNTAX_TOGGLES, named: false });
+    expect(enabledSqlParameterSyntaxes(toggles)).not.toContain("named");
+    expect(resolveSqlVariableSyntaxToggles({ neo4j: { shell: false } }, "neo4j")).toEqual({ ...toggles, shell: false });
+  });
+
+  it("disables SQL named placeholders for NebulaGraph", () => {
+    const toggles = resolveSqlVariableSyntaxToggles(undefined, "nebula");
+    expect(toggles).toEqual({ ...DEFAULT_SQL_VARIABLE_SYNTAX_TOGGLES, named: false });
+    expect(enabledSqlParameterSyntaxes(toggles)).not.toContain("named");
+    expect(resolveSqlVariableSyntaxToggles(undefined, "mysql").named).toBe(true);
+  });
+
   it("enables every syntax when the database type is unknown", () => {
     expect(resolveSqlVariableSyntaxToggles({ mysql: { shell: false } }, undefined)).toEqual(DEFAULT_SQL_VARIABLE_SYNTAX_TOGGLES);
   });

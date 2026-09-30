@@ -20,7 +20,7 @@ import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { connectionIsEffectivelyReadOnly, ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
 import { supportsSqlFileExecution, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
 import { formatError, isManualTransactionSessionExpired } from "@/lib/backend/errorUtils";
-import { fetchSqlFileTargetOptions } from "@/composables/useDatabaseOptions";
+import { fetchSqlFileTargetOptions, namespaceOptionsAreSchemas } from "@/composables/useDatabaseOptions";
 import { requiresSqlFileTargetDatabaseSelection, supportsConnectionLevelDatabaseBootstrap } from "@/lib/connection/connectionLevelDatabaseBootstrap";
 import { beginManualTransaction, commitManualTransaction, rollbackManualTransaction, cancelSqlFileExecution, executeSqlFiles, inspectSqlFileTables, listenSqlFileProgress, previewSqlFile, type SqlFilePreview, type SqlFileProgress, type SqlFileStatus, type SqlFileTable } from "@/lib/backend/api";
 import { activeTabExternalSqlFileTarget, resolveExternalSqlFileTargetForActiveTab, type ExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
@@ -41,6 +41,7 @@ const open = defineModel<boolean>("open", { default: false });
 const props = defineProps<{
   prefillConnectionId?: string;
   prefillDatabase?: string;
+  prefillSchema?: string;
   prefillFilePath?: string;
   prefillPreview?: SqlFilePreview;
 }>();
@@ -117,7 +118,7 @@ function tooltipText(item: SqlFilePreview): string {
 const selectingFile = ref(false);
 const loadingPreview = ref(false);
 const connectionId = ref("");
-const database = ref("");
+const targetNamespace = ref("");
 const databaseOptions = ref<string[]>([]);
 const loadingDatabases = ref(false);
 const preferredTarget = ref<ExternalSqlFileTarget>();
@@ -165,6 +166,8 @@ interface PerFileSummary {
   failureCount: number;
   affectedRows: number;
 }
+type SqlFileExecutionTarget = { database: string; schema?: string };
+
 const perFileResults = ref<PerFileSummary[]>([]);
 const currentFileIndex = ref(-1);
 const currentFileName = ref("");
@@ -224,7 +227,7 @@ async function finishTransaction(commit: boolean) {
       terminalStatus.value = outcomeUnknown ? "error" : committed ? "done" : "cancelled";
       if (progress.value) updateSqlFileTask(executionId.value, { ...progress.value, status: terminalStatus.value });
     }
-    await refreshTargetAfterImport();
+    await refreshTargetAfterImport(sqlFileExecutionTarget());
     return true;
   } catch (error: any) {
     toast(error?.message || String(error), 5000);
@@ -314,7 +317,7 @@ const canStart = computed(() => {
     hasDatabaseContext ||= item.establishesDatabaseContext === true;
     return true;
   });
-  return !!database.value.trim() || !requiresSqlFileTargetDatabaseSelection(connection, canExecuteWithoutSelectedDatabase);
+  return !!targetNamespace.value.trim() || !requiresSqlFileTargetDatabaseSelection(connection, canExecuteWithoutSelectedDatabase);
 });
 
 const statusTone = computed(() => {
@@ -383,27 +386,62 @@ function statusLabel(status: SqlFileStatus | "idle") {
 
 function resolveInitialTarget(): ExternalSqlFileTarget {
   if (props.prefillConnectionId && sqlConnections.value.some((c) => c.id === props.prefillConnectionId)) {
-    return { connectionId: props.prefillConnectionId, database: props.prefillDatabase ?? "" };
+    return {
+      connectionId: props.prefillConnectionId,
+      database: props.prefillDatabase ?? "",
+      schema: props.prefillSchema,
+    };
   }
   if (props.prefillFilePath) return { connectionId: "", database: "" };
   return activeTabExternalSqlFileTarget(queryStore.tabs, queryStore.activeTabId, (connectionId) => store.getConfig(connectionId));
 }
 
-function applyTarget(target: ExternalSqlFileTarget) {
-  preferredTarget.value = target;
-  connectionId.value = target.connectionId;
-  database.value = target.database;
+function normalizeTargetForConnection(target: ExternalSqlFileTarget): ExternalSqlFileTarget {
+  const connection = store.getConfig(target.connectionId);
+  if (!namespaceOptionsAreSchemas(connection)) return target;
+
+  const configuredDatabase = connection?.database?.trim() || "";
+  const requestedDatabase = target.database.trim();
+  const explicitSchema = target.schema?.trim() || undefined;
+  const legacySchema = explicitSchema || (requestedDatabase && requestedDatabase !== configuredDatabase ? requestedDatabase : undefined);
+  return {
+    ...target,
+    database: configuredDatabase,
+    ...(legacySchema ? { schema: legacySchema } : { schema: undefined }),
+  };
 }
 
-function chooseDatabase(names: string[], id: string) {
-  const configDatabase = store.getConfig(id)?.database ?? "";
-  const preferredDatabase = preferredTarget.value?.connectionId === id ? preferredTarget.value.database : props.prefillDatabase;
+function applyTarget(target: ExternalSqlFileTarget) {
+  const normalizedTarget = normalizeTargetForConnection(target);
+  preferredTarget.value = normalizedTarget;
+  connectionId.value = normalizedTarget.connectionId;
+  targetNamespace.value = namespaceOptionsAreSchemas(store.getConfig(normalizedTarget.connectionId)) ? (normalizedTarget.schema ?? "") : normalizedTarget.database;
+}
+
+function chooseNamespace(names: string[], id: string) {
+  const connection = store.getConfig(id);
+  const optionsAreSchemas = namespaceOptionsAreSchemas(connection);
+  const preferred = preferredTarget.value?.connectionId === id ? preferredTarget.value : undefined;
+  const preferredNamespace = preferred ? (optionsAreSchemas ? preferred.schema : preferred.database) : optionsAreSchemas ? (id === props.prefillConnectionId ? props.prefillSchema : undefined) : props.prefillDatabase;
+  const configuredNamespace = optionsAreSchemas ? (connection?.default_schema ?? "") : (connection?.database ?? "");
   if (names.length > 0) {
-    if (preferredDatabase && names.includes(preferredDatabase)) return preferredDatabase;
-    if (configDatabase && names.includes(configDatabase)) return configDatabase;
+    if (preferredNamespace && names.includes(preferredNamespace)) return preferredNamespace;
+    if (configuredNamespace && names.includes(configuredNamespace)) return configuredNamespace;
     return names.length === 1 ? names[0] : "";
   }
-  return preferredDatabase ?? configDatabase;
+  return preferredNamespace ?? configuredNamespace;
+}
+
+function sqlFileExecutionTarget(): SqlFileExecutionTarget {
+  const namespace = targetNamespace.value.trim();
+  const connection = store.getConfig(connectionId.value);
+  if (namespaceOptionsAreSchemas(connection)) {
+    return {
+      database: connection?.database?.trim() || "",
+      ...(namespace ? { schema: namespace } : {}),
+    };
+  }
+  return { database: namespace };
 }
 
 function resetExecution() {
@@ -444,7 +482,7 @@ async function loadDatabasesForConnection(id: string) {
   databaseOptions.value = [];
 
   if (!sqlConnections.value.some((c) => c.id === id)) {
-    database.value = "";
+    targetNamespace.value = "";
     return;
   }
 
@@ -456,11 +494,11 @@ async function loadDatabasesForConnection(id: string) {
     const names = await fetchSqlFileTargetOptions(id, connection);
     if (token !== databaseLoadToken) return;
     databaseOptions.value = names;
-    database.value = chooseDatabase(names, id);
+    targetNamespace.value = chooseNamespace(names, id);
   } catch {
     if (token !== databaseLoadToken) return;
     databaseOptions.value = [];
-    database.value = chooseDatabase([], id);
+    targetNamespace.value = chooseNamespace([], id);
   } finally {
     if (token === databaseLoadToken) {
       loadingDatabases.value = false;
@@ -566,11 +604,15 @@ function isTerminalProgress(status: SqlFileStatus): boolean {
   return status === "done" || status === "error" || status === "cancelled";
 }
 
-async function refreshTargetAfterImport() {
+async function refreshTargetAfterImport(target: SqlFileExecutionTarget) {
   if (refreshedTarget.value) return;
   refreshedTarget.value = true;
   try {
-    await store.refreshDatabaseTreeNode(connectionId.value, database.value.trim());
+    if (target.schema) {
+      await store.refreshObjectListTreeNode(connectionId.value, target.database, target.schema);
+    } else {
+      await store.refreshDatabaseTreeNode(connectionId.value, target.database);
+    }
   } catch (e: any) {
     toast(e?.message || String(e), 5000);
   }
@@ -578,13 +620,14 @@ async function refreshTargetAfterImport() {
 
 async function startExecution() {
   if (!canStart.value || previews.value.length === 0) return;
+  const target = sqlFileExecutionTarget();
   // Await the unlock guard only when it can actually prompt/block (effectively
   // read-only); writable or already-unlocked connections stay synchronous so
   // the running state flips in the same tick as the click.
   if (connectionIsEffectivelyReadOnly(selectedConnection.value)) {
     if (!(await ensureReadOnlyWriteAccess({ connection: selectedConnection.value, source: t("readOnlyUnlock.sourceSqlFile"), treatAsMutation: true }))) return;
   }
-  const productionContext = productionContextForDatabase(selectedConnection.value, database.value);
+  const productionContext = productionContextForDatabase(selectedConnection.value, target.database);
   if (productionContext.active) {
     // File previews are truncated, so production file execution is always reviewed instead of inferring safety from a partial preview.
     const confirmed = await productionSafetyStore.requestConfirmation({
@@ -593,7 +636,7 @@ async function startExecution() {
         .join("\n\n")
         .slice(0, 20_000),
       connectionName: selectedConnection.value?.name,
-      database: database.value,
+      database: target.database,
       productionDatabases: productionContext.databases,
       source: t("production.sourceSqlFile"),
     });
@@ -625,7 +668,7 @@ async function startExecution() {
     }
 
     if (manualTransaction.value) {
-      const sessionId = await beginManualTransaction(connectionId.value, database.value.trim());
+      const sessionId = target.schema ? await beginManualTransaction(connectionId.value, target.database, target.schema) : await beginManualTransaction(connectionId.value, target.database);
       txnSessionId.value = sessionId;
       commitUncertain.value = false;
       if (disposed || cancelRequested.value) {
@@ -701,7 +744,8 @@ async function startExecution() {
         {
           executionId: batchId,
           connectionId: connectionId.value,
-          database: database.value.trim(),
+          database: target.database,
+          ...(target.schema ? { schema: target.schema } : {}),
           filePath: executionPaths[0]!,
           continueOnError: continueOnError.value,
           ...(txnSessionId.value ? { txnSessionId: txnSessionId.value } : {}),
@@ -724,7 +768,7 @@ async function startExecution() {
       unlisten();
     }
 
-    if (completedSuccessfully && !txnSessionId.value) await refreshTargetAfterImport();
+    if (completedSuccessfully && !txnSessionId.value) await refreshTargetAfterImport(target);
   } catch (e: any) {
     terminalStatus.value = cancelRequested.value ? "cancelled" : "error";
     terminalError.value = e?.message || String(e);
@@ -920,7 +964,7 @@ watch(
 
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("sqlFile.database") }}</Label>
-              <Select v-if="databaseOptions.length" v-model="database" :disabled="executionLocked || loadingDatabases">
+              <Select v-if="databaseOptions.length" v-model="targetNamespace" :disabled="executionLocked || loadingDatabases">
                 <SelectTrigger class="h-8 text-xs">
                   <SelectValue :placeholder="t('sqlFile.selectDatabase')" />
                 </SelectTrigger>
@@ -929,7 +973,7 @@ watch(
                 </SelectContent>
               </Select>
               <div v-else class="relative">
-                <Input v-model="database" class="h-8 text-xs" :disabled="executionLocked || loadingDatabases" :placeholder="t('sqlFile.databasePlaceholder')" />
+                <Input v-model="targetNamespace" class="h-8 text-xs" :disabled="executionLocked || loadingDatabases" :placeholder="t('sqlFile.databasePlaceholder')" />
                 <Loader2 v-if="loadingDatabases" class="absolute right-2 top-2 w-3.5 h-3.5 animate-spin text-muted-foreground" />
               </div>
             </div>

@@ -126,6 +126,8 @@ the same OS identity is outside this boundary; this is not multi-user isolation.
 A saved DBX connection must explicitly acknowledge disposable data. Tunnels and
 changed runtime endpoints are rejected. UI calls and MCP use the same bounded
 controller; MCP calls require the host-bound connection and retain the host's
-per-action approval rules. No third-party network APIs, public listeners,
+per-action approval rules. Standalone MCP discovery returns a static catalog without
+starting any listener; explicitly mutating lab_start/lab_stop own lifecycle. The
+saved connection read-only flag and injection opt-in are rechecked on calls. No third-party network APIs, public listeners,
 persistent tokens, OS security changes or business-application instrumentation
 are part of the MVP.

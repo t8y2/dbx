@@ -3,7 +3,7 @@
   "manifest_version": 1,
   "id": "io.xuedinge.pg-fault-lab",
   "name": "PostgreSQL Fault Lab (experimental)",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "xuedinge",
   "description": "Loopback-only PostgreSQL 17 wire fault lab with pre-execution barriers and truthful transaction outcomes. Synthetic databases only.",
   "icon": "assets/plugin.svg",

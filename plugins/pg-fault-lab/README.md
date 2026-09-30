@@ -29,7 +29,7 @@ read-only.** All data must still be synthetic and disposable.
 ## Support boundary
 
 Validated on Linux x64, PostgreSQL **17.11**, Go **1.25.0**, pgx **5.11.0**,
-GORM **1.25.12** and gorm postgres driver **1.5.11**, with prepared statements enabled.
+GORM **1.31.2**, gorm postgres driver **1.6.3**, and gorm-gen **0.3.29**, with prepared statements enabled.
 Initial compatibility testing also passed pgx 5.7.2, but the shipped sidecar pins
 5.11.0 for the current protocol decoder fixes. DBX contract: manifest v1, Host API
 1.x, sidecar protocol v1, minimum declared DBX **0.6.29**.
@@ -45,8 +45,9 @@ TLS is not terminated or passed through in this MVP. SSLRequest/GSSENCRequest
 receive `N`; TLS-required clients fail. **Do not downgrade an existing environment's
 TLS settings.** Use `sslmode=disable` only on a newly created loopback-only lab.
 
-The plugin's DBX protocol, tools and workbench are tested separately from the full
-native desktop. This is not a claim that a signed release or installed desktop
+The real standalone `dbx-mcp` process has loaded this plugin from an isolated
+development registry, discovered/called its tools, and controlled real PostgreSQL.
+The full native desktop and visual workbench installation remain unverified. This is not a claim that a signed release or installed desktop
 integration has passed. External plugin MCP tools require DBX's native plugin
 bridge; the current DBX Web/Docker backend does not expose plugin tools.
 
@@ -139,13 +140,23 @@ never exposes SQL text, bind values or result rows. “Show CLI endpoints” is 
 explicit reveal of ephemeral capabilities for controlling the same running
 instance; changing connection context clears that display.
 
-MCP contribution `external_tools: true` exposes `lab_snapshot`; injection-enabled
-connections additionally expose `lab_add_rule`, `lab_delete_rule`, `lab_resume`,
-and `lab_abort`. Mutating tools have `readOnlyHint:false` and remain subject to
-DBX's host approval/connection allowlist policy. Calls must use the host-bound
-open connection; cross-connection argument spoofing is rejected. Lifecycle and
-capability-reveal operations are not MCP tools. Standalone `dbx-pg-fault` is a
-companion CLI: DBX currently has no plugin-defined native `dbx` subcommand hook.
+MCP contribution `external_tools: true` supports two host flows. The built-in AI
+can discover tools on an already-open connection. Standalone `dbx-mcp` first
+calls `mcp/tools` without a connection, so it gets the static seven-tool catalog:
+`lab_snapshot`, `lab_add_rule`, `lab_delete_rule`, `lab_resume`, `lab_abort`,
+`lab_start`, and `lab_stop`. Discovery never starts a listener. Explicitly call
+`lab_start` on a saved lab connection before standalone inspection/injection;
+`lab_stop` closes it. Only `lab_snapshot` is read-only.
+
+Mutating tools have `readOnlyHint:false` and remain subject to DBX's host
+approval/read-only/connection allowlist policy. The plugin additionally enforces
+the saved connection's read-only flag and injection opt-in at call time. Calls
+must use the host-bound connection; unknown/cross-connection selections are
+rejected. `lab_start` rejects changed settings on an already-running instance;
+stop/restart to apply settings. Capabilities are never returned by MCP.
+
+Standalone `dbx-pg-fault` is a companion CLI: DBX currently has no plugin-defined
+native `dbx` subcommand hook.
 
 ## Verification
 
@@ -176,6 +187,44 @@ errors, unsupported SQL/pipeline closure, TLS-required rejection and SCRAM relay
 A deterministic wire fixture proves a sent COMMIT with a lost reply records
 `unknown`. Additional tests cover bounded rule matching/TTL, observer/injector
 separation, token redaction, MCP connection binding, and lifecycle cleanup.
+
+### Reproducible GORM and gorm-gen application example
+
+`backend/example/service.go` provides the same synthetic create/update order
+transaction using ordinary GORM (`PlaceOrderGORM`) and generated typed queries
+(`PlaceOrder`). Neither function imports the proxy or calls its API. The tests
+point their ordinary DB connection at the proxy and control faults out-of-band.
+
+```sh
+cd plugins/pg-fault-lab/backend
+go generate ./example
+# Model definitions and generated queries are checked in; regeneration is byte-identical.
+DBX_FAULT_LAB_TEST=1 DBX_FAULT_PG_BIN=/absolute/pg17/bin \
+  GOMAXPROCS=1 go test -race -p 1 -run TestRealGORMAndGeneratedTransactions -v ./faultproxy
+```
+
+Both variants cover normal commit, pause/resume before UPDATE, forced COMMIT
+failure without partial data, and independent concurrent transactions where one
+resumes and the other aborts. The generator uses local Go models; it never
+introspects an existing database or reads application configuration.
+
+### Real external MCP regression
+
+After building the plugin, provide actual native DBX CLI/MCP binaries:
+
+```sh
+python scripts/external_mcp.py --dbx /absolute/bin/dbx \
+  --mcp /absolute/bin/dbx-mcp --sidecar dist/dbx-pg-fault \
+  --pg-bin /absolute/pg17/bin
+```
+
+This creates a disposable DBX store and PG17 instance, loads an unpacked
+**development fixture** through the real plugin registry, and verifies discovery,
+host-bound start/stop, SQL, COMMIT abort, zero committed rows, redaction and global
+and saved read-only/injection policy. It records binary SHA-256 values. The
+current CLI's add input exposes only basic connection fields, so the harness adds
+plugin metadata directly to its newly created fixture storage. This is neither a
+production configuration recipe nor a signed-package installer test.
 
 See [VALIDATION.md](VALIDATION.md) for the actual run and remaining gaps.
 

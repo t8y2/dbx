@@ -54,6 +54,7 @@ type Endpoint struct {
 	Capability string `json:"capability"`
 }
 type Instance struct {
+	Config    faultproxy.Config
 	Server    *faultproxy.Server
 	Observe   Endpoint
 	Inject    *Endpoint
@@ -70,7 +71,7 @@ func Start(cfg faultproxy.Config) (*Instance, error) {
 	if err = s.Start(); err != nil {
 		return nil, err
 	}
-	i := &Instance{Server: s}
+	i := &Instance{Server: s, Config: cfg}
 	i.Observe, err = i.listen(false)
 	if err != nil {
 		i.Close()

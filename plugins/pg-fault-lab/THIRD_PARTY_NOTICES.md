@@ -6,8 +6,8 @@ Runtime dependencies:
 - jackc/pgx v5.11.0 (pgproto3 and internal/pgio): MIT, notice below
 - Go standard library: BSD-style Go project license
 
-Test-only modules (not linked into the sidecar executable): GORM v1.25.12 and
-gorm postgres driver v1.5.11 (MIT), pgx client helpers (MIT), pgpassfile,
+Test-only modules (not linked into the sidecar executable): GORM v1.31.2, gorm-gen v0.3.29, dbresolver v1.6.2 and
+gorm postgres driver v1.6.3 (MIT), pgx client helpers (MIT), pgpassfile,
 pgservicefile, puddle (MIT), jinzhu/inflection and jinzhu/now (MIT), golang.org/x/sync
 and golang.org/x/text (BSD-3-Clause). Versions/checksums are in backend/go.mod and
 backend/go.sum. Go module downloads retain their upstream license files.

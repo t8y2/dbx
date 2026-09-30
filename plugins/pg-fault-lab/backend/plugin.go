@@ -16,6 +16,7 @@ import (
 
 type lifecycle struct {
 	Connection struct {
+		ReadOnly  bool              `json:"read_only"`
 		ID        string            `json:"id"`
 		Host      string            `json:"host"`
 		Port      int               `json:"port"`
@@ -48,7 +49,7 @@ func (l lifecycle) config() (faultproxy.Config, error) {
 	if proxyPort == 0 {
 		proxyPort = 55433
 	}
-	return faultproxy.Config{Upstream: net.JoinHostPort(c.Host, strconv.Itoa(c.Port)), Listen: net.JoinHostPort("127.0.0.1", strconv.Itoa(proxyPort)), DisposableLab: c.Config.Disposable, AllowInjection: c.Config.Allow}, nil
+	return faultproxy.Config{Upstream: net.JoinHostPort(c.Host, strconv.Itoa(c.Port)), Listen: net.JoinHostPort("127.0.0.1", strconv.Itoa(proxyPort)), DisposableLab: c.Config.Disposable, AllowInjection: c.Config.Allow && !c.ReadOnly}, nil
 }
 
 type plugin struct {
@@ -118,6 +119,11 @@ func (p *plugin) handle(method string, raw json.RawMessage) (any, error) {
 		if json.Unmarshal(raw, &a) != nil {
 			return nil, errors.New("invalid tool discovery")
 		}
+		// External dbx-mcp discovers the schema before it has a bound connection.
+		// Discovery must never start a proxy or expose ephemeral capabilities.
+		if a.ConnectionID == "" {
+			return externalToolList(), nil
+		}
 		i := p.instances[a.ConnectionID]
 		if i == nil {
 			return nil, errors.New("open the bound lab connection first")
@@ -140,10 +146,48 @@ func (p *plugin) handle(method string, raw json.RawMessage) (any, error) {
 		if json.Unmarshal(a.Arguments, &params) != nil {
 			return nil, errors.New("invalid tool arguments")
 		}
+
 		id := a.Lifecycle.Connection.ID
+		if id == "" || params.ConnectionID != "" && params.ConnectionID != id {
+			return nil, errors.New("tool must use its host-bound connection")
+		}
+		if a.Lifecycle.Connection.ReadOnly && a.Tool != "lab_snapshot" {
+			return toolResult("saved connection is read-only", true), nil
+		}
+		if a.Tool != "lab_start" && a.Tool != "lab_stop" && a.Tool != "lab_snapshot" && !a.Lifecycle.Connection.Config.Allow {
+			return toolResult("saved connection has disabled fault injection", true), nil
+		}
 		i := p.instances[id]
-		if id == "" || i == nil || params.ConnectionID != "" && params.ConnectionID != id {
-			return nil, errors.New("tool must use its host-bound open connection")
+		if a.Tool == "lab_start" {
+			cfg, err := a.Lifecycle.config()
+			if err != nil {
+				return toolResult(err.Error(), true), nil
+			}
+			if i != nil && i.Config != cfg {
+				return toolResult("saved connection settings changed; stop and restart the lab", true), nil
+			}
+			if i == nil {
+				if len(p.instances) >= 4 {
+					return toolResult("four lab instances maximum", true), nil
+				}
+				i, err = control.Start(cfg)
+				if err != nil {
+					return toolResult(err.Error(), true), nil
+				}
+				p.instances[id] = i
+			}
+			data, _ := json.Marshal(map[string]any{"connected": true, "address": i.Server.Addr(), "allowInjection": i.Server.Snapshot().AllowInjection})
+			return toolResult(string(data), false), nil
+		}
+		if a.Tool == "lab_stop" {
+			if i != nil {
+				i.Close()
+				delete(p.instances, id)
+			}
+			return toolResult(`{"connected":false}`, false), nil
+		}
+		if i == nil {
+			return toolResult("lab is not running; call lab_start (write permission required) or connect it in DBX", true), nil
 		}
 		action := strings.TrimPrefix(a.Tool, "lab_")
 		result, err := control.Dispatch(i.Server, control.Request{Method: action, Rule: params.Rule, ID: params.ID}, i.Server.Snapshot().AllowInjection)
@@ -206,4 +250,16 @@ func toolList(inject bool) any {
 		out = append(out, map[string]any{"name": "lab_" + m, "description": fmt.Sprintf("%s in the disposable PostgreSQL lab; abort closes both connections before forwarding", m), "inputSchema": map[string]any{"type": "object", "properties": props, "required": required}, "annotations": map[string]any{"readOnlyHint": m == "snapshot", "destructiveHint": m != "snapshot", "openWorldHint": false}})
 	}
 	return map[string]any{"tools": out}
+}
+
+// Connection-less discovery includes explicitly mutating lifecycle tools. Saved
+// read-only policy and this plugin's immutable injection opt-in apply at call time.
+func externalToolList() any {
+	result := toolList(true).(map[string]any)
+	list := result["tools"].([]any)
+	for _, action := range []string{"start", "stop"} {
+		list = append(list, map[string]any{"name": "lab_" + action, "description": action + " the saved disposable loopback fault lab; changes listener lifecycle", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"connectionId": map[string]any{"type": "string", "description": "Host-bound saved lab connection"}}, "required": []string{"connectionId"}}, "annotations": map[string]any{"readOnlyHint": false, "destructiveHint": true, "openWorldHint": false}})
+	}
+	result["tools"] = list
+	return result
 }

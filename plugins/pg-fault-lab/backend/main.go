@@ -25,7 +25,7 @@ func run(args []string) error {
 	if len(args) == 0 || args[0] == "plugin" {
 		p := newPlugin()
 		defer p.close()
-		return sdk.NewServer(sdk.Metadata{ID: "io.xuedinge.pg-fault-lab", Version: "0.1.0", Capabilities: []string{"connections"}}, p).Serve()
+		return sdk.NewServer(sdk.Metadata{ID: "io.xuedinge.pg-fault-lab", Version: "0.1.1", Capabilities: []string{"connections"}}, p).Serve()
 	}
 	switch args[0] {
 	case "serve":

@@ -95,3 +95,58 @@ func TestPluginRejectsTunnels(t *testing.T) {
 		t.Fatal("tunnel runtime accepted")
 	}
 }
+
+func TestExternalMCPDiscoveryAndExplicitLifecycle(t *testing.T) {
+	p := newPlugin()
+	defer p.close()
+	result, e := p.handle("mcp/tools", raw(map[string]any{}))
+	if e != nil {
+		t.Fatal(e)
+	}
+	b, _ := json.Marshal(result)
+	if !strings.Contains(string(b), "lab_start") || !strings.Contains(string(b), "lab_stop") {
+		t.Fatal("external lifecycle tools absent")
+	}
+	if len(p.instances) != 0 {
+		t.Fatal("discovery opened listener")
+	}
+	l := lifecycleFixture(t, "external", true)
+	call := func(tool string) any {
+		r, e := p.handle("mcp/call", raw(map[string]any{"tool": tool, "arguments": map[string]any{}, "lifecycle": l}))
+		if e != nil {
+			t.Fatal(e)
+		}
+		return r
+	}
+	b, _ = json.Marshal(call("lab_snapshot"))
+	if !strings.Contains(string(b), `"isError":true`) || len(p.instances) != 0 {
+		t.Fatal("read-only snapshot started proxy")
+	}
+	b, _ = json.Marshal(call("lab_start"))
+	if strings.Contains(string(b), `"isError":true`) || len(p.instances) != 1 {
+		t.Fatal("explicit start failed", string(b))
+	}
+	call("lab_start")
+	if len(p.instances) != 1 {
+		t.Fatal("start not idempotent")
+	}
+	call("lab_stop")
+	if len(p.instances) != 0 {
+		t.Fatal("external stop retained instance")
+	}
+}
+
+func TestExternalMCPSavedPolicy(t *testing.T) {
+	p := newPlugin()
+	defer p.close()
+	l := lifecycleFixture(t, "saved-policy", true)
+	l["connection"].(map[string]any)["read_only"] = true
+	r, e := p.handle("mcp/call", raw(map[string]any{"tool": "lab_start", "arguments": map[string]any{}, "lifecycle": l}))
+	if e != nil {
+		t.Fatal(e)
+	}
+	b, _ := json.Marshal(r)
+	if !strings.Contains(string(b), `"isError":true`) || len(p.instances) != 0 {
+		t.Fatal("saved read-only policy bypassed")
+	}
+}

@@ -726,6 +726,30 @@ fn is_sqlserver_binary_export_column(database_type: Option<DatabaseType>, column
     })
 }
 
+/// SQL Server columns that can never take an explicit `INSERT` value:
+/// `timestamp`/`rowversion` counters and computed columns both reject supplied
+/// values ("Cannot insert an explicit value into a timestamp column" / "Cannot
+/// insert a value into the computed column"), so INSERT scripts (grid copy, SQL
+/// export) must omit them, the same way tsvector columns are omitted for
+/// PostgreSQL (issue #10764).
+fn is_sqlserver_non_insertable_export_column(
+    database_type: Option<DatabaseType>,
+    column_type: Option<&str>,
+    column_extra: Option<&str>,
+) -> bool {
+    if database_type != Some(DatabaseType::SqlServer) {
+        return false;
+    }
+    if column_extra.is_some_and(|extra| extra.trim().eq_ignore_ascii_case("computed")) {
+        return true;
+    }
+    column_type.is_some_and(|column_type| {
+        let normalized = column_type.trim().to_ascii_lowercase();
+        let base = normalized.split(['(', ' ', '\t', '\n']).next().unwrap_or("").trim();
+        matches!(base, "timestamp" | "rowversion")
+    })
+}
+
 /// Renders a SQL Server binary value as a T-SQL binary literal (`0x..`). Values
 /// that are not `0x`-prefixed hex text keep the previous string quoting, so an
 /// unexpected driver encoding is not silently reinterpreted.
@@ -1678,6 +1702,7 @@ fn is_export_insert_column(
 ) -> bool {
     !is_internal_export_column(database_type, column)
         && !is_postgres_tsvector_export_column(database_type, column_type)
+        && !is_sqlserver_non_insertable_export_column(database_type, column_type, column_extra)
         && (database_type != Some(DatabaseType::Mysql) || !is_mysql_generated_column_extra(column_extra))
 }
 
@@ -6456,7 +6481,78 @@ mod tests {
     }
 
     #[test]
-    fn sqlserver_rowversion_timestamp_type_is_not_treated_as_datetime() {
+    fn sqlserver_insert_scripts_omit_non_insertable_timestamp_and_computed_columns() {
+        // `timestamp`/`rowversion` counters and computed columns can never take
+        // an explicit INSERT value ("Cannot insert an explicit value into a
+        // timestamp column" / "Cannot insert a value into the computed column"),
+        // so generated INSERT scripts (grid copy, SQL export) must omit them
+        // (issue #10764).
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
+            schema: Some("dbo".to_string()),
+            table_name: Some("sync_state".to_string()),
+            qualified_table_name: None,
+            columns: vec![
+                "id".to_string(),
+                "note".to_string(),
+                "row_version".to_string(),
+                "stamp_alias".to_string(),
+                "total".to_string(),
+            ],
+            column_types: vec![
+                Some("int".to_string()),
+                Some("nvarchar(50)".to_string()),
+                Some("timestamp".to_string()),
+                Some("rowversion".to_string()),
+                Some("int".to_string()),
+            ],
+            column_extras: vec![None, None, None, None, Some("computed".to_string())],
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![vec![
+                json!(7),
+                json!("ok"),
+                json!("0x00000000000007D1"),
+                json!("0x00000000000007D2"),
+                json!(42),
+            ]],
+            batch_size: Some(10),
+        })
+        .unwrap();
+
+        assert_eq!(statements, vec!["INSERT INTO [dbo].[sync_state] ([id], [note]) VALUES (7, N'ok');"]);
+    }
+
+    #[test]
+    fn mysql_insert_scripts_keep_timestamp_columns() {
+        // MySQL `timestamp` is an ordinary datetime column and must stay insertable.
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            schema: None,
+            table_name: Some("events".to_string()),
+            qualified_table_name: None,
+            columns: vec!["id".to_string(), "created_at".to_string()],
+            column_types: vec![Some("int".to_string()), Some("timestamp".to_string())],
+            column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![vec![json!(1), json!("2026-09-30 10:00:00")]],
+            batch_size: Some(10),
+        })
+        .unwrap();
+
+        assert_eq!(statements.len(), 1);
+        assert!(statements[0].contains("`created_at`"), "statements: {statements:?}");
+    }
+
+    #[test]
+    fn sqlserver_rowversion_timestamp_columns_are_omitted_from_insert_export() {
+        // `timestamp`/`rowversion` is a server-generated counter on SQL Server,
+        // not a datetime: a replayed INSERT with an explicit value is rejected
+        // ("Cannot insert an explicit value into a timestamp column"), so the
+        // column is omitted while `datetime2` keeps its literal (issue #10764).
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::SqlServer),
             identifier_quote: None,
@@ -6473,12 +6569,7 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(
-            statements,
-            vec![
-                "INSERT INTO [dbo].[events] ([row_version], [created_at]) VALUES ('2026-06-12T10:11:12Z', '2026-06-12 10:11:12.123');"
-            ]
-        );
+        assert_eq!(statements, vec!["INSERT INTO [dbo].[events] ([created_at]) VALUES ('2026-06-12 10:11:12.123');"]);
     }
 
     #[test]
@@ -6768,6 +6859,32 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(path).unwrap(),
             "INSERT INTO \"dbo\".\"event]log\" (\"enabled\", \"path\") VALUES (TRUE, 'C:\\exports\\O''Hara');\n\n"
+        );
+    }
+
+    #[test]
+    fn database_row_writer_omits_sqlserver_timestamp_columns_from_export_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sync_state.sql");
+        let mut file = std::fs::File::create(&path).unwrap();
+
+        write_database_export_rows(
+            &mut file,
+            &[vec![json!(7), json!("0x00000000000007D1")]],
+            &["id".to_string(), "row_version".to_string()],
+            &[Some("int".to_string()), Some("timestamp".to_string())],
+            &[None, None],
+            "sync_state",
+            "dbo",
+            &DatabaseType::SqlServer,
+            SqlInsertDialect::Standard,
+        )
+        .unwrap();
+        drop(file);
+
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "INSERT INTO \"dbo\".\"sync_state\" (\"id\") VALUES (7);\n\n"
         );
     }
 

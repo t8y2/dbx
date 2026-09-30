@@ -1029,6 +1029,7 @@ pub(super) fn build_sqlite_existing_column_sql(
     statements
 }
 
+#[cfg(feature = "duckdb-sidecar")]
 pub(super) fn build_duckdb_existing_column_sql(table: &str, column: &EditableStructureColumn) -> Vec<String> {
     let Some(original) = &column.original else {
         return Vec::new();

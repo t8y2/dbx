@@ -9239,6 +9239,7 @@ export default withEnglishFallback({
   },
   sqlFileTree: {
     title: "SQL 檔案",
+    storageHelp: "此處列出透過「開啟資料夾」開啟的磁碟上真實 .sql 檔案，編輯後直接儲存回原檔案。",
     openFolder: "開啟資料夾",
     closePanel: "關閉",
     loading: "載入中...",

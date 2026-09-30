@@ -9231,6 +9231,7 @@ export default withEnglishFallback({
   },
   sqlFileTree: {
     title: "Arquivos SQL",
+    storageHelp: "São os arquivos .sql reais no disco abertos com Abrir pasta; as edições são salvas diretamente no arquivo original.",
     openFolder: "Abrir pasta",
     closePanel: "Fechar",
     loading: "Carregando...",

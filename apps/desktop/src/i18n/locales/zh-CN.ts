@@ -7368,6 +7368,7 @@ export default withEnglishFallback({
   },
   sqlFileTree: {
     title: "SQL 文件",
+    storageHelp: "此处列出通过「打开文件夹」打开的磁盘上真实 .sql 文件，编辑后直接保存回原文件。",
     openFolder: "打开文件夹",
     closePanel: "关闭",
     loading: "加载中...",

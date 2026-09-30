@@ -6369,6 +6369,7 @@ export default withEnglishFallback({
   },
   sqlFileTree: {
     title: "SQL 파일",
+    storageHelp: "폴더 열기로 연 디스크의 실제 .sql 파일을 표시하며, 편집 내용은 원본 파일에 바로 저장됩니다.",
     openFolder: "폴더 열기",
     closePanel: "닫기",
     loading: "불러오는 중...",

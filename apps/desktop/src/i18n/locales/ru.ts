@@ -7813,6 +7813,7 @@ export default withEnglishFallback({
   },
   sqlFileTree: {
     title: "SQL-файлы",
+    storageHelp: "Это реальные .sql-файлы на диске, открытые через «Открыть папку»; изменения сохраняются прямо в исходный файл.",
     openFolder: "Открыть папку",
     closePanel: "Закрыть",
     loading: "Загрузка...",

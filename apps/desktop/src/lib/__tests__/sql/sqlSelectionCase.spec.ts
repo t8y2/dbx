@@ -57,4 +57,45 @@ describe("convertSqlSelectionCase", () => {
 
     expect(convertSqlSelectionCase(sql, { from: 0, to: sql.length }, "lower", "mysql")).toBe("select 1 /*!40101 SET @Name = 'Mixed Value' */ from dual");
   });
+
+  // #10775: a selection made only of string literals joined by punctuation —
+  // like the IN-list `('D','C','B','B','A')` — used to hit the string
+  // protection and come back unchanged, which read as "the command does
+  // nothing". With no identifiers or keywords inside the selection there is no
+  // SQL structure to protect, so the explicit request converts the strings.
+  it("converts an IN-list selection whose only word content is string literals", () => {
+    const sql = "select * from t where code in ('D','C','B','B','A')";
+    const from = sql.indexOf("('D'");
+
+    expect(convertSqlSelectionCase(sql, { from, to: sql.length }, "lower")).toBe("('d','c','b','b','a')");
+    expect(convertSqlSelectionCase(sql, { from, to: sql.length }, "upper")).toBe("('D','C','B','B','A')");
+  });
+
+  it("converts adjacent literals joined by operators or commas", () => {
+    const sql = "select * from t where a = 'AbC' || 'DeF' and b in ('GhI','JkL')";
+
+    expect(convertSqlSelectionCase(sql, { from: sql.indexOf("'AbC'"), to: sql.indexOf("||") - 1 }, "lower")).toBe("'abc'");
+    expect(convertSqlSelectionCase(sql, { from: sql.indexOf("'GhI'"), to: sql.indexOf("'JkL'") + 5 }, "lower")).toBe("'ghi','jkl'");
+  });
+
+  it("still protects literals when the selection reaches identifiers or keywords", () => {
+    const sql = "select * from t where code in ('D','C') and flag = 'E'";
+    const from = sql.indexOf("in (");
+
+    expect(convertSqlSelectionCase(sql, { from, to: sql.length }, "upper")).toBe("IN ('D','C') AND FLAG = 'E'");
+  });
+
+  it("keeps converting a selection fully inside one literal", () => {
+    const sql = "select * from t where code = 'AbC001'";
+    const from = sql.indexOf("bC");
+
+    expect(convertSqlSelectionCase(sql, { from, to: from + 2 }, "upper")).toBe("BC");
+  });
+
+  it("treats number tokens outside literals as structure and keeps the protection", () => {
+    const sql = "select * from t where score > 60 and grade = 'AbC'";
+    const from = sql.indexOf("> 60");
+
+    expect(convertSqlSelectionCase(sql, { from, to: sql.length }, "upper")).toBe("> 60 AND GRADE = 'AbC'");
+  });
 });

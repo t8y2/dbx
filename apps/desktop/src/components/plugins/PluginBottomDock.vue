@@ -307,7 +307,14 @@ function onPanelOpenWorkbench(entry: (typeof entries.value)[number], _contributi
   delete payload.restored;
   delete payload.surface;
   if (options?.target === "tab") {
-    queryStore.openPluginWorkbench(entry.pluginId, entry.workbenchContributionId, { context: payload, forceNew: options.forceNew === true });
+    // Title derivation mirrors the tab-surface caller (PluginWorkbenchTab
+    // openWorkbench): per-connection sessions are titled after the connection
+    // display name, falling back to the localized workbench label and the
+    // dock entry's title — never the raw contribution id.
+    const contextConnectionId = typeof payload.connectionId === "string" ? payload.connectionId : "";
+    const connectionName = contextConnectionId ? connectionStore.getConfig(contextConnectionId)?.name : undefined;
+    const label = createFrontendPluginRegistry(plugins.value, locale.value).findWorkbench(entry.pluginId, entry.workbenchContributionId)?.contribution.label;
+    queryStore.openPluginWorkbench(entry.pluginId, entry.workbenchContributionId, { title: connectionName || label || entry.title, context: payload, forceNew: options.forceNew === true });
     return;
   }
   const id = addPluginDockEntry({

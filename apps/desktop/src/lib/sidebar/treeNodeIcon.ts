@@ -160,6 +160,18 @@ export function getTreeNodeIconInfo(node: TreeNode): TreeNodeIconInfo | null {
       return { icon: Package, colorClass: "text-violet-400" };
     case "event-trigger":
       return { icon: Package, colorClass: "text-violet-400" };
+    case "group-foreign-data-wrappers":
+      return { icon: Network, colorClass: "text-blue-500" };
+    case "group-foreign-servers":
+      return { icon: Server, colorClass: "text-blue-500" };
+    case "group-user-mappings":
+      return { icon: UsersRound, colorClass: "text-blue-500" };
+    case "foreign-data-wrapper":
+      return { icon: Network, colorClass: "text-blue-400" };
+    case "foreign-server":
+      return { icon: Server, colorClass: "text-blue-400" };
+    case "user-mapping":
+      return { icon: Link, colorClass: "text-blue-400" };
     case "load-more":
       return { icon: Plus, colorClass: "text-primary" };
     default:

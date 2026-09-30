@@ -4743,6 +4743,9 @@ export default withEnglishFallback({
     loadMore: "Загрузить ещё...",
     extensions: "Расширения",
     eventTriggers: "Триггеры событий",
+    foreignDataWrappers: "Оболочки внешних данных",
+    foreignServers: "Внешние серверы",
+    userMappings: "Сопоставления пользователей",
   },
   eventTrigger: {
     detailsTitle: "Сведения о триггере события",
@@ -4754,6 +4757,38 @@ export default withEnglishFallback({
     enabled: "Включено",
     tags: "Теги",
     definition: "Определение",
+  },
+
+  foreignDataWrapper: {
+    detailsTitle: "Сведения об оболочке внешних данных",
+    viewDetails: "Просмотреть сведения",
+    name: "Имя",
+    owner: "Владелец",
+    handler: "Обработчик",
+    validator: "Валидатор",
+    options: "Параметры",
+    definition: "DDL",
+  },
+
+  foreignServer: {
+    detailsTitle: "Сведения о внешнем сервере",
+    viewDetails: "Просмотреть сведения",
+    name: "Имя",
+    owner: "Владелец",
+    foreignDataWrapper: "Оболочка внешних данных",
+    type: "Тип",
+    version: "Версия",
+    options: "Параметры",
+    definition: "DDL",
+  },
+
+  userMapping: {
+    detailsTitle: "Сведения о сопоставлении пользователя",
+    viewDetails: "Просмотреть сведения",
+    userName: "Пользователь",
+    serverName: "Сервер",
+    options: "Параметры",
+    definition: "DDL",
   },
 
   extension: {

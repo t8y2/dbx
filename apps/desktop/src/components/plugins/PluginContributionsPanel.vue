@@ -373,8 +373,18 @@ function applyFocusTarget(focus: PluginCenterFocus) {
     activeSection.value = "settings";
     return;
   }
+  if (!focus.pluginId) {
+    activeSection.value = "installed";
+    return selectFirstProvider();
+  }
+  const installed = installedPlugins.value.some((plugin) => plugin.manifest.id === focus.pluginId);
+  if (!installed) {
+    activeSection.value = "marketplace";
+    marketplaceRepositoryId.value = "all";
+    marketplaceQuery.value = focus.pluginId;
+    return;
+  }
   activeSection.value = "installed";
-  if (!focus.pluginId) return selectFirstProvider();
   const provider = connectionProviders.value.find((entry) => entry.plugin.manifest.id === focus.pluginId && (!focus.providerId || entry.contribution.id === focus.providerId));
   if (!provider) {
     selectPlugin(focus.pluginId);

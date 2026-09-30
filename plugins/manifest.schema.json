@@ -43,6 +43,20 @@
         "ui": { "$ref": "#/$defs/uiEntrypoint" }
       }
     },
+    "capabilities": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "label"],
+        "properties": {
+          "id": { "$ref": "#/$defs/capability" },
+          "label": { "type": "string", "minLength": 1 },
+          "kind": { "type": "string" }
+        }
+      }
+    },
     "contributions": {
       "type": "array",
       "items": {

@@ -13,6 +13,31 @@ export function getConfigKey(config: AiConfig): string {
   return `${config.provider}|${config.apiKey}|${config.endpoint}|${config.model}`;
 }
 
+/** Prepare imported configurations without overwriting existing entries. */
+export function prepareImportedAiConfigs(existing: AiConfigItem[], imported: AiConfigItem[]): AiConfigItem[] {
+  const existingKeys = new Set(existing.map(getConfigKey));
+  const usedNames = new Set(existing.map((config) => config.name.trim().toLocaleLowerCase()));
+  const prepared: AiConfigItem[] = [];
+
+  for (const config of imported) {
+    const key = getConfigKey(config);
+    if (existingKeys.has(key)) continue;
+    existingKeys.add(key);
+
+    const originalName = config.name.trim() || "CC-SWITCH";
+    let name = originalName;
+    let suffix = 0;
+    while (usedNames.has(name.toLocaleLowerCase())) {
+      suffix += 1;
+      name = `${originalName} (CC-SWITCH${suffix > 1 ? ` ${suffix}` : ""})`;
+    }
+    usedNames.add(name.toLocaleLowerCase());
+    prepared.push({ ...config, name, isDefault: false });
+  }
+
+  return prepared;
+}
+
 export function aiConfigToItem(config: AiConfig, id: string, name: string): AiConfigItem {
   return {
     ...config,

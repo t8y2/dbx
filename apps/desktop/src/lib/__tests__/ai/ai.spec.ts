@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { buildAgentRequest, buildSystemPrompt, buildUserPrompt, runAgentStream, type AiContext } from "@/lib/ai/ai";
+import { buildAgentRequest, buildSystemPrompt, buildUserPrompt, runAgentStream, type AiContext, type AiRequestInput } from "@/lib/ai/ai";
 import * as api from "@/lib/backend/api";
 import { setLocale } from "@/i18n";
 
@@ -48,6 +48,29 @@ describe("AI SQL dialect prompt", () => {
   // English-string assertions are deterministic regardless of the host OS locale.
   beforeAll(async () => {
     await setLocale("en");
+  });
+
+  // The skill tools ship with the listing, so the flag and the listing must
+  // travel together (ADR Decision 10); a send without a listing must not turn
+  // them on.
+  it("forwards the skill-listing flag only when the listing is sent", async () => {
+    const stream = vi.spyOn(api, "aiAgentStream").mockResolvedValue("done");
+    try {
+      const input: AiRequestInput = {
+        config: { provider: "openai", apiKey: "test", apiUrl: "https://example.invalid", model: "model" },
+        action: "general",
+        mode: "agent",
+        instruction: "Use the skill",
+        context: context(),
+      };
+      await runAgentStream({ ...input, allowSkills: true }, [], () => {}, "skill-run");
+      expect(stream.mock.calls[0][15]).toBe(true);
+
+      await runAgentStream(input, [], () => {}, "plain-run");
+      expect(stream.mock.calls[1][15]).toBe(false);
+    } finally {
+      stream.mockRestore();
+    }
   });
 
   it("pins identifier quoting to the active database type", () => {

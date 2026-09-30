@@ -9,8 +9,9 @@ type UserSkillRootStatus = UserSkillRootListing["status"];
  * Metadata-only catalog of discoverable skills for the AI panel selector.
  * Selection state does NOT live here: it is panel-session scoped inside
  * AiAssistant (like activeTemplateIds), so closing the panel clears it while
- * the catalog cache survives. This store never holds skill bodies - bodies
- * are read once per send through the backend (prd.md:36/:56).
+ * the catalog cache survives. This store never holds skill bodies — built-in
+ * providers load them on demand through the use_skill tool, and CLI providers
+ * do not use skills at all (prd.md:36/:56).
  */
 export const useUserSkillStore = defineStore("userSkillStore", () => {
   const defaultRootSkills = ref<UserSkillMeta[]>([]);

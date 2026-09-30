@@ -65,9 +65,10 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
 import { useUserSkillStore } from "@/stores/userSkillStore";
-import { buildSelectedSkillChips, capSkillsToCharLimit, removeSkillIds, userSkillSourceOfId } from "@/lib/ai/userSkillSelection";
+import { buildSelectedSkillChips, removeSkillIds, userSkillSourceOfId } from "@/lib/ai/userSkillSelection";
 import { aiConversationTypographyCssVariables } from "@/lib/ai/aiTypography";
-import { ACTIVE_SKILLS_TOTAL_MAX, type ReadUserSkill, type ReadUserSkillFailure, type UserSkillFailureReason, type UserSkillRootSettings } from "@/types/userSkills";
+import { buildSkillListing, buildSkillListingLines } from "@/lib/ai/skillListing";
+import { type ReadUserSkillFailure, type UserSkillFailureReason, type UserSkillMeta, type UserSkillRootSettings } from "@/types/userSkills";
 import { supportsAiAssistantContext } from "@/lib/database/databaseFeatureSupport";
 import ConnectionIcon from "@/components/icons/ConnectionIcon.vue";
 import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
@@ -127,7 +128,7 @@ import {
   selectionContextBudgetError,
   truncateTextAttachmentContent,
 } from "@/lib/ai/aiAttachments";
-import { isAiConfigModelCandidate } from "@/lib/ai/aiConfigCandidates";
+import { isAiConfigModelCandidate, isCliProvider } from "@/lib/ai/aiConfigCandidates";
 import { deleteConversationWithCancellation, stopAiGenerationWithFallback } from "@/lib/ai/aiConversationLifecycle";
 import { AiGenerationGuard } from "@/lib/ai/aiGenerationGuard";
 import { applyStatusEvent, createGenerationStatus, createStatusTicker, liveAnnouncementText, markCancelling, shouldShowLongRunningHint, statusText, toolLabel, STATUS_IDLE_THRESHOLD_MS, type AiGenerationStatus } from "@/lib/ai/aiGenerationStatus";
@@ -167,7 +168,7 @@ import { buildAiAgentStepItems, formatAgentToolName, formatToolDurationMs, toolC
 import { createAiShikiCodeHighlighter, type AiCodeHighlighter } from "@/lib/ai/aiCodeHighlighter";
 import { createAiMessageRenderer } from "@/lib/ai/aiMessageRender";
 import { formatAiInlineMarkdown, handleAiMarkdownLinkClick } from "@/lib/ai/aiMarkdown";
-import { aiStream, aiCancelStream, resolveAiToolApproval, saveAiConversation, saveAiRun, saveAiRunState, loadAiConversations, loadAiRuns, deleteAiConversation, listSchemas, listTables, readUserSkills, type AiConversation, type AiRun, type AiRunStatus } from "@/lib/backend/api";
+import { aiStream, aiCancelStream, resolveAiToolApproval, saveAiConversation, saveAiRun, saveAiRunState, loadAiConversations, loadAiRuns, deleteAiConversation, listSchemas, listTables, listUserSkills, type AiConversation, type AiRun, type AiRunStatus } from "@/lib/backend/api";
 import type { AiMessage } from "@/lib/backend/api";
 import type { AiConfigItem, AiEffortCapability, AiEffortOption, AiEffortSelection } from "@/types/ai";
 import type { ConnectionConfig, QueryTab, SavedSqlFile, TableInfo } from "@/types/database";
@@ -198,7 +199,7 @@ import { resolveAiMessageCopyText } from "@/lib/ai/aiMessageCopy";
 import { buildPluginAiRequest, createPluginAiConversation, pluginComposerConnectionLabel, pluginContextConnectionId, pluginContextFromMessages, pluginContextText, streamPluginAiConversation, type AiPluginContext, type AiPluginConversationRequest } from "@/lib/ai/aiPluginConversation";
 import type { PluginAiRecommendationHostUpdate } from "@/lib/plugins/pluginHostBridge";
 
-const { t } = useI18n();
+const { t, locale } = useI18n();
 const AiChartRenderer = defineAsyncComponent({
   // Lazy-load the chart renderer (and with it the whole echarts bundle): echarts
   // is only pulled in when a message actually renders a chart-json segment.
@@ -643,6 +644,8 @@ const skillFailures = ref<ReadUserSkillFailure[]>([]);
 // vanished from discovery must keep a removable chip (prd.md:37) instead of
 // silently becoming an id the user can no longer drop.
 const selectedSkillChips = computed(() => buildSelectedSkillChips(selectedSkillIds.value, (id) => userSkillStore.metaFor(id)));
+// The selector's capability state (predicate, gated open state, trigger label)
+// lives below `activeFullConfig`, next to the config it reads.
 // Selector retry-on-open mirrors the template selector above.
 watch(showSkillSelector, (open) => {
   if (open) void userSkillStore.refresh(skillRootSettings());
@@ -702,9 +705,9 @@ function openSkillRootSettings() {
   emit("openSettings");
 }
 
-function selectedSkillsAgentStep(skills: ReadUserSkill[]): AiAgentStepItem {
+function selectedSkillsListedStep(skills: readonly UserSkillMeta[]): AiAgentStepItem {
   const details = skills.map((skill) => `${skill.name} (${t(userSkillSourceOfId(skill.id) === "custom" ? "ai.skillsGroupCustom" : "ai.skillsGroupDefault")})`).join(" · ");
-  return { key: "selected-skills", labelKey: "ai.agentSteps.skillsLoaded", tone: "success", toolName: skills.map((skill) => skill.name).join(", "), toolResult: details };
+  return { key: "selected-skills", labelKey: "ai.agentSteps.skillsListed", tone: "success", toolName: skills.map((skill) => skill.name).join(", "), toolResult: details };
 }
 
 // Retry store load on selector open if prior init failed (e.g. backend not yet ready at mount)
@@ -1053,6 +1056,39 @@ function isModelCandidate(config: AiConfigItem): boolean {
   return isAiConfigModelCandidate(config, getAiProviderPreset(config.provider, config.endpoint).requiresApiKey, supportsCliProviders);
 }
 
+// Skill capability belongs to DBX's built-in AI alone (prd 09-30 Req 15a): a CLI
+// run returns before the agent loop builds its tool list and its surface is the
+// DBX MCP server, so nothing in a CLI prompt can reference a skill.
+//
+// These sit here, after `activeFullConfig`, and not beside `showSkillSelector`:
+// `watch()` reads its source once at creation, so a predicate placed above the
+// config it reads throws the same "Cannot access before initialization" that once
+// kept this panel from opening at all.
+//
+// The predicate reads the very config the send path resolves, so the selector and
+// the send can never disagree about the provider.
+const skillCapabilityUnavailable = computed(() => isCliProvider(activeFullConfig.value?.provider));
+// The open state is gated here rather than left to the button's native `disabled`
+// attribute: `/skill` writes the selector ref directly, and a disabled button is
+// not guaranteed to stop a PopoverTrigger from opening. `showSkillSelector` stays
+// the source of truth (the retry-on-open watcher reads it); writing `true` while
+// unavailable is dropped, so no path reaches the silent "ticked but never sent"
+// state this state exists to remove.
+const skillSelectorOpen = computed<boolean>({
+  get: () => showSkillSelector.value && !skillCapabilityUnavailable.value,
+  set: (open) => {
+    showSkillSelector.value = open && !skillCapabilityUnavailable.value;
+  },
+});
+// Switching to a CLI provider while the selector is open must close it, otherwise
+// the stale `true` would reopen the popover on a switch back to a built-in model.
+watch(skillCapabilityUnavailable, (unavailable) => {
+  if (unavailable) showSkillSelector.value = false;
+});
+// A disabled control with no explanation is the silent state being removed: the
+// reason rides on the trigger's label and title whenever the capability is gone.
+const skillSelectorTriggerLabel = computed(() => t(skillCapabilityUnavailable.value ? "ai.skillsUnsupportedForCliProvider" : "ai.skillsEntry"));
+
 function getModelsForConfig(configId: string) {
   const config = settings.aiConfigs.find((item) => item.id === configId);
   if (!config) return [];
@@ -1355,7 +1391,10 @@ type AiSlashEntry = { type: "action"; button: AiActionButton } | { type: "skills
 
 const filteredCommands = computed<AiSlashEntry[]>(() => {
   const query = prompt.value.slice(commandStart.value + 1).toLowerCase();
-  const entries: AiSlashEntry[] = [...actionButtons.value.map((button): AiSlashEntry => ({ type: "action", button })), { type: "skills" }];
+  // `/skill` is dropped when the provider has no skill capability (Req 15a), so the
+  // palette never offers an action that cannot happen — the disabled trigger's
+  // label carries the reason.
+  const entries: AiSlashEntry[] = [...actionButtons.value.map((button): AiSlashEntry => ({ type: "action", button })), ...(skillCapabilityUnavailable.value ? [] : [{ type: "skills" } as AiSlashEntry])];
   return entries.filter((entry) => {
     const haystack = entry.type === "action" ? `${entry.button.action} ${t(entry.button.key)}` : `skill ${t("ai.skillsEntry")}`;
     return haystack.toLowerCase().includes(query);
@@ -2859,7 +2898,9 @@ function selectCommand(command: AiSlashEntry) {
   commandOpen.value = false;
   if (command.type === "skills") {
     skillFailures.value = [];
-    showSkillSelector.value = true;
+    // Routed through the gated open state, so the palette entry cannot open the
+    // selector when the provider has no skill capability (Req 15a).
+    skillSelectorOpen.value = true;
     nextTick(() => promptTextareaRef.value?.focus());
     return;
   }
@@ -3444,17 +3485,32 @@ async function send() {
   }
   const generationCanContinue = () => (detachedRun ? !detachedRun.cancelRequested : aiGenerationGuard.isCurrent(myGeneration));
   const runIsVisible = () => !detachedRun || (assistantViewMounted && conversationId.value === runConversationId);
-  // Selected skills are read and validated through the backend registry right
-  // before the request pipeline starts (after the generation guard: no awaits
-  // above this point). On any failure no AI request is sent: the failure banner
-  // appears above the composer while the draft and selection stay untouched
-  // (prd send-time loading contract).
-  let sendSkillSnapshot: ReadUserSkill[] | undefined;
+  // Selected skills are no longer read at send time: their bodies never enter the
+  // prompt (they load on demand through the use_skill tool, which only the
+  // built-in AI has — a CLI run receives no skill content at all). Only the
+  // catalog is consulted, to tell the user that a checked skill has disappeared
+  // before the request goes out. On any failure no AI request is sent: the
+  // failure banner appears above the composer while the draft and selection stay
+  // untouched.
+  let sendSkillListing: string[] | undefined;
+  let sendSelectedSkillMetas: UserSkillMeta[] | undefined;
   if (selectedSkillIds.value.length > 0) {
+    // PR3 adds the "allow AI to use skills automatically" Settings toggle here.
     skillFailures.value = [];
-    const skillRead = await readUserSkills([...selectedSkillIds.value], skillRootSettings());
-    if (skillRead.failures.length > 0) {
-      skillFailures.value = skillRead.failures;
+    const catalog = await listUserSkills(skillRootSettings());
+    const catalogSkills = [...catalog.defaultRoot.skills, ...(catalog.customRoot?.skills ?? [])];
+    const known = new Set(catalogSkills.map((skill) => skill.id));
+    const failures: ReadUserSkillFailure[] = [];
+    for (const id of selectedSkillIds.value) {
+      if (known.has(id)) continue;
+      // Distinguish "this skill is gone" from "its whole root is unavailable" —
+      // the frozen reason vocabulary has one word for each, and the banner copy
+      // differs.
+      const rootUnavailable = userSkillSourceOfId(id) === "custom" ? !catalog.customRoot || catalog.customRoot.status !== "ok" : catalog.defaultRoot.status !== "ok";
+      failures.push({ id, reason: rootUnavailable ? "root_unavailable" : "not_found" });
+    }
+    if (failures.length > 0) {
+      skillFailures.value = failures;
       clearPendingWriteGrant();
       if (generationCanContinue()) {
         if (detachedRun) finishDesktopAiRun(detachedRun, "failed");
@@ -3467,14 +3523,10 @@ async function send() {
       resolveDetachedRunSettled();
       return;
     }
-    // Skill bodies are only known here, so the combined budget is enforced on
-    // the read snapshots: overflowing skills are skipped for this send while
-    // the selection itself stays untouched.
-    const cappedSkills = capSkillsToCharLimit(skillRead.skills, ACTIVE_SKILLS_TOTAL_MAX);
-    if (cappedSkills.length < skillRead.skills.length) {
-      toast(t("ai.skillsTotalTrimmed", { max: ACTIVE_SKILLS_TOTAL_MAX }), 4000);
-    }
-    sendSkillSnapshot = cappedSkills;
+    // Only the metadata survives the send: the listing is rendered here (it is
+    // what the prompt carries) and the metas feed the transcript's agent step.
+    sendSelectedSkillMetas = selectedSkillIds.value.flatMap((id) => catalogSkills.filter((skill) => skill.id === id));
+    sendSkillListing = buildSkillListingLines(buildSkillListing({ skills: catalogSkills, selectedIds: selectedSkillIds.value }), locale.value.startsWith("zh"));
   }
   if (!(await promptTemplateStore.ensureLoaded())) {
     clearPendingWriteGrant();
@@ -3514,8 +3566,12 @@ async function send() {
   const customPromptContext: CustomPromptContext = {
     globalInstructions: promptTemplateStore.globalInstructions,
     activeTemplates: runPluginContext ? [] : [...activeTemplates.value],
-    ...(sendSkillSnapshot?.length ? { selectedSkills: sendSkillSnapshot } : {}),
+    ...(sendSkillListing?.length ? { skillListing: sendSkillListing } : {}),
   };
+  // The skill tools ship with the listing and nothing else gates them (ADR
+  // Decision 10), so this is the same condition that just put lines in the
+  // prompt rather than a second decision that could drift away from it.
+  const allowSkills = Boolean(sendSkillListing?.length);
   // Remember what was actually sent for this db_type so panels opened later can
   // restore it when no explicit per-db_type defaults are configured. This runs
   // for empty selections too: the store clears the remembered entry so a
@@ -3692,8 +3748,8 @@ async function send() {
   }
   runMessages.push({ role: "assistant", content: "", sourceConnectionName: runSourceName, sourceBinding: runBinding });
   const assistantIdx = runMessages.length - 1;
-  if (requestedMode === "agent" && sendSkillSnapshot?.length) {
-    runMessages[assistantIdx].agentSteps = [selectedSkillsAgentStep(sendSkillSnapshot)];
+  if (requestedMode === "agent" && sendSelectedSkillMetas?.length) {
+    runMessages[assistantIdx].agentSteps = [selectedSkillsListedStep(sendSelectedSkillMetas)];
   }
   const sessionId = uuid();
   if (runIsVisible()) {
@@ -3864,6 +3920,7 @@ async function send() {
           taskContractUserRequest: text,
           context,
           inlineImages: imageAttachments.map(({ mediaType, data }) => ({ mediaType, data })),
+          allowSkills,
         },
         history,
         onEvent,
@@ -3929,6 +3986,7 @@ async function send() {
           confirmedConnectionId: confirmedTargetConnId,
           confirmedDatabase: confirmedTargetDb,
           confirmedSchema: confirmedTargetSchema,
+          allowSkills,
         },
         history,
         onEvent,
@@ -6352,9 +6410,15 @@ async function openExternalUrl(url: string) {
               </PopoverContent>
             </Popover>
             <!-- Skill selector (read-only user SKILL.md library) -->
-            <Popover v-model:open="showSkillSelector">
+            <Popover v-model:open="skillSelectorOpen">
               <PopoverTrigger as-child>
-                <button type="button" class="ai-skills-selector-trigger flex min-w-0 items-center gap-1 rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground" :aria-label="t('ai.skillsEntry')" :title="t('ai.skillsEntry')">
+                <button
+                  type="button"
+                  class="ai-skills-selector-trigger flex min-w-0 items-center gap-1 rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
+                  :disabled="skillCapabilityUnavailable"
+                  :aria-label="skillSelectorTriggerLabel"
+                  :title="skillSelectorTriggerLabel"
+                >
                   <Layers class="h-3 w-3" />
                   <span class="ai-skills-selector-label truncate">{{ t("ai.skillsEntry") }}</span>
                   <span v-if="selectedSkillIds.length" class="ai-skills-selector-count rounded-sm bg-primary px-1 text-[10px] font-medium text-primary-foreground">{{ selectedSkillIds.length }}</span>

@@ -33,6 +33,11 @@ const aiAssistantMountApi = vi.hoisted(() => ({
   runAgentStreamHistories: [] as unknown[],
   savedConversations: [] as Array<Record<string, unknown>>,
   codeHighlighterDelayMs: 0,
+  // `supportsCliProviders` is a runtime capability, so a CLI model config is only a
+  // valid active config under Tauri. The panel mounts on the web/http lane here
+  // (false), where a CLI config is ineligible and its disabled selector never
+  // renders — the skill-capability test flips this for its own duration.
+  tauriRuntime: false,
 }));
 
 // `onMounted` imports the syntax highlighter lazily; this module-level delay stands in for the
@@ -62,6 +67,8 @@ vi.mock("@/lib/ai/ai", async (importOriginal) => {
   };
 });
 
+vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => aiAssistantMountApi.tauriRuntime }));
+
 vi.mock("@/lib/backend/api", async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
   const empty = () => Promise.resolve([]);
@@ -73,7 +80,9 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
       aiAssistantMountApi.savedConversations.push(conversation);
       return Promise.resolve();
     },
-    readUserSkills: empty,
+    // The send path consults the skill catalog (metadata only — bodies are read
+    // on demand by the use_skill tool); an empty catalog keeps sends skill-free.
+    listUserSkills: () => Promise.resolve({ defaultRoot: { status: "ok", skills: [] }, customRoot: null }),
     loadAiConfigs: empty,
     listPlugins: empty,
     loadPromptTemplates: empty,
@@ -102,6 +111,7 @@ afterEach(() => {
   aiAssistantMountApi.runAgentStreamHistories = [];
   aiAssistantMountApi.savedConversations = [];
   aiAssistantMountApi.codeHighlighterDelayMs = 0;
+  aiAssistantMountApi.tauriRuntime = false;
   while (cleanups.length) cleanups.pop()?.();
 });
 
@@ -326,6 +336,70 @@ describe("AiAssistant mount", () => {
     const modelTrigger = container.querySelector<HTMLButtonElement>(".ai-model-selector-trigger");
     expect(modelTrigger?.getAttribute("aria-label")).toBe("deepseek-chat");
     expect(modelTrigger?.getAttribute("title")).toBe("deepseek-chat");
+  });
+
+  // Skill capability belongs to DBX's built-in AI only (prd 09-30 Req 15a). A CLI
+  // user can still hold a selection, so the narrowed capability has to be stated:
+  // a disabled control with no reason would read as a bug rather than a boundary.
+  it("disables the skill selector with a reason under a CLI provider", async () => {
+    const { errors, container } = await mountPanel(true, undefined, (settings) => {
+      // A CLI config is only an eligible model when the runtime supports CLI
+      // providers, so this test runs the panel on the Tauri lane.
+      aiAssistantMountApi.tauriRuntime = true;
+      settings.aiConfigs = [
+        {
+          id: "cli-default",
+          name: "Claude Code",
+          provider: "claude-code-cli",
+          apiKey: "",
+          authMethod: "api-key",
+          endpoint: "",
+          model: "",
+          apiStyle: "completions",
+          isDefault: true,
+        },
+      ];
+      settings.activeModel = { configId: "cli-default", modelId: "" };
+    });
+
+    const trigger = container.querySelector<HTMLButtonElement>(".ai-skills-selector-trigger");
+    expect(trigger).not.toBeNull();
+    expect(trigger!.disabled).toBe(true);
+    expect(trigger!.getAttribute("aria-label")).toBe(i18n.global.t("ai.skillsUnsupportedForCliProvider"));
+    expect(trigger!.getAttribute("title")).toBe(i18n.global.t("ai.skillsUnsupportedForCliProvider"));
+    // A disabled button is not what keeps the popover shut — clicking must not open
+    // it either, or the user reaches the silent selection state this replaces.
+    trigger!.click();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(container.querySelector('[data-slot="popover-content"]')).toBeNull();
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("keeps the skill selector enabled and labelled for a built-in provider", async () => {
+    const { errors, container } = await mountPanel(true, undefined, (settings) => {
+      aiAssistantMountApi.tauriRuntime = true;
+      settings.aiConfigs = [
+        {
+          id: "builtin-default",
+          name: "DeepSeek",
+          provider: "deepseek",
+          apiKey: "test-key",
+          authMethod: "api-key",
+          endpoint: "https://api.deepseek.com",
+          model: "deepseek-chat",
+          apiStyle: "completions",
+          isDefault: true,
+        },
+      ];
+      settings.activeModel = { configId: "builtin-default", modelId: "deepseek-chat" };
+    });
+
+    const trigger = container.querySelector<HTMLButtonElement>(".ai-skills-selector-trigger");
+    expect(trigger).not.toBeNull();
+    expect(trigger!.disabled).toBe(false);
+    expect(trigger!.getAttribute("aria-label")).toBe(i18n.global.t("ai.skillsEntry"));
+    expect(trigger!.getAttribute("title")).toBe(i18n.global.t("ai.skillsEntry"));
+    expect(errors.map(String)).toEqual([]);
   });
 
   // These states settle through requestAnimationFrame plus async measurement, and the component

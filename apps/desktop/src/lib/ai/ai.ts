@@ -3,7 +3,6 @@ import type { AiAssistantMode } from "@/types/ai";
 import { uuid } from "@/lib/common/utils";
 import type { ColumnInfo, ConnectionConfig, DatabaseType, ForeignKeyInfo, IndexInfo, QueryResult, QueryTab } from "@/types/database";
 import type { PromptTemplate } from "@/types/promptTemplate";
-import type { ReadUserSkill } from "@/types/userSkills";
 import * as api from "@/lib/backend/api";
 import { currentLocale, type Locale } from "@/i18n";
 import { aiTableMentionKey, type AiTableMention } from "@/lib/ai/aiTableMentions";
@@ -183,6 +182,14 @@ export interface AiRequestInput {
   confirmedSchema?: string;
   /** Stable per-conversation key forwarded to the Responses API. */
   promptCacheKey?: string;
+  /**
+   * True when this send carries a skill listing (`CustomPromptContext.skillListing`).
+   * The backend appends the on-demand skill tools (`use_skill` /
+   * `read_skill_file`) to the run's tool table only then, so a skill-free request
+   * keeps the exact tool table it had before those tools existed. Setting it
+   * without a listing gives the model tools with nothing to resolve.
+   */
+  allowSkills?: boolean;
 }
 
 export interface AiNamespaceSelection {
@@ -193,33 +200,41 @@ export interface AiNamespaceSelection {
 export interface CustomPromptContext {
   globalInstructions?: string;
   activeTemplates?: PromptTemplate[];
-  /** Selected read-only SKILL.md snapshots resolved at send time (09-21-public-skill-loader). */
-  selectedSkills?: ReadUserSkill[];
+  /**
+   * Pre-rendered skill listing lines (`buildSkillListingLines`), snapshotted at
+   * send time. Skill bodies are deliberately absent: they load on demand through
+   * the `use_skill` tool, so the listing is the only skill text in the prompt.
+   * Skill capability is DBX's built-in AI only — a CLI run never receives this.
+   */
+  skillListing?: string[];
 }
 
 function buildCustomInstructionLines(custom: CustomPromptContext | undefined, isZh: boolean): string[] {
   const global = custom?.globalInstructions?.trim() ?? "";
   const templates = (custom?.activeTemplates ?? []).filter((t) => t.content.trim());
-  const skills = (custom?.selectedSkills ?? []).filter((skill) => skill.content.trim());
-  if (!global && templates.length === 0 && skills.length === 0) return [];
+  const skillListing = custom?.skillListing ?? [];
 
   const parts: string[] = [];
   if (global) parts.push(global);
   parts.push(...templates.map((t) => `### ${t.name}\n${t.content}`));
-  if (skills.length > 0) {
-    parts.push(
-      isZh
-        ? "## 用户选择的 Skills（补充性）\n以下为用户显式选择的外部 SKILL.md 规则文件，按原样注入；上方核心安全及方言规则优先级更高。"
-        : "## Selected Skills (supplementary)\nThe following external SKILL.md rule files were explicitly selected by the user and are injected as-is. Core safety and dialect rules above take precedence.",
-    );
-    parts.push(...skills.map((skill) => `### Skill: ${skill.name}\n<ai-skill id="${skill.id}">\n${skill.content}\n</ai-skill>`));
-  }
 
-  return [
-    isZh
-      ? `## 用户自定义规范（补充性）\n以下为用户定义的规范与模板；上方核心安全及方言规则优先级更高。\n\n${parts.join("\n\n")}`
-      : `## Custom Instructions (supplementary)\nThe following are user-defined conventions and templates. Core safety and dialect rules above take precedence.\n\n${parts.join("\n\n")}`,
-  ];
+  const lines: string[] = [];
+  // The wrapper is emitted only when there are actually custom instructions, so
+  // a send with no globals/templates (and no skills) stays byte-identical to the
+  // pre-skill prompt.
+  if (parts.length > 0) {
+    lines.push(
+      isZh
+        ? `## 用户自定义规范（补充性）\n以下为用户定义的规范与模板；上方核心安全及方言规则优先级更高。\n\n${parts.join("\n\n")}`
+        : `## Custom Instructions (supplementary)\nThe following are user-defined conventions and templates. Core safety and dialect rules above take precedence.\n\n${parts.join("\n\n")}`,
+    );
+  }
+  // The skill listing sits OUTSIDE that wrapper on purpose: the wrapper's text is
+  // shared with the templates/globals paths, so folding skills into it would make
+  // those prompts differ depending on whether skills exist. The listing carries
+  // its own use_skill instructions (see lib/ai/skillListing.ts).
+  if (skillListing.length > 0) lines.push(skillListing.join("\n"));
+  return lines;
 }
 
 export function buildAgentRequest(input: AiRequestInput, history?: api.AiMessage[], custom?: CustomPromptContext): { messages: api.AiMessage[]; systemPrompt: string; taskContract: api.AiTaskContract; maxTokens: number } {
@@ -310,10 +325,7 @@ export async function runAgentStream(input: AiRequestInput, history: api.AiMessa
     input.confirmedDatabase,
     input.confirmedSchema,
   ] as const;
-  if (selectedDatabases?.length) {
-    return api.aiAgentStream(...args, undefined, selectedDatabases);
-  }
-  return api.aiAgentStream(...args);
+  return api.aiAgentStream(...args, undefined, selectedDatabases, input.allowSkills === true);
 }
 
 export function buildUserPrompt(action: AiAction, context: AiContext, instruction: string, isZh: boolean): string {

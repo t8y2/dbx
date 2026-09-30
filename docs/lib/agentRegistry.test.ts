@@ -186,7 +186,7 @@ test("RabbitMQ native tar.zst packages appear in the native catalog", () => {
 });
 
 test("all current native-only agent packages appear in the native catalog", () => {
-  const nativeKeys = ["cassandra", "duckdb", "hive", "iotdb", "kingbase", "neo4j", "oracle", "rabbitmq", "rocketmq", "tdengine", "vastbase", "xugu", "zookeeper"];
+  const nativeKeys = ["cassandra", "duckdb", "hive", "iotdb", "kingbase", "neo4j", "oracle", "oracle-oci", "rabbitmq", "rocketmq", "tdengine", "vastbase", "xugu", "zookeeper"];
   const entries = buildNativeAgentEntries(
     nativeKeys.map((key) => ({
       name: `dbx-agent-${key}-${driverVersions[key as keyof typeof driverVersions]}-macos-aarch64.tar.zst`,
@@ -200,4 +200,7 @@ test("all current native-only agent packages appear in the native catalog", () =
   assert.equal(entries.find(({ key }) => key === "hive")?.label, "Apache Hive");
   assert.equal(entries.find(({ key }) => key === "rocketmq")?.label, "Apache RocketMQ");
   assert.equal(entries.find(({ key }) => key === "zookeeper")?.label, "Apache ZooKeeper");
+  assert.equal(entries.find(({ key }) => key === "oracle")?.label, "Oracle");
+  // The OCI (thick driver) agent is a separate package from the thin one.
+  assert.equal(entries.find(({ key }) => key === "oracle-oci")?.label, "Oracle (OCI)");
 });

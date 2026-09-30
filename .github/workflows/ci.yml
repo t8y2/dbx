@@ -316,6 +316,8 @@ jobs:
       SCCACHE_GHA_ENABLED: "true"
       SCCACHE_GHA_VERSION: win7-webview2-1.0.902.49-v1
       SCCACHE_IDLE_TIMEOUT: "0"
+      SCCACHE_LOG: debug
+      SCCACHE_LOG_MILLIS: "1"
       # Single source for the job's nightly pin: the toolchain step and the
       # prebuilt AWS-LC cache key must move together.
       WIN7_NIGHTLY_TOOLCHAIN: nightly-2026-07-22
@@ -342,9 +344,23 @@ jobs:
           toolchain: ${{ env.WIN7_NIGHTLY_TOOLCHAIN }}
           components: rust-src
 
+      - name: Configure Win7 sccache diagnostics
+        shell: pwsh
+        run: |
+          $logPath = Join-Path $env:RUNNER_TEMP "sccache-win7-debug.log"
+          "SCCACHE_ERROR_LOG=$logPath" >> $env:GITHUB_ENV
+
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: "v0.16.0"
+
+      - name: Run Win7 sccache probe before build (first)
+        shell: pwsh
+        run: ./.github/scripts/ci-win7-sccache-probe.ps1 -Label "before build #1" -ResetStats
+
+      - name: Run Win7 sccache probe before build (second)
+        shell: pwsh
+        run: ./.github/scripts/ci-win7-sccache-probe.ps1 -Label "before build #2"
 
       - name: Restore prebuilt Win7 AWS-LC
         id: aws-lc-cache
@@ -520,6 +536,39 @@ jobs:
         run: |
           $env:TAURI_CONFIG = Get-Content src-tauri/tauri.webview2-win7-fixed.conf.json -Raw
           cargo build --locked --package dbx --release --features custom-protocol --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort --timings
+
+      - name: Run Win7 sccache probe after build
+        if: always()
+        shell: pwsh
+        run: ./.github/scripts/ci-win7-sccache-probe.ps1 -Label "after DBX build"
+
+      - name: Report filtered Win7 sccache backend errors
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          "## Filtered Win7 sccache backend errors" >> $env:GITHUB_STEP_SUMMARY
+          if (!(Test-Path -LiteralPath $env:SCCACHE_ERROR_LOG)) {
+            "No sccache debug log exists." >> $env:GITHUB_STEP_SUMMARY
+            exit 0
+          }
+
+          $matches = @(Select-String -LiteralPath $env:SCCACHE_ERROR_LOG `
+            -Pattern "429|Too Many Requests|rate.?limit|cache.*write|ghac")
+          "Matched lines: $($matches.Count)" >> $env:GITHUB_STEP_SUMMARY
+          if ($matches.Count -eq 0) {
+            "No matching backend errors." >> $env:GITHUB_STEP_SUMMARY
+            exit 0
+          }
+
+          '```text' >> $env:GITHUB_STEP_SUMMARY
+          $matches | Select-Object -First 50 | ForEach-Object {
+            $_.Line >> $env:GITHUB_STEP_SUMMARY
+          }
+          '```' >> $env:GITHUB_STEP_SUMMARY
+          if ($matches.Count -gt 50) {
+            "Output stopped after 50 matching lines." >> $env:GITHUB_STEP_SUMMARY
+          }
 
       - name: Upload Windows 7 Cargo timings
         if: always()

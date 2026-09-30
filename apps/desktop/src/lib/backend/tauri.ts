@@ -5963,6 +5963,11 @@ export interface TableExportRequest {
   numericColumnRightAlign?: boolean;
   autoFilter?: boolean;
   splitMaxMb?: number;
+  /**
+   * SQL 导出时省略 INSERT 目标的库/模式限定（前端按「生成 SQL 时包含数据库名」设置 +
+   * `dropsSchemaQualifier` 引擎规则解析；仅影响 INSERT 目标，读取 SQL 不变）。
+   */
+  omitDatabaseQualifier?: boolean;
 }
 
 export interface TableCsvExportOptions {

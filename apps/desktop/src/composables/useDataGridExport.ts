@@ -3,6 +3,7 @@ import { useI18n } from "vue-i18n";
 import { useDataGridExtractor } from "@/composables/useDataGridExtractor";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { saveTextFile, sanitizeExportBaseName, compactLocalTimestamp } from "@/lib/export/saveTextFile";
+import { dropsSchemaQualifier } from "@/lib/table/tableSelectSql";
 import * as api from "@/lib/backend/api";
 import { type CellSelectionMatrix, type CellSelectionRange, type SelectionData } from "@/lib/dataGrid/gridSelection";
 import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, type DataGridCopyExtractorId, type DataGridExtractRequest, type DataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
@@ -1381,7 +1382,14 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           tableName: meta.tableName,
           filePath: outputPath,
           format,
-          ...(format === "sql" && sqlExportOptions ? { insertMode: sqlExportOptions.insertMode, splitMaxMb: sqlExportOptions.splitMaxMb, selectedColumns: sqlExportOptions.selectedColumns } : {}),
+          ...(format === "sql" && sqlExportOptions
+            ? {
+                insertMode: sqlExportOptions.insertMode,
+                splitMaxMb: sqlExportOptions.splitMaxMb,
+                selectedColumns: sqlExportOptions.selectedColumns,
+                omitDatabaseQualifier: dropsSchemaQualifier(databaseType.value, options.includeDatabaseName?.value, meta.catalog),
+              }
+            : {}),
           csvQuoteMode: editorSettings.csvQuoteMode,
           nullLiteral: csvNullLiteralForMode(editorSettings.csvNullMode),
           columns: format === "sql" ? effectiveColumns(sourceColumns.value, columns.value).map((column, index) => column ?? columns.value[index]!) : columns.value,

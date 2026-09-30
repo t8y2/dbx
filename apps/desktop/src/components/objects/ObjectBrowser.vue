@@ -81,7 +81,7 @@ import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionTableSq
 import { getTableMetadataCapabilities, type TableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { findTableStatistics } from "@/lib/dataGrid/tableInfoOverview";
 import { constraintsForConstraintsTab } from "@/lib/table/constraintPresentation";
-import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
+import { buildTableSelectSql, dropsSchemaQualifier } from "@/lib/table/tableSelectSql";
 import { PARTITION_TREE_INDENT_PX } from "@/lib/table/pgPartitionPresentation";
 import {
   buildDropObjectSql,
@@ -2460,7 +2460,14 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx" | "
       tableName: row.name,
       filePath,
       format,
-      ...(format === "sql" ? { insertMode, insertDialect, splitMaxMb } : {}),
+      ...(format === "sql"
+        ? {
+            insertMode,
+            insertDialect,
+            splitMaxMb,
+            omitDatabaseQualifier: dropsSchemaQualifier(effectiveDatabaseType.value, settingsStore.editorSettings.generateSqlIncludeDatabaseName, props.catalog),
+          }
+        : {}),
       csvQuoteMode: settingsStore.editorSettings.csvQuoteMode,
       nullLiteral: csvNullLiteralForMode(settingsStore.editorSettings.csvNullMode),
       columns,

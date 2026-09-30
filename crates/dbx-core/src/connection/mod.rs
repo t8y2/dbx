@@ -1797,10 +1797,20 @@ impl AppState {
         let env = self.external_driver_runtime_env(driver_id)?;
         let session = self.plugins.start_driver_session_for_connection(driver_id, env, &config.name).await?;
         let params = serde_json::json!({ "connection": config });
-        session
+        let result = session
             .invoke_with_timeout::<serde_json::Value>("connect", params, Some(external_driver_connect_timeout(config)))
-            .await?;
-        Ok(PoolKind::ExternalDriver { driver_id: driver_id.to_string(), config: Arc::new(config.clone()), session })
+            .await;
+        match result {
+            Ok(_) => Ok(PoolKind::ExternalDriver {
+                driver_id: driver_id.to_string(),
+                config: Arc::new(config.clone()),
+                session,
+            }),
+            Err(error) => {
+                session.shutdown().await;
+                Err(error)
+            }
+        }
     }
 
     pub async fn test_sqlserver_connection(
@@ -8099,6 +8109,17 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn plugin_process_exists(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
     #[tokio::test]
     async fn app_state_uses_explicit_agent_dir() {
         let dir = std::env::temp_dir().join(format!("dbx-core-agent-dir-test-{}", uuid::Uuid::new_v4()));
@@ -8379,6 +8400,89 @@ mod tests {
         assert!(keepalive_failure_proves_pool_dead(
             "MySQL connection pool checkout timed out [stage=create, timeout_ms=10000]"
         ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn external_driver_pool_shuts_down_sidecar_when_connect_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_dir = dir.path().join("plugins").join("sample.jdbc");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let executable = plugin_dir.join("plugin.sh");
+        let pid_file = dir.path().join("plugin.pid");
+        std::fs::write(
+            &executable,
+            format!(
+                r#"#!/bin/sh
+printf '%s' "$$" > '{}'
+IFS= read -r connect
+connect_id=$(printf '%s' "$connect" | sed -E 's/.*"id":([0-9]+).*/\1/')
+printf '{{"jsonrpc":"2.0","id":%s,"error":{{"message":"fake connect failed"}}}}\n' "$connect_id"
+sleep 30
+"#,
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+        std::fs::write(
+            plugin_dir.join("manifest.json"),
+            serde_json::json!({
+                "id": "sample.jdbc",
+                "name": "Sample JDBC",
+                "version": "1.0.0",
+                "protocol_version": 1,
+                "executable": "plugin.sh",
+                "drivers": [{
+                    "id": "jdbc",
+                    "label": "JDBC",
+                    "kind": "external",
+                    "database_type": "jdbc"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_dir_and_app_version(storage, dir.path().join("plugins"), "0.6.0");
+        let mut config = mysql_config(None);
+        config.name = "Fake JDBC".to_string();
+        config.db_type = DatabaseType::Jdbc;
+        config.connection_string = Some("jdbc:fake://127.0.0.1/example".to_string());
+
+        let error = match state.external_driver_pool("jdbc", &config).await {
+            Ok(_) => panic!("fake connect should fail"),
+            Err(error) => error,
+        };
+        assert_eq!(error, "fake connect failed");
+
+        let pid = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Ok(contents) = std::fs::read_to_string(&pid_file) {
+                    if let Ok(pid) = contents.parse::<u32>() {
+                        break pid;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("fake sidecar should write its pid");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if !plugin_process_exists(pid) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("failed external-driver connect must terminate its sidecar");
     }
 
     #[tokio::test]

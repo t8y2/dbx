@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import type { DialogContentEmits, DialogContentProps } from "reka-ui";
 
-import type { HTMLAttributes } from "vue";
+import { ref, type HTMLAttributes } from "vue";
 import { reactiveOmit } from "@vueuse/core";
 import { XIcon } from "@lucide/vue";
 import { DialogClose, DialogContent, DialogDescription, DialogPortal, VisuallyHidden, useForwardPropsEmits } from "reka-ui";
 import { cn } from "@/lib/common/utils";
 import { Button } from "@/components/ui/button";
 import DialogOverlay from "./DialogOverlay.vue";
+import { useDialogLayerOrder } from "./useDialogLayerOrder";
 
 defineOptions({
   inheritAttrs: false,
@@ -31,12 +32,15 @@ const emits = defineEmits<DialogContentEmits>();
 const delegatedProps = reactiveOmit(props, "class", "overlayClass", "portalClass");
 
 const forwarded = useForwardPropsEmits(delegatedProps, emits);
+
+const positioner = ref<HTMLElement | null>(null);
+useDialogLayerOrder(positioner);
 </script>
 
 <template>
   <DialogPortal>
     <DialogOverlay :class="props.overlayClass" />
-    <div data-slot="dialog-positioner" :class="cn('fixed inset-0 z-50 grid place-items-center p-4 pointer-events-none', props.portalClass)">
+    <div ref="positioner" data-slot="dialog-positioner" :class="cn('fixed inset-0 z-50 grid place-items-center p-4 pointer-events-none', props.portalClass)">
       <DialogContent
         data-slot="dialog-content"
         v-bind="{ ...$attrs, ...forwarded }"

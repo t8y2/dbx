@@ -13,6 +13,7 @@ import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { clampInterval, createProcessListLoadCoordinator, DEFAULT_REFRESH_SECONDS, processListExecutionError, processListSessionCount } from "@/lib/database/mysqlProcessList";
 import { resolveProcessListDriverForConnection, type ProcessRow } from "@/lib/database/processListDrivers";
+import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { processListSelectionAfterClick } from "@/lib/database/processListSelection";
 import { useTabUiState } from "@/lib/tabs/tabUiState";
 
@@ -34,12 +35,16 @@ const { initialState: restoredUiState, track: trackUiState } = useTabUiState<{
 // The panel is only opened for supported engines; guard the driver defensively so
 // a missing one degrades to an empty table rather than crashing the render.
 const driver = computed(() => resolveProcessListDriverForConnection(props.connection));
+const xuguAdminRequired = computed(() => effectiveDatabaseTypeForConnection(props.connection) === "xugu" && driver.value === null);
 const columns = computed(() => driver.value?.columns ?? []);
 const numericKeys = computed(() => new Set(columns.value.filter((column) => column.numeric).map((column) => column.key)));
 
 const rows = ref<ProcessRow[]>([]);
 const truncated = ref(false);
 const ownSessionId = ref<number | null>(null);
+const ownNodeId = ref<number | null>(null);
+const transactionMode = computed(() => driver.value?.mode === "transaction");
+const transactionIdentityUnavailable = computed(() => transactionMode.value && (ownSessionId.value === null || ownNodeId.value === null));
 const loading = ref(false);
 const loadCoordinator = createProcessListLoadCoordinator();
 const loadError = ref("");
@@ -154,14 +159,14 @@ function requestBatchCancel() {
 async function confirmBatchCancel() {
   const targets = batchTargets.value;
   const activeDriver = driver.value;
-  if (!targets?.length || !activeDriver?.supportsBatchCancel || ownSessionId.value === null || canceling.value) return;
+  if (!targets?.length || !activeDriver?.supportsBatchCancel || !activeDriver.buildCancelQuerySql || ownSessionId.value === null || canceling.value) return;
   const connection = { ...props.connection };
   const generation = connectionGeneration;
   const isCurrent = () => !disposed && generation === connectionGeneration;
   canceling.value = true;
   let executed = false;
   try {
-    const statements = targets.map((row) => ({ id: row.id, sql: activeDriver.buildCancelQuerySql(row.id) }));
+    const statements = targets.map((row) => ({ id: row.id, sql: activeDriver.buildCancelQuerySql!(row.id) }));
     const result = await executeWithProductionSqlGuard({
       connection,
       database: "",
@@ -296,14 +301,23 @@ async function load(options: { silent?: boolean } = {}) {
       try {
         let idResult;
         try {
-          idResult = await api.executeQuery(connectionId, "", activeDriver.ownSessionSql, undefined, undefined, { maxRows: 1 });
+          idResult = await api.executeQuery(connectionId, activeDriver.database ?? "", activeDriver.ownSessionSql, undefined, undefined, { maxRows: 1 });
         } catch (error) {
           if (!activeDriver.fallbackOwnSessionSql || !activeDriver.shouldUseFallbackOwnSessionSql?.(error)) throw error;
-          idResult = await api.executeQuery(connectionId, "", activeDriver.fallbackOwnSessionSql, undefined, undefined, { maxRows: 1 });
+          idResult = await api.executeQuery(connectionId, activeDriver.database ?? "", activeDriver.fallbackOwnSessionSql, undefined, undefined, { maxRows: 1 });
         }
-        const raw = idResult?.rows?.[0]?.[0];
-        const parsed = Number(raw);
-        if (isCurrent() && Number.isInteger(parsed) && parsed > 0) ownSessionId.value = parsed;
+        const ownRow = idResult?.rows?.[0];
+        if (activeDriver.mode === "transaction") {
+          const nodeId = Number(ownRow?.[0]);
+          const sessionId = Number(ownRow?.[1]);
+          if (isCurrent() && Number.isSafeInteger(nodeId) && nodeId > 0 && Number.isSafeInteger(sessionId) && sessionId >= 0) {
+            ownNodeId.value = nodeId;
+            ownSessionId.value = sessionId;
+          }
+        } else {
+          const parsed = Number(ownRow?.[0]);
+          if (isCurrent() && Number.isInteger(parsed) && parsed > 0) ownSessionId.value = parsed;
+        }
       } catch {
         // Non-fatal: without our own id we simply cannot dim the self row.
       }
@@ -312,10 +326,10 @@ async function load(options: { silent?: boolean } = {}) {
     const listSql = fallbackListSql.value ?? activeDriver.listSql;
     let result;
     try {
-      result = await api.executeQuery(connectionId, "", listSql, undefined, undefined, { maxRows: activeDriver.maxRows });
+      result = await api.executeQuery(connectionId, activeDriver.database ?? "", listSql, undefined, undefined, { maxRows: activeDriver.maxRows });
     } catch (error) {
       if (fallbackListSql.value || !activeDriver.fallbackListSql || !activeDriver.shouldUseFallbackListSql?.(error)) throw error;
-      result = await api.executeQuery(connectionId, "", activeDriver.fallbackListSql, undefined, undefined, { maxRows: activeDriver.maxRows });
+      result = await api.executeQuery(connectionId, activeDriver.database ?? "", activeDriver.fallbackListSql, undefined, undefined, { maxRows: activeDriver.maxRows });
       // Cache the compatible query so old servers do not fail once per refresh.
       if (isCurrent()) fallbackListSql.value = activeDriver.fallbackListSql;
     }
@@ -323,7 +337,17 @@ async function load(options: { silent?: boolean } = {}) {
     rows.value = activeDriver.mapRows(result);
     truncated.value = result.truncated === true;
   } catch (error: any) {
-    if (isCurrent()) loadError.value = error?.message || String(error);
+    if (isCurrent()) {
+      if (activeDriver.mode === "transaction") {
+        // A failed refresh must not leave stale kill targets on screen. A
+        // connection failure is not evidence that there are no transactions.
+        rows.value = [];
+        truncated.value = false;
+        ownSessionId.value = null;
+        ownNodeId.value = null;
+      }
+      loadError.value = activeDriver.mode === "transaction" ? t("processList.transactionLoadFailed", { message: error?.message || String(error) }) : error?.message || String(error);
+    }
   } finally {
     loading.value = false;
     refreshing.value = false;
@@ -333,38 +357,48 @@ async function load(options: { silent?: boolean } = {}) {
 }
 
 function isOwnSession(row: ProcessRow): boolean {
+  if (transactionMode.value) return ownNodeId.value !== null && ownSessionId.value !== null && row.nodeId === ownNodeId.value && row.id === ownSessionId.value;
   return ownSessionId.value !== null && row.id === ownSessionId.value;
 }
 
 function requestCancel(row: ProcessRow) {
-  if (isOwnSession(row) || actionsLocked.value || refreshing.value) return;
+  if (isOwnSession(row) || transactionIdentityUnavailable.value || actionsLocked.value || refreshing.value) return;
   cancelTarget.value = row;
 }
 
 async function confirmCancel() {
   const target = cancelTarget.value;
   const activeDriver = driver.value;
-  if (!target || !activeDriver || canceling.value) return;
+  if (!target || !activeDriver || canceling.value || isOwnSession(target) || transactionIdentityUnavailable.value || (transactionMode.value ? !activeDriver.buildKillTransactionSql : !activeDriver.buildCancelQuerySql)) return;
   const connection = { ...props.connection };
   const generation = connectionGeneration;
   const isCurrent = () => !disposed && generation === connectionGeneration;
   canceling.value = true;
   try {
-    const cancelSql = activeDriver.buildCancelQuerySql(target.id);
+    const cancelSql = transactionMode.value ? activeDriver.buildKillTransactionSql!(target) : activeDriver.buildCancelQuerySql!(target.id);
     let usedFallbackCancelSql = false;
     const executeCancelSql = async (sql: string) => {
       if (!isCurrent()) return undefined;
-      const results = await api.executeMulti(connection.id, "", sql, undefined, undefined, { maxRows: 1 });
+      const results = await api.executeMulti(connection.id, activeDriver.database ?? "", sql, undefined, undefined, { maxRows: 1 });
       const executionError = processListExecutionError(results);
       if (executionError) throw new Error(executionError);
       return results;
     };
     const result = await executeWithProductionSqlGuard({
       connection,
-      database: "",
+      database: activeDriver.database ?? "",
       sql: cancelSql,
       source: t("production.sourceAdmin"),
       execute: async () => {
+        if (activeDriver.mode === "transaction") {
+          // A confirmation dialog may stay open while the Agent reconnects.
+          // Refuse to kill until the executing session has been identified again.
+          const identity = await api.executeQuery(connection.id, activeDriver.database ?? "", activeDriver.ownSessionSql, undefined, undefined, { maxRows: 1 });
+          const currentNode = Number(identity.rows?.[0]?.[0]);
+          const currentSession = Number(identity.rows?.[0]?.[1]);
+          if (!Number.isSafeInteger(currentNode) || currentNode <= 0 || !Number.isSafeInteger(currentSession) || currentSession < 0) throw new Error(t("processList.transactionNeedsSession"));
+          if (currentNode === target.nodeId && currentSession === target.id) throw new Error(t("processList.transactionCannotKillSelf"));
+        }
         try {
           return await executeCancelSql(cancelSql);
         } catch (error) {
@@ -377,10 +411,10 @@ async function confirmCancel() {
     if (result === undefined || !isCurrent()) return;
     const cancelResultError = usedFallbackCancelSql ? activeDriver.fallbackCancelQueryResultError?.(result) : activeDriver.cancelQueryResultError?.(result);
     if (cancelResultError) throw new Error(cancelResultError);
-    toast(t("processList.killSuccess", { id: target.id }), 2500);
+    toast(t(activeDriver.mode === "transaction" ? "processList.transactionKillSuccess" : "processList.killSuccess", { id: target.transactionId ?? target.id }), 2500);
     cancelTarget.value = null;
   } catch (error: any) {
-    if (isCurrent()) toast(t("processList.killFailed", { message: error?.message || String(error) }), 5000);
+    if (isCurrent()) toast(t(activeDriver.mode === "transaction" ? "processList.transactionKillFailed" : "processList.killFailed", { message: error?.message || String(error) }), 5000);
   } finally {
     canceling.value = false;
     if (cancelTarget.value === null) void load({ silent: true });
@@ -485,6 +519,7 @@ watch(
     rows.value = [];
     truncated.value = false;
     ownSessionId.value = null;
+    ownNodeId.value = null;
     search.value = "";
     sortKey.value = driver.value?.defaultSortKey ?? "time";
     sortDir.value = "desc";
@@ -501,13 +536,21 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="flex h-full min-h-0 flex-col bg-background">
+  <div v-if="xuguAdminRequired" class="flex h-full items-center justify-center bg-background p-6">
+    <div class="flex max-w-md items-start gap-3 rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">
+      <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" />
+      <span>{{ t("processList.transactionRequiresSysdba") }}</span>
+    </div>
+  </div>
+  <div v-else class="flex h-full min-h-0 flex-col bg-background">
     <div class="flex min-h-11 shrink-0 flex-wrap items-center gap-2 border-b bg-muted/20 px-3 py-1">
       <div class="flex min-w-0 items-center gap-2">
         <Activity class="h-4 w-4 text-primary" />
-        <div class="truncate text-sm font-semibold">{{ t("processList.title") }}</div>
+        <div class="truncate text-sm font-semibold">{{ t(transactionMode ? "processList.transactionTitle" : "processList.title") }}</div>
         <Badge variant="outline" class="h-5 rounded-md px-1.5 text-[11px]">{{ connection.name }}</Badge>
-        <Badge variant="secondary" class="h-5 rounded-md px-1.5 text-[11px]">{{ t("processList.sessionCount", { count: processListSessionCount(truncated ? rows.length : filteredRows.length, truncated) }) }}</Badge>
+        <Badge v-if="!transactionMode || !loadError" variant="secondary" class="h-5 rounded-md px-1.5 text-[11px]">{{
+          t(transactionMode ? "processList.transactionCount" : "processList.sessionCount", { count: processListSessionCount(truncated ? rows.length : filteredRows.length, truncated) })
+        }}</Badge>
       </div>
       <div class="ml-auto flex flex-wrap items-center gap-2">
         <Button
@@ -538,7 +581,7 @@ onBeforeUnmount(() => {
         </Button>
         <div class="flex h-7 items-center gap-1.5 rounded-md border bg-background px-2">
           <Search class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-          <input v-model="search" :disabled="actionsLocked" class="h-full w-40 min-w-0 bg-transparent text-xs outline-none placeholder:text-muted-foreground" :placeholder="t('processList.filter')" />
+          <input v-model="search" :disabled="actionsLocked" class="h-full w-40 min-w-0 bg-transparent text-xs outline-none placeholder:text-muted-foreground" :placeholder="t(transactionMode ? 'processList.transactionFilter' : 'processList.filter')" />
         </div>
         <label class="flex items-center gap-1.5 text-xs text-muted-foreground">
           <input v-model="autoRefresh" type="checkbox" class="h-3.5 w-3.5 accent-primary" />
@@ -556,7 +599,10 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
+    <div v-if="transactionMode" class="border-b bg-muted/10 px-3 py-2 text-xs text-muted-foreground">{{ t("processList.transactionScope") }}</div>
+
     <div v-if="selectionSupported && ownSessionId === null && !refreshing" class="border-b px-3 py-2 text-xs text-muted-foreground">{{ t("processList.batchNeedsSession") }}</div>
+    <div v-if="transactionIdentityUnavailable && !refreshing && !loadError" class="border-b px-3 py-2 text-xs text-muted-foreground">{{ t("processList.transactionNeedsSession") }}</div>
 
     <div v-if="loadError" class="border-b bg-destructive/10 px-3 py-2 text-xs text-destructive">{{ loadError }}</div>
 
@@ -587,7 +633,7 @@ onBeforeUnmount(() => {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="row in filteredRows" :key="row.id" class="border-b hover:bg-accent/40" :class="{ 'bg-primary/5': isOwnSession(row) }">
+          <tr v-for="row in filteredRows" :key="driver?.rowKey?.(row) ?? row.id" class="border-b hover:bg-accent/40" :class="{ 'bg-primary/5': isOwnSession(row) }">
             <td v-if="selectionSupported" class="px-3 py-1.5">
               <input
                 type="checkbox"
@@ -618,12 +664,12 @@ onBeforeUnmount(() => {
                   variant="ghost"
                   size="sm"
                   class="h-6 gap-1 px-1.5 text-[11px] text-destructive hover:bg-destructive/10 hover:text-destructive disabled:opacity-40"
-                  :disabled="isOwnSession(row) || actionsLocked || refreshing"
-                  :title="isOwnSession(row) ? t('processList.cannotKillSelf') : t('processList.kill')"
+                  :disabled="isOwnSession(row) || transactionIdentityUnavailable || actionsLocked || refreshing"
+                  :title="isOwnSession(row) ? t(transactionMode ? 'processList.transactionCannotKillSelf' : 'processList.cannotKillSelf') : t(transactionMode ? 'processList.transactionKill' : 'processList.kill')"
                   @click="requestCancel(row)"
                 >
                   <Ban class="h-3.5 w-3.5" />
-                  {{ t("processList.kill") }}
+                  {{ t(transactionMode ? "processList.transactionKill" : "processList.kill") }}
                 </Button>
                 <Button
                   v-if="terminateSupported"
@@ -640,9 +686,9 @@ onBeforeUnmount(() => {
               </span>
             </td>
           </tr>
-          <tr v-if="!loading && filteredRows.length === 0">
+          <tr v-if="!loading && filteredRows.length === 0 && (!transactionMode || !loadError)">
             <td :colspan="columns.length + 1 + (selectionSupported ? 1 : 0)" class="px-3 py-10 text-center text-muted-foreground">
-              {{ search ? t("grid.noSearchResults") : t("processList.empty") }}
+              {{ search ? t("grid.noSearchResults") : t(transactionMode ? "processList.transactionEmpty" : "processList.empty") }}
             </td>
           </tr>
         </tbody>
@@ -661,17 +707,17 @@ onBeforeUnmount(() => {
         <DialogHeader>
           <DialogTitle class="flex items-center gap-2">
             <AlertTriangle class="h-4 w-4 text-destructive" />
-            {{ t("processList.killTitle") }}
+            {{ t(transactionMode ? "processList.transactionKillTitle" : "processList.killTitle") }}
           </DialogTitle>
         </DialogHeader>
         <p v-if="cancelTarget" class="text-sm text-muted-foreground">
-          {{ t("processList.killConfirm", { id: cancelTarget.id, user: cancelTarget.user }) }}
+          {{ t(transactionMode ? "processList.transactionKillConfirm" : "processList.killConfirm", { id: cancelTarget.transactionId ?? cancelTarget.id, node: cancelTarget.nodeId, user: cancelTarget.user, db: cancelTarget.db }) }}
         </p>
         <DialogFooter>
           <Button variant="outline" :disabled="canceling" @click="cancelTarget = null">{{ t("dangerDialog.cancel") }}</Button>
           <Button variant="destructive" :disabled="canceling" @click="confirmCancel">
             <Loader2 v-if="canceling" class="mr-1.5 h-3.5 w-3.5 animate-spin" />
-            {{ t("processList.kill") }}
+            {{ t(transactionMode ? "processList.transactionKill" : "processList.kill") }}
           </Button>
         </DialogFooter>
       </DialogContent>

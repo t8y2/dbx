@@ -5671,7 +5671,7 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
       items.push({ label: t("contextMenu.userAdmin"), action: openUserAdmin, icon: UsersRound });
     }
     if (node.connectionId && connectionSupportsProcessList(connectionStore.getConfig(node.connectionId))) {
-      items.push({ label: t("contextMenu.processList"), action: openProcessList, icon: Activity });
+      items.push({ label: t(currentDatabaseType() === "xugu" ? "processList.transactionTitle" : "contextMenu.processList"), action: openProcessList, icon: Activity });
     }
     if (currentDatabaseType() === "sqlserver") {
       items.push({ label: t("contextMenu.sqlServerTrace"), action: openSqlServerActivityTrace, icon: Activity });

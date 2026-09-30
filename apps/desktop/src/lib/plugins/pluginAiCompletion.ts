@@ -33,7 +33,7 @@ export function pluginAiModels(configs: AiConfigItem[]): PluginAiModel[] {
     );
 }
 
-export function createPluginAiCompletion(deps: { load: () => Promise<AiConfigItem[]>; discover?: (config: AiConfigItem) => Promise<{ id: string }[]>; complete: (request: AiCompletionRequest) => Promise<string>; confirm: (pluginName: string, model: PluginAiModel) => Promise<boolean> }) {
+export function createPluginAiCompletion(deps: { load: () => Promise<AiConfigItem[]>; discover?: (config: AiConfigItem) => Promise<{ id: string }[]>; complete: (request: AiCompletionRequest) => Promise<string> }) {
   let busy = false;
   return {
     async listAiProviders() {
@@ -52,7 +52,7 @@ export function createPluginAiCompletion(deps: { load: () => Promise<AiConfigIte
     async listAiModels() {
       return pluginAiModels(await deps.load());
     },
-    async generateAiText(pluginName: string, input: PluginAiGenerateRequest): Promise<string> {
+    async generateAiText(_pluginName: string, input: PluginAiGenerateRequest): Promise<string> {
       if (busy) throw new Error("AI is already generating. Please wait.");
       busy = true;
       try {
@@ -60,7 +60,6 @@ export function createPluginAiCompletion(deps: { load: () => Promise<AiConfigIte
         const chosen = configs.find((c) => c.id === input.configId && !isCliProvider(c.provider));
         const model = chosen && input.model.trim() && input.model.length <= 256 ? { configId: chosen.id, name: chosen.name, model: input.model.trim(), isDefault: false } : undefined;
         if (!model) throw new Error("AI configuration or model is no longer available. Refresh the model list.");
-        if (!(await deps.confirm(pluginName, model))) throw new Error("AI generation cancelled.");
         const config = configs.find((c) => c.id === model.configId)!;
         let result: string;
         try {

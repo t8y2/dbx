@@ -11,18 +11,20 @@ describe("plugin text completion", () => {
     ]);
     expect(JSON.stringify(models)).not.toContain("secret");
   });
-  it("validates selected models and requires host consent", async () => {
-    const complete = vi.fn();
-    const confirm = vi.fn().mockResolvedValue(false);
-    const api = createPluginAiCompletion({ load: async () => [config], complete, confirm });
+  it("generates consecutive requests without a confirmation callback and rejects unavailable providers", async () => {
+    const complete = vi.fn().mockResolvedValue("done");
+    const api = createPluginAiCompletion({ load: async () => [config, { ...config, id: "cli", provider: "codex-cli" }], complete });
     await expect(api.generateAiText("Plugin", { configId: "missing", model: "unknown", prompt: "hi" })).rejects.toThrow("no longer available");
-    expect(confirm).not.toHaveBeenCalled();
-    await expect(api.generateAiText("Plugin", { configId: "one", model: "b", prompt: "hi" })).rejects.toThrow("cancelled");
+    await expect(api.generateAiText("Plugin", { configId: "cli", model: "a", prompt: "hi" })).rejects.toThrow("no longer available");
     expect(complete).not.toHaveBeenCalled();
+    for (const prompt of ["first", "second"]) {
+      await expect(api.generateAiText("Plugin", { configId: "one", model: "b", prompt })).resolves.toBe("done");
+    }
+    expect(complete).toHaveBeenCalledTimes(2);
   });
   it("resolves credentials only inside host and sanitizes provider errors", async () => {
     const complete = vi.fn().mockResolvedValue(" fix: example ");
-    const api = createPluginAiCompletion({ load: async () => [config], complete, confirm: async () => true });
+    const api = createPluginAiCompletion({ load: async () => [config], complete });
     expect(await api.generateAiText("Plugin", { configId: "one", model: "b", prompt: "hi" })).toBe("fix: example");
     expect(complete.mock.calls[0][0].config).toMatchObject({ model: "b", apiKey: "secret" });
     complete.mockRejectedValue(new Error("secret"));
@@ -32,7 +34,7 @@ describe("plugin text completion", () => {
     const empty = { ...config, model: "", models: [] };
     const complete = vi.fn().mockResolvedValue("done");
     const discover = vi.fn().mockResolvedValue([{ id: "remote", apiKey: "secret" }]);
-    const api = createPluginAiCompletion({ load: async () => [empty], discover, complete, confirm: async () => true });
+    const api = createPluginAiCompletion({ load: async () => [empty], discover, complete });
     expect(await api.listAiProviders()).toEqual([{ configId: "one", name: "My AI" }]);
     expect(await api.discoverAiModels("one")).toEqual([{ configId: "one", name: "My AI", model: "remote", isDefault: false }]);
     await api.generateAiText("Plugin", { configId: "one", model: "manual", prompt: "hi" });
@@ -49,7 +51,7 @@ describe("plugin text completion", () => {
           finish = resolve;
         }),
     );
-    const api = createPluginAiCompletion({ load: async () => [config], complete, confirm: async () => true });
+    const api = createPluginAiCompletion({ load: async () => [config], complete });
     const input = { configId: "one", model: "a", prompt: "hi" };
     const first = api.generateAiText("Plugin", input);
     await expect(api.generateAiText("Plugin", input)).rejects.toThrow("already generating");

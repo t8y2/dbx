@@ -157,7 +157,7 @@ export interface PluginHostBridgeApi {
   listAiProviders?(): Promise<PluginAiProvider[]>;
   discoverAiModels?(configId: string): Promise<PluginAiModel[]>;
   listAiModels?(): Promise<PluginAiModel[]>;
-  /** Must obtain trusted host consent for every send; never return provider errors or credentials. */
+  /** Requires host.ai permission at the bridge; never return provider errors or credentials. */
   generateAiText?(pluginName: string, input: PluginAiGenerateRequest): Promise<string>;
   openAiConversation?(request: AiPluginConversationRequest): Promise<void>;
   setAiRecommendations?(update: PluginAiRecommendationHostUpdate): void;

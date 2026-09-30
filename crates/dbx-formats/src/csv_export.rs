@@ -32,21 +32,55 @@ pub fn default_csv_null_literal() -> String {
     DEFAULT_CSV_NULL_LITERAL.to_string()
 }
 
-/// Excel/Sheets 公式注入中和：以 `=`、`+`、`-`、`@`、Tab、CR 开头的文本在导出
-/// 时前置 `'`，避免 `=WEBSERVICE(...)` 类值被电子表格应用按公式执行（数据外泄）。
-/// 与 DBeaver/DataGrip 的既有做法一致；代价是这类单元格回导时会多出前缀。
+/// Excel/Sheets 公式注入中和（OWASP CSV Injection 触发字符）：以 `=`、`+`、`-`、
+/// `@`、Tab、CR 开头的文本在导出时前置 `'`，避免 `=WEBSERVICE(...)` 类值被电子
+/// 表格应用按公式执行（数据外泄）。DataGrip 导出 CSV 时采用同一惯例。
 /// 数值列不受影响（Number 分支不走文本路径）。
-fn push_formula_guard(out: &mut String, value: &str) {
-    if matches!(value.as_bytes().first(), Some(b'=') | Some(b'+') | Some(b'-') | Some(b'@') | Some(b'\t') | Some(b'\r'))
-    {
+///
+/// 前缀的写入/剥离必须保持每单元格一次的对称对：[`push_formula_guard`] 与
+/// [`strip_formula_guard`]。guard 绝不能放进 [`push_csv_escaped_content`] 这类
+/// 片段级写入路径——serde_json 的 `Display` 会把对象/数组拆成多个片段经
+/// `CsvEscapedWriter` 逐段写入，片段级 guard 会在 JSON 单元格中间插 `'`。
+const FORMULA_TRIGGER_BYTES: [u8; 6] = [b'=', b'+', b'-', b'@', b'\t', b'\r'];
+
+/// 文本是否需要公式中和：跳过前导空格（OWASP 标注的 `" =cmd"` 前导空白绕过）
+/// 后，首字节是触发字符即命中。
+pub fn needs_formula_guard(value: &str) -> bool {
+    value.bytes().find(|&byte| byte != b' ').is_some_and(|byte| FORMULA_TRIGGER_BYTES.contains(&byte))
+}
+
+/// 在单元格值开头写入公式中和前缀，每单元格调用一次：
+/// - 命中 [`needs_formula_guard`] 的文本前置 `'`；
+/// - 以 `'` 开头且其后仍需中和（或本身以 `''` 开头）的文本前置一个额外 `'`
+///   转义字面撇号，使 [`strip_formula_guard`] 的剥离成为无歧义逆操作——
+///   用户字面数据 `'+8613800000000` 导出为 `''+86…`、回导无损。
+pub fn push_formula_guard(out: &mut String, value: &str) {
+    if value.as_bytes().first() == Some(&b'\'') {
+        if value.as_bytes().get(1) == Some(&b'\'') || needs_formula_guard(&value[1..]) {
+            out.push('\'');
+        }
+    } else if needs_formula_guard(value) {
         out.push('\'');
+    }
+}
+
+/// [`push_formula_guard`] 的逆操作：单元格以 `'` 开头且其后命中中和条件（字面
+/// 撇号转义的 `''`，或 `'<触发字符>` / `' <触发字符>` 守卫）时剥掉一个 `'`，
+/// 否则原样返回——单独的 `'` 是用户数据，不动。
+pub fn strip_formula_guard(value: &str) -> &str {
+    let guarded = value.as_bytes().first() == Some(&b'\'')
+        && (value.as_bytes().get(1) == Some(&b'\'') || needs_formula_guard(&value[1..]));
+    if guarded {
+        &value[1..]
+    } else {
+        value
     }
 }
 
 /// CSV 转义直写目标 buffer：包引号 + 内部 `"` 翻倍。值不含 `"` 时整段拷贝，
 /// 不做 replace 分配（逐批流式导出对每个单元格调用，是导出热路径）。
+/// 这里是纯转义原语，不含公式中和——guard 属于单元格级语义（见 [`push_formula_guard`]）。
 fn push_csv_escaped_content(out: &mut String, value: &str) {
-    push_formula_guard(out, value);
     let mut rest = value;
     while let Some(pos) = rest.find('"') {
         out.push_str(&rest[..=pos]);
@@ -68,7 +102,11 @@ fn csv_field_needs_quotes(value: &str) -> bool {
 
 pub fn push_csv_field(out: &mut String, value: &str, quote_mode: CsvQuoteMode) {
     if quote_mode == CsvQuoteMode::All || csv_field_needs_quotes(value) {
-        push_csv_escaped(out, value);
+        // 守卫前缀写在引号内：`"'-total"` 是合法的带引号字段，`'"-total"'` 不是
+        out.push('"');
+        push_formula_guard(out, value);
+        push_csv_escaped_content(out, value);
+        out.push('"');
     } else {
         push_formula_guard(out, value);
         out.push_str(value);
@@ -89,7 +127,10 @@ pub fn push_csv_text_value(out: &mut String, value: &Value) {
     out.push('"');
     match value {
         Value::Null => {}
-        Value::String(value) => push_csv_escaped_content(out, value),
+        Value::String(value) => {
+            push_formula_guard(out, value);
+            push_csv_escaped_content(out, value)
+        }
         Value::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
         Value::Number(value) => {
             fmt::write(out, format_args!("{value}")).expect("writing a number into a String cannot fail")
@@ -140,10 +181,13 @@ fn push_csv_value_with_quote_mode(
     }
 }
 
-/// TSV 转义直写：仅含特殊字符时包引号（语义与原 escape_tsv 一致）。
+/// TSV 转义直写：仅含特殊字符时包引号（语义与原 escape_tsv 一致），守卫前缀在引号内。
 fn push_tsv_escaped(out: &mut String, value: &str) {
     if value.contains('\t') || value.contains('\n') || value.contains('\r') || value.contains('"') {
-        push_csv_escaped(out, value);
+        out.push('"');
+        push_formula_guard(out, value);
+        push_csv_escaped_content(out, value);
+        out.push('"');
     } else {
         push_formula_guard(out, value);
         out.push_str(value);
@@ -310,7 +354,7 @@ fn format_csv_with_value_formatter(columns: &[String], rows: &[Vec<Value>]) -> S
         if index > 0 {
             out.push(',');
         }
-        push_csv_escaped(&mut out, column);
+        push_csv_field(&mut out, column, CsvQuoteMode::All);
     }
     out.push('\n');
     push_query_result_csv_rows(&mut out, rows);
@@ -495,15 +539,9 @@ mod tests {
     fn escape_tsv_matches_reference_semantics() {
         // TSV 仅在含 \t/\n/\r/引号时包引号；逗号不触发
         for input in ["", "plain", "with,comma", "tab\there", "line\nbreak", "cr\rhere", "quo\"te", "\t\"mix\""] {
-            // 公式中和前缀与转义正交：触发字符开头的文本无论是否包引号都带前缀
-            let guard = if matches!(
-                input.as_bytes().first(),
-                Some(b'=') | Some(b'+') | Some(b'-') | Some(b'@') | Some(b'\t') | Some(b'\r')
-            ) {
-                "'"
-            } else {
-                ""
-            };
+            // 公式中和前缀与转义正交：守卫由共享原语计算，无论是否包引号都带前缀
+            let mut guard = String::new();
+            super::push_formula_guard(&mut guard, input);
             let expected =
                 if input.contains('\t') || input.contains('\n') || input.contains('\r') || input.contains('"') {
                     format!("\"{guard}{}\"", input.replace('"', "\"\""))
@@ -685,6 +723,88 @@ mod tests {
         assert_eq!(out, "v\n'=sum\nx=y");
         let tsv = format_tsv(&["v".to_string()], &[vec![json!("=sum")], vec![json!("plain")]]);
         assert_eq!(tsv, "v\n'=sum\nplain");
+    }
+
+    #[test]
+    fn formula_guard_covers_headers() {
+        let out = format_csv(&["-total".to_string()], &[vec![json!(1)]]);
+        assert_eq!(out, "\"'-total\"\n\"1\"");
+    }
+
+    #[test]
+    fn json_cells_are_exported_verbatim_and_strings_still_guarded() {
+        // 回归：guard 曾挂在片段级写入路径（push_csv_escaped_content）上，而它同时是
+        // serde_json Display 的 fmt::Write sink，对象/数组被拆成多个片段逐段写入，
+        // guard 在单元格中间触发，把 {"n": -5} 写成 {"n":'-5}、[1, -2] 写成 [1,'-2]，
+        // 导出的 JSON 因此失效。guard 现在是单元格级语义，JSON 单元格逐字节原样。
+        let out = format_csv(
+            &["v".to_string()],
+            &[
+                vec![json!({"n": -5})],
+                vec![json!([1, -2])],
+                vec![json!(["-5"])],
+                vec![json!({"formula": "=1+1"})],
+                vec![json!("-5")],
+            ],
+        );
+        assert_eq!(
+            out,
+            concat!(
+                "\"v\"\n",
+                "\"{\"\"n\"\":-5}\"\n",
+                "\"[1,-2]\"\n",
+                "\"[\"\"-5\"\"]\"\n",
+                "\"{\"\"formula\"\":\"\"=1+1\"\"}\"\n",
+                "\"'-5\""
+            )
+        );
+    }
+
+    #[test]
+    fn formula_guard_escapes_literal_leading_apostrophe_for_symmetric_round_trip() {
+        // 字面前导撇号（'+86 是表格里存手机号的常见写法）导出时翻倍为 ''，
+        // 使导入侧的剥离成为无歧义逆操作；前导空格后跟触发字符（OWASP " =cmd"
+        // 绕过）同样中和；单独的 ' 或 ' 后接普通字符是用户数据，不动。
+        let out = format_csv(
+            &["v".to_string()],
+            &[
+                vec![json!("'+8613800000000")],
+                vec![json!("''-already-doubled")],
+                vec![json!("'plain")],
+                vec![json!(" =cmd")],
+                vec![json!("  -note")],
+                vec![json!("' =spaced")],
+            ],
+        );
+        assert_eq!(
+            out,
+            concat!(
+                "\"v\"\n",
+                "\"''+8613800000000\"\n",
+                "\"'''-already-doubled\"\n",
+                "\"'plain\"\n",
+                "\"' =cmd\"\n",
+                "\"'  -note\"\n",
+                "\"'' =spaced\""
+            )
+        );
+    }
+
+    #[test]
+    fn formula_guard_strip_is_the_exact_inverse_of_push() {
+        // guard 之后再 strip 必须还原原值，覆盖触发字符、前导空格、撇号转义与
+        // 空串边界；不以撇号开头的单元格 strip 一律原样返回。
+        for value in [
+            "=cmd", " =cmd", "  -x", "+2", "-3", "@a", "\tx", "\rx", "'+86", "''-e", "' =spaced", "'", "''", "'''",
+            "'plain", "plain", "",
+        ] {
+            let mut guarded = String::new();
+            super::push_formula_guard(&mut guarded, value);
+            let cell = format!("{guarded}{value}");
+            assert_eq!(super::strip_formula_guard(&cell), value, "value: {value:?}");
+        }
+        assert_eq!(super::strip_formula_guard("plain"), "plain");
+        assert_eq!(super::strip_formula_guard("'"), "'");
     }
 
     use serde_json::Value;

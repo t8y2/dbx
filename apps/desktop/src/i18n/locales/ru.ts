@@ -7768,6 +7768,11 @@ export default withEnglishFallback({
     cancelledLabel: "Отменено; уже записанные строки остаются в таблице",
   },
   tableToolbox: {
+    browser: "Веб-просмотр",
+    browserFiltered: "Веб-просмотр (текущий результат)",
+    browserSelected: "Веб-просмотр (выбранные строки)",
+    openWith: "Открыть с помощью",
+    openXlsx: "Открыть как XLSX",
     title: "Инструменты данных",
     generateData: "Генерировать данные",
     importData: "Импорт данных",

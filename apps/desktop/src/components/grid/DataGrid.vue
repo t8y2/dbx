@@ -59,6 +59,8 @@ import {
   WandSparkles,
   Camera,
   AlertTriangle,
+  FileSpreadsheet,
+  Globe2,
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -66,6 +68,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Input } from "@/components/ui/input";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import DataGridBusyOverlay from "@/components/grid/DataGridBusyOverlay.vue";
+import ProductionWatermark from "@/components/common/ProductionWatermark.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import LightDropdownMenu from "@/components/ui/LightDropdownMenu.vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
@@ -216,6 +219,7 @@ import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGrid
 import {
   canFetchNextDataGridSegment,
   canGoNextDataGridPage,
+  dataGridLoadAllNextSegment,
   dataGridLoadAllSegment,
   dataGridTotalRowCountLabelKey,
   dataGridUserFacingPage,
@@ -249,6 +253,7 @@ import { dataGridPreviewLabelKey, dataGridSaveActionMode, dataGridSaveToolbarSta
 import { buildDataGridSavedRowRefreshPlan, dataGridSavedRowRefreshPatches } from "@/lib/dataGrid/dataGridSavedRowRefresh";
 import type { QueryEditabilityReason } from "@/lib/sql/sqlAnalysis";
 import { sqlWithoutCommentsForCopy } from "@/lib/sql/sqlWithoutCommentsForCopy";
+import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { EDITOR_FONT_FAMILY_CSS_VAR } from "@/lib/editor/editorThemes";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import {
@@ -305,6 +310,7 @@ import { useToast } from "@/composables/useToast";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import { useDataGridExport, type MongoCopyUpdateTarget } from "@/composables/useDataGridExport";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { eventTargetAllowsNativeClipboard, isPlainClipboardShortcut, readTextFromClipboard } from "@/lib/common/clipboard";
 import { claimDataGridPaste, claimDataGridSelectAll, clearDataGridClipboardCopy, parseDataGridClipboard, planDataGridPaste } from "@/lib/dataGrid/dataGridClipboard";
 import { parseInsertStatementPaste } from "@/lib/dataGrid/dataGridInsertPaste";
@@ -755,6 +761,7 @@ const columnTypeMap = computed(() => {
 });
 const resolvedConnectionConfig = computed(() => connectionStore.getConfig(props.connectionId ?? ""));
 const resolvedDatabaseType = computed(() => props.databaseType ?? effectiveDatabaseTypeForConnection(resolvedConnectionConfig.value));
+const productionContext = computed(() => productionContextForDatabase(resolvedConnectionConfig.value, props.database));
 // The collection grid and Mongo query-result grids share the document-grid value
 // encoding (BSON null sentinel + JSON-prefixed containers), so every display,
 // editor and clipboard path must decode it whenever MongoDB values are on screen.
@@ -3187,6 +3194,10 @@ let infiniteScrollAllLoaded = false;
 let infiniteScrollRequestedOffset: number | undefined;
 let infiniteScrollRequestedLimit: number | undefined;
 let infiniteScrollLoadAllPending = false;
+// True while an explicit "load all" run is still appending chunks. The per-request
+// row cap bounds each request, not the run — the run only stops when the server
+// runs out of rows, so a table larger than the cap does not silently stop halfway (#10752).
+let loadAllRowsLoopActive = false;
 const loadAllRowsActive = ref(false);
 // Tracks whether the current loading cycle was triggered by a refresh/rollback
 // (as opposed to a normal paginate). Used to decide whether to auto-redirect
@@ -3245,9 +3256,14 @@ watch(
         currentPage.value = Math.max(1, currentPage.value - 1);
         lastInfiniteScrollPage = Math.max(0, currentPage.value - 1);
         loadAllRowsActive.value = false;
+        loadAllRowsLoopActive = false;
         return;
       }
       const appendedRows = props.result.rows.length - requestedOffset;
+      if (loadAllRowsLoopActive) {
+        finishOrContinueLoadAllRun(requestedOffset, requestedLimit);
+        return;
+      }
       if (props.result.rows.length >= infiniteScrollMaxRows.value || appendedRows < (requestedLimit ?? pageSize.value)) {
         infiniteScrollAllLoaded = true;
       }
@@ -3647,6 +3663,7 @@ function loadAllRowsAndGoToLast() {
 
 function startLoadAllRows(segment: { offset: number; limit: number }) {
   loadAllRowsActive.value = true;
+  loadAllRowsLoopActive = true;
   infiniteScrollLoadAllPending = true;
   infiniteScrollLoading.value = true;
   isInfiniteScrollPaginating.value = true;
@@ -3654,6 +3671,30 @@ function startLoadAllRows(segment: { offset: number; limit: number }) {
   infiniteScrollRequestedLimit = segment.limit;
   currentPage.value++;
   emit("paginate", segment.offset, segment.limit, currentWhereInput(), currentOrderBy(), true);
+}
+
+// Continues an explicit "load all" run chunk by chunk until the server runs
+// out of rows (a chunk returns fewer rows than requested) or an exact known
+// total has been reached. Returns true when another chunk was dispatched.
+// The per-request result-row cap bounds each chunk, never the run (#10752).
+function finishOrContinueLoadAllRun(requestedOffset: number | undefined, requestedLimit: number | undefined): boolean {
+  if (!loadAllRowsLoopActive) return false;
+  const nextSegment = canFetchNextInfiniteScrollSegment.value
+    ? dataGridLoadAllNextSegment({
+        loadedRowCount: props.result.rows.length,
+        requestedOffset: requestedOffset ?? props.result.rows.length,
+        requestedLimit: requestedLimit ?? pageSize.value,
+        totalRowCount: totalRowCountIsExact.value ? displayedTotalRowCount.value : undefined,
+      })
+    : null;
+  if (!nextSegment) {
+    loadAllRowsLoopActive = false;
+    infiniteScrollAllLoaded = true;
+    selectAndRevealLastLoadedRow();
+    return false;
+  }
+  startLoadAllRows(nextSegment);
+  return true;
 }
 
 function confirmLoadAllRows() {
@@ -3686,6 +3727,7 @@ function changePageSize(size: number) {
   lastInfiniteScrollPage = 0;
   infiniteScrollAllLoaded = false;
   loadAllRowsActive.value = false;
+  loadAllRowsLoopActive = false;
   infiniteScrollPositions = new WeakMap();
   resetGridVerticalScroll(true);
   emit("paginate", 0, normalizedSize, currentWhereInput(), currentOrderBy());
@@ -4530,6 +4572,7 @@ function resetInfiniteScrollState() {
   infiniteScrollLoading.value = false;
   infiniteScrollLoadAllPending = false;
   loadAllRowsActive.value = false;
+  loadAllRowsLoopActive = false;
   infiniteScrollPositions = new WeakMap();
   resetGridVerticalScroll(true);
 }
@@ -5938,6 +5981,12 @@ function exportSelectedRowsXlsx() {
   const rowIds = affectedRowIds();
   if (rowIds.length === 0) return;
   return exportXlsx(rowIds);
+}
+
+function openSelectedRowsXlsx() {
+  const rowIds = affectedRowIds();
+  if (rowIds.length === 0) return openXlsx();
+  return openXlsx(rowIds);
 }
 
 function exportSelectedRowsXlsxWithSql() {
@@ -7959,6 +8008,8 @@ const {
   exportHtml,
   exportCurrentPageHtml,
   exportXlsx,
+  openXlsx,
+  openBrowser,
   exportXlsxWithSql,
   exportCurrentPageXlsx,
   exportCurrentPageXlsxWithSql,
@@ -10387,9 +10438,15 @@ watch(
     preservedDetailsOnNextResult = null;
     const shouldPreserveTranspose = preserveTransposeOnNextResult.value;
     preserveTransposeOnNextResult.value = false;
+    const appendRequestedOffset = infiniteScrollRequestedOffset;
+    const appendRequestedLimit = infiniteScrollRequestedLimit;
     const appendCompletion = dataGridInfiniteScrollAppendCompletion(previousResult, result, {
       pageSize: pageSize.value,
       maxRows: infiniteScrollMaxRows.value,
+      // While a "load all" run is active the per-request row cap must not be
+      // read as the end of data — only the requested-vs-appended count and an
+      // exact known total end the run (#10752).
+      ...(loadAllRowsLoopActive && appendRequestedLimit ? { loadAll: { requestedLimit: appendRequestedLimit, totalRowCount: totalRowCountIsExact.value ? displayedTotalRowCount.value : undefined } } : {}),
     });
     if (appendCompletion) {
       if (infiniteScrollEnabled.value) {
@@ -10403,10 +10460,12 @@ watch(
       }
       // The append completion above already reset `infiniteScrollLoading`, so the
       // post-flush loading watcher cannot observe this append; a "load all" run
-      // must still reveal its last row from here.
+      // must still continue or reveal its last row from here.
       if (infiniteScrollLoadAllPending) {
         infiniteScrollLoadAllPending = false;
-        selectAndRevealLastLoadedRow();
+        if (!finishOrContinueLoadAllRun(appendRequestedOffset, appendRequestedLimit)) {
+          selectAndRevealLastLoadedRow();
+        }
       }
       return;
     }
@@ -10414,6 +10473,7 @@ watch(
     filterValueSuggestionLoader.reset({ clearCache: true });
     // A non-append result replaces the whole data set, so a running "load all" is over.
     loadAllRowsActive.value = false;
+    loadAllRowsLoopActive = false;
     // The replacement also invalidates the all-loaded marker: a filter change or
     // page jump swaps in a fresh first page whose remaining segments must be
     // re-derived instead of being silently skipped.
@@ -11991,6 +12051,7 @@ defineExpose({
   exportJson,
   exportSql,
   exportXlsx,
+  openXlsx,
   exportTxt,
   defaultCopyPreference: selectedCopyPreference,
   defaultCopyPreferenceLabel,
@@ -12352,7 +12413,22 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         },
       },
     }),
-    [exportSubmenu()],
+    [
+      exportSubmenu(),
+      ...(isTauriRuntime()
+        ? [
+            {
+              label: t("tableToolbox.openWith"),
+              icon: ExternalLink,
+              children: [
+                { label: t("tableToolbox.openXlsx"), icon: FileSpreadsheet, action: openSelectedRowsXlsx },
+                { label: t("tableToolbox.browserFiltered"), icon: Globe2, action: () => openBrowser(undefined) },
+                { label: t("tableToolbox.browserSelected"), icon: Globe2, disabled: !hasRowSelection.value, action: () => openBrowser(affectedRowIds()) },
+              ],
+            },
+          ]
+        : []),
+    ],
     previewItems,
     // 右键刷新：与工具栏刷新按钮/Mod+R 走同一个 onToolbarRefresh，方便
     // 习惯 Navicat 等工具在数据页右键刷新的用户（#7273）。
@@ -12757,294 +12833,301 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                   <X class="w-3 h-3" />
                 </Button>
               </div>
-              <RecycleScroller
-                ref="transposeScrollRef"
-                class="transpose-grid-scroller flex-1 min-h-0 overflow-auto overscroll-none bg-background"
-                :class="{ 'is-scrolling': isScrolling }"
-                :style="{
-                  '--transpose-total-w': `${transposeTotalWidth}px`,
-                  '--transpose-field-w': `${transposePinnedWidth}px`,
-                }"
-                :items="transposeRows"
-                :item-size="transposeRowHeight"
-                :buffer="400"
-                key-field="id"
-                @scroll="onTransposeScroll"
-                @resize="updateTransposeViewport"
-              >
-                <template #before>
-                  <div class="data-grid-transpose-header data-grid-header-shell sticky top-0 z-20 flex h-7 border-b border-border font-semibold text-muted-foreground" :style="{ width: `${transposeTotalWidth}px` }">
-                    <div class="data-grid-header-cell sticky left-0 z-30 shrink-0 border-r border-border px-3 py-1.5 truncate relative" :style="{ width: `${transposePinnedWidth}px` }">
-                      {{ t("grid.columnName") }}
-                      <div class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30" @mousedown.stop="onTransposePinnedResizeStart" />
-                    </div>
-                    <div class="shrink-0" :style="{ width: `${transposeBeforeSpacerWidth}px` }" />
-                    <div
-                      v-for="recordIndex in activeTransposeRecordIndexes"
-                      :key="`transpose-head-${recordIndex}`"
-                      data-grid-transpose-record-header
-                      :data-grid-transpose-record-index="recordIndex"
-                      class="shrink-0 border-r border-border px-2 py-1.5 text-left tabular-nums relative"
-                      :class="{
-                        'transpose-record-header-selected text-primary font-semibold': transposeRecordUsesFramedHeader(recordIndex),
-                        'transpose-record-header-active text-primary': transposeRecordUsesActiveHighlight(recordIndex) && !transposeRecordUsesFramedHeader(recordIndex),
-                        'data-grid-header-cell': !transposeRecordUsesActiveHighlight(recordIndex) && !transposeRecordUsesFramedHeader(recordIndex),
-                        'crosshair-column': !!crosshairTarget?.rowCrosshair && crosshairTarget.rowIndex === recordIndex && !transposeRecordUsesFramedHeader(recordIndex) && !transposeRecordUsesActiveHighlight(recordIndex),
-                      }"
-                      :style="{
-                        width: `${getTransposeRecordWidth(recordIndex)}px`,
-                      }"
-                      @click="selectTransposeRecord(recordIndex, $event)"
-                      @contextmenu="selectTransposeRecord(recordIndex, $event)"
-                    >
-                      {{ rowNumberText(displayItems[recordIndex]) }}
-                      <div class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30" @mousedown.stop="onTransposeRecordResizeStart(recordIndex, $event)" @dblclick.stop="autoFitTransposeRecord(recordIndex)" />
-                    </div>
-                    <div class="shrink-0" :style="{ width: `${transposeAfterSpacerWidth}px` }" />
-                  </div>
-                </template>
-                <template #default="{ item, index }">
-                  <div
-                    class="data-grid-transpose-row flex border-b border-border/60"
-                    :style="{
-                      height: `${transposeRowHeight}px`,
-                      width: `${transposeTotalWidth}px`,
-                    }"
-                  >
-                    <LightTooltip :text="transposeFieldTitle(item)" side="right" :side-offset="6" :delay="250" :open-on-focus="false" surface="popover">
-                      <div
-                        data-native-clipboard
-                        :data-grid-transpose-column-index="visibleColumnIndexes[index]"
-                        class="sticky left-0 z-10 flex shrink-0 flex-col items-start justify-center overflow-hidden border-r border-border bg-background px-3 py-0"
-                        :class="{
-                          'ring-2 ring-inset ring-primary': highlightedColumnIndex === visibleColumnIndexes[index],
-                          'bg-yellow-200/60 dark:bg-yellow-500/20': transposeHeaderIsSearchMatch(visibleColumnIndexes[index]),
-                          'ring-2 ring-inset ring-yellow-500 bg-yellow-300/60 dark:bg-yellow-500/40': transposeHeaderIsCurrentMatch(visibleColumnIndexes[index]),
-                        }"
-                        :style="{ width: `${transposePinnedWidth}px` }"
-                      >
-                        <span class="flex w-full min-w-0 items-center gap-1 overflow-hidden pr-5">
-                          <KeyRound v-if="transposeColumnIndexKind(item.column) === 'primary'" data-grid-transpose-index-indicator class="h-3 w-3 shrink-0" :class="columnIndexColorClass('primary')" :title="transposeColumnIndexText('primary')" />
-                          <Hash v-else-if="transposeColumnIndexKind(item.column)" data-grid-transpose-index-indicator class="h-3 w-3 shrink-0" :class="columnIndexColorClass(transposeColumnIndexKind(item.column)!)" :title="transposeColumnIndexText(transposeColumnIndexKind(item.column)!)" />
-                          <span class="min-w-0 flex-1 truncate font-medium leading-4">{{ item.column }}</span>
-                        </span>
-                        <LightDropdownMenu
-                          v-if="headerColumnSortable(visibleColumnIndexes[index])"
-                          :items="sortMenuItems(item.column, visibleColumnIndexes[index])"
-                          :open="headerSortMenuOpenColumn === visibleColumnIndexes[index]"
-                          :selected-value="selectedSortMenuValue(item.column, visibleColumnIndexes[index])"
-                          check-position="none"
-                          align="end"
-                          content-class="w-max min-w-28 p-0.5"
-                          item-class="gap-1 rounded-none px-1.5 py-0.5 text-xs"
-                          item-icon-class="h-3 w-3"
-                          :match-trigger-width="false"
-                          @update:open="(value: boolean) => (headerSortMenuOpenColumn = value ? visibleColumnIndexes[index] : null)"
-                          @select="(value: string) => selectHeaderSort(value, item.column, visibleColumnIndexes[index])"
-                        >
-                          <template #trigger="{ open, toggle }">
-                            <button
-                              data-grid-transpose-sort
-                              type="button"
-                              class="absolute right-1 top-1 flex h-4 w-4 shrink-0 items-center justify-center rounded"
-                              :class="columnIsSorted(item.column, visibleColumnIndexes[index]) ? 'bg-primary text-primary-foreground opacity-100 shadow-sm hover:bg-primary/90' : 'text-muted-foreground opacity-80 hover:bg-accent hover:text-foreground'"
-                              :title="t('grid.sort')"
-                              :aria-label="`${t('grid.sort')}: ${item.column}`"
-                              :aria-expanded="open"
-                              @mousedown.stop
-                              @click.stop="toggle"
-                            >
-                              <ArrowUp v-if="columnIsSorted(item.column, visibleColumnIndexes[index]) && sortDir === 'asc'" class="h-3 w-3 shrink-0" />
-                              <ArrowDown v-else-if="columnIsSorted(item.column, visibleColumnIndexes[index]) && sortDir === 'desc'" class="h-3 w-3 shrink-0" />
-                              <ArrowUpDown v-else class="h-3 w-3 shrink-0" />
-                            </button>
-                          </template>
-                        </LightDropdownMenu>
-                        <template v-if="showTransposeFieldMetadata && showColumnTypesInHeader && item.type">
-                          <span data-grid-transpose-type-line class="h-3 min-w-0 truncate text-[10px] font-normal leading-3 select-none" :class="typeColorClass(item.type)" :title="item.type">
-                            {{ item.type }}
-                          </span>
-                        </template>
-                        <template v-if="showTransposeFieldMetadata && showColumnCommentsInHeader && item.comment">
-                          <span data-grid-transpose-comment-line class="h-3 min-w-0 truncate text-[10px] font-normal leading-3 text-muted-foreground select-none" :title="item.comment">
-                            {{ item.comment }}
-                          </span>
-                        </template>
+              <div class="relative min-h-0 flex-1 overflow-hidden">
+                <ProductionWatermark v-if="productionContext.active" />
+                <RecycleScroller
+                  ref="transposeScrollRef"
+                  class="transpose-grid-scroller h-full overflow-auto overscroll-none bg-background"
+                  :class="{ 'is-scrolling': isScrolling }"
+                  :style="{
+                    '--transpose-total-w': `${transposeTotalWidth}px`,
+                    '--transpose-field-w': `${transposePinnedWidth}px`,
+                  }"
+                  :items="transposeRows"
+                  :item-size="transposeRowHeight"
+                  :buffer="400"
+                  key-field="id"
+                  @scroll="onTransposeScroll"
+                  @resize="updateTransposeViewport"
+                >
+                  <template #before>
+                    <div class="data-grid-transpose-header data-grid-header-shell sticky top-0 z-20 flex h-7 border-b border-border font-semibold text-muted-foreground" :style="{ width: `${transposeTotalWidth}px` }">
+                      <div class="data-grid-header-cell sticky left-0 z-30 shrink-0 border-r border-border px-3 py-1.5 truncate relative" :style="{ width: `${transposePinnedWidth}px` }">
+                        {{ t("grid.columnName") }}
+                        <div class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30" @mousedown.stop="onTransposePinnedResizeStart" />
                       </div>
-                      <template #content>
-                        <div
-                          data-grid-transpose-field-tooltip
-                          class="grid max-h-[min(20rem,calc(100vh-1rem))] w-[min(24rem,calc(100vw-1rem))] grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 overflow-auto rounded-md border border-border bg-popover px-3 py-2 text-left text-popover-foreground shadow-md"
-                        >
-                          <span class="text-muted-foreground">{{ t("grid.columnName") }}</span>
-                          <span class="min-w-0 break-all font-mono select-text">{{ item.column }}</span>
-                          <template v-if="showTransposeFieldMetadata && showColumnTypesInHeader && item.type">
-                            <span class="text-muted-foreground">{{ t("grid.columnType") }}</span>
-                            <span class="min-w-0 break-all font-mono select-text" :class="typeColorClass(item.type)">{{ item.type }}</span>
-                          </template>
-                          <template v-if="showTransposeFieldMetadata && showColumnCommentsInHeader && item.comment">
-                            <span class="text-muted-foreground">{{ t("grid.columnComment") }}</span>
-                            <span class="min-w-0 whitespace-pre-wrap break-words select-text">{{ item.comment }}</span>
-                          </template>
-                        </div>
-                      </template>
-                    </LightTooltip>
-                    <div class="shrink-0" :style="{ width: `${transposeBeforeSpacerWidth}px` }" />
+                      <div class="shrink-0" :style="{ width: `${transposeBeforeSpacerWidth}px` }" />
+                      <div
+                        v-for="recordIndex in activeTransposeRecordIndexes"
+                        :key="`transpose-head-${recordIndex}`"
+                        data-grid-transpose-record-header
+                        :data-grid-transpose-record-index="recordIndex"
+                        class="shrink-0 border-r border-border px-2 py-1.5 text-left tabular-nums relative"
+                        :class="{
+                          'transpose-record-header-selected text-primary font-semibold': transposeRecordUsesFramedHeader(recordIndex),
+                          'transpose-record-header-active text-primary': transposeRecordUsesActiveHighlight(recordIndex) && !transposeRecordUsesFramedHeader(recordIndex),
+                          'data-grid-header-cell': !transposeRecordUsesActiveHighlight(recordIndex) && !transposeRecordUsesFramedHeader(recordIndex),
+                          'crosshair-column': !!crosshairTarget?.rowCrosshair && crosshairTarget.rowIndex === recordIndex && !transposeRecordUsesFramedHeader(recordIndex) && !transposeRecordUsesActiveHighlight(recordIndex),
+                        }"
+                        :style="{
+                          width: `${getTransposeRecordWidth(recordIndex)}px`,
+                        }"
+                        @click="selectTransposeRecord(recordIndex, $event)"
+                        @contextmenu="selectTransposeRecord(recordIndex, $event)"
+                      >
+                        {{ rowNumberText(displayItems[recordIndex]) }}
+                        <div class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30" @mousedown.stop="onTransposeRecordResizeStart(recordIndex, $event)" @dblclick.stop="autoFitTransposeRecord(recordIndex)" />
+                      </div>
+                      <div class="shrink-0" :style="{ width: `${transposeAfterSpacerWidth}px` }" />
+                    </div>
+                  </template>
+                  <template #default="{ item, index }">
                     <div
-                      v-for="cell in item.values"
-                      :key="`${item.id}:${cell.recordIndex}`"
-                      data-grid-transpose-cell
-                      :data-grid-transpose-record-index="cell.recordIndex"
-                      class="relative flex shrink-0 items-center border-r border-border/70 px-2 py-0"
-                      :class="[
-                        transposeCellTextColorClass(cell.recordIndex, cell.valueIndex),
-                        {
-                          'overflow-visible z-20 border-r-transparent': transposeCellEditorActive(cell.recordIndex, cell.valueIndex),
-                          'overflow-hidden text-ellipsis whitespace-nowrap': !transposeCellEditorActive(cell.recordIndex, cell.valueIndex),
-                          'cell-selected': transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
-                          'cell-selected-dirty': transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
-                          'cell-selected--sparse': transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
-                          'cell-selected-dirty--sparse': transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
-                          'row-cell-selected': transposeRecordUsesSelectionVisual(cell.recordIndex) && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
-                          'row-cell-selected-dirty': transposeRecordUsesSelectionVisual(cell.recordIndex) && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
-                          'crosshair-row':
-                            !!crosshairTarget?.columnCrosshair && cell.valueIndex === crosshairTarget.actualColIdx && !transposeRecordUsesSelectionVisual(cell.recordIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex] && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex),
-                          'bg-primary/15': transposeRecordUsesActiveHighlight(cell.recordIndex) && !transposeRecordUsesSelectionVisual(cell.recordIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex] && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex),
-                          'bg-yellow-500/10 cell-dirty': displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
-                          'bg-yellow-200/60 dark:bg-yellow-500/20': cellIsSearchMatch(cell.recordIndex, cell.valueIndex),
-                          'ring-2 ring-inset ring-yellow-500 bg-yellow-300/60 dark:bg-yellow-500/40': cellIsCurrentMatch(cell.recordIndex, cell.valueIndex),
-                          'cursor-text': !isScrolling,
-                          'hover:bg-gray-200 hover:text-foreground dark:hover:bg-gray-800':
-                            !isScrolling && canEditCellItem(displayItems[cell.recordIndex], cell.valueIndex) && !transposeRecordUsesSelectionVisual(cell.recordIndex) && !transposeRecordUsesActiveHighlight(cell.recordIndex) && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex),
-                        },
-                      ]"
+                      class="data-grid-transpose-row flex border-b border-border/60"
                       :style="{
-                        width: `${getTransposeRecordWidth(cell.recordIndex)}px`,
+                        height: `${transposeRowHeight}px`,
+                        width: `${transposeTotalWidth}px`,
                       }"
-                      :title="cell.display"
-                      @mousedown="prepareTransposeCellMouseDown(cell.recordIndex, cell.valueIndex)"
-                      @click="selectTransposeCell(cell.recordIndex, cell.valueIndex, $event)"
-                      @mouseenter="onTransposeCellMouseenter(cell.recordIndex, cell.valueIndex)"
-                      @mouseleave="onCellMouseleave(cell.recordIndex, cell.valueIndex)"
-                      @contextmenu="onTransposeCellContext(cell.recordIndex, cell.valueIndex, $event)"
-                      @dblclick.stop="onTransposeCellDblClick(cell.recordIndex, cell.valueIndex, cell.display, $event)"
                     >
-                      <template v-if="readonlyTextCellMatches(displayItems[cell.recordIndex]?.id, cell.valueIndex)">
-                        <DataGridReadonlyTextSelection :value="readonlyTextCell!.value" :expanded="readonlyTextCell!.expanded" @close="closeReadonlyCellTextSelection" @escape="escapeReadonlyCellTextSelection" />
-                      </template>
-                      <template v-else-if="editingCell?.rowId === displayItems[cell.recordIndex]?.id && editingCell?.col === cell.valueIndex">
-                        <TemporalCellEditor
-                          v-if="temporalEditorConfigForColumn(cell.valueIndex)"
-                          v-model="editValue"
-                          :kind="temporalEditorConfigForColumn(cell.valueIndex)!.kind"
-                          :fraction-precision="temporalEditorConfigForColumn(cell.valueIndex)!.fractionPrecision"
-                          :normalize-value="(value) => normalizeTemporalCellEditorValue(value, cell.valueIndex)"
-                          cell-layout="transpose"
-                          @cancel="cancelEdit"
-                          @commit="commitGridEdit"
-                          @save="onTemporalCellEditorSave"
-                        />
-                        <EnumCellEditor
-                          v-else-if="isBooleanGridCell(displayItems[cell.recordIndex], cell.valueIndex)"
-                          v-model="booleanEditorModelValue"
-                          :values="BOOLEAN_CELL_EDITOR_VALUES"
-                          :nullable="isBooleanGridColumnNullable(cell.valueIndex)"
-                          :initial-null="isGridCellInitialNull(displayItems[cell.recordIndex]?.id, cell.valueIndex)"
-                          cell-layout="transpose"
-                          @cancel="cancelEdit"
-                          @commit="commitBooleanGridEdit"
-                        />
-                        <EnumCellEditor
-                          v-else-if="isEnumGridColumn(cell.valueIndex)"
-                          v-model="editValue"
-                          :values="enumValuesForGridColumn(cell.valueIndex)"
-                          :nullable="isEnumGridColumnNullable(cell.valueIndex)"
-                          :initial-null="isGridCellInitialNull(displayItems[cell.recordIndex]?.id, cell.valueIndex)"
-                          cell-layout="transpose"
-                          @cancel="cancelEdit"
-                          @commit="commitGridEdit"
-                        />
-                        <textarea
-                          v-else-if="cellUsesExpandedEditor(displayItems[cell.recordIndex]?.id, cell.valueIndex)"
-                          v-model="editValue"
-                          data-expanded-cell-editor="true"
-                          rows="1"
-                          :inputmode="cellEditInputModeForColumn(cell.valueIndex)"
-                          autocapitalize="off"
-                          autocorrect="off"
-                          spellcheck="false"
-                          class="cell-edit-input cell-edit-input--expanded absolute left-0 top-0 min-h-full bg-background px-1.5 py-1 leading-[18px] outline-none z-10"
-                          @blur="commitEditFromCellBlur"
-                          @click.stop
-                          @focus="onCellEditTextareaInput"
-                          @input="onCellEditTextareaInput"
-                          @keydown.stop="onCellEditKeydown"
-                          @paste.stop="onCellEditTextareaPaste"
-                          @wheel.stop
-                        />
-                        <input
-                          v-else
-                          v-model="editValue"
-                          :inputmode="cellEditInputModeForColumn(cell.valueIndex)"
-                          autocapitalize="off"
-                          autocorrect="off"
-                          spellcheck="false"
-                          class="cell-edit-input absolute inset-0 bg-background border-2 border-primary px-1.5 py-0 leading-[26px] outline-none z-10"
-                          @blur="commitEditFromCellBlur"
-                          @click.stop
-                          @input="onCellEditTextareaInput"
-                          @keydown.stop="onCellEditKeydown"
-                          @paste.stop="onCellEditTextareaPaste"
-                        />
-                      </template>
-                      <template v-else>
-                        <template v-if="newRowCellPlaceholder(displayItems[cell.recordIndex], cell.valueIndex)">
-                          <span class="text-muted-foreground/70 italic">{{ firstLineCellDisplayValue(newRowCellPlaceholder(displayItems[cell.recordIndex], cell.valueIndex) ?? "", flatteningMultiLineEnabled) }}</span>
-                        </template>
-                        <template v-else>{{ gridCellDisplayValue(cell.display, flatteningMultiLineEnabled, showWhitespaceEnabled) }}</template>
-                        <div v-if="cellDetailButtonVisible(cell.recordIndex, cell.valueIndex)" class="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1">
+                      <LightTooltip :text="transposeFieldTitle(item)" side="right" :side-offset="6" :delay="250" :open-on-focus="false" surface="popover">
+                        <div
+                          data-native-clipboard
+                          :data-grid-transpose-column-index="visibleColumnIndexes[index]"
+                          class="sticky left-0 z-10 flex shrink-0 flex-col items-start justify-center overflow-hidden border-r border-border bg-background px-3 py-0"
+                          :class="{
+                            'ring-2 ring-inset ring-primary': highlightedColumnIndex === visibleColumnIndexes[index],
+                            'bg-yellow-200/60 dark:bg-yellow-500/20': transposeHeaderIsSearchMatch(visibleColumnIndexes[index]),
+                            'ring-2 ring-inset ring-yellow-500 bg-yellow-300/60 dark:bg-yellow-500/40': transposeHeaderIsCurrentMatch(visibleColumnIndexes[index]),
+                          }"
+                          :style="{ width: `${transposePinnedWidth}px` }"
+                        >
+                          <span class="flex w-full min-w-0 items-center gap-1 overflow-hidden pr-5">
+                            <KeyRound v-if="transposeColumnIndexKind(item.column) === 'primary'" data-grid-transpose-index-indicator class="h-3 w-3 shrink-0" :class="columnIndexColorClass('primary')" :title="transposeColumnIndexText('primary')" />
+                            <Hash v-else-if="transposeColumnIndexKind(item.column)" data-grid-transpose-index-indicator class="h-3 w-3 shrink-0" :class="columnIndexColorClass(transposeColumnIndexKind(item.column)!)" :title="transposeColumnIndexText(transposeColumnIndexKind(item.column)!)" />
+                            <span class="min-w-0 flex-1 truncate font-medium leading-4">{{ item.column }}</span>
+                          </span>
                           <LightDropdownMenu
-                            v-if="canQuickDownloadCellValue(cell.recordIndex, cell.valueIndex)"
-                            :items="binaryCellDownloadMenuItems"
-                            :open="quickDownloadMenuOpenFor(cell.recordIndex, cell.valueIndex)"
+                            v-if="headerColumnSortable(visibleColumnIndexes[index])"
+                            :items="sortMenuItems(item.column, visibleColumnIndexes[index])"
+                            :open="headerSortMenuOpenColumn === visibleColumnIndexes[index]"
+                            :selected-value="selectedSortMenuValue(item.column, visibleColumnIndexes[index])"
+                            check-position="none"
                             align="end"
-                            content-class="w-44"
+                            content-class="w-max min-w-28 p-0.5"
+                            item-class="gap-1 rounded-none px-1.5 py-0.5 text-xs"
+                            item-icon-class="h-3 w-3"
                             :match-trigger-width="false"
-                            @update:open="(value: boolean) => handleQuickDownloadMenuOpenChange(value, cell.recordIndex, cell.valueIndex)"
-                            @select="(mode: string) => downloadCellBinaryValue(cell.recordIndex, cell.valueIndex, mode as BinaryCellDownloadMode)"
+                            @update:open="(value: boolean) => (headerSortMenuOpenColumn = value ? visibleColumnIndexes[index] : null)"
+                            @select="(value: string) => selectHeaderSort(value, item.column, visibleColumnIndexes[index])"
                           >
                             <template #trigger="{ open, toggle }">
-                              <button class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground" :title="t('grid.downloadBinaryValue')" :aria-expanded="open" @mousedown.stop @click.stop="toggle">
-                                <Download class="h-3 w-3" />
+                              <button
+                                data-grid-transpose-sort
+                                type="button"
+                                class="absolute right-1 top-1 flex h-4 w-4 shrink-0 items-center justify-center rounded"
+                                :class="columnIsSorted(item.column, visibleColumnIndexes[index]) ? 'bg-primary text-primary-foreground opacity-100 shadow-sm hover:bg-primary/90' : 'text-muted-foreground opacity-80 hover:bg-accent hover:text-foreground'"
+                                :title="t('grid.sort')"
+                                :aria-label="`${t('grid.sort')}: ${item.column}`"
+                                :aria-expanded="open"
+                                @mousedown.stop
+                                @click.stop="toggle"
+                              >
+                                <ArrowUp v-if="columnIsSorted(item.column, visibleColumnIndexes[index]) && sortDir === 'asc'" class="h-3 w-3 shrink-0" />
+                                <ArrowDown v-else-if="columnIsSorted(item.column, visibleColumnIndexes[index]) && sortDir === 'desc'" class="h-3 w-3 shrink-0" />
+                                <ArrowUpDown v-else class="h-3 w-3 shrink-0" />
                               </button>
                             </template>
                           </LightDropdownMenu>
-                          <button
-                            v-if="canOpenCellExternalUrl(cell.recordIndex, cell.valueIndex)"
-                            class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
-                            :title="t('grid.openUrl')"
-                            :aria-label="t('grid.openUrl')"
-                            @mousedown.stop
-                            @click.stop="openCellExternalUrl(cell.recordIndex, cell.valueIndex)"
-                          >
-                            <ExternalLink class="h-3 w-3" />
-                          </button>
-                          <button
-                            v-if="cellDetailButtonEnabled"
-                            class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
-                            :title="t('grid.cellDetails')"
-                            @mousedown.stop
-                            @click.stop="showTransposeCellDetails(cell.recordIndex, cell.valueIndex)"
-                          >
-                            <Info class="h-3 w-3" />
-                          </button>
+                          <template v-if="showTransposeFieldMetadata && showColumnTypesInHeader && item.type">
+                            <span data-grid-transpose-type-line class="h-3 min-w-0 truncate text-[10px] font-normal leading-3 select-none" :class="typeColorClass(item.type)" :title="item.type">
+                              {{ item.type }}
+                            </span>
+                          </template>
+                          <template v-if="showTransposeFieldMetadata && showColumnCommentsInHeader && item.comment">
+                            <span data-grid-transpose-comment-line class="h-3 min-w-0 truncate text-[10px] font-normal leading-3 text-muted-foreground select-none" :title="item.comment">
+                              {{ item.comment }}
+                            </span>
+                          </template>
                         </div>
-                      </template>
+                        <template #content>
+                          <div
+                            data-grid-transpose-field-tooltip
+                            class="grid max-h-[min(20rem,calc(100vh-1rem))] w-[min(24rem,calc(100vw-1rem))] grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 overflow-auto rounded-md border border-border bg-popover px-3 py-2 text-left text-popover-foreground shadow-md"
+                          >
+                            <span class="text-muted-foreground">{{ t("grid.columnName") }}</span>
+                            <span class="min-w-0 break-all font-mono select-text">{{ item.column }}</span>
+                            <template v-if="showTransposeFieldMetadata && showColumnTypesInHeader && item.type">
+                              <span class="text-muted-foreground">{{ t("grid.columnType") }}</span>
+                              <span class="min-w-0 break-all font-mono select-text" :class="typeColorClass(item.type)">{{ item.type }}</span>
+                            </template>
+                            <template v-if="showTransposeFieldMetadata && showColumnCommentsInHeader && item.comment">
+                              <span class="text-muted-foreground">{{ t("grid.columnComment") }}</span>
+                              <span class="min-w-0 whitespace-pre-wrap break-words select-text">{{ item.comment }}</span>
+                            </template>
+                          </div>
+                        </template>
+                      </LightTooltip>
+                      <div class="shrink-0" :style="{ width: `${transposeBeforeSpacerWidth}px` }" />
+                      <div
+                        v-for="cell in item.values"
+                        :key="`${item.id}:${cell.recordIndex}`"
+                        data-grid-transpose-cell
+                        :data-grid-transpose-record-index="cell.recordIndex"
+                        class="relative flex shrink-0 items-center border-r border-border/70 px-2 py-0"
+                        :class="[
+                          transposeCellTextColorClass(cell.recordIndex, cell.valueIndex),
+                          {
+                            'overflow-visible z-20 border-r-transparent': transposeCellEditorActive(cell.recordIndex, cell.valueIndex),
+                            'overflow-hidden text-ellipsis whitespace-nowrap': !transposeCellEditorActive(cell.recordIndex, cell.valueIndex),
+                            'cell-selected': transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
+                            'cell-selected-dirty': transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
+                            'cell-selected--sparse': transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
+                            'cell-selected-dirty--sparse': transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
+                            'row-cell-selected': transposeRecordUsesSelectionVisual(cell.recordIndex) && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
+                            'row-cell-selected-dirty': transposeRecordUsesSelectionVisual(cell.recordIndex) && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
+                            'crosshair-row':
+                              !!crosshairTarget?.columnCrosshair &&
+                              cell.valueIndex === crosshairTarget.actualColIdx &&
+                              !transposeRecordUsesSelectionVisual(cell.recordIndex) &&
+                              !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex] &&
+                              !transposeCellIsSelected(cell.recordIndex, cell.valueIndex),
+                            'bg-primary/15': transposeRecordUsesActiveHighlight(cell.recordIndex) && !transposeRecordUsesSelectionVisual(cell.recordIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex] && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex),
+                            'bg-yellow-500/10 cell-dirty': displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
+                            'bg-yellow-200/60 dark:bg-yellow-500/20': cellIsSearchMatch(cell.recordIndex, cell.valueIndex),
+                            'ring-2 ring-inset ring-yellow-500 bg-yellow-300/60 dark:bg-yellow-500/40': cellIsCurrentMatch(cell.recordIndex, cell.valueIndex),
+                            'cursor-text': !isScrolling,
+                            'hover:bg-gray-200 hover:text-foreground dark:hover:bg-gray-800':
+                              !isScrolling && canEditCellItem(displayItems[cell.recordIndex], cell.valueIndex) && !transposeRecordUsesSelectionVisual(cell.recordIndex) && !transposeRecordUsesActiveHighlight(cell.recordIndex) && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex),
+                          },
+                        ]"
+                        :style="{
+                          width: `${getTransposeRecordWidth(cell.recordIndex)}px`,
+                        }"
+                        :title="cell.display"
+                        @mousedown="prepareTransposeCellMouseDown(cell.recordIndex, cell.valueIndex)"
+                        @click="selectTransposeCell(cell.recordIndex, cell.valueIndex, $event)"
+                        @mouseenter="onTransposeCellMouseenter(cell.recordIndex, cell.valueIndex)"
+                        @mouseleave="onCellMouseleave(cell.recordIndex, cell.valueIndex)"
+                        @contextmenu="onTransposeCellContext(cell.recordIndex, cell.valueIndex, $event)"
+                        @dblclick.stop="onTransposeCellDblClick(cell.recordIndex, cell.valueIndex, cell.display, $event)"
+                      >
+                        <template v-if="readonlyTextCellMatches(displayItems[cell.recordIndex]?.id, cell.valueIndex)">
+                          <DataGridReadonlyTextSelection :value="readonlyTextCell!.value" :expanded="readonlyTextCell!.expanded" @close="closeReadonlyCellTextSelection" @escape="escapeReadonlyCellTextSelection" />
+                        </template>
+                        <template v-else-if="editingCell?.rowId === displayItems[cell.recordIndex]?.id && editingCell?.col === cell.valueIndex">
+                          <TemporalCellEditor
+                            v-if="temporalEditorConfigForColumn(cell.valueIndex)"
+                            v-model="editValue"
+                            :kind="temporalEditorConfigForColumn(cell.valueIndex)!.kind"
+                            :fraction-precision="temporalEditorConfigForColumn(cell.valueIndex)!.fractionPrecision"
+                            :normalize-value="(value) => normalizeTemporalCellEditorValue(value, cell.valueIndex)"
+                            cell-layout="transpose"
+                            @cancel="cancelEdit"
+                            @commit="commitGridEdit"
+                            @save="onTemporalCellEditorSave"
+                          />
+                          <EnumCellEditor
+                            v-else-if="isBooleanGridCell(displayItems[cell.recordIndex], cell.valueIndex)"
+                            v-model="booleanEditorModelValue"
+                            :values="BOOLEAN_CELL_EDITOR_VALUES"
+                            :nullable="isBooleanGridColumnNullable(cell.valueIndex)"
+                            :initial-null="isGridCellInitialNull(displayItems[cell.recordIndex]?.id, cell.valueIndex)"
+                            cell-layout="transpose"
+                            @cancel="cancelEdit"
+                            @commit="commitBooleanGridEdit"
+                          />
+                          <EnumCellEditor
+                            v-else-if="isEnumGridColumn(cell.valueIndex)"
+                            v-model="editValue"
+                            :values="enumValuesForGridColumn(cell.valueIndex)"
+                            :nullable="isEnumGridColumnNullable(cell.valueIndex)"
+                            :initial-null="isGridCellInitialNull(displayItems[cell.recordIndex]?.id, cell.valueIndex)"
+                            cell-layout="transpose"
+                            @cancel="cancelEdit"
+                            @commit="commitGridEdit"
+                          />
+                          <textarea
+                            v-else-if="cellUsesExpandedEditor(displayItems[cell.recordIndex]?.id, cell.valueIndex)"
+                            v-model="editValue"
+                            data-expanded-cell-editor="true"
+                            rows="1"
+                            :inputmode="cellEditInputModeForColumn(cell.valueIndex)"
+                            autocapitalize="off"
+                            autocorrect="off"
+                            spellcheck="false"
+                            class="cell-edit-input cell-edit-input--expanded absolute left-0 top-0 min-h-full bg-background px-1.5 py-1 leading-[18px] outline-none z-10"
+                            @blur="commitEditFromCellBlur"
+                            @click.stop
+                            @focus="onCellEditTextareaInput"
+                            @input="onCellEditTextareaInput"
+                            @keydown.stop="onCellEditKeydown"
+                            @paste.stop="onCellEditTextareaPaste"
+                            @wheel.stop
+                          />
+                          <input
+                            v-else
+                            v-model="editValue"
+                            :inputmode="cellEditInputModeForColumn(cell.valueIndex)"
+                            autocapitalize="off"
+                            autocorrect="off"
+                            spellcheck="false"
+                            class="cell-edit-input absolute inset-0 bg-background border-2 border-primary px-1.5 py-0 leading-[26px] outline-none z-10"
+                            @blur="commitEditFromCellBlur"
+                            @click.stop
+                            @input="onCellEditTextareaInput"
+                            @keydown.stop="onCellEditKeydown"
+                            @paste.stop="onCellEditTextareaPaste"
+                          />
+                        </template>
+                        <template v-else>
+                          <template v-if="newRowCellPlaceholder(displayItems[cell.recordIndex], cell.valueIndex)">
+                            <span class="text-muted-foreground/70 italic">{{ firstLineCellDisplayValue(newRowCellPlaceholder(displayItems[cell.recordIndex], cell.valueIndex) ?? "", flatteningMultiLineEnabled) }}</span>
+                          </template>
+                          <template v-else>{{ gridCellDisplayValue(cell.display, flatteningMultiLineEnabled, showWhitespaceEnabled) }}</template>
+                          <div v-if="cellDetailButtonVisible(cell.recordIndex, cell.valueIndex)" class="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1">
+                            <LightDropdownMenu
+                              v-if="canQuickDownloadCellValue(cell.recordIndex, cell.valueIndex)"
+                              :items="binaryCellDownloadMenuItems"
+                              :open="quickDownloadMenuOpenFor(cell.recordIndex, cell.valueIndex)"
+                              align="end"
+                              content-class="w-44"
+                              :match-trigger-width="false"
+                              @update:open="(value: boolean) => handleQuickDownloadMenuOpenChange(value, cell.recordIndex, cell.valueIndex)"
+                              @select="(mode: string) => downloadCellBinaryValue(cell.recordIndex, cell.valueIndex, mode as BinaryCellDownloadMode)"
+                            >
+                              <template #trigger="{ open, toggle }">
+                                <button class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground" :title="t('grid.downloadBinaryValue')" :aria-expanded="open" @mousedown.stop @click.stop="toggle">
+                                  <Download class="h-3 w-3" />
+                                </button>
+                              </template>
+                            </LightDropdownMenu>
+                            <button
+                              v-if="canOpenCellExternalUrl(cell.recordIndex, cell.valueIndex)"
+                              class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
+                              :title="t('grid.openUrl')"
+                              :aria-label="t('grid.openUrl')"
+                              @mousedown.stop
+                              @click.stop="openCellExternalUrl(cell.recordIndex, cell.valueIndex)"
+                            >
+                              <ExternalLink class="h-3 w-3" />
+                            </button>
+                            <button
+                              v-if="cellDetailButtonEnabled"
+                              class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
+                              :title="t('grid.cellDetails')"
+                              @mousedown.stop
+                              @click.stop="showTransposeCellDetails(cell.recordIndex, cell.valueIndex)"
+                            >
+                              <Info class="h-3 w-3" />
+                            </button>
+                          </div>
+                        </template>
+                      </div>
+                      <div class="shrink-0" :style="{ width: `${transposeAfterSpacerWidth}px` }" />
                     </div>
-                    <div class="shrink-0" :style="{ width: `${transposeAfterSpacerWidth}px` }" />
-                  </div>
-                </template>
-              </RecycleScroller>
+                  </template>
+                </RecycleScroller>
+              </div>
             </div>
             <template v-else>
               <!-- Sticky header -->
@@ -13562,6 +13645,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                    `top`/`inset` offsets are measured from the body instead of from the
                    grid's outer relative container (which starts at the header row). -->
               <div class="relative min-h-0 flex-1 flex flex-col overflow-hidden">
+                <ProductionWatermark v-if="productionContext.active" />
                 <div v-if="!hasVisibleRows" class="relative min-h-0 flex-1">
                   <div class="data-grid-scroller h-full overflow-x-auto overflow-y-hidden overscroll-none" :class="{ 'is-scrolling': isScrolling }" @scroll="onScrollerScroll" @wheel="onDomGridWheel">
                     <div class="h-full min-h-[220px]" :style="{ width: 'max(100%, var(--total-w))' }" />

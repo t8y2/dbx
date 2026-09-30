@@ -3427,6 +3427,10 @@ export async function cancelQueryResultExport(exportId: string, executionId?: st
   });
 }
 
+export async function createQueryResultTempFile(_extension = "xlsx"): Promise<string> {
+  throw new Error("Opening query results in an external application is only available in the desktop app");
+}
+
 export async function exportQueryResultCsv(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[], csvQuoteMode: CsvQuoteMode = "all", nullLiteral?: string): Promise<void> {
   const { formatCsv } = await import("@/lib/export/exportFormats");
   const content = formatCsv(columns, rows as (string | number | boolean | null)[][], csvQuoteMode, nullLiteral);
@@ -5467,4 +5471,8 @@ export async function setPluginUiStorage(_pluginId: string, _key: string, _value
 
 export async function deletePluginUiStorage(_pluginId: string, _key: string): Promise<void> {
   throw new Error("Plugin UI storage is not available in the web backend");
+}
+
+export async function openQueryResultTempFile(_path: string): Promise<void> {
+  throw new Error("Opening query results requires the desktop app");
 }

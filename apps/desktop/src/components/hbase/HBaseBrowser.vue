@@ -450,6 +450,8 @@ function errorMessage(value: unknown): string {
       :result="gridResult"
       context="results"
       database-type="hbase"
+      :connection-id="props.connectionId"
+      :database="props.namespace"
       :editable="!readOnly"
       :custom-save-handler="customSaveHandler"
       :allow-insert-rows="false"

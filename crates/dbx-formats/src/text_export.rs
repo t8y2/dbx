@@ -147,6 +147,20 @@ pub fn format_html(data: &QueryResultTextExportData) -> String {
     .hdr { flex-shrink: 0; margin-bottom: 12px; }
     .hdr h1 { font-size: 16px; font-weight: 600; }
     .hdr .meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .tools {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+      margin-bottom: 10px;
+    }
+    .tools label { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); }
+    .tools input, .tools select, .tools button {
+      height: 30px; border: 1px solid var(--border); border-radius: 6px;
+      background: var(--surface); color: var(--text); font: inherit; font-size: 12px;
+    }
+    .tools input { width: min(280px, 42vw); padding: 0 9px; }
+    .tools select { max-width: 180px; padding: 0 26px 0 8px; }
+    .tools button { padding: 0 10px; cursor: pointer; }
+    .tools button:hover { background: var(--hover); }
+    .tools .count { margin-left: auto; color: var(--muted); font-size: 12px; }
     .tbl-wrap {
       flex: 1; min-height: 0;
       display: flex; flex-direction: column;
@@ -173,6 +187,13 @@ pub fn format_html(data: &QueryResultTextExportData) -> String {
       border-bottom: 1px solid var(--border);
       white-space: nowrap;
     }
+    thead th .sort-button {
+      display: inline-flex; align-items: center; gap: 5px; width: 100%;
+      padding: 0; border: 0; background: transparent; color: inherit;
+      font: inherit; text-align: left; cursor: pointer;
+    }
+    thead th .sort-button:hover { color: var(--text-2); }
+    .sort-indicator { color: var(--muted); font-size: 12px; line-height: 1; opacity: .8; }
     tbody td {
       padding: 6px 12px;
       border-bottom: 1px solid var(--border-2);
@@ -194,6 +215,7 @@ pub fn format_html(data: &QueryResultTextExportData) -> String {
       .page, .tbl-wrap { display: block; }
       .tbl-scroll { max-height: none; overflow: visible; }
       thead th { position: static; }
+      .tools { display: none; }
     }
   </style>
 </head>
@@ -213,12 +235,28 @@ pub fn format_html(data: &QueryResultTextExportData) -> String {
     ));
     html.push_str("    </div>\n");
 
+    html.push_str("    <div class=\"tools\" role=\"search\" aria-label=\"Filter query result\">\n");
+    html.push_str("      <label>Search <input id=\"dbx-search\" type=\"search\" placeholder=\"Search all columns\" autocomplete=\"off\"></label>\n");
+    html.push_str("      <label>Filter <select id=\"dbx-filter-column\"><option value=\"\">All columns</option>");
+    for (index, column) in data.columns.iter().enumerate() {
+        html.push_str(&format!("<option value=\"{}\">{}</option>", index, html_escape(column)));
+    }
+    html.push_str("</select></label>\n");
+    html.push_str("      <input id=\"dbx-filter-value\" type=\"search\" placeholder=\"Filter value\" autocomplete=\"off\" aria-label=\"Filter value\">\n");
+    html.push_str("      <button id=\"dbx-clear-filters\" type=\"button\">Clear</button>\n");
+    html.push_str("      <span id=\"dbx-match-count\" class=\"count\" aria-live=\"polite\"></span>\n");
+    html.push_str("    </div>\n");
+
     // Table card
     html.push_str("    <div class=\"tbl-wrap\">\n");
     html.push_str("      <div class=\"tbl-scroll\">\n");
     html.push_str("        <table>\n          <thead>\n            <tr>\n");
-    for col in &data.columns {
-        html.push_str(&format!("              <th>{}</th>\n", html_escape(col)));
+    for (index, col) in data.columns.iter().enumerate() {
+        html.push_str(&format!(
+            "              <th><button class=\"sort-button\" type=\"button\" data-sort-column=\"{}\" aria-sort=\"none\">{}<span class=\"sort-indicator\" aria-hidden=\"true\">↕</span></button></th>\n",
+            index,
+            html_escape(col)
+        ));
     }
     html.push_str("            </tr>\n          </thead>\n          <tbody>\n");
 
@@ -236,6 +274,94 @@ pub fn format_html(data: &QueryResultTextExportData) -> String {
     }
 
     html.push_str("          </tbody>\n        </table>\n      </div>\n    </div>\n");
+    html.push_str(
+        r#"    <script>
+      (() => {
+        const search = document.getElementById('dbx-search');
+        const column = document.getElementById('dbx-filter-column');
+        const value = document.getElementById('dbx-filter-value');
+        const clear = document.getElementById('dbx-clear-filters');
+        const count = document.getElementById('dbx-match-count');
+        const tbody = document.querySelector('tbody');
+        const rows = Array.from(tbody.querySelectorAll('tr'));
+        const originalOrder = rows.slice();
+        const sortButtons = Array.from(document.querySelectorAll('[data-sort-column]'));
+        let sortedColumn = -1;
+        let sortDirection = 0;
+        const normalize = (text) => text.toLocaleLowerCase();
+        const compareCells = (left, right) => {
+          const leftText = (left.textContent || '').trim();
+          const rightText = (right.textContent || '').trim();
+          const leftNull = left.classList.contains('null');
+          const rightNull = right.classList.contains('null');
+          if (leftNull || rightNull) return leftNull === rightNull ? 0 : (leftNull ? 1 : -1);
+          const leftNumber = Number(leftText);
+          const rightNumber = Number(rightText);
+          if (leftText !== '' && rightText !== '' && Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) {
+            return leftNumber - rightNumber;
+          }
+          return leftText.localeCompare(rightText, undefined, { numeric: true, sensitivity: 'base' });
+        };
+        const updateSortIndicators = () => {
+          sortButtons.forEach((button) => {
+            const active = Number(button.dataset.sortColumn) === sortedColumn;
+            const direction = active ? (sortDirection === 1 ? '↑' : '↓') : '↕';
+            button.setAttribute('aria-sort', active ? (sortDirection === 1 ? 'ascending' : sortDirection === -1 ? 'descending' : 'none') : 'none');
+            const indicator = button.querySelector('.sort-indicator');
+            if (indicator) indicator.textContent = direction;
+          });
+        };
+        const sortRows = (index) => {
+          if (sortedColumn !== index) {
+            sortedColumn = index;
+            sortDirection = 1;
+          } else if (sortDirection === 1) {
+            sortDirection = -1;
+          } else if (sortDirection === -1) {
+            sortedColumn = -1;
+            sortDirection = 0;
+          }
+          if (sortDirection === 0) {
+            originalOrder.forEach((row) => tbody.appendChild(row));
+          } else {
+            rows.slice().sort((left, right) => {
+              const result = compareCells(left.children[index], right.children[index]);
+              return result * sortDirection;
+            }).forEach((row) => tbody.appendChild(row));
+          }
+          updateSortIndicators();
+        };
+        const apply = () => {
+          const query = normalize(search.value.trim());
+          const filter = normalize(value.value.trim());
+          const columnIndex = column.value === '' ? -1 : Number(column.value);
+          let visible = 0;
+          rows.forEach((row) => {
+            const cells = Array.from(row.children);
+            const rowText = normalize(row.textContent || '');
+            const filterText = columnIndex < 0 ? rowText : normalize(cells[columnIndex]?.textContent || '');
+            const matches = (!query || rowText.includes(query)) && (!filter || filterText.includes(filter));
+            row.hidden = !matches;
+            if (matches) visible += 1;
+          });
+          count.textContent = `${visible} / ${rows.length} rows`;
+        };
+        search.addEventListener('input', apply);
+        value.addEventListener('input', apply);
+        column.addEventListener('change', apply);
+        sortButtons.forEach((button) => button.addEventListener('click', () => sortRows(Number(button.dataset.sortColumn))));
+        clear.addEventListener('click', () => {
+          search.value = '';
+          value.value = '';
+          column.value = '';
+          apply();
+          search.focus();
+        });
+        apply();
+      })();
+    </script>
+"#,
+    );
     html.push_str("    <div class=\"ftr\">Exported by DBX</div>\n");
     html.push_str("  </div>\n</body>\n</html>\n");
     html
@@ -335,8 +461,14 @@ mod tests {
         assert!(out.contains("<meta charset=\"UTF-8\">"));
         assert!(out.contains("<style>"), "CSS must be embedded");
         assert!(out.contains("<h1>Query Result</h1>"), "default heading when no title");
-        assert!(out.contains("<th>id</th>"), "column headers must be rendered");
-        assert!(out.contains("<th>name</th>"));
+        assert!(out.contains("data-sort-column=\"0\""), "sortable column headers must be rendered");
+        assert!(out.contains(">id<span class=\"sort-indicator\""), "column header text must be rendered");
+        assert!(out.contains(">name<span class=\"sort-indicator\""));
+        assert!(out.contains("id=\"dbx-search\""), "global search control must be rendered");
+        assert!(out.contains("id=\"dbx-filter-column\""), "column filter control must be rendered");
+        assert!(out.contains("id=\"dbx-clear-filters\""), "filter reset control must be rendered");
+        assert!(out.contains("row.hidden = !matches"), "filter behavior must be embedded");
+        assert!(out.contains("sortRows"), "sort behavior must be embedded");
         assert!(out.contains("1 rows &middot; 2 columns"), "row/column counts in meta line");
         assert!(out.contains("Exported by DBX"), "footer watermark");
     }
@@ -388,7 +520,7 @@ mod tests {
             rows: vec![vec![json!("<script>alert('x');</script> & \"quoted\"")]],
         });
 
-        assert!(out.contains("<th>col&lt;a&gt;</th>"), "header must be escaped");
+        assert!(out.contains(">col&lt;a&gt;<span class=\"sort-indicator\""), "header must be escaped");
         assert!(!out.contains("<script>alert"), "raw script tag must never appear");
         assert!(out.contains("&lt;script&gt;"));
         assert!(out.contains("&amp; &quot;quoted&quot;"));

@@ -5917,6 +5917,11 @@ export default withEnglishFallback({
     cancelledLabel: "已取消，已寫入的列保留在表中",
   },
   tableToolbox: {
+    browser: "網頁預覽",
+    browserFiltered: "網頁預覽（目前結果）",
+    browserSelected: "網頁預覽（選取的列）",
+    openWith: "開啟方式",
+    openXlsx: "開啟為 XLSX",
     title: "數據工具",
     generateData: "產生資料",
     importData: "匯入資料",

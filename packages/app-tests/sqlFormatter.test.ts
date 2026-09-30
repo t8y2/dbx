@@ -29,10 +29,17 @@ test("formats SQL with uppercase keywords and readable line breaks by default", 
   assert.match(formatted, /\nORDER BY\b/);
 });
 
-test("collapses a statement that fits on one line", async () => {
+test("puts each SELECT field on its own line even when the statement fits on one line", async () => {
   const formatted = await formatSqlText("select id, name from users where active = 1 order by name", "postgres");
 
-  assert.equal(formatted, "SELECT id, name FROM users WHERE active = 1 ORDER BY name");
+  assert.equal(formatted, "SELECT id,\n       name\nFROM users\nWHERE active = 1\nORDER BY name");
+  assert.equal(await formatSqlText(formatted, "postgres"), formatted);
+});
+
+test("collapses a single-field statement that fits on one line", async () => {
+  const formatted = await formatSqlText("select id from users where active = 1 order by id", "postgres");
+
+  assert.equal(formatted, "SELECT id FROM users WHERE active = 1 ORDER BY id");
 });
 
 test("formats SQL with custom keyword case and indentation settings", async () => {

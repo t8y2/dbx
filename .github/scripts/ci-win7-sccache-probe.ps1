@@ -59,12 +59,15 @@ pub fn answer() -> u32 {
 Remove-Item -LiteralPath $outputDir -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
 
-sccache rustc `
-  --crate-name dbx_sccache_retention_probe `
-  --crate-type rlib `
-  --edition 2021 `
-  $sourcePath `
-  --out-dir $outputDir
+$rustcArguments = @(
+  "--crate-name=dbx_sccache_retention_probe"
+  "--crate-type=rlib"
+  "--edition=2021"
+  "--emit=link"
+  $sourcePath
+  "--out-dir=$outputDir"
+)
+sccache rustc @rustcArguments
 if ($LASTEXITCODE -ne 0) {
   throw "The Win7 sccache retention probe failed to compile."
 }
@@ -77,4 +80,3 @@ $writeErrors = $after.WriteErrors - $before.WriteErrors
 
 "[WIN7-SCCACHE-PROBE] ${Label}: hits=$hits misses=$misses writes=$writes write_errors=$writeErrors"
 "| $Label | $hits | $misses | $writes | $writeErrors |" >> $env:GITHUB_STEP_SUMMARY
-

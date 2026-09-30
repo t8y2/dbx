@@ -181,7 +181,7 @@ test("the Win7 retention probe reports each compile without changing cache setti
   const probe = readFileSync(new URL("./ci-win7-sccache-probe.ps1", import.meta.url), "utf8");
   assert.ok(probe.includes("sccache --zero-stats"));
   assert.ok(probe.includes("sccache --show-stats --stats-format json"));
-  assert.ok(probe.includes("--crate-type rlib"));
+  for (const argument of ["--crate-name=dbx_sccache_retention_probe", "--crate-type=rlib", "--edition=2021", "--emit=link", "--out-dir=$outputDir"]) assert.ok(probe.includes(argument));
   assert.ok(probe.includes(".sccache-win7-retention-probe.rs"));
   assert.ok(probe.includes('Join-Path $env:RUNNER_TEMP "sccache-win7-retention-probe"'));
   assert.ok(probe.includes("$after.Hits - $before.Hits"));

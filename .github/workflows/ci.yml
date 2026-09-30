@@ -356,11 +356,13 @@ jobs:
 
       - name: Run Win7 sccache probe before build (first)
         shell: pwsh
-        run: ./.github/scripts/ci-win7-sccache-probe.ps1 -Label "before build #1" -ResetStats
+        run: |
+          ./.github/scripts/ci-win7-sccache-probe.ps1 -Label "before build #1" -ResetStats
 
       - name: Run Win7 sccache probe before build (second)
         shell: pwsh
-        run: ./.github/scripts/ci-win7-sccache-probe.ps1 -Label "before build #2"
+        run: |
+          ./.github/scripts/ci-win7-sccache-probe.ps1 -Label "before build #2"
 
       - name: Restore prebuilt Win7 AWS-LC
         id: aws-lc-cache

@@ -1258,6 +1258,8 @@ export interface QueryMessage {
   hint?: string;
 }
 
+export type QueryResultSourceLabelKind = "source" | "comment";
+
 export interface QueryResult {
   columns: string[];
   /** One SRID per geometry/geography column (first non-null observed). */
@@ -1351,6 +1353,8 @@ export interface QueryResult {
   /** Preformatted Redis command output retained alongside the default grid rows. */
   redis_console_output?: string;
   sourceLabel?: string;
+  /** Identifies whether sourceLabel came from a parsed object source or a SQL preamble comment. */
+  sourceLabelKind?: QueryResultSourceLabelKind;
   /** 结果集来源的库名 / schema（与 sourceLabel 同时写入），供结果集页签按设置决定是否展示。 */
   sourceQualifier?: string;
   /** 结果集来源的对象名（通常为表名），关闭“结果集名称包含数据库名”时用于展示短名称。 */
@@ -1433,6 +1437,8 @@ export interface QueryResultRun {
    */
   sourceLabel?: string;
   sourceName?: string;
+  /** Identifies whether sourceLabel came from a parsed object source or a SQL preamble comment. */
+  sourceLabelKind?: QueryResultSourceLabelKind;
   /**
    * Logical-result identity for the tab-switch view snapshot cache. Distinct
    * from `resultGridRevision` (the grid remount key): this one changes on every

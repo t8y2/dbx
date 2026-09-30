@@ -501,8 +501,12 @@ const activeQueryError = computed(() => {
 const hasQueryOutput = computed(() => tabHasQueryOutput(props.activeTab));
 // 结果集页签/列表的名称是否带库名，由编辑器设置控制（默认带库名）
 const includeResultSourceDatabase = computed(() => settingsStore.editorSettings.showResultSourceDatabase);
-const visibleResultItems = computed(() => tabularResultItems(props.activeTab.results ?? (props.activeTab.result ? [props.activeTab.result] : undefined), { includeSourceDatabase: includeResultSourceDatabase.value }));
-const tabularResults = computed(() => tabularResultItems(props.activeTab.results, { includeSourceDatabase: includeResultSourceDatabase.value }));
+const resultTabNamingMode = computed(() => settingsStore.editorSettings.resultTabNamingMode);
+const preferResultTabComments = computed(() => settingsStore.editorSettings.resultTabPreferComments);
+const visibleResultItems = computed(() =>
+  tabularResultItems(props.activeTab.results ?? (props.activeTab.result ? [props.activeTab.result] : undefined), { includeSourceDatabase: includeResultSourceDatabase.value, namingMode: resultTabNamingMode.value, preferComments: preferResultTabComments.value }),
+);
+const tabularResults = computed(() => tabularResultItems(props.activeTab.results, { includeSourceDatabase: includeResultSourceDatabase.value, namingMode: resultTabNamingMode.value, preferComments: preferResultTabComments.value }));
 const allResultExportSheets = computed(() =>
   tabularResults.value.map((item) => ({
     sheetName: item.label || t("tabs.resultN", { n: item.n }),
@@ -514,10 +518,13 @@ const allResultExportSheets = computed(() =>
 const resultRuns = computed(() =>
   resultRunItems(props.activeTab, {
     includeSourceDatabase: includeResultSourceDatabase.value,
+    namingMode: resultTabNamingMode.value,
+    preferComments: preferResultTabComments.value,
     database: props.activeTab.database,
     databaseType: activeEffectiveDatabaseType.value,
   }),
 );
+const resultRunFallbackLabel = (sequence: number) => t(resultTabNamingMode.value === "ordinal" ? "tabs.resultN" : "tabs.runN", { n: sequence });
 const activeResultGridCacheKey = computed(() => resultGridCacheKey(props.activeTab));
 const activeResultGridColumnWidthCacheKey = computed(() => resultGridColumnWidthCacheKey(props.activeTab));
 const activeResultGridInstanceKey = computed(() => resultGridInstanceKey(props.activeTab));
@@ -1824,7 +1831,7 @@ defineExpose({
                             @keydown="onResultRunTabKeydown($event, runIndex)"
                           >
                             <Pin v-if="run.pinned" class="h-3 w-3 shrink-0 fill-current text-primary" />
-                            {{ run.title || run.sourceLabel || t("tabs.runN", { n: run.sequence }) }}
+                            {{ run.title || run.sourceLabel || resultRunFallbackLabel(run.sequence) }}
                           </button>
                           <button
                             type="button"
@@ -1844,7 +1851,7 @@ defineExpose({
                   <DropdownMenu>
                     <DropdownMenuTrigger as-child>
                       <Button variant="ghost" size="sm" class="h-6 max-w-48 gap-1 px-2 text-xs">
-                        <span class="min-w-0 truncate">{{ activeResultRunItem ? activeResultRunItem.title || activeResultRunItem.sourceLabel || t("tabs.runN", { n: activeResultRunItem.sequence }) : t("tabs.resultRuns") }}</span>
+                        <span class="min-w-0 truncate">{{ activeResultRunItem ? activeResultRunItem.title || activeResultRunItem.sourceLabel || resultRunFallbackLabel(activeResultRunItem.sequence) : t("tabs.resultRuns") }}</span>
                         <ChevronDown class="h-3.5 w-3.5 shrink-0" />
                       </Button>
                     </DropdownMenuTrigger>
@@ -1854,7 +1861,7 @@ defineExpose({
                           <Check v-if="run.active" class="h-3.5 w-3.5 shrink-0" />
                           <span v-else class="h-3.5 w-3.5 shrink-0" />
                           <Pin v-if="run.pinned" class="h-3 w-3 shrink-0 fill-current text-primary" />
-                          <span class="min-w-0 flex-1 truncate">{{ run.title || run.sourceLabel || t("tabs.runN", { n: run.sequence }) }}</span>
+                          <span class="min-w-0 flex-1 truncate">{{ run.title || run.sourceLabel || resultRunFallbackLabel(run.sequence) }}</span>
                           <button
                             type="button"
                             class="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground"

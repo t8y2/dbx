@@ -4752,6 +4752,57 @@ fn builds_dameng_alter_table_change_primary_key() {
 }
 
 #[test]
+fn builds_sqlserver_alter_table_add_primary_key() {
+    // T-SQL accepts an anonymous `ADD PRIMARY KEY`; the server names the constraint.
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::SqlServer,
+        Some("dbo"),
+        "users",
+        vec![existing_pk_column("id", "INT", false, true)],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE [dbo].[users] ADD PRIMARY KEY ([id]);"]);
+}
+
+#[test]
+fn sqlserver_replaces_primary_key_by_persisted_constraint_name() {
+    let mut old_pk = existing_pk_column("id", "INT", true, false);
+    old_pk.id = "old_id".to_string();
+    let mut new_pk = existing_pk_column("code", "VARCHAR(50)", false, true);
+    new_pk.id = "new_code".to_string();
+    let mut options = structure_change_options(DatabaseType::SqlServer, Some("dbo"), "users", vec![old_pk, new_pk]);
+    options.indexes = vec![existing_primary_index("PK_users", &["id"])];
+
+    let result = build_table_structure_change_sql(options);
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE [dbo].[users] DROP CONSTRAINT [PK_users];",
+            "ALTER TABLE [dbo].[users] ADD CONSTRAINT [PK_users] PRIMARY KEY ([code]);",
+        ]
+    );
+}
+
+#[test]
+fn builds_sqlserver_alter_table_drop_primary_key() {
+    let mut options = structure_change_options(
+        DatabaseType::SqlServer,
+        Some("dbo"),
+        "users",
+        vec![existing_pk_column("id", "INT", true, false)],
+    );
+    options.indexes = vec![existing_primary_index("PK_users", &["id"])];
+
+    let result = build_table_structure_change_sql(options);
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE [dbo].[users] DROP CONSTRAINT [PK_users];"]);
+}
+
+#[test]
 fn dameng_validates_new_primary_key_column_before_replacing_existing_key() {
     let mut old_pk = existing_pk_column("id", "INT", true, false);
     old_pk.id = "old_id".to_string();
@@ -5431,8 +5482,10 @@ fn warns_sqlite_cannot_alter_primary_key() {
 }
 
 #[test]
-fn warns_sqlserver_cannot_alter_primary_key_without_drop_strategy() {
-    // alter_primary_key is false for SQL Server; fail closed (no partial ADD-only SQL).
+fn sqlserver_requires_persisted_constraint_name_and_fails_closed_without_it() {
+    // Dropping the persisted primary key needs its constraint name from the index metadata
+    // (server-generated names have no rule); without it, emit no partial SQL (no ADD-only) and
+    // ask the user to refresh the structure (issue #10758).
     let result = build_table_structure_change_sql(structure_change_options(
         DatabaseType::SqlServer,
         Some("dbo"),
@@ -5442,7 +5495,8 @@ fn warns_sqlserver_cannot_alter_primary_key_without_drop_strategy() {
 
     assert_eq!(result.statements, Vec::<String>::new());
     assert_eq!(result.warnings.len(), 1);
-    assert!(result.warnings[0].contains("primary key"));
+    assert!(result.warnings[0].contains("SQL Server primary key constraint name"));
+    assert!(result.warnings[0].contains("Refresh"));
 }
 
 #[test]

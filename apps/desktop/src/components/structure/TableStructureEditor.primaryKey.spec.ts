@@ -604,6 +604,26 @@ describe("TableStructureEditor primary key editing", () => {
     );
   });
 
+  it("allows an existing SQL Server primary key to be cleared", async () => {
+    const root = await mountEditor("sqlserver", true);
+    const primaryKey = columnCheckbox(root, "structureEditor.primaryKey");
+
+    expect(primaryKey.disabled).toBe(false);
+    expect(primaryKey.checked).toBe(true);
+
+    primaryKey.checked = false;
+    primaryKey.dispatchEvent(new Event("change", { bubbles: true }));
+    await nextTick();
+
+    expect(primaryKey.checked).toBe(false);
+    await vi.waitFor(() => expect(mocks.buildTableStructureChangeSql).toHaveBeenCalled());
+    expect(mocks.buildTableStructureChangeSql).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        columns: [expect.objectContaining({ isPrimaryKey: false })],
+      }),
+    );
+  });
+
   it("keeps the current SQL preview visible while a newer preview is loading", async () => {
     const root = await mountEditor("dameng", true);
     const primaryKey = columnCheckbox(root, "structureEditor.primaryKey");

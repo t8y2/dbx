@@ -5,6 +5,7 @@ use dbx_core::{
 };
 use serde_json::{json, Value};
 use std::{
+    io::Write,
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
 };
@@ -38,7 +39,7 @@ fn invoke_with_passphrase(
     environment: &[(&str, &str)],
     passphrase_file: Option<&Path>,
 ) -> Output {
-    invoke_options(directory, path, confirmed, environment, passphrase_file, false)
+    invoke_options(directory, path, confirmed, environment, passphrase_file, false, None)
 }
 
 fn invoke_options(
@@ -48,6 +49,7 @@ fn invoke_options(
     environment: &[(&str, &str)],
     passphrase_file: Option<&Path>,
     initialize: bool,
+    input: Option<&[u8]>,
 ) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dbx"));
     command.args(["connections", "import", "--file"]).arg(path).arg("--json");
@@ -61,6 +63,8 @@ fn invoke_options(
         .current_dir(directory)
         .env("HOME", directory)
         .env("XDG_DATA_HOME", directory)
+        .env("XDG_CONFIG_HOME", directory.join(".config"))
+        .env_remove("APPDATA")
         .env("DBX_DATA_DIR", directory)
         .env("DBX_SECRET_KEY_FILE", managed_key_path(directory))
         .env_remove("DBX_SECRET_KEY")
@@ -73,7 +77,7 @@ fn invoke_options(
         .env_remove("DBX_MCP_SCOPE_CONNECTION_NAME")
         .env_remove("DBX_MCP_SCOPE_DATABASE")
         .env_remove("DBX_MCP_SCOPE_SCHEMA")
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if initialize {
@@ -82,7 +86,11 @@ fn invoke_options(
     for (key, value) in environment {
         command.env(key, value);
     }
-    let output = command.output().unwrap();
+    let mut child = command.spawn().unwrap();
+    if let Some(input) = input {
+        child.stdin.take().unwrap().write_all(input).unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
     for secret in [
         "cli-import-secret",
         "cli-script-secret",
@@ -107,7 +115,7 @@ async fn cli_import_previews_by_default_and_requires_yes_to_persist() {
     let directory = tempfile::tempdir().unwrap();
     let storage = test_storage::open(&directory.path().join("dbx.db")).await.unwrap();
     storage.save_mcp_global_policy(&McpGlobalPolicy { read_only: false, ..Default::default() }).await.unwrap();
-    let file = protected_file(directory.path(), "connections.json", fixture().to_string().as_bytes());
+    let file = protected_file(directory.path(), "bundle-input.json", fixture().to_string().as_bytes());
     let preview = report(&invoke(directory.path(), &file, false, &[]));
     assert_eq!(preview["dry_run"], true);
     assert_eq!(preview["input_count"], 1);
@@ -132,7 +140,7 @@ async fn cli_import_read_only_preview_is_allowed_but_apply_remains_blocked() {
     let directory = tempfile::tempdir().unwrap();
     let storage = test_storage::open(&directory.path().join("dbx.db")).await.unwrap();
     storage.save_mcp_global_policy(&McpGlobalPolicy { read_only: true, ..Default::default() }).await.unwrap();
-    let file = protected_file(directory.path(), "connections.json", fixture().to_string().as_bytes());
+    let file = protected_file(directory.path(), "bundle-input.json", fixture().to_string().as_bytes());
     assert_eq!(report(&invoke(directory.path(), &file, false, &[]))["dry_run"], true);
     let blocked = invoke(directory.path(), &file, true, &[]);
     assert!(!blocked.status.success());
@@ -168,7 +176,7 @@ async fn cli_import_rejects_group_readable_input_before_preview_or_apply() {
     let directory = tempfile::tempdir().unwrap();
     let storage = test_storage::open(&directory.path().join("dbx.db")).await.unwrap();
     storage.save_mcp_global_policy(&McpGlobalPolicy { read_only: false, ..Default::default() }).await.unwrap();
-    let file = protected_file(directory.path(), "connections.json", fixture().to_string().as_bytes());
+    let file = protected_file(directory.path(), "bundle-input.json", fixture().to_string().as_bytes());
     std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
     for confirmed in [false, true] {
         let result = invoke(directory.path(), &file, confirmed, &[]);
@@ -183,7 +191,7 @@ async fn cli_import_cannot_run_in_web_mode_or_scoped_sessions() {
     let directory = tempfile::tempdir().unwrap();
     let storage = test_storage::open(&directory.path().join("dbx.db")).await.unwrap();
     storage.save_mcp_global_policy(&McpGlobalPolicy { read_only: false, ..Default::default() }).await.unwrap();
-    let file = protected_file(directory.path(), "connections.json", fixture().to_string().as_bytes());
+    let file = protected_file(directory.path(), "bundle-input.json", fixture().to_string().as_bytes());
     for environment in [
         vec![("DBX_WEB_URL", "http://127.0.0.1:1")],
         vec![("DBX_MCP_SCOPE_CONNECTION_ID", "scoped")],
@@ -219,28 +227,31 @@ async fn cli_import_encrypted_bundle_uses_protected_passphrase_file() {
     assert_eq!(storage.load_connections().await.unwrap()[0].password, "synthetic-encrypted-password");
 }
 
-// The standalone Linux build uses the managed key file. Never probe a developer's OS keychain.
+// The standalone Linux build uses an isolated XDG key file. Never probe a developer's OS keychain.
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn explicit_initialization_creates_a_key_only_when_applying_to_an_empty_profile() {
     use std::os::unix::fs::PermissionsExt;
     let directory = tempfile::tempdir().unwrap();
-    let file = protected_file(directory.path(), "connections.json", fixture().to_string().as_bytes());
-    let key = managed_key_path(directory.path());
+    let file = protected_file(directory.path(), "bundle-input.json", fixture().to_string().as_bytes());
+    let key = directory.path().join(".config/dbx/secret.key");
     let default_apply = invoke(directory.path(), &file, true, &[]);
     assert!(!default_apply.status.success(), "ordinary import must not provision a key");
     assert!(!key.exists());
-    let preview = report(&invoke_options(directory.path(), &file, false, &[], None, true));
+    let preview = report(&invoke_options(directory.path(), &file, false, &[], None, true, None));
     assert_eq!(preview["dry_run"], true);
     assert!(!key.exists(), "preview must not create encryption-key material");
     let storage = test_storage::open_unmigrated(&directory.path().join("dbx.db")).await.unwrap();
     assert!(storage.load_connections().await.unwrap().is_empty());
     assert!(!key.exists());
-    let applied = report(&invoke_options(directory.path(), &file, true, &[], None, true));
+    let applied = report(&invoke_options(directory.path(), &file, true, &[], None, true, None));
     assert_eq!(applied["imported_count"], 1);
     assert!(key.exists());
     assert_eq!(std::fs::metadata(&key).unwrap().permissions().mode() & 0o077, 0);
-    assert_eq!(storage.load_connections().await.unwrap()[0].password, "cli-import-secret");
+    let key_environment = [("DBX_SECRET_KEY_FILE", key.to_str().unwrap())];
+    let saved = report(&invoke(directory.path(), &file, false, &key_environment));
+    assert_eq!(saved["skipped_count"], 1);
+    assert_eq!(saved["imported_count"], 0);
     for name in ["dbx.db", "dbx.db-wal"] {
         if let Ok(bytes) = std::fs::read(directory.path().join(name)) {
             for secret in [b"cli-import-secret".as_slice(), b"cli-plugin-secret".as_slice()] {
@@ -252,11 +263,11 @@ async fn explicit_initialization_creates_a_key_only_when_applying_to_an_empty_pr
         }
     }
     let key_before = std::fs::read(&key).unwrap();
-    let existing = storage.load_connections().await.unwrap();
-    let blocked = invoke_options(directory.path(), &file, true, &[], None, true);
+    let blocked = invoke_options(directory.path(), &file, true, &[], None, true, None);
     assert!(!blocked.status.success());
     assert!(String::from_utf8_lossy(&blocked.stderr).contains("CONNECTION_IMPORT_INITIALIZATION_BLOCKED"));
-    assert_eq!(storage.load_connections().await.unwrap(), existing);
+    let still_saved = report(&invoke(directory.path(), &file, false, &key_environment));
+    assert_eq!(still_saved["skipped_count"], 1);
     assert_eq!(std::fs::read(&key).unwrap(), key_before);
 }
 
@@ -267,11 +278,40 @@ async fn explicit_initialization_refuses_legacy_files_without_migrating_them() {
     let file = protected_file(directory.path(), "import.json", fixture().to_string().as_bytes());
     let legacy_bytes = fixture()["connections"].to_string();
     let legacy = protected_file(directory.path(), "connections.json", legacy_bytes.as_bytes());
-    let result = invoke_options(directory.path(), &file, true, &[], None, true);
+    let result = invoke_options(directory.path(), &file, true, &[], None, true, None);
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("CONNECTION_IMPORT_INITIALIZATION_BLOCKED"));
     assert!(!managed_key_path(directory.path()).exists());
+    assert!(!directory.path().join(".config/dbx/secret.key").exists());
     assert_eq!(std::fs::read(&legacy).unwrap(), legacy_bytes.as_bytes());
     let storage = test_storage::open_unmigrated(&directory.path().join("dbx.db")).await.unwrap();
     assert!(storage.load_connections().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn cli_import_accepts_a_secure_passphrase_pipe_without_putting_it_in_argv() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = test_storage::open(&directory.path().join("dbx.db")).await.unwrap();
+    storage.save_mcp_global_policy(&McpGlobalPolicy { read_only: false, ..Default::default() }).await.unwrap();
+    let encrypted = protected_file(
+        directory.path(),
+        "encrypted.json",
+        include_bytes!("../../dbx-core/tests/fixtures/connection_import_encrypted.json"),
+    );
+    for confirmed in [false, true] {
+        let result = invoke_options(
+            directory.path(),
+            &encrypted,
+            confirmed,
+            &[],
+            Some(Path::new("-")),
+            false,
+            Some(b"synthetic-import-passphrase\n"),
+        );
+        let result = report(&result);
+        assert_eq!(result["dry_run"], !confirmed);
+        assert_eq!(result["imported_count"], 1);
+        assert_eq!(storage.load_connections().await.unwrap().len(), usize::from(confirmed));
+    }
+    assert_eq!(storage.load_connections().await.unwrap()[0].password, "synthetic-encrypted-password");
 }

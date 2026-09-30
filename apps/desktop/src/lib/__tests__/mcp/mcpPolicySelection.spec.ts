@@ -90,6 +90,7 @@ describe("MCP tool permission selection", () => {
   });
 
   it("keeps connection details and configuration updates independently switchable", () => {
+    expect(MCP_TOOL_OPTIONS.find((tool) => tool.name === "dbx_import_connections")?.labelKey).toBe("settings.mcpToolImportConnections");
     expect(MCP_TOOL_OPTIONS.find((tool) => tool.name === "dbx_get_connection")?.labelKey).toBe("settings.mcpToolGetConnection");
     expect(MCP_TOOL_OPTIONS.find((tool) => tool.name === "dbx_update_connection")?.labelKey).toBe("settings.mcpToolUpdateConnection");
     const withoutUpdates = toggleMcpAllowedToolName(null, "dbx_update_connection", false);

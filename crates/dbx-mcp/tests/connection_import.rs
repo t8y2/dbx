@@ -23,7 +23,7 @@ fn fixture() -> Value {
 }
 
 fn protected_file(directory: &Path, content: &[u8]) -> PathBuf {
-    let path = directory.join("connections.json");
+    let path = directory.join("bundle-input.json");
     std::fs::write(&path, content).unwrap();
     #[cfg(unix)]
     {

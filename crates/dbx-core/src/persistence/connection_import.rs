@@ -130,6 +130,8 @@ pub(crate) struct ImportBundle {
     pub layout: Option<Value>,
     #[serde(default, rename = "tunnelProfiles")]
     pub profiles: Vec<TransportLayerConfig>,
+    #[serde(skip)]
+    pub timeout_inheritance: HashMap<String, (bool, bool)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,6 +152,7 @@ pub(crate) struct ImportPlan {
     pub profiles: Vec<TransportLayerConfig>,
     pub layout: Value,
     pub report: ConnectionImportReport,
+    pub timeout_inheritance: Vec<(String, bool, bool)>,
 }
 
 pub(crate) fn parse_bundle(mut value: Value) -> Result<ImportBundle, String> {
@@ -174,7 +177,23 @@ pub(crate) fn parse_bundle(mut value: Value) -> Result<ImportBundle, String> {
             }
         }
     }
-    let bundle: ImportBundle = serde_json::from_value(value).map_err(|_| invalid())?;
+    let mut timeout_inheritance = HashMap::new();
+    if let Some(connections) = value.get("connections").and_then(Value::as_array) {
+        for config in connections {
+            if config.get("connect_timeout_inherit").is_some() || config.get("query_timeout_inherit").is_some() {
+                let mut flags = [false; 2];
+                for (index, key) in ["connect_timeout_inherit", "query_timeout_inherit"].into_iter().enumerate() {
+                    if let Some(value) = config.get(key) {
+                        flags[index] = value.as_bool().ok_or_else(invalid)?;
+                    }
+                }
+                let id = config.get("id").and_then(Value::as_str).ok_or_else(invalid)?;
+                timeout_inheritance.insert(id.to_string(), (flags[0], flags[1]));
+            }
+        }
+    }
+    let mut bundle: ImportBundle = serde_json::from_value(value).map_err(|_| invalid())?;
+    bundle.timeout_inheritance = timeout_inheritance;
     if bundle.connections.is_empty() || bundle.connections.len() > 10_000 || bundle.profiles.len() > 10_000 {
         return Err(invalid());
     }
@@ -211,7 +230,15 @@ pub(crate) fn parse_bundle(mut value: Value) -> Result<ImportBundle, String> {
 
 fn identity(config: &ConnectionConfig) -> String {
     // Name alone is not an identity; different DB types/databases must never be silently skipped.
-    json!([config.name.trim().to_lowercase(), config.db_type, config.host, config.port, config.database]).to_string()
+    json!([
+        config.name.trim().to_lowercase(),
+        config.db_type,
+        config.host,
+        config.port,
+        config.database,
+        config.username
+    ])
+    .to_string()
 }
 fn remap_profile(layer: &mut TransportLayerConfig, id: Option<String>, profile_id: Option<String>) {
     match layer {
@@ -289,6 +316,11 @@ pub(crate) fn plan_import(
             }
         }
     }
+    let timeout_inheritance = bundle
+        .timeout_inheritance
+        .into_iter()
+        .filter_map(|(source, (connect, query))| new_ids.get(&source).map(|id| (id.clone(), connect, query)))
+        .collect();
     let layout = merge_import_layout(current_layout, bundle.layout, &new_ids)?;
     let without_password = connections.iter().filter(|c| c.password.is_empty()).count();
     let ssh_missing = connections
@@ -336,7 +368,7 @@ pub(crate) fn plan_import(
         file_database_count: files,
         warnings,
     };
-    Ok(ImportPlan { connections, profiles, layout, report })
+    Ok(ImportPlan { connections, profiles, layout, report, timeout_inheritance })
 }
 
 fn merge_import_layout(

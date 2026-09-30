@@ -7648,6 +7648,7 @@ export default withEnglishFallback({
     mcpToolPeekMessages: "讀取 Kafka 訊息",
     mcpToolSendMessage: "傳送訊息佇列訊息",
     mcpToolAddConnection: "新增連線",
+    mcpToolImportConnections: "匯入連線設定（僅本機）",
     mcpToolGetConnection: "檢視連線詳細資料",
     mcpToolUpdateConnection: "修改連線",
     mcpToolDuplicateConnection: "複製連線",

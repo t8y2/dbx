@@ -295,13 +295,15 @@ async fn equal_names_with_distinct_complete_identities_are_preserved_and_idempot
     other_type["db_type"] = json!("postgres");
     let mut other_port = connection("source-port", "Shared name");
     other_port["port"] = json!(12345);
-    let bundle = json!({"connections":[other_host, other_database, other_type, other_port]});
-    assert_report(storage.import_connections_for_mcp(bundle.clone(), false).await.unwrap(), false, 4, 4, 0);
+    let mut other_user = connection("source-user", "Shared name");
+    other_user["username"] = json!("different-principal");
+    let bundle = json!({"connections":[other_host, other_database, other_type, other_port, other_user]});
+    assert_report(storage.import_connections_for_mcp(bundle.clone(), false).await.unwrap(), false, 5, 5, 0);
     let saved = storage.load_connections().await.unwrap();
-    assert_eq!(saved.len(), 5);
+    assert_eq!(saved.len(), 6);
     assert_eq!(saved.iter().find(|c| c.id == "existing").unwrap(), &existing);
     assert!(saved.iter().all(|c| c.name == "Shared name"));
-    assert_report(storage.import_connections_for_mcp(bundle, false).await.unwrap(), false, 4, 0, 4);
+    assert_report(storage.import_connections_for_mcp(bundle, false).await.unwrap(), false, 5, 0, 5);
     assert_eq!(storage.load_connections().await.unwrap(), saved);
 }
 
@@ -355,4 +357,69 @@ fn encrypted_import_refuses_readable_passphrase_and_shared_stdin() {
     let error = read_import_file_with_passphrase(Path::new("-"), true, Some(Path::new("-"))).unwrap_err();
     assert!(error.starts_with("INVALID_CONNECTION_IMPORT:"));
     assert!(read_import_file_with_passphrase(&encrypted, false, Some(Path::new("-"))).is_err());
+}
+
+#[tokio::test]
+async fn timeout_inheritance_flags_follow_new_ids_and_preserve_existing_editor_settings() {
+    for existing_profile in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = writable_storage(&directory.path().join("dbx.db")).await;
+        let initial_settings = if existing_profile {
+            storage
+                .add_connection_for_mcp(serde_json::from_value(connection("existing", "Existing")).unwrap())
+                .await
+                .unwrap();
+            json!({"fontSize":17, "connectTimeoutInheritConnectionIds":["existing"],
+                "queryTimeoutInheritConnectionIds":["existing"], "timeoutInheritanceMigrationVersion":1})
+        } else {
+            json!({"fontSize":17})
+        };
+        storage.save_editor_settings(&initial_settings).await.unwrap();
+        let mut connect = connection("source-connect", "Inherit connect");
+        connect["connect_timeout_inherit"] = json!(true);
+        connect["query_timeout_inherit"] = json!(false);
+        let mut query = connection("source-query", "Inherit query");
+        query["connect_timeout_inherit"] = json!(false);
+        query["query_timeout_inherit"] = json!(true);
+        let mut neither = connection("source-neither", "Explicit timeouts");
+        neither["connect_timeout_inherit"] = json!(false);
+        neither["query_timeout_inherit"] = json!(false);
+        let bundle = json!({"connections":[connect, query, neither]});
+        assert_report(storage.import_connections_for_mcp(bundle.clone(), true).await.unwrap(), true, 3, 3, 0);
+        assert_eq!(storage.load_editor_settings().await.unwrap(), Some(initial_settings));
+        assert_report(storage.import_connections_for_mcp(bundle.clone(), false).await.unwrap(), false, 3, 3, 0);
+        let connections = storage.load_connections().await.unwrap();
+        let id = |name: &str| connections.iter().find(|c| c.name == name).unwrap().id.clone();
+        let settings = storage.load_editor_settings().await.unwrap().unwrap();
+        let connect_ids = settings["connectTimeoutInheritConnectionIds"].as_array().unwrap();
+        let query_ids = settings["queryTimeoutInheritConnectionIds"].as_array().unwrap();
+        assert!(connect_ids.contains(&json!(id("Inherit connect"))));
+        assert!(!connect_ids.contains(&json!(id("Inherit query"))));
+        assert!(!connect_ids.contains(&json!(id("Explicit timeouts"))));
+        assert!(query_ids.contains(&json!(id("Inherit query"))));
+        assert!(!query_ids.contains(&json!(id("Inherit connect"))));
+        assert!(!query_ids.contains(&json!(id("Explicit timeouts"))));
+        assert_eq!(connect_ids.len(), 1 + usize::from(existing_profile));
+        assert_eq!(query_ids.len(), 1 + usize::from(existing_profile));
+        if existing_profile {
+            assert!(connect_ids.contains(&json!("existing")));
+            assert!(query_ids.contains(&json!("existing")));
+        }
+        assert_eq!(settings["fontSize"], 17);
+        assert_eq!(settings["timeoutInheritanceMigrationVersion"], if existing_profile { 1 } else { 2 });
+        assert_report(storage.import_connections_for_mcp(bundle, false).await.unwrap(), false, 3, 0, 3);
+        assert_eq!(storage.load_editor_settings().await.unwrap(), Some(settings));
+    }
+}
+
+#[tokio::test]
+async fn invalid_timeout_inheritance_fails_without_partial_changes() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = writable_storage(&directory.path().join("dbx.db")).await;
+    let mut invalid = connection("source-invalid", "Invalid inheritance");
+    invalid["query_timeout_inherit"] = json!("not-a-boolean");
+    let bundle = json!({"connections":[connection("source-valid", "Valid"), invalid]});
+    assert!(storage.import_connections_for_mcp(bundle, false).await.is_err());
+    assert!(storage.load_connections().await.unwrap().is_empty());
+    assert!(storage.load_editor_settings().await.unwrap().is_none());
 }

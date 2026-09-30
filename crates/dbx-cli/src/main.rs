@@ -683,7 +683,9 @@ fn parse_flags(argv: &[String]) -> Result<Flags, CliError> {
 fn option_value(argv: &[String], index: &mut usize, option: &'static str) -> Result<String, CliError> {
     *index += 1;
     argv.get(*index)
-        .filter(|value| !value.starts_with('-') || (option == "--file" && value.as_str() == "-"))
+        .filter(|value| {
+            !value.starts_with('-') || (matches!(option, "--file" | "--passphrase-file") && value.as_str() == "-")
+        })
         .cloned()
         .ok_or_else(|| CliError::new("INVALID_OPTION", format!("{option} requires a value.")))
 }

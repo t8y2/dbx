@@ -9136,6 +9136,7 @@ export default withEnglishFallback({
     mcpToolPeekMessages: "读取 Kafka 消息",
     mcpToolSendMessage: "发送消息队列消息",
     mcpToolAddConnection: "新增连接",
+    mcpToolImportConnections: "导入连接配置（仅本地）",
     mcpToolGetConnection: "查看连接详情",
     mcpToolUpdateConnection: "修改连接",
     mcpToolDuplicateConnection: "复制连接",

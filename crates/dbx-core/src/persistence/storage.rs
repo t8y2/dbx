@@ -6458,6 +6458,49 @@ impl Storage {
                 let json = serde_json::to_string(&plan.layout).map_err(|_| "CONNECTION_STORE_ERROR".to_string())?;
                 tx.execute("INSERT OR REPLACE INTO sidebar_layout (id,layout_json) VALUES (1,?1)", [json])
                     .map_err(|_| "CONNECTION_STORE_ERROR".to_string())?;
+                if !plan.timeout_inheritance.is_empty() {
+                    let previous: Option<String> = tx
+                        .query_row(
+                            "SELECT value_json FROM app_state WHERE key=?1",
+                            [APP_STATE_EDITOR_SETTINGS_KEY],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .map_err(|_| "CONNECTION_STORE_ERROR".to_string())?;
+                    let mut settings: serde_json::Value = previous
+                        .map(|json| serde_json::from_str(&json).map_err(|_| "CONNECTION_STORE_ERROR".to_string()))
+                        .transpose()?
+                        .unwrap_or_else(|| serde_json::json!({}));
+                    if !settings.is_object() {
+                        return Err("CONNECTION_STORE_ERROR: Invalid editor settings.".into());
+                    }
+                    for (field, is_connect) in
+                        [("connectTimeoutInheritConnectionIds", true), ("queryTimeoutInheritConnectionIds", false)]
+                    {
+                        if settings.get(field).is_none() {
+                            settings[field] = serde_json::json!([]);
+                        }
+                        let ids = settings[field]
+                            .as_array_mut()
+                            .ok_or_else(|| "CONNECTION_STORE_ERROR: Invalid timeout settings.".to_string())?;
+                        for (id, connect, query) in &plan.timeout_inheritance {
+                            if (if is_connect { *connect } else { *query })
+                                && !ids.iter().any(|value| value.as_str() == Some(id))
+                            {
+                                ids.push(serde_json::json!(id));
+                            }
+                        }
+                    }
+                    // No existing profile's migration state is advanced implicitly.
+                    if existing.is_empty() {
+                        settings["timeoutInheritanceMigrationVersion"] = serde_json::json!(2);
+                    }
+                    tx.execute(
+                        "INSERT OR REPLACE INTO app_state (key,value_json) VALUES (?1,?2)",
+                        params![APP_STATE_EDITOR_SETTINGS_KEY, settings.to_string()],
+                    )
+                    .map_err(|_| "CONNECTION_STORE_ERROR".to_string())?;
+                }
                 tx.commit().map_err(|_| "CONNECTION_STORE_ERROR".to_string())?;
             }
             Ok(plan.report)

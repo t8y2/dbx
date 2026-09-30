@@ -178,7 +178,7 @@ dbx context local --tables users,orders | codex exec "Write a retention query"
 
 ## Manage saved connections
 
-These commands edit DBX connection configuration, without connecting to or modifying the database. Local mode requires an initialized DBX encrypted store and access to its existing key; these commands do not provision keys or bypass the data security upgrade. They share Desktop's encrypted storage and also work with `DBX_WEB_URL` when the Web server supports the update endpoint. All commands respect MCP connection/tool scope; mutations are blocked by global MCP read-only mode and scoped AI sessions. Configure access in **DBX Settings → MCP**. `--allow-writes` cannot override that policy for connection management.
+These commands edit DBX connection configuration, without connecting to or modifying the database. Local mode normally requires an initialized DBX encrypted store and access to its existing key. Only `connections import --initialize` can opt in to key creation for a completely empty profile; it does not bypass security migration for existing data. These commands share Desktop's encrypted storage. CRUD also works with `DBX_WEB_URL` when the Web server supports the update endpoint; bundle import is local-only. All commands respect MCP connection/tool scope; mutations are blocked by global MCP read-only mode and scoped AI sessions. Configure access in **DBX Settings → MCP**. `--allow-writes` cannot override that policy for connection management.
 
 ```bash
 dbx connections list --json
@@ -229,7 +229,7 @@ Without `--yes`, import is a dry run. JSON output includes `dry_run`, `input_cou
 
 - Accepts a plain DBX bundle with `connections`, optional `layout` and `tunnelProfiles`, legacy connection arrays, and legacy `dbx-config` version 1 exports
 - Preserves full supported connection settings and credentials, imports referenced tunnel profiles, and appends sidebar groups/order with new IDs; existing configuration and secrets are not overwritten
-- Skips connections with the same normalized name, host, port, database type, and database; equal names with different endpoints/types/databases remain separate (use IDs to select them), while duplicate source IDs and invalid configurations reject the entire batch
+- Skips connections with the same normalized name, host, port, username, database type, and database; equal names with different endpoints/usernames/types/databases remain separate (use IDs to select them), while duplicate source IDs and invalid configurations reject the entire batch
 - Normally requires an initialized local DBX store and its existing encryption key; `DBX_WEB_URL` and scoped sessions are unsupported, and MCP tool/connection scope applies to preview and import
 - Preview is allowed under global read-only mode; applying requires a writable MCP policy and rechecks it in the storage transaction. `--yes` and SQL write flags do not override that policy
 - Input is limited to 16 MiB and must be a regular owner-only file on Unix; on Windows, restrict the file's ACL. Encrypted `dbx-encrypted` version 1 exports require a separate protected passphrase file

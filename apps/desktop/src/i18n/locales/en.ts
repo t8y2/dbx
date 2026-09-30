@@ -9170,6 +9170,7 @@ export default {
     mcpToolPeekMessages: "Read Kafka messages",
     mcpToolSendMessage: "Send message queue message",
     mcpToolAddConnection: "Add connection",
+    mcpToolImportConnections: "Import connection bundle (local only)",
     mcpToolGetConnection: "Get connection details",
     mcpToolUpdateConnection: "Update connection",
     mcpToolDuplicateConnection: "Duplicate connection",

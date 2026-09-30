@@ -26,10 +26,10 @@ capabilities:
   tableDataEdit: true
   tableStructureEdit: false
   tableImport: true
-  dataTransfer: false
+  dataTransfer: true
   sqlFileExecution: true
   databaseCreate: false
-  fieldLineage: false
+  fieldLineage: true
   sqlExplain: false
   userAdmin: false
   driverManagement: true

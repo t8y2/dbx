@@ -11,6 +11,7 @@ import {
   supportsDatabaseNameCompletion,
   supportsDatabaseSchemaQualifier,
   supportsDatabaseSearch,
+  supportsFieldLineage,
   supportsObjectBrowser,
   supportsObjectBrowserTreeNode,
   supportsQueryExecution,
@@ -19,6 +20,7 @@ import {
   supportsSqlInListPaste,
   supportsTableImport,
   supportsTableVacuum,
+  supportsTransfer,
   supportsTransaction,
   usesOracleStickyTransactionState,
   usesProvenReadOnlyStickyTransactionState,
@@ -333,6 +335,20 @@ describe("supportsTableImport", () => {
 
   it("keeps Xugu table import available", () => {
     expect(supportsTableImport("xugu")).toBe(true);
+  });
+});
+
+describe("supportsFieldLineage", () => {
+  it("enables DB2 field lineage", () => {
+    expect(supportsFieldLineage("db2")).toBe(true);
+  });
+});
+
+describe("DB2 transfer and namespace capabilities", () => {
+  it("enables table transfers without enabling database lifecycle operations", () => {
+    expect(supportsTransfer("db2")).toBe(true);
+    expect(connectionNamespaceCreationTarget({ db_type: "db2" })).toBeNull();
+    expect(databaseNodeNamespaceCreationTarget({ db_type: "db2" }, { type: "database", database: "SAMPLE" })).toBe("schema");
   });
 });
 

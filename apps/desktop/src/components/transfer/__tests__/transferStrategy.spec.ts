@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { TransferOwnershipPreview, TransferRequest } from "@/lib/backend/api";
 import type { ConnectionConfig } from "@/types/database";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
-import { confirmTransferWithProductionSafety, createTransferSubmission, rebuildUnavailableReason, resolveTransferStrategy, transferStrategyOptions } from "../transferStrategy";
+import { confirmTransferWithProductionSafety, createTransferSubmission, rebuildUnavailableReason, resolveTransferStrategy, supportsTransferUpsert, transferStrategyOptions } from "../transferStrategy";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -68,6 +68,15 @@ describe("transfer strategies", () => {
 
   it("defaults legacy tasks without strategy fields to append", () => {
     expect(resolveTransferStrategy({})).toBe("append");
+  });
+
+  it("does not expose unimplemented DB2 upsert or rebuild strategies", () => {
+    expect(supportsTransferUpsert("db2")).toBe(false);
+    expect(rebuildUnavailableReason("structureAndData", "db2")).toBe("unsupported");
+    expect(rebuildUnavailableReason("structureOnly", "db2")).toBe("unsupported");
+    expect(supportsTransferUpsert("postgres")).toBe(true);
+    expect(supportsTransferUpsert("mysql")).toBe(true);
+    expect(supportsTransferUpsert(undefined)).toBe(true);
   });
 
   it.each([

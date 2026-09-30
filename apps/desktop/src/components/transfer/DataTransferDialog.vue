@@ -6,7 +6,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Di
 import { Button } from "@/components/ui/button";
 import { buildTransferObjectSelections, countTransferObjects } from "./transferSelections";
 import { createTaskLoadTracker } from "./taskLoadTracker";
-import { confirmTransferWithProductionSafety, createTransferSubmission, rebuildUnavailableReason, resolveTransferStrategy, transferStrategyOptions, type TransferStrategy } from "./transferStrategy";
+import { confirmTransferWithProductionSafety, createTransferSubmission, rebuildUnavailableReason, resolveTransferStrategy, supportsTransferUpsert, transferStrategyOptions, type TransferStrategy } from "./transferStrategy";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -220,6 +220,7 @@ function isMongoConnection(id: string): boolean {
 const showTargetColumnQuoteOption = computed(() => ["gaussdb", "opengauss"].includes(connectionType(targetConnectionId.value) ?? ""));
 
 const rebuildDisabledReason = computed(() => rebuildUnavailableReason(transferContent.value, connectionType(targetConnectionId.value)));
+const upsertSupported = computed(() => supportsTransferUpsert(connectionType(targetConnectionId.value)));
 const rebuildDisabledHint = computed(() => {
   if (rebuildDisabledReason.value === "dataOnly") return t("transfer.rebuildDataOnlyDisabled");
   if (rebuildDisabledReason.value === "unsupported") return t("transfer.rebuildUnsupportedDisabled");
@@ -266,6 +267,7 @@ const canStart = computed(() => {
     (targetCatalogs.value.length <= 1 || !!targetCatalog.value) &&
     (selectedTables.value.size > 0 || Object.values(selectedObjects.value).some((names) => names.size > 0)) &&
     (targetTableStrategy.value !== "rebuild" || !rebuildDisabledReason.value) &&
+    (transferContent.value === "structureOnly" || targetTableStrategy.value !== "upsert" || upsertSupported.value) &&
     !sameSourceAndTarget
   );
 });
@@ -1371,7 +1373,7 @@ async function saveConfigTask() {
                   <SelectContent>
                     <SelectItem value="append">{{ t(transferContent === "structureOnly" ? "transfer.modeKeepExisting" : "transfer.modeAppend") }}</SelectItem>
                     <SelectItem v-if="transferContent !== 'structureOnly'" value="overwrite">{{ t("transfer.modeOverwrite") }}</SelectItem>
-                    <SelectItem v-if="transferContent !== 'structureOnly'" value="upsert">{{ t("transfer.modeUpsert") }}</SelectItem>
+                    <SelectItem v-if="transferContent !== 'structureOnly'" value="upsert" :disabled="!upsertSupported">{{ t("transfer.modeUpsert") }}</SelectItem>
                     <SelectItem value="rebuild" :disabled="!!rebuildDisabledReason">{{ t(transferContent === "structureOnly" ? "transfer.modeRebuildStructure" : "transfer.modeRebuild") }}</SelectItem>
                   </SelectContent>
                 </Select>

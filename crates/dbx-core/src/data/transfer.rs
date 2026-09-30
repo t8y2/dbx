@@ -17,6 +17,7 @@ use futures::{SinkExt, StreamExt};
 #[path = "transfer/rebuild_tests.rs"]
 mod rebuild_tests;
 
+mod db2;
 mod ddl_plan;
 
 use crate::connection::{config_for_pool_key, AppState, PoolKind};
@@ -2926,6 +2927,9 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
             }
         },
         serde_json::Value::Number(n) => {
+            if *db_type == DatabaseType::Db2 {
+                return db2::numeric_literal(&n.to_string(), column_type);
+            }
             if let Some(integer_literal) = normalize_integer_literal(&n.to_string(), db_type, column_type) {
                 return integer_literal;
             }
@@ -2941,6 +2945,9 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
             }
         }
         serde_json::Value::String(s) => {
+            if *db_type == DatabaseType::Db2 {
+                return db2::string_literal(s, column_type);
+            }
             if let Some(json_array_literal) = format_starrocks_json_array_sql_literal(s, db_type, column_type) {
                 return json_array_literal;
             }
@@ -3000,11 +3007,15 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
             }
             match db_type {
                 DatabaseType::ClickHouse | DatabaseType::Databend => format_ch_array_sql_literal(arr),
+                DatabaseType::Db2 => db2::string_literal(&val.to_string(), None),
                 _ => format_pg_array_sql_literal(arr),
             }
         }
         _ => {
             let s = val.to_string();
+            if *db_type == DatabaseType::Db2 {
+                return db2::string_literal(&s, None);
+            }
             if *db_type == DatabaseType::H2 {
                 return quote_string_literal(&s);
             }
@@ -3418,7 +3429,7 @@ fn oracle_char_length_params(params: &str) -> String {
 /// targets to `CLOB` for file imports; the transfer path did not (#9886).
 fn target_text_type(target_db: &DatabaseType) -> &'static str {
     match target_db {
-        DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng => "CLOB",
+        DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng | DatabaseType::Db2 => "CLOB",
         _ => "TEXT",
     }
 }
@@ -3426,6 +3437,11 @@ fn target_text_type(target_db: &DatabaseType) -> &'static str {
 pub fn map_column_type(source_type: &str, source_db: &DatabaseType, target_db: &DatabaseType) -> String {
     if source_db == target_db {
         return source_type.to_string();
+    }
+    if *target_db == DatabaseType::Db2 {
+        if let Some(mapped) = db2::map_column_type(source_type, source_db) {
+            return mapped;
+        }
     }
     let t = source_type.to_lowercase();
     let mut base = t.split('(').next().unwrap_or(&t).trim();
@@ -3771,9 +3787,11 @@ fn generate_create_table_ddl_with_column_quoting(
     };
 
     let create_prefix = match target_db {
-        DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::SqlServer | DatabaseType::Dameng => {
-            "CREATE TABLE"
-        }
+        DatabaseType::Oracle
+        | DatabaseType::OceanbaseOracle
+        | DatabaseType::SqlServer
+        | DatabaseType::Dameng
+        | DatabaseType::Db2 => "CREATE TABLE",
         _ => "CREATE TABLE IF NOT EXISTS",
     };
 
@@ -4629,6 +4647,8 @@ fn rewrite_transfer_source_table_ddl(
     } else if matches!((source_db_type, target_db_type), (DatabaseType::H2, DatabaseType::H2)) {
         let source_schema = if source_schema.trim().is_empty() { "PUBLIC" } else { source_schema };
         let target_schema = if target_schema.trim().is_empty() { "PUBLIC" } else { target_schema };
+        Some(rewrite_h2_schema_qualifier(sql, source_schema, target_schema))
+    } else if matches!((source_db_type, target_db_type), (DatabaseType::Db2, DatabaseType::Db2)) {
         Some(rewrite_h2_schema_qualifier(sql, source_schema, target_schema))
     } else if is_oracle_family_transfer_target(source_db_type) && is_oracle_family_transfer_target(target_db_type) {
         // Oracle-family sources return `DBMS_METADATA`-style DDL whose CREATE TABLE head
@@ -9196,6 +9216,19 @@ fn transfer_cursor_sql(
     format!("SELECT {col_list} FROM {full_table}")
 }
 
+fn uses_agent_transfer_cursor(db_type: &DatabaseType) -> bool {
+    matches!(db_type, DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Transwarp | DatabaseType::Db2)
+}
+
+fn transfer_clear_table_sql(table: &str, schema: &str, db_type: &DatabaseType, catalog: Option<&str>) -> String {
+    let full_table = qualified_table(table, schema, db_type, catalog);
+    match db_type {
+        DatabaseType::Sqlite | DatabaseType::CloudflareD1 | DatabaseType::DuckDb => format!("DELETE FROM {full_table}"),
+        DatabaseType::Db2 => format!("TRUNCATE TABLE {full_table} IMMEDIATE"),
+        _ => format!("TRUNCATE TABLE {full_table}"),
+    }
+}
+
 async fn fetch_hive_server_transfer_batch(
     state: &AppState,
     pool_key: &str,
@@ -9800,6 +9833,9 @@ async fn transfer_table_inner<F>(
 where
     F: FnMut(TransferProgress),
 {
+    if *target_db_type == DatabaseType::Db2 {
+        db2::validate_request(request)?;
+    }
     if is_mongodb_transfer_type(source_db_type) || is_mongodb_transfer_type(target_db_type) {
         return transfer_mongodb_table(
             state,
@@ -10179,6 +10215,14 @@ where
         col_names.clone()
     };
 
+    if *target_db_type == DatabaseType::Db2 {
+        let sql = db2::generated_columns_sql(&request.target_schema, &target_table, &write_col_names);
+        let generated_columns = execute_on_pool(state, target_pool_key, &sql)
+            .await
+            .map_err(|error| format!("Failed to inspect DB2 generated columns before transfer: {error}"))?;
+        db2::validate_generated_columns(&generated_columns.rows)?;
+    }
+
     if server_side_complex_copy {
         for (source_column, target_name) in writable_columns.iter().zip(&write_col_names) {
             let Some(target_column) =
@@ -10204,14 +10248,12 @@ where
     // When drop_target_before_create is true, the target table was just created
     // and is already empty, so TRUNCATE is unnecessary.
     if request.mode == TransferMode::Overwrite && !request.drop_target_before_create {
-        let full_table =
-            qualified_table(&target_table, &request.target_schema, target_db_type, request.target_catalog.as_deref());
-        let truncate_sql = match target_db_type {
-            DatabaseType::Sqlite | DatabaseType::CloudflareD1 | DatabaseType::DuckDb => {
-                format!("DELETE FROM {full_table}")
-            }
-            _ => format!("TRUNCATE TABLE {full_table}"),
-        };
+        let truncate_sql = transfer_clear_table_sql(
+            &target_table,
+            &request.target_schema,
+            target_db_type,
+            request.target_catalog.as_deref(),
+        );
         execute_on_pool(state, target_pool_key, &truncate_sql).await.map_err(|e| format!("Failed to truncate: {e}"))?;
     }
 
@@ -10369,8 +10411,7 @@ where
     // A single Agent cursor keeps Hive-family rows in one query execution. Inceptor
     // rejects the generic LIMIT/OFFSET form, just like the other Agent cursor paths.
     // Re-running LIMIT/OFFSET pages is unstable for tables without a unique key.
-    let use_hive_server_cursor =
-        matches!(source_db_type, DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Transwarp);
+    let use_hive_server_cursor = uses_agent_transfer_cursor(source_db_type);
     let hive_server_transfer_sql = use_hive_server_cursor.then(|| {
         transfer_cursor_sql(
             &col_names,

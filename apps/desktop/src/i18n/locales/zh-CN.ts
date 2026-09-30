@@ -7303,6 +7303,11 @@ export default withEnglishFallback({
     cancelledLabel: "已取消，已写入的行保留在表中",
   },
   tableToolbox: {
+    browser: "网页预览",
+    browserFiltered: "网页预览（当前结果）",
+    browserSelected: "网页预览（选中行）",
+    openWith: "打开方式",
+    openXlsx: "打开为 XLSX",
     title: "数据工具",
     generateData: "生成数据",
     importData: "导入数据",

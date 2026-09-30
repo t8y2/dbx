@@ -59,6 +59,8 @@ import {
   WandSparkles,
   Camera,
   AlertTriangle,
+  FileSpreadsheet,
+  Globe2,
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -307,6 +309,7 @@ import { useToast } from "@/composables/useToast";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import { useDataGridExport, type MongoCopyUpdateTarget } from "@/composables/useDataGridExport";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { eventTargetAllowsNativeClipboard, isPlainClipboardShortcut, readTextFromClipboard } from "@/lib/common/clipboard";
 import { claimDataGridPaste, claimDataGridSelectAll, clearDataGridClipboardCopy, parseDataGridClipboard, planDataGridPaste } from "@/lib/dataGrid/dataGridClipboard";
 import { parseInsertStatementPaste } from "@/lib/dataGrid/dataGridInsertPaste";
@@ -5943,6 +5946,12 @@ function exportSelectedRowsXlsx() {
   return exportXlsx(rowIds);
 }
 
+function openSelectedRowsXlsx() {
+  const rowIds = affectedRowIds();
+  if (rowIds.length === 0) return openXlsx();
+  return openXlsx(rowIds);
+}
+
 function exportSelectedRowsXlsxWithSql() {
   const rowIds = affectedRowIds();
   if (rowIds.length === 0) return;
@@ -7962,6 +7971,8 @@ const {
   exportHtml,
   exportCurrentPageHtml,
   exportXlsx,
+  openXlsx,
+  openBrowser,
   exportXlsxWithSql,
   exportCurrentPageXlsx,
   exportCurrentPageXlsxWithSql,
@@ -11994,6 +12005,7 @@ defineExpose({
   exportJson,
   exportSql,
   exportXlsx,
+  openXlsx,
   exportTxt,
   defaultCopyPreference: selectedCopyPreference,
   defaultCopyPreferenceLabel,
@@ -12355,7 +12367,22 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         },
       },
     }),
-    [exportSubmenu()],
+    [
+      exportSubmenu(),
+      ...(isTauriRuntime()
+        ? [
+            {
+              label: t("tableToolbox.openWith"),
+              icon: ExternalLink,
+              children: [
+                { label: t("tableToolbox.openXlsx"), icon: FileSpreadsheet, action: openSelectedRowsXlsx },
+                { label: t("tableToolbox.browserFiltered"), icon: Globe2, action: () => openBrowser(undefined) },
+                { label: t("tableToolbox.browserSelected"), icon: Globe2, disabled: !hasRowSelection.value, action: () => openBrowser(affectedRowIds()) },
+              ],
+            },
+          ]
+        : []),
+    ],
     previewItems,
     // 右键刷新：与工具栏刷新按钮/Mod+R 走同一个 onToolbarRefresh，方便
     // 习惯 Navicat 等工具在数据页右键刷新的用户（#7273）。

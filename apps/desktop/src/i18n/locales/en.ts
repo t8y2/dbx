@@ -7336,6 +7336,11 @@ export default {
     cancelledLabel: "Cancelled; rows already written remain in the table",
   },
   tableToolbox: {
+    browser: "Web preview",
+    browserFiltered: "Web preview (current result)",
+    browserSelected: "Web preview (selected rows)",
+    openWith: "Open with",
+    openXlsx: "Open as XLSX",
     title: "Data Tools",
     generateData: "Generate Data",
     importData: "Import Data",

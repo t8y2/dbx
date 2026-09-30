@@ -162,7 +162,9 @@ async fn core_cluster_database_operations_are_isolated_on_all_masters() {
                 let key_raw = raw(&key);
                 match kind {
                     "hash" => redis_hash_set_in_db_core(state, ID, db, &key_raw, "field", &value, None).await.unwrap(),
-                    "list" => redis_list_push_in_db_core(state, ID, db, &key_raw, &value, None).await.unwrap(),
+                    "list" => redis_list_push_in_db_core(state, ID, db, &key_raw, &value, None, ListPushSide::Right)
+                        .await
+                        .unwrap(),
                     "set" => redis_set_add_in_db_core(state, ID, db, &key_raw, &value, None).await.unwrap(),
                     "zset" => redis_zadd_in_db_core(state, ID, db, &key_raw, &value, 1.0, None).await.unwrap(),
                     "stream" => redis_stream_add_in_db_core(

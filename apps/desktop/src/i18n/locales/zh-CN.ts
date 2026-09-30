@@ -9130,6 +9130,8 @@ export default withEnglishFallback({
     mcpToolPeekMessages: "读取 Kafka 消息",
     mcpToolSendMessage: "发送消息队列消息",
     mcpToolAddConnection: "新增连接",
+    mcpToolGetConnection: "查看连接详情",
+    mcpToolUpdateConnection: "修改连接",
     mcpToolDuplicateConnection: "复制连接",
     mcpToolRemoveConnection: "删除连接",
     mcpToolOpenTable: "在 DBX 中打开表",

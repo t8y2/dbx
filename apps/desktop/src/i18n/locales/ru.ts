@@ -9553,6 +9553,8 @@ export default withEnglishFallback({
     mcpToolPeekMessages: "Читать сообщения Kafka",
     mcpToolSendMessage: "Отправить сообщение в очередь",
     mcpToolAddConnection: "Добавить подключение",
+    mcpToolGetConnection: "Сведения о подключении",
+    mcpToolUpdateConnection: "Изменить подключение",
     mcpToolDuplicateConnection: "Дублировать подключение",
     mcpToolRemoveConnection: "Удалить подключение",
     mcpToolOpenTable: "Открыть таблицу в DBX",

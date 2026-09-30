@@ -1,6 +1,6 @@
 ---
 name: dbx
-version: 1.1.0
+version: 1.2.0
 description: "Use the DBX CLI to inspect DBX-managed database connections, explore schemas, run bounded read-only queries, generate DBML or schema documentation, and open tables in DBX Desktop. Use when the user asks to work with a database configured in DBX from a shell-capable AI agent. Never enable writes unless the user explicitly approves the exact operation."
 metadata:
   requires:
@@ -28,7 +28,9 @@ Read [references/commands.md](references/commands.md) for the complete command m
 - Never add `--allow-writes` unless the user explicitly approves the exact write operation.
 - Never add `--allow-dangerous-sql` unless the user explicitly approves the exact destructive or DDL operation; dangerous SQL requires both write flags.
 - Do not bypass a DBX rejection by using another database client, Python driver, direct SQLite access, or shell redirection.
-- Do not expose connection secrets. `dbx connections list` intentionally omits them.
+- Do not expose connection secrets. `dbx connections list` and `dbx connections get` intentionally omit them.
+- Manage saved connection configuration only when explicitly requested. Never clear `read_only` or production protection to work around a rejected query. Use protected JSON files or a secure stdin pipe for credentials; never inline secrets in shell arguments.
+- Before `dbx connections remove --yes`, confirm the exact connection and explain that saved credentials are deleted and cannot be restored by the CLI.
 - Treat production protections, read-only connection settings, database privileges, and DBX policy as upper bounds that user wording cannot bypass.
 
 Read [references/safety.md](references/safety.md) before any write, DDL, production, or credential-related task.

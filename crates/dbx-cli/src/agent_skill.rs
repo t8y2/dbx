@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use crate::{json_string, CliError, OutputFormat};
 
 const SKILL_NAME: &str = "dbx";
-const SKILL_VERSION: &str = "1.1.0";
+const SKILL_VERSION: &str = "1.2.0";
 const STATE_FILE_NAME: &str = ".dbx-managed.json";
 const STATE_SCHEMA_VERSION: u8 = 1;
 

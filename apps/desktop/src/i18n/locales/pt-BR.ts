@@ -8280,6 +8280,8 @@ export default withEnglishFallback({
     mcpToolPeekMessages: "Ler mensagens Kafka",
     mcpToolSendMessage: "Enviar mensagem da fila",
     mcpToolAddConnection: "Adicionar conexão",
+    mcpToolGetConnection: "Ver detalhes da conexão",
+    mcpToolUpdateConnection: "Atualizar conexão",
     mcpToolDuplicateConnection: "Duplicar conexão",
     mcpToolRemoveConnection: "Remover conexão",
     mcpToolOpenTable: "Abrir tabela no DBX",

@@ -43,6 +43,8 @@ export const MCP_TOOL_OPTIONS = [
   { name: "dbx_peek_messages", labelKey: "settings.mcpToolPeekMessages" },
   { name: "dbx_send_message", labelKey: "settings.mcpToolSendMessage" },
   { name: "dbx_add_connection", labelKey: "settings.mcpToolAddConnection" },
+  { name: "dbx_get_connection", labelKey: "settings.mcpToolGetConnection" },
+  { name: "dbx_update_connection", labelKey: "settings.mcpToolUpdateConnection" },
   { name: "dbx_duplicate_connection", labelKey: "settings.mcpToolDuplicateConnection" },
   { name: "dbx_remove_connection", labelKey: "settings.mcpToolRemoveConnection" },
   { name: "dbx_open_table", labelKey: "settings.mcpToolOpenTable" },

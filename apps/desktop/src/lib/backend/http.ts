@@ -248,6 +248,7 @@ import type { DataCompareFromTablesOptions, DataCompareFromTablesPreparation, Da
 import { apiUrl, apiWebSocketUrl } from "@/lib/common/webPath";
 import type {
   ActivePluginSession,
+  ConnectionLivenessMessage,
   PluginBinaryEvent,
   PluginConnectionActionResult,
   PluginEvent,
@@ -555,6 +556,17 @@ export async function checkConnectionHealth(connectionId: string): Promise<void>
   return post("/api/connection/check-health", { connectionId });
 }
 
+/**
+ * Read-only counterpart of `checkConnectionHealth`: reports whether the connection still has a
+ * pool, without probing or mutating anything (#4339).
+ *
+ * Liveness events must be confirmed through this, never through `checkConnectionHealth`: the
+ * latter removes unhealthy pools and is the path `ensureConnected` uses to trigger a reconnect.
+ */
+export async function connectionIsOpen(connectionId: string): Promise<boolean> {
+  return post("/api/connection/is-open", { connectionId });
+}
+
 export async function prewarmConnection(connectionId: string, database?: string, catalog?: string, clientSessionId?: string): Promise<void> {
   return post("/api/connection/prewarm", { connectionId, database, catalog, clientSessionId });
 }
@@ -780,6 +792,20 @@ export async function subscribePluginEvents(onEvent: (event: PluginEvent) => voi
     const payload = JSON.parse(message.data) as ({ kind: "event" } & PluginEvent) | ({ kind: "binary" } & PluginBinaryEvent) | { kind: "lagged" };
     if (payload.kind === "event") onEvent(payload);
     if (payload.kind === "binary") onBinary?.(payload);
+  };
+  return () => source.close();
+}
+
+/**
+ * Subscribe to backend connection-liveness messages (#4339).
+ *
+ * The SSE payload is one `ConnectionLivenessMessage`: the plugin stream's `{ kind }` wrapper
+ * multiplexes two streams, whereas here `kind` is the message's own discriminator.
+ */
+export async function subscribeConnectionLiveness(onEvent: (event: ConnectionLivenessMessage) => void): Promise<() => void> {
+  const source = new EventSource(apiUrl("/api/connection/liveness-events"));
+  source.onmessage = (message) => {
+    onEvent(JSON.parse(message.data) as ConnectionLivenessMessage);
   };
   return () => source.close();
 }

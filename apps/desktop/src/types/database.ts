@@ -190,6 +190,26 @@ export interface ConnectionTestResult {
   databaseInfo?: DatabaseConnectionInfo;
 }
 
+/**
+ * Why the backend declared a connection's pools dead while the app was idle (#4339).
+ * A stable enum by design: raw driver/network error text must not reach a background
+ * UI notification.
+ */
+export type ConnectionLivenessFailureKind = "probe_failed" | "timed_out";
+
+/**
+ * A message on the backend connection-liveness channel (#4339).
+ *
+ * Mirrors the Rust `ConnectionLivenessMessage`, and both transports deliver this exact shape:
+ * the desktop shell forwards it unwrapped and the web SSE stream sends the object itself, so
+ * there is no envelope beyond the message's own `kind` discriminator.
+ *
+ * `resync` means the transport skipped messages, so the frontend must re-check every
+ * connection it still shows as connected — without it, a dropped `lost` would leave a
+ * sidebar green indefinitely.
+ */
+export type ConnectionLivenessMessage = { kind: "lost"; connectionId: string; failureKind: ConnectionLivenessFailureKind } | { kind: "resync" };
+
 export type TransportLayerConfig = ({ type: "ssh" } & SshTunnelConfig) | ({ type: "proxy" } & ProxyTunnelConfig) | ({ type: "http_tunnel" } & HttpTunnelConfig);
 
 /**

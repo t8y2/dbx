@@ -12,6 +12,7 @@ import type {
   CompletionAssistantObjectKind,
   CompletionAssistantRequest,
   ConnectionConfig,
+  ConnectionLivenessMessage,
   DatabaseType,
   DatabaseConnectionInfo,
   DatabaseStorageInfo,
@@ -4674,6 +4675,60 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     clearConnectionHealthCheck(connectionId);
     clearConnectionPrewarmState(connectionId);
+  }
+
+  /**
+   * Re-check one connection against the backend and grey it out when it has no pool left.
+   *
+   * The confirmation is the read-only `api.connectionIsOpen`, never `checkConnectionHealth`:
+   * the latter removes unhealthy pools and is the path `ensureConnected` uses to reconnect, so
+   * confirming with it would turn a background probe into a reconnect and an error banner.
+   *
+   * A failed confirm says nothing about the connection, so it leaves the sidebar untouched.
+   */
+  async function confirmConnectionLiveness(connectionId: string): Promise<void> {
+    if (!connectionId || !connectedIds.value.has(connectionId)) return;
+    const stateRevision = connectionStateRevision(connectionId);
+    let open: boolean;
+    try {
+      open = await api.connectionIsOpen(connectionId);
+    } catch (error) {
+      console.warn("[DBX] connection liveness confirm failed:", error);
+      return;
+    }
+    if (open) return;
+    // A late confirm must not undo an explicit disconnect or a newer reconnect.
+    if (!isCurrentConnectionStateRevision(connectionId, stateRevision)) return;
+    if (!connectedIds.value.has(connectionId)) return;
+    markConnectionOffline(connectionId);
+  }
+
+  /**
+   * Apply a message from the backend connection-liveness channel (#4339).
+   *
+   * `lost` is published only once the connection has no pools left, but it is asynchronous, so
+   * it is confirmed before the sidebar changes: a message generated before a reconnect but
+   * delivered after it confirms as "open" and is dropped.
+   *
+   * `resync` is sent when the transport skipped messages. Those are gone for good, so every
+   * connection this frontend still shows as connected is re-checked. Without it a dropped loss
+   * would leave its sidebar green until the user happened to touch that connection — the very
+   * bug this channel exists to fix.
+   */
+  async function handleConnectionLivenessMessage(message: ConnectionLivenessMessage): Promise<void> {
+    if (!message) return;
+    if (message.kind === "resync") {
+      // Sequential on purpose: resync only happens after a transport lag, and one probe in
+      // flight at a time keeps a large connected set from stampeding the backend.
+      // Snapshot the ids: the confirm below removes entries from this set as it flips them.
+      for (const connectionId of Array.from(connectedIds.value)) {
+        await confirmConnectionLiveness(connectionId);
+      }
+      return;
+    }
+    // Defensive against a newer backend sending a kind this build does not know.
+    if (message.kind !== "lost") return;
+    await confirmConnectionLiveness(message.connectionId);
   }
 
   /**
@@ -10177,6 +10232,7 @@ export const useConnectionStore = defineStore("connection", () => {
     disconnect,
     hasDisconnectInFlight,
     markConnectionOffline,
+    handleConnectionLivenessMessage,
     metadataGenerationFor,
     disconnectAndForgetConnectionPassword,
     hasSessionCredential,

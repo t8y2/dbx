@@ -531,6 +531,8 @@ async fn serve() {
         .route("/connection/final-proxy-port", post(routes::connection::connection_final_proxy_port))
         .route("/connection/disconnect", post(routes::connection::disconnect_db))
         .route("/connection/check-health", post(routes::connection::check_connection_health))
+        .route("/connection/is-open", post(routes::connection::connection_is_open))
+        .route("/connection/liveness-events", get(routes::connection::connection_liveness_events))
         .route("/connection/prewarm", post(routes::connection::prewarm_connection))
         .route("/connection/session-credential-status", post(routes::connection::session_credential_status))
         .route("/connection/forget-session-credential", post(routes::connection::forget_session_credential))

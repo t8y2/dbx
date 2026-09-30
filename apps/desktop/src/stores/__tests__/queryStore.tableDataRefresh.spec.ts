@@ -77,6 +77,53 @@ describe("queryStore table data refresh", () => {
     ]);
   });
 
+  it("loads a duplicated data tab with its filter, database sort and page without sharing results", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const id = store.createTab("pg-1", "app", "users", "data", "public");
+    store.setTableMeta(id, {
+      database: "app",
+      schema: "public",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [{ name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      primaryKeys: ["id"],
+    });
+    const original = store.tabs.find((tab) => tab.id === id)!;
+    original.whereInput = "status = 'ACTIVE'";
+    original.orderByInput = "id DESC";
+    original.resultSortColumn = "id";
+    original.resultSortDirection = "desc";
+    original.resultSortMode = "database";
+    original.resultPageLimit = 25;
+    original.resultPageOffset = 50;
+    original.result = { columns: ["id"], rows: [[99]], affected_rows: 0, execution_time_ms: 1 };
+    mocks.executeMulti.mockResolvedValue([{ columns: ["id"], rows: [[42]], affected_rows: 0, execution_time_ms: 1 }]);
+
+    store.duplicateTab(id);
+    const copy = store.tabs[1];
+    await vi.waitFor(() => expect(copy.result?.rows).toEqual([[42]]));
+
+    expect(copy.id).not.toBe(id);
+    expect(copy.mode).toBe("data");
+    expect(copy.connectionId).toBe("pg-1");
+    expect(copy.database).toBe("app");
+    expect(copy.schema).toBe("public");
+    expect(store.activeTabId).toBe(copy.id);
+    expect(store.groups[0].tabIds).toEqual([id, copy.id]);
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(
+      expect.objectContaining({
+        whereInput: "status = 'ACTIVE'",
+        orderBy: "id DESC",
+        limit: 25,
+        offset: 50,
+      }),
+    );
+    expect(mocks.executeMulti).toHaveBeenCalledTimes(1);
+    expect(original.result?.rows).toEqual([[99]]);
+    expect(copy.result).not.toBe(original.result);
+  });
+
   it("refreshes only matching data tabs after a table mutation", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();

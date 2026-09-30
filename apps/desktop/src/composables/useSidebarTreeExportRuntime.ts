@@ -16,6 +16,7 @@ import { joinExportedDdls } from "@/lib/export/ddlExport";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { sidebarStructureExportTargets, sidebarTableDataExportTargets } from "@/lib/sidebar/sidebarExportRuntime";
 import { fetchTableDataForExport } from "@/lib/table/tableDataExport";
+import { dropsSchemaQualifier } from "@/lib/table/tableSelectSql";
 import XlsxHeaderDialog from "@/components/export/XlsxHeaderDialog.vue";
 import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, type XlsxExportOptions, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
 import {
@@ -504,7 +505,12 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
         tableName: target.tableName,
         filePath: outputPath,
         format,
-        ...(format === "sql" ? { insertDialect } : {}),
+        ...(format === "sql"
+          ? {
+              insertDialect,
+              omitDatabaseQualifier: dropsSchemaQualifier(target.databaseType, settingsStore.editorSettings.generateSqlIncludeDatabaseName, target.catalog),
+            }
+          : {}),
         csvQuoteMode: target.csvQuoteMode,
         nullLiteral: target.nullLiteral,
         columns: queryColumns,

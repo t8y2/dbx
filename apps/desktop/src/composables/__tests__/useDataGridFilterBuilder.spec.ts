@@ -1,7 +1,52 @@
 import { describe, expect, it, vi } from "vitest";
+import { ref } from "vue";
 import { buildDataGridStructuredWhere, createDataGridFilterConditionCache, moveDataGridStructuredFilterRule, useDataGridFilterBuilder, type DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
 
 describe("useDataGridFilterBuilder", () => {
+  it("finds columns by comments and keeps the column name when building a condition", async () => {
+    const buildCondition = vi.fn(async (rule: DataGridStructuredFilterRule) => `${rule.columnName} = 'Alice'`);
+    const builder = useDataGridFilterBuilder({
+      columns: ["id", "customer_name", "email"],
+      commentByColumn: new Map([["customer_name", "客户名称 / Customer Name"]]),
+      createId: () => "rule-1",
+      isComplete: () => true,
+      buildCondition,
+    });
+
+    for (const query of ["客户", " CUSTOMER ", "name"]) {
+      builder.columnSearch.value = query;
+      expect(builder.filteredColumns.value).toEqual(["customer_name"]);
+    }
+    builder.ensureRule();
+    builder.updateRule("rule-1", { columnName: builder.filteredColumns.value[0], rawValue: "Alice" });
+    expect(await builder.buildWhere()).toBe("customer_name = 'Alice'");
+    expect(buildCondition).toHaveBeenCalledWith(expect.objectContaining({ columnName: "customer_name" }));
+
+    builder.columnSearch.value = "missing";
+    expect(builder.filteredColumns.value).toEqual([]);
+    builder.columnSearch.value = "  ";
+    expect(builder.filteredColumns.value).toEqual(["id", "customer_name", "email"]);
+  });
+
+  it("reacts to refreshed comments and columns without including comments from absent columns", () => {
+    const columns = ref(["id", "customer_name"]);
+    const comments = ref(
+      new Map([
+        ["customer_name", "客户名称"],
+        ["removed", "客户历史"],
+      ]),
+    );
+    const builder = useDataGridFilterBuilder({ columns, commentByColumn: () => comments.value, isComplete: () => true, buildCondition: async () => "" });
+    builder.columnSearch.value = "客户";
+    expect(builder.filteredColumns.value).toEqual(["customer_name"]);
+    comments.value = new Map([["customer_name", "姓名"]]);
+    expect(builder.filteredColumns.value).toEqual([]);
+    builder.columnSearch.value = "姓名";
+    expect(builder.filteredColumns.value).toEqual(["customer_name"]);
+    columns.value = ["id"];
+    expect(builder.filteredColumns.value).toEqual([]);
+  });
+
   it("searches columns by camel-case initials and any-position text", () => {
     const builder = useDataGridFilterBuilder({ columns: ["userProfile", "order_id", "created_at"], createId: () => "rule-1", isComplete: () => true, buildCondition: async () => "" });
 

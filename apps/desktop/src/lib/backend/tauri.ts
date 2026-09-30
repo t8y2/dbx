@@ -122,6 +122,7 @@ import type { QueryEditability } from "@/lib/sql/sqlAnalysis";
 import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
 import type {
   ActivePluginSession,
+  ConnectionLivenessMessage,
   PluginBinaryEvent,
   PluginConnectionActionResult,
   PluginEvent,
@@ -1563,6 +1564,17 @@ export async function checkConnectionHealth(connectionId: string): Promise<void>
   return invokeBackend("check_connection_health", { connectionId });
 }
 
+/**
+ * Read-only counterpart of `checkConnectionHealth`: reports whether the connection still has a
+ * pool, without probing or mutating anything (#4339).
+ *
+ * Liveness events must be confirmed through this, never through `checkConnectionHealth`: the
+ * latter removes unhealthy pools and is the path `ensureConnected` uses to trigger a reconnect.
+ */
+export async function connectionIsOpen(connectionId: string): Promise<boolean> {
+  return invokeBackend("connection_is_open", { connectionId });
+}
+
 export async function prewarmConnection(connectionId: string, database?: string, catalog?: string, clientSessionId?: string): Promise<void> {
   return invokeBackend("prewarm_connection", { connectionId, database, catalog, clientSessionId });
 }
@@ -2853,6 +2865,16 @@ export async function subscribePluginEvents(onEvent: (event: PluginEvent) => voi
   };
 }
 
+/**
+ * Subscribe to backend connection-liveness messages (#4339).
+ *
+ * The listener receives the message unwrapped; the web transport's SSE handler parses the same
+ * shape, so the store can stay transport-agnostic.
+ */
+export async function subscribeConnectionLiveness(onEvent: (event: ConnectionLivenessMessage) => void): Promise<UnlistenFn> {
+  return listen<ConnectionLivenessMessage>("dbx-connection-liveness", (event) => onEvent(event.payload));
+}
+
 export async function listJdbcDrivers(): Promise<JdbcDriverInfo[]> {
   return invoke("list_jdbc_drivers");
 }
@@ -3410,6 +3432,10 @@ export async function redisScanValues(connectionId: string, db: number, cursor: 
 
 export async function redisGetValue(connectionId: string, db: number, keyRaw: string): Promise<RedisValue> {
   return invoke("redis_get_value", { connectionId, db, keyRaw });
+}
+
+export async function redisGetRawValue(connectionId: string, db: number, keyRaw: string): Promise<RedisBlob> {
+  return invoke("redis_get_raw_value", { connectionId, db, keyRaw });
 }
 
 export async function redisGetTtl(connectionId: string, db: number, keyRaw: string): Promise<number> {
@@ -5937,6 +5963,11 @@ export interface TableExportRequest {
   numericColumnRightAlign?: boolean;
   autoFilter?: boolean;
   splitMaxMb?: number;
+  /**
+   * SQL 导出时省略 INSERT 目标的库/模式限定（前端按「生成 SQL 时包含数据库名」设置 +
+   * `dropsSchemaQualifier` 引擎规则解析；仅影响 INSERT 目标，读取 SQL 不变）。
+   */
+  omitDatabaseQualifier?: boolean;
 }
 
 export interface TableCsvExportOptions {

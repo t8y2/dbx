@@ -405,6 +405,7 @@ function releaseResultObjectPayload(result: QueryResult): void {
   result.messages = undefined;
   result.error = undefined;
   result.sourceLabel = undefined;
+  result.sourceLabelKind = undefined;
   result.sourceQualifier = undefined;
   result.sourceName = undefined;
   result.sourceStatement = undefined;
@@ -464,9 +465,9 @@ function annotateQueryResultSources(results: QueryResult[], sql: string, databas
     const customName = queryResultNameFromPreamble(preamble, { databaseType });
     if (customName) {
       result.sourceLabel = customName;
-      // 自定义名称（-- name: xxx）优先：清除结构化来源，避免“结果集名称包含数据库名”设置把它替换成表名
-      result.sourceQualifier = undefined;
-      result.sourceName = undefined;
+      result.sourceLabelKind = "comment";
+      // 保留结构化来源，方便“来源表名”模式在注释存在时仍显示表名。
+      // “注释”模式通过 sourceLabelKind 选择这个自定义名称。
     }
     const successfulUseDatabase = result.execution_error !== true ? useDatabaseFromStatement(statement.sql, databaseType) : undefined;
     if (successfulUseDatabase) {
@@ -688,7 +689,10 @@ function annotateQueryResultSource(result: QueryResult, sourceStatement: string,
     result.sourceQualifier = parts.qualifier;
     result.sourceName = parts.name;
     const label = parts.qualifier ? `${parts.qualifier}.${parts.name}` : parts.name;
-    if (label) result.sourceLabel = label;
+    if (label) {
+      result.sourceLabel = label;
+      result.sourceLabelKind = "source";
+    }
   }
   return result;
 }
@@ -2184,6 +2188,7 @@ export const useQueryStore = defineStore("query", () => {
       createdAt,
       sourceLabel: primaryResult?.sourceLabel,
       sourceName: primaryResult?.sourceName,
+      sourceLabelKind: primaryResult?.sourceLabelKind,
       result: tab.result,
       results: tab.results,
       activeResultIndex: tab.activeResultIndex,
@@ -2621,6 +2626,7 @@ export const useQueryStore = defineStore("query", () => {
         customTitle: run.customTitle,
         sourceLabel: run.sourceLabel,
         sourceName: run.sourceName,
+        sourceLabelKind: run.sourceLabelKind,
         activeResultIndex: run.activeResultIndex,
         resultCacheKey: run.resultCacheKey,
         resultEvicted: run.resultEvicted,
@@ -4645,18 +4651,18 @@ export const useQueryStore = defineStore("query", () => {
       lastExecutedSql: undefined,
       resultBaseSql: original.resultBaseSql,
       resultSortedSql: undefined,
-      resultSortColumn: undefined,
-      resultSortColumnIndex: undefined,
-      resultSortDirection: undefined,
-      resultSortMode: undefined,
+      resultSortColumn: original.mode === "data" && original.resultSortMode === "database" ? original.resultSortColumn : undefined,
+      resultSortColumnIndex: original.mode === "data" && original.resultSortMode === "database" ? original.resultSortColumnIndex : undefined,
+      resultSortDirection: original.mode === "data" && original.resultSortMode === "database" ? original.resultSortDirection : undefined,
+      resultSortMode: original.mode === "data" && original.resultSortMode === "database" ? original.resultSortMode : undefined,
       resultLocalSortOriginalRows: undefined,
       resultLocalSortOriginalLargeValueCells: undefined,
       resultLocalSortOriginalMongoDocuments: undefined,
       resultLocalSortOriginalMongoCopyDocuments: undefined,
-      orderByInput: undefined,
+      orderByInput: original.mode === "data" ? original.orderByInput : undefined,
       resultPageSql: undefined,
-      resultPageLimit: undefined,
-      resultPageOffset: undefined,
+      resultPageLimit: original.mode === "data" ? original.resultPageLimit : undefined,
+      resultPageOffset: original.mode === "data" ? original.resultPageOffset : undefined,
       resultExecutedPageLimit: undefined,
       resultExecutedPageOffset: undefined,
       resultCountSql: undefined,
@@ -4696,6 +4702,8 @@ export const useQueryStore = defineStore("query", () => {
       objectSource: original.objectSource ? { ...original.objectSource } : undefined,
       sourceView: original.sourceView,
       tableMeta: original.tableMeta ? { ...original.tableMeta, columns: [...original.tableMeta.columns], primaryKeys: [...original.tableMeta.primaryKeys] } : undefined,
+      tableMetaGeneration: original.mode === "data" ? original.tableMetaGeneration : undefined,
+      tableMetaUpdatedAt: original.mode === "data" ? original.tableMetaUpdatedAt : undefined,
       queryAnalysis: original.queryAnalysis ? { ...original.queryAnalysis, sources: original.queryAnalysis.sources?.map((source) => ({ ...source })), columns: original.queryAnalysis.columns.map((c) => ({ ...c })) } : undefined,
       querySourceColumns: original.querySourceColumns ? [...original.querySourceColumns] : undefined,
       queryWriteTargets: original.queryWriteTargets?.map((target) => ({ ...target, sourceColumns: [...target.sourceColumns] })),
@@ -4717,6 +4725,7 @@ export const useQueryStore = defineStore("query", () => {
       focusedGroupId.value = owner.id;
     }
     activeTabId.value = newId;
+    if (newTab.mode === "data") void refreshDataTab(newId);
   }
 
   function closeTabsWhere(predicate: (tab: QueryTab) => boolean) {
@@ -5933,8 +5942,12 @@ export const useQueryStore = defineStore("query", () => {
       });
       if (nextLabel) {
         tab.result.sourceLabel = nextLabel;
+        tab.result.sourceLabelKind = "source";
         const matching = tab.results?.find((result) => result === tab.result);
-        if (matching) matching.sourceLabel = nextLabel;
+        if (matching) {
+          matching.sourceLabel = nextLabel;
+          matching.sourceLabelKind = "source";
+        }
       }
     }
   }
@@ -7116,6 +7129,7 @@ export const useQueryStore = defineStore("query", () => {
               annotated.sourceQualifier = currentDatabase || undefined;
               annotated.sourceName = mongoCommand.collection;
               annotated.sourceLabel = currentDatabase ? `${currentDatabase}.${mongoCommand.collection}` : mongoCommand.collection;
+              annotated.sourceLabelKind = "source";
             }
             return commandTiming.finish(annotated);
           };

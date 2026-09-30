@@ -727,6 +727,8 @@ export type DataGridFilterEditorView = "quick" | "conditions" | "text";
 export type DataGridToolbarLayout = "single" | "split";
 const RESULT_RUN_DISPLAY_MODES = ["tabs", "list"] as const;
 export type ResultRunDisplayMode = (typeof RESULT_RUN_DISPLAY_MODES)[number];
+export const RESULT_TAB_NAMING_MODES = ["source", "ordinal", "comment"] as const;
+export type ResultTabNamingMode = (typeof RESULT_TAB_NAMING_MODES)[number];
 const MULTI_STATEMENT_DEFAULT_VIEWS = ["result", "summary"] as const;
 export type MultiStatementDefaultView = (typeof MULTI_STATEMENT_DEFAULT_VIEWS)[number];
 export const TABLE_FONT_SIZE_MIN = 8;
@@ -930,6 +932,10 @@ export interface EditorSettings {
    * switching the connection to the TNS form.
    */
   oracleOciTnsAdmin: string;
+  /** Naming strategy for query result execution and result-set tabs. */
+  resultTabNamingMode: ResultTabNamingMode;
+  /** Prefer SQL preamble comments in source naming mode, preserving the original naming behavior. */
+  resultTabPreferComments: boolean;
   dataGridShowTransposeFieldMetadata: boolean;
   colorizeDataGridCellTypes: boolean;
   dataGridTypeColorSchemes: DataGridTypeColorScheme[];
@@ -1223,6 +1229,8 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   oracleOciClientPath: "",
   oracleOciNlsLang: "",
   oracleOciTnsAdmin: "",
+  resultTabNamingMode: "source",
+  resultTabPreferComments: true,
   dataGridShowTransposeFieldMetadata: false,
   colorizeDataGridCellTypes: false,
   dataGridTypeColorSchemes: [],
@@ -1438,6 +1446,10 @@ function normalizeDataGridToolbarLayout(value: unknown): DataGridToolbarLayout {
 
 function normalizeResultRunDisplayMode(value: unknown): ResultRunDisplayMode {
   return RESULT_RUN_DISPLAY_MODES.includes(value as ResultRunDisplayMode) ? (value as ResultRunDisplayMode) : DEFAULT_EDITOR_SETTINGS.resultRunDisplayMode;
+}
+
+function normalizeResultTabNamingMode(value: unknown): ResultTabNamingMode {
+  return RESULT_TAB_NAMING_MODES.includes(value as ResultTabNamingMode) ? (value as ResultTabNamingMode) : DEFAULT_EDITOR_SETTINGS.resultTabNamingMode;
 }
 
 function normalizeMultiStatementDefaultView(value: unknown): MultiStatementDefaultView {
@@ -1800,6 +1812,8 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     oracleOciNlsLang: typeof settings.oracleOciNlsLang === "string" ? settings.oracleOciNlsLang.trim() : "",
     oracleOciTnsAdmin: typeof settings.oracleOciTnsAdmin === "string" ? settings.oracleOciTnsAdmin.trim() : "",
     oracleOciClientPath: typeof settings.oracleOciClientPath === "string" ? settings.oracleOciClientPath.trim() : "",
+    resultTabNamingMode: normalizeResultTabNamingMode(settings.resultTabNamingMode),
+    resultTabPreferComments: settings.resultTabPreferComments !== false,
     dataGridShowTransposeFieldMetadata: settings.dataGridShowTransposeFieldMetadata === true,
     colorizeDataGridCellTypes: settings.colorizeDataGridCellTypes ?? DEFAULT_EDITOR_SETTINGS.colorizeDataGridCellTypes,
     dataGridTypeColorSchemes,
@@ -2644,6 +2658,8 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.oracleOciNlsLang !== undefined) editorSettings.value.oracleOciNlsLang = partial.oracleOciNlsLang.trim();
     if (partial.oracleOciTnsAdmin !== undefined) editorSettings.value.oracleOciTnsAdmin = partial.oracleOciTnsAdmin.trim();
     if (partial.oracleOciClientPath !== undefined) editorSettings.value.oracleOciClientPath = partial.oracleOciClientPath.trim();
+    if (partial.resultTabNamingMode !== undefined) editorSettings.value.resultTabNamingMode = normalizeResultTabNamingMode(partial.resultTabNamingMode);
+    if (partial.resultTabPreferComments !== undefined) editorSettings.value.resultTabPreferComments = partial.resultTabPreferComments !== false;
     if (partial.dataGridShowTransposeFieldMetadata !== undefined) editorSettings.value.dataGridShowTransposeFieldMetadata = partial.dataGridShowTransposeFieldMetadata === true;
     if (partial.colorizeDataGridCellTypes !== undefined) editorSettings.value.colorizeDataGridCellTypes = partial.colorizeDataGridCellTypes === true;
     if (partial.dataGridTypeColorSchemes !== undefined) {

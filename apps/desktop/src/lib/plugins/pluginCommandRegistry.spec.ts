@@ -108,7 +108,7 @@ describe("plugin command registry (PR-A4)", () => {
     expect(firstEntry.context.workbenchId).toBe(firstEntry.id);
     expect(firstEntry.context.workbenchId).not.toBe("plugin-forged");
     expect(firstEntry.context.restored).toBe(false);
-    expect(firstEntry.context.surface).toBe("panel");
+    expect(firstEntry.context.surface).toBe("dock");
     expect(activeEntryId.value).toBe(firstEntry.id);
     // §4.1 reuse key = pluginId + commandId + presentation + instance_key.
     expect(firstEntry.instanceKey).toBe("local-terminal");
@@ -270,6 +270,6 @@ describe("plugin command registry (PR-A4)", () => {
     // §11: reserved identity fields are host-authored — forged values never pass.
     expect(entry.context.workbenchId).toBe(entry.id);
     expect(entry.context.restored).toBe(false);
-    expect(entry.context.surface).toBe("panel");
+    expect(entry.context.surface).toBe("dock");
   });
 });

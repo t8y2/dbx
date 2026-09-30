@@ -20,6 +20,13 @@ import type { AiConfigItem } from "@/types/ai";
 import { DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION } from "@/lib/dataGrid/dataGridCopyExtractor";
 
 describe("normalizeEditorSettings", () => {
+  it("preserves comment-first naming for existing settings and permits opting out", () => {
+    expect(DEFAULT_EDITOR_SETTINGS.resultTabPreferComments).toBe(true);
+    expect(normalizeEditorSettings({}).resultTabPreferComments).toBe(true);
+    expect(normalizeEditorSettings({ resultTabPreferComments: false }).resultTabPreferComments).toBe(false);
+    expect(normalizeEditorSettings({ resultTabPreferComments: "false" } as any).resultTabPreferComments).toBe(true);
+  });
+
   it("defaults and sanitizes AI conversation typography independently", () => {
     expect(normalizeEditorSettings({})).toMatchObject({ aiFontFamily: "", aiFontSize: 12 });
     expect(

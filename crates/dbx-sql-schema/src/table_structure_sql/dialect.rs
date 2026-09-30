@@ -262,6 +262,11 @@ pub(super) fn capabilities_for(
             index_include: true,
             index_filter: true,
             index_comment: true,
+            // T-SQL: `ALTER TABLE ... DROP CONSTRAINT <name>` for the persisted primary key and
+            // `ADD [CONSTRAINT name] PRIMARY KEY (...)` are supported; constraint names are read
+            // from the index metadata (issue #10758).
+            add_primary_key: true,
+            alter_primary_key: true,
             ..base
         },
         Some(DatabaseType::Dameng) => TableStructureCapabilities {

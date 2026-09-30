@@ -147,6 +147,8 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "showColumnTypesInHeader",
     "showColumnHeaderTooltips",
     "showResultSourceDatabase",
+    "resultTabNamingMode",
+    "resultTabPreferComments",
     "dataGridShowTransposeFieldMetadata",
     "colorizeDataGridCellTypes",
     "dataGridTypeColorSchemes",
@@ -278,6 +280,7 @@ const PASS_THROUGH_BOOLEAN_KEYS = [
   "showColumnTypesInHeader",
   "showColumnHeaderTooltips",
   "showResultSourceDatabase",
+  "resultTabPreferComments",
   "colorizeDataGridCellTypes",
   "showIndexIndicatorsInHeader",
   "compactColumnHeaderActions",
@@ -302,6 +305,7 @@ const PASS_THROUGH_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (val
   // The editor font slider and the Ctrl+wheel zoom both clamp to this range.
   fontSize: (value) => typeof value === "number" && Number.isFinite(value) && value >= EDITOR_MIN_FONT_SIZE && value <= EDITOR_MAX_FONT_SIZE,
   appLayout: (value) => value === "separated" || value === "classic",
+  resultTabNamingMode: (value) => value === "source" || value === "ordinal" || value === "comment",
   activeCustomThemeId: (value) => typeof value === "string" && value.trim().length > 0,
   // normalizeToolbarItems keeps unknown/typed values for every known key, so
   // each one must already be the boolean the UI writes, and no extra key may

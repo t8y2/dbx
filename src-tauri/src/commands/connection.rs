@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
-use tauri::State;
+use tauri::{Emitter, State};
 
 pub use dbx_core::agent_connection::{
     agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver, oracle_alternate_connect_config,
@@ -16,8 +16,8 @@ use dbx_core::database_capabilities;
 use dbx_core::db;
 use dbx_core::db::agent_driver::{AgentDriverClient, AgentMethod};
 use dbx_core::models::connection::{
-    database_info_from_protocol_value, rewrite_jdbc_url_host, ConnectionConfig, ConnectionTestResult,
-    DatabaseConnectionInfo, DatabaseType,
+    database_info_from_protocol_value, rewrite_jdbc_url_host, ConnectionConfig, ConnectionLivenessMessage,
+    ConnectionTestResult, DatabaseConnectionInfo, DatabaseType,
 };
 pub use dbx_core::path_utils::expand_tilde;
 use dbx_core::runtime_config::{release_runtime_config_on_disconnect, should_retain_runtime_config};
@@ -2314,6 +2314,44 @@ pub async fn refresh_connections(state: State<'_, Arc<AppState>>) -> Result<(), 
 #[tauri::command]
 pub async fn check_connection_health(state: State<'_, Arc<AppState>>, connection_id: String) -> Result<(), String> {
     state.check_connection_health(&connection_id).await
+}
+
+/// Read-only counterpart of `check_connection_health`: reports whether the connection still
+/// has a pool, without probing, mutating, or triggering a reconnect.
+///
+/// The frontend uses it to confirm a keepalive liveness event before greying the sidebar
+/// (#4339). `check_connection_health` must never be used for that confirmation: it removes
+/// unhealthy pools and is the path `ensureConnected` uses to reconnect.
+#[tauri::command]
+pub async fn connection_is_open(state: State<'_, Arc<AppState>>, connection_id: String) -> Result<bool, String> {
+    Ok(state.is_connection_open(&connection_id).await)
+}
+
+/// Relay backend-confirmed liveness losses to the frontend (#4339).
+///
+/// Mirrors `install_plugin_event_bridge`: the core publishes to a broadcast channel and each
+/// shell owns its transport, so core never needs a UI handle.
+pub fn install_connection_liveness_bridge(app: &tauri::AppHandle, state: Arc<AppState>) {
+    let app_handle = app.clone();
+    let mut events = state.subscribe_connection_liveness();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(message) => {
+                    let _ = app_handle.emit("dbx-connection-liveness", message);
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    // The skipped messages are gone for good, so ask the frontend to re-check
+                    // every connection it still shows as connected. Dropping the transition
+                    // silently would leave a sidebar green indefinitely — exactly the state
+                    // this bridge exists to prevent.
+                    log::warn!("Desktop connection liveness bridge skipped {skipped} messages; requesting a resync");
+                    let _ = app_handle.emit("dbx-connection-liveness", ConnectionLivenessMessage::Resync);
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
 }
 
 /// Warm the driver and connection pool for a connection a tab is opening, so the

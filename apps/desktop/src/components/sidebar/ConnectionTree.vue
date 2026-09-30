@@ -1943,13 +1943,32 @@ function onNodeToggled(node: TreeNode, expanded: boolean) {
   syncSidebarTreeNodeExpansion(store.treeNodes, node, expanded);
 }
 
+let contextMenuRequest = 0;
 function openSidebarContextMenu(event: MouseEvent, node: TreeNode, openContextMenu: (event: MouseEvent, itemsOverride?: ContextMenuItem[]) => void) {
+  event.preventDefault();
+  event.stopPropagation();
+  const request = ++contextMenuRequest;
   const items = sidebarTreeRuntime.buildContextMenu(node);
-  sidebarContextMenuTarget.value = createSidebarActionTarget(node);
-  sidebarContextMenuItems.value = items;
-  // Pass the current row's resolved menu atomically. Waiting for the items prop
-  // to flush would let the singleton menu briefly reuse the previous row menu.
-  openContextMenu(event, items);
+  const resolved = sidebarTreeRuntime.resolveContextMenu(node, items);
+  const show = (menuItems: ContextMenuItem[]) => {
+    if (request !== contextMenuRequest) return;
+    sidebarContextMenuTarget.value = createSidebarActionTarget(node);
+    sidebarContextMenuItems.value = menuItems;
+    // Pass the current row's resolved menu atomically, including async plugin items.
+    openContextMenu(event, menuItems);
+  };
+  if (resolved instanceof Promise) {
+    const cancelPending = () => {
+      contextMenuRequest += 1;
+    };
+    document.addEventListener("pointerdown", cancelPending, { capture: true, once: true });
+    void resolved
+      .then(show)
+      .catch(() => show(items))
+      .finally(() => {
+        document.removeEventListener("pointerdown", cancelPending, true);
+      });
+  } else show(resolved);
 }
 
 function openSidebarDangerDialog(request: SidebarDangerDialogRequest) {

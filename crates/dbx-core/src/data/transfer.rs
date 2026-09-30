@@ -6529,21 +6529,30 @@ fn transfer_ddl_statements(sql: &str, db_type: &DatabaseType) -> Vec<String> {
 /// KEY (` / bare `FOREIGN KEY (`); a column line whose COMMENT or DEFAULT text
 /// merely mentions the words must survive (#7660).
 fn strip_inline_foreign_key_constraint_lines(statement: &str) -> String {
+    strip_inline_foreign_key_constraint_lines_collecting(statement).0
+}
+
+/// Same as [`strip_inline_foreign_key_constraint_lines`], but also returns every
+/// removed `CONSTRAINT ... FOREIGN KEY ...` clause (whitespace-trimmed, trailing
+/// comma dropped) so callers can re-create each constraint later — e.g. database
+/// export defers PostgreSQL foreign keys to the end of the script, where restore
+/// order no longer has to satisfy foreign key dependencies (issue #10575).
+pub(crate) fn strip_inline_foreign_key_constraint_lines_collecting(statement: &str) -> (String, Vec<String>) {
     if !statement.trim_start().to_ascii_uppercase().starts_with("CREATE TABLE ") {
-        return statement.to_string();
+        return (statement.to_string(), Vec::new());
     }
 
     let mut lines: Vec<String> = Vec::new();
-    let mut removed_foreign_key = false;
+    let mut removed_foreign_keys: Vec<String> = Vec::new();
     for line in statement.lines() {
         if INLINE_FOREIGN_KEY_CONSTRAINT_LINE_RE.is_match(line) {
-            removed_foreign_key = true;
+            removed_foreign_keys.push(line.trim().trim_end_matches(',').trim_end().to_string());
             continue;
         }
         lines.push(line.to_string());
     }
 
-    if removed_foreign_key {
+    if !removed_foreign_keys.is_empty() {
         if let Some(closing_index) = lines.iter().rposition(|line| line.trim_start().starts_with(')')) {
             if let Some(previous) = lines[..closing_index].iter_mut().rfind(|line| !line.trim().is_empty()) {
                 let trimmed_len = previous.trim_end_matches(char::is_whitespace).len();
@@ -6554,7 +6563,7 @@ fn strip_inline_foreign_key_constraint_lines(statement: &str) -> String {
         }
     }
 
-    lines.join("\n")
+    (lines.join("\n"), removed_foreign_keys)
 }
 
 fn is_postgres_post_table_index_statement(statement: &str) -> bool {

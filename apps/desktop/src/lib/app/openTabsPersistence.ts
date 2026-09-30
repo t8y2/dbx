@@ -1,4 +1,4 @@
-import type { QueryTab, TabOutputView } from "@/types/database";
+import type { QueryResultSourceLabelKind, QueryTab, TabOutputView } from "@/types/database";
 import { sanitizeTabUiState } from "@/lib/tabs/tabUiState";
 
 export const OPEN_TABS_STORAGE_KEY = "dbx-open-tabs";
@@ -19,6 +19,7 @@ export interface SavedQueryResultRun {
   /** 结果来源（库名.表名 / 表名），用于结果标签命名；与结果 payload 分离，回收 payload 后仍可显示 */
   sourceLabel?: string;
   sourceName?: string;
+  sourceLabelKind?: QueryResultSourceLabelKind;
 }
 
 export interface SavedOpenTab {
@@ -228,6 +229,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
             createdAt: run.createdAt,
             ...(run.sourceLabel ? { sourceLabel: run.sourceLabel } : {}),
             ...(run.sourceName ? { sourceName: run.sourceName } : {}),
+            ...(run.sourceLabelKind ? { sourceLabelKind: run.sourceLabelKind } : {}),
             ...(run.customTitle ? { customTitle: true } : {}),
             ...(run.pinned ? { pinned: true } : {}),
             activeResultIndex: run.activeResultIndex,

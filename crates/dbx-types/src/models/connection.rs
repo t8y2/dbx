@@ -12,6 +12,35 @@ pub enum IdentifierCase {
     Mixed,
 }
 
+/// Why the backend declared a connection's pools dead while nobody was using it.
+///
+/// A stable enum on purpose: the frontend only needs to tell the two cases apart, and raw
+/// driver/network error text must not leak into a background UI notification (#4339).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionLivenessFailureKind {
+    /// The keepalive probe ran and reported a dead connection.
+    ProbeFailed,
+    /// The keepalive probe exceeded its budget.
+    TimedOut,
+}
+
+/// A message on the connection-liveness channel (#4339).
+///
+/// One shape for both shells and both transports, discriminated by `kind`. The `Resync`
+/// variant exists because a broadcast subscriber can fall behind: without a way to say
+/// "you skipped messages", a dropped `Lost` would leave a sidebar claiming a dead
+/// connection is connected until the user happened to act on it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
+pub enum ConnectionLivenessMessage {
+    /// The connection has no pools left, so the sidebar must stop showing it as connected.
+    Lost { connection_id: String, failure_kind: ConnectionLivenessFailureKind },
+    /// The transport skipped messages and must re-check every connection it currently
+    /// shows as connected.
+    Resync,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DatabaseConnectionInfo {

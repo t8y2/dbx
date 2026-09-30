@@ -7011,7 +7011,7 @@ mod tests {
     use super::{
         agent_connect_timeout, connection_configs_pool_equivalent, connection_configs_session_credentials_compatible,
         connection_probe_endpoints, connection_remote_endpoint, connection_url_for_endpoint,
-        database_connection_config, database_connection_config_with_catalog, detach_and_report_keepalive_loss,
+        database_connection_config, database_connection_config_with_catalog,
         gaussdb_identifier_quote_from_query_result, gaussdb_m_jdbc_config_for_endpoint, gaussdb_uses_m_jdbc_driver,
         kafka_single_loopback_bootstrap_endpoint, keepalive_failure_proves_pool_dead, metadata_connection_config,
         metadata_pool_database, mysql_metadata_fallback_url, mysql_pool_setup_queries, oceanbase_mysql_setup_queries,
@@ -9406,6 +9406,243 @@ mod tests {
             .await;
         assert!(!state.is_connection_open("conn").await);
         assert!(state.is_connection_open("conn-2").await);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Minimal `ConnectionConfig` for driving `start_keepalive_task` directly.
+    ///
+    /// The keepalive path only reads `id`, the effective timeouts and
+    /// `keepalive_interval_secs`; the rest is filler so the struct can be built without a
+    /// live database. `connect_timeout_secs` is 1 so a failing probe resolves fast.
+    fn keepalive_test_config(id: &str, interval_secs: u64) -> ConnectionConfig {
+        ConnectionConfig {
+            docs_notes_path: None,
+            id: id.to_string(),
+            name: id.to_string(),
+            note: String::new(),
+            db_type: DatabaseType::Oracle,
+            driver_profile: None,
+            driver_label: None,
+            url_params: None,
+            agent_java_options: Vec::new(),
+            host: "127.0.0.1".to_string(),
+            port: 1521,
+            username: "dbx".to_string(),
+            password: "dbx".to_string(),
+            database: None,
+            default_schema: None,
+            visible_databases: None,
+            visible_database_patterns: None,
+            visible_schemas: None,
+            attached_databases: Vec::new(),
+            init_script: None,
+            color: None,
+            transport_layers: Vec::new(),
+            connect_timeout_secs: 1,
+            query_timeout_secs: 30,
+            idle_timeout_secs: 60,
+            keepalive_interval_secs: interval_secs,
+            ssl: false,
+            ca_cert_path: String::new(),
+            client_cert_path: String::new(),
+            client_key_path: String::new(),
+            sysdba: false,
+            oracle_connection_type: None,
+            connection_string: None,
+            redis_connection_mode: None,
+            redis_sentinel_master: String::new(),
+            redis_sentinel_nodes: String::new(),
+            redis_sentinel_username: String::new(),
+            redis_sentinel_password: String::new(),
+            redis_sentinel_tls: false,
+            redis_cluster_nodes: String::new(),
+            redis_key_separator: crate::models::connection::default_redis_key_separator(),
+            redis_scan_page_size: None,
+            redis_database_aliases: Default::default(),
+            redis_key_templates: Vec::new(),
+            redis_key_grouping: None,
+            etcd_endpoints: String::new(),
+            gbase_server: String::new(),
+            informix_server: String::new(),
+            external_config: None,
+            plugin_id: None,
+            plugin_connection_provider: None,
+            plugin_connection_type: None,
+            connection_secrets: Default::default(),
+            jdbc_driver_class: None,
+            jdbc_driver_paths: Vec::new(),
+            one_time: false,
+            save_password: true,
+            read_only: false,
+            is_production: false,
+            production_databases: vec![],
+            show_system_schemas: false,
+            sidebar_auto_load_all_tables: false,
+            database_info: None,
+        }
+    }
+
+    /// Fake agent whose `validate_connection` reports a real failure.
+    ///
+    /// It must NOT answer with an unsupported-method error: `ping_keepalive_target` treats that
+    /// as a healthy connection (`is_agent_validate_connection_unsupported`), which would make
+    /// this fixture silently green.
+    const KEEPALIVE_FAILING_AGENT: &str = r#"import json, sys
+print(json.dumps({'ready': True}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    if req['method'] == 'handshake':
+        result = {'protocolVersion': 2, 'agentProtocolVersion': 2, 'capabilities': ['multi_session']}
+        print(json.dumps({'jsonrpc': '2.0', 'id': req['id'], 'result': result}), flush=True)
+    elif 'validate_connection' in req['method']:
+        print(json.dumps({'jsonrpc': '2.0', 'id': req['id'], 'error': {'code': -32000, 'message': 'connection refused by keepalive fixture'}}), flush=True)
+    else:
+        print(json.dumps({'jsonrpc': '2.0', 'id': req['id'], 'result': {}}), flush=True)
+"#;
+
+    async fn spawn_keepalive_agent(
+        dir: &std::path::Path,
+        name: &str,
+    ) -> std::sync::Arc<crate::db::agent_driver::PooledAgentClient> {
+        let script_path = dir.join(name);
+        std::fs::write(&script_path, KEEPALIVE_FAILING_AGENT).unwrap();
+        let python = if cfg!(windows) { "python" } else { "python3" };
+        let runtime = crate::db::agent_driver::AgentRuntimeClient::spawn(
+            crate::db::agent_driver::AgentLaunchSpec::new(python)
+                .with_args([script_path.to_string_lossy().to_string()]),
+            "test",
+        )
+        .await
+        .unwrap();
+        runtime.increment_session_count();
+        std::sync::Arc::new(crate::db::agent_driver::PooledAgentClient::new(
+            crate::db::agent_driver::AgentDriverClient::shared_session(runtime, format!("{name}-session")),
+        ))
+    }
+
+    /// A failing probe on the connection's current pool must reach the UI (#4339). This drives
+    /// the real keepalive task rather than the publish helper, so it pins the wiring between
+    /// the probe's failure branch and the report.
+    #[tokio::test]
+    async fn keepalive_probe_failure_reports_a_lost_connection() {
+        let (state, dir) = test_app_state().await;
+        let config = keepalive_test_config("conn", 1);
+        state.configs.write().await.insert(config.id.clone(), config.clone());
+        let client = spawn_keepalive_agent(&dir, "failing-keepalive-agent.py").await;
+        state.connections.write().await.insert("conn".to_string(), PoolKind::Agent(std::sync::Arc::clone(&client)));
+        let pool = PoolKind::Agent(client);
+        let mut events = state.subscribe_connection_liveness();
+
+        state.start_keepalive_task(
+            "conn",
+            &pool,
+            &config,
+            #[cfg(feature = "mq-admin")]
+            None,
+        );
+
+        let message = tokio::time::timeout(Duration::from_secs(10), events.recv())
+            .await
+            .expect("a failing probe must report a liveness loss")
+            .expect("the channel must stay open");
+        assert_eq!(
+            message,
+            ConnectionLivenessMessage::Lost {
+                connection_id: "conn".to_string(),
+                failure_kind: ConnectionLivenessFailureKind::ProbeFailed,
+            }
+        );
+        state.stop_keepalive_task("conn").await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A pool that is busy with a running query is not evidence of a dead connection: the probe
+    /// is skipped entirely, so nothing may be reported (#4339).
+    #[tokio::test]
+    async fn keepalive_busy_pool_reports_nothing() {
+        let (state, dir) = test_app_state().await;
+        let config = keepalive_test_config("conn", 1);
+        state.configs.write().await.insert(config.id.clone(), config.clone());
+        let client = spawn_keepalive_agent(&dir, "busy-keepalive-agent.py").await;
+        state.connections.write().await.insert("conn".to_string(), PoolKind::Agent(std::sync::Arc::clone(&client)));
+        let pool = PoolKind::Agent(client);
+
+        // `is_pool_active` is true whenever a registered execution owns this pool key.
+        let registered = state.running_queries.register("keepalive-busy-exec".to_string());
+        state.running_queries.set_pool_key("keepalive-busy-exec", "conn");
+        assert!(state.running_queries.is_pool_active("conn"));
+
+        let mut events = state.subscribe_connection_liveness();
+        state.start_keepalive_task(
+            "conn",
+            &pool,
+            &config,
+            #[cfg(feature = "mq-admin")]
+            None,
+        );
+
+        // Long enough for more than one interval to elapse.
+        let outcome = tokio::time::timeout(Duration::from_millis(1500), events.recv()).await;
+        assert!(outcome.is_err(), "a busy pool must not report a liveness loss: {outcome:?}");
+
+        state.stop_keepalive_task("conn").await;
+        drop(registered);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A probe whose pool was already replaced reports nothing: its result says nothing about
+    /// the connection that is live now (#4339).
+    #[tokio::test]
+    async fn keepalive_stale_target_reports_nothing() {
+        let (state, dir) = test_app_state().await;
+        let config = keepalive_test_config("conn", 1);
+        state.configs.write().await.insert(config.id.clone(), config.clone());
+        // The registry holds `current`, but the keepalive task is started for a different client,
+        // so the detach cannot match the live pool and must stay silent.
+        let current = spawn_keepalive_agent(&dir, "stale-current-agent.py").await;
+        let stale = spawn_keepalive_agent(&dir, "stale-replaced-agent.py").await;
+        state.connections.write().await.insert("conn".to_string(), PoolKind::Agent(current));
+
+        let mut events = state.subscribe_connection_liveness();
+        state.start_keepalive_task(
+            "conn",
+            &PoolKind::Agent(stale),
+            &config,
+            #[cfg(feature = "mq-admin")]
+            None,
+        );
+
+        let outcome = tokio::time::timeout(Duration::from_millis(1500), events.recv()).await;
+        assert!(outcome.is_err(), "a stale probe must not report a liveness loss: {outcome:?}");
+
+        state.stop_keepalive_task("conn").await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Stopping the keepalive task (explicit disconnect / reconnect) must not report a loss for
+    /// a pool that was never detached (#4339).
+    #[tokio::test]
+    async fn keepalive_stop_reports_nothing() {
+        let (state, dir) = test_app_state().await;
+        let config = keepalive_test_config("conn", 1);
+        state.configs.write().await.insert(config.id.clone(), config.clone());
+        let client = spawn_keepalive_agent(&dir, "stopped-keepalive-agent.py").await;
+        state.connections.write().await.insert("conn".to_string(), PoolKind::Agent(std::sync::Arc::clone(&client)));
+        let pool = PoolKind::Agent(client);
+
+        let mut events = state.subscribe_connection_liveness();
+        state.start_keepalive_task(
+            "conn",
+            &pool,
+            &config,
+            #[cfg(feature = "mq-admin")]
+            None,
+        );
+        state.stop_keepalive_task("conn").await;
+
+        let outcome = tokio::time::timeout(Duration::from_millis(1500), events.recv()).await;
+        assert!(outcome.is_err(), "a stopped keepalive must not report a liveness loss: {outcome:?}");
 
         let _ = std::fs::remove_dir_all(dir);
     }

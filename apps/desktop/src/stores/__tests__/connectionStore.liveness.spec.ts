@@ -35,6 +35,7 @@ describe("connectionStore keepalive liveness", () => {
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
     vi.doMock("@/lib/backend/api", () => ({
       connectionIsOpen,
+      disconnectDb: vi.fn().mockResolvedValue(undefined),
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
       listInstalledAgents: vi.fn().mockResolvedValue([]),
       loadSchemaCache: vi.fn().mockResolvedValue(null),
@@ -118,5 +119,45 @@ describe("connectionStore keepalive liveness", () => {
     await store.handleConnectionLivenessMessage({ kind: "resync" });
 
     expect(connectionIsOpen).not.toHaveBeenCalled();
+  });
+
+  it("drops a stale confirm that lands after a newer connection attempt", async () => {
+    // The revision guard: a `lost` message captured before a newer connect/disconnect attempt
+    // must not grey out the connection that attempt produced. Only `disconnect` (and the
+    // connect path it mirrors) advances the generation, so the test drives it for real.
+    let resolveConfirm: (open: boolean) => void = () => {};
+    connectionIsOpen.mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveConfirm = resolve;
+        }),
+    );
+    vi.doMock("@/stores/settingsStore", () => ({
+      useSettingsStore: () => ({ editorSettings: { disconnectTabHandlingMode: "keep-tabs" } }),
+    }));
+    vi.doMock("@/stores/queryStore", () => ({
+      useQueryStore: () => ({
+        closeConnectionTabs: vi.fn(),
+        releaseConnectionTabs: vi.fn(),
+        flushPendingPersist: vi.fn().mockResolvedValue(undefined),
+      }),
+    }));
+
+    const store = await loadStore();
+    store.connectedIds.add("c1");
+
+    const pending = store.handleConnectionLivenessMessage({
+      kind: "lost",
+      connectionId: "c1",
+      failureKind: "probe_failed",
+    });
+    // The user drops and re-establishes the connection while the probe is still in flight.
+    await store.disconnect("c1");
+    store.connectedIds.add("c1");
+
+    resolveConfirm(false);
+    await pending;
+
+    expect(store.connectedIds.has("c1")).toBe(true);
   });
 });

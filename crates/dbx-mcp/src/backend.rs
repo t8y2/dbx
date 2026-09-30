@@ -35,6 +35,7 @@ pub struct ConnectionSummary {
     pub port: u16,
     pub database: String,
     pub group_path: Vec<String>,
+    pub read_only: bool,
 }
 
 impl From<&ConnectionConfig> for ConnectionSummary {
@@ -44,13 +45,18 @@ impl From<&ConnectionConfig> for ConnectionSummary {
             .and_then(|value| value.as_str().map(ToOwned::to_owned))
             .unwrap_or_else(|| format!("{:?}", config.db_type).to_ascii_lowercase());
         Self {
-            id: config.id.clone(),
-            name: config.name.clone(),
+            id: dbx_core::persistence::connection_management::safe_connection_text(&config.id),
+            name: dbx_core::persistence::connection_management::safe_connection_text(&config.name),
             db_type,
-            host: config.host.clone(),
+            host: dbx_core::persistence::connection_management::safe_connection_text(&config.host),
             port: config.port,
-            database: config.database.clone().unwrap_or_default(),
+            database: config
+                .database
+                .as_deref()
+                .map(dbx_core::persistence::connection_management::safe_connection_text)
+                .unwrap_or_default(),
             group_path: Vec::new(),
+            read_only: config.read_only,
         }
     }
 }
@@ -322,6 +328,9 @@ pub trait DbxBackend: Send + Sync {
         dbx_core::sql::sql_execution_plan_for_database(sql, connection.db_type)
     }
     async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String>;
+    async fn update_connection_for_mcp(&self, _connection_id: &str, _patch: Value) -> Result<ConnectionConfig, String> {
+        Err("CONNECTION_UPDATE_UNSUPPORTED: backend does not support connection updates".to_string())
+    }
     async fn duplicate_connection_for_mcp(
         &self,
         source_id: &str,
@@ -1256,6 +1265,22 @@ impl DbxBackend for LocalBackend {
         Ok(config)
     }
 
+    async fn update_connection_for_mcp(&self, connection_id: &str, patch: Value) -> Result<ConnectionConfig, String> {
+        let config = self.state.storage.update_connection_for_mcp(connection_id, patch).await?;
+        // A read-only/credential change must not leave a pinned session using old permissions.
+        self.transaction_owners.invalidate_connection(connection_id);
+        self.state.session_credentials.clear_connection(connection_id);
+        self.state.remove_connection_pools_detached(connection_id).await;
+        self.state.reset_connection_transport(connection_id).await;
+        self.state.write_unlock_windows.lock(connection_id).await;
+        self.state.nacos_registry.drop_connection(connection_id).await;
+        #[cfg(feature = "mq-admin")]
+        self.state.mq_registry.drop_connection(connection_id).await;
+        self.state.configs.write().await.insert(config.id.clone(), config.clone());
+        self.notify_connections_changed().await;
+        Ok(config)
+    }
+
     async fn duplicate_connection_for_mcp(
         &self,
         source_id: &str,
@@ -1746,6 +1771,21 @@ impl DbxBackend for WebBackend {
             .json()
             .await
             .map_err(|error| format!("Invalid MCP connection response: {error}"))
+    }
+
+    async fn update_connection_for_mcp(&self, connection_id: &str, patch: Value) -> Result<ConnectionConfig, String> {
+        let config = self
+            .request(
+                reqwest::Method::POST,
+                "/api/connection/mcp/update",
+                Some(json!({ "connectionId": connection_id, "changes": patch })),
+            )
+            .await?
+            .json()
+            .await
+            .map_err(|_| "Invalid MCP connection response".to_string())?;
+        self.connected.lock().await.remove(connection_id);
+        Ok(config)
     }
 
     async fn duplicate_connection_for_mcp(
@@ -2823,12 +2863,17 @@ mod tests {
     };
 
     async fn connection_mutation_backend(data_dir: &Path) -> LocalBackend {
-        let storage = Storage::open(&data_dir.join("dbx.db"))
-            .await
-            .unwrap()
-            .with_secret_key_policy(dbx_core::persistence::secret_codec::SecretKeyPolicy::ManagedDataDir);
+        let storage = dbx_core::persistence::test_storage::open(&data_dir.join("dbx.db")).await.unwrap();
         storage.save_mcp_global_policy(&McpGlobalPolicy { read_only: false, ..Default::default() }).await.unwrap();
-        LocalBackend::from_app_state(Arc::new(AppState::new(storage)), data_dir.to_path_buf())
+        LocalBackend::from_app_state(
+            Arc::new(AppState::new_with_plugin_and_agent_dir_and_app_version(
+                storage,
+                data_dir.join("plugins"),
+                data_dir.join("agents"),
+                "",
+            )),
+            data_dir.to_path_buf(),
+        )
     }
 
     fn mutation_test_connection() -> ConnectionConfig {
@@ -2874,6 +2919,16 @@ mod tests {
 
         backend.add_connection_for_mcp(mutation_test_connection()).await.unwrap();
         assert_eq!(received.try_recv().unwrap(), vec!["source"]);
+        backend.state.session_credentials.set("fixture-owner", "source", "session-fixture").unwrap();
+        backend.state.write_unlock_windows.unlock("source", 60).await.unwrap();
+        let changed = backend.update_connection_for_mcp("source", json!({"read_only": true})).await.unwrap();
+        assert!(!backend.state.session_credentials.has("fixture-owner", "source"));
+        assert_eq!(backend.state.write_unlock_windows.remaining_ms("source").await, 0);
+        assert!(changed.read_only);
+        assert_eq!(changed.password, "test-password");
+        assert_eq!(backend.state.configs.read().await.get("source"), Some(&changed));
+        assert_eq!(received.try_recv().unwrap(), vec!["source"]);
+
         backend.duplicate_connection_for_mcp("source", "copy", "Copy").await.unwrap();
         let mut ids = received.try_recv().unwrap();
         ids.sort();
@@ -2891,6 +2946,7 @@ mod tests {
             .unwrap();
         assert!(backend.add_connection_for_mcp(mutation_test_connection()).await.is_err());
         assert!(backend.remove_connection_for_mcp("source").await.is_err());
+        assert!(backend.update_connection_for_mcp("source", json!({"read_only": false})).await.is_err());
         assert!(received.try_recv().is_err());
         server.abort();
     }

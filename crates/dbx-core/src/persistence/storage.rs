@@ -5869,6 +5869,32 @@ fn ensure_mcp_connection_change_allowed_in_tx(
     Ok(())
 }
 
+fn ensure_unique_connection_name_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    name: &str,
+    except_id: Option<&str>,
+) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err("INVALID_CONNECTION: connection name must not be empty".to_string());
+    }
+    let mut statement = tx.prepare("SELECT id, config_json FROM connections").map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .map_err(|error| error.to_string())?;
+    for row in rows {
+        let (id, json) = row.map_err(|error| error.to_string())?;
+        if except_id == Some(id.as_str()) {
+            continue;
+        }
+        let existing: ConnectionConfig =
+            serde_json::from_str(&json).map_err(|_| "CONNECTION_LOAD_ERROR: invalid saved connection".to_string())?;
+        if existing.name.trim().to_lowercase() == name.trim().to_lowercase() {
+            return Err("CONNECTION_ALREADY_EXISTS: connection name already exists".to_string());
+        }
+    }
+    Ok(())
+}
+
 fn sanitized_connection_config(config: &ConnectionConfig) -> ConnectionConfig {
     let mut sanitized = config.clone().canonicalized();
     sanitized.password = String::new();
@@ -6342,15 +6368,78 @@ impl Storage {
 
     pub async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
         let config = config.canonicalized();
+        super::connection_management::validate_connection_patch(
+            &serde_json::json!({"name": config.name, "host": config.host}),
+        )?;
         let codec = self.secret_codec_for_write(connection_config_has_inline_secrets(&config)).await?;
         self.with_conn(move |conn| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
             ensure_mcp_connection_change_allowed_in_tx(&tx, None)?;
+            ensure_unique_connection_name_in_tx(&tx, &config.name, None)?;
             persist_connection_in_tx(&tx, &codec, &config)?;
             tx.commit().map_err(|e| e.to_string())?;
             Ok(config)
         })
         .await
+    }
+
+    /// Atomically patch one saved connection without re-saving a stale hydrated config.
+    /// Unspecified secrets remain encrypted and untouched, including tunnel/plugin credentials.
+    pub async fn update_connection_for_mcp(
+        &self,
+        connection_id: &str,
+        patch: serde_json::Value,
+    ) -> Result<ConnectionConfig, String> {
+        super::connection_management::validate_connection_patch(&patch)?;
+        let needs_key =
+            patch.get("password").and_then(serde_json::Value::as_str).is_some_and(|value| !value.is_empty())
+                && patch.get("save_password").and_then(serde_json::Value::as_bool) != Some(false);
+        let codec = self.secret_codec_for_write(needs_key).await?;
+        let id = connection_id.to_string();
+        let updated_id = id.clone();
+        self.with_conn(move |conn| {
+            let tx =
+                conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
+            ensure_mcp_connection_change_allowed_in_tx(&tx, Some(&id))?;
+            let json = tx
+                .query_row("SELECT config_json FROM connections WHERE id = ?1", [&id], |row| row.get::<_, String>(0))
+                .optional()
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "CONNECTION_NOT_FOUND: connection was not found".to_string())?;
+            let mut value: serde_json::Value = serde_json::from_str(&json)
+                .map_err(|_| "CONNECTION_LOAD_ERROR: invalid saved connection".to_string())?;
+            let object =
+                value.as_object_mut().ok_or_else(|| "CONNECTION_LOAD_ERROR: invalid saved connection".to_string())?;
+            for (key, replacement) in patch.as_object().expect("validated object") {
+                if key != "password" {
+                    object.insert(key.clone(), replacement.clone());
+                }
+            }
+            let config: ConnectionConfig = serde_json::from_value(value)
+                .map_err(|_| "INVALID_CONNECTION: invalid connection settings".to_string())?;
+            if config.id != id {
+                return Err("CONNECTION_LOAD_ERROR: saved connection ID does not match its row".to_string());
+            }
+            if patch.get("name").is_some() {
+                ensure_unique_connection_name_in_tx(&tx, &config.name, Some(&id))?;
+            }
+            // Only update the requested password key. Never rewrite/delete other secret rows.
+            if !config.save_password {
+                persist_secret_in_tx(&tx, &codec, &id, "password", "")?;
+            } else if let Some(password) = patch.get("password").and_then(serde_json::Value::as_str) {
+                persist_secret_in_tx(&tx, &codec, &id, "password", password)?;
+            }
+            let json = serde_json::to_string(&config).map_err(|error| error.to_string())?;
+            tx.execute("UPDATE connections SET config_json = ?1 WHERE id = ?2", params![json, id])
+                .map_err(|error| error.to_string())?;
+            tx.commit().map_err(|error| error.to_string())
+        })
+        .await?;
+        self.load_connections()
+            .await?
+            .into_iter()
+            .find(|connection| connection.id == updated_id)
+            .ok_or_else(|| "CONNECTION_NOT_FOUND: updated connection could not be reloaded".to_string())
     }
 
     pub async fn duplicate_connection_for_mcp(
@@ -6368,18 +6457,7 @@ impl Storage {
             let tx =
                 conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
             ensure_mcp_connection_change_allowed_in_tx(&tx, Some(&source_id))?;
-            let copy_name_lower = copy_name.to_lowercase();
-            let mut names = tx.prepare("SELECT config_json FROM connections").map_err(|error| error.to_string())?;
-            let duplicate_name = names
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(|error| error.to_string())?
-                .filter_map(Result::ok)
-                .filter_map(|json| serde_json::from_str::<ConnectionConfig>(&json).ok())
-                .any(|connection| connection.name.to_lowercase() == copy_name_lower);
-            drop(names);
-            if duplicate_name {
-                return Err(format!("CONNECTION_ALREADY_EXISTS: connection '{copy_name}' already exists"));
-            }
+            ensure_unique_connection_name_in_tx(&tx, &copy_name, None)?;
             let source_json = tx
                 .query_row("SELECT config_json FROM connections WHERE id = ?1", [&source_id], |row| {
                     row.get::<_, String>(0)
@@ -11863,7 +11941,8 @@ mod tests {
         let mut concurrently_updated = removed.clone();
         concurrently_updated.host = "updated-by-web-ui".to_string();
         storage.save_connections(&[kept.clone(), concurrently_updated.clone()]).await.unwrap();
-        let added = mq_connection("added", "added-token");
+        let mut added = mq_connection("added", "added-token");
+        added.name = "Added".to_string();
         storage.add_connection_for_mcp(added.clone()).await.unwrap();
         let after_add = storage.load_connections().await.unwrap();
         assert_eq!(after_add.len(), 3);

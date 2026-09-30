@@ -8356,6 +8356,8 @@ export default withEnglishFallback({
     mcpToolPeekMessages: "Leer mensajes de Kafka",
     mcpToolSendMessage: "Enviar mensaje de cola de mensajes",
     mcpToolAddConnection: "Añadir conexión",
+    mcpToolGetConnection: "Ver detalles de conexión",
+    mcpToolUpdateConnection: "Actualizar conexión",
     mcpToolDuplicateConnection: "Duplicar conexión",
     mcpToolRemoveConnection: "Eliminar conexión",
     mcpToolOpenTable: "Abrir tabla en DBX",

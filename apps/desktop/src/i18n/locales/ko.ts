@@ -8057,6 +8057,8 @@ export default withEnglishFallback({
     mcpToolPeekMessages: "Kafka 메시지 읽기",
     mcpToolSendMessage: "메시지 큐 메시지 전송",
     mcpToolAddConnection: "연결 추가",
+    mcpToolGetConnection: "연결 세부 정보 보기",
+    mcpToolUpdateConnection: "연결 업데이트",
     mcpToolDuplicateConnection: "연결 복제",
     mcpToolRemoveConnection: "연결 삭제",
     mcpToolOpenTable: "DBX에서 테이블 열기",

@@ -46,6 +46,7 @@ uuid = { version = "1", features = ["v4"] }
 url = "2"
 
 [dev-dependencies]
+dbx-core = { path = "../dbx-core", default-features = false, features = ["test-support"] }
 rmcp = { version = "2.2.0", features = ["transport-streamable-http-client-reqwest"] }
 rustls-pemfile = "2.2"
 tempfile = "3"

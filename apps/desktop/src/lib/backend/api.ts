@@ -583,6 +583,7 @@ export const redisScanKeys = forward("redisScanKeys");
 export const redisScanKeysBatch = forward("redisScanKeysBatch");
 export const redisScanValues = forward("redisScanValues");
 export const redisGetValue = forward("redisGetValue");
+export const redisGetRawValue = forward("redisGetRawValue");
 export const redisGetTtl = forward("redisGetTtl");
 export const redisGetStreamEntries = forward("redisGetStreamEntries");
 export const redisGetStreamGroups = forward("redisGetStreamGroups");

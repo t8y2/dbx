@@ -825,6 +825,7 @@ async fn serve() {
         .route("/redis/scan-keys-batch", post(routes::redis::scan_keys_batch))
         .route("/redis/scan-values", post(routes::redis::scan_values))
         .route("/redis/get-value", post(routes::redis::get_value))
+        .route("/redis/get-raw-value", post(routes::redis::get_raw_value))
         .route("/redis/get-ttl", post(routes::redis::get_ttl))
         .route("/redis/get-stream-entries", post(routes::redis::get_stream_entries))
         .route("/redis/get-stream-groups", post(routes::redis::get_stream_groups))

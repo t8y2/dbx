@@ -5726,6 +5726,10 @@ export default withEnglishFallback({
     keySearchHistory: "検索履歴",
     keySearchHistoryForget: "履歴から削除",
     keySearchHistoryEmpty: "履歴はありません",
+    downloadValue: "完全な値をダウンロード",
+    downloadValueFileType: "Redis 値",
+    downloadValueTextFileType: "テキストファイル",
+    downloadValueSuccess: "Redis 値をダウンロードしました",
   },
   mongo: {
     documents: "{count}ドキュメント",

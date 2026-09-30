@@ -110,6 +110,7 @@ import type {
   DownloadedUpdate,
   UpdateDownloadSource,
   RedisCollectionPage,
+  RedisBlob,
   RedisDatabaseInfo,
   RedisStreamConsumer,
   RedisStreamGroup,
@@ -3554,6 +3555,10 @@ export async function redisScanValues(connectionId: string, db: number, cursor: 
 
 export async function redisGetValue(connectionId: string, db: number, keyRaw: string): Promise<RedisValue> {
   return post("/api/redis/get-value", { connectionId, db, keyRaw });
+}
+
+export async function redisGetRawValue(connectionId: string, db: number, keyRaw: string): Promise<RedisBlob> {
+  return post("/api/redis/get-raw-value", { connectionId, db, keyRaw });
 }
 
 export async function redisGetTtl(connectionId: string, db: number, keyRaw: string): Promise<number> {

@@ -6726,6 +6726,10 @@ export default withEnglishFallback({
         keyspace: "Пространство ключей",
       },
     },
+    downloadValue: "Скачать полное значение",
+    downloadValueFileType: "Значение Redis",
+    downloadValueTextFileType: "Текстовый файл",
+    downloadValueSuccess: "Значение Redis скачано",
   },
   mongoDump: {
     selectAll: "Выбрать все коллекции",

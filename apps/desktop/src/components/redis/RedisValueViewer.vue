@@ -5,7 +5,7 @@ import type { CalendarDateTime } from "@internationalized/date";
 import { useI18n } from "vue-i18n";
 import { onClickOutside } from "@vueuse/core";
 import { DynamicScroller, DynamicScrollerItem, RecycleScroller } from "vue-virtual-scroller";
-import { Check, ChevronDown, Copy, ClipboardCopy, Eye, Trash2, Save, RefreshCw, Plus, Loader2, Pencil, WrapText, ArrowUp, ArrowDown, ArrowUpDown, Search, X, FileArchive } from "@lucide/vue";
+import { Check, ChevronDown, Copy, ClipboardCopy, Eye, Trash2, Save, RefreshCw, Plus, Loader2, Pencil, WrapText, ArrowUp, ArrowDown, ArrowUpDown, Search, X, FileArchive, Download } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -69,6 +69,7 @@ import { unixSecondsToCalendarDateTime } from "@/components/ui/date-time-picker/
 import { applyRedisExpiryPolicy, type RedisExpiryMode, redisExpiryModeForTtl, validateRedisExpiry } from "@/lib/redis/redisExpiry";
 import { redisKeyRawToText, redisKeyTextToDisplay, redisKeyTextToRaw } from "@/lib/redis/redisCommandSession";
 import { formatBytes } from "@/lib/database/serverMetrics";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 
 const { t, locale } = useI18n();
 const { toast } = useToast();
@@ -103,6 +104,7 @@ const REDIS_COLLECTION_ROW_HEIGHT = 32;
 const REDIS_STREAM_MIN_ROW_HEIGHT = 96;
 const data = ref<RedisValue | null>(null);
 const loading = ref(false);
+const downloadingLargeValue = ref(false);
 const loadingMore = ref(false);
 const showRenameKeyDialog = ref(false);
 const renamingKey = ref(false);
@@ -674,6 +676,46 @@ const largeStringPreviewHint = computed(() => {
   }
   return t("redis.largeStringPreviewHintUnknown", { loaded: formatBytes(loaded) });
 });
+
+function redisDownloadFileName(keyDisplay: string, encoding: RedisBlob["encoding"]): string {
+  const safe =
+    keyDisplay
+      .replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_")
+      .trim()
+      .slice(0, 120) || "redis-value";
+  return `${safe}.${encoding === "utf8" ? "txt" : "bin"}`;
+}
+
+async function downloadLargeValue() {
+  if (downloadingLargeValue.value || !isStringValueTruncated.value) return;
+  downloadingLargeValue.value = true;
+  try {
+    const blob = await api.redisGetRawValue(props.connectionId, props.db, props.keyRaw);
+    const bytes = decodeRedisBlob(blob);
+    const filename = redisDownloadFileName(props.keyDisplay, blob.encoding);
+    if (isTauriRuntime()) {
+      const [{ save }, { writeFile }] = await Promise.all([import("@tauri-apps/plugin-dialog"), import("@tauri-apps/plugin-fs")]);
+      const extension = blob.encoding === "utf8" ? "txt" : "bin";
+      const path = await save({ defaultPath: filename, filters: [{ name: t(blob.encoding === "utf8" ? "redis.downloadValueTextFileType" : "redis.downloadValueFileType"), extensions: [extension] }] });
+      if (path) {
+        await writeFile(path, bytes);
+        toast(t("redis.downloadValueSuccess"), 2500);
+      }
+    } else {
+      const url = URL.createObjectURL(new Blob([bytes.slice().buffer as ArrayBuffer], { type: blob.encoding === "utf8" ? "text/plain;charset=utf-8" : "application/octet-stream" }));
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      toast(t("redis.downloadValueSuccess"), 2500);
+    }
+  } catch (error) {
+    toast(errorMessage(error), 4000);
+  } finally {
+    downloadingLargeValue.value = false;
+  }
+}
 const streamRows = computed<RedisStreamRow[]>(() => {
   if (redisKind.value !== "stream") return [];
   return streamEntries.value.map((entry, index) => ({
@@ -2953,7 +2995,12 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
         <pre v-else class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-4 text-sm leading-6" :class="detailTextClass(stringValueView)">{{ detailTextForFormat(stringValueDetail, stringValueView) }}</pre>
         <div v-if="isStringValueTruncated" data-redis-large-string-preview class="flex shrink-0 items-center gap-2 border-t bg-muted/30 px-4 py-2 text-xs text-muted-foreground">
           <Eye class="h-3.5 w-3.5 shrink-0" />
-          <span>{{ largeStringPreviewHint }}</span>
+          <span class="min-w-0 flex-1">{{ largeStringPreviewHint }}</span>
+          <Button variant="outline" size="sm" class="h-7 shrink-0" :disabled="downloadingLargeValue" :title="t('redis.downloadValue')" :aria-label="t('redis.downloadValue')" @click="downloadLargeValue">
+            <Loader2 v-if="downloadingLargeValue" class="mr-1 h-3 w-3 animate-spin" />
+            <Download v-else class="mr-1 h-3 w-3" />
+            {{ t("redis.downloadValue") }}
+          </Button>
         </div>
         <div v-else-if="isBinaryStringValue" class="px-4 py-2 border-t text-xs text-muted-foreground shrink-0">
           {{ t("redis.binaryStringReadonlyHint") }}

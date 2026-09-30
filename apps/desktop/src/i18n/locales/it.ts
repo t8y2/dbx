@@ -5698,6 +5698,10 @@ export default withEnglishFallback({
     keySearchHistory: "Cronologia ricerche",
     keySearchHistoryForget: "Rimuovi dalla cronologia",
     keySearchHistoryEmpty: "Nessuna cronologia",
+    downloadValue: "Scarica valore completo",
+    downloadValueFileType: "Valore Redis",
+    downloadValueTextFileType: "File di testo",
+    downloadValueSuccess: "Valore Redis scaricato",
   },
   mongo: {
     documents: "{count} documenti",

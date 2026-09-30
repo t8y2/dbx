@@ -5700,6 +5700,10 @@ export default withEnglishFallback({
     keySearchHistory: "Histórico de pesquisa",
     keySearchHistoryForget: "Remover do histórico",
     keySearchHistoryEmpty: "Nenhum histórico",
+    downloadValue: "Baixar valor completo",
+    downloadValueFileType: "Valor Redis",
+    downloadValueTextFileType: "Arquivo de texto",
+    downloadValueSuccess: "Valor Redis baixado",
   },
   mongo: {
     documents: "{count} documentos",

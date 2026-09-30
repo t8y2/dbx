@@ -3412,6 +3412,10 @@ export async function redisGetValue(connectionId: string, db: number, keyRaw: st
   return invoke("redis_get_value", { connectionId, db, keyRaw });
 }
 
+export async function redisGetRawValue(connectionId: string, db: number, keyRaw: string): Promise<RedisBlob> {
+  return invoke("redis_get_raw_value", { connectionId, db, keyRaw });
+}
+
 export async function redisGetTtl(connectionId: string, db: number, keyRaw: string): Promise<number> {
   return invoke("redis_get_ttl", { connectionId, db, keyRaw });
 }

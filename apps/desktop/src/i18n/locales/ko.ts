@@ -5361,6 +5361,10 @@ export default withEnglishFallback({
     keySearchHistory: "검색 기록",
     keySearchHistoryForget: "기록에서 제거",
     keySearchHistoryEmpty: "검색 기록이 없습니다",
+    downloadValue: "전체 값 다운로드",
+    downloadValueFileType: "Redis 값",
+    downloadValueTextFileType: "텍스트 파일",
+    downloadValueSuccess: "Redis 값이 다운로드됨",
   },
   mongo: {
     documents: "문서 {count}개",

@@ -795,8 +795,23 @@ mod tests {
         // guard 之后再 strip 必须还原原值，覆盖触发字符、前导空格、撇号转义与
         // 空串边界；不以撇号开头的单元格 strip 一律原样返回。
         for value in [
-            "=cmd", " =cmd", "  -x", "+2", "-3", "@a", "\tx", "\rx", "'+86", "''-e", "' =spaced", "'", "''", "'''",
-            "'plain", "plain", "",
+            "=cmd",
+            " =cmd",
+            "  -x",
+            "+2",
+            "-3",
+            "@a",
+            "\tx",
+            "\rx",
+            "'+86",
+            "''-e",
+            "' =spaced",
+            "'",
+            "''",
+            "'''",
+            "'plain",
+            "plain",
+            "",
         ] {
             let mut guarded = String::new();
             super::push_formula_guard(&mut guarded, value);

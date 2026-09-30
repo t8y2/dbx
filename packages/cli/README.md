@@ -85,6 +85,7 @@ dbx open local users
 | `dbx connections get <id-or-name>` | Inspect safe saved connection settings |
 | `dbx connections add --file <path>` | Add a saved connection from protected JSON |
 | `dbx connections update <id-or-name> --file <path>` | Partially update saved settings |
+| `dbx connections import --file <path> [--yes]` | Preview or atomically import a local DBX bundle |
 | `dbx connections remove <id-or-name> --yes` | Remove a saved connection and its credentials |
 | `dbx schema list <connection>`              | List tables and views                                 |
 | `dbx schema describe <connection> <table>`  | Show table columns                                    |
@@ -212,3 +213,37 @@ Update accepts `name`, `note`, `host`, `port`, `username`, `password`, `database
 - `{"save_password":false}` removes the saved database password; switching back to true does not recover it
 - Changing connection settings invalidates cached connections and pinned transactions, so reconnect afterward
 - Removal requires `--yes`, deletes the saved connection and its credentials, and cannot be undone by the CLI. Review the target first. Database files/data are untouched. Keep an authorized DBX backup if recovery is needed
+
+## Import a DBX connection bundle
+
+Import a plaintext or encrypted DBX export into local encrypted connection storage without connecting to any database:
+
+```bash
+chmod 600 connections.json
+dbx connections import --file connections.json --json
+# Review the preview, then explicitly apply:
+dbx connections import --file connections.json --yes --json
+```
+
+Without `--yes`, import is a dry run. JSON output includes `dry_run`, `input_count`, `imported_count` (the number that would be added during preview), `skipped_count`, tunnel-profile counts, and warnings; it never includes credentials. CLI also accepts a non-interactive secure pipe with `--file -`.
+
+- Accepts a plain DBX bundle with `connections`, optional `layout` and `tunnelProfiles`, legacy connection arrays, and legacy `dbx-config` version 1 exports
+- Preserves full supported connection settings and credentials, imports referenced tunnel profiles, and appends sidebar groups/order with new IDs; existing configuration and secrets are not overwritten
+- Skips connections with the same normalized name, host, port, database type, and database; equal names with different endpoints/types/databases remain separate (use IDs to select them), while duplicate source IDs and invalid configurations reject the entire batch
+- Normally requires an initialized local DBX store and its existing encryption key; `DBX_WEB_URL` and scoped sessions are unsupported, and MCP tool/connection scope applies to preview and import
+- Preview is allowed under global read-only mode; applying requires a writable MCP policy and rechecks it in the storage transaction. `--yes` and SQL write flags do not override that policy
+- Input is limited to 16 MiB and must be a regular owner-only file on Unix; on Windows, restrict the file's ACL. Encrypted `dbx-encrypted` version 1 exports require a separate protected passphrase file
+
+For an encrypted export, pass the path to an owner-only UTF-8 passphrase file. Use the same arguments for preview and apply:
+
+```bash
+chmod 600 connections.json passphrase.txt
+dbx connections import --file connections.json --passphrase-file passphrase.txt --json
+dbx connections import --file connections.json --passphrase-file passphrase.txt --yes --json
+```
+
+A final LF or CRLF is removed from the passphrase file. To avoid a passphrase file, a credential manager may pipe the passphrase to `--passphrase-file -` while the bundle is read from a file; bundle and passphrase cannot both use stdin. No literal passphrase argument is supported. A wrong passphrase or invalid ciphertext fails before any connection is written.
+
+For a completely empty local profile, opt in to `--initialize` on the import command. Preview still creates no encryption key or connections; applying with `--initialize --yes` may provision the profile's encryption key before saving encrypted credentials. Existing connections, legacy files, stored credentials, or a pending/failed security migration block initialization. It never replaces existing keys or weakens MCP policy. Omit `--initialize` for subsequent imports.
+
+Treat plaintext exports as credentials: do not paste their contents into chat, command arguments, logs, or source control. Remove temporary exports when the migration is finished. The import does not test connectivity, copy SQLite/DuckDB files, install drivers, or translate local paths and private-network addresses for the destination machine. Review warnings before using the imported connections.

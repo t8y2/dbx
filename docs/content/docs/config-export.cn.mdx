@@ -57,6 +57,12 @@ description: 导出数据库连接配置（AES-256-GCM 加密），安全地在�
   </Step>
 </Steps>
 
+## CLI 与 MCP 导入
+
+本地 DBX 导出可用 `dbx connections import --file connections.json --json` 预览，检查数量和警告后添加 `--yes` 执行。MCP 的 `dbx_import_connections` 接收 `file_path`；省略 `confirmed` 时仅预览，获得批准后传 `confirmed: true`。凭据保留在受保护的本地文件中，不进入工具参数或结果。
+
+这两个接口以事务方式仅追加导入，包含支持的完整连接设置、被引用的隧道配置和侧边栏分组/排序，并重新映射 ID。只有规范化名称、主机、端口、数据库类型和数据库均相同的连接才会跳过；同名但端点、类型或数据库不同的连接分别保留，不覆盖已有设置或凭据。输入文件上限为 16 MiB，Unix 下须仅所有者可访问。此功能仅支持本地模式，通常需要已初始化的加密存储，并遵守 MCP 策略。CLI 可对完全为空的配置明确使用 `--initialize`，有已有连接或旧版凭据时拒绝，预览不创建密钥。加密导出须添加 CLI `--passphrase-file passphrase.txt` 或 MCP `passphrase_file`，指定单独的仅所有者可访问 UTF-8 文件；不要在命令参数或工具调用中传递口令字面值。详见 [CLI 导入](/cn/docs/cli#导入-dbx-连接包)。
+
 ## 安全性
 
 - 密码使用 **AES-256-GCM** 加密，密钥通过 **PBKDF2** 派生

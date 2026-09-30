@@ -47,6 +47,13 @@ fn default_save_password() -> bool {
 fn management_error(message: String) -> CliError {
     let message = safe_connection_error(&message);
     for code in [
+        "INVALID_CONNECTION_IMPORT",
+        "ENCRYPTED_IMPORT_UNSUPPORTED",
+        "IMPORT_PASSPHRASE_REQUIRED",
+        "IMPORT_DECRYPT_FAILED",
+        "INSECURE_INPUT",
+        "TOOL_OUT_OF_SCOPE",
+        "CONNECTION_IMPORT_UNSUPPORTED",
         "MCP_READ_ONLY",
         "CONNECTION_OUT_OF_SCOPE",
         "CONNECTION_NOT_FOUND",
@@ -169,6 +176,7 @@ pub(super) async fn run(backend: &dyn DbxBackend, flags: &Flags) -> Result<Strin
         "add" => "dbx_add_connection",
         "update" => "dbx_update_connection",
         "remove" => "dbx_remove_connection",
+        "import" => "dbx_import_connections",
         _ => "",
     };
     if policy.allowed_tool_names.as_ref().is_some_and(|names| !names.iter().any(|name| name == tool)) {
@@ -191,11 +199,60 @@ pub(super) async fn run(backend: &dyn DbxBackend, flags: &Flags) -> Result<Strin
             "Connection commands accept --json/--format, --file for add/update, and --yes for remove.",
         ));
     }
-    if flags.yes && command != "remove" {
-        return Err(CliError::new("INVALID_OPTION", "--yes is only supported by connections remove."));
+    if flags.yes && !matches!(command, "remove" | "import") {
+        return Err(CliError::new("INVALID_OPTION", "--yes is only supported by connections remove/import."));
     }
-    if flags.file.is_some() && !matches!(command, "add" | "update") {
-        return Err(CliError::new("INVALID_OPTION", "--file is only supported by connections add/update."));
+    if flags.file.is_some() && !matches!(command, "add" | "update" | "import") {
+        return Err(CliError::new("INVALID_OPTION", "--file is only supported by connections add/update/import."));
+    }
+    if command == "import" {
+        ensure_arg_count(&flags.args, 2, "dbx connections import")?;
+        if flags.format == OutputFormat::Csv {
+            return Err(CliError::new("INVALID_OPTION", "Use --json for import reports."));
+        }
+        let scope = dbx_mcp::McpScope::from_env();
+        if !scope.connection_ids.is_empty()
+            || scope.connection_name.is_some()
+            || scope.database.is_some()
+            || scope.schema.is_some()
+        {
+            return Err(CliError::new("CONNECTION_OUT_OF_SCOPE", "Import is disabled in scoped sessions."));
+        }
+        if flags.yes && policy.read_only {
+            return Err(CliError::new("MCP_READ_ONLY", "Global MCP read-only mode blocks connection imports."));
+        }
+        if std::env::var_os("DBX_WEB_URL").is_some() {
+            return Err(CliError::new("CONNECTION_IMPORT_UNSUPPORTED", "Bundle import is local-only."));
+        }
+        let path = flags.file.as_deref().ok_or_else(|| {
+            CliError::new(
+                "INVALID_INPUT",
+                "Provide --file <owner-only.json> or --file -. Preview is default; add --yes to apply.",
+            )
+        })?;
+        let value = dbx_core::persistence::connection_import::read_import_file_with_passphrase(
+            path,
+            true,
+            flags.passphrase_file.as_deref(),
+        )
+        .map_err(management_error)?;
+        let report = backend.import_connections_for_mcp(value, !flags.yes).await.map_err(management_error)?;
+        if flags.format == OutputFormat::Json {
+            return json_string(&report);
+        }
+        let mut message = format!(
+            "{}: {} new connections, {} skipped.\n",
+            if report.dry_run { "Preview" } else { "Imported" },
+            report.imported_count,
+            report.skipped_count
+        );
+        for warning in report.warnings {
+            message.push_str(&format!("Warning: {warning}\n"));
+        }
+        if report.dry_run {
+            message.push_str("No configuration changed. Repeat with --yes to apply.\n");
+        }
+        return Ok(message);
     }
     if command == "list" {
         ensure_arg_count(&flags.args, 2, "dbx connections list")?;

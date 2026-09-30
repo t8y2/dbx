@@ -24,6 +24,12 @@ pub fn safe_connection_text(value: &str) -> String {
 /// text from credential-bearing operations; preserve only known codes and fixed messages.
 pub fn safe_connection_error(error: &str) -> String {
     for (code, message) in [
+        ("INVALID_CONNECTION_IMPORT", "Invalid or unsupported connection import bundle."),
+        ("CONNECTION_IMPORT_UNSUPPORTED", "Bundle import is supported only by the local backend."),
+        ("ENCRYPTED_IMPORT_UNSUPPORTED", "Use the encrypted export file and an owner-only passphrase file."),
+        ("IMPORT_PASSPHRASE_REQUIRED", "Encrypted import requires an owner-only passphrase file."),
+        ("IMPORT_DECRYPT_FAILED", "Encrypted export or passphrase is invalid."),
+        ("INSECURE_INPUT", "Import and passphrase files must be owner-only (chmod 600)."),
         ("MCP_READ_ONLY", "Global MCP read-only mode blocks connection changes."),
         ("MCP_POLICY_UNAVAILABLE", "The MCP access policy could not be loaded."),
         ("TOOL_OUT_OF_SCOPE", "This tool is not allowed by the MCP policy."),

@@ -57,6 +57,12 @@ description: Export database connections with AES-256-GCM encrypted passwords. M
   </Step>
 </Steps>
 
+## CLI and MCP imports
+
+For a local DBX export, use `dbx connections import --file connections.json --json` to preview, then add `--yes` after reviewing the counts and warnings. MCP provides `dbx_import_connections` with `file_path`; omit `confirmed` for preview, and set `confirmed: true` only after approval. Credentials remain in the protected local file, never in the tool arguments or result.
+
+These interfaces perform an add-only atomic import, including supported connection settings, referenced tunnel profiles, and sidebar groups/order with remapped IDs. They skip existing connections only when normalized name, host, port, database type, and database all match; connections with equal names but different endpoints/types/databases remain separate, and existing settings or credentials are never overwritten. Input files are limited to 16 MiB and must be owner-only on Unix. Import is local-only, normally requires the existing initialized encrypted store, and respects MCP policy. CLI additionally offers explicit `--initialize` for a completely empty profile; it refuses existing connections or legacy credentials and creates no key during preview. For encrypted exports, add CLI `--passphrase-file passphrase.txt` or MCP `passphrase_file`, pointing to a separate owner-only UTF-8 file. Never supply a literal passphrase in command arguments or tool calls. See [CLI import](/en/docs/cli#import-a-dbx-connection-bundle).
+
 ## Security
 
 - Passwords are encrypted using **AES-256-GCM** with **PBKDF2** key derivation

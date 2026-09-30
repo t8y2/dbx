@@ -327,6 +327,13 @@ pub trait DbxBackend: Send + Sync {
         let _ = database;
         dbx_core::sql::sql_execution_plan_for_database(sql, connection.db_type)
     }
+    async fn import_connections_for_mcp(
+        &self,
+        _bundle: Value,
+        _dry_run: bool,
+    ) -> Result<dbx_core::persistence::connection_import::ConnectionImportReport, String> {
+        Err("CONNECTION_IMPORT_UNSUPPORTED: Bundle import is supported only by the local backend.".into())
+    }
     async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String>;
     async fn update_connection_for_mcp(&self, _connection_id: &str, _patch: Value) -> Result<ConnectionConfig, String> {
         Err("CONNECTION_UPDATE_UNSUPPORTED: backend does not support connection updates".to_string())
@@ -746,6 +753,35 @@ impl LocalBackend {
             transaction_owners: Arc::new(TransactionOwnerRegistry::default()),
             transaction_owner_config: TransactionOwnerConfig::from_env(),
         }
+    }
+
+    /// Explicit CLI initialization is permitted only for an empty, unmigrated profile.
+    /// Existing key material, policies, and legacy credentials are never replaced or migrated.
+    pub async fn open_for_connection_import(path: &Path, initialize: bool) -> Result<Self, String> {
+        if !initialize {
+            return Self::open(path).await;
+        }
+        let storage = Storage::open_unmigrated(path).await?;
+        let preflight = storage.inspect_data_migration().await?;
+        if preflight.connection_count != 0
+            || preflight.database_plaintext_count != 0
+            || preflight.plugin_secret_count != 0
+            || preflight.ai_secret_count != 0
+            || preflight.tunnel_secret_count != 0
+            || preflight.sync_credential_count != 0
+            || preflight.legacy_json_files.iter().any(|file| file.exists)
+            || !preflight.is_ready()
+        {
+            return Err("CONNECTION_IMPORT_INITIALIZATION_BLOCKED: --initialize requires an empty profile with no legacy data. Use the normal DBX data-security setup for an existing profile.".into());
+        }
+        let data_dir = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+        let state = Arc::new(AppState::new_with_plugin_and_agent_dir_and_app_version(
+            storage,
+            data_dir.join("plugins"),
+            data_dir.join("agents"),
+            "",
+        ));
+        Ok(Self::from_app_state(state, data_dir))
     }
 
     pub async fn open(path: &Path) -> Result<Self, String> {
@@ -1256,6 +1292,24 @@ impl DbxBackend for LocalBackend {
         let is_sqlserver_agent =
             dbx_core::query::connection_pool_is_sqlserver_agent(self.state.as_ref(), &connection.id, database).await;
         dbx_core::query::query_execution_plan(sql, Some(connection.db_type), is_sqlserver_agent)
+    }
+
+    async fn import_connections_for_mcp(
+        &self,
+        bundle: Value,
+        dry_run: bool,
+    ) -> Result<dbx_core::persistence::connection_import::ConnectionImportReport, String> {
+        if !dry_run && self.load_mcp_global_policy().await?.read_only {
+            return Err("MCP_READ_ONLY: Global MCP read-only mode blocks connection imports.".into());
+        }
+        let report = self.state.storage.import_connections_for_mcp(bundle, dry_run).await?;
+        if !dry_run && report.imported_count > 0 {
+            for config in self.state.storage.load_connections().await? {
+                self.state.configs.write().await.insert(config.id.clone(), config);
+            }
+            self.notify_connections_changed().await;
+        }
+        Ok(report)
     }
 
     async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {

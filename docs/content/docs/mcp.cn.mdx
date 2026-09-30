@@ -123,6 +123,7 @@ DBX MCP 当前提供以下工具（具体可用工具取决于构建功能及权
 | `dbx_list_connections` | 列出当前 MCP 会话可见的连接 |
 | `dbx_list_databases` | 列出连接中可通过 MCP 访问的数据库，并遵守该连接的数据库范围 |
 | `dbx_add_connection` | 添加连接到 DBX 存储 |
+| `dbx_import_connections` | 预览或原子导入受保护的本地 DBX 导出文件 |
 | `dbx_get_connection` | 查看不含凭据的连接配置 |
 | `dbx_update_connection` | 局部修改配置，保留未提供的字段和凭据 |
 | `dbx_duplicate_connection` | 复制一个连接及其完整配置 |
@@ -429,3 +430,21 @@ Updates support `name`, `note`, `host`, `port`, `username`, `password`, `databas
 `dbx_add_connection` also accepts `read_only`. `dbx_remove_connection` requires `confirmed: true` after the caller has reviewed the exact target and obtained confirmation. Removal deletes saved configuration and credentials, cannot be undone by MCP, and does not touch database contents. Keep an authorized DBX backup if recovery is needed. All mutations recheck global read-only and connection scope in the storage transaction; update is unavailable in scoped AI sessions. The per-connection `read_only` field can be edited only when the global management policy allows it. Updating invalidates cached connections and pinned transactions.
 
 中文：详情和局部更新按 ID 或名称选择连接；`changes` 只写需要修改的字段。未提供的密码及隧道/插件凭据保持不变，空字符串密码表示明确清除，`database`/`driver_profile` 用 null 清除。新增支持 `read_only`；删除须确认目标后传 `confirmed: true`，会删除配置与凭据，无法通过 MCP 撤销，业务数据不受影响。所有修改在存储事务中重新检查全局只读和连接范围，限定范围的 AI 会话不开放更新；不能通过修改连接自身的 `read_only` 绕过全局只读。
+
+## 导入已保存的连接包
+
+`dbx_import_connections` 从受保护的本地文件读取 DBX 导出。先预览，再获得批准后执行同一文件：
+
+```json
+{"file_path":"/absolute/path/connections.json"}
+```
+
+```json
+{"file_path":"/absolute/path/connections.json","confirmed":true}
+```
+
+加密的 `dbx-encrypted` 版本 1 导出需在两次调用中都添加 `"passphrase_file":"/absolute/path/passphrase.txt"`，指定独立的仅所有者可访问 UTF-8 口令文件；末尾的一个 LF 或 CRLF 会被去除。MCP 不接受标准输入或口令字面值，缺少口令或口令错误时不会写入连接。不要将凭据放入 MCP 参数。
+
+输入上限为 16 MiB；Unix 下须为仅所有者可访问的普通文件，Windows 下请限制 ACL。明文格式支持含 `connections`、可选 `layout` 和 `tunnelProfiles` 的 DBX 连接包、旧版连接数组和 `dbx-config` 版本 1 对象。需要现有已初始化的加密 DBX 存储及密钥。Web 模式和限定范围的 AI 会话不开放此工具，工具/连接白名单仍然生效。全局只读允许预览，但阻止实际导入，策略在事务内重新检查。
+
+结果只包含数量和警告，不输出连接凭据。预览的 `imported_count` 表示将新增的数量，`dry_run` 为 true，不保存内容。确认后保留支持的完整设置，新增被引用的隧道配置以及重新映射 ID 的侧边栏分组/排序，不覆盖已有凭据。规范化名称、主机、端口、数据库类型和数据库均相同的连接跳过；同名但完整标识不同的连接分别保留，请按 ID 选择。无效配置或重复来源 ID 会拒绝整批导入。此操作不连接数据库、不复制文件，也不测试凭据；使用前请检查设备路径、缺失凭据和网络可达性。

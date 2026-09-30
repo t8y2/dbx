@@ -145,6 +145,7 @@ Ask the MCP client to:
 | `dbx_list_connections` | List connections visible to the MCP session |
 | `dbx_list_databases` | List databases available through a connection, respecting its MCP database scope |
 | `dbx_add_connection` | Add a connection to DBX storage |
+| `dbx_import_connections` | Preview or atomically import a protected local DBX export |
 | `dbx_get_connection` | Get safe saved settings without credentials |
 | `dbx_update_connection` | Patch saved settings while preserving omitted fields and credentials |
 | `dbx_duplicate_connection` | Duplicate a DBX connection with its complete settings |
@@ -792,3 +793,21 @@ Updates support `name`, `note`, `host`, `port`, `username`, `password`, `databas
 `dbx_add_connection` also accepts `read_only`. `dbx_remove_connection` requires `confirmed: true` after the caller has reviewed the exact target and obtained confirmation. Removal deletes saved configuration and credentials, cannot be undone by MCP, and does not touch database contents. Keep an authorized DBX backup if recovery is needed. All mutations recheck global read-only and connection scope in the storage transaction; update is unavailable in scoped AI sessions. The per-connection `read_only` field can be edited only when the global management policy allows it. Updating invalidates cached connections and pinned transactions.
 
 中文：详情和局部更新按 ID 或名称选择连接；`changes` 只写需要修改的字段。未提供的密码及隧道/插件凭据保持不变，空字符串密码表示明确清除，`database`/`driver_profile` 用 null 清除。新增支持 `read_only`；删除须确认目标后传 `confirmed: true`，会删除配置与凭据，无法通过 MCP 撤销，业务数据不受影响。所有修改在存储事务中重新检查全局只读和连接范围，限定范围的 AI 会话不开放更新；不能通过修改连接自身的 `read_only` 绕过全局只读。
+
+## Import saved connection bundles
+
+`dbx_import_connections` reads a protected local DBX export file. Preview first, then obtain approval before applying the same file:
+
+```json
+{"file_path":"/absolute/path/connections.json"}
+```
+
+```json
+{"file_path":"/absolute/path/connections.json","confirmed":true}
+```
+
+For an encrypted `dbx-encrypted` version 1 export, add `"passphrase_file":"/absolute/path/passphrase.txt"` to both calls. It must be a separate owner-only UTF-8 file; one final LF or CRLF is removed. MCP does not accept stdin or literal passphrases. A missing or incorrect passphrase fails without writing connections. Never put credentials in MCP arguments.
+
+Input is bounded to 16 MiB and must be a regular owner-only file on Unix; restrict its ACL on Windows. Supported plaintext formats are a DBX bundle with `connections`, optional `layout` and `tunnelProfiles`, a legacy connection array, or a legacy `dbx-config` version 1 object. The existing initialized encrypted DBX store and key are required. This tool is unavailable in Web mode and scoped AI sessions; tool/connection allowlists also apply. Global read-only mode allows preview but blocks confirmed import, with policy rechecked inside the transaction.
+
+The result contains counts and warnings, never connection credentials. During preview, `imported_count` is the number that would be added; `dry_run` is true and nothing is saved. Confirmed import preserves full supported settings, adds referenced tunnel profiles and sidebar groups/order with remapped IDs, and never overwrites existing credentials. Exact normalized name/host/port/database-type/database matches are skipped; equal names with different identities remain separate, so select those connections by ID. Invalid configurations or duplicate source IDs reject the whole batch. No database connection, file copy, or credential test is performed; review device-specific paths, missing credentials, and network reachability before use.

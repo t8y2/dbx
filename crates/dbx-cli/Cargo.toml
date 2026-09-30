@@ -4,13 +4,18 @@ version = "0.4.102"
 edition = "2021"
 license = "Apache-2.0"
 
+[features]
+default = ["duckdb-sidecar", "mq-admin"]
+duckdb-sidecar = ["dbx-mcp/duckdb-sidecar"]
+mq-admin = ["dbx-mcp/mq-admin"]
+
 [[bin]]
 name = "dbx"
 path = "src/main.rs"
 
 [dependencies]
 dbx-core = { path = "../dbx-core", default-features = false, features = ["sqlite-bundled"] }
-dbx-mcp = { path = "../dbx-mcp" }
+dbx-mcp = { path = "../dbx-mcp", default-features = false }
 dirs = "6"
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 serde = { version = "1", features = ["derive"] }

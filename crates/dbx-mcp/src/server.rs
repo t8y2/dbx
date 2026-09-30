@@ -243,6 +243,24 @@ pub struct AddConnectionRequest {
     pub read_only: bool,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ImportConnectionsRequest {
+    #[schemars(
+        description = "Owner-only JSON export path on the local DBX host. Never send credentials in tool arguments."
+    )]
+    pub file_path: String,
+    #[schemars(
+        description = "Optional owner-only passphrase file for a dbx-encrypted export; never a literal passphrase."
+    )]
+    pub passphrase_file: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Preview is the default. Set true only after approving persistent connection and credential import."
+    )]
+    pub confirmed: bool,
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetConnectionRequest {
     #[serde(flatten)]
@@ -836,6 +854,9 @@ impl DbxMcpServer {
         // startup paths, so select the same provider before any TLS tool call.
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let mut tool_router = Self::tool_router();
+        if web_mode || scope.enabled() {
+            tool_router.disable_route("dbx_import_connections");
+        }
         if scope.enabled() {
             tool_router.disable_route("dbx_add_connection");
             tool_router.disable_route("dbx_update_connection");
@@ -2631,6 +2652,43 @@ impl DbxMcpServer {
                 result
             }
             Err(error) => backend_tool_error("CONNECTION_SAVE_ERROR", safe_connection_error(&error)),
+        }
+    }
+
+    #[tool(
+        name = "dbx_import_connections",
+        description = "Preview or atomically import a local DBX connection export. Add-only and offline; never connects to databases. Results contain counts and warnings, never credentials."
+    )]
+    async fn import_connections(&self, Parameters(request): Parameters<ImportConnectionsRequest>) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_import_connections").await {
+            return error;
+        }
+        let policy = match self.load_policy().await {
+            Ok(policy) => policy,
+            Err(error) => return error,
+        };
+        if request.confirmed && policy.read_only {
+            return tool_error("MCP_READ_ONLY", "Global MCP read-only mode blocks imports.");
+        }
+        if policy.allowed_connection_ids.is_some() || !policy.allowed_group_ids.is_empty() {
+            return tool_error("CONNECTION_OUT_OF_SCOPE", "Import is disabled by scoped policy.");
+        }
+        let input = match dbx_core::persistence::connection_import::read_import_file_with_passphrase(
+            std::path::Path::new(&request.file_path),
+            false,
+            request.passphrase_file.as_deref().map(std::path::Path::new),
+        ) {
+            Ok(value) => value,
+            Err(error) => return backend_tool_error("INVALID_CONNECTION_IMPORT", safe_connection_error(&error)),
+        };
+        match self.backend.import_connections_for_mcp(input, !request.confirmed).await {
+            Ok(report) => {
+                let value = serde_json::to_value(report).expect("serializable report");
+                let mut result = text(value.to_string());
+                result.structured_content = Some(value);
+                result
+            }
+            Err(error) => backend_tool_error("CONNECTION_STORE_ERROR", safe_connection_error(&error)),
         }
     }
 

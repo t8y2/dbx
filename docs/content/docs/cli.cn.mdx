@@ -72,6 +72,40 @@ dbx context local --tables users,orders
 dbx open local users
 ```
 
+## 导入 DBX 连接包
+
+将明文或加密 DBX 导出文件导入本地加密连接存储；此操作不会连接业务数据库：
+
+```bash
+chmod 600 connections.json
+dbx connections import --file connections.json --json
+# 检查预览后，再明确执行导入：
+dbx connections import --file connections.json --yes --json
+```
+
+未传 `--yes` 时只预览。JSON 结果包含 `dry_run`、`input_count`、`imported_count`（预览时表示将新增的数量）、`skipped_count`、隧道配置数量和警告，不输出凭据。CLI 也支持通过非交互安全管道使用 `--file -`。
+
+- 支持含 `connections`、可选 `layout` 和 `tunnelProfiles` 的明文 DBX 连接包，以及旧版连接数组和 `dbx-config` 版本 1 导出
+- 保留支持的完整连接设置和凭据，导入被引用的隧道配置，为连接、隧道配置和侧边栏分组重新分配 ID，并追加分组及排序；不覆盖已有配置和密码
+- 规范化名称、主机、端口、数据库类型和数据库均相同的连接会跳过；同名但端点、类型或数据库不同的连接会分别保留（请用 ID 选择）；重复来源 ID 或无效配置会使整批导入失败
+- 通常需要已初始化的本地 DBX 存储及现有加密密钥；不支持 `DBX_WEB_URL` 或限定范围的会话，预览和导入均受 MCP 工具/连接范围限制
+- 全局只读模式允许预览；实际导入需要可写 MCP 策略，并在存储事务中重新检查。`--yes` 和 SQL 写入标志不能绕过该策略
+- 输入上限为 16 MiB，Unix 文件须为仅所有者可访问的普通文件；Windows 请限制文件 ACL。加密的 `dbx-encrypted` 版本 1 导出需要单独受保护的口令文件
+
+加密导出通过仅所有者可访问的 UTF-8 口令文件解密，预览和执行使用相同参数：
+
+```bash
+chmod 600 connections.json passphrase.txt
+dbx connections import --file connections.json --passphrase-file passphrase.txt --json
+dbx connections import --file connections.json --passphrase-file passphrase.txt --yes --json
+```
+
+口令文件末尾的一个 LF 或 CRLF 会被去除。也可让凭据管理器将口令通过非交互管道传给 `--passphrase-file -`，此时连接包必须来自文件，两者不能同时使用标准输入。不能将口令字面值作为命令参数。口令错误或密文损坏时，在写入任何连接前失败。
+
+仅当本地配置完全为空时，可明确添加 `--initialize`。预览仍不创建加密密钥或连接；使用 `--initialize --yes` 执行时，可以先创建配置的加密密钥再保存加密凭据。已有连接、旧版文件、已存凭据，或未完成/失败的安全迁移会阻止初始化。该选项不替换已有密钥，也不放宽 MCP 策略；后续导入请省略它。
+
+明文导出文件可能包含密码，不要将内容粘贴到聊天、命令参数、日志或版本库中，迁移结束后清理临时导出文件。导入不会测试连通性、复制 SQLite/DuckDB 文件、安装驱动，也不会转换本机路径或内网地址；使用前请检查警告。
+
 ## 诊断
 
 使用 `dbx doctor` 查看本地 DBX 路径、连接存储健康状态，以及桌面端 bridge 是否可用：

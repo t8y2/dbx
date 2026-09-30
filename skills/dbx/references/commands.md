@@ -11,10 +11,18 @@ dbx connections list --json
 dbx connections get <id-or-name> --json
 dbx connections add --file connection.json --json
 dbx connections update <id-or-name> --file changes.json --json
+dbx connections import --file export.json --json
+dbx connections import --file export.json --yes --json
 dbx connections remove <id-or-name> --yes --json
 ```
 
 `doctor` reports connection storage and Desktop bridge health. `capabilities` identifies direct-query and bridge-required database types. Connection listings and details omit secrets. Configuration mutations require an explicit user request and a writable global MCP policy; write flags cannot override it. JSON files must be owner-only on Unix; `--file -` accepts non-terminal stdin. Never put credentials in command arguments. Updates preserve omitted fields and credentials: `{"password":""}` clears the saved password, and null clears `database` or `driver_profile`. Removal requires confirmation and cannot be undone by the CLI.
+
+### Import existing DBX exports
+
+`connections import` is local-only and preview-first: omit `--yes` until the user approves applying the reviewed file. It accepts a plain DBX bundle (`connections`, optional `layout`/`tunnelProfiles`), a legacy array or `dbx-config` object. For an encrypted export, add `--passphrase-file /protected/passphrase.txt`; never put a literal passphrase in argv. A credential manager may pipe it through `--passphrase-file -` when the bundle comes from a file. MCP's corresponding tool accepts only file paths.
+
+Files must be regular, owner-only on Unix, and no larger than 16 MiB for the bundle. Import normally requires the existing encrypted DBX store and key. Only an explicitly approved empty-profile setup may use CLI `--initialize`; it refuses existing connections/credentials or legacy data, and creates no key during preview. Preview is allowed under global read-only; apply still needs writable MCP policy, and both obey tool/connection scopes. It atomically adds full supported settings, referenced tunnel profiles and sidebar layout with new IDs. Exact normalized name/host/port/type/database duplicates are skipped; existing secrets are never overwritten. Same-name distinct connections are kept, so use IDs for ambiguous names. Output reports counts/warnings only. Import never tests credentials, connects databases, copies file databases, or installs drivers. Review missing credentials, private addresses and machine-specific paths before use.
 
 ## Schema Inspection
 

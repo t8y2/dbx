@@ -746,6 +746,7 @@ export default withEnglishFallback({
     damengDriverModeHint: "DM8 için pakete gömülü sürücüyü kullanın. DM6 veya başka bir uyumlu sürüm için resmî JDBC JAR dosyasını seçin.",
     damengCustomDriverHint: "Lisanslı bir kaynaktan Dameng JDBC JAR dosyası seçin. Özel sürücü Dameng agent'ı içinde yalıtılır ve genel JDBC eklentisini gerektirmez.",
     damengCustomDriverRequired: "Bir Dameng JDBC sürücü JAR dosyası seçin.",
+    sundbCustomDriverHint: "SunDB agent'i üretici JDBC sürücüsünü içerir, bu yüzden JAR gerekmez (sürücü sınıfı csii.sundb.jdbc.SundbDriver). Yalnızca daha yeni bir üretici sürücüsü yüklemek için burada JAR belirtin; özel sürücü agent içinde yalıtılarak yüklenir.",
     redisTlsInsecure: "Sertifika doğrulamasını atla",
     redisTlsInsecureHint: "redis-cli --tls --insecure ile eşdeğerdir; kendinden imzalı sertifikalar veya özel CA'lar içindir.",
     mysqlTlsMode: "TLS Modu",

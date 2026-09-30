@@ -1040,6 +1040,7 @@ export default {
     damengDriverModeHint: "Use the bundled driver for DM8. For DM6 or another compatible version, select its official JDBC JAR.",
     damengCustomDriverHint: "Select a Dameng JDBC JAR from a licensed source. The custom driver is isolated inside the Dameng agent and does not require the generic JDBC plugin.",
     damengCustomDriverRequired: "Select a Dameng JDBC driver JAR.",
+    sundbCustomDriverHint: "The SunDB Agent ships the vendor JDBC driver, so no JAR is needed (driver class csii.sundb.jdbc.SundbDriver). Provide a JAR here only to load a newer vendor driver; custom drivers are loaded in isolation inside the Agent.",
     redisTlsInsecure: "Skip certificate verification",
     redisTlsInsecureHint: "Equivalent to redis-cli --tls --insecure, for self-signed certificates or private CAs.",
     mysqlTlsMode: "TLS Mode",

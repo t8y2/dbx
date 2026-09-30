@@ -925,6 +925,8 @@ export default withEnglishFallback({
     damengDriverModeHint: "Используйте встроенный драйвер для DM8. Для DM6 или другой совместимой версии выберите её официальный JDBC JAR.",
     damengCustomDriverHint: "Выберите Dameng JDBC JAR из лицензированного источника. Пользовательский драйвер изолирован внутри агента Dameng и не требует универсального плагина JDBC.",
     damengCustomDriverRequired: "Выберите JAR-файл драйвера Dameng JDBC.",
+    sundbCustomDriverHint:
+      "Агент SunDB уже включает драйвер JDBC от производителя, поэтому JAR указывать не нужно (класс драйвера csii.sundb.jdbc.SundbDriver). Укажите JAR здесь, только чтобы загрузить более новую версию драйвера производителя; пользовательский драйвер загружается изолированно внутри агента.",
     redisTlsInsecure: "Пропускать проверку сертификата",
     redisTlsInsecureHint: "Эквивалентно redis-cli --tls --insecure, для самоподписанных сертификатов или частных CA.",
     mysqlTlsMode: "Режим TLS",

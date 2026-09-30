@@ -968,6 +968,7 @@ export default withEnglishFallback({
     damengDriverModeHint: "DM8은 내장 드라이버를 사용합니다. DM6 또는 다른 호환 버전은 해당 공식 JDBC JAR을 선택하세요.",
     damengCustomDriverHint: "정식 출처의 Dameng JDBC JAR을 선택하세요. 사용자 지정 드라이버는 Dameng 에이전트에서 격리되어 로드되며 일반 JDBC 플러그인이 필요하지 않습니다.",
     damengCustomDriverRequired: "Dameng JDBC 드라이버 JAR을 선택하세요.",
+    sundbCustomDriverHint: "SunDB 에이전트에는 벤더 JDBC 드라이버가 포함되어 있으므로 JAR을 지정할 필요가 없습니다(드라이버 클래스 csii.sundb.jdbc.SundbDriver). 더 새로운 벤더 드라이버를 로드할 때만 여기에서 JAR을 지정하세요. 사용자 지정 드라이버는 에이전트 내에서 격리되어 로드됩니다.",
     redisTlsInsecure: "인증서 검증 건너뛰기",
     redisTlsInsecureHint: "redis-cli --tls --insecure과 동일하며, 자체 서명 인증서나 사설 CA용입니다.",
     mysqlTlsMode: "TLS 모드",

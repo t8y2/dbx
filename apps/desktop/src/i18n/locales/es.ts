@@ -1659,6 +1659,8 @@ export default withEnglishFallback({
     damengDriverModeHint: "Use el controlador incluido para DM8. Para DM6 u otra versión compatible, seleccione su JAR JDBC oficial.",
     damengCustomDriverHint: "Seleccione un JAR JDBC de Dameng de una fuente con licencia. El controlador se carga de forma aislada en el agente de Dameng y no requiere el complemento JDBC genérico.",
     damengCustomDriverRequired: "Seleccione un JAR del controlador JDBC de Dameng.",
+    sundbCustomDriverHint:
+      "El agente de SunDB ya incluye el controlador JDBC del fabricante, por lo que no se necesita ningún JAR (clase de controlador csii.sundb.jdbc.SundbDriver). Indique aquí un JAR solo para cargar un controlador del fabricante más reciente; el controlador personalizado se carga de forma aislada dentro del agente.",
     zookeeperClusterInputHint: "El clúster ZooKeeper puede completarse con todos los nodos en la URL superior (por ejemplo, zookeeper://zk-1:2181,zk-2:2181/app), o en el Connect String a continuación.",
     zookeeperAuthMethod: "Método de autenticación",
     zookeeperAuthDigest: "Digest (predeterminado)",

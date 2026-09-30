@@ -1593,6 +1593,8 @@ export default withEnglishFallback({
     damengDriverModeHint: "DM8 では内蔵ドライバーを使用します。DM6 またはその他の互換バージョンでは、対応する公式 JDBC JAR を選択してください。",
     damengCustomDriverHint: "正規の提供元から入手した Dameng JDBC JAR を選択してください。カスタムドライバーは Dameng エージェント内で分離して読み込まれ、汎用 JDBC プラグインは不要です。",
     damengCustomDriverRequired: "Dameng JDBC ドライバー JAR を選択してください。",
+    sundbCustomDriverHint:
+      "SunDB エージェントにはベンダー製 JDBC ドライバーが同梱されているため、JAR の指定は不要です（ドライバークラス csii.sundb.jdbc.SundbDriver）。より新しいベンダー製ドライバーを読み込む場合にのみ、ここで JAR を指定してください。カスタムドライバーはエージェント内で分離して読み込まれます。",
     localInfilePathHint: "LOAD DATA LOCAL INFILE を使用する場合、localInfilePath=/絶対パス/file.csv で各ファイルを明示的に許可してください。複数のファイルがある場合はこのパラメータを繰り返します。",
     hiveAuthMode: "認証",
     hiveAuthNone: "なし",

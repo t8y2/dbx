@@ -1604,6 +1604,7 @@ export default withEnglishFallback({
     damengDriverModeHint: "DM8 使用內建驅動；DM6 或其他相容版本請選擇對應的官方 JDBC JAR。",
     damengCustomDriverHint: "請選擇合法來源的達夢 JDBC JAR。自訂驅動會在達夢 Agent 內隔離載入，不需要安裝通用 JDBC 外掛。",
     damengCustomDriverRequired: "請選擇達夢 JDBC 驅動 JAR。",
+    sundbCustomDriverHint: "科藍 SUNDB Agent 已內建廠商 JDBC 驅動，無需指定 JAR（驅動類別 csii.sundb.jdbc.SundbDriver）。僅在需要載入更新版廠商驅動時在此指定 JAR；自訂驅動會在 Agent 內隔離載入。",
     zookeeperClusterInputHint: "ZooKeeper 叢集可在上方 URL 中填寫全部節點（例如 zookeeper://zk-1:2181,zk-2:2181/app），也可在下方 Connect String 中填寫。",
     zookeeperAuthMethod: "認證方式",
     zookeeperAuthDigest: "Digest（預設）",

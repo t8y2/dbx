@@ -955,6 +955,7 @@ export default withEnglishFallback({
     damengDriverModeHint: "DM8 使用内置驱动；DM6 或其他兼容版本请选择对应的官方 JDBC JAR。",
     damengCustomDriverHint: "请选择合法来源的达梦 JDBC JAR。自定义驱动在达梦 Agent 内隔离加载，无需安装通用 JDBC 插件。",
     damengCustomDriverRequired: "请选择达梦 JDBC 驱动 JAR。",
+    sundbCustomDriverHint: "科蓝 SUNDB Agent 已内置厂商 JDBC 驱动，无需指定 JAR（驱动类 csii.sundb.jdbc.SundbDriver）。仅在需要加载更新版厂商驱动时在此指定 JAR；自定义驱动在 Agent 内隔离加载。",
     redisTlsInsecure: "跳过证书验证",
     redisTlsInsecureHint: "等价于 redis-cli --tls --insecure，适用于自签名证书或私有 CA。",
     mysqlTlsMode: "TLS 模式",

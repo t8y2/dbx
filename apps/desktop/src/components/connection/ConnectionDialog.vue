@@ -90,6 +90,7 @@ import { mysqlCleartextPasswordAuthEnabled, setMysqlCleartextPasswordAuthEnabled
 import { applyDamengSslUrlParams, damengSslFormConfig } from "@/lib/database/damengSslOptions";
 import { DAMENG_BUILTIN_DRIVER_PROFILE, DAMENG_CUSTOM_DRIVER_PROFILE, DAMENG_DEFAULT_JDBC_DRIVER_CLASS, damengCustomJdbcUrl, damengDriverModeForConfig, defaultDamengJdbcUrl, type DamengDriverMode } from "@/lib/database/damengDriverOptions";
 import { doltSystemTablesVisible, isDoltDriverProfile, setDoltSystemTablesVisible } from "@/lib/database/doltProfile";
+import { SUNDB_DEFAULT_JDBC_DRIVER_CLASS, sundbJdbcDriverClass } from "@/lib/database/sundbDriverOptions";
 import { DamengJvmSystemPropertyError, damengJvmSystemPropertiesText, parseDamengJvmSystemProperties } from "@/lib/database/damengJvmOptions";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { configuredDatabaseProductName, connectionConfigFingerprint, databaseInfoCopyText, databaseInfoRows, normalizeDatabaseConnectionInfo, type DatabaseInfoField } from "@/lib/connection/connectionDatabaseInfo";
@@ -2888,6 +2889,15 @@ function applyProfile(val: string, preserveConnectionFields = false) {
       jdbcDriverPathsInput.value = "";
       jdbcManualClasspathOpen.value = true;
     }
+    if (profile.type === "sundb") {
+      // The SunDB Agent bundles the vendor JDBC driver, so the connection works
+      // without a JAR; the classpath field is only an override for anyone who
+      // wants the Agent to load a newer vendor JAR in isolation.
+      form.value.connection_string = undefined;
+      form.value.jdbc_driver_class = SUNDB_DEFAULT_JDBC_DRIVER_CLASS;
+      form.value.jdbc_driver_paths = [];
+      jdbcDriverPathsInput.value = "";
+    }
     if (profile.type === "transwarp") {
       form.value.connection_string = undefined;
     }
@@ -3097,7 +3107,7 @@ watch(
         sysdba: config.sysdba || isOracleSysUser(config),
         oracle_connection_type: config.oracle_connection_type || "service_name",
         connection_string: config.connection_string,
-        jdbc_driver_class: config.jdbc_driver_class,
+        jdbc_driver_class: config.db_type === "sundb" ? sundbJdbcDriverClass(config) : config.jdbc_driver_class,
         jdbc_driver_paths: config.jdbc_driver_paths || [],
         redis_connection_mode: config.redis_connection_mode || "standalone",
         redis_sentinel_master: config.redis_sentinel_master || "",
@@ -3597,7 +3607,7 @@ function dbCategoryForOption(value: string): DbCategoryKey | undefined {
 
 const selectedDbIcon = computed(() => (isPluginConnection.value ? "plugin" : iconTypeMap[selectedType.value] || selectedProfile().icon || selectedType.value));
 function supportsNativeAgentJdbcDriverConfigType(dbType: DatabaseType): boolean {
-  return dbType === "prestosql" || dbType === "bigquery" || dbType === "dameng";
+  return dbType === "prestosql" || dbType === "bigquery" || dbType === "dameng" || dbType === "sundb";
 }
 
 const jdbcBackedDatabaseTypes = new Set<DatabaseType>(["jdbc", "prestosql", "bigquery"]);
@@ -3613,6 +3623,11 @@ const jdbcxHighPrivilegeExtensionsAllowed = computed({
   },
 });
 const supportsNativeAgentJdbcDriverConfig = computed(() => supportsNativeAgentJdbcDriverConfigType(form.value.db_type) && (form.value.db_type !== "dameng" || isDamengCustomDriver.value));
+const nativeAgentJdbcDriverHint = computed(() => {
+  if (form.value.db_type === "dameng") return t("connection.damengCustomDriverHint");
+  if (form.value.db_type === "sundb") return t("connection.sundbCustomDriverHint");
+  return t("connection.jdbcPluginHint");
+});
 const isH2FileMode = computed(() => form.value.db_type === "h2" && h2ConnectionMode.value === "file");
 const isH2CustomDriver = computed(() => form.value.db_type === "h2" && form.value.driver_profile === "h2-custom");
 const usesLocalFilePathInput = computed(() => isLocalFileTypeDb(form.value.db_type) && (form.value.db_type !== "h2" || isH2FileMode.value));
@@ -5072,6 +5087,13 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
       config.jdbc_driver_class = undefined;
       config.jdbc_driver_paths = [];
     }
+  }
+  if (config.db_type === "sundb") {
+    // The SunDB Agent bundles the vendor driver; an empty classpath means the
+    // Agent resolves the driver class on its own classloader. A non-empty
+    // classpath still overrides it with a user-supplied JAR.
+    config.jdbc_driver_class = sundbJdbcDriverClass(config);
+    config.jdbc_driver_paths = parsedJdbcDriverPaths();
   }
   if (jdbcBackedDatabaseTypes.has(config.db_type) || gaussdbConnectionMode(config) === "m-jdbc") {
     if (config.db_type === "jdbc") {
@@ -9155,7 +9177,7 @@ function openExternalUrl(url: string) {
                         <span />
                         <div class="col-span-3 space-y-2">
                           <p class="text-xs text-muted-foreground">
-                            {{ form.db_type === "dameng" ? t("connection.damengCustomDriverHint") : t("connection.jdbcPluginHint") }}
+                            {{ nativeAgentJdbcDriverHint }}
                           </p>
                           <div class="flex flex-wrap gap-2">
                             <Button type="button" variant="outline" size="sm" @click="emit('openDriverStore', { target: 'tab', tab: 'jdbc' })">

@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, watch, onBeforeUnmount, onScopeDispose, inject, reactive, ref, shallowRef } from "vue";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import PluginWorkbenchHost from "@/components/plugins/PluginWorkbenchHost.vue";
+import type { PluginWorkbenchContext } from "@/lib/plugins/pluginHostBridge";
 import { createRoutedSidebarDialogController, routedCanSetCreateDatabaseCharset } from "./sidebarDialogControllerRouting";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import { useSidebarDataOpenRuntime } from "@/composables/useSidebarDataOpenRuntime";
@@ -74,8 +77,9 @@ import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
 import { useToast } from "@/composables/useToast";
 import { createFrontendPluginRegistry } from "@/lib/plugins/frontendPlugin";
 import { activatePluginContextMenuItem, buildPluginConnectionContextMenuInvocation, buildPluginTableContextMenuInvocation } from "@/lib/plugins/pluginContext";
+import { parseDynamicMenuResponse, renderDynamicMenuEntries, type DynamicMenuAction } from "@/lib/plugins/dynamicContextMenu";
 import type { PluginContextMenuInvocation } from "@/lib/plugins/pluginContext";
-import type { InstalledPlugin, PluginContextMenuContribution } from "@/types/database";
+import type { InstalledPlugin, PluginContextMenuContribution, PluginWorkbenchContribution } from "@/types/database";
 import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import type { ColumnInfo, ConnectionConfig, DatabaseType, TreeNode, TreeNodeType } from "@/types/database";
 import * as api from "@/lib/backend/api";
@@ -387,6 +391,7 @@ const savedSqlStore = useSavedSqlStore();
 const { toast } = useToast();
 const installedPlugins = ref<InstalledPlugin[]>([]);
 const sidebarPluginRegistry = computed(() => createFrontendPluginRegistry(installedPlugins.value, appLocale.value));
+const pluginDialog = shallowRef<{ plugin: InstalledPlugin; contribution: PluginWorkbenchContribution; context: PluginWorkbenchContext; title: string } | null>(null);
 
 async function refreshInstalledPlugins() {
   try {
@@ -6865,17 +6870,19 @@ function appendPluginConnectionMenuItems(items: ContextMenuItem[], node: TreeNod
   if (pluginItems.length === 0) return;
   const config = node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined;
   if (!config) return;
-  const menuItems = pluginItems.flatMap(({ plugin, contribution }) => {
-    const invocation = buildPluginConnectionContextMenuInvocation(contribution.id, config);
-    if (!invocation) return [];
-    return [
-      {
-        label: contribution.label,
-        icon: PlugZap,
-        action: () => activateSidebarPluginContextMenuItem(plugin.manifest.id, contribution, invocation),
-      },
-    ];
-  });
+  const menuItems = pluginItems
+    .filter(({ contribution }) => !contribution.dynamic)
+    .flatMap(({ plugin, contribution }) => {
+      const invocation = buildPluginConnectionContextMenuInvocation(contribution.id, config);
+      if (!invocation) return [];
+      return [
+        {
+          label: contribution.label,
+          icon: PlugZap,
+          action: () => activateSidebarPluginContextMenuItem(plugin.manifest.id, contribution, invocation),
+        },
+      ];
+    });
   if (menuItems.length === 0) return;
   items.push({ label: "", separator: true }, ...menuItems);
 }
@@ -6888,6 +6895,7 @@ function appendPluginTableMenuItems(items: ContextMenuItem[], node: TreeNode) {
 
   const tableItems: ContextMenuItem[] = [];
   for (const { plugin, contribution } of pluginItems) {
+    if (contribution.dynamic) continue;
     const invocation = buildPluginTableContextMenuInvocation(contribution.id, node);
     if (!invocation) continue;
     tableItems.push({
@@ -6898,6 +6906,67 @@ function appendPluginTableMenuItems(items: ContextMenuItem[], node: TreeNode) {
   }
   if (tableItems.length === 0) return;
   items.push({ label: "", separator: true }, ...tableItems);
+}
+
+/** Resolve opt-in contributions only for the row being opened. A failing plugin cannot hold the menu open. */
+function resolveContextMenu(node: TreeNode, staticItems: ContextMenuItem[]): Promise<ContextMenuItem[]> | ContextMenuItem[] {
+  if (node.type !== "connection" && node.type !== "table") return staticItems;
+  const entries = sidebarPluginRegistry.value.listContextMenuItems(node.type).filter(({ contribution }) => contribution.dynamic);
+  if (entries.length === 0) return staticItems;
+  const requests = entries.map(async ({ plugin, contribution }) => {
+    const invocation = node.type === "connection" ? (node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined) : undefined;
+    const target = node.type === "connection" ? (invocation ? buildPluginConnectionContextMenuInvocation(contribution.id, invocation) : null) : buildPluginTableContextMenuInvocation(contribution.id, node);
+    if (!target) return [];
+    try {
+      const ownerPluginId = node.type === "connection" && node.connectionId ? connectionStore.getConfig(node.connectionId)?.plugin_id : undefined;
+      const response = await api.invokePlugin(
+        plugin.manifest.id,
+        `contextMenu/resolve/${contribution.id}`,
+        {
+          ...target.params,
+          locale: appLocale.value,
+          ...(ownerPluginId ? { ownerPluginId } : {}),
+        },
+        500,
+      );
+      const resolved = parseDynamicMenuResponse(response);
+      if (!resolved) return [];
+      const activate = (action: DynamicMenuAction, label: string) => {
+        if (action.type === "open-workbench") {
+          if (action.presentation === "dialog") {
+            const workbench = sidebarPluginRegistry.value.findWorkbench(plugin.manifest.id, action.workbench);
+            if (!workbench) {
+              toast(`Plugin workbench '${plugin.manifest.id}/${action.workbench}' is unavailable`, 5000);
+              return;
+            }
+            pluginDialog.value = { ...workbench, context: target.context, title: label };
+            return;
+          }
+          activateSidebarPluginContextMenuItem(plugin.manifest.id, { ...contribution, label, action }, target);
+          return;
+        }
+        const invoke = () => api.invokePlugin(plugin.manifest.id, target.method, { ...target.params, itemId: action.id });
+        void invoke()
+          .catch(async (error: unknown) => {
+            if (!action.reopenConnectionOnMissing || node.type !== "connection" || !target.connectionId || !String((error as Error)?.message || error).includes("Connection is not active")) throw error;
+            await connectionStore.reopenPluginConnection(target.connectionId, plugin.manifest.id);
+            return invoke();
+          })
+          .then((result) => {
+            const message = (result as { message?: unknown } | null)?.message;
+            if (typeof message === "string" && message.trim()) toast(message, 4000);
+          })
+          .catch((error: unknown) => toast(String((error as Error)?.message || error), 5000));
+      };
+      return renderDynamicMenuEntries(resolved, activate).map((item) => ({ ...item, icon: PlugZap }));
+    } catch {
+      return [];
+    }
+  });
+  return Promise.all(requests).then((groups) => {
+    const dynamicItems = groups.flat();
+    return dynamicItems.length ? [...staticItems, { label: "", separator: true }, ...dynamicItems] : staticItems;
+  });
 }
 
 function activateRuntimeNode(node: TreeNode) {
@@ -7025,6 +7094,7 @@ function toggleNode(node: TreeNode) {
 
 defineExpose({
   buildContextMenu,
+  resolveContextMenu,
   handleRowClick,
   handleRowDoubleClick,
   handleRowKeydown,
@@ -7036,4 +7106,18 @@ defineExpose({
 });
 </script>
 
-<template />
+<template>
+  <Dialog
+    :open="!!pluginDialog"
+    @update:open="
+      (open) => {
+        if (!open) pluginDialog = null;
+      }
+    "
+  >
+    <DialogContent class="h-[min(82vh,780px)] max-w-[min(1080px,calc(100vw-2rem))] gap-0 p-0">
+      <DialogTitle class="sr-only">{{ pluginDialog?.title }}</DialogTitle>
+      <PluginWorkbenchHost v-if="pluginDialog" class="min-h-0 size-full overflow-hidden rounded-lg" :plugin="pluginDialog.plugin" :contribution="pluginDialog.contribution" :context="pluginDialog.context" @close-tab="pluginDialog = null" />
+    </DialogContent>
+  </Dialog>
+</template>

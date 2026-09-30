@@ -5122,7 +5122,9 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
       config.oracle_oci_nls_lang = config.oracle_oci_nls_lang?.trim() || undefined;
       config.oracle_oci_tns_admin = config.oracle_oci_tns_admin?.trim() || undefined;
     } else {
-      config.driver_profile = "oracle";
+      // Only default when empty: saved legacy profiles (oracle-legacy,
+      // oracle-10g) must survive edits untouched.
+      if (!config.driver_profile) config.driver_profile = "oracle";
       config.driver_label = "Oracle";
       config.oracle_oci_nls_lang = undefined;
       config.oracle_oci_tns_admin = undefined;

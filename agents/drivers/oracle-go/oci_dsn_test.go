@@ -5,8 +5,9 @@ import (
 	"testing"
 )
 
-// 期望的公共尾部：取数批量（prefetchRows + fetchArraySize）与显式时区
-const ociDSNTail = ` prefetchRows=256 fetchArraySize=256 timezone="Local"`
+// 期望的公共尾部：显式时区（godror 的 DSN 解析器没有 prefetchRows/
+// fetchArraySize 键，取数批量是 per-statement 选项，不进连接串）
+const ociDSNTail = ` timezone="Local"`
 
 func TestBuildOCIDSNDerivesDescriptorFromPlainParams(t *testing.T) {
 	dsn, err := buildOCIDSN(connectParams{
@@ -118,7 +119,7 @@ func TestBuildOCIDSNQuotesCredentials(t *testing.T) {
 	}
 }
 
-func TestBuildOCIDSNHonoursPrefetchRowsFromURLParams(t *testing.T) {
+func TestBuildOCIDSNOmitsPerStatementFetchParams(t *testing.T) {
 	dsn, err := buildOCIDSN(connectParams{
 		ConnectionString: "jdbc:oracle:oci8:@ORCLPDB1",
 		Username:         "u",
@@ -128,8 +129,8 @@ func TestBuildOCIDSNHonoursPrefetchRowsFromURLParams(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(dsn, "prefetchRows=2000 fetchArraySize=2000") {
-		t.Fatalf("dsn = %q, want the configured fetch batch", dsn)
+	if strings.Contains(dsn, "prefetchRows=") || strings.Contains(dsn, "fetchArraySize=") {
+		t.Fatalf("dsn = %q, want no per-statement fetch params in the DSN", dsn)
 	}
 }
 

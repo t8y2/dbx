@@ -17,7 +17,8 @@ import (
 // 采用 godror 的 logfmt 形式（含 `connectString=` 即按参数串解析）：
 // 只有 URL 与 logfmt 形式会解析参数，旧式的 `user/pass@connectString` 不会，
 // 而我们需要下传 timezone（godror 要求显式声明连接时区，否则取 TIMESTAMP
-// WITH LOCAL TIME ZONE 时无法判断换算基准）与 prefetchRows（与 thin 路径对齐）。
+// WITH LOCAL TIME ZONE 时无法判断换算基准）。取数批量是 per-statement 选项，
+// godror 的 DSN 解析器没有 prefetchRows/fetchArraySize 键，不能放进连接串。
 //
 // 进程级设置仍由 DBX 注入的启动环境提供：Instant Client 目录在 PATH 上，
 // TNS_ADMIN 指向 tnsnames.ora 所在目录 —— 两者都在 agent 进程启动时确定，
@@ -32,10 +33,6 @@ func buildOCIDSN(params connectParams) (string, error) {
 		"user=" + ociLogfmtValue(params.Username),
 		"password=" + ociLogfmtValue(params.Password),
 	}
-	// 取数批量：OCI 需要同时给服务端预取提示与客户端取数数组大小。只设
-	// prefetchRows 时 godror 仍按默认的 100 行一组取回，在高延迟链路上会明显变慢。
-	fetchRows := ociFetchRows(params)
-	fields = append(fields, "prefetchRows="+fetchRows, "fetchArraySize="+fetchRows)
 	// 会话时区由客户端（OCI/NLS）确定，显式告知 godror 以本地时区换算，
 	// 消除 “SESSIONTIMEZONE 与 SYSTIMESTAMP 不一致” 的告警。
 	fields = append(fields, "timezone="+ociLogfmtValue("Local"))
@@ -43,21 +40,6 @@ func buildOCIDSN(params connectParams) (string, error) {
 		fields = append(fields, "sysdba=1")
 	}
 	return strings.Join(fields, " "), nil
-}
-
-// ociFetchRows 返回每次往返取回的行数。
-//
-// 与 thin 路径共用连接参数里的 PREFETCH_ROWS（大小写不敏感），未配置时取
-// oracleDefaultPrefetchRows，保持两种驱动的默认行为一致。
-func ociFetchRows(params connectParams) string {
-	for key, value := range parseURLParams(params.URLParams) {
-		if strings.EqualFold(strings.TrimSpace(key), "PREFETCH_ROWS") {
-			if trimmed := strings.TrimSpace(value); trimmed != "" {
-				return trimmed
-			}
-		}
-	}
-	return oracleDefaultPrefetchRows
 }
 
 // ociConnectTarget 返回 OCI 连接目标：完整连接描述符或 TNS 别名。

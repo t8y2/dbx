@@ -362,7 +362,7 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | `ai.clearRecommendations()` | Clears recommendations for the current workbench; requires `host.ai` and `capabilities.aiRecommendations`. |
 | `onInit(fn)` / `onEvent(fn)` | Observes initialization, environment changes, or backend events; forwarding backend events requires `host.events`. |
 | `storage` | Persistent per-plugin key-value state; requires `host.storage`; see below. |
-| `fileTransfer` | Streams local files and OS drops (desktop only); see below. |
+| `fileTransfer` | Streams local files, downloads, and (desktop) OS drops; see below. |
 | `clipboard` | System clipboard access from the sandbox; see below. |
 
 Failed calls reject their Promise; show a useful error and offer retry. Host methods, parameters, and results are versioned API surface—do not call undocumented DBX internals.
@@ -574,10 +574,10 @@ const offDrag = fileTransfer.onDragState((active) => showDropOverlay(active));
 | `beginSave({ name, contentType?, size? })` | Native save dialog + write handle; resolves `{ handleId, chunkBytes }`, or `null` when the user cancels. |
 | `write(handleId, offset, data)` | Writes one chunk (transferred binary or base64); resolves `{ written, nextOffset }`. |
 | `finish(handleId)` / `cancel(handleId)` | Flush-closes a write handle / discards any handle. |
-| `onDrop(fn)` | Files dropped onto this workbench arrive as already-opened read handles. |
+| `onDrop(fn)` | Files dropped onto this workbench arrive as read handles. A dropped folder is expanded into the regular files it contains (dotfiles and dot-directories like `.git` are skipped); each expanded file carries `relativePath` — its '/'-separated path starting with the dropped folder's own name (`folder/nested/a.csv`) — so the plugin can rebuild the dragged structure and tell same-named files under different dropped roots apart. Listeners receive `(files, { dropId, truncated })`: `dropId` groups this drop's entries (cancellation and progress bookkeeping), `truncated` is `true` when the 2000-file or 8-depth expansion cap cut the delivery short. |
 | `onDragState(fn)` | Whether an OS drag is currently over this workbench; drive drop overlays with it. |
 
-Desktop only: the whole namespace is `undefined` in the web host, so feature-detect before use. `onDrop` only fires for drops that land inside this plugin's workbench area; drops elsewhere keep the host's own behavior.
+Desktop and web hosts differ in what the namespace can do — gate on the additive `capabilities.fileTransfer` flags (`pick`, `beginSave`, `read`, `drop`, `folderExpansion`) instead of probing calls. On desktop, `pick` / `beginSave` use native dialogs and `onDrop` receives OS drops; dropped entries are opened lazily and streamed in chunks, so very large folders and multi-gigabyte files never exhaust handles or memory, and picking more files than the shared handle registry holds downgrades them to lazily-opened entries instead of dropping any. On the web host, `pick` falls back to a browser file input, `beginSave` buffers in memory and downloads through the browser, `onDrop` / `onDragState` never fire (`drop`/`folderExpansion` are `false` there), and handles carry no `relativePath`. `onDrop` only fires for drops that land inside this plugin's workbench area; drops elsewhere keep the host's own behavior.
 
 ### Persistent UI State
 

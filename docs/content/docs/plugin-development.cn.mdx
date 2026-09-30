@@ -362,7 +362,7 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | `ai.clearRecommendations()` | 清空当前工作台的推荐问题；需要 `host.ai` 和 `capabilities.aiRecommendations`。 |
 | `onInit(fn)` / `onEvent(fn)` | 监听初始化、环境变化或后端事件；转发后端事件需要 `host.events`。 |
 | `storage` | 本插件独享的持久化键值状态；需要 `host.storage`；见下文。 |
-| `fileTransfer` | 本地文件流式传输与系统拖放（仅桌面端）；见下文。 |
+| `fileTransfer` | 本地文件流式传输、下载与（桌面端）系统拖放；见下文。 |
 | `clipboard` | 沙箱内的系统剪贴板访问；见下文。 |
 
 调用失败会以 Promise rejection 返回，处理时应展示可理解的错误并允许重试。通过 `request` 调用的宿主方法、参数和返回值以当前 Host API 版本为准，不要调用未在协议中声明的 DBX 内部函数。
@@ -574,10 +574,10 @@ const offDrag = fileTransfer.onDragState((active) => showDropOverlay(active));
 | `beginSave({ name, contentType?, size? })` | 原生保存对话框 + 写句柄；返回 `{ handleId, chunkBytes }`，用户取消时为 `null`。 |
 | `write(handleId, offset, data)` | 写入一个分块（二进制 transfer 或 base64）；返回 `{ written, nextOffset }`。 |
 | `finish(handleId)` / `cancel(handleId)` | 冲洗并关闭写句柄 / 丢弃任意句柄。 |
-| `onDrop(fn)` | 拖入本工作台的文件以已打开的读句柄送达。 |
+| `onDrop(fn)` | 拖入本工作台的文件以读句柄送达；拖入文件夹会被展开为其中包含的文件（`.git` 等点开头文件与目录会被跳过），每个文件额外携带 `relativePath`（以 `/` 分隔、以拖入文件夹自身名字开头的路径，如 `folder/nested/a.csv`），可用于还原拖入的目录结构，也能区分不同拖入根目录下的同名文件。监听器签名为 `(files, { dropId, truncated })`：`dropId` 标识本次拖入的整组条目（取消与进度记账的分组键），`truncated` 为 `true` 表示展开因 2000 文件或 8 层深度上限被截断。 |
 | `onDragState(fn)` | 是否有系统拖拽悬在本工作台上方；用它驱动拖放遮罩。 |
 
-仅桌面端可用：Web 宿主下整个命名空间是 `undefined`，使用前请先探测。`onDrop` 只在拖放落点位于本插件工作台区域内时触发；落点在宿主其他区域时保持宿主自身的行为。
+桌面端与网页端的行为差异：请以 init 消息里 additive 的 `capabilities.fileTransfer` 标志位（`pick`、`beginSave`、`read`、`drop`、`folderExpansion`）做能力探测，不要靠试调用。桌面端 `pick` / `beginSave` 走原生对话框、`onDrop` 接收系统拖放（句柄由宿主惰性打开，读时分块流式，因此超大文件夹与大文件都不会占满句柄；选取文件数超过共享句柄池时自动降级为惰性条目，不会静默丢弃）。网页端 `pick` 回退到浏览器文件选择器、`beginSave` 回退为内存缓冲加浏览器下载、`onDrop` / `onDragState` 不会触发（`drop`/`folderExpansion` 为 `false`）、句柄也没有 `relativePath`。`onDrop` 只在拖放落点位于本插件工作台区域内时触发；落点在宿主其他区域时保持宿主自身的行为。
 
 ### 持久化 UI 状态
 

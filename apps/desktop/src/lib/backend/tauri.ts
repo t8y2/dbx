@@ -2736,6 +2736,8 @@ export interface PluginLocalFileHandle {
   size: number;
   contentType: string;
   write: boolean;
+  /** Only for files expanded out of a dropped folder: '/'-separated path relative to the dropped folder root. */
+  relativePath?: string;
 }
 
 export interface PluginLocalFileChunk {
@@ -2749,14 +2751,23 @@ export interface PluginLocalFileWriteResult {
   nextOffset: number;
 }
 
-export async function openPluginLocalFile(pluginId: string, path: string, write: boolean): Promise<PluginLocalFileHandle> {
-  return invoke("plugin_file_open", { pluginId, path, write });
-}
-
 // The native open/save dialogs run on the Rust side: the host never passes
 // paths into the plugin-file registry, it only receives handles for what the
-// user picked. Only the OS drop flow still goes through openPluginLocalFile,
-// and the Rust command accepts exactly the paths its own drop pipeline granted.
+// user picked. Only the OS drop flow goes through openDroppedPluginLocalFiles:
+// the Rust command accepts exactly the paths its own drop pipeline granted to
+// this webview (one open attempt per granted path); a granted folder expands
+// to its contained files on the Rust side, and `truncated` flags any cap
+// cutoff so partial delivery is visible to the plugin.
+export interface PluginDroppedFilesResult {
+  dropId: string;
+  files: PluginLocalFileHandle[];
+  truncated: boolean;
+}
+
+export async function openDroppedPluginLocalFiles(pluginId: string, paths: string[]): Promise<PluginDroppedFilesResult> {
+  return invoke("plugin_file_open_dropped", { pluginId, paths });
+}
+
 export async function pickPluginLocalFiles(pluginId: string, multiple: boolean): Promise<PluginLocalFileHandle[]> {
   return invoke("plugin_file_pick_files", { pluginId, multiple });
 }

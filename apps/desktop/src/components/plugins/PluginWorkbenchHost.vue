@@ -93,12 +93,16 @@ let bootCacheHit = false;
 // read with "unknown plugin file handle". Every path is consented to on the
 // Rust side — dialogs open there (plugin_file_pick_files / plugin_file_save_as)
 // and drops are registered by the native drag-drop pipeline before
-// plugin_file_open accepts them — never a plugin-supplied string.
+// plugin_file_open_dropped accepts them — never a plugin-supplied string.
 
 let webFileSequence = 0;
 const webPickedFiles = new Map<string, File>();
 const webSaveBuffers = new Map<string, { name: string; contentType: string; chunks: Map<number, Uint8Array> }>();
-const openTauriHandles = new Set<string>();
+// raw handle id -> the plugin id that opened it, recorded at open time.
+// Teardown closes precisely these handles: an owner-wide sweep would also
+// kill the SAME plugin's handles held by a sibling workbench instance, so it
+// is reserved for Rust-side lifecycle (stop/uninstall) only.
+const openTauriHandles = new Map<string, string>();
 const tauriHandlePrefix = "t";
 const webHandlePrefix = "w";
 
@@ -124,15 +128,21 @@ async function tauriFileApi() {
 }
 
 // OS drops are the one flow where the renderer still names a path: the native
-// drag-drop pipeline registered the dropped files for THIS webview, and
-// plugin_file_open accepts exactly those (one open per dropped file).
-async function openTauriPluginFile(pluginId: string, path: string, write: boolean): Promise<PluginFileHandleMeta> {
-  const { openPluginLocalFile } = await tauriFileApi();
-  const handle = await openPluginLocalFile(pluginId, path, write);
-  // Track read AND write handles: unmount must reclaim both (leaked fds also
-  // burn the shared 64-handle registry quota).
-  openTauriHandles.add(handle.handleId);
-  return { handleId: `${tauriHandlePrefix}${handle.handleId}`, name: handle.name, size: handle.size, contentType: handle.contentType };
+// drag-drop pipeline registered the dropped paths for THIS webview, and
+// plugin_file_open_dropped accepts exactly those (one open attempt per dropped
+// path). A dropped folder comes back expanded to its contained files on the
+// Rust side, with `truncated` flagging any cap cutoff and a `dropId` grouping
+// the entries of this one drop.
+async function openDroppedPluginFiles(pluginId: string, paths: string[]): Promise<{ dropId: string; truncated: boolean; files: PluginFileHandleMeta[] }> {
+  const { openDroppedPluginLocalFiles } = await tauriFileApi();
+  const result = await openDroppedPluginLocalFiles(pluginId, paths);
+  const files = result.files.map((handle) => {
+    openTauriHandles.set(handle.handleId, pluginId);
+    const meta: PluginFileHandleMeta = { handleId: `${tauriHandlePrefix}${handle.handleId}`, name: handle.name, size: handle.size, contentType: handle.contentType };
+    if (handle.relativePath) meta.relativePath = handle.relativePath;
+    return meta;
+  });
+  return { dropId: result.dropId, truncated: result.truncated, files };
 }
 
 async function pickPluginFiles(pluginId: string, options: PluginPickFilesOptions): Promise<PluginFileHandleMeta[]> {
@@ -144,7 +154,7 @@ async function pickPluginFiles(pluginId: string, options: PluginPickFilesOptions
     for (const handle of await pickPluginLocalFiles(pluginId, options.multiple === true)) {
       // Track read AND write handles: unmount must reclaim both (leaked fds
       // also burn the shared 64-handle registry quota).
-      openTauriHandles.add(handle.handleId);
+      openTauriHandles.set(handle.handleId, pluginId);
       files.push({ handleId: `${tauriHandlePrefix}${handle.handleId}`, name: handle.name, size: handle.size, contentType: handle.contentType });
     }
     return files;
@@ -233,7 +243,7 @@ async function beginPluginFileSave(pluginId: string, request: { name?: string; c
     const { savePluginLocalFileAs } = await tauriFileApi();
     const handle = await savePluginLocalFileAs(pluginId, request.name || "download.bin");
     if (!handle) return null;
-    openTauriHandles.add(handle.handleId);
+    openTauriHandles.set(handle.handleId, pluginId);
     return { handleId: `${tauriHandlePrefix}${handle.handleId}`, chunkBytes: PLUGIN_SAVE_CHUNK_BYTES };
   }
   const handleId = `${webHandlePrefix}${++webFileSequence}`;
@@ -257,8 +267,11 @@ async function finishPluginFileSave(pluginId: string, handleId: string): Promise
   const parsed = parseHandleId(handleId);
   if (parsed.source === "tauri") {
     const { closePluginLocalFile } = await tauriFileApi();
-    openTauriHandles.delete(parsed.rawId);
     await closePluginLocalFile(pluginId, parsed.rawId);
+    // Drop local tracking only after the close succeeded: a failed flush
+    // leaves the Rust entry alive, and the map is what unmount cleanup uses
+    // to retry it.
+    openTauriHandles.delete(parsed.rawId);
     return;
   }
   const buffer = webSaveBuffers.get(handleId);
@@ -284,8 +297,8 @@ async function closePluginFileHandleById(pluginId: string, handleId: string): Pr
   const parsed = parseHandleId(handleId);
   if (parsed.source === "tauri") {
     const { closePluginLocalFile } = await tauriFileApi();
-    openTauriHandles.delete(parsed.rawId);
     await closePluginLocalFile(pluginId, parsed.rawId);
+    openTauriHandles.delete(parsed.rawId);
     return;
   }
   webPickedFiles.delete(handleId);
@@ -293,9 +306,11 @@ async function closePluginFileHandleById(pluginId: string, handleId: string): Pr
 }
 
 function disposeLocalFileHandles(): void {
-  for (const handleId of openTauriHandles)
-    tauriFileApi()
-      .then(({ closePluginLocalFile }) => closePluginLocalFile(props.plugin.manifest.id, handleId))
+  // Close exactly the handles THIS instance opened, with the plugin id that
+  // opened them — a sibling workbench of the same plugin keeps its own.
+  for (const [handleId, pluginId] of openTauriHandles)
+    void tauriFileApi()
+      .then(({ closePluginLocalFile }) => closePluginLocalFile(pluginId, handleId))
       .catch(() => undefined);
   openTauriHandles.clear();
   webPickedFiles.clear();
@@ -352,16 +367,32 @@ function onHostFileDrop(event: Event): void {
   forwardDragState(false);
   const paths = (payload.paths || []).filter((path) => typeof path === "string" && path);
   if (!paths.length || !bridge) return;
+  // Pin the owner and generation before the await: the expansion runs on a
+  // Rust blocking thread and can land after a teardown or identity rebuild.
+  const pluginId = props.plugin.manifest.id;
+  const generation = loadGeneration;
   void (async () => {
-    const files: PluginFileHandleMeta[] = [];
-    for (const path of paths) {
-      try {
-        files.push(await openTauriPluginFile(props.plugin.manifest.id, path, false));
-      } catch (error) {
-        console.error("[DBX][plugin-workbench:drop]", error);
+    try {
+      // A granted folder comes back expanded to its files; a path the drop
+      // pipeline never granted (or that vanished) is skipped on the Rust side,
+      // so an empty result surfaces here instead of silently handing the
+      // plugin nothing while the drop looked successful.
+      const { dropId, truncated, files } = await openDroppedPluginFiles(pluginId, paths);
+      if (disposed || generation !== loadGeneration) {
+        // The teardown already ran while the expansion was in flight: retire
+        // exactly these late arrivals — a closeAll here would also kill the
+        // same plugin's handles in a freshly rebuilt workbench.
+        const rawIds = files.map((file) => file.handleId.replace(new RegExp(`^${tauriHandlePrefix}`), ""));
+        void tauriFileApi().then(({ closePluginLocalFile }) => {
+          for (const rawId of rawIds) closePluginLocalFile(pluginId, rawId).catch(() => undefined);
+        });
+        return;
       }
+      if (files.length) bridge?.forwardFileDrop(files, { dropId, truncated });
+      else console.error("[DBX][plugin-workbench:drop] no dropped files could be opened", paths);
+    } catch (error) {
+      console.error("[DBX][plugin-workbench:drop]", error);
     }
-    if (files.length) bridge?.forwardFileDrop(files);
   })();
 }
 
@@ -461,6 +492,9 @@ function createBridge() {
       writeFileChunk: (pluginId, handleId, offset, bytes) => writePluginFileChunkById(pluginId, handleId, offset, bytes),
       finishFileSave: (pluginId, handleId) => finishPluginFileSave(pluginId, handleId),
       closeFileHandle: (pluginId, handleId) => closePluginFileHandleById(pluginId, handleId),
+      // OS drops (with folder expansion) are a desktop-host capability; the
+      // bridge advertises it to plugins through capabilities.fileTransfer.
+      receiveOsDrops: isTauriRuntime(),
       storageGet: (pluginId, key) => getPluginStorage(pluginId, key),
       storageSet: (pluginId, key, value) => setPluginStorage(pluginId, key, value),
       storageDelete: (pluginId, key) => deletePluginStorage(pluginId, key),
@@ -549,6 +583,9 @@ function pluginUiBaseUrl(pluginId: string, entryDirectory: string): string | und
 
 async function loadWorkbench() {
   const generation = ++loadGeneration;
+  // An identity rebuild swaps the plugin this component serves; retire the
+  // previous plugin's handles first or they would outlive their owner.
+  disposeLocalFileHandles();
   bridge?.dispose();
   bridge = undefined;
   loading.value = true;

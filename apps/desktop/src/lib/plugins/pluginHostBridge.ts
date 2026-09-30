@@ -120,6 +120,8 @@ export interface PluginFileHandleMeta {
   name: string;
   size: number;
   contentType: string;
+  /** Only for files expanded out of a dropped folder: '/'-separated path relative to the dropped folder root, so the plugin can rebuild the dragged tree. */
+  relativePath?: string;
 }
 
 export interface PluginPickFilesOptions {
@@ -250,6 +252,8 @@ export interface PluginHostBridgeApi {
   finishFileSave?(pluginId: string, handleId: string): Promise<void>;
   /** Close any file handle, discarding unsaved state. */
   closeFileHandle?(pluginId: string, handleId: string): Promise<void>;
+  /** Whether this host receives OS file drops on the plugin's behalf (desktop only). */
+  receiveOsDrops?: boolean;
   /** Persistent per-plugin key-value storage for sandboxed UIs; resolves null when the key is unset. */
   storageGet?(pluginId: string, key: string): Promise<unknown>;
   storageSet?(pluginId: string, key: string, value: unknown): Promise<void>;
@@ -460,6 +464,16 @@ export class PluginHostBridge {
         clipboardRead: !!this.api.clipboardRead,
         clipboardImageRead: !!this.api.clipboardReadImage,
         mediaUrl: !!this.api.openMedia && !!this.api.closeMedia,
+        // The namespace exists on both hosts, but what it can DO differs:
+        // portable plugins gate on these flags instead of probing calls.
+        fileTransfer: {
+          pick: !!this.api.pickFiles,
+          beginSave: !!this.api.beginFileSave && !!this.api.writeFileChunk && !!this.api.finishFileSave,
+          read: !!this.api.readFileChunk,
+          // OS drops (and their folder expansion) are desktop-only.
+          drop: !!this.api.receiveOsDrops,
+          folderExpansion: !!this.api.receiveOsDrops,
+        },
       },
       context: snapshotPluginWorkbenchContext(this.context),
     });
@@ -539,8 +553,8 @@ export class PluginHostBridge {
   }
 
   /** Hand the plugin already-opened handles for files dropped onto its workbench. */
-  forwardFileDrop(files: PluginFileHandleMeta[]): void {
-    this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "filedrop", files });
+  forwardFileDrop(files: PluginFileHandleMeta[], drop?: { dropId?: string; truncated?: boolean }): void {
+    this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "filedrop", files, dropId: drop?.dropId, truncated: drop?.truncated === true });
   }
 
   private async handleRequest(request: PluginRequestMessage, target: Window): Promise<void> {
@@ -1352,8 +1366,11 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         document.dispatchEvent(new CustomEvent('dbx-plugin-binary', { detail: payload }));
       } else if (message.type === 'filedrop') {
         const files = Array.isArray(message.files) ? message.files : [];
-        listeners.filedrop.forEach((listener) => listener(files));
-        document.dispatchEvent(new CustomEvent('dbx-plugin-filedrop', { detail: files }));
+        // The drop metadata rides as a second listener argument so existing
+        // single-parameter listeners keep working unchanged.
+        const drop = { dropId: typeof message.dropId === 'string' ? message.dropId : undefined, truncated: message.truncated === true };
+        listeners.filedrop.forEach((listener) => listener(files, drop));
+        document.dispatchEvent(new CustomEvent('dbx-plugin-filedrop', { detail: { files, drop } }));
       } else if (message.type === 'dragstate') {
         const active = message.active === true;
         listeners.dragstate.forEach((listener) => listener(active));

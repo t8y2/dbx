@@ -5389,9 +5389,9 @@ export * from "@/lib/backend/mqtt-http";
 // Plugin local file streaming (native dialogs / OS drops are Tauri-only)
 // ---------------------------------------------------------------------------
 
-import type { PluginLocalFileChunk, PluginLocalFileHandle, PluginLocalFileWriteResult } from "./tauri";
+import type { PluginDroppedFilesResult, PluginLocalFileChunk, PluginLocalFileHandle, PluginLocalFileWriteResult } from "./tauri";
 
-export async function openPluginLocalFile(_pluginId: string, _path: string, _write: boolean): Promise<PluginLocalFileHandle> {
+export async function openDroppedPluginLocalFiles(_pluginId: string, _paths: string[]): Promise<PluginDroppedFilesResult> {
   throw new Error("Plugin local file access is not available in the web backend");
 }
 

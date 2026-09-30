@@ -583,6 +583,31 @@ describe("queryStore table data refresh", () => {
     expect(store.tabs.find((tab) => tab.id === secondTabId)?.result).toBeUndefined();
   });
 
+  it("rebuilds the structured sort from persisted tab state on refresh", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "users", "data", "public");
+    store.setTableMeta(tabId, {
+      schema: "public",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [
+        { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+        { name: "status", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+        { name: "created_at", data_type: "timestamp", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+      ],
+      primaryKeys: ["id"],
+    });
+    const tab = store.tabs.find((tab) => tab.id === tabId)!;
+    tab.orderByInput = '"status" ASC';
+    tab.structuredOrderByInput = '"created_at" DESC';
+
+    const refreshed = await store.refreshDataTab(tabId);
+
+    expect(refreshed).toBe(true);
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ orderBy: '"status" ASC, "created_at" DESC' }));
+  });
+
   it("keeps the configured MySQL page size when results contain large-value previews", async () => {
     mocks.getConnectionConfig.mockReturnValue({
       id: "mysql-1",
@@ -679,6 +704,7 @@ describe("queryStore table data refresh", () => {
     const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
     tab.whereInput = "id > 0";
     tab.orderByInput = '"old_name" ASC';
+    tab.structuredOrderByInput = '"old_name" DESC';
     tab.resultSortColumn = "old_name";
     tab.resultSortColumnIndex = 1;
     tab.resultSortDirection = "asc";
@@ -712,6 +738,7 @@ describe("queryStore table data refresh", () => {
     expect(tab.resultLocalSortOriginalMongoDocuments).toBeUndefined();
     expect(tab.resultLocalSortOriginalMongoCopyDocuments).toBeUndefined();
     expect(tab.orderByInput).toBeUndefined();
+    expect(tab.structuredOrderByInput).toBeUndefined();
     expect(tab.whereInput).toBe("id > 0");
     expect(tab.resultPageLimit).toBe(25);
     expect(tab.resultPageOffset).toBe(50);

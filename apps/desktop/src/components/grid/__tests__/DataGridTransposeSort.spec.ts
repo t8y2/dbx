@@ -194,13 +194,13 @@ describe("DataGrid transpose sorting", () => {
     expect(transposeRecordHeader(host, 2).classList.contains("transpose-record-header-active")).toBe(true);
 
     await selectTransposeSort(host, 1, "grid.sortDatabaseDescending");
-    expect(onSort).toHaveBeenLastCalledWith("score", 1, "desc", undefined, "database");
+    expect(onSort).toHaveBeenLastCalledWith("score", 1, "desc", undefined, "database", "`score` DESC");
     expect(transposeValues(host, 1)).toEqual(["10", "2", "NULL"]);
     expect(transposeRecordHeader(host, 0).classList.contains("transpose-record-header-selected")).toBe(true);
     expect(transposeRecordHeader(host, 2).classList.contains("transpose-record-header-active")).toBe(true);
 
     await selectTransposeSort(host, 1, "grid.clearSort");
-    expect(onSort).toHaveBeenLastCalledWith("score", 1, null, undefined, "database");
+    expect(onSort).toHaveBeenLastCalledWith("score", 1, null, undefined, "database", undefined);
     expect(transposeValues(host, 1)).toEqual(["10", "NULL", "2"]);
     expect(transposeRecordHeader(host, 0).classList.contains("transpose-record-header-selected")).toBe(true);
     expect(transposeRecordHeader(host, 1).classList.contains("transpose-record-header-active")).toBe(true);

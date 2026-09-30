@@ -7409,6 +7409,7 @@ export default {
   },
   sqlFileTree: {
     title: "SQL Files",
+    storageHelp: "These are the real .sql files on disk opened via Open Folder; edits are saved straight back to the original file.",
     openFolder: "Open Folder",
     closePanel: "Close",
     loading: "Loading...",

@@ -9285,6 +9285,7 @@ export default withEnglishFallback({
   },
   sqlFileTree: {
     title: "SQL ファイル",
+    storageHelp: "「フォルダを開く」で開いたディスク上の実際の.sqlファイルを表示し、編集内容は元のファイルに直接保存されます。",
     openFolder: "フォルダを開く",
     closePanel: "閉じる",
     loading: "読み込み中...",

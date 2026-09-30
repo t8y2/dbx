@@ -6670,6 +6670,7 @@ export default withEnglishFallback({
   },
   sqlFileTree: {
     title: "SQL faylları",
+    storageHelp: "Bunlar Qovluq aç ilə açılan diskdəki real .sql fayllarıdır; düzəlişlər birbaşa orijinal fayla yazılır.",
     openFolder: "Qovluq aç",
     closePanel: "Bağla",
     loading: "Yüklənir...",

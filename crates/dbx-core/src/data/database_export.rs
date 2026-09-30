@@ -1859,6 +1859,44 @@ fn split_postgres_export_table_triggers(ddl: &str, database_type: DatabaseType) 
     (table_statements.join("\n"), trigger_statements)
 }
 
+/// PostgreSQL database export: split inline `FOREIGN KEY` constraints out of a
+/// relation's `CREATE TABLE` and return them as deferred
+/// `ALTER TABLE ... ADD CONSTRAINT ...` statements.
+///
+/// Inline foreign keys tie the script's replay to table creation order. The
+/// exporter sorts tables by dependency, but a foreign key cycle can never
+/// satisfy that order, so a backup that inlines its foreign keys cannot be
+/// restored (`ERROR: relation ... does not exist` — issue #10575). Emitting
+/// the constraints after every table and row exists (pg_dump's post-data
+/// position) removes the ordering requirement entirely.
+fn extract_postgres_deferred_foreign_keys(ddl: &str, schema: &str, table: &str) -> (String, Vec<String>) {
+    let fallback_qualified = crate::transfer::qualified_table(table, schema, &DatabaseType::Postgres, None);
+    let mut statements = Vec::new();
+    let mut deferred = Vec::new();
+    for range in crate::db::ddl_scan::top_level_statement_ranges(ddl) {
+        let statement = ddl[range].trim();
+        if statement.is_empty() {
+            continue;
+        }
+        let (stripped, removed) = crate::transfer::strip_inline_foreign_key_constraint_lines_collecting(statement);
+        if !removed.is_empty() {
+            // Qualify the ALTER from the statement's own relation name: whole-
+            // database exports leave `schema` empty and rely on each statement
+            // to carry its schema, so a mismatch here would fail the replay.
+            let qualified = crate::db::ddl_scan::parse_create_table_relation(statement)
+                .map(|(statement_schema, statement_table)| {
+                    crate::transfer::qualified_table(&statement_table, &statement_schema, &DatabaseType::Postgres, None)
+                })
+                .unwrap_or_else(|| fallback_qualified.clone());
+            for clause in removed {
+                deferred.push(format!("ALTER TABLE {qualified} ADD {clause};"));
+            }
+        }
+        statements.push(stripped);
+    }
+    (statements.join("\n"), deferred)
+}
+
 fn postgres_sequence_qualified_name(schema: &str, sequence_name: &str) -> String {
     let db_type = DatabaseType::Postgres;
     if schema.trim().is_empty() {
@@ -3718,6 +3756,9 @@ async fn export_database_sql_core_inner(
     let mut object_index: usize = 0;
     let mut total_rows_exported = 0_u64;
     let mut deferred_postgres_triggers = Vec::new();
+    // PostgreSQL foreign keys collected from table DDL while writing structure,
+    // emitted at the end of the file (see `extract_postgres_deferred_foreign_keys`).
+    let mut deferred_postgres_foreign_keys: Vec<String> = Vec::new();
     // total_objects is known later for the write phase; preparing updates stay
     // presence-only so the UI does not show a counter that later resets.
     emit_database_export_running(&on_progress, &request.export_id, "", 0, 0, 0, true);
@@ -3994,6 +4035,16 @@ async fn export_database_sql_core_inner(
                 Ok(ddl) => {
                     let (ddl, triggers) = split_postgres_export_table_triggers(&ddl, db_type);
                     deferred_postgres_triggers.extend(triggers);
+                    // Defer inline foreign keys so restore never has to satisfy
+                    // the dependency graph's order (cycles included).
+                    let ddl = if db_type == DatabaseType::Postgres {
+                        let (stripped, deferred) =
+                            extract_postgres_deferred_foreign_keys(&ddl, &request.schema, table_name);
+                        deferred_postgres_foreign_keys.extend(deferred);
+                        stripped
+                    } else {
+                        ddl
+                    };
                     let ddl = format_export_table_ddl(
                         &ddl,
                         Some(db_type),
@@ -4502,6 +4553,13 @@ async fn export_database_sql_core_inner(
         writeln!(file, "{trigger}\n").map_err(|e| format!("Failed to write file: {e}"))?;
     }
 
+    // PostgreSQL foreign keys come after every table and row exists, so the
+    // script replays into an empty database no matter what order (or cycle)
+    // the schema's foreign key graph has (issue #10575).
+    for statement in deferred_postgres_foreign_keys {
+        writeln!(file, "{statement}\n").map_err(|e| format!("Failed to write file: {e}"))?;
+    }
+
     // For MySQL: re-enable foreign key checks
     if matches!(db_type, DatabaseType::Mysql) {
         writeln!(file, "SET FOREIGN_KEY_CHECKS = 1;").map_err(|e| format!("Failed to write file: {e}"))?;
@@ -4584,19 +4642,19 @@ mod tests {
         build_export_insert_statements_excluding, build_export_object_source_sql, build_export_sql_insert,
         create_database_export_writer, database_export_query_options_for_timeout, database_export_select_sql,
         database_export_total_objects, drop_table_if_exists_sql, ensure_export_destination_dir,
-        export_destination_identity_mismatch, filter_export_table_infos, format_export_sql_literal,
-        format_export_table_ddl, format_mysql_spatial_export_literal, format_xugu_spatial_export_literal,
-        generate_postgres_enum_ddl, generate_postgres_extension_ddl, generate_postgres_sequence_create_ddl,
-        generate_postgres_sequence_owner_ddl, generate_postgres_sequence_setval_sql,
-        is_postgres_extension_member_routine, mysql_database_export_preamble, mysql_view_dependencies_from_rows,
-        mysql_view_dependencies_sql, normalize_export_table_ddl, record_export_destination_identity,
-        record_export_error, replace_database_export_select_list, sort_export_views_by_dependencies,
-        split_postgres_export_table_triggers, write_database_export_rows, BuildDatabaseSqlExportOptions,
-        BuildExportInsertStatementsOptions, BuildExportSqlInsertOptions, DatabaseExportObjectCounts,
-        DatabaseExportRequest, DatabaseExportWriter, DdlNormalizeOptions, ExportedTableSql, PostgresExportEnum,
-        PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers, SqlInsertDialect,
-        DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT, POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL,
-        POSTGRES_EXPORT_SEQUENCES_SQL,
+        export_destination_identity_mismatch, extract_postgres_deferred_foreign_keys, filter_export_table_infos,
+        format_export_sql_literal, format_export_table_ddl, format_mysql_spatial_export_literal,
+        format_xugu_spatial_export_literal, generate_postgres_enum_ddl, generate_postgres_extension_ddl,
+        generate_postgres_sequence_create_ddl, generate_postgres_sequence_owner_ddl,
+        generate_postgres_sequence_setval_sql, is_postgres_extension_member_routine, mysql_database_export_preamble,
+        mysql_view_dependencies_from_rows, mysql_view_dependencies_sql, normalize_export_table_ddl,
+        record_export_destination_identity, record_export_error, replace_database_export_select_list,
+        sort_export_views_by_dependencies, split_postgres_export_table_triggers, write_database_export_rows,
+        BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions, BuildExportSqlInsertOptions,
+        DatabaseExportObjectCounts, DatabaseExportRequest, DatabaseExportWriter, DdlNormalizeOptions, ExportedTableSql,
+        PostgresExportEnum, PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers,
+        SqlInsertDialect, DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT,
+        POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL, POSTGRES_EXPORT_SEQUENCES_SQL,
     };
     use super::{ExportProgress, LenientExportErrors};
     use crate::connection::AppState;
@@ -5078,6 +5136,85 @@ mod tests {
         let (mysql_ddl, mysql_triggers) = split_postgres_export_table_triggers(ddl, DatabaseType::Mysql);
         assert_eq!(mysql_ddl, ddl);
         assert!(mysql_triggers.is_empty());
+    }
+
+    #[test]
+    fn postgres_export_defers_inline_foreign_keys_to_file_tail_statements() {
+        let ddl = "CREATE TABLE \"public\".\"child_versions\" (\n  \"id\" uuid NOT NULL,\n  \"parent_id\" uuid NOT NULL,\n  CONSTRAINT \"child_versions_pkey\" PRIMARY KEY (id),\n  CONSTRAINT \"fk_child_parent\" FOREIGN KEY (\"parent_id\") REFERENCES \"public\".\"parent_entities\"(\"id\")\n);";
+
+        let (stripped, deferred) = extract_postgres_deferred_foreign_keys(ddl, "public", "child_versions");
+
+        assert!(!stripped.contains("FOREIGN KEY"), "stripped: {stripped}");
+        // Removing the trailing foreign key must also drop the comma it left behind.
+        assert!(stripped.contains("CONSTRAINT \"child_versions_pkey\" PRIMARY KEY (id)\n)"), "stripped: {stripped}");
+        assert_eq!(
+            deferred,
+            vec![
+                "ALTER TABLE \"public\".\"child_versions\" ADD CONSTRAINT \"fk_child_parent\" FOREIGN KEY (\"parent_id\") REFERENCES \"public\".\"parent_entities\"(\"id\");".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn postgres_export_defers_foreign_keys_and_keeps_other_constraints() {
+        let ddl = "CREATE TABLE \"public\".\"assignments\" (\n  \"id\" integer NOT NULL,\n  \"owner_id\" integer NOT NULL,\n  \"reviewer_id\" integer NOT NULL,\n  CONSTRAINT \"assignments_owner_fk\" FOREIGN KEY (\"owner_id\") REFERENCES \"users\"(\"id\"),\n  CONSTRAINT \"assignments_owner_check\" CHECK (owner_id > 0),\n  CONSTRAINT \"assignments_reviewer_fk\" FOREIGN KEY (\"reviewer_id\") REFERENCES \"users\"(\"id\"),\n  CONSTRAINT \"assignments_pair_unique\" UNIQUE (\"owner_id\", \"reviewer_id\")\n);";
+
+        let (stripped, deferred) = extract_postgres_deferred_foreign_keys(ddl, "public", "assignments");
+
+        assert!(!stripped.contains("FOREIGN KEY"), "stripped: {stripped}");
+        assert!(
+            stripped.contains("CONSTRAINT \"assignments_owner_check\" CHECK (owner_id > 0),"),
+            "stripped: {stripped}"
+        );
+        assert!(
+            stripped.contains("CONSTRAINT \"assignments_pair_unique\" UNIQUE (\"owner_id\", \"reviewer_id\")"),
+            "stripped: {stripped}"
+        );
+        assert_eq!(deferred.len(), 2);
+        assert!(deferred[0]
+            .starts_with("ALTER TABLE \"public\".\"assignments\" ADD CONSTRAINT \"assignments_owner_fk\" FOREIGN KEY"));
+        assert!(deferred[1].starts_with(
+            "ALTER TABLE \"public\".\"assignments\" ADD CONSTRAINT \"assignments_reviewer_fk\" FOREIGN KEY"
+        ));
+    }
+
+    #[test]
+    fn postgres_export_defers_foreign_keys_across_multiple_statements() {
+        let no_foreign_keys = "CREATE TABLE \"public\".\"parent_entities\" (\n  \"id\" integer NOT NULL,\n  CONSTRAINT \"parent_entities_pkey\" PRIMARY KEY (id)\n);\nALTER TABLE ONLY \"public\".\"events_2027_h1\" ALTER COLUMN \"status\" DROP DEFAULT;";
+        let (stripped, deferred) = extract_postgres_deferred_foreign_keys(no_foreign_keys, "public", "parent_entities");
+        assert_eq!(stripped, no_foreign_keys);
+        assert!(deferred.is_empty());
+
+        let with_cycle = "CREATE TABLE \"public\".\"cyc_x\" (\n  \"id\" integer NOT NULL,\n  CONSTRAINT \"cyc_x_pkey\" PRIMARY KEY (id),\n  CONSTRAINT \"cyc_x_y_fk\" FOREIGN KEY (\"id\") REFERENCES \"public\".\"cyc_y\"(\"id\")\n);\nALTER TABLE ONLY \"public\".\"cyc_x\" ALTER COLUMN \"id\" DROP DEFAULT;";
+        let (stripped, deferred) = extract_postgres_deferred_foreign_keys(with_cycle, "public", "cyc_x");
+        assert!(!stripped.contains("cyc_x_y_fk"), "stripped: {stripped}");
+        assert!(
+            stripped.contains("ALTER TABLE ONLY \"public\".\"cyc_x\" ALTER COLUMN \"id\" DROP DEFAULT;"),
+            "stripped: {stripped}"
+        );
+        assert_eq!(
+            deferred,
+            vec![
+                "ALTER TABLE \"public\".\"cyc_x\" ADD CONSTRAINT \"cyc_x_y_fk\" FOREIGN KEY (\"id\") REFERENCES \"public\".\"cyc_y\"(\"id\");".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn postgres_export_deferred_foreign_keys_use_the_statement_schema() {
+        // Whole-database exports leave the request schema empty; the ALTER must
+        // still target the schema the CREATE TABLE statement itself carries.
+        let ddl = "CREATE TABLE \"inventory\".\"orders\" (\n  \"id\" integer NOT NULL,\n  \"product_id\" integer NOT NULL,\n  CONSTRAINT \"orders_product_fk\" FOREIGN KEY (\"product_id\") REFERENCES \"inventory\".\"products\"(\"id\")\n);";
+
+        let (stripped, deferred) = extract_postgres_deferred_foreign_keys(ddl, "", "orders");
+
+        assert!(!stripped.contains("FOREIGN KEY"), "stripped: {stripped}");
+        assert_eq!(
+            deferred,
+            vec![
+                "ALTER TABLE \"inventory\".\"orders\" ADD CONSTRAINT \"orders_product_fk\" FOREIGN KEY (\"product_id\") REFERENCES \"inventory\".\"products\"(\"id\");".to_string()
+            ]
+        );
     }
 
     #[test]

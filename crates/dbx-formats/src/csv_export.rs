@@ -41,7 +41,7 @@ pub fn default_csv_null_literal() -> String {
 /// [`strip_formula_guard`]。guard 绝不能放进 [`push_csv_escaped_content`] 这类
 /// 片段级写入路径——serde_json 的 `Display` 会把对象/数组拆成多个片段经
 /// `CsvEscapedWriter` 逐段写入，片段级 guard 会在 JSON 单元格中间插 `'`。
-const FORMULA_TRIGGER_BYTES: [u8; 6] = [b'=', b'+', b'-', b'@', b'\t', b'\r'];
+const FORMULA_TRIGGER_BYTES: &[u8] = b"=+-@\t\r";
 
 /// 文本是否需要公式中和：跳过前导空格（OWASP 标注的 `" =cmd"` 前导空白绕过）
 /// 后，首字节是触发字符即命中。

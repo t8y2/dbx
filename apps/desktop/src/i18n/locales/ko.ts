@@ -2600,6 +2600,7 @@ export default withEnglishFallback({
     xlsxExportTitle: "내보내기 옵션",
     xlsxFilterPrompt: "내보낸 Excel에 필터를 포함할지 선택하십시오:",
     xlsxIncludeAutoFilter: "필터 포함",
+    batchAppendPasteNoMatchingColumns: "INSERT 문의 열 이름이 현재 결과 집합의 어떤 열과도 일치하지 않습니다.",
   },
   exportProgress: {
     streamingUnsupported: "이 쿼리는 스트리밍 내보내기를 지원하지 않습니다. 쿼리를 단순화하거나 지원되는 드라이버를 사용하세요.",

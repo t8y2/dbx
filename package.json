@@ -68,6 +68,7 @@
     "@codemirror/view": "^6.43.0",
     "@dbx-app/mongo-shell": "workspace:^",
     "@internationalized/date": "^3.12.2",
+    "@lezer/common": "1.5.2",
     "@lezer/highlight": "^1.2.3",
     "@lucide/vue": "1.17.0",
     "@msgpack/msgpack": "^3.1.3",

@@ -63,6 +63,9 @@ importers:
       '@internationalized/date':
         specifier: ^3.12.2
         version: 3.12.2
+      '@lezer/common':
+        specifier: 1.5.2
+        version: 1.5.2
       '@lezer/highlight':
         specifier: ^1.2.3
         version: 1.2.3

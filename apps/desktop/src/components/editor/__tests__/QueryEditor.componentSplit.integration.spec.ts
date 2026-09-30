@@ -4,6 +4,8 @@ import { createApp, h, nextTick, reactive, shallowRef } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { createI18n } from "vue-i18n";
 import { EditorSelection } from "@codemirror/state";
+import { ensureSyntaxTree, foldable, syntaxTree } from "@codemirror/language";
+import { diagnosticCount, forceLinting } from "@codemirror/lint";
 import { EditorView } from "@codemirror/view";
 import { toggleLineComment, undo } from "@codemirror/commands";
 import { closeCompletion, completionStatus, currentCompletions, selectedCompletionIndex, startCompletion } from "@codemirror/autocomplete";
@@ -79,6 +81,44 @@ function keydown(target: HTMLElement, key: string) {
 }
 
 describe("QueryEditor component split integration", () => {
+  it.each(["elasticsearch", "easysearch"] as const)("enables nested JSON folding and linting for %s without changing execution text", async (databaseType) => {
+    const text = 'POST /orders/_search\n{\n  "query": {\n    "match_all": {}\n  }\n}';
+    const { editor, view, onExecute } = await mountEditor({ databaseType, modelValue: text });
+    ensureSyntaxTree(view.state, text.length, 5000);
+    const line = view.state.doc.line(3);
+    expect(foldable(view.state, line.from, line.to)).not.toBeNull();
+    expect(syntaxTree(view.state).resolveInner(text.indexOf('"query"') + 1).name).toBe("PropertyName");
+    expect(editor.requestExecute({ bypassPicker: true })).toBe(true);
+    expect(onExecute.mock.calls[0][0].selectedSql).toBe(text);
+
+    const close = text.lastIndexOf("}");
+    view.dispatch({ changes: { from: close, insert: "," } });
+    await nextTick();
+    forceLinting(view);
+    await vi.waitFor(() => expect(diagnosticCount(view.state)).toBe(1));
+    view.dispatch({ changes: { from: close, to: close + 1, insert: "" } });
+    await nextTick();
+    forceLinting(view);
+    await vi.waitFor(() => expect(diagnosticCount(view.state)).toBe(0));
+  });
+
+  it("reconfigures REST JSON and SQL languages on the existing editor", async () => {
+    const { view, props } = await mountEditor({ modelValue: 'POST /orders/_search\n{ "query": {} }' });
+    props.databaseType = "elasticsearch";
+    await nextTick();
+    await vi.waitFor(() => {
+      ensureSyntaxTree(view.state, view.state.doc.length, 5000);
+      expect(syntaxTree(view.state).resolveInner(props.modelValue.indexOf('"query"') + 1).name).toBe("PropertyName");
+    });
+    props.databaseType = "mysql";
+    props.modelValue = "SELECT 1";
+    await nextTick();
+    await vi.waitFor(() => {
+      ensureSyntaxTree(view.state, view.state.doc.length, 5000);
+      expect(syntaxTree(view.state).resolveInner(2).name).toBe("Keyword");
+    });
+  });
+
   it("preserves upstream structure-peek focus and insertion context across updates and unmount", async () => {
     const { view, props, unmount } = await mountEditor({ connectionId: "peek-a", database: "demo", schema: "public" });
     expect(queryEditorInsertContext(view)).toEqual({ connectionId: "peek-a", database: "demo", schema: "public", databaseType: "mysql" });

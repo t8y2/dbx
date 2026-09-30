@@ -85,6 +85,11 @@ function mountToolbar() {
         onToggle: vi.fn(),
         onSelectInterval: vi.fn(),
       },
+      exportData: {
+        label: "Export",
+        items: [{ value: "csv", label: "CSV" }],
+        onSelect: vi.fn(),
+      },
     }),
   );
 }
@@ -147,6 +152,21 @@ async function hover(element: HTMLElement) {
   await settle();
 }
 
+async function click(element: HTMLElement) {
+  element.click();
+  await settle();
+}
+
+function expectPositionedSurface(contentType: string) {
+  const content = document.querySelector<HTMLElement>(`[data-slot="${contentType}"]`);
+  if (!content) throw new Error(`No ${contentType} surface was rendered`);
+  const wrapper = content.parentElement;
+  if (!wrapper) throw new Error(`No ${contentType} popper wrapper was rendered`);
+  // Reka parks an unpositioned surface at `translate(0, -200%)`, which puts every
+  // menu and popover above the viewport.
+  expect(wrapper.style.transform).toMatch(/^translate\(-?[\d.]+px, -?[\d.]+px\)$/);
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   for (const { app, host } of mountedApps.splice(0)) {
@@ -185,5 +205,38 @@ describe("data grid icon-only toolbar tooltips", () => {
     await hover(button);
 
     expect(showsTooltip("Go to column")).toBe(true);
+  });
+});
+
+// Reka resolves the popper anchor from the nearest popper root. Wrapping an overlay
+// trigger in TooltipTrigger handed the anchor to the tooltip root instead, so the
+// menu/popover still opened but kept the unpositioned `translate(0, -200%)`
+// fallback and every toolbar click looked like a no-op.
+describe("data grid toolbar overlay surfaces anchor to their trigger", () => {
+  it("positions the auto refresh menu after a click", async () => {
+    const { host } = mountToolbar();
+    await settle();
+
+    await click(toolbarButton(host, "autoRefresh"));
+
+    expectPositionedSurface("dropdown-menu-content");
+  });
+
+  it("positions the export menu after a click", async () => {
+    const { host } = mountToolbar();
+    await settle();
+
+    await click(toolbarButton(host, "exportData"));
+
+    expectPositionedSurface("dropdown-menu-content");
+  });
+
+  it("positions the go to column popover after a click", async () => {
+    const { host } = mountGrid();
+    await settle();
+
+    await click(toolbarButton(host, "navigation"));
+
+    expectPositionedSurface("popover-content");
   });
 });

@@ -486,6 +486,8 @@ describe("buildDuplicateTableStructurePlan", () => {
   });
 
   it("recreates the SQL Server primary key that SELECT INTO drops", async () => {
+    apiMock.getColumns.mockResolvedValue([]);
+    apiMock.getTableComment.mockResolvedValue(null);
     apiMock.listIndexes.mockResolvedValue([
       { name: "PK_ORDERS", columns: ["ID", "SEQ"], is_unique: true, is_primary: true },
       { name: "IDX_ORDERS_CUSTOMER", columns: ["CUSTOMER"], is_unique: false, is_primary: false },
@@ -507,6 +509,8 @@ describe("buildDuplicateTableStructurePlan", () => {
   });
 
   it("renames the SQL Server clone PK when it would collide with a source index", async () => {
+    apiMock.getColumns.mockResolvedValue([]);
+    apiMock.getTableComment.mockResolvedValue(null);
     apiMock.listIndexes.mockResolvedValue([
       { name: "PK_ORDERS", columns: ["ID"], is_unique: true, is_primary: true },
       { name: "PK_orders_copy", columns: ["FLAG"], is_unique: false, is_primary: false },
@@ -549,6 +553,8 @@ describe("buildDuplicateTableStructurePlan", () => {
   });
 
   it("keeps primary-key-free SQL Server clones on a single statement", async () => {
+    apiMock.getColumns.mockResolvedValue([]);
+    apiMock.getTableComment.mockResolvedValue(null);
     apiMock.listIndexes.mockResolvedValue([{ name: "IDX_ORDERS_CUSTOMER", columns: ["CUSTOMER"], is_unique: false, is_primary: false }]);
     apiMock.buildDuplicateTableStructureSql.mockResolvedValue("SELECT TOP 0 * INTO [orders_copy] FROM [orders];");
 
@@ -562,7 +568,48 @@ describe("buildDuplicateTableStructurePlan", () => {
     });
 
     expect(apiMock.buildDuplicateTableStructureSql).toHaveBeenCalledWith(expect.objectContaining({ databaseType: "sqlserver", primaryKeyColumns: [] }));
-    expect(plan).toEqual({ sql: "SELECT TOP 0 * INTO [orders_copy] FROM [orders];", sourceColumns: undefined, executeAsScript: false });
+    expect(plan).toEqual({ sql: "SELECT TOP 0 * INTO [orders_copy] FROM [orders];", sourceColumns: [], executeAsScript: false });
+  });
+
+  it("loads SQL Server table and column comments and runs a comment-only clone as a script", async () => {
+    const columns = [
+      { name: "value field", comment: "  字段 O'Brien;注释  ", data_type: "nvarchar", is_nullable: true, column_default: null, is_primary_key: false },
+      { name: "id", comment: null, data_type: "int", is_nullable: false, column_default: null, is_primary_key: false },
+    ];
+    const sql = "SELECT TOP 0 * INTO [dbo].[copy] FROM [dbo].[source];\nEXEC sys.sp_addextendedproperty ...;";
+    apiMock.getColumns.mockResolvedValue(columns);
+    apiMock.getTableComment.mockResolvedValue("  表 O'Brien;注释  ");
+    apiMock.listIndexes.mockResolvedValue([]);
+    apiMock.buildDuplicateTableStructureSql.mockResolvedValue(sql);
+
+    const plan = await buildDuplicateTableStructurePlan({ connectionId: "mssql-1", database: "app", catalog: "catalog", databaseType: "sqlserver", schema: "dbo", sourceName: "source", targetName: "copy" });
+
+    expect(apiMock.getColumns).toHaveBeenCalledExactlyOnceWith("mssql-1", "app", "dbo", "source", "catalog");
+    expect(apiMock.getTableComment).toHaveBeenCalledExactlyOnceWith("mssql-1", "app", "dbo", "source", "catalog");
+    expect(apiMock.buildDuplicateTableStructureSql).toHaveBeenCalledWith(expect.objectContaining({ tableComment: "  表 O'Brien;注释  ", columnComments: [{ name: "value field", comment: "  字段 O'Brien;注释  " }], primaryKeyColumns: [] }));
+    expect(plan).toEqual({ sql, sourceColumns: columns, executeAsScript: true });
+  });
+
+  it("reuses supplied SQL Server column and table comments for data-copy callers", async () => {
+    const columns = [{ name: "id", comment: "编号", data_type: "int", is_nullable: false, column_default: null, is_primary_key: true }];
+    apiMock.listIndexes.mockResolvedValue([{ name: "PK_source", columns: ["id"], is_unique: true, is_primary: true }]);
+    apiMock.buildDuplicateTableStructureSql.mockResolvedValue("SELECT TOP 0 * INTO [copy] FROM [source];");
+    const plan = await buildDuplicateTableStructurePlan({ connectionId: "mssql-1", database: "app", databaseType: "sqlserver", sourceName: "source", targetName: "copy", sourceColumns: columns, tableComment: "表注释" });
+    expect(apiMock.getColumns).not.toHaveBeenCalled();
+    expect(apiMock.getTableComment).not.toHaveBeenCalled();
+    expect(apiMock.buildDuplicateTableStructureSql).toHaveBeenCalledWith(expect.objectContaining({ tableComment: "表注释", columnComments: [{ name: "id", comment: "编号" }], primaryKeyColumns: ["id"] }));
+    expect(plan.sourceColumns).toBe(columns);
+    expect(plan.executeAsScript).toBe(true);
+  });
+
+  it.each(["columns", "tableComment"])("does not create a SQL Server clone when %s metadata cannot be loaded", async (metadata) => {
+    apiMock.listIndexes.mockResolvedValue([]);
+    apiMock.getColumns.mockResolvedValue([]);
+    apiMock.getTableComment.mockResolvedValue(null);
+    const error = new Error("comment metadata unavailable");
+    (metadata === "columns" ? apiMock.getColumns : apiMock.getTableComment).mockRejectedValueOnce(error);
+    await expect(buildDuplicateTableStructurePlan({ connectionId: "mssql-1", database: "app", databaseType: "sqlserver", sourceName: "source", targetName: "copy" })).rejects.toBe(error);
+    expect(apiMock.buildDuplicateTableStructureSql).not.toHaveBeenCalled();
   });
 
   it("forwards the connection identifier quote so dual-dialect clones stay executable", async () => {

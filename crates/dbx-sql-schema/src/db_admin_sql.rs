@@ -841,6 +841,30 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
         }));
     }
 
+    // SELECT INTO does not copy MS_Description extended properties. The
+    // target is newly created, so add each supplied comment without updating
+    // or deleting any pre-existing object's properties.
+    if options.database_type == Some(DatabaseType::SqlServer) {
+        if let Some(comment) = options.table_comment.as_deref().filter(|comment| !comment.trim().is_empty()) {
+            comment_sql.push(sqlserver_clone_comment_sql(
+                options.schema.as_deref(),
+                &options.target_name,
+                None,
+                comment,
+            ));
+        }
+        for column in &options.column_comments {
+            if !column.comment.trim().is_empty() {
+                comment_sql.push(sqlserver_clone_comment_sql(
+                    options.schema.as_deref(),
+                    &options.target_name,
+                    Some(&column.name),
+                    &column.comment,
+                ));
+            }
+        }
+    }
+
     // `SELECT ... INTO` copies the IDENTITY property but not constraints, so the cloned table
     // would silently lose its primary key (t8y2/dbx#8931). Recreate it from the source metadata.
     let mut constraint_sql = Vec::new();
@@ -866,6 +890,19 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
         return structure_sql;
     }
     format!("{};\n{};", structure_sql.trim_end_matches(';'), trailing_sql.join(";\n"))
+}
+
+fn sqlserver_clone_comment_sql(schema: Option<&str>, table: &str, column: Option<&str>, comment: &str) -> String {
+    let schema = schema.filter(|value| !value.trim().is_empty()).unwrap_or("dbo").replace('\'', "''");
+    let table = table.replace('\'', "''");
+    let comment = comment.replace('\'', "''");
+    let mut sql = format!(
+        "EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'{comment}', @level0type=N'SCHEMA', @level0name=N'{schema}', @level1type=N'TABLE', @level1name=N'{table}'"
+    );
+    if let Some(column) = column {
+        sql.push_str(&format!(", @level2type=N'COLUMN', @level2name=N'{}'", column.replace('\'', "''")));
+    }
+    sql
 }
 
 pub fn build_copy_table_data_sql(options: CopyTableDataSqlOptions) -> String {
@@ -2350,6 +2387,57 @@ mod tests {
             .unwrap(),
             "ALTER TABLE `orders` DROP COLUMN `status`;"
         );
+    }
+
+    #[test]
+    fn sqlserver_clone_preserves_unicode_comments_with_quoted_object_names() {
+        let sql = build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            schema: Some("业务]".to_string()),
+            source_name: "source".to_string(),
+            target_name: "副本]".to_string(),
+            table_comment: Some("  表 O'Brien;\n注释  ".to_string()),
+            column_comments: vec![
+                DuplicateTableColumnComment {
+                    name: "value' field]".to_string(),
+                    comment: "  字段 O'Brien  ".to_string(),
+                },
+                DuplicateTableColumnComment { name: "empty".to_string(), comment: " \t\n ".to_string() },
+            ],
+            primary_key_columns: vec!["id".to_string()],
+            primary_key_constraint_name: Some("PK_copy".to_string()),
+            identifier_quote: None,
+        });
+        let statements = crate::sql::split_sql_statements_for_database(&sql, DatabaseType::SqlServer);
+        assert_eq!(statements.len(), 4);
+        assert_eq!(statements[0], "SELECT TOP 0 * INTO [业务]]].[副本]]] FROM [业务]]].[source]");
+        assert!(statements[1].contains("PRIMARY KEY ([id])"));
+        assert!(statements[2].contains("@value=N'  表 O''Brien;\n注释  '"));
+        assert!(statements[2].contains("@level0name=N'业务]'"));
+        assert!(statements[2].contains("@level1name=N'副本]'"));
+        assert!(statements[3].contains("@level2name=N'value'' field]'"));
+        assert!(statements[3].contains("@value=N'  字段 O''Brien  '"));
+        assert!(statements[2..].iter().all(|statement| statement.starts_with("EXEC sys.sp_addextendedproperty")));
+    }
+
+    #[test]
+    fn sqlserver_clone_column_only_comments_use_default_schema() {
+        let sql = build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            schema: None,
+            source_name: "source".to_string(),
+            target_name: "copy".to_string(),
+            table_comment: None,
+            column_comments: vec![DuplicateTableColumnComment {
+                name: "id".to_string(), comment: "编号".to_string()
+            }],
+            primary_key_columns: vec![],
+            primary_key_constraint_name: None,
+            identifier_quote: None,
+        });
+        assert_eq!(crate::sql::split_sql_statements_for_database(&sql, DatabaseType::SqlServer).len(), 2);
+        assert!(sql.contains("@level0name=N'dbo'"));
+        assert!(sql.contains("@level2name=N'id'"));
     }
 
     #[test]

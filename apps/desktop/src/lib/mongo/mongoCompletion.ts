@@ -87,8 +87,10 @@ export interface MongoCompletionContext {
   replaceClosingQuote?: '"' | "'";
   /** Collection the cursor's command targets, used to load field metadata. */
   collection?: string;
-  /** Database the cursor's command targets when reached through `db.getSiblingDB(…)`, used instead of the editor's active database. */
+  /** Database the cursor's command targets when reached through `db.getSiblingDB(…)` or `use <db>`, used instead of the editor's active database. */
   database?: string;
+  /** Whether the command's root is an explicit `db.getSiblingDB(…)`, which disallows chaining another getSiblingDB. */
+  siblingRoot?: boolean;
   /** Enclosing aggregation stage (`$lookup`, `$group`, …), when inside one. */
   stage?: string;
   /** Kind of pipeline array holding the cursor, when inside a pipeline. */
@@ -332,7 +334,16 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
   const usePrefix = matchUseDatabasePrefix(beforeCursor);
   if (usePrefix) return { mode: "database", prefix: usePrefix.prefix, from: usePrefix.from };
 
-  if (endsAtDbRootDot(beforeCursor)) return { mode: "collection", prefix: "", from: safeCursor, collection, database };
+  if (endsAtDbRootDot(beforeCursor)) {
+    return {
+      mode: "collection",
+      prefix: "",
+      from: safeCursor,
+      collection,
+      database,
+      siblingRoot: endsAtSiblingRootDot(beforeCursor),
+    };
+  }
 
   const getSiblingDbPrefix = matchGetSiblingDbPrefix(beforeCursor);
   if (getSiblingDbPrefix) {
@@ -358,12 +369,14 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
 
   const collectionPrefix = matchDbCollectionPrefix(beforeCursor);
   if (collectionPrefix) {
+    const isSibling = matchSiblingCollectionPrefix(beforeCursor);
     return {
       mode: collectionPrefix.prefix.includes(".") ? "collectionOrMethod" : "collection",
       prefix: collectionPrefix.prefix,
       from: collectionPrefix.from,
       collection,
       database,
+      ...(isSibling ? { siblingRoot: true } : {}),
     };
   }
 
@@ -419,7 +432,7 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
       items = databaseItems(prefix, input.databases ?? []);
       break;
     case "collection":
-      items = collectionItems(prefix, collections, context.database !== undefined);
+      items = collectionItems(prefix, collections, context.siblingRoot ?? false);
       break;
     case "collectionOrMethod":
       items = collectionOrMethodItems(prefix, collections);
@@ -1481,6 +1494,7 @@ function readMethodPrefix(beforeCursor: string): { prefix: string; from: number 
  * accepts either root rather than only a literal `db.`.
  */
 const DB_ROOT = String.raw`db(?:\s*\.\s*getSiblingDB\s*\(\s*(?:"[^"]*"|'[^']*')\s*\))?`;
+const SIBLING_ROOT_PATTERN = String.raw`db\s*\.\s*getSiblingDB\s*\(\s*(?:"[^"]*"|'[^']*')\s*\)`;
 const COLLECTION_REF = String.raw`(?:[A-Za-z_][\w$-]*|getCollection\(["'][^"']+["']\))`;
 
 /** `db.` or `db.getSiblingDB("other").` immediately before the cursor. */
@@ -1488,11 +1502,26 @@ function endsAtDbRootDot(beforeCursor: string): boolean {
   return new RegExp(String.raw`(?:^|[\s;(])${DB_ROOT}\s*\.$`).test(beforeCursor);
 }
 
+function endsAtSiblingRootDot(beforeCursor: string): boolean {
+  return new RegExp(String.raw`(?:^|[\s;(])${SIBLING_ROOT_PATTERN}\s*\.$`).test(beforeCursor);
+}
+
 function matchDbCollectionPrefix(beforeCursor: string): { prefix: string; from: number } | null {
   const match = new RegExp(String.raw`(?:^|[\s;(])${DB_ROOT}\.([A-Za-z_][\w$-]*(?:\.[\w$-]*)*)$`).exec(beforeCursor);
   if (!match) return null;
   const prefix = match[1] ?? "";
   return { prefix, from: beforeCursor.length - prefix.length };
+}
+
+function matchSiblingCollectionPrefix(beforeCursor: string): boolean {
+  return new RegExp(String.raw`(?:^|[\s;(])${SIBLING_ROOT_PATTERN}\s*\.([A-Za-z_][\w$-]*(?:\.[\w$-]*)*)$`).test(beforeCursor);
+}
+
+const MONGO_COMMAND_LINE_START_PATTERN = /(?:use\b|show\s+(?:dbs|databases|collections)\b|db(?:\s*\.|\b))/iy;
+
+function isMongoCommandLineStart(text: string, index: number): boolean {
+  MONGO_COMMAND_LINE_START_PATTERN.lastIndex = index;
+  return MONGO_COMMAND_LINE_START_PATTERN.test(text);
 }
 
 /** Cursor inside the string argument of `db.getSiblingDB(`, with the opening quote as part of the prefix. */
@@ -1708,15 +1737,76 @@ function extractActiveCollection(text: string, cursor: number): string | undefin
   return lastDirect?.[1];
 }
 
+const USE_COMMAND_PATTERN = /use\s+([a-zA-Z0-9_-]+)(?=[\s;]|$)/iy;
+
 /**
- * The last `db.getSiblingDB("name")` before the cursor decides which database the
- * command targets; plain `db.` references leave it unset so the editor's active
- * database keeps applying.
+ * Resolves the database targeted by the command at the cursor.
+ *
+ * If the current command explicitly addresses another database via `db.getSiblingDB("name")`,
+ * that database takes precedence. Otherwise, the database set by the last preceding top-level
+ * `use <name>` command applies. If neither is present, returns undefined so the editor's active
+ * database continues to apply.
  */
 function extractActiveDatabase(text: string, cursor: number): string | undefined {
-  const before = text.slice(0, cursor);
-  const matches = [...before.matchAll(new RegExp(String.raw`(?:^|[\s;(])db\s*\.\s*getSiblingDB\s*\(\s*(["'])([^"']*)\1\s*\)`, "g"))];
-  return matches[matches.length - 1]?.[2] || undefined;
+  const safeCursor = Math.max(0, Math.min(cursor, text.length));
+  const before = text.slice(0, safeCursor);
+  const masked = maskMongoLiterals(before);
+
+  let parenDepth = 0;
+  let bracketDepth = 0;
+  let braceDepth = 0;
+  let currentCommandStart = 0;
+  let lastUseDb: string | undefined = undefined;
+
+  let i = 0;
+  while (i < masked.length) {
+    const isTopLevel = parenDepth === 0 && bracketDepth === 0 && braceDepth === 0;
+
+    if (isTopLevel) {
+      const prevChar = i > 0 ? masked[i - 1] : "\n";
+      if (/[\s;]/.test(prevChar)) {
+        USE_COMMAND_PATTERN.lastIndex = i;
+        const useMatch = USE_COMMAND_PATTERN.exec(masked);
+        if (useMatch) {
+          lastUseDb = useMatch[1];
+          currentCommandStart = i;
+          i += useMatch[0].length;
+          continue;
+        }
+      }
+
+      if (masked[i] === ";") {
+        let next = i + 1;
+        while (next < masked.length && /\s/.test(masked[next])) next++;
+        currentCommandStart = next;
+      } else if (masked[i] === "\n") {
+        let next = i + 1;
+        while (next < masked.length && (masked[next] === " " || masked[next] === "\t")) next++;
+        if (next < masked.length && isMongoCommandLineStart(masked, next)) {
+          currentCommandStart = next;
+        }
+      }
+    }
+
+    const char = masked[i];
+    if (char === "(") parenDepth++;
+    else if (char === ")") parenDepth = Math.max(0, parenDepth - 1);
+    else if (char === "[") bracketDepth++;
+    else if (char === "]") bracketDepth = Math.max(0, bracketDepth - 1);
+    else if (char === "{") braceDepth++;
+    else if (char === "}") braceDepth = Math.max(0, braceDepth - 1);
+
+    i++;
+  }
+
+  const currentCommandText = before.slice(currentCommandStart);
+  const siblingMatches = [...currentCommandText.matchAll(/(?:^|[\s;(])db\s*\.\s*getSiblingDB\s*\(\s*(?:(["'])([^"']*)\1|[^\s)]+)?\s*\)/gi)];
+  if (siblingMatches.length > 0) {
+    const lastMatch = siblingMatches[siblingMatches.length - 1];
+    return lastMatch?.[2] || undefined;
+  }
+
+  return lastUseDb;
 }
 
 function collectFieldTypes(value: unknown, prefix: string, out: Map<string, Set<string>>, depth: number) {

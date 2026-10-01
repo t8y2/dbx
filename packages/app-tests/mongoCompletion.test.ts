@@ -457,6 +457,16 @@ test("suggests fields under an update operator and array modifiers under $push",
   const modifiers = labels("db.users.updateOne({}, { $push: { tags: { ", { fields });
   assert.ok(modifiers.includes("$each"));
   assert.equal(modifiers.includes("$set"), false);
+
+  const pullOperators = labels("db.users.updateOne({}, { $pull: { tags: { $", { fields });
+  assert.ok(pullOperators.includes("$gte"));
+  assert.ok(pullOperators.includes("$in"));
+  assert.equal(pullOperators.includes("$set"), false);
+  assert.equal(pullOperators.includes("name"), false);
+
+  assert.deepEqual(labels("db.users.updateOne({}, { $pull: { tags: { na", { fields }), ["name"]);
+  assert.ok(labels("db.users.updateOne({}, { $pull: { tags: { $in: [").includes("ObjectId"));
+  assert.equal(labels("db.users.updateOne({}, { $pullAll: { tags: [").length, 0);
 });
 
 test("suggests fields inside a $match stage rather than operators", () => {
@@ -690,6 +700,12 @@ test("suggests the option keys of methods that take an options argument", () => 
   // A `sort` or `projection` option holds field names.
   assert.deepEqual(labels("db.users.findOneAndUpdate({}, {$set:{a:1}}, { sort: { na", { fields }), ["name"]);
   assert.deepEqual(labels("db.users.findOneAndDelete({}, { projection: { na", { fields }), ["name"]);
+
+  // An `arrayFilters` option holds filter documents.
+  assert.deepEqual(labels('db.users.updateOne({}, { $set: { "tags.$[e].x": 1 } }, { arrayFilters: [{ na', { fields }), ["name"]);
+  assert.ok(labels('db.users.updateOne({}, { $set: { "tags.$[e].x": 1 } }, { arrayFilters: [{ "tags.x": { $', { fields }).includes("$gte"));
+  assert.deepEqual(labels('db.users.updateMany({}, { $set: { "tags.$[e].x": 1 } }, { arrayFilters: [{ na', { fields }), ["name"]);
+  assert.deepEqual(labels('db.users.findOneAndUpdate({}, { $set: { "tags.$[e].x": 1 } }, { arrayFilters: [{ na', { fields }), ["name"]);
 });
 
 test("stays quiet in the trailing argument of methods that take no options", () => {

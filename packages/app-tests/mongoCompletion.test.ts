@@ -1068,3 +1068,101 @@ test("infers dotted MongoDB fields from sampled documents", () => {
   assert.ok(inferred.find((field) => field.name === "profile.age" && field.type === "number"));
   assert.ok(inferred.find((field) => field.name === "tags.label" && field.type === "string"));
 });
+
+test("completes joined-collection fields inside $lookup, $graphLookup and $unionWith", () => {
+  // $lookup foreignField targets joined collection
+  const lookupForeign = getMongoCompletionContext('db.users.aggregate([{ $lookup: { from: "orders", localField: "name", foreignField: "', 'db.users.aggregate([{ $lookup: { from: "orders", localField: "name", foreignField: "'.length);
+  assert.equal(lookupForeign.collection, "orders");
+  assert.equal(lookupForeign.mode, "fieldPath");
+
+  // $lookup sub-pipeline runs over joined collection
+  const lookupPipelineMatch = getMongoCompletionContext('db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $match: { ', 'db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $match: { '.length);
+  assert.equal(lookupPipelineMatch.collection, "orders");
+  assert.equal(lookupPipelineMatch.mode, "filterField");
+
+  const lookupPipelineProject = getMongoCompletionContext('db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $project: { ', 'db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $project: { '.length);
+  assert.equal(lookupPipelineProject.collection, "orders");
+  assert.equal(lookupPipelineProject.mode, "field");
+
+  // $graphLookup connectToField and connectFromField target joined collection
+  const graphConnectTo = getMongoCompletionContext('db.users.aggregate([{ $graphLookup: { from: "orders", connectToField: "', 'db.users.aggregate([{ $graphLookup: { from: "orders", connectToField: "'.length);
+  assert.equal(graphConnectTo.collection, "orders");
+  assert.equal(graphConnectTo.mode, "fieldPath");
+
+  const graphConnectFrom = getMongoCompletionContext('db.users.aggregate([{ $graphLookup: { from: "orders", connectFromField: "', 'db.users.aggregate([{ $graphLookup: { from: "orders", connectFromField: "'.length);
+  assert.equal(graphConnectFrom.collection, "orders");
+  assert.equal(graphConnectFrom.mode, "fieldPath");
+
+  // $graphLookup restrictSearchWithMatch targets joined collection
+  const graphRestrict = getMongoCompletionContext('db.users.aggregate([{ $graphLookup: { from: "orders", restrictSearchWithMatch: { ', 'db.users.aggregate([{ $graphLookup: { from: "orders", restrictSearchWithMatch: { '.length);
+  assert.equal(graphRestrict.collection, "orders");
+  assert.equal(graphRestrict.mode, "filterField");
+
+  // $unionWith sub-pipeline runs over joined collection
+  const unionPipelineMatch = getMongoCompletionContext('db.users.aggregate([{ $unionWith: { coll: "orders", pipeline: [{ $match: { ', 'db.users.aggregate([{ $unionWith: { coll: "orders", pipeline: [{ $match: { '.length);
+  assert.equal(unionPipelineMatch.collection, "orders");
+  assert.equal(unionPipelineMatch.mode, "filterField");
+});
+
+test("keeps localField and startWith on outer collection at top level", () => {
+  const lookupLocal = getMongoCompletionContext('db.users.aggregate([{ $lookup: { from: "orders", localField: "', 'db.users.aggregate([{ $lookup: { from: "orders", localField: "'.length);
+  assert.equal(lookupLocal.collection, "users");
+  assert.equal(lookupLocal.mode, "fieldPath");
+
+  const graphStartWith = getMongoCompletionContext('db.users.aggregate([{ $graphLookup: { from: "orders", startWith: "', 'db.users.aggregate([{ $graphLookup: { from: "orders", startWith: "'.length);
+  assert.equal(graphStartWith.collection, "users");
+  assert.equal(graphStartWith.mode, "fieldRef");
+});
+
+test("resolves collections for nested join stages inside a sub-pipeline", () => {
+  const nestedLookupForeign = getMongoCompletionContext(
+    'db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $lookup: { from: "items", foreignField: "',
+    'db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $lookup: { from: "items", foreignField: "'.length,
+  );
+  assert.equal(nestedLookupForeign.collection, "items");
+
+  const nestedSubPipeline = getMongoCompletionContext(
+    'db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $lookup: { from: "items", pipeline: [{ $match: { ',
+    'db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $lookup: { from: "items", pipeline: [{ $match: { '.length,
+  );
+  assert.equal(nestedSubPipeline.collection, "items");
+
+  // Nested localField and startWith resolve to the enclosing sub-pipeline's input collection
+  const nestedLocalField = getMongoCompletionContext(
+    'db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $lookup: { from: "items", localField: "',
+    'db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $lookup: { from: "items", localField: "'.length,
+  );
+  assert.equal(nestedLocalField.collection, "orders");
+
+  const nestedStartWith = getMongoCompletionContext(
+    'db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $graphLookup: { from: "items", startWith: "',
+    'db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $graphLookup: { from: "items", startWith: "'.length,
+  );
+  assert.equal(nestedStartWith.collection, "orders");
+
+  // Nested $lookup with no from typed yet falls back to sub-pipeline input
+  const nestedMissingFrom = getMongoCompletionContext(
+    'db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $lookup: { foreignField: "',
+    'db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $lookup: { foreignField: "'.length,
+  );
+  assert.equal(nestedMissingFrom.collection, "orders");
+});
+
+test("falls back to outer collection when from or coll is missing or untyped at top level", () => {
+  const missingFromLookup = getMongoCompletionContext('db.users.aggregate([{ $lookup: { foreignField: "', 'db.users.aggregate([{ $lookup: { foreignField: "'.length);
+  assert.equal(missingFromLookup.collection, "users");
+
+  const missingCollUnion = getMongoCompletionContext('db.users.aggregate([{ $unionWith: { pipeline: [{ $match: { ', 'db.users.aggregate([{ $unionWith: { pipeline: [{ $match: { '.length);
+  assert.equal(missingCollUnion.collection, "users");
+
+  const fromAfterCursor = getMongoCompletionContext('db.users.aggregate([{ $lookup: { foreignField: " }, from: "orders" }])', 'db.users.aggregate([{ $lookup: { foreignField: "'.length);
+  assert.equal(fromAfterCursor.collection, "users");
+});
+
+test("handles from values containing commas or braces without confusing scan", () => {
+  const commaFrom = getMongoCompletionContext('db.users.aggregate([{ $lookup: { from: "orders,archive", foreignField: "', 'db.users.aggregate([{ $lookup: { from: "orders,archive", foreignField: "'.length);
+  assert.equal(commaFrom.collection, "orders,archive");
+
+  const braceFrom = getMongoCompletionContext('db.users.aggregate([{ $lookup: { from: "orders{2024}", foreignField: "', 'db.users.aggregate([{ $lookup: { from: "orders{2024}", foreignField: "'.length);
+  assert.equal(braceFrom.collection, "orders{2024}");
+});

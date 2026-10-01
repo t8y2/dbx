@@ -1388,7 +1388,7 @@ const localColumnFilterRuntime = useDataGridColumnFilters({
   getGlobalQueryTimeoutSecs: () => settingsStore.editorSettings.globalQueryTimeoutSecs,
   getNewRows: () => getGridNewRows(),
   getRowData: (row, sourceIndex) => getGridRowData(row, sourceIndex),
-  formatValue: formatCellCached,
+  formatValue: (value, columnIndex) => formatCell(value, columnIndex, undefined, false),
   waitForTableMeta,
   applyWhereFilter,
   resetGridVerticalScroll: () => resetLocalFilterGridScroll(),

@@ -107,6 +107,10 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
     return typeof options.readOnly === "function" ? options.readOnly() : Boolean(options.readOnly);
   }
 
+  function isLineWrapping(): boolean {
+    return typeof options.lineWrapping === "function" ? options.lineWrapping() : settingsStore.editorSettings.wordWrap;
+  }
+
   function readOnlyExtensions(readOnly: boolean) {
     return [EditorState.readOnly.of(readOnly), EditorView.editable.of(!readOnly), EditorView.contentAttributes.of(readOnly ? { tabindex: "0" } : {})];
   }
@@ -173,7 +177,7 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
   });
 
   watch(
-    () => options.lineWrapping?.() ?? false,
+    () => isLineWrapping(),
     (lineWrapping) => {
       const editor = view.value;
       if (!editor || destroyed) return;
@@ -250,7 +254,7 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
               ]),
         ]),
         languageComp.of(currentIsJson ? json() : []),
-        lineWrappingComp.of(options.lineWrapping?.() ? EditorView.lineWrapping : []),
+        lineWrappingComp.of(isLineWrapping() ? EditorView.lineWrapping : []),
         readOnlyComp.of(readOnlyExtensions(isReadOnly())),
         themeComp.of(theme),
         fontThemeComp.of(fontTheme),

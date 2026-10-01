@@ -6480,6 +6480,7 @@ watch(valueEditorContainer, async (el) => {
       appPalette: editorAppPalette,
       fontSize: editorFontSize,
       fontFamily: detailEditorFontFamily,
+      lineWrapping: () => settingsStore.editorSettings.wordWrap,
     });
     const editor = valueDetailEditor;
     await editor.create(el, detailEditValue.value, activeCellDetail.value?.type);

@@ -3789,7 +3789,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn streaming_gaussdb_on_error_stop_overrides_continue_on_error_at_script_position() {
+    async fn streaming_postgres_family_on_error_stop_overrides_continue_on_error_at_script_position() {
+        for db_type in [DatabaseType::Postgres, DatabaseType::OpenGauss, DatabaseType::Gaussdb] {
+            assert_streaming_psql_on_error_stop_at_script_position(db_type).await;
+        }
+    }
+
+    async fn assert_streaming_psql_on_error_stop_at_script_position(db_type: DatabaseType) {
         let dir = std::env::temp_dir().join(format!("dbx-sql-file-stop-on-error-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
@@ -3797,7 +3803,7 @@ mod tests {
         let config: crate::models::connection::ConnectionConfig = serde_json::from_value(serde_json::json!({
             "id": "gauss-stream",
             "name": "GaussDB stream test",
-            "db_type": "gaussdb",
+            "db_type": db_type,
             "host": "localhost",
             "port": 5432,
             "username": "",
@@ -3815,7 +3821,7 @@ mod tests {
             .await;
 
         let path = temporary_sql_file(
-            b"CREATE TABLE side_effects(value INTEGER);\nINSERT INTO missing_before_control VALUES (1);\nINSERT INTO side_effects VALUES (1);\n\\set ON_ERROR_STOP on\nINSERT INTO missing_after_control VALUES (1);\nINSERT INTO side_effects VALUES (2);",
+            b"CREATE TABLE side_effects(value INTEGER);\nINSERT INTO missing_before_control VALUES (1);\nINSERT INTO side_effects VALUES (1);\n\\set ON_ERROR_STOP on\n\\echo progress; -- display text\nINSERT INTO missing_after_control VALUES (1);\nINSERT INTO side_effects VALUES (2);",
         )
         .await;
         let request = SqlFileRequest {

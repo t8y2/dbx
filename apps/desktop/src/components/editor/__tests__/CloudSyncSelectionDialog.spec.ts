@@ -109,3 +109,75 @@ describe.each([
     expect(root.textContent).not.toContain(actionLabel);
   });
 });
+
+describe.each(["restore", "upload"] as const)("CloudSyncSelectionDialog %s category checkboxes", (mode) => {
+  it.each(["connections", "tunnelProfiles"] as const)("disables the %s parent checkbox when the category is empty", async (category) => {
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(CloudSyncSelectionDialog, {
+      open: true,
+      mode,
+      catalog: { ...catalog, [category]: [] },
+    });
+    app.mount(root);
+    await nextTick();
+
+    const section = root.querySelectorAll("details")[category === "connections" ? 0 : 1];
+    const parent = section.querySelector<HTMLInputElement>("summary input")!;
+    expect(parent.disabled).toBe(true);
+    parent.click();
+    await nextTick();
+    expect(parent.checked).toBe(false);
+    expect(section.textContent).toContain("0/0");
+    expect(section.open).toBe(true);
+  });
+
+  it.each(["connections", "tunnelProfiles"] as const)("keeps the %s parent checkbox in sync after select-all clicks", async (category) => {
+    const items = Array.from({ length: 5 }, (_, index) => ({ id: `item-${index}`, label: `Item ${index}` }));
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(CloudSyncSelectionDialog, {
+      open: true,
+      mode,
+      catalog: { ...catalog, [category]: items },
+    });
+    app.mount(root);
+    await nextTick();
+
+    const section = root.querySelectorAll("details")[category === "connections" ? 0 : 1];
+    const parent = section.querySelector<HTMLInputElement>("summary input")!;
+    const children = Array.from(section.querySelectorAll<HTMLInputElement>("label input"));
+    expect(parent.checked).toBe(true);
+
+    let clickEvent: MouseEvent | undefined;
+    parent.addEventListener("click", (event) => {
+      clickEvent = event;
+    });
+    parent.click();
+    await nextTick();
+    // Canceling native checkbox activation rolls back checked in browsers.
+    // happy-dom does not emulate that rollback, so also inspect the event.
+    expect(clickEvent?.defaultPrevented).toBe(false);
+    expect(section.textContent).toContain("0/5");
+    expect(parent.checked).toBe(false);
+    expect(children.every((child) => !child.checked)).toBe(true);
+    expect(section.open).toBe(true);
+
+    parent.click();
+    await nextTick();
+    expect(section.textContent).toContain("5/5");
+    expect(parent.checked).toBe(true);
+    expect(children.every((child) => child.checked)).toBe(true);
+
+    children[0].click();
+    await nextTick();
+    expect(section.textContent).toContain("4/5");
+    expect(parent.checked).toBe(false);
+
+    parent.click();
+    await nextTick();
+    expect(section.textContent).toContain("5/5");
+    expect(parent.checked).toBe(true);
+    expect(children.every((child) => child.checked)).toBe(true);
+  });
+});

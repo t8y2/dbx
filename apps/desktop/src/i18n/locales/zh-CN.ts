@@ -8843,6 +8843,8 @@ export default withEnglishFallback({
     shortcutScopeHintSearch: "搜索框聚焦时生效",
     shortcutScopeHintSidebar: "侧边栏聚焦时生效",
     shortcutGroupCount: "{count} 项",
+    shortcutGroupCollapse: "折叠分组",
+    shortcutGroupExpand: "展开分组",
     shortcutGroupUnbound: "{count} 项未绑定",
     shortcutGroupUnboundTooltip: "这些操作当前没有绑定快捷键；点击行内铅笔图标即可录入。",
     shortcutModifiedTag: "已改",

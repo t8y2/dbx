@@ -7987,6 +7987,8 @@ export default withEnglishFallback({
     shortcutScopeHintSearch: "Si applica con il campo di ricerca attivo",
     shortcutScopeHintSidebar: "Si applica con la barra laterale attiva",
     shortcutGroupCount: "{count} azioni",
+    shortcutGroupCollapse: "Comprimi gruppo",
+    shortcutGroupExpand: "Espandi gruppo",
     shortcutGroupUnbound: "{count} non assegnate",
     shortcutGroupUnboundTooltip: "Queste azioni non hanno una scorciatoia assegnata; usa l’icona a matita nella riga per assegnarne una.",
     shortcutModifiedTag: "Modificata",

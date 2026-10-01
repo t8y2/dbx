@@ -8001,6 +8001,8 @@ export default withEnglishFallback({
     shortcutScopeHintSearch: "Axtarış sahəsi fokusda olduqda keçərlidir",
     shortcutScopeHintSidebar: "Yan panel fokusda olduqda keçərlidir",
     shortcutGroupCount: "{count} əməliyyat",
+    shortcutGroupCollapse: "Qrupu yığ",
+    shortcutGroupExpand: "Qrupu genişləndir",
     shortcutGroupUnbound: "{count} təyin edilməyib",
     shortcutGroupUnboundTooltip: "Bu əməliyyatlara qısayol təyin edilməyib; sətirdəki karandaş ikonundan istifadə edərək təyin edin.",
     shortcutModifiedTag: "Dəyişdirilib",

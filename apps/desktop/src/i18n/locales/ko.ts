@@ -7767,6 +7767,8 @@ export default withEnglishFallback({
     shortcutScopeHintSearch: "검색 필드에 포커스 시 적용",
     shortcutScopeHintSidebar: "사이드바에 포커스 시 적용",
     shortcutGroupCount: "{count}개",
+    shortcutGroupCollapse: "그룹 접기",
+    shortcutGroupExpand: "그룹 펼치기",
     shortcutGroupUnbound: "{count}개 미할당",
     shortcutGroupUnboundTooltip: "이 작업에는 단축키가 지정되어 있지 않습니다. 행의 연필 아이콘으로 지정할 수 있습니다.",
     shortcutModifiedTag: "변경됨",

@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { createApp, defineComponent, h, nextTick, ref, type App } from "vue";
+import { createApp, defineComponent, h, nextTick, type App } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createPinia } from "pinia";
 import { DEFAULT_EDITOR_SETTINGS } from "@/stores/settingsStore";
@@ -154,6 +154,13 @@ const inputFor = (host: HTMLElement, id: string) => shortcutsPane(host).querySel
 
 const rowFor = (host: HTMLElement, id: string) => inputFor(host, id).closest<HTMLElement>(".settings-shortcut-row")!;
 
+const headerFor = (host: HTMLElement, scope: string) =>
+  groupSections(host)
+    .find((section) => section.querySelector("h3")?.textContent?.trim() === `settings.shortcutScope${scope[0].toUpperCase()}${scope.slice(1)}`)!
+    .querySelector<HTMLElement>("header")!;
+
+const contentFor = (host: HTMLElement, scope: string) => shortcutsPane(host).querySelector<HTMLElement>(`#shortcut-scope-content-${scope}`)!;
+
 function button(host: HTMLElement, text: string) {
   return [...host.querySelectorAll<HTMLButtonElement>("button")].find((item) => item.textContent?.trim() === text) ?? null;
 }
@@ -200,6 +207,59 @@ describe("EditorSettingsDialog shortcut scope grouping (behaviour)", () => {
     for (const row of rendered) {
       expect(row.textContent).not.toContain("settings.shortcutScope");
     }
+  });
+
+  it("collapses and expands a group from its accessible header", async () => {
+    hoisted.shortcuts = defaults();
+    const host = await mountShortcutsTab();
+    const header = headerFor(host, "editor");
+
+    expect(header.getAttribute("role")).toBe("button");
+    expect(header.getAttribute("aria-expanded")).toBe("true");
+    expect(header.getAttribute("aria-controls")).toBe("shortcut-scope-content-editor");
+    expect(rowFor(host, "formatSql")).toBeTruthy();
+
+    header.click();
+    await flushAsyncUpdates();
+    expect(header.getAttribute("aria-expanded")).toBe("false");
+    expect(contentFor(host, "editor").getAttribute("aria-hidden")).toBe("true");
+    expect(contentFor(host, "editor").hasAttribute("inert")).toBe(true);
+
+    header.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await flushAsyncUpdates();
+    expect(header.getAttribute("aria-expanded")).toBe("true");
+    expect(contentFor(host, "editor").getAttribute("aria-hidden")).toBe("false");
+    expect(contentFor(host, "editor").hasAttribute("inert")).toBe(false);
+    expect(rowFor(host, "formatSql")).toBeTruthy();
+
+    header.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true }));
+    await flushAsyncUpdates();
+    expect(header.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("auto-expands a collapsed group while searching and restores it afterward", async () => {
+    hoisted.shortcuts = defaults();
+    const host = await mountShortcutsTab();
+    const header = headerFor(host, "editor");
+    header.click();
+    await flushAsyncUpdates();
+    expect(header.getAttribute("aria-expanded")).toBe("false");
+
+    const search = shortcutsPane(host).querySelector<HTMLInputElement>('input[placeholder="settings.shortcutSearchPlaceholder"]')!;
+    search.value = "shortcutFormatSql";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushAsyncUpdates();
+
+    expect(header.getAttribute("aria-expanded")).toBe("true");
+    expect(rows(host).length).toBe(1);
+    expect(rowFor(host, "formatSql")).toBeTruthy();
+
+    search.value = "";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushAsyncUpdates();
+    expect(header.getAttribute("aria-expanded")).toBe("false");
+    expect(contentFor(host, "editor").getAttribute("aria-hidden")).toBe("true");
+    expect(contentFor(host, "editor").hasAttribute("inert")).toBe(true);
   });
 
   it("treats a same-scope duplicate as blocking: red pills, footer reason and a disabled Apply", async () => {

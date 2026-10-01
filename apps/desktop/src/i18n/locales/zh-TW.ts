@@ -7282,6 +7282,8 @@ export default withEnglishFallback({
     shortcutScopeHintSearch: "搜尋框聚焦時生效",
     shortcutScopeHintSidebar: "側邊欄聚焦時生效",
     shortcutGroupCount: "{count} 項",
+    shortcutGroupCollapse: "摺疊分組",
+    shortcutGroupExpand: "展開分組",
     shortcutGroupUnbound: "{count} 項未綁定",
     shortcutGroupUnboundTooltip: "這些操作目前沒有綁定快速鍵；點擊行內鉛筆圖示即可錄入。",
     shortcutModifiedTag: "已改",

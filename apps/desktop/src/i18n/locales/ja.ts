@@ -7984,6 +7984,8 @@ export default withEnglishFallback({
     shortcutScopeHintSearch: "検索フィールドにフォーカス時",
     shortcutScopeHintSidebar: "サイドバーにフォーカス時",
     shortcutGroupCount: "{count} 件",
+    shortcutGroupCollapse: "グループを折りたたむ",
+    shortcutGroupExpand: "グループを展開",
     shortcutGroupUnbound: "未割り当て {count} 件",
     shortcutGroupUnboundTooltip: "これらの操作にはショートカットが割り当てられていません。行内の鉛筆アイコンから登録できます。",
     shortcutModifiedTag: "変更済み",

@@ -8877,6 +8877,8 @@ export default {
     shortcutScopeHintSearch: "Applies while the search field is focused",
     shortcutScopeHintSidebar: "Applies while the sidebar is focused",
     shortcutGroupCount: "{count} actions",
+    shortcutGroupCollapse: "Collapse group",
+    shortcutGroupExpand: "Expand group",
     shortcutGroupUnbound: "{count} unbound",
     shortcutGroupUnboundTooltip: "These actions have no shortcut assigned; use the pencil icon on the row to record one.",
     shortcutModifiedTag: "Changed",

@@ -8216,6 +8216,8 @@ export default withEnglishFallback({
     shortcutScopeHintSearch: "Se aplica con el campo de búsqueda enfocado",
     shortcutScopeHintSidebar: "Se aplica con la barra lateral enfocada",
     shortcutGroupCount: "{count} acciones",
+    shortcutGroupCollapse: "Contraer grupo",
+    shortcutGroupExpand: "Expandir grupo",
     shortcutGroupUnbound: "{count} sin asignar",
     shortcutGroupUnboundTooltip: "Estas acciones no tienen atajo asignado; usa el icono de lápiz de la fila para asignar uno.",
     shortcutModifiedTag: "Modificado",

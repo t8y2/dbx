@@ -9253,6 +9253,8 @@ export default withEnglishFallback({
     shortcutScopeHintSearch: "Действует, когда фокус в поле поиска",
     shortcutScopeHintSidebar: "Действует, когда фокус на боковой панели",
     shortcutGroupCount: "{count} действий",
+    shortcutGroupCollapse: "Свернуть группу",
+    shortcutGroupExpand: "Развернуть группу",
     shortcutGroupUnbound: "{count} без привязки",
     shortcutGroupUnboundTooltip: "У этих действий нет назначенных сочетаний клавиш; используйте значок карандаша в строке, чтобы задать его.",
     shortcutModifiedTag: "Изменено",

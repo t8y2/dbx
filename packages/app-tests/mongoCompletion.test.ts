@@ -138,7 +138,7 @@ test("prioritizes common read helpers and keeps destructive helpers last", () =>
   assert.deepEqual(methodLabels.slice(0, 6), ["find", "findOne", "aggregate", "countDocuments", "estimatedDocumentCount", "distinct"]);
   assert.deepEqual(getCollectionMethodLabels.slice(0, 6), ["find", "findOne", "aggregate", "countDocuments", "estimatedDocumentCount", "distinct"]);
   assert.deepEqual(methodLabels.slice(-3), ["dropIndex", "dropIndexes", "drop"]);
-  assert.deepEqual(labels("db.users.find({})."), ["limit", "sort", "skip", "count", "explain", "collation"]);
+  assert.deepEqual(labels("db.users.find({})."), ["limit", "sort", "skip", "count", "explain", "collation", "toArray", "pretty"]);
 });
 
 test("keeps dotted collection names ahead of methods until the collection is resolved", () => {
@@ -163,7 +163,7 @@ test("suggests cursor methods after find result chains", () => {
 
   assert.deepEqual(
     allItems.map((item) => item.label),
-    ["limit", "sort", "skip", "count", "explain", "collation"],
+    ["limit", "sort", "skip", "count", "explain", "collation", "toArray", "pretty"],
   );
   assert.deepEqual(
     prefixedItems.map((item) => item.label),
@@ -171,7 +171,7 @@ test("suggests cursor methods after find result chains", () => {
   );
   assert.deepEqual(
     formattedChainItems.map((item) => item.label),
-    ["limit", "sort", "skip", "count", "explain", "collation"],
+    ["limit", "sort", "skip", "count", "explain", "collation", "toArray", "pretty"],
   );
   assert.deepEqual(
     formattedPrefixedItems.map((item) => item.label),
@@ -183,7 +183,49 @@ test("offers count only where find().count() actually parses", () => {
   // The shell parser accepts count() only as the sole call chained onto find().
   assert.ok(labels("db.characters.find({}).").includes("count"));
   assert.equal(labels("db.characters.find({}).sort({ name: 1 }).").includes("count"), false);
+  assert.equal(labels("db.characters.find({}).toArray().").includes("count"), false);
+  assert.equal(labels("db.characters.find({}).pretty().").includes("count"), false);
   assert.equal(labels("db.characters.aggregate([]).").includes("count"), false);
+});
+
+test("offers only accepted cursor methods toArray and pretty after aggregate", () => {
+  // The executor rejects limit, sort, skip, explain, etc. after aggregate(), accepting only toArray() and pretty().
+  assert.deepEqual(labels("db.characters.aggregate([])."), ["toArray", "pretty"]);
+  assert.deepEqual(labels("db.characters.aggregate([], { allowDiskUse: true })."), ["toArray", "pretty"]);
+  assert.deepEqual(labels("db.characters.aggregate([]).toArray()."), ["toArray", "pretty"]);
+  assert.deepEqual(labels("db.characters.aggregate([]).pretty()."), ["toArray", "pretty"]);
+  assert.deepEqual(labels("db.characters.aggregate([]).to"), ["toArray"]);
+  assert.deepEqual(labels("db.characters.aggregate([]).pr"), ["pretty"]);
+
+  for (const rejected of ["limit", "sort", "skip", "explain", "collation", "count"]) {
+    assert.equal(labels("db.characters.aggregate([]).").includes(rejected), false, `${rejected} should not be offered after aggregate()`);
+  }
+});
+
+test("recognises toArray and pretty in find chains and keeps count restricted", () => {
+  const expectedChainMethods = ["limit", "sort", "skip", "explain", "collation", "toArray", "pretty"];
+  assert.deepEqual(labels("db.characters.find({}).toArray()."), expectedChainMethods);
+  assert.deepEqual(labels("db.characters.find({}).pretty()."), expectedChainMethods);
+  assert.deepEqual(labels("db.characters.find({}).sort({ name: 1 }).toArray()."), expectedChainMethods);
+});
+
+test("stops offering root snippets after terminal cursor methods count and explain", () => {
+  // Nothing can follow count() or explain(); these positions must yield mode "none" rather than root db.* snippets.
+  assert.equal(getMongoCompletionContext("db.users.find({}).count().", "db.users.find({}).count().".length).mode, "none");
+  assert.deepEqual(labels("db.users.find({}).count()."), []);
+  assert.deepEqual(labels("db.users.find({}).count().db"), []);
+  assert.deepEqual(labels("db.characters.find({}).count()."), []);
+
+  assert.equal(getMongoCompletionContext("db.users.find({}).explain().", "db.users.find({}).explain().".length).mode, "none");
+  assert.deepEqual(labels("db.users.find({}).explain()."), []);
+  assert.deepEqual(labels('db.users.find({}).explain("executionStats").'), []);
+  assert.deepEqual(labels("db.users.find({}).sort({ name: 1 }).explain()."), []);
+  assert.deepEqual(labels("db.users.find({}).explain().db"), []);
+  assert.deepEqual(labels("db.users.find({}).explain().lim"), []);
+
+  assert.deepEqual(labels("db.users.aggregate([]).count()."), []);
+  assert.deepEqual(labels("db.users.aggregate([]).explain()."), []);
+  assert.deepEqual(labels("db.users.aggregate([]).limit(5)."), []);
 });
 
 test("suggests observed fields inside query objects", () => {
@@ -876,8 +918,8 @@ test("completes the collation document wherever it appears", () => {
   assert.deepEqual(labels('db.users.find({}).collation({ strength: "'), []);
   assert.deepEqual(labels('db.users.find({}).collation({ locale: "'), []);
   // The chain continues after collation(), and collation() is a find-cursor method only.
-  assert.deepEqual(labels('db.users.find({}).collation({ locale: "en" }).'), ["limit", "sort", "skip", "explain", "collation"]);
-  assert.ok(!labels("db.users.aggregate([]).").includes("collation"));
+  assert.deepEqual(labels('db.users.find({}).collation({ locale: "en" }).'), ["limit", "sort", "skip", "explain", "collation", "toArray", "pretty"]);
+  assert.deepEqual(labels("db.users.aggregate([])."), ["toArray", "pretty"]);
 });
 
 test("completes an index's partial filter as a filter", () => {

@@ -68,6 +68,8 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       NPM_CONFIG_LOGLEVEL: error
+      # The frontend type graph exceeds Node 22's default ~2 GiB heap on this runner.
+      NODE_OPTIONS: --max-old-space-size=4096
     steps:
       - uses: actions/checkout@v7
 

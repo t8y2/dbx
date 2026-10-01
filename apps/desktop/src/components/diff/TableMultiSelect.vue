@@ -16,6 +16,10 @@ const props = withDefaults(
   defineProps<{
     /** All available table names. */
     tables: string[];
+    /** Optional display labels for opaque selection keys. */
+    labels?: Record<string, string>;
+    /** Plain text to search when display labels escape identifier characters. */
+    searchValues?: Record<string, string>;
     /** Currently selected table names (v-model). */
     modelValue: string[];
     /** Optional header label; falls back to `tableMultiSelect.tables`. */
@@ -42,7 +46,11 @@ const emit = defineEmits<{ (e: "update:modelValue", value: string[]): void }>();
 const { t } = useI18n();
 const search = ref("");
 
-const filteredTables = computed(() => filterTableNames(props.tables, search.value));
+const filteredTables = computed(() => {
+  if (!props.labels) return filterTableNames(props.tables, search.value);
+  const query = search.value.trim().toLocaleLowerCase();
+  return props.tables.filter((key) => (props.searchValues?.[key] ?? props.labels?.[key] ?? key).toLocaleLowerCase().includes(query));
+});
 const selectedSet = computed(() => new Set(props.modelValue));
 const allFilteredSelected = computed(() => isEveryFilteredSelected(props.modelValue, filteredTables.value));
 const showSearch = computed(() => props.searchable && props.tables.length > 5);
@@ -82,7 +90,7 @@ function toggleSelectAll() {
       <button v-for="table in filteredTables" :key="table" type="button" :data-table-name="table" :disabled="disabled" class="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs hover:bg-muted/50 disabled:opacity-50" @click="toggle(table)">
         <CheckSquare v-if="selectedSet.has(table)" class="h-3.5 w-3.5 shrink-0 text-primary" />
         <Square v-else class="h-3.5 w-3.5 shrink-0 text-muted-foreground/40" />
-        <span class="truncate">{{ table }}</span>
+        <span class="truncate" :title="labels?.[table] ?? table">{{ labels?.[table] ?? table }}</span>
       </button>
     </div>
   </div>

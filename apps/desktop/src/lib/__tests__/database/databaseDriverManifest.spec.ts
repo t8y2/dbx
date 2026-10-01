@@ -1,7 +1,32 @@
 import { describe, expect, it } from "vitest";
-import { databaseConnectionFormKind, databaseDefaultPort, databaseManifestEntry, databaseRuntimeMode, usesAgentCursorForQuery, usesAgentCursorForTableData } from "@/lib/database/databaseDriverManifest";
+import { databaseConnectionFormKind, databaseDefaultPort, databaseManifestEntry, databaseProductCapabilities, databaseRuntimeMode, supportsDatabaseFeature, usesAgentCursorForQuery, usesAgentCursorForTableData } from "@/lib/database/databaseDriverManifest";
 
 describe("databaseDriverManifest", () => {
+  it("advertises implemented Xugu capabilities without enabling unsupported features", () => {
+    expect(databaseProductCapabilities("xugu")).toEqual({
+      queryExecution: true,
+      metadataBrowse: true,
+      objectBrowser: true,
+      objectSource: true,
+      schemaSearch: true,
+      diagram: true,
+      tableDataEdit: true,
+      tableStructureEdit: true,
+      tableImport: true,
+      dataTransfer: false,
+      sqlFileExecution: true,
+      databaseCreate: false,
+      fieldLineage: false,
+      sqlExplain: false,
+      userAdmin: true,
+      driverManagement: true,
+    });
+    for (const capability of ["objectSource", "tableDataEdit", "userAdmin"] as const) {
+      expect(supportsDatabaseFeature("xugu", capability), capability).toBe(true);
+    }
+    expect(supportsDatabaseFeature("xugu", "sqlExplain")).toBe(false);
+  });
+
   it("uses agent cursor only for agent or external runtimes", () => {
     expect(databaseRuntimeMode("gaussdb")).toBe("native");
     expect(databaseRuntimeMode("meilisearch")).toBe("native");

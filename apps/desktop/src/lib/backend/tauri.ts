@@ -324,6 +324,7 @@ export interface DesktopSettings {
   agent_store_dir?: string | null;
   custom_ai_skill_root_enabled?: boolean | null;
   custom_ai_skill_root?: string | null;
+  custom_ai_skill_auto_enabled?: boolean | null;
   sidebar_table_page_size?: number | null;
 }
 
@@ -590,13 +591,29 @@ export interface DriverInstallProgress {
 }
 
 export interface AiMessage {
-  role: "user" | "assistant" | "system";
+  role: "user" | "assistant" | "system" | "tool";
   content: string;
   /** Transient images for this message. Persisted conversation history intentionally omits them. */
   images?: Array<{
     mediaType: string;
     data: string;
   }>;
+  /** For `role: "tool"`: the call this message answers. */
+  toolCallId?: string;
+  /** For `role: "assistant"`: the calls this turn made. The panel builds one of
+   *  these per request to replay a loaded skill as a real tool round; it is never
+   *  written to a conversation record. */
+  toolCalls?: AiToolCallRef[];
+}
+
+/** Mirrors `ToolCallRef` in `crates/dbx-ai-provider/src/ai.rs`. `providerPayload`
+ *  is provider-private replay data (Gemini thought signatures) that only a real
+ *  provider round can produce; a panel-built call leaves it unset. */
+export interface AiToolCallRef {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+  providerPayload?: unknown;
 }
 
 export interface AiTaskContract {
@@ -1348,6 +1365,17 @@ export interface AiChatMessage {
    * the turn was not empty. Absent on records written before the field existed.
    */
   selectionsOmitted?: boolean;
+  /**
+   * Skills this conversation has had loaded (prd 09-30 Req 13), carried on the
+   * newest assistant turn of each snapshot.
+   *
+   * Only the fact, never the body: a body can reach 1 MiB per skill, the stored
+   * message array is an unbounded column with no per-message cap, and it is
+   * re-serialized in full on every save. Bodies stay in memory and are re-read
+   * from disk when a request needs them — the same shape as the #10058 selection
+   * footprint above, which keeps a flag instead of its payload.
+   */
+  loadedSkillIds?: string[];
 }
 
 export interface AiConversation {

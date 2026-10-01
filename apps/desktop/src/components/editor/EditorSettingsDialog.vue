@@ -9822,6 +9822,15 @@ LIMIT 100;</pre
                     </Button>
                   </div>
                 </div>
+                <!-- Default off: a skill listing rides in every request once this is
+                     on, even with nothing selected (prd 09-30 Req 5). -->
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="ai-skill-auto-enabled">{{ t("settings.aiSkillAutoEnabled") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.aiSkillAutoEnabledDesc") }}</p>
+                  </div>
+                  <Switch id="ai-skill-auto-enabled" :model-value="settingsStore.desktopSettings.custom_ai_skill_auto_enabled === true" @update:model-value="(value) => settingsStore.updateDesktopSettings({ custom_ai_skill_auto_enabled: Boolean(value) })" />
+                </div>
               </div>
 
               <!-- Max Retries (list mode, global) -->

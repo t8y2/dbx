@@ -1,3 +1,45 @@
+<script lang="ts">
+// Aliased because `<script setup>` imports the same binding and the two blocks
+// share one module scope.
+import { reactive as createReactiveMap } from "vue";
+
+/**
+ * Per-conversation skill state, shared by every panel instance.
+ *
+ * Declared in a plain `<script>` block — not in `<script setup>`, where the
+ * bindings would be re-created per instance — because this has to outlive the
+ * component: closing the AI panel unmounts it, and the chip's "loaded" state
+ * (prd 09-30 Req 13) and the one-time hint flag (Req 14) must survive reopening
+ * the same conversation.
+ */
+
+/** A skill body this conversation has loaded, kept for the life of the app run. */
+interface LoadedSkillBody {
+  id: string;
+  name: string;
+  source: "custom" | "default";
+  content: string;
+}
+
+/**
+ * Which skills each conversation has loaded. This is the fact the transcript
+ * persists (see `AiChatMessage.loadedSkillIds`); the bodies do not go to disk at
+ * all, so this map plus the persisted ids are what the chips read.
+ */
+const conversationLoadedSkillIds = createReactiveMap(new Map<string, string[]>());
+/**
+ * Bodies loaded in this app run, session-only by design. A forced load can carry
+ * up to 1 MiB per skill, and the stored message array is an unbounded column that
+ * is re-serialized in full on every save — so only the ids above are persisted
+ * (the same shape as the #10058 selection footprint in
+ * `crates/dbx-ai-provider/src/ai.rs`). The body is re-read from disk when a
+ * request actually needs it.
+ */
+const conversationLoadedSkillBodies = createReactiveMap(new Map<string, LoadedSkillBody[]>());
+/** Conversations whose one-time hint has already been shown. */
+const conversationSkillHintSeen = new Set<string>();
+</script>
+
 <script setup lang="ts">
 import { computed, defineAsyncComponent, h, nextTick, onMounted, onUnmounted, reactive, ref, toRaw, watch, type Component } from "vue";
 import { uuid } from "@/lib/common/utils";
@@ -68,7 +110,7 @@ import { useUserSkillStore } from "@/stores/userSkillStore";
 import { buildSelectedSkillChips, removeSkillIds, userSkillSourceOfId } from "@/lib/ai/userSkillSelection";
 import { aiConversationTypographyCssVariables } from "@/lib/ai/aiTypography";
 import { buildSkillListing, buildSkillListingLines } from "@/lib/ai/skillListing";
-import { type ReadUserSkillFailure, type UserSkillFailureReason, type UserSkillMeta, type UserSkillRootSettings } from "@/types/userSkills";
+import { type ReadUserSkillFailure, type UserSkillFailureReason, type UserSkillMeta, type UserSkillRootSettings, type UserSkillsListResult } from "@/types/userSkills";
 import { supportsAiAssistantContext } from "@/lib/database/databaseFeatureSupport";
 import ConnectionIcon from "@/components/icons/ConnectionIcon.vue";
 import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
@@ -168,7 +210,7 @@ import { buildAiAgentStepItems, formatAgentToolName, formatToolDurationMs, toolC
 import { createAiShikiCodeHighlighter, type AiCodeHighlighter } from "@/lib/ai/aiCodeHighlighter";
 import { createAiMessageRenderer } from "@/lib/ai/aiMessageRender";
 import { formatAiInlineMarkdown, handleAiMarkdownLinkClick } from "@/lib/ai/aiMarkdown";
-import { aiStream, aiCancelStream, resolveAiToolApproval, saveAiConversation, saveAiRun, saveAiRunState, loadAiConversations, loadAiRuns, deleteAiConversation, listSchemas, listTables, listUserSkills, type AiConversation, type AiRun, type AiRunStatus } from "@/lib/backend/api";
+import { aiStream, aiCancelStream, resolveAiToolApproval, saveAiConversation, saveAiRun, saveAiRunState, loadAiConversations, loadAiRuns, deleteAiConversation, listSchemas, listTables, listUserSkills, readUserSkills, type AiConversation, type AiRun, type AiRunStatus } from "@/lib/backend/api";
 import type { AiMessage } from "@/lib/backend/api";
 import type { AiConfigItem, AiEffortCapability, AiEffortOption, AiEffortSelection } from "@/types/ai";
 import type { ConnectionConfig, QueryTab, SavedSqlFile, TableInfo } from "@/types/database";
@@ -315,6 +357,14 @@ interface ChatMessage {
    */
   routedFrom?: "auto";
   routedAction?: AiAction;
+  /**
+   * Skills this conversation has had loaded (prd 09-30 Req 13), kept on the newest
+   * assistant turn of every snapshot. Only the fact is persisted: a body can reach
+   * 1 MiB per skill and the stored message array is re-serialized in full on every
+   * save, so bodies are re-read from disk when a request needs them (see
+   * `rehydrateLoadedSkillBodies`). Same shape as `selectionsOmitted`.
+   */
+  loadedSkillIds?: string[];
 }
 
 const props = defineProps<{
@@ -640,10 +690,148 @@ const userSkillStore = useUserSkillStore();
 const selectedSkillIds = ref<string[]>([]);
 const showSkillSelector = ref(false);
 const skillFailures = ref<ReadUserSkillFailure[]>([]);
+/** Force-loads in flight, so a chip can spin and a double click cannot inject the
+ *  same body twice. */
+const skillPreloadPending = ref<string[]>([]);
+
+/** Tool name backing the on-demand skill load (`crates/dbx-core/src/ai/skill_tools.rs`). */
+const USE_SKILL_TOOL_NAME = "use_skill";
+
 // Chips derive from the selection truth, not from the catalog: a skill that
 // vanished from discovery must keep a removable chip (prd.md:37) instead of
 // silently becoming an id the user can no longer drop.
-const selectedSkillChips = computed(() => buildSelectedSkillChips(selectedSkillIds.value, (id) => userSkillStore.metaFor(id)));
+const selectedSkillChips = computed(() => buildSelectedSkillChips(selectedSkillIds.value, (id) => userSkillStore.metaFor(id), loadedSkillIds.value));
+
+/**
+ * A `use_skill` call addresses a skill by its listed name (and optionally its
+ * source), never by the opaque id (ADR Decision 6 / Req 11), so only the catalog
+ * can map a call back to a chip. A name the catalog no longer lists lights no
+ * chip — it still reaches the model, which is what the loaded state describes.
+ */
+function skillIdFromToolArguments(args: Record<string, unknown> | undefined): string | undefined {
+  const name = typeof args?.skill === "string" ? args.skill.trim() : "";
+  if (!name) return undefined;
+  const source = args?.source === "custom" || args?.source === "default" ? args.source : undefined;
+  for (const group of userSkillStore.groupedSkills) {
+    for (const skill of group.skills) {
+      if (skill.name === name && (!source || group.source === source)) return skill.id;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Loaded = this conversation's recorded facts (a model-initiated `use_skill` in
+ * one of its runs, a forced load, or the ids restored from its own transcript).
+ * Per-conversation and never recomputed per turn, so the chip cannot flicker
+ * between turns; a new chat starts over, and a different conversation reads its
+ * own key.
+ */
+/**
+ * Key for the per-conversation skill maps: the conversation's id once it has one,
+ * and otherwise an id for the unsaved chat — fresh per panel instance and per
+ * "new chat", because such a chat cannot be reopened, so no other instance may
+ * inherit its state.
+ */
+const unsavedConversationKey = ref(`unsaved:${uuid()}`);
+const skillStateKey = computed(() => conversationId.value || unsavedConversationKey.value);
+
+/**
+ * Loaded = this conversation's recorded facts (a model-initiated `use_skill` in
+ * one of its runs, a forced load, or the ids restored from its own transcript).
+ * Per-conversation and never recomputed per turn, so the chip cannot flicker
+ * between turns; a new chat starts over, and a different conversation reads its
+ * own key.
+ */
+const loadedSkillIds = computed<Set<string>>(() => new Set(conversationLoadedSkillIds.get(skillStateKey.value) ?? []));
+
+function recordConversationSkillLoad(key: string, id: string) {
+  const loaded = conversationLoadedSkillIds.get(key) ?? [];
+  if (loaded.includes(id)) return;
+  conversationLoadedSkillIds.set(key, [...loaded, id]);
+}
+
+/**
+ * Moves the unsaved chat's skill state onto the id it just adopted. The id
+ * watcher covers this for the UI, but watchers flush later: `send()` mints the id
+ * and reads this state in the same tick, so it calls this again itself.
+ */
+function migrateUnsavedSkillState(id: string) {
+  const unsavedKey = unsavedConversationKey.value;
+  if (!unsavedKey || unsavedKey === id) return;
+  const facts = conversationLoadedSkillIds.get(unsavedKey);
+  if (facts) {
+    conversationLoadedSkillIds.delete(unsavedKey);
+    conversationLoadedSkillIds.set(id, facts);
+  }
+  const bodies = conversationLoadedSkillBodies.get(unsavedKey);
+  if (bodies) {
+    conversationLoadedSkillBodies.delete(unsavedKey);
+    conversationLoadedSkillBodies.set(id, bodies);
+  }
+}
+
+/**
+ * Seed the conversation's facts from its persisted transcript (Req 13 after a
+ * restart). Every snapshot writes the whole list onto the newest assistant turn,
+ * so the newest carrier is the authoritative one — older turns hold stale
+ * subsets, and reading the union would resurrect an id a later snapshot dropped
+ * (a skill that was deleted, say).
+ */
+function seedLoadedSkillsFromTranscript(conversationIdToSeed: string, transcript: readonly ChatMessage[]) {
+  for (let i = transcript.length - 1; i >= 0; i--) {
+    const persisted = transcript[i].loadedSkillIds;
+    if (!persisted?.length) continue;
+    const existing = conversationLoadedSkillIds.get(conversationIdToSeed) ?? [];
+    const merged = [...existing, ...persisted.filter((id) => !existing.includes(id))];
+    conversationLoadedSkillIds.set(conversationIdToSeed, merged);
+    return;
+  }
+}
+
+/**
+ * Req 14's one-time hint: the first turn of a conversation in which something is
+ * selected and none of it has been loaded yet. It is latched rather than derived
+ * (so it does not re-render every turn) and it disappears on its own once the
+ * skill it names is loaded, or when the user drops its chip.
+ */
+const skillHintLatch = ref<{ key: string; id: string; name: string } | null>(null);
+const showSkillHint = computed(() => {
+  const latch = skillHintLatch.value;
+  if (!latch || latch.key !== skillStateKey.value) return false;
+  return selectedSkillIds.value.includes(latch.id) && !loadedSkillIds.value.has(latch.id);
+});
+const skillHintText = computed(() => t("ai.skillsPreloadHint", { name: skillHintLatch.value?.name ?? "" }));
+function preloadHintedSkill() {
+  const id = skillHintLatch.value?.id;
+  if (id) void preloadSkill(id);
+}
+/** The hint names one specific skill, so dropping that skill retires it. */
+function forgetSkillHintFor(id: string) {
+  if (skillHintLatch.value?.id === id) skillHintLatch.value = null;
+}
+watch([skillStateKey, () => selectedSkillChips.value.map((chip) => chip.id).join(","), () => [...loadedSkillIds.value].sort().join(",")], () => {
+  if (skillCapabilityUnavailable.value) return;
+  const key = skillStateKey.value;
+  if (conversationSkillHintSeen.has(key)) return;
+  const chips = selectedSkillChips.value;
+  if (!chips.length) return;
+  if (chips.some((chip) => loadedSkillIds.value.has(chip.id))) return;
+  conversationSkillHintSeen.add(key);
+  skillHintLatch.value = { key, id: chips[0].id, name: chips[0].name };
+});
+// Minting the unsaved chat's id on its first send (or when queueing) is not a
+// conversation switch: move the unsaved chat's skill state onto the id it just
+// adopted, or the brand-new id would read as a fresh conversation (Req 14) and
+// would lose the bodies a forced load already put in this run's state (Req 13).
+watch(conversationId, (id, previous) => {
+  if (previous !== "" || !id) return;
+  const unsavedKey = unsavedConversationKey.value;
+  if (conversationSkillHintSeen.delete(unsavedKey)) conversationSkillHintSeen.add(id);
+  const latch = skillHintLatch.value;
+  if (latch && latch.key === unsavedKey) skillHintLatch.value = { ...latch, key: id };
+  migrateUnsavedSkillState(id);
+});
 // The selector's capability state (predicate, gated open state, trigger label)
 // lives below `activeFullConfig`, next to the config it reads.
 // Selector retry-on-open mirrors the template selector above.
@@ -672,6 +860,7 @@ function toggleSkillSelected(id: string) {
 function removeSelectedSkill(id: string) {
   selectedSkillIds.value = removeSkillIds(selectedSkillIds.value, [id]);
   skillFailures.value = [];
+  forgetSkillHintFor(id);
 }
 
 /** Banner Remove: drops every failed skill from the selection, so the next send is not blocked by a stale id. */
@@ -708,6 +897,122 @@ function openSkillRootSettings() {
 function selectedSkillsListedStep(skills: readonly UserSkillMeta[]): AiAgentStepItem {
   const details = skills.map((skill) => `${skill.name} (${t(userSkillSourceOfId(skill.id) === "custom" ? "ai.skillsGroupCustom" : "ai.skillsGroupDefault")})`).join(" · ");
   return { key: "selected-skills", labelKey: "ai.agentSteps.skillsListed", tone: "success", toolName: skills.map((skill) => skill.name).join(", "), toolResult: details };
+}
+
+/**
+ * Provider-shaped call id for the synthetic round. Gemini derives a tool result's
+ * function name from the id (`gemini-tc-<name>-<index>`, see `build_gemini_contents`
+ * in dbx-ai-provider), so a generic id would replay the result as "unknown" and
+ * the provider would reject the whole request.
+ */
+function skillLoadCallId(skillName: string): string {
+  return activeFullConfig.value?.provider === "gemini" ? `gemini-tc-${USE_SKILL_TOOL_NAME}-0` : `dbx-skill-${skillName}-${uuid()}`;
+}
+
+/** Same shape `use_skill` returns, minus the file listing: the panel's read API
+ *  returns the body only, and the model can still call `use_skill` for the list. */
+function skillToolResultText(name: string, source: string, content: string): string {
+  return `# Skill: ${name} [${source}]\n\n${content.trimEnd()}\n\nFollow this skill's instructions.\n`;
+}
+
+/** The pair a real `use_skill` round produces, for the request to replay. Built
+ *  per request — never written to the transcript or to storage. */
+function skillRoundMessages(bodies: readonly LoadedSkillBody[]): AiMessage[] {
+  return bodies.flatMap((body): AiMessage[] => {
+    const callId = skillLoadCallId(body.name);
+    return [
+      { role: "assistant", content: "", toolCalls: [{ id: callId, name: USE_SKILL_TOOL_NAME, arguments: { skill: body.name, source: body.source } }] },
+      { role: "tool", content: skillToolResultText(body.name, body.source, body.content), toolCallId: callId },
+    ];
+  });
+}
+
+/**
+ * Req 13's forced load: read the body now and remember it for this conversation.
+ *
+ * The body stays in this app run (`conversationLoadedSkillBodies`); only the fact
+ * that the skill is loaded is persisted. A failed read is reported and stores
+ * nothing — that refusal is the guard, since a body can be up to 1 MiB and a
+ * result that size would wreck the context instead of helping it.
+ */
+async function preloadSkill(id: string) {
+  if (skillCapabilityUnavailable.value) return;
+  // Re-loading would stack the same body into the request twice.
+  if (loadedSkillIds.value.has(id) || skillPreloadPending.value.includes(id)) return;
+  const name = userSkillStore.metaFor(id)?.name ?? id;
+  skillPreloadPending.value = [...skillPreloadPending.value, id];
+  try {
+    const result = await readUserSkills([id], skillRootSettings());
+    const skill = result.skills.find((entry) => entry.id === id);
+    if (!skill) {
+      const reason = result.failures.find((failure) => failure.id === id)?.reason ?? "unreadable";
+      // A toast, not the send-blocked banner: no request was refused here, and the
+      // banner's recovery actions all belong to a send that was.
+      toast(`${t("ai.skillsPreloadFailed")}: ${name} — ${t(skillFailureReasonKey(reason))}`, 5000);
+      return;
+    }
+    const key = skillStateKey.value;
+    const source = userSkillSourceOfId(id);
+    conversationLoadedSkillBodies.set(key, [...(conversationLoadedSkillBodies.get(key) ?? []), { id, name: skill.name, source, content: skill.content }]);
+    recordConversationSkillLoad(key, id);
+    // Only an already-stored conversation is re-persisted: a chip click must not
+    // create a conversation of its own (the first send snapshots the fact).
+    if (conversationId.value && conversations.value.some((conversation) => conversation.id === conversationId.value)) {
+      void persistConversation();
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    toast(`${t("ai.skillsPreloadFailed")}: ${name} — ${translateBackendError(t, message)}`, 5000);
+  } finally {
+    skillPreloadPending.value = skillPreloadPending.value.filter((pending) => pending !== id);
+  }
+}
+
+/**
+ * The bodies a request should replay: this run's loaded bodies, plus the ones a
+ * restart left as a fact without a body.
+ *
+ * Re-reading those is NOT ADR Decision 3's rejected auto-fallback. That decision
+ * forbade loading a skill the conversation never used into an unrelated
+ * conversation, because the body then stays in the history and burns tokens
+ * forever. This restores state the conversation already had, on the topic it is
+ * already on, and the ids come from what the user or the model actually loaded.
+ *
+ * A skill that has since been deleted or grown past the read limit cannot be
+ * restored: its id is dropped from the facts (so the chip stops claiming it is
+ * loaded and the next snapshot persists the correction) and the reason is shown.
+ */
+async function rehydrateLoadedSkillBodies(key: string): Promise<LoadedSkillBody[]> {
+  const ids = conversationLoadedSkillIds.get(key) ?? [];
+  if (!ids.length) return [];
+  const bodies = [...(conversationLoadedSkillBodies.get(key) ?? [])];
+  const missing = ids.filter((id) => !bodies.some((body) => body.id === id));
+  if (!missing.length) return bodies;
+  try {
+    const result = await readUserSkills(missing, skillRootSettings());
+    for (const skill of result.skills) {
+      bodies.push({ id: skill.id, name: skill.name, source: userSkillSourceOfId(skill.id), content: skill.content });
+    }
+    for (const failure of result.failures) {
+      const name = userSkillStore.metaFor(failure.id)?.name ?? failure.id;
+      toast(`${t("ai.skillsPreloadFailed")}: ${name} — ${t(skillFailureReasonKey(failure.reason))}`, 5000);
+    }
+    if (result.failures.length) {
+      const failed = new Set(result.failures.map((failure) => failure.id));
+      conversationLoadedSkillIds.set(
+        key,
+        ids.filter((id) => !failed.has(id)),
+      );
+    }
+  } catch (error) {
+    // The read itself failed (backend unavailable). Keep the facts — this is an
+    // environment failure, not evidence that the skills are gone — and send the
+    // request without the bodies rather than failing the whole send.
+    const message = error instanceof Error ? error.message : String(error);
+    toast(`${t("ai.skillsPreloadFailed")}: ${translateBackendError(t, message)}`, 5000);
+  }
+  conversationLoadedSkillBodies.set(key, bodies);
+  return bodies;
 }
 
 // Retry store load on selector open if prior init failed (e.g. backend not yet ready at mount)
@@ -3425,6 +3730,9 @@ async function send() {
   }
   const myGeneration = aiGenerationGuard.begin();
   if (!auto && !conversationId.value) conversationId.value = uuid();
+  // The id was minted a line ago and the watcher has not flushed yet: this send
+  // must already read the skill state of the conversation it is now running for.
+  if (!auto) migrateUnsavedSkillState(conversationId.value);
   const runConversationId = auto ? auto.conversationId : conversationId.value;
   const runMessages = auto ? auto.messages : messages.value;
   const runCreatedAt = new Date().toISOString();
@@ -3492,12 +3800,30 @@ async function send() {
   // before the request goes out. On any failure no AI request is sent: the
   // failure banner appears above the composer while the draft and selection stay
   // untouched.
+  //
+  // Skill capability is built-in-AI only (Req 12): a CLI provider gets neither
+  // the listing nor the two tools, so the whole block is skipped for it. The
+  // selector is disabled there too (Req 15a), but a selection made under an API
+  // provider survives a model switch, and nothing of it may reach the CLI run.
   let sendSkillListing: string[] | undefined;
   let sendSelectedSkillMetas: UserSkillMeta[] | undefined;
-  if (selectedSkillIds.value.length > 0) {
-    // PR3 adds the "allow AI to use skills automatically" Settings toggle here.
+  const skillsAvailable = !isCliProvider(activeConfig.provider);
+  // Req 5: the listing rides along when the user ticked something OR the
+  // "allow the AI to use skills automatically" Settings toggle (default off) is
+  // on. `allowSkills` below then follows from the listing itself, so the two
+  // skill tools ship exactly when the prompt points at them (ADR Decision 10).
+  const autoSkillsEnabled = settings.desktopSettings?.custom_ai_skill_auto_enabled === true;
+  if (skillsAvailable && (selectedSkillIds.value.length > 0 || autoSkillsEnabled)) {
     skillFailures.value = [];
-    const catalog = await listUserSkills(skillRootSettings());
+    let catalog: UserSkillsListResult;
+    try {
+      catalog = await listUserSkills(skillRootSettings());
+    } catch {
+      // The catalog gates nothing on its own: with nothing selected the request
+      // just goes out skill-free, and a checked skill is reported as
+      // unavailable. An unhandled rejection here would take the whole send down.
+      catalog = { defaultRoot: { status: "invalid", skills: [] }, customRoot: null };
+    }
     const catalogSkills = [...catalog.defaultRoot.skills, ...(catalog.customRoot?.skills ?? [])];
     const known = new Set(catalogSkills.map((skill) => skill.id));
     const failures: ReadUserSkillFailure[] = [];
@@ -3572,6 +3898,19 @@ async function send() {
   // Decision 10), so this is the same condition that just put lines in the
   // prompt rather than a second decision that could drift away from it.
   const allowSkills = Boolean(sendSkillListing?.length);
+  // The bodies this request should replay: the ones loaded in this session, plus
+  // the ones this conversation had loaded before a restart and never kept on disk
+  // (Req 13). Only when the request declares the skill tools — a send with no
+  // listing carries no `use_skill`, and Gemini and Anthropic reject a replayed
+  // call to a function they were not given.
+  const skillBodies = allowSkills ? await rehydrateLoadedSkillBodies(runConversationId) : [];
+  // Superseded while the bodies were being re-read: this generation no longer owns
+  // the conversation, and `skillBodies` describes a state it may have left.
+  if (!generationCanContinue()) {
+    clearPendingWriteGrant();
+    resolveDetachedRunSettled();
+    return;
+  }
   // Remember what was actually sent for this db_type so panels opened later can
   // restore it when no explicit per-db_type defaults are configured. This runs
   // for empty selections too: the store clears the remembered entry so a
@@ -3785,7 +4124,10 @@ async function send() {
     void persistConversationSnapshot(runConversationId, runMessages, runSourceName, tab?.database || "", runCreatedAt);
   }
   try {
-    const history: AiMessage[] = messagesForAgentHistory(runMessages.slice(0, -2));
+    // The skill round is appended after the transcript's own turns: it reaches the
+    // model as the most recent context before the new user prompt, and it is built
+    // per request so the body never enters the transcript or any stored record.
+    const history: AiMessage[] = [...messagesForAgentHistory(runMessages.slice(0, -2)), ...skillRoundMessages(skillBodies)];
     const onEvent = (event: AgentEvent) => {
       // Superseded by a clear/switch/new-chat (or a newer send()) — the backend
       // stream may still be running, but this generation no longer owns any
@@ -3865,6 +4207,15 @@ async function send() {
       }
       // Real-time agent step rendering
       if (event.type === "tool_call_start" || event.type === "tool_call_end") {
+        // Req 13's "the model actually used it" signal. The tool round itself
+        // lives inside the backend run and is never persisted back into the
+        // transcript, so the event stream is where this is observed — recorded
+        // under the run's own conversation, which a background send may not be
+        // showing.
+        if (event.type === "tool_call_start" && event.tool_name === USE_SKILL_TOOL_NAME) {
+          const loadedSkillId = skillIdFromToolArguments(event.args);
+          if (loadedSkillId && runConversationId) recordConversationSkillLoad(runConversationId, loadedSkillId);
+        }
         const msg = runMessages[assistantIdx];
         if (msg) {
           if (!msg.agentSteps) msg.agentSteps = [];
@@ -4069,6 +4420,8 @@ async function send() {
       if (compaction) {
         const { summary, compactedMessages } = compaction;
         if (!detachedRun) pendingCompaction.value = null;
+        // The backend counted the messages it received; the transcript is what it
+        // counted (skill rounds never enter it — see `skillRoundMessages`).
         const insertAt = Math.min(1 + compactedMessages, runMessages.length - 1);
         if (summary) {
           runMessages.splice(insertAt, 0, {
@@ -4633,6 +4986,14 @@ function clearMessages() {
   historyIndex.value = -1;
   draftBeforeHistory.value = "";
   recoveredDraftActive.value = false;
+  // A new chat is a new conversation, so it gets its own hint identity and a
+  // first hint of its own (Req 14). Its predecessor's skill state is dropped with
+  // it — that chat's id can never come back.
+  skillHintLatch.value = null;
+  conversationSkillHintSeen.delete(unsavedConversationKey.value);
+  conversationLoadedSkillIds.delete(unsavedConversationKey.value);
+  conversationLoadedSkillBodies.delete(unsavedConversationKey.value);
+  unsavedConversationKey.value = `unsaved:${uuid()}`;
   messageRenderer.value.clear();
 }
 
@@ -4661,6 +5022,14 @@ function buildConversationSnapshot(targetConversationId: string, targetMessages:
   const first = targetMessages.find((m) => m.role === "user" && m.kind !== "contextSummary");
   const existingConversation = conversations.value.find((conversation) => conversation.id === targetConversationId);
   const binding = snapshotBinding(targetConversationId, fallbackBinding);
+  let lastAssistantIndex = -1;
+  for (let i = targetMessages.length - 1; i >= 0; i--) {
+    if (targetMessages[i].role === "assistant") {
+      lastAssistantIndex = i;
+      break;
+    }
+  }
+  const loadedSkillIdsForSnapshot = conversationLoadedSkillIds.get(targetConversationId) ?? [];
   return {
     id: targetConversationId,
     title: first?.pluginContext?.title || renamedConversationTitles.get(targetConversationId) || existingConversation?.title || (first ? messageTitle(first).slice(0, 50) : "Untitled"),
@@ -4673,7 +5042,7 @@ function buildConversationSnapshot(targetConversationId: string, targetMessages:
     connectionId: binding.connectionId,
     database: existingConversation ? binding.database : database,
     schema: binding.schema,
-    messages: targetMessages.map((m) => ({
+    messages: targetMessages.map((m, index) => ({
       role: m.role,
       content: m.content,
       ...(m.mentions?.length ? { mentions: m.mentions } : {}),
@@ -4689,6 +5058,11 @@ function buildConversationSnapshot(targetConversationId: string, targetMessages:
       // Preserve it on every subsequent snapshot or the second restart silently
       // loses the omission warning again.
       ...(m.selections?.length || m.selectionsOmitted ? { selectionsOmitted: true } : {}),
+      // Skills this conversation has loaded (Req 13), carried on the newest
+      // assistant turn so a reload reads back one authoritative list. Only the
+      // ids: see `ChatMessage.loadedSkillIds` for why the bodies stay out of the
+      // record.
+      ...(index === lastAssistantIndex && loadedSkillIdsForSnapshot.length ? { loadedSkillIds: [...loadedSkillIdsForSnapshot] } : {}),
     })),
     // The conversation's single queued "send later" input, persisted so it
     // survives a restart (parent PRD §5).
@@ -4815,6 +5189,14 @@ async function persistPendingInputRecovery(conversation: AiConversation, message
       ...(m.kind ? { kind: m.kind } : {}),
       ...(m.failed ? { failed: true } : {}),
       ...(m.sourceBinding ? { sourceBinding: m.sourceBinding } : {}),
+      // This is a second snapshot-writing path beside
+      // `buildConversationSnapshot`, and it replaces the whole message array.
+      // Every footprint a message carries must be re-projected here or the
+      // restart that recovers a queued run silently drops it: the selection
+      // omission warning (#10058) and the loaded-skill fact (Req 13) both only
+      // survive as long as each rewrite carries them forward.
+      ...(m.selections?.length || m.selectionsOmitted ? { selectionsOmitted: true } : {}),
+      ...(m.loadedSkillIds?.length ? { loadedSkillIds: [...m.loadedSkillIds] } : {}),
     })),
     queuedInput: conversation.queuedInput,
     createdAt: conversation.createdAt,
@@ -4892,6 +5274,11 @@ function chatMessagesFromConversation(conv: AiConversation): ChatMessage[] {
     failed: m.failed === true ? true : undefined,
     // Only the footprint is loaded back; the selection text itself is gone.
     selectionsOmitted: m.selectionsOmitted === true ? true : undefined,
+    // Which skills this conversation had loaded — the fact only, and only on the
+    // turn that carried it. `seedLoadedSkillsFromTranscript` reads it back into
+    // the panel's per-conversation state, and the body is re-read from disk when
+    // a request needs it.
+    loadedSkillIds: m.loadedSkillIds?.length ? m.loadedSkillIds : undefined,
     // Old transcripts have no per-turn target. Capture the conversation's
     // current binding on load so a later rebind cannot retarget a pending card.
     sourceBinding: m.sourceBinding ?? (m.role === "assistant" && conv.connectionId ? { connectionId: conv.connectionId, database: conv.database, schema: conv.schema } : undefined),
@@ -4920,8 +5307,15 @@ function selectConversation(conv: AiConversation) {
   clearAttachmentDraftState();
   // Drop the previous conversation's rendered Markdown instead of keeping it until the LRU evicts it.
   messageRenderer.value.clear();
+  // The arriving conversation owns its own one-time skill hint; the watcher below
+  // latches it again only if that conversation has not shown one yet (Req 14).
+  skillHintLatch.value = null;
   const activeRun = backgroundAiRunsEnabled ? desktopAiRun<ChatMessage>(conv.id) : undefined;
   messages.value = activeRun?.messages ?? chatMessagesFromConversation(conv);
+  // Req 13 after a restart: the transcript keeps the fact that skills were
+  // loaded, so the chips can light up before anything is read again. The bodies
+  // come back when a request actually needs them (`rehydrateLoadedSkillBodies`).
+  seedLoadedSkillsFromTranscript(conv.id, messages.value);
   if (pluginContext.value) {
     assistantMode.value = pluginContext.value.mode === "agent" && !boundConnection.value ? "ask" : (pluginContext.value.mode ?? "ask");
     activeAction.value = "general";
@@ -5033,6 +5427,10 @@ async function performDeleteConversation(id: string) {
     removeDesktopAiRun(id);
   }
   queuedInputs.delete(id);
+  // The conversation's skill state goes with it; the ids can never come back.
+  conversationLoadedSkillIds.delete(id);
+  conversationLoadedSkillBodies.delete(id);
+  conversationSkillHintSeen.delete(id);
   await deleteConversationWithCancellation({
     id,
     currentConversationId: () => conversationId.value,
@@ -6548,21 +6946,37 @@ async function openExternalUrl(url: string) {
               <X class="h-3 w-3 shrink-0 text-muted-foreground group-hover:text-foreground" />
             </button>
           </div>
+          <!-- Req 13: a chip has two states (idle / loaded in this conversation)
+               and clicking its body force-loads the skill. Removal therefore needs
+               its own control — one button cannot both load and remove. -->
           <div v-if="selectedSkillChips.length" class="mb-1.5 flex flex-wrap gap-1">
-            <button
-              v-for="chip in selectedSkillChips"
-              :key="chip.id"
-              type="button"
-              class="group inline-flex max-w-full items-center gap-1 rounded border bg-muted/60 px-1.5 py-0.5 text-[11px] text-foreground/90 hover:bg-muted"
-              :class="chip.unavailable ? 'border-destructive/50 text-destructive' : 'border-border/80'"
-              :title="chip.description || chip.name"
-              @click="removeSelectedSkill(chip.id)"
-            >
-              <AlertTriangle v-if="chip.unavailable" class="h-3 w-3 shrink-0" />
-              <Layers v-else class="h-3 w-3 shrink-0 text-primary" />
-              <span class="truncate">{{ chip.name }}</span>
-              <span class="shrink-0 text-[9px] text-muted-foreground">{{ t(chip.source === "custom" ? "ai.skillsGroupCustom" : "ai.skillsGroupDefault") }}</span>
-              <X class="h-3 w-3 shrink-0 text-muted-foreground group-hover:text-foreground" />
+            <span v-for="chip in selectedSkillChips" :key="chip.id" class="inline-flex max-w-full items-center rounded border bg-muted/60 text-[11px] text-foreground/90" :class="chip.unavailable ? 'border-destructive/50 text-destructive' : chip.loaded ? 'border-emerald-500/60' : 'border-border/80'">
+              <button
+                type="button"
+                class="ai-skill-chip flex min-w-0 items-center gap-1 py-0.5 pl-1.5 pr-1 hover:bg-muted disabled:cursor-not-allowed"
+                :disabled="skillCapabilityUnavailable || chip.loaded"
+                :title="chip.loaded ? t('ai.skillsLoadedState') : skillCapabilityUnavailable ? t('ai.skillsUnsupportedForCliProvider') : t('ai.skillsPreload')"
+                @click="preloadSkill(chip.id)"
+              >
+                <Loader2 v-if="skillPreloadPending.includes(chip.id)" class="h-3 w-3 shrink-0 animate-spin" />
+                <Check v-else-if="chip.loaded" class="h-3 w-3 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                <AlertTriangle v-else-if="chip.unavailable" class="h-3 w-3 shrink-0" />
+                <Layers v-else class="h-3 w-3 shrink-0 text-primary" />
+                <span class="truncate" :title="chip.description || chip.name">{{ chip.name }}</span>
+                <span class="shrink-0 text-[9px] text-muted-foreground">{{ t(chip.source === "custom" ? "ai.skillsGroupCustom" : "ai.skillsGroupDefault") }}</span>
+                <span v-if="chip.loaded" class="shrink-0 text-[9px] font-medium text-emerald-600 dark:text-emerald-400">{{ t("ai.skillsLoadedState") }}</span>
+              </button>
+              <button type="button" class="ai-skill-chip-remove shrink-0 py-0.5 pl-0.5 pr-1.5 hover:text-destructive" :aria-label="t('common.remove')" :title="t('common.remove')" @click="removeSelectedSkill(chip.id)">
+                <X class="h-3 w-3 shrink-0" />
+              </button>
+            </span>
+          </div>
+          <!-- Req 14: one one-time hint per conversation while nothing selected has
+               been loaded yet. Clicking it is the same force-load as the chip. -->
+          <div v-if="showSkillHint" class="mb-1.5">
+            <button type="button" class="ai-skill-hint inline-flex max-w-full items-center gap-1 rounded border border-primary/40 bg-primary/5 px-1.5 py-0.5 text-left text-[11px] text-primary hover:bg-primary/10" :title="t('ai.skillsPreload')" @click="preloadHintedSkill">
+              <Sparkles class="h-3 w-3 shrink-0" />
+              <span class="truncate">{{ skillHintText }}</span>
             </button>
           </div>
           <div v-if="selectedCsvAttachments.length || selectedImageAttachments.length" class="mb-1.5 flex max-h-28 flex-wrap gap-1.5 overflow-y-auto pr-0.5">

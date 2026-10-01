@@ -665,6 +665,15 @@ describe("normalizeDesktopSettings", () => {
     expect(normalizeDesktopSettings({ duckdb_worker_max_processes: 32 }).duckdb_worker_max_processes).toBe(16);
     expect(normalizeDesktopSettings({ duckdb_worker_max_processes: 3.6 }).duckdb_worker_max_processes).toBe(4);
   });
+
+  // Req 5: the automatic skill listing costs prompt tokens on every request, so a
+  // record written before the toggle existed (key absent) must normalize to off,
+  // and only an explicit `true` may turn it on.
+  it("defaults the automatic skill listing to off", () => {
+    expect(normalizeDesktopSettings({}).custom_ai_skill_auto_enabled).toBe(false);
+    expect(normalizeDesktopSettings({ custom_ai_skill_auto_enabled: null }).custom_ai_skill_auto_enabled).toBe(false);
+    expect(normalizeDesktopSettings({ custom_ai_skill_auto_enabled: true }).custom_ai_skill_auto_enabled).toBe(true);
+  });
 });
 
 describe("normalizeMcpGlobalPolicy", () => {

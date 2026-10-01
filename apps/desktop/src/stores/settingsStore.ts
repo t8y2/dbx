@@ -77,6 +77,9 @@ export interface DesktopSettings {
   agent_store_dir?: string | null;
   custom_ai_skill_root_enabled?: boolean | null;
   custom_ai_skill_root?: string | null;
+  /** "Allow the AI to use skills automatically" (prd 09-30 Req 5): the built-in
+   *  AI then receives the skill listing even with nothing selected. Default off. */
+  custom_ai_skill_auto_enabled?: boolean | null;
   sidebar_table_page_size?: number | null;
 }
 
@@ -154,6 +157,7 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   agent_store_dir: null,
   custom_ai_skill_root_enabled: false,
   custom_ai_skill_root: null,
+  custom_ai_skill_auto_enabled: false,
   sidebar_table_page_size: DEFAULT_SIDEBAR_TABLE_PAGE_SIZE,
 };
 
@@ -259,6 +263,7 @@ export function normalizeDesktopSettings(settings: Partial<DesktopSettings> | nu
     agent_store_dir: settings?.agent_store_dir?.trim() || DEFAULT_DESKTOP_SETTINGS.agent_store_dir,
     custom_ai_skill_root_enabled: settings?.custom_ai_skill_root_enabled ?? DEFAULT_DESKTOP_SETTINGS.custom_ai_skill_root_enabled,
     custom_ai_skill_root: settings?.custom_ai_skill_root?.trim() || DEFAULT_DESKTOP_SETTINGS.custom_ai_skill_root,
+    custom_ai_skill_auto_enabled: settings?.custom_ai_skill_auto_enabled ?? DEFAULT_DESKTOP_SETTINGS.custom_ai_skill_auto_enabled,
     sidebar_table_page_size: sidebarTablePageSize,
   };
 }

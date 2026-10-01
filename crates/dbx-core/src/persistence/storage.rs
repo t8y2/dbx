@@ -437,6 +437,13 @@ pub struct DesktopSettings {
     pub custom_ai_skill_root_enabled: bool,
     #[serde(default)]
     pub custom_ai_skill_root: Option<String>,
+    /// "Allow the AI to use skills automatically" (prd 09-30 Req 5). When on,
+    /// the built-in AI receives the skill listing even with nothing selected, so
+    /// the model can pick a skill up on its own. Off by default: a listing costs
+    /// prompt tokens on every request, and the user's selection stays the
+    /// explicit gate.
+    #[serde(default)]
+    pub custom_ai_skill_auto_enabled: bool,
     #[serde(default = "default_sidebar_table_page_size")]
     pub sidebar_table_page_size: usize,
 }
@@ -962,6 +969,7 @@ impl Default for DesktopSettings {
             agent_store_dir: None,
             custom_ai_skill_root_enabled: false,
             custom_ai_skill_root: None,
+            custom_ai_skill_auto_enabled: false,
             sidebar_table_page_size: default_sidebar_table_page_size(),
         }
     }
@@ -4778,6 +4786,10 @@ impl Storage {
             }
         }
         settings.insert(
+            "custom_ai_skill_auto_enabled".to_string(),
+            serde_json::Value::Bool(desktop_settings.custom_ai_skill_auto_enabled),
+        );
+        settings.insert(
             "sidebar_table_page_size".to_string(),
             serde_json::Value::Number(serde_json::Number::from(desktop_settings.sidebar_table_page_size)),
         );
@@ -4855,6 +4867,10 @@ impl Storage {
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(ToString::to_string),
+            custom_ai_skill_auto_enabled: settings
+                .get("custom_ai_skill_auto_enabled")
+                .and_then(|value| value.as_bool())
+                .unwrap_or_else(|| DesktopSettings::default().custom_ai_skill_auto_enabled),
             sidebar_table_page_size: settings
                 .get("sidebar_table_page_size")
                 .and_then(|value| value.as_u64())
@@ -9639,6 +9655,7 @@ mod tests {
                 covered_messages: None,
                 source_binding: None,
                 selections_omitted: None,
+                loaded_skill_ids: None,
             }],
             queued_input: None,
             created_at: updated_at.to_string(),
@@ -9978,6 +9995,36 @@ mod tests {
 
         let legacy: AiChatMessage = serde_json::from_str(r#"{"role":"user","content":"old turn"}"#).unwrap();
         assert!(legacy.selections_omitted.is_none());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    // prd 09-30 Req 13: a conversation keeps the FACT that skills were loaded so
+    // the panel can light its chips after a restart. The body itself is
+    // deliberately not part of the record — see the field comment in
+    // `dbx-ai-provider`. This pins both halves: the ids round-trip, and a record
+    // written before the field existed still loads.
+    #[tokio::test]
+    async fn ai_conversation_roundtrips_loaded_skill_ids() {
+        let path = temp_db_path("ai-conversation-loaded-skills");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+
+        let mut conversation = ai_conversation("skills-conv", "0000");
+        conversation.messages[0].loaded_skill_ids = Some(vec!["d-abc".to_string(), "c-def".to_string()]);
+        storage.save_ai_conversation(&conversation).await.unwrap();
+
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        assert_eq!(
+            loaded[0].messages[0].loaded_skill_ids.as_deref(),
+            Some(["d-abc".to_string(), "c-def".to_string()].as_slice())
+        );
+        // No body: the stored message is exactly the id list.
+        let stored = serde_json::to_value(&loaded[0].messages[0]).unwrap();
+        assert!(stored.get("loadedSkillIds").and_then(|value| value.as_array()).is_some());
+        assert!(stored.get("toolCalls").is_none());
+
+        let legacy: AiChatMessage = serde_json::from_str(r#"{"role":"assistant","content":"old turn"}"#).unwrap();
+        assert!(legacy.loaded_skill_ids.is_none());
 
         let _ = std::fs::remove_file(path);
     }
@@ -12129,6 +12176,7 @@ mod tests {
                 agent_store_dir: Some("/tmp/dbx-agents".to_string()),
                 custom_ai_skill_root_enabled: DesktopSettings::default().custom_ai_skill_root_enabled,
                 custom_ai_skill_root: None,
+                custom_ai_skill_auto_enabled: DesktopSettings::default().custom_ai_skill_auto_enabled,
                 sidebar_table_page_size: DesktopSettings::default().sidebar_table_page_size,
             })
             .await
@@ -12152,6 +12200,7 @@ mod tests {
                 agent_store_dir: Some("/tmp/dbx-agents".to_string()),
                 custom_ai_skill_root_enabled: DesktopSettings::default().custom_ai_skill_root_enabled,
                 custom_ai_skill_root: None,
+                custom_ai_skill_auto_enabled: DesktopSettings::default().custom_ai_skill_auto_enabled,
                 sidebar_table_page_size: DesktopSettings::default().sidebar_table_page_size,
             }
         );
@@ -12195,6 +12244,42 @@ mod tests {
         let raw = storage.load_app_settings_json().await.unwrap();
         assert_eq!(raw.get("custom_ai_skill_root_enabled").and_then(|value| value.as_bool()), Some(false));
         assert_eq!(raw.get("custom_ai_skill_root"), None);
+    }
+
+    /// Req 5's toggle defaults off, so a database written before it existed (the
+    /// key absent) must load as off rather than as "unset means on".
+    #[tokio::test]
+    async fn desktop_settings_roundtrip_custom_ai_skill_auto_enabled() {
+        let path = temp_db_path("desktop-settings-custom-ai-skill-auto");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+
+        assert!(!storage.load_desktop_settings().await.unwrap().custom_ai_skill_auto_enabled);
+
+        storage
+            .save_desktop_settings(&DesktopSettings {
+                custom_ai_skill_auto_enabled: true,
+                ..DesktopSettings::default()
+            })
+            .await
+            .unwrap();
+
+        assert!(storage.load_desktop_settings().await.unwrap().custom_ai_skill_auto_enabled);
+        let raw = storage.load_app_settings_json().await.unwrap();
+        assert_eq!(raw.get("custom_ai_skill_auto_enabled").and_then(|value| value.as_bool()), Some(true));
+
+        storage
+            .save_desktop_settings(&DesktopSettings {
+                custom_ai_skill_auto_enabled: false,
+                ..DesktopSettings::default()
+            })
+            .await
+            .unwrap();
+        assert!(!storage.load_desktop_settings().await.unwrap().custom_ai_skill_auto_enabled);
+
+        // An explicit `false` is written through (not removed), which is what
+        // keeps a synced record distinguishable from "never configured".
+        let raw = storage.load_app_settings_json().await.unwrap();
+        assert_eq!(raw.get("custom_ai_skill_auto_enabled").and_then(|value| value.as_bool()), Some(false));
     }
 
     #[tokio::test]

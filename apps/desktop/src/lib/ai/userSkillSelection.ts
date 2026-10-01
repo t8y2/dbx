@@ -8,6 +8,12 @@ export interface SelectedSkillChip {
   source: "custom" | "default";
   /** True when the catalog no longer lists this id (deleted, or its root went away). */
   unavailable: boolean;
+  /**
+   * True once this conversation has had the skill loaded — by the model through
+   * `use_skill`, or by the user forcing the load (prd 09-30 Req 13). A persistent
+   * per-conversation signal, never a per-turn one.
+   */
+  loaded: boolean;
 }
 
 /**
@@ -23,8 +29,12 @@ export function userSkillSourceOfId(id: string): "custom" | "default" {
  * Every selected id keeps a chip: a skill that vanished from discovery would
  * otherwise lose its only remove affordance and block every later send. The
  * fallback label is the opaque id, paired with `unavailable` for styling.
+ *
+ * `loadedIds` is the conversation's loaded set; an omitted one leaves every chip
+ * in its default state, which is what a caller with no conversation state wants.
  */
-export function buildSelectedSkillChips(ids: readonly string[], lookup: (id: string) => UserSkillMeta | undefined): SelectedSkillChip[] {
+export function buildSelectedSkillChips(ids: readonly string[], lookup: (id: string) => UserSkillMeta | undefined, loadedIds: Iterable<string> = []): SelectedSkillChip[] {
+  const loaded = new Set(loadedIds);
   return ids.map((id) => {
     const meta = lookup(id);
     return {
@@ -33,6 +43,7 @@ export function buildSelectedSkillChips(ids: readonly string[], lookup: (id: str
       description: meta?.description ?? "",
       source: userSkillSourceOfId(id),
       unavailable: !meta,
+      loaded: loaded.has(id),
     };
   });
 }

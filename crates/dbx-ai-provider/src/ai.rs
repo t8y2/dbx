@@ -636,8 +636,27 @@ pub struct AiChatMessage {
     /// a reloaded transcript can still tell the model the content is gone
     /// instead of showing an empty turn. Absent on records written before the
     /// field existed.
+    ///
+    /// NOTE (2026-10-01): the sync surface carries no conversations member today
+    /// — `cloud_sync::SyncSnapshot` has no such field, and there is no projection
+    /// to exclude one from — so the reason this field holds today is write
+    /// amplification rather than sync exposure. If conversations ever do join the
+    /// snapshot, the original reason applies again as written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selections_omitted: Option<bool>,
+    /// Which skills this conversation has had loaded (prd 09-30 Req 13), written
+    /// onto the newest assistant message of every snapshot.
+    ///
+    /// Only the FACT is persisted, never the body: a body can reach 1 MiB per
+    /// skill, `ai_conversations.messages_json` is an unbounded TEXT column with no
+    /// per-message or per-record cap, and the whole message array is re-serialised
+    /// on every save (send, streamed snapshot, chip click). A body here would be
+    /// written in full each time, and would ride along with anything that ships a
+    /// conversation record. Same shape as `selections_omitted` above, which keeps a
+    /// footprint instead of its payload; the panel holds the body in memory for the
+    /// current session and re-reads it from disk when a request needs it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loaded_skill_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

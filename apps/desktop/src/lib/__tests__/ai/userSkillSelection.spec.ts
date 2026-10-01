@@ -15,9 +15,22 @@ describe("selected skill chips", () => {
     // must still render a removable chip rather than silently disappearing.
     const chips = buildSelectedSkillChips(["d-aaa", "d-gone", "c-bbb"], lookup);
     expect(chips.map((chip) => chip.id)).toEqual(["d-aaa", "d-gone", "c-bbb"]);
-    expect(chips[1]).toEqual({ id: "d-gone", name: "d-gone", description: "", source: "default", unavailable: true });
+    expect(chips[1]).toEqual({ id: "d-gone", name: "d-gone", description: "", source: "default", unavailable: true, loaded: false });
     expect(chips[0].unavailable).toBe(false);
     expect(chips[0].name).toBe("SQL Review");
+  });
+
+  // Req 13: the chip's second state is a per-conversation signal, so the chip
+  // carries it rather than re-deriving it at render time.
+  it("marks only the ids the conversation has loaded", () => {
+    const chips = buildSelectedSkillChips(["d-aaa", "c-bbb"], lookup, ["c-bbb"]);
+    expect(chips.map((chip) => chip.loaded)).toEqual([false, true]);
+    // Default state for a caller with no conversation state to show.
+    expect(buildSelectedSkillChips(["d-aaa"], lookup).map((chip) => chip.loaded)).toEqual([false]);
+    // A loaded id may also be one the catalog no longer lists — the two flags are
+    // independent, and `unavailable` must not swallow the loaded signal.
+    const vanished = buildSelectedSkillChips(["d-gone"], lookup, ["d-gone"]);
+    expect(vanished[0]).toMatchObject({ unavailable: true, loaded: true });
   });
 
   it("labels the source from the id prefix so a vanished skill keeps its origin", () => {

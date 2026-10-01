@@ -69,6 +69,10 @@ const DESKTOP_DEVICE_LOCAL_SETTINGS: &[&str] = &[
     "agent_store_dir",
     "custom_ai_skill_root_enabled",
     "custom_ai_skill_root",
+    // Device-local like the two above: it gates which of *this* device's skill
+    // files reach the prompt, so a synced "on" would inject another machine's
+    // catalog here.
+    "custom_ai_skill_auto_enabled",
 ];
 const NON_SYNCABLE_DESKTOP_SETTINGS: &[&str] = &["debug_logging_enabled"];
 const NON_SYNCABLE_EDITOR_SETTINGS: &[&str] = &[
@@ -954,6 +958,7 @@ fn syncable_desktop_settings(mut settings: DesktopSettings) -> DesktopSettings {
     settings.agent_store_dir = None;
     settings.custom_ai_skill_root_enabled = false;
     settings.custom_ai_skill_root = None;
+    settings.custom_ai_skill_auto_enabled = false;
     settings.debug_logging_enabled = false;
     settings
 }

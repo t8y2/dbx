@@ -686,6 +686,8 @@ interface MongoContainer {
   kind: MongoContainerKind;
   /** Key this container is the value of, e.g. `age` in `{ age: { … } }`. */
   key: string | null;
+  /** Closed string literal values in this object container, e.g. `{ from: "orders" }`. */
+  stringValues?: Record<string, string>;
 }
 
 interface MongoCallScan {
@@ -733,10 +735,22 @@ function scanMongoCallArguments(text: string, start: number, cursor: number): Mo
     if (quote) {
       if (char === "\\") {
         i++;
+        if (i < cursor) token += text[i];
         continue;
       }
-      if (char === quote) quote = null;
-      else token += char;
+      if (char === quote) {
+        quote = null;
+        if (inValue && valueKey) {
+          const inner = stack[stack.length - 1];
+          if (inner && inner.kind === "object") {
+            inner.stringValues ??= {};
+            inner.stringValues[valueKey] = token;
+          }
+          token = "";
+        }
+      } else {
+        token += char;
+      }
       continue;
     }
     if ((char === "/" && (text[i + 1] === "/" || text[i + 1] === "*")) || (char === "-" && text[i + 1] === "-")) {
@@ -753,7 +767,11 @@ function scanMongoCallArguments(text: string, start: number, cursor: number): Mo
       continue;
     }
     if (char === "{" || char === "[" || char === "(") {
-      stack.push({ kind: char === "{" ? "object" : char === "[" ? "array" : "call", key: inValue ? valueKey : null });
+      stack.push({
+        kind: char === "{" ? "object" : char === "[" ? "array" : "call",
+        key: inValue ? valueKey : null,
+        ...(char === "{" ? { stringValues: {} } : {}),
+      });
       token = "";
       valueKey = null;
       inValue = false;
@@ -1095,6 +1113,25 @@ function detectPipelineKind(scan: MongoCallScan, pipelineIndex: number, defaultK
 }
 
 /**
+ * Resolves the joined collection for a sub-pipeline inside `$lookup` or `$unionWith`.
+ * The innermost enclosing join stage wins; if its collection option is missing or untyped,
+ * it returns undefined so completion falls back to the outer collection.
+ */
+function findSubPipelineJoinedCollection(scan: MongoCallScan, pipelineIndex: number): string | undefined {
+  for (let i = pipelineIndex - 1; i >= 0; i--) {
+    const container = scan.stack[i];
+    if (container?.kind !== "object") continue;
+    if (container.key === "$lookup") {
+      return container.stringValues?.["from"];
+    }
+    if (container.key === "$unionWith") {
+      return container.stringValues?.["coll"];
+    }
+  }
+  return undefined;
+}
+
+/**
  * `kind` carries the enclosing pipeline flavor (top-level aggregate, update,
  * $facet branch, join sub-pipeline or view pipeline) so the item builder can
  * narrow the stage list.
@@ -1107,16 +1144,21 @@ function classifyPipeline(scan: MongoCallScan, pipelineIndex = findPipelineArray
   if (stageHolder.kind !== "object") return { mode: "none" };
 
   const pipelineKind = detectPipelineKind(scan, pipelineIndex, kind);
+  const subCollection = findSubPipelineJoinedCollection(scan, pipelineIndex);
 
   // `[{ … }]` — the cursor is in the stage object itself.
   if (scan.stack.length - 1 === pipelineIndex + 1) {
-    if (!scan.inValue) return { mode: "stage", pipelineKind };
+    if (!scan.inValue) return { mode: "stage", pipelineKind, ...(subCollection ? { collection: subCollection } : {}) };
     const stage = scan.valueKey ?? "";
-    return { mode: stageStringValueMode(stage), stage };
+    return { mode: stageStringValueMode(stage), stage, ...(subCollection ? { collection: subCollection } : {}) };
   }
 
   const stage = scan.stack[pipelineIndex + 2]?.key ?? "";
-  return classifyStageBody(stage, scan, pipelineIndex + 2);
+  const classified = classifyStageBody(stage, scan, pipelineIndex + 2);
+  return {
+    ...classified,
+    ...(subCollection && !classified.collection ? { collection: subCollection } : {}),
+  };
 }
 
 /**
@@ -1184,9 +1226,30 @@ function classifyStageOptions(stage: string, scan: MongoCallScan, bodyIndex: num
   const depth = innerDepth(scan, bodyIndex);
   if (depth < 0) return { mode: "none", stage };
 
+  const stageBody = scan.stack[bodyIndex];
+
   if (depth === 0) {
-    if (scan.inValue) return { mode: STAGE_OPTION_VALUE_MODES[stage]?.[scan.valueKey ?? ""] ?? "none", stage };
+    if (scan.inValue) {
+      const mode = STAGE_OPTION_VALUE_MODES[stage]?.[scan.valueKey ?? ""] ?? "none";
+      const isJoinedField = (stage === "$lookup" && scan.valueKey === "foreignField") || (stage === "$graphLookup" && (scan.valueKey === "connectToField" || scan.valueKey === "connectFromField"));
+      const collection = isJoinedField ? stageBody?.stringValues?.["from"] : undefined;
+      return {
+        mode,
+        stage,
+        ...(collection ? { collection } : {}),
+      };
+    }
     return { mode: innermost(scan)?.kind === "object" ? "stageOption" : "none", stage };
+  }
+
+  if (stage === "$graphLookup" && scan.stack[bodyIndex + 1]?.key === "restrictSearchWithMatch") {
+    const filterClass = classifyFilter(scan, bodyIndex + 1);
+    const collection = stageBody?.stringValues?.["from"];
+    return {
+      ...filterClass,
+      stage,
+      ...(collection ? { collection } : {}),
+    };
   }
 
   if (scan.inValue) return { mode: "fieldRef", stage };

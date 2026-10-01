@@ -79,6 +79,20 @@ function keydown(target: HTMLElement, key: string) {
 }
 
 describe("QueryEditor component split integration", () => {
+  it("executes each IRIS query separately after the Contains operator", async () => {
+    const first = "select * from oec_order_adminstatus where STAT_Code [ '123'";
+    const second = "select top 10 * from Ens_HOSDocument";
+    const source = first + "\n\n" + second;
+    const { editor, view, onExecute } = await mountEditor({ modelValue: source, databaseType: "iris", dialect: "postgres" });
+    view.dispatch({ selection: { anchor: source.indexOf(second) + 7 } });
+    expect(editor.requestExecute({ bypassPicker: true })).toBe(true);
+    expect(onExecute.mock.lastCall?.[0].selectedSql).toBe(second);
+
+    view.dispatch({ selection: { anchor: 7 } });
+    expect(editor.requestExecute({ bypassPicker: true })).toBe(true);
+    expect(onExecute.mock.lastCall?.[0].selectedSql).toBe(first);
+  });
+
   it("preserves upstream structure-peek focus and insertion context across updates and unmount", async () => {
     const { view, props, unmount } = await mountEditor({ connectionId: "peek-a", database: "demo", schema: "public" });
     expect(queryEditorInsertContext(view)).toEqual({ connectionId: "peek-a", database: "demo", schema: "public", databaseType: "mysql" });

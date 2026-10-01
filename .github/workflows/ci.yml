@@ -68,6 +68,8 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       NPM_CONFIG_LOGLEVEL: error
+      # Cold vue-tsc runs exceed 4 GiB; public Linux runners provide 16 GiB RAM.
+      NODE_OPTIONS: --max-old-space-size=8192
     steps:
       - uses: actions/checkout@v7
 

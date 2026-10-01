@@ -1,4 +1,5 @@
 import { withEnglishFallback } from "./fallback";
+import { consulIdMessages as consul } from "./consulId";
 import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessages";
 
 export default withEnglishFallback({
@@ -98,7 +99,7 @@ export default withEnglishFallback({
       openConnections: "AI akan menggunakan koneksi terbuka ini: {names}",
       noOpenConnections: "Tidak ada koneksi plugin ini yang terbuka. Buka salah satu sebelum meminta AI menggunakan alat ini.",
       noTools: "Plugin ini tidak menyediakan alat AI.",
-      readOnly: "Read-only",
+      readOnly: "Baca saja",
       needsApproval: "Perlu persetujuan",
       saveFailed: "Tidak dapat menyimpan pengaturan: {message}",
     },
@@ -4434,6 +4435,7 @@ export default withEnglishFallback({
     copied: "Disalin",
   },
   sqlServerTrace,
+  consul,
   serverDashboard: {
     title: "Dasbor Server",
     autoRefresh: "Segarkan otomatis",

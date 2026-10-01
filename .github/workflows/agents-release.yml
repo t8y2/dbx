@@ -258,8 +258,18 @@ jobs:
           }
           fetch_ic ic-basic.zip "https://download.oracle.com/otn_software/nt/instantclient/2326300/instantclient-basic-windows.x64-23.26.3.0.0.zip"
           fetch_ic ic-sdk.zip "https://download.oracle.com/otn_software/nt/instantclient/2326300/instantclient-sdk-windows.x64-23.26.3.0.0.zip"
-          tar -xf ic-basic.zip -C instantclient
-          tar -xf ic-sdk.zip -C instantclient
+          # Git-bash ships GNU tar, which cannot extract zip archives (bsdtar on
+          # macOS can, which is why this looked fine locally). Use 7-Zip from the
+          # runner image, falling back to PowerShell Expand-Archive.
+          extract_ic() {
+            if command -v 7z >/dev/null 2>&1; then
+              7z x -y -oinstantclient "$1" >/dev/null
+            else
+              powershell.exe -NoProfile -Command "Expand-Archive -Path '$1' -DestinationPath 'instantclient' -Force"
+            fi
+          }
+          extract_ic ic-basic.zip
+          extract_ic ic-sdk.zip
           ic_dir="$(ls -d "${GITHUB_WORKSPACE}/instantclient"/instantclient_* | head -1)"
           echo "MinGW gcc: $cc / Instant Client: $ic_dir"
           {

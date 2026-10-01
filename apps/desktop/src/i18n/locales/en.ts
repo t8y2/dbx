@@ -819,6 +819,8 @@ export default {
     sortByDate: "Sort by Date Modified",
     sortByFolder: "Sort by Folder Structure",
     collapseAll: "Collapse all",
+    moreMatches: "+ {count} more matches",
+    collapseMatches: "Collapse",
   },
 
   connection: {

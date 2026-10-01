@@ -805,6 +805,8 @@ export default withEnglishFallback({
     sortByDate: "更新日時で並べ替え",
     sortByFolder: "フォルダ構造で並べ替え",
     collapseAll: "すべて折りたたむ",
+    moreMatches: "+ 他 {count} 件の一致",
+    collapseMatches: "折りたたむ",
   },
   connection: {
     title: "新しい接続",

@@ -807,6 +807,8 @@ export default withEnglishFallback({
     sortByDate: "수정 날짜순 정렬",
     sortByFolder: "폴더 구조순 정렬",
     collapseAll: "모두 접기",
+    moreMatches: "+ {count}개 더 일치",
+    collapseMatches: "접기",
   },
   connection: {
     title: "새 연결",

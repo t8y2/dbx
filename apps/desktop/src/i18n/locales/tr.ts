@@ -584,6 +584,8 @@ export default withEnglishFallback({
     sortByDate: "Değiştirilme Tarihine Göre Sırala",
     sortByFolder: "Klasör Yapısına Göre Sırala",
     collapseAll: "Tümünü daralt",
+    moreMatches: "+ {count} eşleşme daha",
+    collapseMatches: "Daralt",
   },
 
   connection: {

@@ -808,6 +808,8 @@ export default withEnglishFallback({
     sortByDate: "依修改日期排序",
     sortByFolder: "依資料夾結構排序",
     collapseAll: "全部摺疊",
+    moreMatches: "+ {count} 項更多相符",
+    collapseMatches: "收起",
   },
 
   connection: {

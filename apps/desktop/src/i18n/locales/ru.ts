@@ -764,6 +764,8 @@ export default withEnglishFallback({
     sortByDate: "Сортировать по дате изменения",
     sortByFolder: "Сортировать по структуре папок",
     collapseAll: "Свернуть все",
+    moreMatches: "+ ещё {count} совпадений",
+    collapseMatches: "Свернуть",
   },
   connection: {
     title: "Новое подключение",

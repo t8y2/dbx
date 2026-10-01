@@ -804,6 +804,8 @@ export default withEnglishFallback({
     sortByDate: "Ordina per data di modifica",
     sortByFolder: "Ordina per struttura cartelle",
     collapseAll: "Comprimi tutto",
+    moreMatches: "+ altre {count} corrispondenze",
+    collapseMatches: "Comprimi",
   },
 
   connection: {

@@ -690,8 +690,9 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     }
   }
 
-  async function syncEntries() {
-    if (files.value.some((file) => file.sqlLoaded === false)) {
+  async function ensureAllFilesLoaded() {
+    if (!files.value.some((file) => file.sqlLoaded === false)) return;
+    try {
       const loadedFiles = await api.loadSavedSqlFilesForSync();
       const loadedById = new Map(loadedFiles.map((file) => [file.id, file]));
       files.value = files.value.map((file) => {
@@ -700,7 +701,14 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
         return loaded ? { ...file, sql: loaded.sql, sqlLoaded: true } : file;
       });
       bumpVersion();
+    } catch {
+      const unloaded = files.value.filter((file) => file.sqlLoaded === false);
+      await Promise.allSettled(unloaded.map((file) => ensureFileContent(file.id)));
     }
+  }
+
+  async function syncEntries() {
+    await ensureAllFilesLoaded();
 
     const folderById = new Map(folders.value.map((folder) => [folder.id, folder]));
     const folderPath = (folderId?: string): string | undefined => {
@@ -941,6 +949,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     listFiles,
     getFile,
     ensureFileContent,
+    ensureAllFilesLoaded,
     createFolder,
     renameFolder,
     deleteFolder,

@@ -805,6 +805,8 @@ export default withEnglishFallback({
     sortByDate: "Ordenar por data de modificação",
     sortByFolder: "Ordenar por estrutura de pastas",
     collapseAll: "Recolher todos",
+    moreMatches: "+ {count} mais correspondências",
+    collapseMatches: "Recolher",
   },
 
   connection: {

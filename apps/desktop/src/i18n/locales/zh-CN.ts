@@ -735,6 +735,8 @@ export default withEnglishFallback({
     sortByDate: "按修改日期排序",
     sortByFolder: "按文件夹结构排序",
     collapseAll: "全部折叠",
+    moreMatches: "+ {count} 项更多匹配",
+    collapseMatches: "收起",
   },
 
   connection: {

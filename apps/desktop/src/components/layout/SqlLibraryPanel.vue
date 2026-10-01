@@ -10,6 +10,8 @@ import CustomContextMenu, { type ContextMenuItem as CtxMenuItem } from "@/compon
 import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import HelpTooltip from "@/components/ui/tooltip/HelpTooltip.vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
+import SqlLibrarySearchSnippet from "@/components/layout/SqlLibrarySearchSnippet.vue";
+import type { SavedSqlLineMatch } from "@/lib/savedSql/savedSqlSearch";
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import * as api from "@/lib/backend/api";
@@ -56,6 +58,12 @@ type DropPosition = "before" | "after" | "inside";
 const activeConnectionIds = computed(() => new Set(connectionStore.connections.map((c) => c.id)));
 const searchText = ref("");
 const searchQuery = computed(() => searchText.value.trim().toLowerCase());
+
+watch(searchText, (text) => {
+  if (text.trim()) {
+    void savedSqlStore.ensureAllFilesLoaded();
+  }
+});
 
 // Sort mode: "folder" (default tree structure) or "date" (flat list by update date)
 const sortMode = ref<"folder" | "date">("folder");
@@ -875,14 +883,25 @@ async function moveFilesToFolder(fileIds: string[], folderId?: string) {
   }
 }
 
-async function openFile(file: SavedSqlFile, targetMode?: SavedSqlOpenTargetMode) {
+async function openFile(file: SavedSqlFile, targetMode?: SavedSqlOpenTargetMode, reveal?: { line: number; column?: number }) {
   if (suppressNextRowClick.value) return;
   const loadedFile = await savedSqlStore.ensureFileContent(file.id);
   if (!loadedFile) return;
-  const tabId = queryStore.openSavedSql(loadedFile, { targetMode });
+  const tabId = queryStore.openSavedSql(loadedFile, { targetMode, reveal });
   const openedConnectionId = queryStore.tabs.find((tab) => tab.id === tabId)?.connectionId ?? loadedFile.connectionId;
   if (openedConnectionId) connectionStore.activeConnectionId = openedConnectionId;
   void savedSqlStore.recordFileUsage(loadedFile.id);
+}
+
+function handleMatchClick(file: SavedSqlFile, match: SavedSqlLineMatch) {
+  if (suppressNextRowClick.value) return;
+  const currentIndex = allSelectableItems.value.findIndex((item) => item.type === "file" && item.id === file.id);
+  if (currentIndex >= 0) {
+    clearSelection();
+    lastClickedItemIndex.value = currentIndex;
+    setActiveItem(file.id, "file");
+  }
+  openFile(file, undefined, { line: match.lineNumber, column: match.column });
 }
 
 function handleFileClick(file: SavedSqlFile, event: MouseEvent) {
@@ -1356,7 +1375,16 @@ function showDropInside(targetId: string) {
     <div class="border-b shrink-0 px-2 py-1">
       <div class="relative">
         <Search class="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-muted-foreground" />
-        <input data-sql-library-search v-model="searchText" autocapitalize="off" autocorrect="off" spellcheck="false" class="w-full h-6 pl-7 pr-6 text-[13px] rounded border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring" :placeholder="t('grid.search')" />
+        <input
+          data-sql-library-search
+          v-model="searchText"
+          @focus="savedSqlStore.ensureAllFilesLoaded()"
+          autocapitalize="off"
+          autocorrect="off"
+          spellcheck="false"
+          class="w-full h-6 pl-7 pr-6 text-[13px] rounded border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+          :placeholder="t('grid.search')"
+        />
         <button v-if="searchText" type="button" class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" @click="searchText = ''">
           <X class="h-3 w-3" />
         </button>
@@ -1422,36 +1450,38 @@ function showDropInside(targetId: string) {
                   </LightTooltip>
                 </div>
 
-                <div
-                  v-else
-                  class="relative flex cursor-default items-center gap-1 px-2 py-1.5 text-[13px] group"
-                  :class="[fileRowClass(item.item.id), isDraggingItem(item.item.id) ? 'opacity-50' : '']"
-                  @mousedown="handleDragMouseDown($event, item.item.id, 'file')"
-                  @click="handleFileClick(item.item, $event)"
-                  @contextmenu.capture="contextTarget = item.item"
-                  @contextmenu.prevent="
-                    contextTarget = item.item;
-                    onContextMenu($event);
-                  "
-                >
-                  <FileText class="h-3.5 w-3.5 text-blue-400 shrink-0" />
-                  <span v-if="isFileDirty(item.item)" aria-hidden="true" class="dirty-sql-library-marker">*</span>
-                  <template v-if="isRenamingFile(item.item.id)">
-                    <input
-                      :ref="setRenameInputRef"
-                      v-model="renameValue"
-                      data-no-drag="true"
-                      class="min-w-0 flex-1 rounded border border-primary/50 bg-transparent px-1 text-[13px] outline-none"
-                      @keydown.enter.prevent="confirmRename"
-                      @keydown.escape.prevent="cancelRename"
-                      @blur="confirmRename"
-                      @mousedown.stop
-                      @click.stop
-                    />
-                  </template>
-                  <span v-else class="dbx-sql-library-drag-label min-w-0 flex-1 truncate" :title="fileTitleLabel(item.item)" :style="fileTitleStyle(item.item)">{{ item.item.name }}</span>
-                  <span class="min-w-0 max-w-[45%] shrink truncate text-[13px]" :class="fileMetaClass(item.item.id)" :title="getConnectionLabel(item.item.connectionId)">[{{ getConnectionLabel(item.item.connectionId) }}]</span>
-                </div>
+                <template v-else>
+                  <div
+                    class="relative flex cursor-default items-center gap-1 px-2 py-1.5 text-[13px] group"
+                    :class="[fileRowClass(item.item.id), isDraggingItem(item.item.id) ? 'opacity-50' : '']"
+                    @mousedown="handleDragMouseDown($event, item.item.id, 'file')"
+                    @click="handleFileClick(item.item, $event)"
+                    @contextmenu.capture="contextTarget = item.item"
+                    @contextmenu.prevent="
+                      contextTarget = item.item;
+                      onContextMenu($event);
+                    "
+                  >
+                    <FileText class="h-3.5 w-3.5 text-blue-400 shrink-0" />
+                    <span v-if="isFileDirty(item.item)" aria-hidden="true" class="dirty-sql-library-marker">*</span>
+                    <template v-if="isRenamingFile(item.item.id)">
+                      <input
+                        :ref="setRenameInputRef"
+                        v-model="renameValue"
+                        data-no-drag="true"
+                        class="min-w-0 flex-1 rounded border border-primary/50 bg-transparent px-1 text-[13px] outline-none"
+                        @keydown.enter.prevent="confirmRename"
+                        @keydown.escape.prevent="cancelRename"
+                        @blur="confirmRename"
+                        @mousedown.stop
+                        @click.stop
+                      />
+                    </template>
+                    <span v-else class="dbx-sql-library-drag-label min-w-0 flex-1 truncate" :title="fileTitleLabel(item.item)" :style="fileTitleStyle(item.item)">{{ item.item.name }}</span>
+                    <span class="min-w-0 max-w-[45%] shrink truncate text-[13px]" :class="fileMetaClass(item.item.id)" :title="getConnectionLabel(item.item.connectionId)">[{{ getConnectionLabel(item.item.connectionId) }}]</span>
+                  </div>
+                  <SqlLibrarySearchSnippet v-if="searchQuery" :file="item.item" :query="searchQuery" @select-match="(match) => handleMatchClick(item.item, match)" />
+                </template>
               </div>
             </div>
 
@@ -1507,41 +1537,43 @@ function showDropInside(targetId: string) {
                   </LightTooltip>
                 </div>
 
-                <div
-                  v-else
-                  class="relative flex cursor-default items-center gap-1 py-1.5 pr-2 text-[13px] group"
-                  :style="{ paddingLeft: `${8 + row.depth * 16}px` }"
-                  :class="[fileRowClass(row.file.id), isDraggingItem(row.file.id) ? 'opacity-50' : '']"
-                  @mousedown="handleDragMouseDown($event, row.file.id, 'file')"
-                  @mousemove="updateDropTarget($event, row.file.id, 'file')"
-                  @mouseleave="clearDropTarget(row.file.id)"
-                  @click="handleFileClick(row.file, $event)"
-                  @contextmenu.capture="contextTarget = row.file"
-                  @contextmenu.prevent="
-                    contextTarget = row.file;
-                    onContextMenu($event);
-                  "
-                >
-                  <div v-if="showDropBefore(row.file.id)" class="absolute left-2 right-2 top-0 border-t-2 border-primary" />
-                  <div v-if="showDropAfter(row.file.id)" class="absolute left-2 right-2 bottom-0 border-b-2 border-primary" />
-                  <FileText class="h-3.5 w-3.5 text-blue-400 shrink-0" />
-                  <span v-if="isFileDirty(row.file)" aria-hidden="true" class="dirty-sql-library-marker">*</span>
-                  <template v-if="isRenamingFile(row.file.id)">
-                    <input
-                      :ref="setRenameInputRef"
-                      v-model="renameValue"
-                      data-no-drag="true"
-                      class="min-w-0 flex-1 rounded border border-primary/50 bg-transparent px-1 text-[13px] outline-none"
-                      @keydown.enter.prevent="confirmRename"
-                      @keydown.escape.prevent="cancelRename"
-                      @blur="confirmRename"
-                      @mousedown.stop
-                      @click.stop
-                    />
-                  </template>
-                  <span v-else class="dbx-sql-library-drag-label min-w-0 flex-1 truncate" :title="fileTitleLabel(row.file)" :style="fileTitleStyle(row.file)">{{ row.file.name }}</span>
-                  <span class="min-w-0 max-w-[45%] shrink truncate text-[13px]" :class="fileMetaClass(row.file.id)" :title="getConnectionLabel(row.file.connectionId)">[{{ getConnectionLabel(row.file.connectionId) }}]</span>
-                </div>
+                <template v-else>
+                  <div
+                    class="relative flex cursor-default items-center gap-1 py-1.5 pr-2 text-[13px] group"
+                    :style="{ paddingLeft: `${8 + row.depth * 16}px` }"
+                    :class="[fileRowClass(row.file.id), isDraggingItem(row.file.id) ? 'opacity-50' : '']"
+                    @mousedown="handleDragMouseDown($event, row.file.id, 'file')"
+                    @mousemove="updateDropTarget($event, row.file.id, 'file')"
+                    @mouseleave="clearDropTarget(row.file.id)"
+                    @click="handleFileClick(row.file, $event)"
+                    @contextmenu.capture="contextTarget = row.file"
+                    @contextmenu.prevent="
+                      contextTarget = row.file;
+                      onContextMenu($event);
+                    "
+                  >
+                    <div v-if="showDropBefore(row.file.id)" class="absolute left-2 right-2 top-0 border-t-2 border-primary" />
+                    <div v-if="showDropAfter(row.file.id)" class="absolute left-2 right-2 bottom-0 border-b-2 border-primary" />
+                    <FileText class="h-3.5 w-3.5 text-blue-400 shrink-0" />
+                    <span v-if="isFileDirty(row.file)" aria-hidden="true" class="dirty-sql-library-marker">*</span>
+                    <template v-if="isRenamingFile(row.file.id)">
+                      <input
+                        :ref="setRenameInputRef"
+                        v-model="renameValue"
+                        data-no-drag="true"
+                        class="min-w-0 flex-1 rounded border border-primary/50 bg-transparent px-1 text-[13px] outline-none"
+                        @keydown.enter.prevent="confirmRename"
+                        @keydown.escape.prevent="cancelRename"
+                        @blur="confirmRename"
+                        @mousedown.stop
+                        @click.stop
+                      />
+                    </template>
+                    <span v-else class="dbx-sql-library-drag-label min-w-0 flex-1 truncate" :title="fileTitleLabel(row.file)" :style="fileTitleStyle(row.file)">{{ row.file.name }}</span>
+                    <span class="min-w-0 max-w-[45%] shrink truncate text-[13px]" :class="fileMetaClass(row.file.id)" :title="getConnectionLabel(row.file.connectionId)">[{{ getConnectionLabel(row.file.connectionId) }}]</span>
+                  </div>
+                  <SqlLibrarySearchSnippet v-if="searchQuery" :file="row.file" :query="searchQuery" :depth="row.depth" @select-match="(match) => handleMatchClick(row.file, match)" />
+                </template>
               </div>
 
               <div v-if="visibleFiles.length > 0 || dragState.draggedType === 'file'">
@@ -1554,41 +1586,42 @@ function showDropInside(targetId: string) {
                 >
                   {{ t("sqlLibrary.unfiled") }}
                 </div>
-                <div
-                  v-for="file in visibleFiles"
-                  :key="file.id"
-                  class="relative flex cursor-default items-center gap-1 px-2 py-1.5 text-[13px] group"
-                  :class="[fileRowClass(file.id), isDraggingItem(file.id) ? 'opacity-50' : '']"
-                  @mousedown="handleDragMouseDown($event, file.id, 'file')"
-                  @mousemove="updateDropTarget($event, file.id, 'file')"
-                  @mouseleave="clearDropTarget(file.id)"
-                  @click="handleFileClick(file, $event)"
-                  @contextmenu.capture="contextTarget = file"
-                  @contextmenu.prevent="
-                    contextTarget = file;
-                    onContextMenu($event);
-                  "
-                >
-                  <div v-if="showDropBefore(file.id)" class="absolute left-2 right-2 top-0 border-t-2 border-primary" />
-                  <div v-if="showDropAfter(file.id)" class="absolute left-2 right-2 bottom-0 border-b-2 border-primary" />
-                  <FileText class="h-3.5 w-3.5 text-blue-400 shrink-0" />
-                  <span v-if="isFileDirty(file)" aria-hidden="true" class="dirty-sql-library-marker">*</span>
-                  <template v-if="isRenamingFile(file.id)">
-                    <input
-                      :ref="setRenameInputRef"
-                      v-model="renameValue"
-                      data-no-drag="true"
-                      class="min-w-0 flex-1 rounded border border-primary/50 bg-transparent px-1 text-[13px] outline-none"
-                      @keydown.enter.prevent="confirmRename"
-                      @keydown.escape.prevent="cancelRename"
-                      @blur="confirmRename"
-                      @mousedown.stop
-                      @click.stop
-                    />
-                  </template>
-                  <span v-else class="dbx-sql-library-drag-label min-w-0 flex-1 truncate" :title="fileTitleLabel(file)" :style="fileTitleStyle(file)">{{ file.name }}</span>
-                  <span class="min-w-0 max-w-[45%] shrink truncate text-[13px]" :class="fileMetaClass(file.id)" :title="getConnectionLabel(file.connectionId)">[{{ getConnectionLabel(file.connectionId) }}]</span>
-                </div>
+                <template v-for="file in visibleFiles" :key="file.id">
+                  <div
+                    class="relative flex cursor-default items-center gap-1 px-2 py-1.5 text-[13px] group"
+                    :class="[fileRowClass(file.id), isDraggingItem(file.id) ? 'opacity-50' : '']"
+                    @mousedown="handleDragMouseDown($event, file.id, 'file')"
+                    @mousemove="updateDropTarget($event, file.id, 'file')"
+                    @mouseleave="clearDropTarget(file.id)"
+                    @click="handleFileClick(file, $event)"
+                    @contextmenu.capture="contextTarget = file"
+                    @contextmenu.prevent="
+                      contextTarget = file;
+                      onContextMenu($event);
+                    "
+                  >
+                    <div v-if="showDropBefore(file.id)" class="absolute left-2 right-2 top-0 border-t-2 border-primary" />
+                    <div v-if="showDropAfter(file.id)" class="absolute left-2 right-2 bottom-0 border-b-2 border-primary" />
+                    <FileText class="h-3.5 w-3.5 text-blue-400 shrink-0" />
+                    <span v-if="isFileDirty(file)" aria-hidden="true" class="dirty-sql-library-marker">*</span>
+                    <template v-if="isRenamingFile(file.id)">
+                      <input
+                        :ref="setRenameInputRef"
+                        v-model="renameValue"
+                        data-no-drag="true"
+                        class="min-w-0 flex-1 rounded border border-primary/50 bg-transparent px-1 text-[13px] outline-none"
+                        @keydown.enter.prevent="confirmRename"
+                        @keydown.escape.prevent="cancelRename"
+                        @blur="confirmRename"
+                        @mousedown.stop
+                        @click.stop
+                      />
+                    </template>
+                    <span v-else class="dbx-sql-library-drag-label min-w-0 flex-1 truncate" :title="fileTitleLabel(file)" :style="fileTitleStyle(file)">{{ file.name }}</span>
+                    <span class="min-w-0 max-w-[45%] shrink truncate text-[13px]" :class="fileMetaClass(file.id)" :title="getConnectionLabel(file.connectionId)">[{{ getConnectionLabel(file.connectionId) }}]</span>
+                  </div>
+                  <SqlLibrarySearchSnippet v-if="searchQuery" :file="file" :query="searchQuery" @select-match="(match) => handleMatchClick(file, match)" />
+                </template>
               </div>
             </div>
             <!-- End tree structure -->

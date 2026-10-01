@@ -813,6 +813,8 @@ export default withEnglishFallback({
     sortByDate: "Ordenar por fecha de modificación",
     sortByFolder: "Ordenar por estructura de carpetas",
     collapseAll: "Contraer todo",
+    moreMatches: "+ {count} coincidencias más",
+    collapseMatches: "Contraer",
   },
 
   connection: {

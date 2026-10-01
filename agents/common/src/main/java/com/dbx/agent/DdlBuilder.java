@@ -418,7 +418,9 @@ public final class DdlBuilder {
     private static boolean isCharacterType(String normalized) {
         return "character varying".equals(normalized)
             || "varchar".equals(normalized)
+            || "varchar2".equals(normalized)
             || "nvarchar".equals(normalized)
+            || "nvarchar2".equals(normalized)
             || "char".equals(normalized)
             || "nchar".equals(normalized)
             || "character".equals(normalized);

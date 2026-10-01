@@ -1286,6 +1286,56 @@ test("infers dotted MongoDB fields from sampled documents", () => {
   assert.ok(inferred.find((field) => field.name === "tags.label" && field.type === "string"));
 });
 
+test("infers MongoDB fields from up to 10 array elements and ignores later elements", () => {
+  const documents = [
+    {
+      items: [{ e0: 0 }, { e1: 1 }, { e2: 2 }, { e3: 3 }, { e4: 4 }, { e5: 5 }, { e6: 6 }, { e7: 7 }, { e8: 8 }, { e9: 9 }, { e10: 10 }, { e11: 11 }],
+    },
+  ];
+
+  const inferred = inferMongoCompletionFields(documents);
+
+  // Array path itself
+  assert.ok(inferred.find((field) => field.name === "items" && field.type === "array"));
+  // Elements 0 through 9 (first 10 elements) must be sampled
+  assert.ok(inferred.find((field) => field.name === "items.e0" && field.type === "number"));
+  assert.ok(inferred.find((field) => field.name === "items.e2" && field.type === "number"));
+  assert.ok(inferred.find((field) => field.name === "items.e3" && field.type === "number"));
+  assert.ok(inferred.find((field) => field.name === "items.e9" && field.type === "number"));
+  // Elements 10 and 11 (beyond the 10-element limit) must NOT be sampled
+  assert.equal(
+    inferred.some((field) => field.name === "items.e10"),
+    false,
+  );
+  assert.equal(
+    inferred.some((field) => field.name === "items.e11"),
+    false,
+  );
+});
+
+test("caps inferred MongoDB distinct field paths at 512", () => {
+  const pathologicalDoc: Record<string, number> = {};
+  for (let i = 0; i < 600; i++) {
+    pathologicalDoc[`field_${i.toString().padStart(4, "0")}`] = i;
+  }
+
+  const inferred = inferMongoCompletionFields([pathologicalDoc]);
+  assert.equal(inferred.length, 512);
+
+  // A second document with existing and new fields: existing fields update types, new fields are ignored
+  const secondDoc: Record<string, unknown> = {
+    field_0000: "string_value",
+    brand_new_overflow_field: 42,
+  };
+  const inferredWithSecond = inferMongoCompletionFields([pathologicalDoc, secondDoc]);
+  assert.equal(inferredWithSecond.length, 512);
+  assert.equal(inferredWithSecond.find((field) => field.name === "field_0000")?.type, "number | string");
+  assert.equal(
+    inferredWithSecond.some((field) => field.name === "brand_new_overflow_field"),
+    false,
+  );
+});
+
 test("completes $setWindowFields stage options, sortBy key map, and output window operators", () => {
   assert.deepEqual(labels("db.users.aggregate([{ $setWindowFields: { "), ["output", "partitionBy", "sortBy"]);
   assert.deepEqual(labels("db.users.aggregate([{ $setWindowFields: { partitionBy: '", { fields }), ["$_id", "$createdAt", "$name", "$profile.email"]);

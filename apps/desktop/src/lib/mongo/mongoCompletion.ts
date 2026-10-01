@@ -1929,18 +1929,23 @@ function extractActiveDatabase(text: string, cursor: number): string | undefined
   return lastUseDb;
 }
 
+const MAX_MONGO_COMPLETION_FIELDS = 512;
+
 function collectFieldTypes(value: unknown, prefix: string, out: Map<string, Set<string>>, depth: number) {
   if (depth > 4 || value == null || typeof value !== "object") return;
   // A wrapper such as {$oid: "..."} is one BSON value. Walking into it would offer
   // `_id.$oid`, a path that exists only in transport and matches nothing on the server.
   if (mongoExtendedJsonValueType(value)) return;
   if (Array.isArray(value)) {
-    for (const item of value.slice(0, 3)) collectFieldTypes(item, prefix, out, depth + 1);
+    for (const item of value.slice(0, 10)) collectFieldTypes(item, prefix, out, depth + 1);
     return;
   }
   for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
     const path = prefix ? `${prefix}.${key}` : key;
-    if (!out.has(path)) out.set(path, new Set());
+    if (!out.has(path)) {
+      if (out.size >= MAX_MONGO_COMPLETION_FIELDS) continue;
+      out.set(path, new Set());
+    }
     out.get(path)?.add(describeMongoValueType(child));
     collectFieldTypes(child, path, out, depth + 1);
   }

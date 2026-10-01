@@ -946,6 +946,7 @@ async fn live_sqlserver_database_export_replays_composite_foreign_keys() {
         output_compression: Default::default(),
         snapshot_session_id: None,
         insert_dialect: Default::default(),
+        insert_mode: Default::default(),
         batch_size: 1000,
         split_max_mb: None,
     };

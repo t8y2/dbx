@@ -150,6 +150,8 @@ pub struct DatabaseExportRequest {
     #[serde(default)]
     pub insert_dialect: SqlInsertDialect,
     #[serde(default)]
+    pub insert_mode: SqlInsertMode,
+    #[serde(default)]
     pub snapshot_session_id: Option<String>,
     pub batch_size: usize,
     /// When set, the export is packaged as a `.zip` archive containing
@@ -2619,6 +2621,7 @@ fn database_export_select_sql(
     format!("SELECT {columns} FROM {table}")
 }
 
+#[cfg(test)]
 fn write_database_export_rows<W: Write>(
     file: &mut W,
     rows: &[Vec<Value>],
@@ -2629,6 +2632,32 @@ fn write_database_export_rows<W: Write>(
     schema: &str,
     db_type: &DatabaseType,
     insert_dialect: SqlInsertDialect,
+) -> Result<(), String> {
+    write_database_export_rows_with_mode(
+        file,
+        rows,
+        columns,
+        column_types,
+        column_extras,
+        table,
+        schema,
+        db_type,
+        insert_dialect,
+        SqlInsertMode::default(),
+    )
+}
+
+fn write_database_export_rows_with_mode<W: Write>(
+    file: &mut W,
+    rows: &[Vec<Value>],
+    columns: &[String],
+    column_types: &[Option<String>],
+    column_extras: &[Option<String>],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    insert_dialect: SqlInsertDialect,
+    insert_mode: SqlInsertMode,
 ) -> Result<(), String> {
     let insert_indices = columns
         .iter()
@@ -2691,7 +2720,7 @@ fn write_database_export_rows<W: Write>(
             spatial_columns: Vec::new(),
             spatial_values: Vec::new(),
             rows: insert_rows.to_vec(),
-            batch_size: Some(DATABASE_EXPORT_INSERT_BATCH_SIZE),
+            batch_size: Some(insert_mode.batch_size(DATABASE_EXPORT_INSERT_BATCH_SIZE)),
         },
         &[],
         insert_dialect,
@@ -4126,7 +4155,7 @@ async fn export_database_sql_core_inner(
                                 if snapshot_batch_cancelled(&db_type, &request.export_id) {
                                     return Err(EXPORT_CANCELLED_ERROR.to_string());
                                 }
-                                write_database_export_rows(
+                                write_database_export_rows_with_mode(
                                     &mut file,
                                     &rows,
                                     &col_names,
@@ -4136,6 +4165,7 @@ async fn export_database_sql_core_inner(
                                     &request.schema,
                                     &db_type,
                                     request.insert_dialect,
+                                    request.insert_mode,
                                 )?;
                                 total_rows_exported += rows.len() as u64;
                                 on_progress(ExportProgress {
@@ -4243,7 +4273,7 @@ async fn export_database_sql_core_inner(
                         if row_count == 0 {
                             break;
                         }
-                        write_database_export_rows(
+                        write_database_export_rows_with_mode(
                             &mut file,
                             &result.rows,
                             &col_names,
@@ -4253,6 +4283,7 @@ async fn export_database_sql_core_inner(
                             &request.schema,
                             &db_type,
                             request.insert_dialect,
+                            request.insert_mode,
                         )?;
                         total_rows_exported += row_count as u64;
                         if use_keyset {
@@ -4650,11 +4681,11 @@ mod tests {
         mysql_view_dependencies_from_rows, mysql_view_dependencies_sql, normalize_export_table_ddl,
         record_export_destination_identity, record_export_error, replace_database_export_select_list,
         sort_export_views_by_dependencies, split_postgres_export_table_triggers, write_database_export_rows,
-        BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions, BuildExportSqlInsertOptions,
-        DatabaseExportObjectCounts, DatabaseExportRequest, DatabaseExportWriter, DdlNormalizeOptions, ExportedTableSql,
-        PostgresExportEnum, PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers,
-        SqlInsertDialect, DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT,
-        POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL, POSTGRES_EXPORT_SEQUENCES_SQL,
+        write_database_export_rows_with_mode, BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions,
+        BuildExportSqlInsertOptions, DatabaseExportObjectCounts, DatabaseExportRequest, DatabaseExportWriter,
+        DdlNormalizeOptions, ExportedTableSql, PostgresExportEnum, PostgresExportExtension, PostgresExportSequence,
+        PostgresExtensionMembers, SqlInsertDialect, SqlInsertMode, DATABASE_EXPORT_INSERT_BATCH_SIZE,
+        DATABASE_EXPORT_ROW_LIMIT, POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL, POSTGRES_EXPORT_SEQUENCES_SQL,
     };
     use super::{ExportProgress, LenientExportErrors};
     use crate::connection::AppState;
@@ -4855,6 +4886,7 @@ mod tests {
             prevent_overwrite: false,
             output_compression: Default::default(),
             insert_dialect: Default::default(),
+            insert_mode: Default::default(),
             snapshot_session_id: None,
             batch_size: 1000,
             split_max_mb: None,
@@ -6905,6 +6937,33 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(path).unwrap(),
             "INSERT INTO \"dbo\".\"event]log\" (\"enabled\", \"path\") VALUES (TRUE, 'C:\\exports\\O''Hara');\n\n"
+        );
+    }
+
+    #[test]
+    fn database_row_writer_supports_one_insert_statement_per_row() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("users.sql");
+        let mut file = std::fs::File::create(&path).unwrap();
+
+        write_database_export_rows_with_mode(
+            &mut file,
+            &[vec![json!(1), json!("Ada")], vec![json!(2), json!("Linus")]],
+            &["id".to_string(), "name".to_string()],
+            &[Some("int".to_string()), Some("varchar(32)".to_string())],
+            &[None, None],
+            "users",
+            "app",
+            &DatabaseType::Mysql,
+            SqlInsertDialect::Source,
+            SqlInsertMode::Single,
+        )
+        .unwrap();
+        drop(file);
+
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "INSERT INTO `users` (`id`, `name`) VALUES (1, 'Ada');\n\nINSERT INTO `users` (`id`, `name`) VALUES (2, 'Linus');\n\n"
         );
     }
 

@@ -137,6 +137,7 @@ async fn manual_e2e_sqlserver_default_split_zip_export_then_import_skip_relation
         batch_size: 1000,
         split_max_mb: Some(1),
         insert_dialect: Default::default(),
+        insert_mode: Default::default(),
     };
 
     let progress_log = std::sync::Mutex::new(Vec::new());

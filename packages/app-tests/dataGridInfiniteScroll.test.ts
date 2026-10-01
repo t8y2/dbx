@@ -59,7 +59,7 @@ test("load-all selects the last loaded row only after a valid append completes",
   assert.match(source, /\(\) => \[props\.loading, props\.result\.rows\.length, props\.result\.appended_from_row_count\] as const[\s\S]*?\{ flush: "post" \}/);
   assert.match(source, /props\.result\.appended_from_row_count !== requestedOffset[\s\S]*?return;[\s\S]*?if \(shouldSelectLastRow\) selectAndRevealLastLoadedRow\(\)/);
   assert.match(source, /function selectAndRevealLastLoadedRow\(\)[\s\S]*?selectRow\(rowIndex\)[\s\S]*?remainingFrames = 12[\s\S]*?scrollCanvasRowIntoView\(rowIndex, "end"\)[\s\S]*?scrollDomRowIntoView\(rowIndex, "end"\)[\s\S]*?requestAnimationFrame\(revealWhenReady\)/);
-  assert.match(source, /\(\) => \[props\.countSql \?\? ""[\s\S]*?manualTotalRowCount\.value = undefined/);
+  // Count invalidation is verified by mounted-grid tests in DataGridTotalRowCountRefresh.spec.ts.
   assert.match(source, /if \(infiniteScrollLoadAllPending\) \{[\s\S]*?infiniteScrollLoadAllPending = false;[\s\S]*?selectAndRevealLastLoadedRow\(\)/);
   assert.match(source, /dataGridInfiniteScrollAppendCompletion\(previousResult, result,[\s\S]*?loadAllRowsActive\.value = false/);
   assert.match(querySurfacesSource, /paginate: \[tabId: string, offset: number, limit: number, whereInput\?: string, orderBy\?: string, appendResult\?: boolean\]/);

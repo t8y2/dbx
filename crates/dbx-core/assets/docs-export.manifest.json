@@ -39,7 +39,7 @@
     "apps/desktop/src/lib/app/localeOptions.ts": "ce38be921d938dbd97d22fde6035699fe40380be3eb4af2caa5371bacca0d945",
     "apps/desktop/src/lib/common/utils.ts": "76c4b2af1e03edeb8db389d9b2c1b56b72a57a1b5198d4e224671c1445c527da",
     "apps/desktop/src/lib/diagram/erDiagram.ts": "c22416a9a5ec5e619acc2d8bc5451254a25abe29fc518e9fb4f611e076fe7b1f",
-    "apps/desktop/src/styles/tokens.css": "5b8f747a1eb93905dd797ed2c97b4aa3d18ebed866c2e1f150ff0d9cf52162f5",
+    "apps/desktop/src/styles/tokens.css": "ad954638ab9bf59640ee78b8d088d6c4565d3cedf78b93f73087d06b9fa9f2c3",
     "apps/desktop/tsconfig.json": "ee02ba8f2f257b86235cd3053e8d6fbfefd7c39e0807b4ea5e36e133a78e836c",
     "apps/desktop/vite.docs-export.config.ts": "833bc2cbd99f9c0740cbc1584640458492bad75c9518db4d1ce0edd6958881ec"
   },

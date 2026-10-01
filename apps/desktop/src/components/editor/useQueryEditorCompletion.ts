@@ -20,7 +20,17 @@ import {
 import { originForSqlCompletionProvider, originForTypedSqlCompletionStart, shouldAllowSqlCompletionTrigger, type SqlCompletionTriggerFacts, type SqlCompletionTriggerOrigin } from "@/lib/sql/sqlCompletionTriggerPolicy";
 import { driverProfileHasCompletionCandidates } from "@/lib/database/driverProfileExtensions";
 import { buildElasticsearchCompletionItemsFromContext, elasticsearchCompletionNeedsFields, getElasticsearchCompletionContext, getElasticsearchCompletionResultValidFor, shouldAutoOpenElasticsearchCompletion, type ElasticsearchCompletionField } from "@/lib/elasticsearch/elasticsearchCompletion";
-import { buildMongoCompletionItemsFromContext, foldMongoKeySeparator, getMongoCompletionContext, getMongoCompletionResultValidFor, mongoCompletionNeedsCollections, mongoCompletionNeedsDatabases, mongoCompletionNeedsFields, shouldAutoOpenMongoCompletion } from "@/lib/mongo/mongoCompletion";
+import {
+  buildMongoCompletionItemsFromContext,
+  foldMongoKeySeparator,
+  getMongoCompletionContext,
+  getMongoCompletionResultValidFor,
+  mongoCompletionNeedsCollections,
+  mongoCompletionNeedsDatabases,
+  mongoCompletionNeedsFields,
+  mongoCompletionNeedsIndexes,
+  shouldAutoOpenMongoCompletion,
+} from "@/lib/mongo/mongoCompletion";
 import { buildSoqlCompletionItems, getSoqlCompletionContext, getSoqlCompletionResultValidFor, resolveSoqlFieldCandidates, resolveSoqlValueField, shouldAutoOpenSoqlCompletion, soqlCompletionNeedsObjects, type SoqlCompletionField, type SoqlCompletionObject } from "@/lib/soql/soqlCompletion";
 import {
   buildSqlServerUseDatabaseCompletionItems,
@@ -572,6 +582,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     let databases: string[] = [];
     let collections: string[] = [];
     let fields: Awaited<ReturnType<typeof connectionStore.listMongoCompletionFields>> = [];
+    let indexes: Awaited<ReturnType<typeof connectionStore.listMongoCompletionIndexes>> = [];
 
     // `use` and `getSiblingDB` name a database, which does not depend on the tab having one selected.
     if (mongoCompletionNeedsDatabases(completionContext.mode)) {
@@ -598,12 +609,22 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       }
     }
 
+    const indexDatabase = completionContext.database ?? props.database;
+    if (indexDatabase && mongoCompletionNeedsIndexes(completionContext.mode) && completionContext.collection) {
+      try {
+        indexes = await connectionStore.listMongoCompletionIndexes(props.connectionId, indexDatabase, completionContext.collection);
+      } catch {
+        indexes = [];
+      }
+    }
+
     if (epoch !== completionEpoch) return null;
 
     const items = buildMongoCompletionItemsFromContext(completionContext, {
       databases,
       collections,
       fields,
+      indexes,
     });
     if (items.length === 0) return null;
     return {

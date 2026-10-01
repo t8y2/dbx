@@ -166,7 +166,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { decorateDatabaseSavedSqlTreeNodes, indexSavedSqlFilesByDatabase, stripDatabaseSavedSqlTreeNodes, withDatabaseSavedSqlRoot } from "@/lib/savedSql/savedSqlDatabaseTree";
 import { encodeSqlServerLinkedSchema, parseSqlServerLinkedSchema } from "@/lib/database/sqlServerLinkedServers";
-import { inferMongoCompletionFields, type MongoCompletionField } from "@/lib/mongo/mongoCompletion";
+import { formatMongoIndexKeyPattern, inferMongoCompletionFields, type MongoCompletionField, type MongoCompletionIndex } from "@/lib/mongo/mongoCompletion";
 import type { SoqlCompletionField, SoqlCompletionObject } from "@/lib/soql/soqlCompletion";
 import type { SalesforceCurrentUser } from "@/types/salesforce";
 import { flattenElasticsearchMappingFields, type ElasticsearchCompletionField } from "@/lib/elasticsearch/elasticsearchCompletion";
@@ -537,6 +537,7 @@ export const useConnectionStore = defineStore("connection", () => {
   const redisCommandDocsCacheGeneration = new Map<string, number>();
   const mongoCompletionCollectionsCache = ref<Record<string, string[]>>({});
   const mongoCompletionFieldsCache = ref<Record<string, MongoCompletionField[]>>({});
+  const mongoCompletionIndexesCache = ref<Record<string, MongoCompletionIndex[]>>({});
   const soqlCompletionObjectsCache = ref<Record<string, SoqlCompletionObject[]>>({});
   const soqlCompletionFieldsCache = ref<Record<string, SoqlCompletionField[]>>({});
   // One entry per connection: the authenticated Salesforce user never changes for
@@ -3939,6 +3940,9 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     for (const key of Object.keys(mongoCompletionFieldsCache.value)) {
       if (key === exactCacheKey || key.startsWith(cachePrefix)) delete mongoCompletionFieldsCache.value[key];
+    }
+    for (const key of Object.keys(mongoCompletionIndexesCache.value)) {
+      if (key === exactCacheKey || key.startsWith(cachePrefix)) delete mongoCompletionIndexesCache.value[key];
     }
     for (const key of Object.keys(soqlCompletionObjectsCache.value)) {
       if (key === exactCacheKey || key.startsWith(cachePrefix)) delete soqlCompletionObjectsCache.value[key];
@@ -7901,7 +7905,7 @@ export const useConnectionStore = defineStore("connection", () => {
     if (!normalizedKey.startsWith(prefix)) return false;
     const tableToken = `:${tableName.toLowerCase()}`;
     const tableOffset = normalizedKey.lastIndexOf(tableToken);
-    if (tableOffset < prefix.length) return false;
+    if (tableOffset < prefix.length - 1) return false;
     const trailing = normalizedKey.slice(tableOffset + tableToken.length);
     if (trailing && !trailing.startsWith(":")) return false;
     const normalizedSchema = schema?.trim().toLowerCase();
@@ -7919,7 +7923,7 @@ export const useConnectionStore = defineStore("connection", () => {
     bumpCompletionCacheRevision(connectionId, database);
     const matches = (key: string) => completionTableCacheKeyMatches(key, connectionId, database, tableName, schema, catalog);
     let removed = 0;
-    for (const cache of [completionColumnsCache.value, completionForeignKeysCache.value]) {
+    for (const cache of [completionColumnsCache.value, completionForeignKeysCache.value, mongoCompletionFieldsCache.value, mongoCompletionIndexesCache.value]) {
       for (const key of Object.keys(cache)) {
         if (!matches(key)) continue;
         delete cache[key];
@@ -8764,6 +8768,24 @@ export const useConnectionStore = defineStore("connection", () => {
       mongoCompletionFieldsCache.value[cacheKey] = fields;
       evictOldestCacheEntries(mongoCompletionFieldsCache.value, COMPLETION_CACHE_MAX);
       return fields;
+    });
+  }
+
+  async function listMongoCompletionIndexes(connectionId: string, database: string, collection: string): Promise<MongoCompletionIndex[]> {
+    if (!database || !collection) return [];
+    const cacheKey = `${connectionId}:${database}:${collection}`;
+    const cached = mongoCompletionIndexesCache.value[cacheKey];
+    if (cached) return cached;
+    return withCompletionInFlight(`${cacheKey}:mongo-indexes`, async () => {
+      await ensureConnected(connectionId);
+      const specs = (await api.mongoListIndexSpecs(connectionId, database, collection)) ?? [];
+      const indexes = specs.map((spec) => ({
+        name: spec.name,
+        keyPattern: formatMongoIndexKeyPattern(spec.keys),
+      }));
+      mongoCompletionIndexesCache.value[cacheKey] = indexes;
+      evictOldestCacheEntries(mongoCompletionIndexesCache.value, COMPLETION_CACHE_MAX);
+      return indexes;
     });
   }
 
@@ -10325,6 +10347,7 @@ export const useConnectionStore = defineStore("connection", () => {
     listRedisCompletionCommandDocs,
     listMongoCompletionCollections,
     listMongoCompletionFields,
+    listMongoCompletionIndexes,
     listSoqlCompletionObjects,
     listSoqlCompletionFields,
     loadSalesforceCurrentUser,

@@ -523,6 +523,108 @@ test("suggests stages only at pipeline level, including nested pipelines", () =>
   assert.equal(labels("db.users.aggregate([{ $match: { tags: { $in: [{ $m").includes("$match"), false);
 });
 
+test("withholds illegal stages in sub-pipelines and view definitions", () => {
+  // Top-level aggregate includes $out and $merge.
+  const topLevel = labels("db.users.aggregate([{ $");
+  assert.ok(topLevel.includes("$out"));
+  assert.ok(topLevel.includes("$merge"));
+  assert.ok(topLevel.includes("$match"));
+  assert.ok(topLevel.includes("$project"));
+  assert.ok(topLevel.includes("$group"));
+
+  // $facet branch rejects $out, $merge, $facet, $collStats, $indexStats, $planCacheStats, $geoNear, $documents.
+  const facetStages = labels("db.users.aggregate([{ $facet: { a: [{ $");
+  for (const forbidden of ["$out", "$merge", "$facet", "$collStats", "$indexStats", "$planCacheStats", "$geoNear", "$documents"]) {
+    assert.equal(facetStages.includes(forbidden), false, `$facet branch must not offer ${forbidden}`);
+  }
+  assert.ok(facetStages.includes("$match"));
+  assert.ok(facetStages.includes("$project"));
+  assert.ok(facetStages.includes("$group"));
+
+  // $lookup sub-pipeline rejects $out and $merge, but permits $documents, $facet, $geoNear.
+  const lookupStages = labels('db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $');
+  assert.equal(lookupStages.includes("$out"), false, "$lookup must not offer $out");
+  assert.equal(lookupStages.includes("$merge"), false, "$lookup must not offer $merge");
+  assert.ok(lookupStages.includes("$match"));
+  assert.ok(lookupStages.includes("$project"));
+  assert.ok(lookupStages.includes("$group"));
+  assert.ok(lookupStages.includes("$documents"));
+  assert.ok(lookupStages.includes("$facet"));
+  assert.ok(lookupStages.includes("$geoNear"));
+
+  // $unionWith sub-pipeline rejects $out and $merge, but permits $documents.
+  const unionStages = labels('db.users.aggregate([{ $unionWith: { coll: "orders", pipeline: [{ $');
+  assert.equal(unionStages.includes("$out"), false, "$unionWith must not offer $out");
+  assert.equal(unionStages.includes("$merge"), false, "$unionWith must not offer $merge");
+  assert.ok(unionStages.includes("$match"));
+  assert.ok(unionStages.includes("$project"));
+  assert.ok(unionStages.includes("$group"));
+  assert.ok(unionStages.includes("$documents"));
+
+  // View definition pipeline rejects $out and $merge, but permits $documents.
+  const viewStages = labels('db.createCollection("v", { viewOn: "users", pipeline: [{ $');
+  assert.equal(viewStages.includes("$out"), false, "view pipeline must not offer $out");
+  assert.equal(viewStages.includes("$merge"), false, "view pipeline must not offer $merge");
+  assert.ok(viewStages.includes("$match"));
+  assert.ok(viewStages.includes("$project"));
+  assert.ok(viewStages.includes("$group"));
+  assert.ok(viewStages.includes("$documents"));
+
+  // Sub-pipeline nested inside a view pipeline applies sub-pipeline restrictions.
+  const viewFacetStages = labels('db.createCollection("v", { viewOn: "users", pipeline: [{ $facet: { a: [{ $');
+  assert.equal(viewFacetStages.includes("$out"), false);
+  assert.equal(viewFacetStages.includes("$merge"), false);
+  assert.equal(viewFacetStages.includes("$facet"), false);
+  assert.equal(viewFacetStages.includes("$geoNear"), false);
+  assert.ok(viewFacetStages.includes("$match"));
+
+  // runCommand aggregate pipeline is a top-level aggregate and offers $out and $merge.
+  const runCommandStages = labels('db.runCommand({ aggregate: "users", pipeline: [{ $');
+  assert.ok(runCommandStages.includes("$out"));
+  assert.ok(runCommandStages.includes("$merge"));
+  assert.ok(runCommandStages.includes("$match"));
+
+  // Update pipeline remains unchanged.
+  const updateStages = labels("db.users.updateOne({}, [{ $", { fields });
+  assert.deepEqual([...updateStages].sort(), ["$addFields", "$project", "$replaceRoot", "$replaceWith", "$set", "$unset"]);
+});
+
+test("classifies pipeline kinds across top-level, sub-pipelines, views and updates", () => {
+  const topText = "db.users.aggregate([{ $";
+  assert.equal(getMongoCompletionContext(topText, topText.length).pipelineKind, "aggregate");
+  assert.equal(getMongoCompletionContext(topText, topText.length).stage, undefined);
+
+  const facetText = "db.users.aggregate([{ $facet: { a: [{ $";
+  const facetCtx = getMongoCompletionContext(facetText, facetText.length);
+  assert.equal(facetCtx.pipelineKind, "facet");
+  assert.equal(facetCtx.stage, undefined);
+
+  const lookupText = 'db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $';
+  const lookupCtx = getMongoCompletionContext(lookupText, lookupText.length);
+  assert.equal(lookupCtx.pipelineKind, "join");
+  assert.equal(lookupCtx.stage, undefined);
+
+  const unionText = 'db.users.aggregate([{ $unionWith: { coll: "orders", pipeline: [{ $';
+  const unionCtx = getMongoCompletionContext(unionText, unionText.length);
+  assert.equal(unionCtx.pipelineKind, "join");
+  assert.equal(unionCtx.stage, undefined);
+
+  const viewText = 'db.createCollection("v", { viewOn: "users", pipeline: [{ $';
+  const viewCtx = getMongoCompletionContext(viewText, viewText.length);
+  assert.equal(viewCtx.pipelineKind, "view");
+  assert.equal(viewCtx.stage, undefined);
+
+  const runCommandText = 'db.runCommand({ aggregate: "users", pipeline: [{ $';
+  const runCommandCtx = getMongoCompletionContext(runCommandText, runCommandText.length);
+  assert.equal(runCommandCtx.pipelineKind, "aggregate");
+  assert.equal(runCommandCtx.stage, undefined);
+
+  const updateText = "db.users.updateOne({}, [{ $";
+  const updateCtx = getMongoCompletionContext(updateText, updateText.length);
+  assert.equal(updateCtx.pipelineKind, "update");
+  assert.equal(updateCtx.stage, undefined);
+});
+
 test("suggests values, not fields, after a filter key", () => {
   const items = labels("db.users.find({ _id: ", { fields });
 

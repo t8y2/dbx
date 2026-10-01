@@ -27,6 +27,13 @@ describe("openTabsPersistence originalSql round-trip", () => {
     expect(restored.uiState).toEqual({ activeOutputView: "chart", redisResultViewMode: "console", resultPaneOpen: false });
   });
 
+  it("preserves the structured sort field across a data tab round-trip", () => {
+    const [restored] = roundTrip([queryTab({ mode: "data", orderByInput: '"status" ASC', structuredOrderByInput: '"created_at" DESC' })]);
+
+    expect(restored.orderByInput).toBe('"status" ASC');
+    expect(restored.structuredOrderByInput).toBe('"created_at" DESC');
+  });
+
   it("preserves namespaced special-page state across a round-trip", () => {
     const uiState = {
       page: {

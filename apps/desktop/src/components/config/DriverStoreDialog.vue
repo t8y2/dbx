@@ -40,7 +40,7 @@ import { translateBackendError } from "@/i18n/backend-errors";
 import { runAgentOfflineExportAction } from "@/lib/driverStore/agentOfflineExportFlow";
 import { DRIVER_CATEGORIES, getCategoryForAgentDriver, assertAgentDriverCategoriesComplete } from "@/lib/connection/driver-category-definitions";
 import { hasAnyUpdatableDriverMatching, countInstalledDrivers, countAvailableDrivers, partitionDriversByInstallStatus, upgradeAllDriverTypes, upgradeAllMatchesFullUpdateSet, type DriverInstallStatusFilter } from "@/lib/connection/driverListFilter";
-import { notifyComponentUpdatesChanged } from "@/lib/updates/componentUpdateEvents";
+import { COMPONENT_DRIVER_UPDATES_CHANGED_EVENT, notifyComponentUpdatesChanged } from "@/lib/updates/componentUpdateEvents";
 import { updateBlockerLabels } from "@/lib/updates/componentUpdateOrchestration";
 
 const { t } = useI18n();
@@ -429,6 +429,10 @@ async function forceRefresh() {
   } finally {
     refreshing.value = false;
   }
+}
+
+function handleComponentDriverUpdatesChanged() {
+  void Promise.allSettled([forceRefresh(), loadJdbcDrivers(), loadJdbcPluginStatus()]);
 }
 
 function setUpdateDownloadSource(value: unknown) {
@@ -1460,6 +1464,7 @@ async function deleteJdbcLocalBundle(bundleId: string) {
 // ──────────── Lifecycle ────────────
 
 onMounted(async () => {
+  window.addEventListener(COMPONENT_DRIVER_UPDATES_CHANGED_EVENT, handleComponentDriverUpdatesChanged);
   updateAgentDrivers(await api.listInstalledAgentsLocal());
   void loadJavaRuntimeConfig();
   void loadDriverStoreUsage();
@@ -1507,6 +1512,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  window.removeEventListener(COMPONENT_DRIVER_UPDATES_CHANGED_EVENT, handleComponentDriverUpdatesChanged);
   unlisten?.();
   stopDriverRuntimePolling();
 });

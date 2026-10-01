@@ -1361,15 +1361,15 @@ mod tests {
         assert!(plugins_root.join("jdbc/manifest.json").exists());
         let bundles = list_jdbc_maven_bundles(&plugins_root).unwrap();
         assert_eq!(bundles.len(), 1);
+        // 比较 Path 而不是字符串：生产代码在 Windows 上用反斜杠拼接，而被期望值里
+        // 内嵌了 `/`，直接比字符串会在 Windows 上误报。
         assert_eq!(
-            bundles[0].path,
-            plugins_root.join("jdbc/drivers/maven/com.example_demo-driver_1.0.0").to_string_lossy()
+            std::path::PathBuf::from(&bundles[0].path),
+            plugins_root.join("jdbc/drivers/maven/com.example_demo-driver_1.0.0")
         );
         assert_eq!(
-            bundles[0].artifacts[0].path,
-            plugins_root
-                .join("jdbc/drivers/maven/com.example_demo-driver_1.0.0/jars/demo-driver-1.0.0.jar")
-                .to_string_lossy()
+            std::path::PathBuf::from(&bundles[0].artifacts[0].path),
+            plugins_root.join("jdbc/drivers/maven/com.example_demo-driver_1.0.0/jars/demo-driver-1.0.0.jar")
         );
         assert_eq!(std::fs::read(&bundles[0].artifacts[0].path).unwrap(), b"offline-driver");
         let _ = std::fs::remove_dir_all(root);

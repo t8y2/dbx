@@ -190,6 +190,8 @@ const props = defineProps<{
   catalog?: string;
   schema?: string;
   tableName: string;
+  /** `view` loads `CREATE OR REPLACE VIEW` instead of table DDL. */
+  tableType?: "table" | "view";
   initialTab?: TableInfoTab;
   initialTabRequestId?: number;
   initialTarget?: TableStructureEditorTarget;
@@ -431,13 +433,23 @@ function applyDdlGenerationPreferences(sql: string, dialect: SqlFormatDialect): 
   return formatGeneratedDdlIdentifierQuotes(unqualified, dialect, false, { preserveCaseSensitiveIdentifiers: tableStoresCaseSensitiveIdentifiers.value });
 }
 
-function ddlRequest() {
+type StructureDdlRequest = {
+  connectionId: string;
+  database: string;
+  schema: string;
+  tableName: string;
+  catalog?: string;
+  objectType?: "VIEW";
+};
+
+function ddlRequest(): StructureDdlRequest {
   return {
     connectionId: props.connectionId,
     database: props.database,
     schema: metadataSchema.value,
     tableName: props.tableName,
     catalog: props.catalog,
+    objectType: props.tableType === "view" ? "VIEW" : undefined,
   };
 }
 
@@ -2533,7 +2545,7 @@ async function fetchTableCommentValue(connectionId: string, database: string, sc
   }
 }
 
-function loadCachedTableComment(request: ReturnType<typeof ddlRequest>, force = false): Promise<{ value: string | undefined; cacheStatus: "memory" | "disk" | "remote" }> {
+function loadCachedTableComment(request: StructureDdlRequest, force = false): Promise<{ value: string | undefined; cacheStatus: "memory" | "disk" | "remote" }> {
   return loadObjectMetadataFacet(request, "comment", () => fetchTableCommentValue(request.connectionId, request.database, request.schema, request.tableName, request.catalog), { force });
 }
 

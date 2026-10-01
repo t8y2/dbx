@@ -55,7 +55,7 @@ test("load-all selects the last loaded row only after a valid append completes",
   assert.match(loadAllFn, /resolvedDatabaseType\.value === "elasticsearch" \|\| resolvedDatabaseType\.value === "easysearch"/);
   assert.match(loadAllFn, /LOAD_ALL_ROWS_CONFIRM_ROW_THRESHOLD/);
   assert.match(loadAllFn, /infiniteScrollLoadAllPending = true/);
-  assert.match(loadAllFn, /emit\("paginate", segment\.offset, segment\.limit, currentWhereInput\(\), currentOrderBy\(\), true\)/);
+  assert.match(loadAllFn, /emit\("paginate", segment\.offset, segment\.limit, currentWhereInput\(\), effectiveOrderBy\(\), true\)/);
   assert.match(source, /\(\) => \[props\.loading, props\.result\.rows\.length, props\.result\.appended_from_row_count\] as const[\s\S]*?\{ flush: "post" \}/);
   assert.match(source, /props\.result\.appended_from_row_count !== requestedOffset[\s\S]*?return;[\s\S]*?if \(shouldSelectLastRow\) selectAndRevealLastLoadedRow\(\)/);
   assert.match(source, /function selectAndRevealLastLoadedRow\(\)[\s\S]*?selectRow\(rowIndex\)[\s\S]*?remainingFrames = 12[\s\S]*?scrollCanvasRowIntoView\(rowIndex, "end"\)[\s\S]*?scrollDomRowIntoView\(rowIndex, "end"\)[\s\S]*?requestAnimationFrame\(revealWhenReady\)/);

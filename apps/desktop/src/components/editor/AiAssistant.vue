@@ -643,6 +643,8 @@ const skillFailures = ref<ReadUserSkillFailure[]>([]);
 // vanished from discovery must keep a removable chip (prd.md:37) instead of
 // silently becoming an id the user can no longer drop.
 const selectedSkillChips = computed(() => buildSelectedSkillChips(selectedSkillIds.value, (id) => userSkillStore.metaFor(id)));
+const selectableSkillIds = computed(() => userSkillStore.groupedSkills.flatMap((group) => group.skills.map((skill) => skill.id)));
+const canSelectAllSkills = computed(() => !userSkillStore.isLoading && !userSkillStore.lastError && selectableSkillIds.value.some((id) => !selectedSkillIds.value.includes(id)));
 // Selector retry-on-open mirrors the template selector above.
 watch(showSkillSelector, (open) => {
   if (open) void userSkillStore.refresh(skillRootSettings());
@@ -664,6 +666,17 @@ function skillRootSettings(): UserSkillRootSettings {
 function toggleSkillSelected(id: string) {
   skillFailures.value = [];
   selectedSkillIds.value = selectedSkillIds.value.includes(id) ? selectedSkillIds.value.filter((skillId) => skillId !== id) : [...selectedSkillIds.value, id];
+}
+
+function selectAllSkills() {
+  if (!canSelectAllSkills.value) return;
+  selectedSkillIds.value = [...new Set([...selectedSkillIds.value, ...selectableSkillIds.value])];
+  skillFailures.value = [];
+}
+
+function deselectAllSkills() {
+  selectedSkillIds.value = [];
+  skillFailures.value = [];
 }
 
 function removeSelectedSkill(id: string) {
@@ -6380,7 +6393,7 @@ async function openExternalUrl(url: string) {
                         {{ t(group.source === "custom" ? "ai.skillsGroupCustom" : "ai.skillsGroupDefault") }}
                       </div>
                       <template v-for="skill in group.skills" :key="skill.id">
-                        <button type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs hover:bg-muted" @click="toggleSkillSelected(skill.id)">
+                        <button type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs hover:bg-muted" :aria-pressed="selectedSkillIds.includes(skill.id)" @click="toggleSkillSelected(skill.id)">
                           <div class="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border" :class="selectedSkillIds.includes(skill.id) ? 'border-primary bg-primary text-primary-foreground' : ''">
                             <Check v-if="selectedSkillIds.includes(skill.id)" class="h-3 w-3" />
                           </div>
@@ -6394,6 +6407,16 @@ async function openExternalUrl(url: string) {
                   </template>
                 </div>
                 <div class="border-t mt-1 px-1 pt-1">
+                  <div class="flex gap-1">
+                    <button type="button" class="flex min-w-0 flex-1 items-center gap-2 rounded-sm px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50" :disabled="!canSelectAllSkills" @click="selectAllSkills">
+                      <Check class="h-3 w-3 shrink-0" />
+                      {{ t("ai.skillsSelectAll") }}
+                    </button>
+                    <button type="button" class="flex min-w-0 flex-1 items-center gap-2 rounded-sm px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50" :disabled="selectedSkillIds.length === 0" @click="deselectAllSkills">
+                      <X class="h-3 w-3 shrink-0" />
+                      {{ t("ai.skillsDeselectAll") }}
+                    </button>
+                  </div>
                   <button type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground" :disabled="userSkillStore.isLoading" @click="refreshSkills">
                     <Loader2 v-if="userSkillStore.isLoading" class="h-3 w-3 animate-spin" />
                     {{ t("ai.skillsRefresh") }}

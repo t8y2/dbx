@@ -93,7 +93,7 @@ export interface ContentAreaSurfaceEmits {
   formatError: [tabId: string];
   reload: [tabId: string, sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent];
   paginate: [tabId: string, offset: number, limit: number, whereInput?: string, orderBy?: string, appendResult?: boolean];
-  sort: [tabId: string, column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode?: DataGridSortMode];
+  sort: [tabId: string, column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode?: DataGridSortMode, effectiveOrderBy?: string];
   executeSql: [tabId: string, sql: string];
   clickTable: [tabId: string, target: SqlObjectNavigationTarget];
   viewTableData: [tabId: string, target: SqlObjectNavigationTarget];

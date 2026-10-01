@@ -1699,6 +1699,7 @@ pub fn run() {
             let state = Arc::new(state);
             app.manage(state.clone());
             commands::plugins::install_plugin_event_bridge(app.handle(), state.clone());
+            commands::connection::install_connection_liveness_bridge(app.handle(), state.clone());
             let backups = tauri::async_runtime::block_on(async {
                 background_backup::BackgroundBackup::new(state.clone(), data_dir.clone())
             });
@@ -1968,6 +1969,7 @@ pub fn run() {
             commands::connection::clear_all_session_credentials,
             commands::connection::refresh_connections,
             commands::connection::check_connection_health,
+            commands::connection::connection_is_open,
             commands::connection::prewarm_connection,
             commands::connection::connection_identifier_quote,
             commands::connection::connection_database_info,
@@ -2174,6 +2176,7 @@ pub fn run() {
             commands::redis_cmd::redis_scan_keys_batch,
             commands::redis_cmd::redis_scan_values,
             commands::redis_cmd::redis_get_value,
+            commands::redis_cmd::redis_get_raw_value,
             commands::redis_cmd::redis_get_ttl,
             commands::redis_cmd::redis_get_stream_entries,
             commands::redis_cmd::redis_get_stream_groups,
@@ -2587,6 +2590,8 @@ pub fn run() {
             commands::table_export::start_table_export,
             commands::table_export::cancel_table_export,
             commands::query_result_export::start_query_result_export,
+            commands::query_result_export::create_query_result_temp_file,
+            commands::query_result_export::open_query_result_temp_file,
             commands::query_result_export::cancel_query_result_export,
             commands::csv_export::export_query_result_csv,
             commands::csv_export::export_table_data_csv,

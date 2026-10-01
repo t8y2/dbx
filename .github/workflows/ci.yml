@@ -68,6 +68,8 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       NPM_CONFIG_LOGLEVEL: error
+      # Cold vue-tsc runs exceed 4 GiB; public Linux runners provide 16 GiB RAM.
+      NODE_OPTIONS: --max-old-space-size=8192
     steps:
       - uses: actions/checkout@v7
 
@@ -351,10 +353,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/win7-aws-lc-install
-          # Key covers the workspace Cargo.lock too: a main-workspace aws-lc-sys
-          # bump must rebuild the prebuilt artifacts instead of reusing the
-          # cached headers/lib for a stale version.
-          key: win7-aws-lc-v3-${{ runner.os }}-${{ env.WIN7_NIGHTLY_TOOLCHAIN }}-${{ hashFiles('Cargo.lock', '.github/fixtures/win7-aws-lc-cache/Cargo.lock') }}
+          # The fixture manifest and lockfile define the prebuilt AWS-LC artifact.
+          key: win7-aws-lc-v3-${{ runner.os }}-${{ env.WIN7_NIGHTLY_TOOLCHAIN }}-${{ hashFiles('.github/fixtures/win7-aws-lc-cache/Cargo.toml', '.github/fixtures/win7-aws-lc-cache/Cargo.lock') }}
 
       - name: Build Win7 AWS-LC cache
         if: steps.aws-lc-cache.outputs.cache-hit != 'true'
@@ -449,7 +449,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/win7-openssl-install
-          key: win7-openssl-v1-${{ runner.os }}-${{ env.WIN7_NIGHTLY_TOOLCHAIN }}-${{ hashFiles('Cargo.lock', '.github/fixtures/win7-openssl-cache/Cargo.lock') }}
+          key: win7-openssl-v1-${{ runner.os }}-${{ env.WIN7_NIGHTLY_TOOLCHAIN }}-${{ hashFiles('.github/fixtures/win7-openssl-cache/Cargo.toml', '.github/fixtures/win7-openssl-cache/Cargo.lock') }}
 
       - name: Build Win7 OpenSSL cache
         if: steps.openssl-cache.outputs.cache-hit != 'true'
@@ -1036,6 +1036,9 @@ jobs:
       duckdb_windows: ${{ steps.filter.outputs.duckdb_windows == 'true' || steps.plan.outputs.duckdb_windows == 'true' }}
       nix: ${{ steps.filter.outputs.nix }}
       windows_win7_bundle: ${{ steps.filter.outputs.windows_win7_bundle }}
+      windows_win7_candidate: ${{ steps.plan.outputs.windows_win7_candidate }}
+      windows_win7_affected_packages: ${{ steps.plan.outputs.windows_win7_affected_packages }}
+      windows_win7_reasons: ${{ steps.plan.outputs.windows_win7_reasons }}
       github_scripts: ${{ steps.filter.outputs.github_scripts }}
       fast: ${{ steps.plan.outputs.fast }}
       rust_matrix: ${{ steps.plan.outputs.rust_matrix }}
@@ -1192,6 +1195,7 @@ jobs:
           BASE_SHA: ${{ steps.change-base.outputs.sha }}
           RUST_CHANGED: ${{ steps.filter.outputs.rust }}
           AGENTS_CHANGED: ${{ steps.filter.outputs.agents }}
+          WIN7_CURRENT: ${{ steps.filter.outputs.windows_win7_bundle }}
         run: node .github/scripts/ci-plan.mjs
 
   agents:

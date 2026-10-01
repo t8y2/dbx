@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { supportsDatabaseFeature } from "@/lib/database/databaseDriverManifest";
 import {
   dorisGrantPrivilegesSql,
   dorisGrantsResult,
@@ -15,6 +16,7 @@ import {
   postgresUserAdminProvider,
   resolveDatabaseUserAdminProviderForConnection,
   starrocksTableGrantsResult,
+  supportsDatabaseUserAdmin,
 } from "@/lib/database/databaseUserAdmin";
 import type { ConnectionConfig, QueryResult } from "@/types/database";
 
@@ -84,6 +86,13 @@ describe("MySQL grant privilege selection", () => {
 });
 
 describe("database user admin providers", () => {
+  it("keeps Xugu on its dedicated permission surface despite the product capability", () => {
+    expect(supportsDatabaseFeature("xugu", "userAdmin")).toBe(true);
+    expect(supportsDatabaseUserAdmin("xugu")).toBe(false);
+    expect(getDatabaseUserAdminProvider("xugu")).toBeNull();
+    expect(resolveDatabaseUserAdminProviderForConnection(connection("xugu"))).toBeNull();
+  });
+
   it("opts only native MySQL connections into account Host changes", () => {
     const legacyNative = resolveDatabaseUserAdminProviderForConnection(connection("mysql"));
     const blankLegacyNative = resolveDatabaseUserAdminProviderForConnection(connection("mysql", "  "));

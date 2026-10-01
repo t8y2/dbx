@@ -14,6 +14,15 @@ function fileWith(editor: Record<string, unknown>, overrides: Record<string, unk
 }
 
 describe("settingsTransfer", () => {
+  it("round-trips an opt-out of comment-first result names and rejects non-booleans", () => {
+    const text = serializeSettingsTransfer({ ...DEFAULT_EDITOR_SETTINGS, resultTabPreferComments: false });
+    const result = parseSettingsTransferFile(text);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.editorSettings.resultTabPreferComments).toBe(false);
+    expect(transferCategoryForKey("resultTabPreferComments")).toBe("data");
+    expect(parseSettingsTransferFile(fileWith({ resultTabPreferComments: "false" })).ok).toBe(false);
+  });
+
   it("builds a dated transfer filename", () => {
     expect(buildSettingsTransferFilename(new Date(2026, 8, 6))).toBe("dbx-settings-2026-09-06.json");
   });

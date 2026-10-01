@@ -471,6 +471,7 @@ async fn serve() {
     let web_state = Arc::new(WebState {
         app: app_state,
         data_dir,
+        notes_roots: routes::docs::notes_roots_from_env(std::env::var_os("DBX_DOCS_NOTES_ROOTS").as_deref()),
         public_base_path: public_base_path.clone(),
         demo_mode,
         password_disabled,
@@ -531,6 +532,8 @@ async fn serve() {
         .route("/connection/final-proxy-port", post(routes::connection::connection_final_proxy_port))
         .route("/connection/disconnect", post(routes::connection::disconnect_db))
         .route("/connection/check-health", post(routes::connection::check_connection_health))
+        .route("/connection/is-open", post(routes::connection::connection_is_open))
+        .route("/connection/liveness-events", get(routes::connection::connection_liveness_events))
         .route("/connection/prewarm", post(routes::connection::prewarm_connection))
         .route("/connection/session-credential-status", post(routes::connection::session_credential_status))
         .route("/connection/forget-session-credential", post(routes::connection::forget_session_credential))
@@ -830,6 +833,7 @@ async fn serve() {
         .route("/redis/scan-keys-batch", post(routes::redis::scan_keys_batch))
         .route("/redis/scan-values", post(routes::redis::scan_values))
         .route("/redis/get-value", post(routes::redis::get_value))
+        .route("/redis/get-raw-value", post(routes::redis::get_raw_value))
         .route("/redis/get-ttl", post(routes::redis::get_ttl))
         .route("/redis/get-stream-entries", post(routes::redis::get_stream_entries))
         .route("/redis/get-stream-groups", post(routes::redis::get_stream_groups))

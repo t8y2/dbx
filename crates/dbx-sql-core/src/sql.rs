@@ -1364,7 +1364,7 @@ fn starts_with_sqlserver_control_flow_batch(sql: &str) -> bool {
         && tokens.iter().any(|token| token.eq_ignore_ascii_case("END"))
 }
 
-fn starts_with_sqlserver_module_ddl(sql: &str) -> bool {
+pub fn starts_with_sqlserver_module_ddl(sql: &str) -> bool {
     let tokens = first_sql_tokens(sql, 4);
     if tokens.len() >= 4
         && tokens[0].eq_ignore_ascii_case("CREATE")
@@ -1617,14 +1617,45 @@ fn mysql_routine_tokens(sql: &str) -> Vec<String> {
 
 fn first_sql_tokens(sql: &str, limit: usize) -> Vec<String> {
     let mut tokens = Vec::new();
-    for token in sql.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_') {
-        if token.is_empty() {
-            continue;
+    let mut token = String::new();
+    let mut chars = sql.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '-' && chars.peek() == Some(&'-') {
+            chars.next();
+            if !token.is_empty() {
+                tokens.push(std::mem::take(&mut token));
+            }
+            for comment_char in chars.by_ref() {
+                if comment_char == '\n' {
+                    break;
+                }
+            }
+        } else if ch == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            if !token.is_empty() {
+                tokens.push(std::mem::take(&mut token));
+            }
+            let mut previous = None;
+            for comment_char in chars.by_ref() {
+                if previous == Some('*') && comment_char == '/' {
+                    break;
+                }
+                previous = Some(comment_char);
+            }
+        } else if ch.is_ascii_alphanumeric() || ch == '_' {
+            token.push(ch);
+        } else if !token.is_empty() {
+            tokens.push(std::mem::take(&mut token));
         }
-        tokens.push(token.to_string());
+
         if tokens.len() >= limit {
             break;
         }
+    }
+
+    if tokens.len() < limit && !token.is_empty() {
+        tokens.push(token);
     }
     tokens
 }
@@ -1800,6 +1831,20 @@ pub fn optimize_sql_file_import_statements(
     db_type: Option<DatabaseType>,
     driver_profile: Option<&str>,
 ) -> Vec<SqlFileImportStatement> {
+    optimize_sql_file_import_statements_with_max_insert_batch_statements(
+        statements,
+        db_type,
+        driver_profile,
+        SQL_FILE_INSERT_BATCH_MAX_STATEMENTS,
+    )
+}
+
+pub fn optimize_sql_file_import_statements_with_max_insert_batch_statements(
+    statements: &[String],
+    db_type: Option<DatabaseType>,
+    driver_profile: Option<&str>,
+    max_insert_batch_statements: usize,
+) -> Vec<SqlFileImportStatement> {
     let mut optimized = Vec::new();
     let mut pending_insert: Option<PendingInsertBatch> = None;
     let merge_adjacent_inserts =
@@ -1833,7 +1878,7 @@ pub fn optimize_sql_file_import_statements(
                     .flatten();
                 if let Some(insert) = mergeable_insert {
                     match pending_insert.as_mut() {
-                        Some(batch) if batch.can_accept(&insert) => batch.push(insert),
+                        Some(batch) if batch.can_accept(&insert, max_insert_batch_statements) => batch.push(insert),
                         Some(_) => {
                             flush_pending_insert(&mut optimized, &mut pending_insert);
                             pending_insert = Some(PendingInsertBatch::new(insert));
@@ -1904,9 +1949,9 @@ impl PendingInsertBatch {
         }
     }
 
-    fn can_accept(&self, insert: &MergeableInsert) -> bool {
+    fn can_accept(&self, insert: &MergeableInsert, max_insert_batch_statements: usize) -> bool {
         self.prefix_key == insert.prefix_key
-            && self.source_statement_count < SQL_FILE_INSERT_BATCH_MAX_STATEMENTS
+            && self.source_statement_count < max_insert_batch_statements
             && self.byte_len + insert.values.len() + 3 <= SQL_FILE_INSERT_BATCH_MAX_BYTES
     }
 

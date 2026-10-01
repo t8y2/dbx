@@ -51,6 +51,15 @@ These connections use key-value, document, search, vector, messaging, or configu
 
 See [Driver Management](/en/docs/driver-management) for installation, upgrades, offline packages, and runtime monitoring, and [JDBC Plugin](/en/docs/plugins) for custom JDBC.
 
+### Oracle OCI (thick driver)
+
+Oracle connections default to the thin driver. The connection dialog's driver mode also offers **OCI**, which runs the separate `oracle-oci` Agent built against the Oracle Call Interface so the Oracle Client handles the connection. The OCI driver is currently shipped for Windows x64.
+
+- **Instant Client directory** is a global setting: enter the directory that contains `oci.dll` once, and every OCI connection reuses it. The directory is prepended to the Agent process's loader path.
+- **NLS_LANG** is process-scoped for the Oracle Client, so it is configured in two layers: a global default, plus an optional per-connection override. A connection that overrides NLS_LANG gets its own Agent process instead of sharing one, so character sets never leak between connections.
+- **TNS names, wallets, and sqlnet.ora**: `TNS_ADMIN` supports a global default plus a per-connection override (fill the directory in the OCI connection form, or leave it empty to follow the global default), so any OCI connection can use tnsnames.ora aliases, ADB wallets, and sqlnet.ora network options (compression, encryption) without switching to the TNS connection form; the TNS connection form also passes its directory to the Agent process.
+- OCI only affects how the client library is loaded. Grid editing, DDL, transfer, and other features behave the same as on the thin driver.
+
 ## Capability Levels
 
 The driver manifest uses capability levels from basic connection through controlled operations, with per-engine overrides:

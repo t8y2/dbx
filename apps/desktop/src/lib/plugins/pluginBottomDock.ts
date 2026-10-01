@@ -27,7 +27,8 @@ export interface PluginDockEntry {
   instanceKey?: string;
   title: string;
   icon?: string;
-  /** Host-authored context: workbenchId=id, restored=false, surface="panel". */
+  /** Host-authored context: workbenchId=id, restored=false, surface="dock". */
+  /** Surface vocabulary (open set, unknown falls back): "tab" (main multi-tab workbench) / "dock" (bottom dock, was "panel" — renamed 2026-09-30) / "sidebar-left" / "sidebar-right" / "window" (reserved). */
   context: Record<string, unknown>;
 }
 
@@ -78,7 +79,7 @@ export function addPluginDockEntry(payload: AddPluginDockEntryPayload): string {
       ...(payload.commandContext ?? {}),
       workbenchId: id,
       restored: false,
-      surface: "panel",
+      surface: "dock",
     },
   });
   activeEntryId.value = id;

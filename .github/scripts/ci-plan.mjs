@@ -4,6 +4,40 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { goAgents, integrationCases, rustAgents, rustGroups } from "./ci-config.mjs";
 
+const win7InfrastructureFiles = new Set([
+  ".github/scripts/assert-win7-pe-compat.ps1",
+  ".github/scripts/assert-webview2-win7-loader.ps1",
+  ".github/scripts/assert-win7-installer-content.ps1",
+  ".github/scripts/assert-webview2-win7-runtime.ps1",
+  ".github/scripts/prepare-webview2-win7-loader.ps1",
+  ".github/scripts/prepare-webview2-win7-runtime.ps1",
+  ".github/workflows/ci.yml",
+  ".github/workflows/release.yml",
+  "src-tauri/tauri.webview2-win7-fixed.conf.json",
+  "src-tauri/build.rs",
+]);
+const win7InfrastructurePrefixes = [
+  "src-tauri/windows/nsis/",
+  "vendor/wry/",
+  "vendor/webview2-com-sys/",
+  "vendor/ctor/",
+  "vendor/dirs-sys/",
+  "vendor/pageant/",
+];
+
+function expandAffectedPackages(packages, members, affected) {
+  let expanded;
+  do {
+    expanded = false;
+    for (const pkg of packages) {
+      if (!affected.has(pkg.name) && pkg.dependencies.some((dependency) => members.has(dependency.name) && affected.has(dependency.name))) {
+        affected.add(pkg.name);
+        expanded = true;
+      }
+    }
+  } while (expanded);
+}
+
 export function changedPaths(base, root) {
   if (!base || /^0+$/.test(base)) return null;
   execFileSync("git", ["rev-parse", "--verify", `${base}^{commit}`], { cwd: root, stdio: "pipe" });
@@ -54,17 +88,21 @@ export function planCi({ files, metadata, root, eventName = "pull_request", rust
   const unknownMember = packages.some((pkg) => !knownGroups.has(pkg.name));
   const rust = rustChanged || sharedRust || unknownRust || affected.size > 0 || files.includes("scripts/core-architecture.test.mjs");
   const full = rust && (eventName !== "pull_request" || sharedRust || unknownRust || unknownMember || affected.size === 0);
+  const win7Affected = new Set(affected);
+  expandAffectedPackages(packages, members, win7Affected);
   if (full) for (const pkg of packages) affected.add(pkg.name);
-  let expanded;
-  do {
-    expanded = false;
-    for (const pkg of packages) {
-      if (!affected.has(pkg.name) && pkg.dependencies.some((dependency) => members.has(dependency.name) && affected.has(dependency.name))) {
-        affected.add(pkg.name);
-        expanded = true;
-      }
-    }
-  } while (expanded);
+  expandAffectedPackages(packages, members, affected);
+  const win7InfrastructureChanged = unknownDiff || files.some((file) => win7InfrastructureFiles.has(file)
+    || win7InfrastructurePrefixes.some((prefix) => file.startsWith(prefix)));
+  const win7DependencyChanged = files.includes("Cargo.toml") || files.includes("Cargo.lock")
+    || files.some((file) => /^(?:crates\/[^/]+|src-tauri)\/Cargo\.toml$/.test(file));
+  const windowsWin7Reasons = {
+    infrastructure: win7InfrastructureChanged,
+    dependency_input: win7DependencyChanged,
+    desktop_dependency: win7Affected.has("dbx"),
+    unknown_rust: unknownRust,
+  };
+  const windowsWin7Candidate = Object.values(windowsWin7Reasons).some(Boolean);
   const rustMatrix = !rust ? [] : full ? [{ group: "workspace" }] : Object.entries(rustGroups)
     .filter(([, names]) => names.some((name) => affected.has(name)))
     .map(([group]) => ({ group }));
@@ -97,6 +135,9 @@ export function planCi({ files, metadata, root, eventName = "pull_request", rust
     agent_rust_changed: nativeRustMatrix.length > 0, agent_integration_changed: liveMatrix.length > 0,
     duckdb_changed: nativeChanges.has("duckdb"),
     duckdb_windows: sharedRust || files.some((file) => file.startsWith("agents/drivers/duckdb/")),
+    windows_win7_candidate: windowsWin7Candidate,
+    windows_win7_affected_packages: [...win7Affected].sort(),
+    windows_win7_reasons: windowsWin7Reasons,
     fast: rust || agents || ciChanged,
   };
 }
@@ -112,5 +153,13 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
     const outputs = { ...plan, plan };
     appendFileSync(process.env.GITHUB_OUTPUT, Object.entries(outputs).map(([name, value]) => `${name}=${JSON.stringify(value)}\n`).join(""));
   }
-  console.log(JSON.stringify(plan, null, 2));
+  console.log(JSON.stringify({
+    ...plan,
+    win7_routing_comparison: {
+      current: process.env.WIN7_CURRENT === "true",
+      candidate: plan.windows_win7_candidate,
+      affected_packages: plan.windows_win7_affected_packages,
+      reasons: plan.windows_win7_reasons,
+    },
+  }, null, 2));
 }

@@ -10773,6 +10773,8 @@ mod tests {
 
     fn mq_connection(id: &str, token: &str) -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: id.to_string(),
             name: "Pulsar".to_string(),
@@ -10848,6 +10850,8 @@ mod tests {
 
     fn nacos_connection(id: &str, password: &str) -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: id.to_string(),
             name: "Nacos".to_string(),
@@ -11071,7 +11075,10 @@ mod tests {
         let target_dir = temp_data_dir("import-empty-target");
         std::fs::create_dir_all(managed_key_path(&target_dir).parent().unwrap()).unwrap();
         std::fs::copy(managed_key_path(&source_dir), managed_key_path(&target_dir)).unwrap();
-        let _target_storage = crate::persistence::test_storage::open(&target_dir.join("dbx.db")).await.unwrap();
+        // 打开一次以创建空目标库；导入前必须释放，否则 Windows 上目标文件被占用、
+        // 替换会失败（与相邻用例一致）。
+        let target_storage = crate::persistence::test_storage::open(&target_dir.join("dbx.db")).await.unwrap();
+        drop(target_storage);
 
         let result = maybe_import_user_data_db(&target_dir, Some(&source_dir)).unwrap();
 

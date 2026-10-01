@@ -75,7 +75,7 @@ function transposeRecordHeader(host: HTMLElement, recordIndex: number): HTMLElem
   return header;
 }
 
-function mountGrid() {
+function mountGrid(databaseSortEnabled?: boolean) {
   const pinia = createPinia();
   setActivePinia(pinia);
   const settingsStore = useSettingsStore();
@@ -121,6 +121,7 @@ function mountGrid() {
               h(DataGrid, {
                 result: result.value,
                 databaseType: "mysql",
+                databaseSortEnabled,
                 context: "table-data",
                 sortColumn: sortColumn.value,
                 sortColumnIndex: sortColumnIndex.value,
@@ -174,6 +175,21 @@ afterEach(() => {
 });
 
 describe("DataGrid transpose sorting", () => {
+  it("retains local sorting when database sorting is explicitly disabled", async () => {
+    const { host, onSort } = mountGrid(false);
+    await settle();
+    await openTranspose(host);
+    transposeField(host, 1).querySelector<HTMLButtonElement>("[data-grid-transpose-sort]")!.click();
+    await settle();
+    const labels = [...document.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent?.trim());
+    expect(labels).toContain(i18n.global.t("grid.sortCurrentPageAscending"));
+    expect(labels).not.toContain(i18n.global.t("grid.sortDatabaseDescending"));
+    menuAction(i18n.global.t("grid.sortCurrentPageAscending")).click();
+    await settle();
+    expect(onSort).toHaveBeenLastCalledWith("score", 1, "asc", undefined, "local");
+    expect(transposeValues(host, 1)).toEqual(["2", "10", "NULL"]);
+  });
+
   it("uses the shared local/database sort actions and keeps the active record and row selection", async () => {
     const { host, onSort } = mountGrid();
     await settle();
@@ -194,13 +210,13 @@ describe("DataGrid transpose sorting", () => {
     expect(transposeRecordHeader(host, 2).classList.contains("transpose-record-header-active")).toBe(true);
 
     await selectTransposeSort(host, 1, "grid.sortDatabaseDescending");
-    expect(onSort).toHaveBeenLastCalledWith("score", 1, "desc", undefined, "database");
+    expect(onSort).toHaveBeenLastCalledWith("score", 1, "desc", undefined, "database", "`score` DESC");
     expect(transposeValues(host, 1)).toEqual(["10", "2", "NULL"]);
     expect(transposeRecordHeader(host, 0).classList.contains("transpose-record-header-selected")).toBe(true);
     expect(transposeRecordHeader(host, 2).classList.contains("transpose-record-header-active")).toBe(true);
 
     await selectTransposeSort(host, 1, "grid.clearSort");
-    expect(onSort).toHaveBeenLastCalledWith("score", 1, null, undefined, "database");
+    expect(onSort).toHaveBeenLastCalledWith("score", 1, null, undefined, "database", undefined);
     expect(transposeValues(host, 1)).toEqual(["10", "NULL", "2"]);
     expect(transposeRecordHeader(host, 0).classList.contains("transpose-record-header-selected")).toBe(true);
     expect(transposeRecordHeader(host, 1).classList.contains("transpose-record-header-active")).toBe(true);

@@ -4,9 +4,12 @@ import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStor
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { canReloadUnavailableDataTab, restoredDataTabReloadFilters } from "@/lib/table/tableDataRefresh";
 import { defaultViewForResult } from "@/lib/query/queryResultDefaultView";
+import { extractNeo4jNodeCells, projectNeo4jNodeResult } from "@/lib/neo4j/neo4jNodeResult";
+import { useNeo4jNodeTableResult } from "@/composables/useNeo4jNodeTableResult";
 import { queryResultMessages } from "@/lib/query/queryResultMessages";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { hasQueryOutput as tabHasQueryOutput } from "@/lib/query/queryOutput";
+import { batchResultInsertRequest } from "@/lib/query/queryResultBatchInsert";
 import { batchSqlRecoveryState, type BatchSqlRecoveryAction } from "@/lib/query/batchSqlRecovery";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
@@ -68,6 +71,7 @@ import QueryMessagesView from "@/components/layout/QueryMessagesView.vue";
 import QueryResultToolbarActions from "@/components/layout/QueryResultToolbarActions.vue";
 import ResultSetNavigator from "@/components/layout/ResultSetNavigator.vue";
 import QueryResultViewSwitcher from "@/components/layout/QueryResultViewSwitcher.vue";
+import ProductionWatermark from "@/components/common/ProductionWatermark.vue";
 import DataGridCopyFormatControl from "@/components/grid/DataGridCopyFormatControl.vue";
 import DataGridFontFamilyControl from "@/components/grid/DataGridFontFamilyControl.vue";
 import DataGridColumnWidthModeControl from "@/components/grid/DataGridColumnWidthModeControl.vue";
@@ -189,7 +193,7 @@ import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
 import { formatDdlForDisplay } from "@/lib/sql/ddlDisplay";
 import { sqlObjectNavigationTypeFromTableType } from "@/lib/sql/sqlNavigation";
 import type { CustomSaveHandler } from "@/composables/useDataGridEditor";
-import type { QueryMessage, QueryTab, RedisResultViewMode, TableInfoTab, TreeNode, VectorCollectionMeta } from "@/types/database";
+import type { QueryMessage, QueryResult, QueryTab, RedisResultViewMode, TableInfoTab, TreeNode, VectorCollectionMeta } from "@/types/database";
 import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
@@ -220,6 +224,8 @@ type DataGridHandle = DataGridColumnLayoutHandle & {
   exportJson: () => Promise<void>;
   exportSql: () => Promise<void>;
   exportXlsx: () => Promise<void>;
+  exportResultSheetsXlsx: (sheets: Array<{ sheetName: string; result: QueryResult; sql?: string }>) => Promise<void>;
+  openXlsx: () => Promise<void>;
 };
 
 type SearchableBrowserHandle = {
@@ -252,7 +258,7 @@ const props = defineProps<
 
 const emit = defineEmits<ContentAreaSurfaceEmits>();
 
-const { t, locale } = useI18n();
+const { t } = useI18n();
 const queryStore = useQueryStore();
 const connectionStore = useConnectionStore();
 /** Clear a consumed editor reveal request so a later normal tab re-visit doesn't re-jump. */
@@ -383,7 +389,6 @@ const activeSqlStatementParameterOptions = computed(() =>
   sqlStatementParameterOptionsForCompatibility(activeEffectiveDatabaseType.value, activeEffectiveDatabaseType.value === "opengauss" ? connectionStore.databaseCompatibilityMode(activeResultConnectionId.value, activeResultDatabase.value) : undefined),
 );
 const activeProductionContext = computed(() => productionContextForDatabase(props.activeConnection, props.activeTab.database));
-const productionWatermarkText = computed(() => (locale.value.startsWith("zh") ? "生产环境" : "PROD"));
 const productionSessionDetail = computed(() => {
   if (!activeProductionContext.value.active) return "";
   if (activeProductionContext.value.reason === "connection") return t("production.connection");
@@ -501,26 +506,129 @@ const activeQueryError = computed(() => {
 const hasQueryOutput = computed(() => tabHasQueryOutput(props.activeTab));
 // 结果集页签/列表的名称是否带库名，由编辑器设置控制（默认带库名）
 const includeResultSourceDatabase = computed(() => settingsStore.editorSettings.showResultSourceDatabase);
-const visibleResultItems = computed(() => tabularResultItems(props.activeTab.results ?? (props.activeTab.result ? [props.activeTab.result] : undefined), { includeSourceDatabase: includeResultSourceDatabase.value }));
-const tabularResults = computed(() => tabularResultItems(props.activeTab.results, { includeSourceDatabase: includeResultSourceDatabase.value }));
+const resultTabNamingMode = computed(() => settingsStore.editorSettings.resultTabNamingMode);
+const preferResultTabComments = computed(() => settingsStore.editorSettings.resultTabPreferComments);
+const visibleResultItems = computed(() =>
+  tabularResultItems(props.activeTab.results ?? (props.activeTab.result ? [props.activeTab.result] : undefined), { includeSourceDatabase: includeResultSourceDatabase.value, namingMode: resultTabNamingMode.value, preferComments: preferResultTabComments.value }),
+);
+const tabularResults = computed(() => tabularResultItems(props.activeTab.results, { includeSourceDatabase: includeResultSourceDatabase.value, namingMode: resultTabNamingMode.value, preferComments: preferResultTabComments.value }));
 const allResultExportSheets = computed(() =>
   tabularResults.value.map((item) => ({
     sheetName: item.label || t("tabs.resultN", { n: item.n }),
-    result: item.result,
+    result: activeEffectiveDatabaseType.value === "neo4j" ? projectNeo4jNodeResult(item.result) : item.result,
     sql: item.index === props.activeTab.activeResultIndex ? queryResultExecutionSql(props.activeTab) : item.result.sourceStatement,
   })),
 );
+
+type ResultSetItem = (typeof visibleResultItems.value)[number];
+
+const resultBatchBusy = ref(false);
+
+async function copySelectedResultSql(items: ResultSetItem[]) {
+  if (resultBatchBusy.value) return;
+  resultBatchBusy.value = true;
+  const tab = props.activeTab;
+  const generation = tab.resultViewGeneration;
+  const runId = tab.activeResultRunId;
+  const databaseType = activeEffectiveDatabaseType.value;
+  const identifierQuote = connectionStore.connectionIdentifierQuote(activeResultConnectionId.value);
+  const extractorOptions = JSON.parse(JSON.stringify(settingsStore.editorSettings.dataGridExtractorOptions));
+  extractorOptions.sql.includeDatabaseName = settingsStore.editorSettings.generateSqlIncludeDatabaseName;
+  const isCurrent = () => props.activeTab === tab && tab.activeResultRunId === runId && tab.resultViewGeneration === generation && items.every((item) => (tab.results ?? [tab.result]).includes(item.result));
+  try {
+    const sections: string[] = [];
+    let bytes = 0;
+    for (const item of items) {
+      const metadata = await queryStore.resolveResultMetadataForBatch(tab.id, item.result);
+      const request = batchResultInsertRequest(item.result, metadata, databaseType, identifierQuote, extractorOptions);
+      if (!request) throw new Error(t("tabs.batchCopyUnsupportedResult", { name: item.label || t("tabs.resultN", { n: item.n }) }));
+      if (!request.rows.length) continue;
+      const extraction = await api.extractDataGridSelection(request);
+      if (!extraction.text.trim()) throw new Error(t("tabs.batchCopyUnsupportedResult", { name: item.label || t("tabs.resultN", { n: item.n }) }));
+      const label = (item.label || t("tabs.resultN", { n: item.n })).replace(/[\r\n]/g, " ");
+      const section = `-- ${label}\n${extraction.text.trim()}`;
+      bytes += new TextEncoder().encode(section).length + 2;
+      if (bytes > 32 * 1024 * 1024) throw new Error(t("tabs.batchCopyTooLarge"));
+      sections.push(section);
+    }
+    if (!isCurrent()) throw new Error(t("tabs.batchResultsChanged"));
+    if (!sections.length) throw new Error(t("tabs.batchCopyNoCompatibleResults"));
+    await copyToClipboard(sections.join("\n\n"));
+    toast(t("grid.copied"));
+  } catch (error: any) {
+    toast(t("grid.copyFailed", { message: error?.message || String(error) }), 5000);
+  } finally {
+    resultBatchBusy.value = false;
+  }
+}
+
+async function exportSelectedResultSheets(items: ResultSetItem[]) {
+  if (resultBatchBusy.value) return;
+  const dataGrid = dataGridRef.value;
+  if (!dataGrid) return;
+  const sheets = items.filter((item) => !item.result.execution_error && !item.result.server_message).map((item) => ({ sheetName: item.label || t("tabs.resultN", { n: item.n }), result: item.result }));
+  if (!sheets.length) return;
+  resultBatchBusy.value = true;
+  try {
+    await dataGrid.exportResultSheetsXlsx(sheets);
+  } finally {
+    resultBatchBusy.value = false;
+  }
+}
+
+async function copySelectedResultQueries(items: ResultSetItem[]) {
+  const sections = items
+    .map((item) => {
+      const sql = item.result.sourceStatement?.trim();
+      const label = (item.label || t("tabs.resultN", { n: item.n })).replace(/[\r\n]/g, " ");
+      return sql ? `-- ${label}\n${sql.endsWith(";") ? sql : `${sql};`}` : "";
+    })
+    .filter(Boolean);
+  if (!sections.length) {
+    toast(t("tabs.batchCopyNoCompatibleResults"), 5000);
+    return;
+  }
+  try {
+    await copyToClipboard(sections.join("\n\n"));
+    toast(t("grid.copied"));
+  } catch (error: any) {
+    toast(t("grid.copyFailed", { message: error?.message || String(error) }), 5000);
+  }
+}
 // 结果标签优先显示来源（表名），历史批次缺少来源信息时按批次 SQL 重新解析
 const resultRuns = computed(() =>
   resultRunItems(props.activeTab, {
     includeSourceDatabase: includeResultSourceDatabase.value,
+    namingMode: resultTabNamingMode.value,
+    preferComments: preferResultTabComments.value,
     database: props.activeTab.database,
     databaseType: activeEffectiveDatabaseType.value,
   }),
 );
+const resultRunFallbackLabel = (sequence: number) => t(resultTabNamingMode.value === "ordinal" ? "tabs.resultN" : "tabs.runN", { n: sequence });
 const activeResultGridCacheKey = computed(() => resultGridCacheKey(props.activeTab));
 const activeResultGridColumnWidthCacheKey = computed(() => resultGridColumnWidthCacheKey(props.activeTab));
 const activeResultGridInstanceKey = computed(() => resultGridInstanceKey(props.activeTab));
+const hasNeo4jNodes = computed(() => activeEffectiveDatabaseType.value === "neo4j" && !!props.activeTab.result?.neo4j_node_cells?.length);
+const neo4jNodeTable = useNeo4jNodeTableResult(
+  computed(() => props.activeTab.result),
+  activeResultGridInstanceKey,
+);
+const activeGridResult = computed(() => (hasNeo4jNodes.value ? neo4jNodeTable.result.value : props.activeTab.result));
+const activeGridSort = computed(() => (hasNeo4jNodes.value ? neo4jNodeTable.sort.value : undefined));
+
+function sortQueryGrid(column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode?: DataGridSortMode, effectiveOrderBy?: string) {
+  if (hasNeo4jNodes.value) neo4jNodeTable.setSort(column, columnIndex, direction);
+  else emit("sort", props.activeTab.id, column, columnIndex, direction, whereInput, mode, effectiveOrderBy);
+}
+
+async function fetchGridResultForExport(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) {
+  const isNeo4j = activeEffectiveDatabaseType.value === "neo4j";
+  const result = await queryStore.fetchTabResultForExport(props.activeTab.id, onProgress);
+  if (!result || !isNeo4j) return result;
+  extractNeo4jNodeCells(result);
+  return projectNeo4jNodeResult(result);
+}
 const activeResultSql = computed(() => resultSqlForGrid(props.activeTab));
 const activeResultExportSql = computed(() => queryResultExecutionSql(props.activeTab));
 const activeStatementExecutionMarkers = computed(() =>
@@ -1677,9 +1785,7 @@ defineExpose({
                 {{ t("contextMenu.viewData") }}
               </Button>
             </div>
-            <div v-if="activeProductionContext.active" class="production-watermark pointer-events-none absolute inset-0 z-10 grid select-none" aria-hidden="true">
-              <span v-for="index in 4" :key="index" class="production-watermark__label whitespace-nowrap font-mono text-6xl font-extrabold text-red-700/[0.12] dark:text-red-200/[0.1]">{{ productionWatermarkText }}</span>
-            </div>
+            <ProductionWatermark v-if="activeProductionContext.active" />
             <!-- issue #9035：源码 tab 先出现再加载。pending 期间不挂载编辑器
                  （还没有内容可编辑，也省下一次 Monaco 初始化），失败则就地重试。
                  issue #9387：DDL 新标签同样先出 tab 再加载，失败就地显示错误。 -->
@@ -1824,7 +1930,7 @@ defineExpose({
                             @keydown="onResultRunTabKeydown($event, runIndex)"
                           >
                             <Pin v-if="run.pinned" class="h-3 w-3 shrink-0 fill-current text-primary" />
-                            {{ run.title || run.sourceLabel || t("tabs.runN", { n: run.sequence }) }}
+                            {{ run.title || run.sourceLabel || resultRunFallbackLabel(run.sequence) }}
                           </button>
                           <button
                             type="button"
@@ -1844,7 +1950,7 @@ defineExpose({
                   <DropdownMenu>
                     <DropdownMenuTrigger as-child>
                       <Button variant="ghost" size="sm" class="h-6 max-w-48 gap-1 px-2 text-xs">
-                        <span class="min-w-0 truncate">{{ activeResultRunItem ? activeResultRunItem.title || activeResultRunItem.sourceLabel || t("tabs.runN", { n: activeResultRunItem.sequence }) : t("tabs.resultRuns") }}</span>
+                        <span class="min-w-0 truncate">{{ activeResultRunItem ? activeResultRunItem.title || activeResultRunItem.sourceLabel || resultRunFallbackLabel(activeResultRunItem.sequence) : t("tabs.resultRuns") }}</span>
                         <ChevronDown class="h-3.5 w-3.5 shrink-0" />
                       </Button>
                     </DropdownMenuTrigger>
@@ -1854,7 +1960,7 @@ defineExpose({
                           <Check v-if="run.active" class="h-3.5 w-3.5 shrink-0" />
                           <span v-else class="h-3.5 w-3.5 shrink-0" />
                           <Pin v-if="run.pinned" class="h-3 w-3 shrink-0 fill-current text-primary" />
-                          <span class="min-w-0 flex-1 truncate">{{ run.title || run.sourceLabel || t("tabs.runN", { n: run.sequence }) }}</span>
+                          <span class="min-w-0 flex-1 truncate">{{ run.title || run.sourceLabel || resultRunFallbackLabel(run.sequence) }}</span>
                           <button
                             type="button"
                             class="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground"
@@ -1871,7 +1977,19 @@ defineExpose({
                 </div>
                 <div v-else-if="resultRuns.length > 0" class="min-w-0 flex-1" />
                 <span v-if="resultRuns.length > 0 && visibleResultItems.length > 0" class="mx-1 h-4 w-px shrink-0 bg-border" />
-                <ResultSetNavigator v-if="visibleResultItems.length > 0" :key="`${activeTab.id}:${activeTab.activeResultRunId ?? 'current'}`" :items="visibleResultItems" :active-index="activeTab.activeResultIndex ?? 0" :active="activeOutputView === 'result'" @select="selectResultItem" />
+                <ResultSetNavigator
+                  v-if="visibleResultItems.length > 0"
+                  :key="`${activeTab.id}:${activeTab.activeResultRunId ?? 'current'}`"
+                  :items="visibleResultItems"
+                  :busy="resultBatchBusy"
+                  :can-export-xlsx="activeOutputView === 'result' && redisResultViewMode === 'grid' && !!activeTab.result && hasTabularResult && !activeElasticsearchJsonResponse"
+                  :active-index="activeTab.activeResultIndex ?? 0"
+                  :active="activeOutputView === 'result'"
+                  @select="selectResultItem"
+                  @copy-sql="copySelectedResultSql"
+                  @copy-query-sql="copySelectedResultQueries"
+                  @export-xlsx="exportSelectedResultSheets"
+                />
               </template>
               <div class="ml-auto flex shrink-0 items-center gap-1">
                 <Popover v-if="activeOutputView === 'result' && redisResultViewMode === 'grid' && activeTab.result && hasTabularResult && !activeElasticsearchJsonResponse" v-model:open="dataGridViewOptionsOpen">
@@ -2326,21 +2444,22 @@ defineExpose({
                 :pending-state-key="activeResultGridInstanceKey"
                 :view-generation="activeTab.resultViewGeneration"
                 class="flex-1 min-h-0"
-                :result="activeTab.result"
-                :sort-column="activeTab.resultSortColumn"
-                :sort-column-index="activeTab.resultSortColumnIndex"
-                :sort-direction="activeTab.resultSortDirection"
-                :sort-mode="activeTab.resultSortMode"
+                :result="activeGridResult!"
+                :sort-column="hasNeo4jNodes ? activeGridSort?.column : activeTab.resultSortColumn"
+                :sort-column-index="hasNeo4jNodes ? activeGridSort?.columnIndex : activeTab.resultSortColumnIndex"
+                :sort-direction="hasNeo4jNodes ? activeGridSort?.direction : activeTab.resultSortDirection"
+                :sort-mode="hasNeo4jNodes ? 'local' : activeTab.resultSortMode"
+                :database-sort-enabled="!hasNeo4jNodes"
                 :initial-order-by-input="activeTab.orderByInput"
                 :sql="activeResultSql"
                 :export-sql="activeResultExportSql"
                 :loading="activeResultIsLoading"
-                :editable="!!activeTab.queryAnalysis || !!mongoQueryResultSaveHandler"
-                :source-columns="activeTab.querySourceColumns"
-                :joined-write-targets="activeTab.queryWriteTargets"
-                :readonly-column-indexes="groupedQueryReadonlyColumnIndexes(activeTab)"
-                :result-column-comments="activeTab.resultColumnComments"
-                :query-display-source-columns="activeTab.queryDisplaySourceColumns"
+                :editable="!hasNeo4jNodes && (!!activeTab.queryAnalysis || !!mongoQueryResultSaveHandler)"
+                :source-columns="hasNeo4jNodes ? undefined : activeTab.querySourceColumns"
+                :joined-write-targets="hasNeo4jNodes ? undefined : activeTab.queryWriteTargets"
+                :readonly-column-indexes="hasNeo4jNodes ? undefined : groupedQueryReadonlyColumnIndexes(activeTab)"
+                :result-column-comments="hasNeo4jNodes ? undefined : activeTab.resultColumnComments"
+                :query-display-source-columns="hasNeo4jNodes ? undefined : activeTab.queryDisplaySourceColumns"
                 :custom-save-handler="mongoQueryResultSaveHandler"
                 :mongo-update-target="mongoQueryResultSaveHandler && activeTab.result.mongo_copy_documents?.length === activeTab.result.rows.length ? activeTab.mongoEditTarget : undefined"
                 :query-editability-reason="activeTab.queryEditabilityReason"
@@ -2355,7 +2474,7 @@ defineExpose({
                 :connection-id="activeResultConnectionId"
                 :database="activeResultDatabase"
                 :schema="activeResultSchema"
-                :table-meta="activeTab.tableMeta"
+                :table-meta="hasNeo4jNodes ? undefined : activeTab.tableMeta"
                 :table-info-tab="activeTab.tableInfoTab"
                 :page-offset="activeTab.resultPageOffset"
                 :page-limit="activeTab.resultPageLimit"
@@ -2368,18 +2487,20 @@ defineExpose({
                 :total-row-count-loading="activeTab.resultTotalRowCountLoading"
                 :page-jump-progress="activeTab.resultPageJumpProgress"
                 :on-execute-sql="async (sql: string) => emit('executeSql', activeTab.id, sql)"
-                :full-export-result="(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => queryStore.fetchTabResultForExport(activeTab.id, onProgress)"
+                :full-export-result="fetchGridResultForExport"
                 :query-result-export-request="
-                  (options: {
-                    exportId: string;
-                    filePath: string;
-                    format: 'csv' | 'xlsx' | 'json' | 'txt' | 'sql';
-                    includeSqlSheet?: boolean;
-                    exportTableName?: string;
-                    exportColumnTypes?: Array<string | null | undefined>;
-                    exportColumnExtras?: Array<string | null | undefined>;
-                    insertMode?: SqlInsertMode;
-                  }) => queryStore.buildQueryResultExportRequest(activeTab.id, options)
+                  hasNeo4jNodes
+                    ? undefined
+                    : (options: {
+                        exportId: string;
+                        filePath: string;
+                        format: 'csv' | 'xlsx' | 'json' | 'txt' | 'sql';
+                        includeSqlSheet?: boolean;
+                        exportTableName?: string;
+                        exportColumnTypes?: Array<string | null | undefined>;
+                        exportColumnExtras?: Array<string | null | undefined>;
+                        insertMode?: SqlInsertMode;
+                      }) => queryStore.buildQueryResultExportRequest(activeTab.id, options)
                 "
                 :all-export-results="allResultExportSheets"
                 :export-file-base-name="activeQueryResultExportBaseName"
@@ -2391,7 +2512,7 @@ defineExpose({
                 @local-column-filters-change="(filters: Record<string, string[]>) => queryStore.updateDataGridLocalColumnFilters(activeTab.id, filters)"
                 @reload="(sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent) => emit('reload', activeTab.id, sql, searchText, whereInput, orderBy, limit, offset, intent)"
                 @paginate="(offset: number, limit: number, whereInput?: string, orderBy?: string, appendResult?: boolean) => emit('paginate', activeTab.id, offset, limit, whereInput, orderBy, appendResult)"
-                @sort="(column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string, mode?: DataGridSortMode) => emit('sort', activeTab.id, column, columnIndex, direction, whereInput, mode)"
+                @sort="sortQueryGrid"
                 @change-query-timeout="(connectionId: string) => emit('openConnectionSettings', connectionId, 'advanced')"
               >
                 <template #result-toolbar-leading="{ compact }">
@@ -2825,10 +2946,11 @@ defineExpose({
           @cancel="emit('cancel', activeTab.id)"
           @update:where-input="(v: string) => (activeTab.whereInput = v)"
           @update:order-by-input="(v: string) => (activeTab.orderByInput = v)"
+          @update:structured-order-by-input="(v: string) => (activeTab.structuredOrderByInput = v || undefined)"
           @local-column-filters-change="(filters: Record<string, string[]>) => queryStore.updateDataGridLocalColumnFilters(activeTab.id, filters)"
           @reload="(sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent) => emit('reload', activeTab.id, sql, searchText, whereInput, orderBy, limit, offset, intent)"
           @paginate="(offset: number, limit: number, whereInput?: string, orderBy?: string, appendResult?: boolean) => emit('paginate', activeTab.id, offset, limit, whereInput, orderBy, appendResult)"
-          @sort="(column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string, mode?: DataGridSortMode) => emit('sort', activeTab.id, column, columnIndex, direction, whereInput, mode)"
+          @sort="(column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string, mode?: DataGridSortMode, effectiveOrderBy?: string) => emit('sort', activeTab.id, column, columnIndex, direction, whereInput, mode, effectiveOrderBy)"
           @change-query-timeout="(connectionId: string) => emit('openConnectionSettings', connectionId, 'advanced')"
         >
           <template v-if="activeTab.result && isQueryExecutionErrorResult(activeTab.result)" #error-actions="{ errorMessage }">
@@ -3079,6 +3201,7 @@ defineExpose({
           :catalog="activeTab.catalog"
           :schema="activeTab.schema"
           :table-name="activeTab.structureTableName || ''"
+          :table-type="activeTab.structureTableType"
           :initial-tab="activeTab.structureInitialTab"
           :initial-tab-request-id="activeTab.structureInitialTabRequestId"
           :initial-target="activeTab.structureInitialTarget"
@@ -3187,28 +3310,6 @@ defineExpose({
 .query-output-splitpanes :deep(> .splitpanes__splitter) {
   z-index: 1;
   flex: 0 0 3px;
-}
-
-.production-watermark {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  grid-template-rows: repeat(2, minmax(0, 1fr));
-  gap: 3rem;
-  overflow: hidden;
-  padding: 3rem 2.5rem;
-}
-
-.production-watermark__label {
-  align-self: center;
-  justify-self: center;
-  transform: rotate(-22deg);
-}
-
-@media (max-width: 700px) {
-  .production-watermark {
-    grid-template-columns: 1fr;
-    gap: 1.5rem;
-    padding-inline: 1rem;
-  }
 }
 
 .result-tab-scroll::-webkit-scrollbar {

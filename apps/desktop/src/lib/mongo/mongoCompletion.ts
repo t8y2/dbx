@@ -194,6 +194,15 @@ const CURSOR_METHODS = [
  */
 const CURSOR_COUNT_METHOD = { label: "count", detail: "Count the documents matched by find()", apply: "count()" } as const;
 
+/**
+ * Cursor methods that change nothing: results are always materialised, so DBX
+ * drops these calls at execution time. Accepted after both find() and aggregate().
+ */
+const NOOP_CURSOR_METHODS = [
+  { label: "toArray", detail: "Materialise cursor results into an array", apply: "toArray()" },
+  { label: "pretty", detail: "Format results for display", apply: "pretty()" },
+] as const;
+
 const ROOT_SNIPPETS = [
   { label: "db.collection.find", detail: "Find documents", apply: "db.${collection}.find({})" },
   { label: "db.collection.aggregate", detail: "Aggregation pipeline", apply: "db.${collection}.aggregate([\n  { $match: {} }\n])" },
@@ -334,6 +343,7 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
 
   const cursorChain = matchCursorMethodDot(beforeCursor);
   if (cursorChain) {
+    if (cursorChain.terminal) return at("none");
     const methodPrefix = readMethodPrefix(beforeCursor);
     return { mode: "cursorMethod", prefix: methodPrefix.prefix, from: methodPrefix.from, collection, database, stage: cursorChain.countable ? "countable" : cursorChain.find ? "find" : undefined };
   }
@@ -1229,9 +1239,13 @@ function methodItems(prefix: string): MongoCompletionItem[] {
   );
 }
 
-/** `collation()` is a find-cursor method only, so it is withheld after `aggregate(…)`. */
+/**
+ * Cursor methods offered after `find(…)` or `aggregate(…)`.
+ * After `aggregate(…)`, only no-op helpers `toArray()` and `pretty()` are accepted;
+ * all other cursor methods are find-only.
+ */
 function cursorMethodItems(prefix: string, countable: boolean, find: boolean): MongoCompletionItem[] {
-  const methods = [...CURSOR_METHODS.filter((method) => find || method.label !== "collation"), ...(countable ? [CURSOR_COUNT_METHOD] : [])];
+  const methods = find ? [...CURSOR_METHODS, ...(countable ? [CURSOR_COUNT_METHOD] : []), ...NOOP_CURSOR_METHODS] : [...NOOP_CURSOR_METHODS];
   return dedupeAndSort(
     methods
       .filter((method) => matchesFuzzyPrefix(method.label, prefix))
@@ -1240,7 +1254,7 @@ function cursorMethodItems(prefix: string, countable: boolean, find: boolean): M
         type: "function" as const,
         detail: method.detail,
         apply: method.apply,
-        boost: method.label === "limit" ? 150 : method.label === "sort" ? 140 : method.label === "skip" ? 130 : method.label === "collation" ? 115 : 120,
+        boost: method.label === "limit" ? 150 : method.label === "sort" ? 140 : method.label === "skip" ? 130 : method.label === "collation" ? 115 : method.label === "toArray" ? 100 : method.label === "pretty" ? 95 : 120,
       })),
   );
 }
@@ -1462,10 +1476,11 @@ function isAfterCollectionDot(beforeCursor: string): boolean {
 }
 
 /**
- * `db.x.find(…).…` — and whether `count()` is still legal there, which it only
- * is while no other cursor method has been chained on.
+ * `db.x.find(…).…` or `db.x.aggregate(…).…` — matches cursor method chaining positions.
+ * Recognises find chains (including terminal `count()` and `explain()`), and aggregate
+ * chains (which only accept `toArray()` and `pretty()`).
  */
-function matchCursorMethodDot(beforeCursor: string): { find: boolean; countable: boolean } | null {
+function matchCursorMethodDot(beforeCursor: string): { find: boolean; countable: boolean; terminal?: boolean } | null {
   const collectionCall = new RegExp(String.raw`(?:^|[\s;(])${DB_ROOT}\.${COLLECTION_REF}\.(find|aggregate)\s*\(`, "g");
   let lastMatch: RegExpExecArray | null = null;
   let match: RegExpExecArray | null;
@@ -1477,8 +1492,22 @@ function matchCursorMethodDot(beforeCursor: string): { find: boolean; countable:
   if (closeParen < 0) return null;
 
   const chain = beforeCursor.slice(closeParen + 1);
-  if (!/^(?:\s*\.\s*(?:sort|skip|limit|collation)\s*\([^()]*\))*\s*\.\s*[\w$-]*$/.test(chain)) return null;
-  return { find: lastMatch[1] === "find", countable: lastMatch[1] === "find" && /^\s*\.\s*[\w$-]*$/.test(chain) };
+  if (!/\.\s*[\w$-]*$/.test(chain)) return null;
+
+  const isFind = lastMatch[1] === "find";
+  if (/\.\s*(?:count|explain)\s*\([^()]*\)/.test(chain)) {
+    return { find: isFind, countable: false, terminal: true };
+  }
+
+  if (isFind) {
+    if (!/^(?:\s*\.\s*(?:sort|skip|limit|collation|toArray|pretty)\s*\([^()]*\))*\s*\.\s*[\w$-]*$/.test(chain)) return null;
+    return { find: true, countable: /^\s*\.\s*[\w$-]*$/.test(chain) };
+  }
+
+  if (!/^(?:\s*\.\s*(?:toArray|pretty)\s*\([^()]*\))*\s*\.\s*[\w$-]*$/.test(chain)) {
+    return { find: false, countable: false, terminal: true };
+  }
+  return { find: false, countable: false };
 }
 
 function findMatchingParen(text: string, openIndex: number): number {

@@ -60,6 +60,9 @@ export type MongoCompletionMode =
   | "operatorField"
   | "enumValue";
 
+/** Kind of aggregation or update pipeline holding the cursor. */
+export type MongoPipelineKind = "aggregate" | "update" | "facet" | "join" | "view";
+
 export interface MongoCompletionField {
   name: string;
   type?: string;
@@ -88,6 +91,8 @@ export interface MongoCompletionContext {
   database?: string;
   /** Enclosing aggregation stage (`$lookup`, `$group`, …), when inside one. */
   stage?: string;
+  /** Kind of pipeline array holding the cursor, when inside a pipeline. */
+  pipelineKind?: MongoPipelineKind;
   /** Collection method whose options object the cursor sits in. */
   method?: string;
   /** bulkWrite operation (`updateOne`, `deleteMany`, …) whose body the cursor sits in. */
@@ -261,6 +266,32 @@ const OPTION_STAGES = new Set(Object.keys(STAGE_OPTION_KEYS));
 /** The stages an update pipeline accepts: those that rewrite the document without reshaping the result set. */
 const UPDATE_PIPELINE_STAGES = PIPELINE_STAGES.filter((stage) => ["$set", "$addFields", "$unset", "$project", "$replaceRoot", "$replaceWith"].includes(stage.label));
 
+/** Stages that write or merge results, illegal inside sub-pipelines and view definitions. */
+const SUB_PIPELINE_FORBIDDEN_STAGES = new Set(["$out", "$merge"]);
+
+/** Stages MongoDB rejects inside a $facet branch: writes, nesting, metadata/source stages, and $geoNear. */
+const FACET_FORBIDDEN_STAGES = new Set(["$out", "$merge", "$facet", "$collStats", "$indexStats", "$planCacheStats", "$geoNear", "$documents", "$changeStream"]);
+
+/** Stages accepted in join sub-pipelines ($lookup, $unionWith) and view definitions. */
+const SUB_PIPELINE_STAGES = PIPELINE_STAGES.filter((stage) => !SUB_PIPELINE_FORBIDDEN_STAGES.has(stage.label));
+
+/** Stages accepted inside a $facet branch. */
+const FACET_PIPELINE_STAGES = PIPELINE_STAGES.filter((stage) => !FACET_FORBIDDEN_STAGES.has(stage.label));
+
+function pipelineStagesFor(kind?: MongoPipelineKind): MongoOperatorSpec[] {
+  switch (kind) {
+    case "update":
+      return UPDATE_PIPELINE_STAGES;
+    case "facet":
+      return FACET_PIPELINE_STAGES;
+    case "join":
+    case "view":
+      return SUB_PIPELINE_STAGES;
+    default:
+      return PIPELINE_STAGES;
+  }
+}
+
 /** Stages taking a bare `"$field"` string, completed as a field reference. */
 const FIELD_REF_STAGES = new Set(["$unwind", "$sortByCount", "$replaceWith"]);
 
@@ -352,6 +383,7 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
     ...at(classified.mode, classified.stage, classified.method, classified.bulkWriteOperation, classified.keyMap),
     ...(classified.operator ? { operator: classified.operator } : {}),
     ...(classified.enumKey ? { enumKey: classified.enumKey } : {}),
+    ...(classified.pipelineKind ? { pipelineKind: classified.pipelineKind } : {}),
     collection: classified.collection ?? collection,
   };
 }
@@ -427,9 +459,12 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
     case "accumulator":
       items = specItems(ACCUMULATORS, prefix, "accumulator", 100);
       break;
-    case "stage":
-      items = context.stage === "update" ? specItems(UPDATE_PIPELINE_STAGES, prefix, "update stage", 100) : specItems(PIPELINE_STAGES, prefix, "aggregation stage", 100);
+    case "stage": {
+      const kind = context.pipelineKind;
+      const detail = kind === "update" ? "update stage" : "aggregation stage";
+      items = specItems(pipelineStagesFor(kind), prefix, detail, 100);
       break;
+    }
     case "stageOption":
       items = specItems(STAGE_OPTION_KEYS[context.stage ?? ""] ?? [], prefix, `${context.stage} option`, 100);
       break;
@@ -644,6 +679,7 @@ interface MongoCallScan {
 interface MongoCursorClass {
   mode: MongoCompletionMode;
   stage?: string;
+  pipelineKind?: MongoPipelineKind;
   collection?: string;
   method?: string;
   bulkWriteOperation?: string;
@@ -957,7 +993,9 @@ function classifyMethodOptions(method: string, scan: MongoCallScan): MongoCursor
     return { mode: scan.inString ? "none" : "keyMapValue", method, keyMap: option };
   }
   if (FILTER_OPTION_KEYS.has(option)) return { ...classifyFilter(scan, 1), method };
-  if (option === "pipeline" && scan.stack[1]?.kind === "array") return { ...classifyPipeline(scan, 1), method };
+  if (option === "pipeline" && scan.stack[1]?.kind === "array") {
+    return { ...classifyPipeline(scan, findPipelineArrayIndex(scan.stack), method === "createCollection" ? "view" : "aggregate"), method };
+  }
   const valueEnums = SUB_DOCUMENT_OPTION_KEYS[option];
   if (valueEnums) return { ...classifySubDocument(scan, 1, option, valueEnums), method };
   return { mode: "none" };
@@ -1022,21 +1060,34 @@ function classifyBulkWriteOperations(scan: MongoCallScan): MongoCursorClass {
   }
 }
 
+function detectPipelineKind(scan: MongoCallScan, pipelineIndex: number, defaultKind: MongoPipelineKind = "aggregate"): MongoPipelineKind {
+  if (defaultKind === "update") return "update";
+  if (pipelineIndex > 0 && scan.stack[pipelineIndex - 1]?.key === "$facet") return "facet";
+  if (scan.stack[pipelineIndex]?.key === "pipeline") {
+    const parentKey = scan.stack[pipelineIndex - 1]?.key;
+    if (parentKey === "$lookup" || parentKey === "$unionWith") return "join";
+    return defaultKind;
+  }
+  return defaultKind;
+}
+
 /**
- * `kind` is `update` for the pipeline form of an update, which accepts only the
- * stages that rewrite a document; the marker rides in `stage` so the item builder
- * can narrow the list.
+ * `kind` carries the enclosing pipeline flavor (top-level aggregate, update,
+ * $facet branch, join sub-pipeline or view pipeline) so the item builder can
+ * narrow the stage list.
  */
-function classifyPipeline(scan: MongoCallScan, pipelineIndex = findPipelineArrayIndex(scan.stack), kind: "aggregate" | "update" = "aggregate"): MongoCursorClass {
+function classifyPipeline(scan: MongoCallScan, pipelineIndex = findPipelineArrayIndex(scan.stack), kind?: MongoPipelineKind): MongoCursorClass {
   if (pipelineIndex < 0) return { mode: "none" };
 
   const stageHolder = scan.stack[pipelineIndex + 1];
   if (!stageHolder) return { mode: "none" }; // directly inside the array, no stage object yet
   if (stageHolder.kind !== "object") return { mode: "none" };
 
+  const pipelineKind = detectPipelineKind(scan, pipelineIndex, kind);
+
   // `[{ … }]` — the cursor is in the stage object itself.
   if (scan.stack.length - 1 === pipelineIndex + 1) {
-    if (!scan.inValue) return { mode: "stage", stage: kind === "update" ? "update" : undefined };
+    if (!scan.inValue) return { mode: "stage", pipelineKind };
     const stage = scan.valueKey ?? "";
     return { mode: stageStringValueMode(stage), stage };
   }

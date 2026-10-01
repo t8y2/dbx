@@ -3366,6 +3366,8 @@ export default withEnglishFallback({
     skillsLoading: "Caricamento skill…",
     skillsEmpty: "Nessuna skill trovata",
     skillsRefresh: "Aggiorna elenco",
+    skillsSelectAll: "Seleziona tutto",
+    skillsDeselectAll: "Deseleziona tutto",
     skillsLoadError: "Impossibile caricare le skill",
     skillsRetry: "Riprova",
     skillsOpenSettings: "Apri impostazioni",

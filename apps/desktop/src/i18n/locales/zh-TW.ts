@@ -3364,6 +3364,8 @@ export default withEnglishFallback({
     skillsLoading: "正在載入 Skills…",
     skillsEmpty: "未發現可用 Skill",
     skillsRefresh: "重新整理清單",
+    skillsSelectAll: "全選",
+    skillsDeselectAll: "取消全選",
     skillsLoadError: "Skills 載入失敗",
     skillsRetry: "重試",
     skillsOpenSettings: "開啟設定",

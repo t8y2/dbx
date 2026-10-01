@@ -3507,6 +3507,8 @@ export default withEnglishFallback({
     skillsLoading: "Skills を読み込み中…",
     skillsEmpty: "利用可能な Skills がありません",
     skillsRefresh: "一覧を更新",
+    skillsSelectAll: "すべて選択",
+    skillsDeselectAll: "選択をすべて解除",
     skillsLoadError: "Skills の読み込みに失敗しました",
     skillsRetry: "再試行",
     skillsOpenSettings: "設定を開く",

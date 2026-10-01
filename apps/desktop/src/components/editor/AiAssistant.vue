@@ -666,6 +666,25 @@ function toggleSkillSelected(id: string) {
   selectedSkillIds.value = selectedSkillIds.value.includes(id) ? selectedSkillIds.value.filter((skillId) => skillId !== id) : [...selectedSkillIds.value, id];
 }
 
+const selectableSkillIds = computed(() => userSkillStore.groupedSkills.flatMap((group) => group.skills.map((skill) => skill.id)));
+const allSkillsSelected = computed(() => {
+  const selected = new Set(selectedSkillIds.value);
+  return selectableSkillIds.value.length > 0 && selectableSkillIds.value.every((id) => selected.has(id));
+});
+
+function selectAllSkills() {
+  if (userSkillStore.isLoading || userSkillStore.lastError) return;
+  // Preserve existing choices, including unavailable skills whose chips let
+  // the user explicitly remove them. Each catalog id is selected only once.
+  selectedSkillIds.value = [...new Set([...selectedSkillIds.value, ...selectableSkillIds.value])];
+  skillFailures.value = [];
+}
+
+function deselectAllSkills() {
+  selectedSkillIds.value = [];
+  skillFailures.value = [];
+}
+
 function removeSelectedSkill(id: string) {
   selectedSkillIds.value = removeSkillIds(selectedSkillIds.value, [id]);
   skillFailures.value = [];
@@ -6394,6 +6413,19 @@ async function openExternalUrl(url: string) {
                   </template>
                 </div>
                 <div class="border-t mt-1 px-1 pt-1">
+                  <div class="flex gap-1">
+                    <button
+                      type="button"
+                      class="flex-1 rounded-sm px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
+                      :disabled="userSkillStore.isLoading || !!userSkillStore.lastError || selectableSkillIds.length === 0 || allSkillsSelected"
+                      @click="selectAllSkills"
+                    >
+                      {{ t("ai.skillsSelectAll") }}
+                    </button>
+                    <button type="button" class="flex-1 rounded-sm px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50" :disabled="selectedSkillIds.length === 0" @click="deselectAllSkills">
+                      {{ t("ai.skillsDeselectAll") }}
+                    </button>
+                  </div>
                   <button type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground" :disabled="userSkillStore.isLoading" @click="refreshSkills">
                     <Loader2 v-if="userSkillStore.isLoading" class="h-3 w-3 animate-spin" />
                     {{ t("ai.skillsRefresh") }}

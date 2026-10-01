@@ -3508,6 +3508,8 @@ export default withEnglishFallback({
     skillsLoading: "Skills 을(를) 로드하는 중…",
     skillsEmpty: "사용 가능한 Skills 이(가) 없습니다",
     skillsRefresh: "목록 새로 고침",
+    skillsSelectAll: "모두 선택",
+    skillsDeselectAll: "모두 선택 해제",
     skillsLoadError: "Skills 로드 실패",
     skillsRetry: "다시 시도",
     skillsOpenSettings: "설정 열기",

@@ -3716,6 +3716,8 @@ export default withEnglishFallback({
     skillsLoading: "正在加载 Skills…",
     skillsEmpty: "未发现可用 Skill",
     skillsRefresh: "刷新列表",
+    skillsSelectAll: "全选",
+    skillsDeselectAll: "取消全选",
     skillsLoadError: "Skills 加载失败",
     skillsRetry: "重试",
     skillsOpenSettings: "打开设置",

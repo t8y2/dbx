@@ -3804,6 +3804,8 @@ export default {
     skillsLoading: "Loading skills…",
     skillsEmpty: "No skills discovered yet",
     skillsRefresh: "Refresh",
+    skillsSelectAll: "Select all",
+    skillsDeselectAll: "Deselect all",
     skillsLoadError: "Could not load skills",
     skillsRetry: "Retry",
     skillsOpenSettings: "Open Settings",

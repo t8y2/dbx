@@ -3660,6 +3660,8 @@ export default withEnglishFallback({
     skillsLoading: "Загрузка навыков…",
     skillsEmpty: "Навыки пока не найдены",
     skillsRefresh: "Обновить",
+    skillsSelectAll: "Выбрать всё",
+    skillsDeselectAll: "Снять выделение",
     skillsLoadError: "Не удалось загрузить навыки",
     skillsRetry: "Повторить",
     skillsOpenSettings: "Открыть настройки",

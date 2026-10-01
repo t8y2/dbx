@@ -107,6 +107,8 @@ export interface MongoCompletionContext {
   operator?: string;
   /** Which fixed value set the cursor's value position accepts (`$type`, `explain`, `caseFirst`). */
   enumKey?: string;
+  /** User variables in scope for aggregation expressions. */
+  variables?: string[];
 }
 
 export interface MongoCompletionInput {
@@ -406,11 +408,13 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
   if (!scan) return isInsideCallArguments(beforeCursor) || isAfterUseKeyword(beforeCursor) ? at("none") : at("root");
 
   const classified = classifyCursorInCall(call.method, scan);
+  const variables = classified.mode === "fieldRef" || classified.mode === "expression" ? collectScopeVariables(scan) : undefined;
   return {
     ...at(classified.mode, classified.stage, classified.method, classified.bulkWriteOperation, classified.keyMap),
     ...(classified.operator ? { operator: classified.operator } : {}),
     ...(classified.enumKey ? { enumKey: classified.enumKey } : {}),
     ...(classified.pipelineKind ? { pipelineKind: classified.pipelineKind } : {}),
+    ...(variables ? { variables } : {}),
     collection: classified.collection ?? collection,
   };
 }
@@ -461,7 +465,7 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
       items = fieldPathItems(prefix, fields);
       break;
     case "fieldRef":
-      items = fieldRefItems(prefix, fields);
+      items = isVariablePrefix(prefix) ? variableItems(prefix, context.variables, context.stage) : fieldRefItems(prefix, fields);
       break;
     case "value":
       // Shell constructors first; the extended JSON spellings need their own braces here.
@@ -481,7 +485,7 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
       items = specItems(PUSH_MODIFIERS, prefix, "array update modifier", 100);
       break;
     case "expression":
-      items = [...specItems(EXPRESSION_OPERATORS, prefix, "aggregation expression", 100), ...fieldRefItems(prefix, fields, 80)];
+      items = isVariablePrefix(prefix) ? variableItems(prefix, context.variables, context.stage) : [...specItems(EXPRESSION_OPERATORS, prefix, "aggregation expression", 100), ...fieldRefItems(prefix, fields, 80)];
       break;
     case "accumulator":
       items = specItems(ACCUMULATORS, prefix, "accumulator", 100);
@@ -587,7 +591,8 @@ export function getMongoDocumentQueryCompletionContext(text: string, cursor: num
   if (classified.mode === "none") return nothing;
 
   const { prefix, from } = readMongoPropertyPrefix(text, safeCursor);
-  return { ...classified, prefix, from, replaceClosingQuote: closingQuoteAtCursor(prefix, text, safeCursor) };
+  const variables = classified.mode === "fieldRef" || classified.mode === "expression" ? collectScopeVariables(scan) : undefined;
+  return { ...classified, prefix, from, replaceClosingQuote: closingQuoteAtCursor(prefix, text, safeCursor), ...(variables ? { variables } : {}) };
 }
 
 /**
@@ -695,6 +700,10 @@ interface MongoContainer {
   key: string | null;
   /** Closed string literal values in this object container, e.g. `{ from: "orders" }`. */
   stringValues?: Record<string, string>;
+  /** Property keys defined in this object container. */
+  keys?: string[];
+  /** Variables defined by an enclosing child `vars: { … }` or `let: { … }`. */
+  letVars?: string[];
 }
 
 interface MongoCallScan {
@@ -718,6 +727,7 @@ interface MongoCursorClass {
   keyMap?: string;
   operator?: string;
   enumKey?: string;
+  variables?: string[];
 }
 
 /**
@@ -786,7 +796,13 @@ function scanMongoCallArguments(text: string, start: number, cursor: number): Mo
     }
     if (char === "}" || char === "]" || char === ")") {
       if (stack.length === 0) return null;
-      stack.pop();
+      const popped = stack.pop();
+      if (popped && popped.kind === "object" && (popped.key === "vars" || popped.key === "let")) {
+        const parent = stack[stack.length - 1];
+        if (parent && parent.kind === "object") {
+          parent.letVars = [...(parent.letVars ?? []), ...(popped.keys ?? [])];
+        }
+      }
       token = "";
       valueKey = null;
       inValue = false;
@@ -796,6 +812,16 @@ function scanMongoCallArguments(text: string, start: number, cursor: number): Mo
       valueKey = token.trim() || valueKey;
       token = "";
       inValue = true;
+      if (valueKey) {
+        const inner = stack[stack.length - 1];
+        if (inner && inner.kind === "object") {
+          const cleanKey = valueKey.replace(/^["']|["']$/g, "");
+          inner.keys ??= [];
+          if (!inner.keys.includes(cleanKey)) {
+            inner.keys.push(cleanKey);
+          }
+        }
+      }
       continue;
     }
     if (char === ",") {
@@ -809,6 +835,54 @@ function scanMongoCallArguments(text: string, start: number, cursor: number): Mo
   }
 
   return { argIndex, stack, valueKey, inValue, inString: quote !== null };
+}
+
+function isExpressionArray(scan: MongoCallScan): boolean {
+  const inner = innermost(scan);
+  if (inner?.kind !== "array") return false;
+  if (inner.key?.startsWith("$")) return true;
+  for (let i = scan.stack.length - 1; i >= 0; i--) {
+    const container = scan.stack[i];
+    if (container.key?.startsWith("$")) return true;
+    if (container.kind !== "array") break;
+  }
+  return false;
+}
+
+function collectScopeVariables(scan: MongoCallScan): string[] {
+  const vars = new Set<string>();
+
+  for (let i = scan.stack.length - 1; i >= 0; i--) {
+    const container = scan.stack[i];
+    if (!container || container.kind !== "object") continue;
+
+    const childKey = i === scan.stack.length - 1 ? scan.valueKey : scan.stack[i + 1]?.key;
+
+    if (container.key === "$map") {
+      if (childKey === "in") {
+        vars.add(container.stringValues?.["as"] || "this");
+      }
+    } else if (container.key === "$filter") {
+      if (childKey === "cond") {
+        vars.add(container.stringValues?.["as"] || "this");
+      }
+    } else if (container.key === "$reduce") {
+      if (childKey === "in") {
+        vars.add("value");
+        vars.add("this");
+      }
+    } else if (container.key === "$let") {
+      if (childKey === "in" && container.letVars) {
+        for (const v of container.letVars) vars.add(v);
+      }
+    } else if (container.key === "$lookup") {
+      if (childKey === "pipeline" && container.letVars) {
+        for (const v of container.letVars) vars.add(v);
+      }
+    }
+  }
+
+  return [...vars];
 }
 
 function classifyCursorInCall(method: string, scan: MongoCallScan): MongoCursorClass {
@@ -879,6 +953,15 @@ function classifyFilter(scan: MongoCallScan, rootIndex: number): MongoCursorClas
   const schemaIndex = findContainerIndex(scan, rootIndex, "$jsonSchema");
   if (schemaIndex >= 0) return classifyJsonSchema(scan, schemaIndex);
 
+  // Under `$expr` the vocabulary is aggregation expressions.
+  const exprIndex = findContainerIndex(scan, rootIndex, "$expr");
+  if (exprIndex >= 0) {
+    if (isExpressionArray(scan)) return { mode: "fieldRef" };
+    if (scan.inValue) return { mode: "fieldRef" };
+    if (inner.kind === "object") return { mode: "expression" };
+    return { mode: "none" };
+  }
+
   if (inner.kind === "array") {
     // `$type: ["string", "null"]` lists BSON types.
     if (inner.key === "$type") return { mode: "enumValue", enumKey: "$type" };
@@ -887,6 +970,7 @@ function classifyFilter(scan: MongoCallScan, rootIndex: number): MongoCursorClas
   }
   if (inner.kind !== "object") return { mode: "none" };
   if (scan.inValue) {
+    if (scan.valueKey === "$expr") return { mode: "fieldRef" };
     const enumKey = filterValueEnum(inner.key, scan.valueKey);
     if (enumKey) return { mode: "enumValue", enumKey };
     return { mode: scan.inString ? "none" : "value" };
@@ -1213,6 +1297,7 @@ function classifyGroup(scan: MongoCallScan, bodyIndex: number): MongoCompletionM
   if (scan.inValue) return "fieldRef";
 
   const inner = innermost(scan);
+  if (isExpressionArray(scan)) return "fieldRef";
   if (inner?.kind !== "object") return "none";
   // One level in: `_id: { … }` builds a compound key, anything else is an accumulator.
   if (depth === 1) return inner.key === "_id" ? "expression" : "accumulator";
@@ -1225,6 +1310,7 @@ function classifyProjection(scan: MongoCallScan, bodyIndex: number): MongoComple
   if (scan.inValue) return "fieldRef";
 
   const inner = innermost(scan);
+  if (isExpressionArray(scan)) return "fieldRef";
   if (inner?.kind !== "object") return "none";
   return depth === 0 ? "field" : "expression";
 }
@@ -1277,6 +1363,7 @@ function classifyStageOptions(stage: string, scan: MongoCallScan, bodyIndex: num
         return { mode: "fieldRef", stage };
       }
       if (scan.inValue) return { mode: "fieldRef", stage };
+      if (isExpressionArray(scan)) return { mode: "fieldRef", stage };
       return { mode: innermost(scan)?.kind === "object" ? "expression" : "none", stage };
     }
 
@@ -1310,6 +1397,7 @@ function classifyStageOptions(stage: string, scan: MongoCallScan, bodyIndex: num
   }
 
   if (scan.inValue) return { mode: "fieldRef", stage };
+  if (isExpressionArray(scan)) return { mode: "fieldRef", stage };
   return { mode: innermost(scan)?.kind === "object" ? "expression" : "none", stage };
 }
 
@@ -1489,6 +1577,52 @@ function fieldRefItems(prefix: string, fields: MongoCompletionField[], baseBoost
         boost: startsWithPrefix(field.name, normalizedPrefix) ? baseBoost + 20 : baseBoost - 15,
       })),
   );
+}
+
+const SYSTEM_VARIABLES: MongoOperatorSpec[] = [
+  { label: "$$ROOT", detail: "Root document of the pipeline", apply: "$$ROOT" },
+  { label: "$$CURRENT", detail: "Current document being processed", apply: "$$CURRENT" },
+  { label: "$$NOW", detail: "Current date and time", apply: "$$NOW" },
+  { label: "$$CLUSTER_TIME", detail: "Current cluster timestamp", apply: "$$CLUSTER_TIME" },
+  { label: "$$REMOVE", detail: "Excludes a field from the document", apply: "$$REMOVE" },
+  { label: "$$DESCEND", detail: "Descends to subdocuments in $redact", apply: "$$DESCEND" },
+  { label: "$$PRUNE", detail: "Excludes all fields at current level in $redact", apply: "$$PRUNE" },
+  { label: "$$KEEP", detail: "Includes all fields at current level in $redact", apply: "$$KEEP" },
+];
+
+const REDACT_VARIABLES = new Set(["$$DESCEND", "$$PRUNE", "$$KEEP"]);
+
+function isVariablePrefix(prefix: string): boolean {
+  return normalizeMongoKeyPrefix(prefix).startsWith("$$");
+}
+
+function variableItems(prefix: string, userVariables: string[] = [], stage?: string): MongoCompletionItem[] {
+  const normalizedPrefix = normalizeMongoKeyPrefix(prefix);
+
+  const userItems: MongoCompletionItem[] = userVariables
+    .map((name) => `$$${name}`)
+    .filter((label) => matchesFuzzyPrefix(label, normalizedPrefix))
+    .map((label) => ({
+      label,
+      type: "keyword" as const,
+      detail: "variable in scope",
+      apply: quoteMongoString(label, prefix),
+      boost: startsWithPrefix(label, normalizedPrefix) ? 140 : 110,
+    }));
+
+  const systemItems: MongoCompletionItem[] = SYSTEM_VARIABLES.filter((v) => matchesFuzzyPrefix(v.label, normalizedPrefix)).map((v) => {
+    const isRedact = REDACT_VARIABLES.has(v.label);
+    const baseBoost = isRedact && stage !== "$redact" ? 60 : 100;
+    return {
+      label: v.label,
+      type: "keyword" as const,
+      detail: v.detail,
+      apply: quoteMongoString(v.label, prefix),
+      boost: startsWithPrefix(v.label, normalizedPrefix) ? baseBoost + 20 : baseBoost - 15,
+    };
+  });
+
+  return dedupeAndSort([...userItems, ...systemItems]);
 }
 
 /**

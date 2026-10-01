@@ -521,6 +521,153 @@ test("suggests quoted field references in aggregation expression positions", () 
   assert.equal(projection.find((item) => item.label === "$name")?.apply, '"$name"');
 });
 
+test("suggests field references in elements of expression operator arrays across stages and $expr", () => {
+  // Elements of an expression operator's array argument get suggestions
+  // $project
+  const projectConcat = labels('db.users.aggregate([{ $project: { n: { $concat: ["$', { fields });
+  assert.ok(projectConcat.includes("$name"));
+  assert.ok(projectConcat.includes("$profile.email"));
+
+  // Bare element outside quotes offers field references (with quoted apply)
+  const projectAddBare = buildMongoCompletionItems("db.users.aggregate([{ $project: { n: { $add: [", "db.users.aggregate([{ $project: { n: { $add: [".length, { fields });
+  const nameItem = projectAddBare.find((item) => item.label === "$name");
+  assert.equal(nameItem?.apply, '"$name"');
+
+  // Inside { within an array, offers expression operators
+  const projectAddObject = labels("db.users.aggregate([{ $project: { n: { $add: [ { $", { fields });
+  assert.ok(projectAddObject.includes("$multiply"));
+  assert.ok(projectAddObject.includes("$sum"));
+
+  // $expr in $match
+  const matchExpr = labels('db.users.aggregate([{ $match: { $expr: { $gt: ["$', { fields });
+  assert.ok(matchExpr.includes("$name"));
+  assert.ok(matchExpr.includes("$profile.email"));
+
+  // $expr in find()
+  const findExpr = labels('db.users.find({ $expr: { $eq: ["$', { fields });
+  assert.ok(findExpr.includes("$name"));
+  assert.ok(findExpr.includes("$profile.email"));
+
+  // $addFields
+  const addFieldsSum = labels("db.users.aggregate([{ $addFields: { n: { $sum: [", { fields });
+  assert.ok(addFieldsSum.includes("$name"));
+
+  // $set
+  const setMultiply = labels('db.users.aggregate([{ $set: { n: { $multiply: ["$', { fields });
+  assert.ok(setMultiply.includes("$name"));
+
+  // $group accumulators
+  const groupSum = labels('db.users.aggregate([{ $group: { _id: "$_id", total: { $sum: ["$', { fields });
+  assert.ok(groupSum.includes("$name"));
+  const groupSumObject = labels('db.users.aggregate([{ $group: { _id: "$_id", total: { $sum: [ { $', { fields });
+  assert.ok(groupSumObject.includes("$multiply"));
+
+  // Update pipeline stages
+  const updatePipeline = labels('db.users.updateOne({}, [{ $set: { n: { $concat: ["$', { fields });
+  assert.ok(updatePipeline.includes("$name"));
+
+  // Plain filter $in / $nin / $all unchanged
+  const plainInQuoted = labels('db.users.find({ age: { $in: ["$', { fields });
+  assert.equal(plainInQuoted.length, 0);
+  const plainInBare = labels("db.users.find({ age: { $in: [", { fields });
+  assert.equal(plainInBare.includes("$name"), false);
+  assert.ok(plainInBare.includes("ObjectId"));
+});
+
+test("suggests accumulator operators as expressions in $project and other stages", () => {
+  const projectOps = labels("db.users.aggregate([{ $project: { n: { $ma");
+  assert.ok(projectOps.includes("$max"));
+
+  const maxItem = buildMongoCompletionItems("db.users.aggregate([{ $project: { n: { $max", "db.users.aggregate([{ $project: { n: { $max".length).find((i) => i.label === "$max");
+  assert.equal(maxItem?.apply, "$max: [${}, ${}]");
+
+  const sumItem = buildMongoCompletionItems("db.users.aggregate([{ $project: { n: { $sum", "db.users.aggregate([{ $project: { n: { $sum".length).find((i) => i.label === "$sum");
+  assert.equal(sumItem?.apply, "$sum: [${}, ${}]");
+
+  const avgItem = buildMongoCompletionItems("db.users.aggregate([{ $project: { n: { $avg", "db.users.aggregate([{ $project: { n: { $avg".length).find((i) => i.label === "$avg");
+  assert.equal(avgItem?.apply, "$avg: [${}, ${}]");
+
+  const minItem = buildMongoCompletionItems("db.users.aggregate([{ $project: { n: { $min", "db.users.aggregate([{ $project: { n: { $min".length).find((i) => i.label === "$min");
+  assert.equal(minItem?.apply, "$min: [${}, ${}]");
+
+  const stdDevPopItem = buildMongoCompletionItems("db.users.aggregate([{ $project: { n: { $stdDevPop", "db.users.aggregate([{ $project: { n: { $stdDevPop".length).find((i) => i.label === "$stdDevPop");
+  assert.equal(stdDevPopItem?.apply, "$stdDevPop: [${}, ${}]");
+
+  const stdDevSampItem = buildMongoCompletionItems("db.users.aggregate([{ $project: { n: { $stdDevSamp", "db.users.aggregate([{ $project: { n: { $stdDevSamp".length).find((i) => i.label === "$stdDevSamp");
+  assert.equal(stdDevSampItem?.apply, "$stdDevSamp: [${}, ${}]");
+});
+
+test("suggests system and scoped user variables when typing '$$'", () => {
+  // Single '$' offers fields, not variables
+  const singleDollar = labels('db.users.aggregate([{ $project: { n: "$', { fields });
+  assert.ok(singleDollar.includes("$name"));
+  assert.equal(singleDollar.includes("$$ROOT"), false);
+
+  // '$$' switches to variables
+  const varsInProject = labels('db.users.aggregate([{ $project: { n: "$$');
+  assert.ok(varsInProject.includes("$$ROOT"));
+  assert.ok(varsInProject.includes("$$CURRENT"));
+  assert.ok(varsInProject.includes("$$NOW"));
+  assert.ok(varsInProject.includes("$$CLUSTER_TIME"));
+  assert.ok(varsInProject.includes("$$REMOVE"));
+  assert.ok(varsInProject.includes("$$DESCEND"));
+  assert.ok(varsInProject.includes("$$PRUNE"));
+  assert.ok(varsInProject.includes("$$KEEP"));
+
+  // $redact ranks $$DESCEND / $$PRUNE / $$KEEP higher
+  const redactText = 'db.users.aggregate([{ $redact: { $cond: { if: 1, then: "$$';
+  const projectText = 'db.users.aggregate([{ $project: { n: "$$';
+  const redactVars = buildMongoCompletionItems(redactText, redactText.length);
+  const redactDescend = redactVars.find((i) => i.label === "$$DESCEND");
+  const projectDescend = buildMongoCompletionItems(projectText, projectText.length).find((i) => i.label === "$$DESCEND");
+  assert.ok((redactDescend?.boost ?? 0) > (projectDescend?.boost ?? 0));
+
+  // In expression array
+  const concatVars = labels('db.users.aggregate([{ $project: { n: { $concat: ["$$');
+  assert.ok(concatVars.includes("$$ROOT"));
+
+  // In find $expr
+  const findExprVars = labels('db.users.find({ $expr: { $eq: ["$$');
+  assert.ok(findExprVars.includes("$$ROOT"));
+
+  // $map scope: as: "item" offers $$item only inside in:
+  const mapIn = labels('db.users.aggregate([{ $project: { n: { $map: { input: "$arr", as: "item", in: "$$');
+  assert.ok(mapIn.includes("$$item"));
+  assert.ok(mapIn.includes("$$ROOT"));
+
+  const mapInNested = labels('db.users.aggregate([{ $project: { n: { $map: { input: "$arr", as: "item", in: { $concat: ["$$');
+  assert.ok(mapInNested.includes("$$item"));
+
+  const mapInput = labels('db.users.aggregate([{ $project: { n: { $map: { as: "item", input: "$$');
+  assert.equal(mapInput.includes("$$item"), false);
+
+  // $map without as defaults to $$this
+  const mapDefault = labels('db.users.aggregate([{ $project: { n: { $map: { input: "$arr", in: "$$');
+  assert.ok(mapDefault.includes("$$this"));
+
+  // $filter scope: as: "item" offers $$item inside cond, not input
+  const filterCond = labels('db.users.aggregate([{ $project: { n: { $filter: { input: "$arr", as: "item", cond: "$$');
+  assert.ok(filterCond.includes("$$item"));
+  const filterInput = labels('db.users.aggregate([{ $project: { n: { $filter: { as: "item", input: "$$');
+  assert.equal(filterInput.includes("$$item"), false);
+
+  // $reduce scope: offers $$value and $$this inside in
+  const reduceIn = labels('db.users.aggregate([{ $project: { n: { $reduce: { input: "$arr", initialValue: 0, in: "$$');
+  assert.ok(reduceIn.includes("$$value"));
+  assert.ok(reduceIn.includes("$$this"));
+  const reduceInit = labels('db.users.aggregate([{ $project: { n: { $reduce: { input: "$arr", in: "$$value", initialValue: "$$');
+  assert.equal(reduceInit.includes("$$value"), false);
+
+  // $let.vars scope
+  const letIn = labels('db.users.aggregate([{ $project: { n: { $let: { vars: { total: 10, discount: 2 }, in: "$$');
+  assert.ok(letIn.includes("$$total"));
+  assert.ok(letIn.includes("$$discount"));
+
+  // $lookup.let scope
+  const lookupLet = labels('db.users.aggregate([{ $lookup: { from: "orders", let: { order_id: "$_id" }, pipeline: [{ $project: { n: "$$');
+  assert.ok(lookupLet.includes("$$order_id"));
+});
+
 test("suggests $lookup option keys and collections for its from option", () => {
   assert.deepEqual(labels("db.users.aggregate([{ $lookup: { fr", { collections }), ["from"]);
 

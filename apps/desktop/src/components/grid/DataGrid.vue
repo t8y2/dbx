@@ -5197,11 +5197,14 @@ function scrollToCurrentMatch() {
 }
 
 function scrollTransposeFieldIntoView(visibleFieldIndex: number) {
+  const actualColumnIndex = visibleColumnIndexes.value[visibleFieldIndex];
+  const sortedIndex = transposeRows.value.findIndex((item) => item.columnIndex === actualColumnIndex);
+  if (sortedIndex < 0) return;
   const scroller = transposeScrollRef.value;
   if (scroller && !(scroller instanceof HTMLElement)) {
-    (scroller as { scrollToItem?: (index: number) => void }).scrollToItem?.(visibleFieldIndex);
+    (scroller as { scrollToItem?: (index: number) => void }).scrollToItem?.(sortedIndex);
   } else if (scroller instanceof HTMLElement) {
-    scroller.scrollTop = visibleFieldIndex * transposeRowHeight.value;
+    scroller.scrollTop = sortedIndex * transposeRowHeight.value;
   }
 }
 
@@ -10190,8 +10193,9 @@ const activeTransposeRecordIndexes = computed(() =>
 );
 const transposeBeforeSpacerWidth = computed(() => (multiRowTranspose.value ? transposeRecordWindow.value.beforeWidth : 0));
 const transposeAfterSpacerWidth = computed(() => (multiRowTranspose.value ? transposeRecordWindow.value.afterWidth + transposeEndSpacerWidth.value : 0));
+const transposeColumnSortDirection = ref<"asc" | "desc" | null>(null);
 const transposeRows = computed(() => {
-  return buildVisibleTransposeRows({
+  const rows = buildVisibleTransposeRows({
     columns: visibleColumns.value,
     records: displayRowRefs.value.map((_, index) => displayItemAt(index)?.data ?? []),
     recordIndexes: activeTransposeRecordIndexes.value,
@@ -10199,6 +10203,11 @@ const transposeRows = computed(() => {
     types: visibleColumnTypes.value.map((type) => (type ? shortTypeName(compactHeaderColumnType(type)) : "")),
     comments: visibleColumnComments.value,
     displayValue: (value, _column, index) => formatCellCached(value, visibleColumnIndexes.value[index]),
+  }).map((row, index) => ({ ...row, columnIndex: visibleColumnIndexes.value[index] }));
+  if (!transposeColumnSortDirection.value) return rows;
+  return [...rows].sort((left, right) => {
+    const result = left.column.localeCompare(right.column, undefined, { sensitivity: "base" });
+    return transposeColumnSortDirection.value === "asc" ? result : -result;
   });
 });
 const transposeReserveTypeLine = computed(() => showTransposeFieldMetadata.value && showColumnTypesInHeader.value && transposeRows.value.some((row) => row.type));
@@ -10221,6 +10230,10 @@ function transposeFieldTitle(item: { column: string; type: string; comment?: str
   if (showTransposeFieldMetadata.value && showColumnTypesInHeader.value && item.type) details.push(`${t("grid.columnType")}: ${item.type}`);
   if (showTransposeFieldMetadata.value && showColumnCommentsInHeader.value && item.comment) details.push(`${t("grid.columnComment")}: ${item.comment}`);
   return details.join("\n");
+}
+
+function toggleTransposeColumnSort() {
+  transposeColumnSortDirection.value = transposeColumnSortDirection.value === "asc" ? "desc" : "asc";
 }
 
 function transposeColumnIndexKind(column: string): ColumnIndexKind | undefined {
@@ -13005,8 +13018,21 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                 >
                   <template #before>
                     <div class="data-grid-transpose-header data-grid-header-shell sticky top-0 z-20 flex h-7 border-b border-border font-semibold text-muted-foreground" :style="{ width: `${transposeTotalWidth}px` }">
-                      <div class="data-grid-header-cell sticky left-0 z-30 shrink-0 border-r border-border px-3 py-1.5 truncate relative" :style="{ width: `${transposePinnedWidth}px` }">
-                        {{ t("grid.columnName") }}
+                      <div class="data-grid-header-cell sticky left-0 z-30 flex shrink-0 items-center border-r border-border px-3 py-1.5 truncate relative" :style="{ width: `${transposePinnedWidth}px` }">
+                        <span class="min-w-0 flex-1 truncate">{{ t("grid.columnName") }}</span>
+                        <button
+                          data-grid-transpose-column-sort
+                          type="button"
+                          class="ml-1 flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+                          :title="t('grid.sort')"
+                          :aria-label="t('grid.sort')"
+                          @mousedown.stop
+                          @click.stop="toggleTransposeColumnSort"
+                        >
+                          <ArrowUp v-if="transposeColumnSortDirection === 'asc'" class="h-3 w-3" />
+                          <ArrowDown v-else-if="transposeColumnSortDirection === 'desc'" class="h-3 w-3" />
+                          <ArrowUpDown v-else class="h-3 w-3" />
+                        </button>
                         <div class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30" @mousedown.stop="onTransposePinnedResizeStart" />
                       </div>
                       <div class="shrink-0" :style="{ width: `${transposeBeforeSpacerWidth}px` }" />
@@ -13034,7 +13060,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                       <div class="shrink-0" :style="{ width: `${transposeAfterSpacerWidth}px` }" />
                     </div>
                   </template>
-                  <template #default="{ item, index }">
+                  <template #default="{ item }">
                     <div
                       class="data-grid-transpose-row flex border-b border-border/60"
                       :style="{
@@ -13045,12 +13071,12 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                       <LightTooltip :text="transposeFieldTitle(item)" side="right" :side-offset="6" :delay="250" :open-on-focus="false" surface="popover">
                         <div
                           data-native-clipboard
-                          :data-grid-transpose-column-index="visibleColumnIndexes[index]"
+                          :data-grid-transpose-column-index="item.columnIndex"
                           class="sticky left-0 z-10 flex shrink-0 flex-col items-start justify-center overflow-hidden border-r border-border bg-background px-3 py-0"
                           :class="{
-                            'ring-2 ring-inset ring-primary': highlightedColumnIndex === visibleColumnIndexes[index],
-                            'bg-yellow-200/60 dark:bg-yellow-500/20': transposeHeaderIsSearchMatch(visibleColumnIndexes[index]),
-                            'ring-2 ring-inset ring-yellow-500 bg-yellow-300/60 dark:bg-yellow-500/40': transposeHeaderIsCurrentMatch(visibleColumnIndexes[index]),
+                            'ring-2 ring-inset ring-primary': highlightedColumnIndex === item.columnIndex,
+                            'bg-yellow-200/60 dark:bg-yellow-500/20': transposeHeaderIsSearchMatch(item.columnIndex),
+                            'ring-2 ring-inset ring-yellow-500 bg-yellow-300/60 dark:bg-yellow-500/40': transposeHeaderIsCurrentMatch(item.columnIndex),
                           }"
                           :style="{ width: `${transposePinnedWidth}px` }"
                         >
@@ -13059,38 +13085,6 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                             <Hash v-else-if="transposeColumnIndexKind(item.column)" data-grid-transpose-index-indicator class="h-3 w-3 shrink-0" :class="columnIndexColorClass(transposeColumnIndexKind(item.column)!)" :title="transposeColumnIndexText(transposeColumnIndexKind(item.column)!)" />
                             <span class="min-w-0 flex-1 truncate font-medium leading-4">{{ item.column }}</span>
                           </span>
-                          <LightDropdownMenu
-                            v-if="headerColumnSortable(visibleColumnIndexes[index])"
-                            :items="sortMenuItems(item.column, visibleColumnIndexes[index])"
-                            :open="headerSortMenuOpenColumn === visibleColumnIndexes[index]"
-                            :selected-value="selectedSortMenuValue(item.column, visibleColumnIndexes[index])"
-                            check-position="none"
-                            align="end"
-                            content-class="w-max min-w-28 p-0.5"
-                            item-class="gap-1 rounded-none px-1.5 py-0.5 text-xs"
-                            item-icon-class="h-3 w-3"
-                            :match-trigger-width="false"
-                            @update:open="(value: boolean) => (headerSortMenuOpenColumn = value ? visibleColumnIndexes[index] : null)"
-                            @select="(value: string) => selectHeaderSort(value, item.column, visibleColumnIndexes[index])"
-                          >
-                            <template #trigger="{ open, toggle }">
-                              <button
-                                data-grid-transpose-sort
-                                type="button"
-                                class="absolute right-1 top-1 flex h-4 w-4 shrink-0 items-center justify-center rounded"
-                                :class="columnIsSorted(item.column, visibleColumnIndexes[index]) ? 'bg-primary text-primary-foreground opacity-100 shadow-sm hover:bg-primary/90' : 'text-muted-foreground opacity-80 hover:bg-accent hover:text-foreground'"
-                                :title="t('grid.sort')"
-                                :aria-label="`${t('grid.sort')}: ${item.column}`"
-                                :aria-expanded="open"
-                                @mousedown.stop
-                                @click.stop="toggle"
-                              >
-                                <ArrowUp v-if="columnIsSorted(item.column, visibleColumnIndexes[index]) && sortDir === 'asc'" class="h-3 w-3 shrink-0" />
-                                <ArrowDown v-else-if="columnIsSorted(item.column, visibleColumnIndexes[index]) && sortDir === 'desc'" class="h-3 w-3 shrink-0" />
-                                <ArrowUpDown v-else class="h-3 w-3 shrink-0" />
-                              </button>
-                            </template>
-                          </LightDropdownMenu>
                           <template v-if="showTransposeFieldMetadata && showColumnTypesInHeader && item.type">
                             <span data-grid-transpose-type-line class="h-3 min-w-0 truncate text-[10px] font-normal leading-3 select-none" :class="typeColorClass(item.type)" :title="item.type">
                               {{ item.type }}

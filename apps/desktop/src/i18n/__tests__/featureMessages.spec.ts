@@ -3,6 +3,7 @@ import { createI18n } from "vue-i18n";
 import az from "../locales/az";
 import en from "../locales/en";
 import es from "../locales/es";
+import id from "../locales/id";
 import itLocale from "../locales/it";
 import ja from "../locales/ja";
 import ko from "../locales/ko";
@@ -20,9 +21,9 @@ import zhTW from "../locales/zh-TW";
 vi.mock("../locales/fallback", () => ({ withEnglishFallback: (messages: Record<string, unknown>) => messages }));
 
 type Messages = Record<string, unknown>;
-type Locale = "az" | "en" | "es" | "it" | "ja" | "ko" | "pt-BR" | "ru" | "tr" | "zh-CN" | "zh-TW";
+type Locale = "az" | "en" | "es" | "id" | "it" | "ja" | "ko" | "pt-BR" | "ru" | "tr" | "zh-CN" | "zh-TW";
 
-const declared: Record<Locale, Messages> = { az, en, es, it: itLocale, ja, ko, "pt-BR": ptBR, ru, tr, "zh-CN": zhCN, "zh-TW": zhTW };
+const declared: Record<Locale, Messages> = { az, en, es, id, it: itLocale, ja, ko, "pt-BR": ptBR, ru, tr, "zh-CN": zhCN, "zh-TW": zhTW };
 const ALL_LOCALES = Object.keys(declared) as Locale[];
 const EXCEPT_AZ_TR = ALL_LOCALES.filter((locale) => locale !== "az" && locale !== "tr");
 
@@ -71,6 +72,29 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   { feature: "transfer bulk select", keys: under("transfer", ["bulkSelectObjects", "bulkSelectTitle", "bulkSelectHint", "bulkSelectPlaceholder", "bulkSelectConfirm", "bulkSelectMatched", "bulkSelectUnmatched", "noMatchingObjects"]), translated: true },
   { feature: "transfer background acknowledgement (#8649)", keys: ["transfer.backgroundStarted"], translated: true },
   { feature: "table info pin", keys: ["grid.pinTableInfo", "grid.unpinTableInfo"], translated: true },
+  {
+    feature: "data grid structured sorting",
+    keys: under("grid", [
+      "sortBuilderTitle",
+      "sortBuilderAddRule",
+      "sortBuilderSelectColumn",
+      "sortBuilderReorderRule",
+      "sortBuilderApplyOnly",
+      "sortBuilderEnableRule",
+      "sortBuilderDisableRule",
+      "sortBuilderEmpty",
+      "sortBuilderApply",
+      "sortBuilderReset",
+      "sortBuilderCompleteRuleFirst",
+      "sortSqlPreview",
+      "sortSqlPreviewEmpty",
+      "copySortSql",
+      "sortSqlCopied",
+      "resizeSortPanel",
+      "sortTextView",
+    ]),
+    translated: true,
+  },
   { feature: "Consul workspace", keys: ["consul.ui.*", "consul.tools.*"] },
   { feature: "MQTT max packet size", keys: ["connection.mqttMaxPacketSize"] },
   { feature: "sidebar search skip hint", keys: ["sidebar.searchConnectionSkipped"] },

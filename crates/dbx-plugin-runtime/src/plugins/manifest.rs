@@ -737,6 +737,9 @@ pub struct PluginContextMenuContribution {
     /// Menu surface the item belongs to: `connection` or `table`.
     #[serde(default)]
     pub menu: String,
+    /// Resolve native items through `contextMenu/resolve/<id>` on each menu open.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dynamic: bool,
     /// Optional host-handled action. When absent, the legacy backend entrypoint is required.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<PluginContextMenuAction>,
@@ -1432,6 +1435,9 @@ fn validate_contributions(
                     context_menu_workbench_references.push((id.to_string(), action.workbench.clone()));
                 } else if !has_backend {
                     errors.push(format!("Context menu contribution '{id}' requires a backend entrypoint"));
+                }
+                if menu.dynamic && !has_backend {
+                    errors.push(format!("Dynamic context menu contribution '{id}' requires a backend entrypoint"));
                 }
             }
             PluginContribution::FilesystemProvider(provider) => {
@@ -2648,6 +2654,36 @@ mod tests {
 
         let mut errors = Vec::new();
         validate_contributions(&[workbench, context_menu], false, true, plugin_dir.path(), &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn dynamic_context_menu_requires_backend() -> Result<(), Box<dyn std::error::Error>> {
+        let plugin_dir = tempfile::tempdir()?;
+        let context_menu: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "context-menu",
+            "id": "sample.tunnels",
+            "label": "Tunnels",
+            "menu": "connection",
+            "dynamic": true,
+            "action": { "type": "open-workbench", "workbench": "sample.main" }
+        }))?;
+        let workbench: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "workbench", "id": "sample.main", "label": "Sample"
+        }))?;
+        let mut errors = Vec::new();
+        validate_contributions(&[workbench, context_menu], false, true, plugin_dir.path(), &mut errors);
+        assert!(
+            errors.iter().any(|error| error
+                .contains("Dynamic context menu contribution 'sample.tunnels' requires a backend entrypoint")),
+            "{errors:?}"
+        );
+        let context_menu: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "context-menu", "id": "sample.tunnels", "label": "Tunnels", "menu": "connection", "dynamic": true
+        }))?;
+        let mut errors = Vec::new();
+        validate_contributions(&[context_menu], true, false, plugin_dir.path(), &mut errors);
         assert!(errors.is_empty(), "{errors:?}");
         Ok(())
     }

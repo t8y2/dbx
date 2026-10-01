@@ -15,13 +15,15 @@ use dbx_core::connection::AppState;
 use dbx_core::database_export::{export_database_sql_core, DatabaseExportOutputCompression, DatabaseExportRequest};
 use dbx_core::models::connection::DatabaseType;
 use dbx_core::sql::SqlFileRequest;
-use dbx_core::sql_file_import::execute_sql_file_paths;
+use dbx_core::sql_file_import::execute_sql_file_zip_package_paths;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connection::ConnectionConfig {
     dbx_core::models::connection::ConnectionConfig {
+        oracle_oci_nls_lang: None,
+        oracle_oci_tns_admin: None,
         docs_notes_path: None,
         id: id.to_string(),
         name: id.to_string(),
@@ -135,6 +137,7 @@ async fn manual_e2e_sqlserver_default_split_zip_export_then_import_skip_relation
         batch_size: 1000,
         split_max_mb: Some(1),
         insert_dialect: Default::default(),
+        insert_mode: Default::default(),
     };
 
     let progress_log = std::sync::Mutex::new(Vec::new());
@@ -225,7 +228,12 @@ async fn manual_e2e_sqlserver_default_split_zip_export_then_import_skip_relation
     let file_path_refs: Vec<&std::path::Path> = extracted_paths.iter().map(|path| path.as_path()).collect();
     let import_progress_log = std::sync::Mutex::new(Vec::new());
     let started_at = Instant::now();
-    let import_result = execute_sql_file_paths(
+    // Use the dedicated ZIP-package entry point, exactly as the desktop/web
+    // dispatch sites now do once `is_zip_package` is correctly derived from
+    // these extracted part paths (see PR #10632 review: routing previously
+    // fell through to `execute_sql_file_paths`, silently losing the
+    // persistent splitter across parts this whole flow is meant to exercise).
+    let import_result = execute_sql_file_zip_package_paths(
         &reimport_state,
         &import_request,
         &file_path_refs,

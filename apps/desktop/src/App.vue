@@ -35,7 +35,7 @@ import { canDownloadAndInstallUpdate, useAppUpdater } from "@/composables/useApp
 import { useMcpUpdateBadge } from "@/composables/useMcpUpdateBadge";
 import { useComponentUpdates, type ComponentUpdateCategory } from "@/composables/useComponentUpdates";
 import type { PluginUpdateBlock } from "@/composables/useComponentUpdates";
-import { COMPONENT_UPDATES_CHANGED_EVENT, notifyComponentPluginsUpdated, notifyComponentUpdatesChanged } from "@/lib/updates/componentUpdateEvents";
+import { COMPONENT_UPDATES_CHANGED_EVENT, notifyComponentDriverUpdatesChanged, notifyComponentPluginsUpdated, notifyComponentUpdatesChanged } from "@/lib/updates/componentUpdateEvents";
 import { driverStoreUpdateBadgeCount, showMcpUpdateBadge, showToolbarUpdateAction } from "@/lib/updates/updateBadges";
 import {
   continuePreparedAppUpdate,
@@ -371,6 +371,9 @@ let updateCheckTimer: ReturnType<typeof setInterval> | undefined;
 const needsAuth = ref(!isDesktop && (startupProps.startupAuthentication?.required ?? true));
 const authenticated = ref(isDesktop || (startupProps.startupAuthentication?.authenticated ?? false));
 const setupRequired = ref(!isDesktop && (startupProps.startupAuthentication?.setup_required ?? false));
+// Mirrors the template gate above the app shell. The backend liveness stream is registered
+// against it so the web runtime only opens an authenticated subscription.
+const appReady = computed(() => !setupRequired.value && (!needsAuth.value || authenticated.value));
 
 const showConnectionDialog = ref(false);
 const connectionDialogPrefill = ref<ConnectionDeepLinkDraft | null>(null);
@@ -1341,6 +1344,7 @@ function reportComponentUpdateResult(result: Awaited<ReturnType<typeof component
   // Only a clean refresh is authoritative; a failed registry check must not clear stale toolbar state.
   if (result.failed.length === 0) syncToolbarComponentUpdateState();
   if (result.plugins > 0) notifyComponentPluginsUpdated();
+  if (result.drivers > 0 || result.jdbc) notifyComponentDriverUpdatesChanged();
   if (updatedComponents.length) toast(t("updates.componentsAutoUpdated", { components: updatedComponents.join(t("updates.componentListSeparator")) }));
   if (result.blockedDrivers.length) {
     toast(t("driverStore.driverUpdateBlocked", { labels: updateBlockerLabels(result.blockedDrivers).join(", ") }), 8000);
@@ -4077,6 +4081,40 @@ function runUpdateNotificationChecks() {
   void componentUpdates.refresh();
 }
 
+// Backend-confirmed connection liveness losses (#4339). Registered through the forwarded
+// `api` layer rather than the Tauri-only `listen` helpers so both runtimes subscribe, and
+// keyed off `appReady` so the web runtime never opens the SSE stream before it is
+// authenticated (the whole /api surface sits behind the auth middleware).
+let connectionLivenessUnlisten: (() => void) | null = null;
+let connectionLivenessSubscribing = false;
+
+async function syncConnectionLivenessSubscription(active: boolean): Promise<void> {
+  if (!active) {
+    connectionLivenessUnlisten?.();
+    connectionLivenessUnlisten = null;
+    return;
+  }
+  if (connectionLivenessUnlisten || connectionLivenessSubscribing) return;
+  connectionLivenessSubscribing = true;
+  try {
+    const unlisten = await api.subscribeConnectionLiveness((message) => {
+      void connectionStore.handleConnectionLivenessMessage(message);
+    });
+    if (!appReady.value) {
+      // Auth flipped off while the subscription was being established.
+      unlisten();
+      return;
+    }
+    connectionLivenessUnlisten = unlisten;
+  } catch (error) {
+    console.error("[DBX] subscribeConnectionLiveness error:", error);
+  } finally {
+    connectionLivenessSubscribing = false;
+  }
+}
+
+watch(appReady, (ready) => void syncConnectionLivenessSubscription(ready), { immediate: true });
+
 onMounted(async () => {
   clearStartupPreloadRetry();
   markStartupPhase("app-mounted");
@@ -4181,6 +4219,8 @@ onMounted(async () => {
 onUnmounted(() => {
   disposeUpdater();
   updatePreparation?.dispose();
+  connectionLivenessUnlisten?.();
+  connectionLivenessUnlisten = null;
   detachedEventUnlisteners.forEach((unlisten) => unlisten());
   detachedEventUnlisteners = [];
   cleanupTauriListeners();
@@ -4453,7 +4493,7 @@ onUnmounted(() => {
                     @save-sql="(tabId: string) => void openSaveSqlDialog(tabId)"
                     @reload="(tabId: string, sql: any, searchText: any, whereInput: any, orderBy: any, limit: any, offset: any, intent: any) => onReloadData(tabId, sql, searchText, whereInput, orderBy, limit, offset, intent)"
                     @paginate="(tabId: string, offset: number, limit: number, whereInput?: string, orderBy?: string, appendResult?: boolean) => onPaginate(tabId, offset, limit, whereInput, orderBy, appendResult)"
-                    @sort="(tabId: string, column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string, mode?: DataGridSortMode) => onSort(tabId, column, columnIndex, direction, whereInput, mode)"
+                    @sort="(tabId: string, column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string, mode?: DataGridSortMode, effectiveOrderBy?: string) => onSort(tabId, column, columnIndex, direction, whereInput, mode, effectiveOrderBy)"
                     @execute-sql="(tabId: string, sql: string) => onExecuteSql(tabId, sql)"
                     @click-table="(_tabId: string, target: SqlObjectNavigationTarget) => onClickTable(target)"
                     @view-table-data="(_tabId: string, target: SqlObjectNavigationTarget) => onViewTableData(target)"

@@ -30,6 +30,23 @@ describe("restoredDataTabReloadFilters", () => {
     });
   });
 
+  it("recombines the persisted structured ORDER BY with the manual input for restored tabs", () => {
+    expect(
+      restoredDataTabReloadFilters({
+        whereInput: "status = 'active'",
+        orderByInput: '"name" ASC',
+        structuredOrderByInput: '"age" DESC, "created_at" ASC',
+      }),
+    ).toEqual({
+      whereInput: "status = 'active'",
+      orderBy: '"name" ASC, "age" DESC, "created_at" ASC',
+    });
+    expect(restoredDataTabReloadFilters({ whereInput: undefined, orderByInput: undefined, structuredOrderByInput: '"age" DESC' })).toEqual({
+      whereInput: undefined,
+      orderBy: '"age" DESC',
+    });
+  });
+
   it("reports blank filters as absent so the reload does not emit an empty WHERE/ORDER BY", () => {
     expect(restoredDataTabReloadFilters({ whereInput: "", orderByInput: undefined })).toEqual({ whereInput: undefined, orderBy: undefined });
     expect(restoredDataTabReloadFilters({ whereInput: "   ", orderByInput: "  " })).toEqual({ whereInput: undefined, orderBy: undefined });

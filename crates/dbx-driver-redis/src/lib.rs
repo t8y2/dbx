@@ -2796,6 +2796,24 @@ where
     })
 }
 
+/// Read the complete raw payload for a Redis string-like key.
+///
+/// The normal value path deliberately caps previews at 64 KiB. Downloads must
+/// bypass that cap while preserving the exact bytes, including non-UTF-8 data.
+pub async fn get_raw_value<C>(con: &mut C, key: &[u8]) -> Result<RedisBlob, String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let redis_type: String = redis::cmd("TYPE").arg(key).query_async(con).await.map_err(|e| e.to_string())?;
+    let raw: RedisRawValue = match redis_type.as_str() {
+        "string" | "bitmap" => redis::cmd("GET").arg(key).query_async(con).await.map_err(|e| e.to_string())?,
+        "none" => return Err("Redis key does not exist".to_string()),
+        _ => return Err("Only Redis string values can be downloaded".to_string()),
+    };
+    let bytes = redis_value_to_bytes(raw).ok_or_else(|| "Redis value is not byte-addressable".to_string())?;
+    Ok(redis_blob_from_bytes(&bytes))
+}
+
 /// Read only a key's TTL without loading its value or collection members.
 ///
 /// Redis returns `-2` for a missing key and `-1` for a key without an expiry;
@@ -7536,6 +7554,8 @@ mod tests {
 
     fn redis_test_connection_config() -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: "redis".to_string(),
             name: "Redis".to_string(),

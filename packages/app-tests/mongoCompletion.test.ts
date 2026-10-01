@@ -138,7 +138,7 @@ test("prioritizes common read helpers and keeps destructive helpers last", () =>
   assert.deepEqual(methodLabels.slice(0, 6), ["find", "findOne", "aggregate", "countDocuments", "estimatedDocumentCount", "distinct"]);
   assert.deepEqual(getCollectionMethodLabels.slice(0, 6), ["find", "findOne", "aggregate", "countDocuments", "estimatedDocumentCount", "distinct"]);
   assert.deepEqual(methodLabels.slice(-3), ["dropIndex", "dropIndexes", "drop"]);
-  assert.deepEqual(labels("db.users.find({})."), ["limit", "sort", "skip", "count", "explain", "collation"]);
+  assert.deepEqual(labels("db.users.find({})."), ["limit", "sort", "skip", "count", "explain", "collation", "toArray", "pretty"]);
 });
 
 test("keeps dotted collection names ahead of methods until the collection is resolved", () => {
@@ -163,7 +163,7 @@ test("suggests cursor methods after find result chains", () => {
 
   assert.deepEqual(
     allItems.map((item) => item.label),
-    ["limit", "sort", "skip", "count", "explain", "collation"],
+    ["limit", "sort", "skip", "count", "explain", "collation", "toArray", "pretty"],
   );
   assert.deepEqual(
     prefixedItems.map((item) => item.label),
@@ -171,7 +171,7 @@ test("suggests cursor methods after find result chains", () => {
   );
   assert.deepEqual(
     formattedChainItems.map((item) => item.label),
-    ["limit", "sort", "skip", "count", "explain", "collation"],
+    ["limit", "sort", "skip", "count", "explain", "collation", "toArray", "pretty"],
   );
   assert.deepEqual(
     formattedPrefixedItems.map((item) => item.label),
@@ -183,7 +183,49 @@ test("offers count only where find().count() actually parses", () => {
   // The shell parser accepts count() only as the sole call chained onto find().
   assert.ok(labels("db.characters.find({}).").includes("count"));
   assert.equal(labels("db.characters.find({}).sort({ name: 1 }).").includes("count"), false);
+  assert.equal(labels("db.characters.find({}).toArray().").includes("count"), false);
+  assert.equal(labels("db.characters.find({}).pretty().").includes("count"), false);
   assert.equal(labels("db.characters.aggregate([]).").includes("count"), false);
+});
+
+test("offers only accepted cursor methods toArray and pretty after aggregate", () => {
+  // The executor rejects limit, sort, skip, explain, etc. after aggregate(), accepting only toArray() and pretty().
+  assert.deepEqual(labels("db.characters.aggregate([])."), ["toArray", "pretty"]);
+  assert.deepEqual(labels("db.characters.aggregate([], { allowDiskUse: true })."), ["toArray", "pretty"]);
+  assert.deepEqual(labels("db.characters.aggregate([]).toArray()."), ["toArray", "pretty"]);
+  assert.deepEqual(labels("db.characters.aggregate([]).pretty()."), ["toArray", "pretty"]);
+  assert.deepEqual(labels("db.characters.aggregate([]).to"), ["toArray"]);
+  assert.deepEqual(labels("db.characters.aggregate([]).pr"), ["pretty"]);
+
+  for (const rejected of ["limit", "sort", "skip", "explain", "collation", "count"]) {
+    assert.equal(labels("db.characters.aggregate([]).").includes(rejected), false, `${rejected} should not be offered after aggregate()`);
+  }
+});
+
+test("recognises toArray and pretty in find chains and keeps count restricted", () => {
+  const expectedChainMethods = ["limit", "sort", "skip", "explain", "collation", "toArray", "pretty"];
+  assert.deepEqual(labels("db.characters.find({}).toArray()."), expectedChainMethods);
+  assert.deepEqual(labels("db.characters.find({}).pretty()."), expectedChainMethods);
+  assert.deepEqual(labels("db.characters.find({}).sort({ name: 1 }).toArray()."), expectedChainMethods);
+});
+
+test("stops offering root snippets after terminal cursor methods count and explain", () => {
+  // Nothing can follow count() or explain(); these positions must yield mode "none" rather than root db.* snippets.
+  assert.equal(getMongoCompletionContext("db.users.find({}).count().", "db.users.find({}).count().".length).mode, "none");
+  assert.deepEqual(labels("db.users.find({}).count()."), []);
+  assert.deepEqual(labels("db.users.find({}).count().db"), []);
+  assert.deepEqual(labels("db.characters.find({}).count()."), []);
+
+  assert.equal(getMongoCompletionContext("db.users.find({}).explain().", "db.users.find({}).explain().".length).mode, "none");
+  assert.deepEqual(labels("db.users.find({}).explain()."), []);
+  assert.deepEqual(labels('db.users.find({}).explain("executionStats").'), []);
+  assert.deepEqual(labels("db.users.find({}).sort({ name: 1 }).explain()."), []);
+  assert.deepEqual(labels("db.users.find({}).explain().db"), []);
+  assert.deepEqual(labels("db.users.find({}).explain().lim"), []);
+
+  assert.deepEqual(labels("db.users.aggregate([]).count()."), []);
+  assert.deepEqual(labels("db.users.aggregate([]).explain()."), []);
+  assert.deepEqual(labels("db.users.aggregate([]).limit(5)."), []);
 });
 
 test("suggests observed fields inside query objects", () => {
@@ -479,6 +521,108 @@ test("suggests stages only at pipeline level, including nested pipelines", () =>
   assert.ok(labels('db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $m').includes("$match"));
   // A plain value array is not a pipeline.
   assert.equal(labels("db.users.aggregate([{ $match: { tags: { $in: [{ $m").includes("$match"), false);
+});
+
+test("withholds illegal stages in sub-pipelines and view definitions", () => {
+  // Top-level aggregate includes $out and $merge.
+  const topLevel = labels("db.users.aggregate([{ $");
+  assert.ok(topLevel.includes("$out"));
+  assert.ok(topLevel.includes("$merge"));
+  assert.ok(topLevel.includes("$match"));
+  assert.ok(topLevel.includes("$project"));
+  assert.ok(topLevel.includes("$group"));
+
+  // $facet branch rejects $out, $merge, $facet, $collStats, $indexStats, $planCacheStats, $geoNear, $documents.
+  const facetStages = labels("db.users.aggregate([{ $facet: { a: [{ $");
+  for (const forbidden of ["$out", "$merge", "$facet", "$collStats", "$indexStats", "$planCacheStats", "$geoNear", "$documents"]) {
+    assert.equal(facetStages.includes(forbidden), false, `$facet branch must not offer ${forbidden}`);
+  }
+  assert.ok(facetStages.includes("$match"));
+  assert.ok(facetStages.includes("$project"));
+  assert.ok(facetStages.includes("$group"));
+
+  // $lookup sub-pipeline rejects $out and $merge, but permits $documents, $facet, $geoNear.
+  const lookupStages = labels('db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $');
+  assert.equal(lookupStages.includes("$out"), false, "$lookup must not offer $out");
+  assert.equal(lookupStages.includes("$merge"), false, "$lookup must not offer $merge");
+  assert.ok(lookupStages.includes("$match"));
+  assert.ok(lookupStages.includes("$project"));
+  assert.ok(lookupStages.includes("$group"));
+  assert.ok(lookupStages.includes("$documents"));
+  assert.ok(lookupStages.includes("$facet"));
+  assert.ok(lookupStages.includes("$geoNear"));
+
+  // $unionWith sub-pipeline rejects $out and $merge, but permits $documents.
+  const unionStages = labels('db.users.aggregate([{ $unionWith: { coll: "orders", pipeline: [{ $');
+  assert.equal(unionStages.includes("$out"), false, "$unionWith must not offer $out");
+  assert.equal(unionStages.includes("$merge"), false, "$unionWith must not offer $merge");
+  assert.ok(unionStages.includes("$match"));
+  assert.ok(unionStages.includes("$project"));
+  assert.ok(unionStages.includes("$group"));
+  assert.ok(unionStages.includes("$documents"));
+
+  // View definition pipeline rejects $out and $merge, but permits $documents.
+  const viewStages = labels('db.createCollection("v", { viewOn: "users", pipeline: [{ $');
+  assert.equal(viewStages.includes("$out"), false, "view pipeline must not offer $out");
+  assert.equal(viewStages.includes("$merge"), false, "view pipeline must not offer $merge");
+  assert.ok(viewStages.includes("$match"));
+  assert.ok(viewStages.includes("$project"));
+  assert.ok(viewStages.includes("$group"));
+  assert.ok(viewStages.includes("$documents"));
+
+  // Sub-pipeline nested inside a view pipeline applies sub-pipeline restrictions.
+  const viewFacetStages = labels('db.createCollection("v", { viewOn: "users", pipeline: [{ $facet: { a: [{ $');
+  assert.equal(viewFacetStages.includes("$out"), false);
+  assert.equal(viewFacetStages.includes("$merge"), false);
+  assert.equal(viewFacetStages.includes("$facet"), false);
+  assert.equal(viewFacetStages.includes("$geoNear"), false);
+  assert.ok(viewFacetStages.includes("$match"));
+
+  // runCommand aggregate pipeline is a top-level aggregate and offers $out and $merge.
+  const runCommandStages = labels('db.runCommand({ aggregate: "users", pipeline: [{ $');
+  assert.ok(runCommandStages.includes("$out"));
+  assert.ok(runCommandStages.includes("$merge"));
+  assert.ok(runCommandStages.includes("$match"));
+
+  // Update pipeline remains unchanged.
+  const updateStages = labels("db.users.updateOne({}, [{ $", { fields });
+  assert.deepEqual([...updateStages].sort(), ["$addFields", "$project", "$replaceRoot", "$replaceWith", "$set", "$unset"]);
+});
+
+test("classifies pipeline kinds across top-level, sub-pipelines, views and updates", () => {
+  const topText = "db.users.aggregate([{ $";
+  assert.equal(getMongoCompletionContext(topText, topText.length).pipelineKind, "aggregate");
+  assert.equal(getMongoCompletionContext(topText, topText.length).stage, undefined);
+
+  const facetText = "db.users.aggregate([{ $facet: { a: [{ $";
+  const facetCtx = getMongoCompletionContext(facetText, facetText.length);
+  assert.equal(facetCtx.pipelineKind, "facet");
+  assert.equal(facetCtx.stage, undefined);
+
+  const lookupText = 'db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $';
+  const lookupCtx = getMongoCompletionContext(lookupText, lookupText.length);
+  assert.equal(lookupCtx.pipelineKind, "join");
+  assert.equal(lookupCtx.stage, undefined);
+
+  const unionText = 'db.users.aggregate([{ $unionWith: { coll: "orders", pipeline: [{ $';
+  const unionCtx = getMongoCompletionContext(unionText, unionText.length);
+  assert.equal(unionCtx.pipelineKind, "join");
+  assert.equal(unionCtx.stage, undefined);
+
+  const viewText = 'db.createCollection("v", { viewOn: "users", pipeline: [{ $';
+  const viewCtx = getMongoCompletionContext(viewText, viewText.length);
+  assert.equal(viewCtx.pipelineKind, "view");
+  assert.equal(viewCtx.stage, undefined);
+
+  const runCommandText = 'db.runCommand({ aggregate: "users", pipeline: [{ $';
+  const runCommandCtx = getMongoCompletionContext(runCommandText, runCommandText.length);
+  assert.equal(runCommandCtx.pipelineKind, "aggregate");
+  assert.equal(runCommandCtx.stage, undefined);
+
+  const updateText = "db.users.updateOne({}, [{ $";
+  const updateCtx = getMongoCompletionContext(updateText, updateText.length);
+  assert.equal(updateCtx.pipelineKind, "update");
+  assert.equal(updateCtx.stage, undefined);
 });
 
 test("suggests values, not fields, after a filter key", () => {
@@ -790,6 +934,44 @@ test("completes database names after use and inside getSiblingDB", () => {
   assert.deepEqual(labels("// use ", { databases }), []);
 });
 
+test("honours a preceding use command and resolves active database", () => {
+  // `use <db>` switches the active database for following commands in the script.
+  const context = getMongoCompletionContext("use analytics\ndb.", "use analytics\ndb.".length);
+  assert.equal(context.database, "analytics");
+  assert.equal(context.mode, "collection");
+
+  // Plain db root after `use` still offers getSiblingDB, unlike an explicit db.getSiblingDB(…) root.
+  const items = labels("use x\ndb.", { collections });
+  assert.ok(items.includes("getSiblingDB"));
+  assert.ok(items.includes("users"));
+
+  // Field completion inside a command carries the database set by preceding `use`.
+  const fieldContext = getMongoCompletionContext("use analytics\ndb.users.find({ ", "use analytics\ndb.users.find({ ".length);
+  assert.equal(fieldContext.database, "analytics");
+  assert.equal(fieldContext.collection, "users");
+  assert.ok(labels("use analytics\ndb.users.find({ na", { fields }).includes("name"));
+
+  // An explicit db.getSiblingDB("b") on the current command wins over an earlier `use a`.
+  const siblingOverride = getMongoCompletionContext('use a\ndb.getSiblingDB("b").users.find({ ', 'use a\ndb.getSiblingDB("b").users.find({ '.length);
+  assert.equal(siblingOverride.database, "b");
+  assert.equal(siblingOverride.collection, "users");
+
+  // `use` inside comments or argument objects does not set the active database.
+  assert.equal(getMongoCompletionContext("db.users.find({ use: 1 })", "db.users.find({ use: 1 })".length).database, undefined);
+  assert.equal(getMongoCompletionContext("// use x\ndb.", "// use x\ndb.".length).database, undefined);
+  assert.equal(getMongoCompletionContext("/* use x */\ndb.", "/* use x */\ndb.".length).database, undefined);
+
+  // Across multiple `use` commands, the last one before the cursor wins.
+  assert.equal(getMongoCompletionContext("use first\nuse second\ndb.", "use first\nuse second\ndb.".length).database, "second");
+
+  // getSiblingDB on a previous command does not leak into a later plain db command.
+  assert.equal(getMongoCompletionContext('use a\ndb.getSiblingDB("b").users.find({});\ndb.', 'use a\ndb.getSiblingDB("b").users.find({});\ndb.'.length).database, "a");
+
+  // Long scripts with thousands of commands resolve without O(n^2) slicing overhead.
+  const longScript = "db.users.find({});\n".repeat(2000) + "use big\ndb.";
+  assert.equal(getMongoCompletionContext(longScript, longScript.length).database, "big");
+});
+
 test("completes the keys of an operator's own sub-document", () => {
   // `{ field: { $… } }` takes the field operators, but `$text` and the geo operators hold
   // documents with their own keys, where `$gt` and friends are nonsense.
@@ -876,8 +1058,8 @@ test("completes the collation document wherever it appears", () => {
   assert.deepEqual(labels('db.users.find({}).collation({ strength: "'), []);
   assert.deepEqual(labels('db.users.find({}).collation({ locale: "'), []);
   // The chain continues after collation(), and collation() is a find-cursor method only.
-  assert.deepEqual(labels('db.users.find({}).collation({ locale: "en" }).'), ["limit", "sort", "skip", "explain", "collation"]);
-  assert.ok(!labels("db.users.aggregate([]).").includes("collation"));
+  assert.deepEqual(labels('db.users.find({}).collation({ locale: "en" }).'), ["limit", "sort", "skip", "explain", "collation", "toArray", "pretty"]);
+  assert.deepEqual(labels("db.users.aggregate([])."), ["toArray", "pretty"]);
 });
 
 test("completes an index's partial filter as a filter", () => {

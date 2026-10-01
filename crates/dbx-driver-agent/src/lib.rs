@@ -15,6 +15,7 @@ pub mod agent_runtime;
 pub mod agent_service;
 pub mod backend_error;
 pub mod database_capabilities;
+pub mod oracle_oci;
 
 pub mod db {
     pub use crate::agent_driver;

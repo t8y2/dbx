@@ -6,6 +6,7 @@ import { BackendErrorException, formatError, normalizeBackendError, sanitizeBack
 import az from "@/i18n/locales/az";
 import en from "@/i18n/locales/en";
 import es from "@/i18n/locales/es";
+import id from "@/i18n/locales/id";
 import it from "@/i18n/locales/it";
 import ja from "@/i18n/locales/ja";
 import ko from "@/i18n/locales/ko";
@@ -20,6 +21,7 @@ const LOCALES = {
   az,
   en,
   es,
+  id,
   it,
   ja,
   ko,

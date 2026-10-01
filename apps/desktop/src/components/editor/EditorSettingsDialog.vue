@@ -92,6 +92,7 @@ import {
   type DataGridFilterEditorView,
   type DataGridToolbarLayout,
   type MultiStatementDefaultView,
+  type ResultTabNamingMode,
   type OpenTabsRestoreMode,
   type AppCloseUnsavedTabsMode,
   type SidebarObjectInfoMode,
@@ -732,6 +733,8 @@ const editShowColumnCommentsInHeader = ref(settingsStore.editorSettings.showColu
 const editShowColumnTypesInHeader = ref(settingsStore.editorSettings.showColumnTypesInHeader);
 const editShowColumnHeaderTooltips = ref(settingsStore.editorSettings.showColumnHeaderTooltips);
 const editShowResultSourceDatabase = ref(settingsStore.editorSettings.showResultSourceDatabase);
+const editResultTabNamingMode = ref<ResultTabNamingMode>(settingsStore.editorSettings.resultTabNamingMode);
+const editResultTabPreferComments = ref(settingsStore.editorSettings.resultTabPreferComments);
 const editDataGridShowTransposeFieldMetadata = ref(settingsStore.editorSettings.dataGridShowTransposeFieldMetadata);
 const editColorizeDataGridCellTypes = ref(settingsStore.editorSettings.colorizeDataGridCellTypes);
 const editShowIndexIndicatorsInHeader = ref(settingsStore.editorSettings.showIndexIndicatorsInHeader);
@@ -1082,6 +1085,8 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     showColumnTypesInHeader: editShowColumnTypesInHeader.value,
     showColumnHeaderTooltips: editShowColumnHeaderTooltips.value,
     showResultSourceDatabase: editShowResultSourceDatabase.value,
+    resultTabNamingMode: editResultTabNamingMode.value,
+    resultTabPreferComments: editResultTabPreferComments.value,
     dataGridShowTransposeFieldMetadata: editDataGridShowTransposeFieldMetadata.value,
     colorizeDataGridCellTypes: editColorizeDataGridCellTypes.value,
     dataGridTypeColorSchemes: editDataGridTypeColorSchemes.value,
@@ -1748,6 +1753,8 @@ function syncEditorSettingsDraftFromStore() {
   editShowColumnTypesInHeader.value = settingsStore.editorSettings.showColumnTypesInHeader;
   editShowColumnHeaderTooltips.value = settingsStore.editorSettings.showColumnHeaderTooltips;
   editShowResultSourceDatabase.value = settingsStore.editorSettings.showResultSourceDatabase;
+  editResultTabNamingMode.value = settingsStore.editorSettings.resultTabNamingMode;
+  editResultTabPreferComments.value = settingsStore.editorSettings.resultTabPreferComments;
   editDataGridShowTransposeFieldMetadata.value = settingsStore.editorSettings.dataGridShowTransposeFieldMetadata;
   editColorizeDataGridCellTypes.value = settingsStore.editorSettings.colorizeDataGridCellTypes;
   editDataGridTypeColorSchemes.value = cloneDataGridTypeColorSchemes(settingsStore.editorSettings.dataGridTypeColorSchemes);
@@ -1889,6 +1896,8 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   showColumnTypesInHeader: editShowColumnTypesInHeader,
   showColumnHeaderTooltips: editShowColumnHeaderTooltips,
   showResultSourceDatabase: editShowResultSourceDatabase,
+  resultTabNamingMode: editResultTabNamingMode,
+  resultTabPreferComments: editResultTabPreferComments,
   dataGridShowTransposeFieldMetadata: editDataGridShowTransposeFieldMetadata,
   colorizeDataGridCellTypes: editColorizeDataGridCellTypes,
   dataGridTypeColorSchemes: editDataGridTypeColorSchemes,
@@ -2442,6 +2451,8 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editShowColumnTypesInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader;
     editShowColumnHeaderTooltips.value = DEFAULT_EDITOR_SETTINGS.showColumnHeaderTooltips;
     editShowResultSourceDatabase.value = DEFAULT_EDITOR_SETTINGS.showResultSourceDatabase;
+    editResultTabNamingMode.value = DEFAULT_EDITOR_SETTINGS.resultTabNamingMode;
+    editResultTabPreferComments.value = DEFAULT_EDITOR_SETTINGS.resultTabPreferComments;
     editDataGridShowTransposeFieldMetadata.value = DEFAULT_EDITOR_SETTINGS.dataGridShowTransposeFieldMetadata;
     editColorizeDataGridCellTypes.value = DEFAULT_EDITOR_SETTINGS.colorizeDataGridCellTypes;
     // Back to the built-in palette, but keep the user's saved schemes available.
@@ -8467,16 +8478,43 @@ onUnmounted(() => {
                   </div>
                   <Switch id="show-column-header-tooltips" v-model="editShowColumnHeaderTooltips" />
                 </div>
-                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="show-result-source-database">
-                      {{ t("settings.showResultSourceDatabase") }}
-                    </Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.showResultSourceDatabaseDescription") }}
-                    </p>
+                <div class="settings-item space-y-3 rounded-md border bg-muted/20 p-3">
+                  <div class="flex items-center justify-between gap-4">
+                    <div class="min-w-0 space-y-1">
+                      <Label>{{ t("settings.resultTabNamingMode") }}</Label>
+                      <p class="text-xs text-muted-foreground">
+                        {{ t("settings.resultTabNamingModeDescription") }}
+                      </p>
+                    </div>
+                    <Select v-model="editResultTabNamingMode">
+                      <SelectTrigger class="h-8 w-48 shrink-0">
+                        <SelectValue :placeholder="t('settings.resultTabNamingMode')" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="source">{{ t("settings.resultTabNamingModeSource") }}</SelectItem>
+                        <SelectItem value="ordinal">{{ t("settings.resultTabNamingModeOrdinal") }}</SelectItem>
+                        <SelectItem value="comment">{{ t("settings.resultTabNamingModeComment") }}</SelectItem>
+                      </SelectContent>
+                    </Select>
                   </div>
-                  <Switch id="show-result-source-database" v-model="editShowResultSourceDatabase" />
+                  <div v-if="editResultTabNamingMode === 'source'" class="flex items-center justify-between gap-4 border-t border-border/60 pt-3">
+                    <div class="space-y-1 pl-1">
+                      <Label for="result-tab-prefer-comments">{{ t("settings.resultTabPreferComments") }}</Label>
+                      <p class="text-xs text-muted-foreground">{{ t("settings.resultTabPreferCommentsDescription") }}</p>
+                    </div>
+                    <Switch id="result-tab-prefer-comments" v-model="editResultTabPreferComments" />
+                  </div>
+                  <div v-if="editResultTabNamingMode === 'source'" class="flex items-center justify-between gap-4 border-t border-border/60 pt-3">
+                    <div class="space-y-1 pl-1">
+                      <Label for="show-result-source-database">
+                        {{ t("settings.showResultSourceDatabase") }}
+                      </Label>
+                      <p class="text-xs text-muted-foreground">
+                        {{ t("settings.showResultSourceDatabaseDescription") }}
+                      </p>
+                    </div>
+                    <Switch id="show-result-source-database" v-model="editShowResultSourceDatabase" />
+                  </div>
                 </div>
                 <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">

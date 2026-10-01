@@ -1241,6 +1241,29 @@ describe("useDataGridActions", () => {
     expect(tab.resultSortMode).toBe("database");
   });
 
+  it("executes a column sort through the effective ORDER BY channel without exposing the structured part in the input", async () => {
+    const tab = tableDataTab({
+      resultPageLimit: 7,
+      tableMeta: {
+        schema: "public",
+        tableName: "users",
+        tableType: "TABLE",
+        columns: [
+          { name: "sort_value", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+          { name: "created_at", data_type: "timestamp", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+        ],
+        primaryKeys: [],
+      },
+    });
+    mocks.buildTableSelectSql.mockResolvedValueOnce("SELECT sorted");
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onSort(tab.id, "sort_value", 0, "asc", undefined, "database", '"sort_value" ASC, "created_at" DESC');
+
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ orderBy: '"sort_value" ASC, "created_at" DESC', limit: 7, offset: 0 }));
+    expect(tab.orderByInput).toBe('"sort_value" ASC');
+  });
+
   it("clears paginated table sorting by querying the first page without the generated order", async () => {
     const tab = tableDataTab({
       resultSortColumn: "sort_value",

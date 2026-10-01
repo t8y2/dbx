@@ -169,6 +169,7 @@ export function useSidebarDataOpenRuntime() {
       tab.schema = tableSchema;
       tab.whereInput = undefined;
       tab.orderByInput = undefined;
+      tab.structuredOrderByInput = undefined;
       tab.previewSql = undefined;
       tab.resultSortColumn = undefined;
       tab.resultSortColumnIndex = undefined;

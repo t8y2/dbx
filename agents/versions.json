@@ -27,6 +27,7 @@
   "nebula": "0.1.0",
   "oceanbase-oracle": "0.1.68",
   "oracle": "0.1.66",
+  "oracle-oci": "0.1.0",
   "snowflake": "0.1.71",
   "sqlite-worker": "0.1.5",
   "spanner": "0.1.24",

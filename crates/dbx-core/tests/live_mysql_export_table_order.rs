@@ -103,6 +103,7 @@ async fn live_mysql_database_export_table_order_is_not_alphabetical_when_fk_reor
         prevent_overwrite: false,
         output_compression: Default::default(),
         insert_dialect: Default::default(),
+        insert_mode: Default::default(),
         snapshot_session_id: None,
         batch_size: 1000,
         split_max_mb: None,

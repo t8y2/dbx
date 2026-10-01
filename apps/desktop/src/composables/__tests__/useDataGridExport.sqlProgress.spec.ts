@@ -15,6 +15,8 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 vi.mock("@/lib/backend/api", () => ({
   startQueryResultExport: vi.fn(),
   cancelQueryResultExport: vi.fn(),
+  createQueryResultTempFile: vi.fn().mockResolvedValue("/tmp/dbx-query-results/result.xlsx"),
+  openQueryResultTempFile: vi.fn(),
 }));
 
 vi.mock("@/composables/useToast", () => ({
@@ -165,5 +167,23 @@ describe("query result SQL export progress", () => {
     await state.exportJson();
 
     expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ format: "json", sql: "SELECT id, name FROM users" }), expect.any(Function));
+  });
+});
+
+describe("open query result as XLSX", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it.each(["Done", "Cancelled"] as const)("only opens a completed export (%s)", async (status) => {
+    vi.clearAllMocks();
+    vi.stubGlobal("document", undefined);
+    vi.mocked(api.startQueryResultExport).mockImplementation(async (request, onProgress) => {
+      const progress = { exportId: request.exportId, tableName: "", rowsExported: 1, totalRows: 1, status, errorMessage: null };
+      onProgress(progress);
+      return progress;
+    });
+    await useDataGridExport(createOptions()).openXlsx();
+    expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ format: "xlsx", filePath: "/tmp/dbx-query-results/result.xlsx" }), expect.any(Function));
+    if (status === "Done") expect(api.openQueryResultTempFile).toHaveBeenCalledWith("/tmp/dbx-query-results/result.xlsx");
+    else expect(api.openQueryResultTempFile).not.toHaveBeenCalled();
   });
 });

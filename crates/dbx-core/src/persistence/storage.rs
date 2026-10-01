@@ -207,12 +207,20 @@ pub struct Storage {
     /// round-trips to the OS credential store, so hydrating N stored secrets
     /// used to mean N credential-store accesses on the startup path.
     secret_codec_cache: Arc<Mutex<Option<CachedSecretCodec>>>,
+    /// A failed platform lookup is cached for the startup boundary as well.
+    /// Without this, each consumer can prompt a locked Secret Service again.
+    secret_key_error_cache: Arc<Mutex<Option<CachedSecretKeyError>>>,
     migration_failure: Arc<Mutex<Option<MigrationFailure>>>,
 }
 
 /// Key material plus the digest of every key file it was resolved from.
 struct CachedSecretCodec {
     codec: SecretCodec,
+    key_files: Vec<(PathBuf, Option<[u8; 32]>)>,
+}
+
+struct CachedSecretKeyError {
+    error: String,
     key_files: Vec<(PathBuf, Option<[u8; 32]>)>,
 }
 
@@ -1301,6 +1309,7 @@ impl Storage {
             secret_key_policy: SecretKeyPolicy::PlatformDefault,
             secret_key_creation_allowed: true,
             secret_codec_cache: Arc::new(Mutex::new(None)),
+            secret_key_error_cache: Arc::new(Mutex::new(None)),
             migration_failure: Arc::new(Mutex::new(None)),
         };
         // Best-effort: switching journal mode is itself a lock-sensitive
@@ -1339,7 +1348,27 @@ impl Storage {
     }
 
     fn resolve_secret_key(&self, allow_create: bool) -> Result<SecretKeyResolution, String> {
-        SecretCodec::resolve(self.secret_key_policy, self.data_dir(), allow_create)
+        if !allow_create {
+            let key_files = self.key_file_digests();
+            let mut cache = self.secret_key_error_cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(cached) = cache.as_ref() {
+                if cached.key_files == key_files {
+                    return Err(cached.error.clone());
+                }
+                *cache = None;
+            }
+        }
+        let resolved = SecretCodec::resolve(self.secret_key_policy, self.data_dir(), allow_create)?;
+        // A fresh successful resolve supersedes any cached failure recorded
+        // while the platform store was locked or unavailable, so read-only
+        // callers stop serving the stale error once the provider recovers.
+        *self.secret_key_error_cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        Ok(resolved)
+    }
+
+    fn cache_secret_key_error(&self, error: &str, key_files: Vec<(PathBuf, Option<[u8; 32]>)>) {
+        *self.secret_key_error_cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some(CachedSecretKeyError { error: error.to_string(), key_files });
     }
 
     /// Resolution cost is dominated by the platform credential store, so the
@@ -1389,6 +1418,7 @@ impl Storage {
 
     fn invalidate_secret_codec(&self) {
         *self.secret_codec_cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        *self.secret_key_error_cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 
     /// Digest of every file that can supply key material on its own. Comparing
@@ -1635,6 +1665,11 @@ impl Storage {
         // entry, key file, or change permissions while displaying status.
         let key_files_before = self.key_file_digests();
         let key_probe = self.resolve_secret_key(false);
+        if let Err(error) = key_probe.as_ref() {
+            // Keep one startup probe from being repeated by each subsequent
+            // storage read while the desktop keyring is locked or unavailable.
+            self.cache_secret_key_error(error, key_files_before.clone());
+        }
         let mut key_provider_available = key_probe.is_ok();
         let database_plaintext_count = (plaintext + ai + tunnels).max(0) as usize;
         let has_legacy_data =
@@ -9341,6 +9376,68 @@ mod tests {
         assert_eq!(open_with_resolved_codec(&storage, &envelope).as_deref(), Ok("secret"));
     }
 
+    /// Seeds the read-only error cache the way the startup status probe does
+    /// after a failed platform lookup. The sentinel string cannot be produced
+    /// by a real resolve, so observing it proves the cached error was served
+    /// without consulting the provider again.
+    fn cache_locked_keyring_error(storage: &Storage) {
+        let digests = storage.key_file_digests();
+        storage.cache_secret_key_error("CACHED_KEYRING_LOCKED", digests);
+    }
+
+    async fn storage_with_managed_key(directory: &std::path::Path) -> Storage {
+        let key_path = managed_key_path(directory);
+        std::fs::create_dir_all(key_path.parent().unwrap()).unwrap();
+        std::fs::write(&key_path, "ab".repeat(32)).unwrap();
+        Storage::open_unmigrated(&directory.join("dbx.db"))
+            .await
+            .unwrap()
+            .with_secret_key_policy(SecretKeyPolicy::ManagedDataDir)
+    }
+
+    #[tokio::test]
+    async fn cached_secret_key_error_is_served_to_read_only_resolves() {
+        // One failed startup probe must not be repeated by every subsequent
+        // read-only consumer while the desktop keyring stays locked.
+        let dir = tempfile::tempdir().unwrap();
+        let storage = storage_with_managed_key(dir.path()).await;
+        cache_locked_keyring_error(&storage);
+        assert_eq!(storage.resolve_secret_key(false).err().unwrap(), "CACHED_KEYRING_LOCKED");
+        assert_eq!(storage.secret_codec(false).err().unwrap(), "CACHED_KEYRING_LOCKED");
+
+        // A key file change invalidates the cached error, so the next
+        // read-only resolve consults the provider again.
+        std::fs::write(managed_key_path(dir.path()), "cd".repeat(32)).unwrap();
+        assert!(storage.secret_codec(false).is_ok());
+    }
+
+    #[tokio::test]
+    async fn successful_resolve_clears_cached_secret_key_error() {
+        // Once any resolve succeeds against a recovered provider, the stale
+        // cached failure must be retired instead of outliving the recovery.
+        let dir = tempfile::tempdir().unwrap();
+        let storage = storage_with_managed_key(dir.path()).await;
+        cache_locked_keyring_error(&storage);
+        assert_eq!(storage.resolve_secret_key(false).err().unwrap(), "CACHED_KEYRING_LOCKED");
+        // A create-allowed resolve bypasses the read-only guard; its success
+        // drops the cached error for later read-only callers.
+        assert!(storage.resolve_secret_key(true).is_ok());
+        assert!(storage.resolve_secret_key(false).is_ok());
+        assert!(storage.secret_codec(false).is_ok());
+    }
+
+    #[tokio::test]
+    async fn start_data_migration_invalidates_cached_secret_key_error() {
+        // Migration must re-probe the live provider instead of trusting a
+        // stale failure cached at startup.
+        let dir = tempfile::tempdir().unwrap();
+        let storage = storage_with_managed_key(dir.path()).await;
+        cache_locked_keyring_error(&storage);
+        assert_eq!(storage.resolve_secret_key(false).err().unwrap(), "CACHED_KEYRING_LOCKED");
+        storage.start_data_migration().await.unwrap();
+        assert!(storage.secret_codec(false).is_ok());
+    }
+
     #[tokio::test]
     async fn secret_migration_rejects_wrong_or_invalid_managed_keys_without_replacing_them() {
         let directory = tempfile::tempdir().unwrap();
@@ -10773,6 +10870,8 @@ mod tests {
 
     fn mq_connection(id: &str, token: &str) -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: id.to_string(),
             name: "Pulsar".to_string(),
@@ -10848,6 +10947,8 @@ mod tests {
 
     fn nacos_connection(id: &str, password: &str) -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: id.to_string(),
             name: "Nacos".to_string(),
@@ -11071,7 +11172,10 @@ mod tests {
         let target_dir = temp_data_dir("import-empty-target");
         std::fs::create_dir_all(managed_key_path(&target_dir).parent().unwrap()).unwrap();
         std::fs::copy(managed_key_path(&source_dir), managed_key_path(&target_dir)).unwrap();
-        let _target_storage = crate::persistence::test_storage::open(&target_dir.join("dbx.db")).await.unwrap();
+        // 打开一次以创建空目标库；导入前必须释放，否则 Windows 上目标文件被占用、
+        // 替换会失败（与相邻用例一致）。
+        let target_storage = crate::persistence::test_storage::open(&target_dir.join("dbx.db")).await.unwrap();
+        drop(target_storage);
 
         let result = maybe_import_user_data_db(&target_dir, Some(&source_dir)).unwrap();
 

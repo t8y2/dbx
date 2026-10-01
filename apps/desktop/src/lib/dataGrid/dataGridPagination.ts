@@ -134,3 +134,22 @@ export function dataGridLoadAllSegment(loadedRowCount: number, maxRows: number, 
   if (!canFetchMore || offset >= boundedMaxRows) return null;
   return { offset, limit: boundedMaxRows - offset };
 }
+
+/**
+ * Next chunk of an explicit "load all" run, issued after the previous chunk
+ * completed. The per-request result-row cap bounds each request, not the run:
+ * the button promises every remaining row (the confirm dialog quotes the real
+ * remaining count), so stopping at the cap left tables half-loaded (#10752).
+ * The run ends only when the server returns fewer rows than requested, when a
+ * known total has been reached, or when a chunk appends nothing (loop guard).
+ */
+export function dataGridLoadAllNextSegment(options: { loadedRowCount: number; requestedOffset: number; requestedLimit: number; totalRowCount?: number }): DataGridLoadAllSegment | null {
+  const loadedRowCount = Number.isFinite(options.loadedRowCount) ? Math.max(0, Math.trunc(options.loadedRowCount)) : 0;
+  const requestedLimit = Number.isFinite(options.requestedLimit) ? Math.max(0, Math.trunc(options.requestedLimit)) : 0;
+  if (requestedLimit <= 0) return null;
+  const appendedRows = loadedRowCount - Math.max(0, Math.trunc(options.requestedOffset));
+  if (appendedRows < requestedLimit) return null;
+  const totalRowCount = typeof options.totalRowCount === "number" && Number.isFinite(options.totalRowCount) && options.totalRowCount >= 0 ? Math.trunc(options.totalRowCount) : undefined;
+  if (totalRowCount !== undefined && loadedRowCount >= totalRowCount) return null;
+  return { offset: loadedRowCount, limit: totalRowCount !== undefined ? Math.min(requestedLimit, totalRowCount - loadedRowCount) : requestedLimit };
+}

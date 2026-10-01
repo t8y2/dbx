@@ -237,8 +237,27 @@ jobs:
             cc="$(ls /c/ProgramData/chocolatey/lib/mingw/tools/install/mingw64/bin/gcc.exe | head -1)"
           fi
           mkdir -p instantclient
-          curl -fsSL -o ic-basic.zip "https://download.oracle.com/otn_software/nt/instantclient/2326300/instantclient-basic-windows.x64-23.26.3.0.0.zip"
-          curl -fsSL -o ic-sdk.zip "https://download.oracle.com/otn_software/nt/instantclient/2326300/instantclient-sdk-windows.x64-23.26.3.0.0.zip"
+          # Oracle's CDN intermittently answers runner IPs with an HTML page
+          # (HTTP 200) instead of the archive; validate the zip magic and retry
+          # with diagnostics so a bad response fails loudly instead of
+          # surfacing later as "tar: This does not look like a tar archive".
+          fetch_ic() {
+            local name="$1" url="$2"
+            for attempt in 1 2 3; do
+              curl -fSL --retry 5 --retry-delay 5 --retry-all-errors -o "$name" "$url" || true
+              if [ "$(head -c 2 "$name" 2>/dev/null)" = "PK" ]; then
+                echo "$name: $(wc -c < "$name") bytes, zip magic OK (attempt $attempt)"
+                return 0
+              fi
+              echo "::warning::$name attempt $attempt was not a zip; first 200 bytes:"
+              head -c 200 "$name" 2>/dev/null || echo "(no file written)"
+              sleep 10
+            done
+            echo "::error::$name could not be downloaded as a valid zip after 3 attempts"
+            return 1
+          }
+          fetch_ic ic-basic.zip "https://download.oracle.com/otn_software/nt/instantclient/2326300/instantclient-basic-windows.x64-23.26.3.0.0.zip"
+          fetch_ic ic-sdk.zip "https://download.oracle.com/otn_software/nt/instantclient/2326300/instantclient-sdk-windows.x64-23.26.3.0.0.zip"
           tar -xf ic-basic.zip -C instantclient
           tar -xf ic-sdk.zip -C instantclient
           ic_dir="$(ls -d "${GITHUB_WORKSPACE}/instantclient"/instantclient_* | head -1)"

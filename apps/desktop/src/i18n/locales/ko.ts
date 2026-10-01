@@ -3505,6 +3505,8 @@ export default withEnglishFallback({
     templateSelectorDeselectAll: "모두 선택 해제",
     templateSelectorLoading: "불러오는 중...",
     skillsEntry: "Skills",
+    skillsSelectAll: "모두 선택",
+    skillsDeselectAll: "모두 선택 해제",
     skillsLoading: "Skills 을(를) 로드하는 중…",
     skillsEmpty: "사용 가능한 Skills 이(가) 없습니다",
     skillsRefresh: "목록 새로 고침",

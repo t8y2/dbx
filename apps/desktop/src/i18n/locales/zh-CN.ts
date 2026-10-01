@@ -3713,6 +3713,8 @@ export default withEnglishFallback({
     templateSelectorDeselectAll: "全不选",
     templateSelectorLoading: "加载中...",
     skillsEntry: "Skills",
+    skillsSelectAll: "全选",
+    skillsDeselectAll: "取消全选",
     skillsLoading: "正在加载 Skills…",
     skillsEmpty: "未发现可用 Skill",
     skillsRefresh: "刷新列表",

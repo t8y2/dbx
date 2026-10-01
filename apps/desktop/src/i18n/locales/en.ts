@@ -3801,6 +3801,8 @@ export default {
     templateSelectorDeselectAll: "Deselect All",
     templateSelectorLoading: "Loading...",
     skillsEntry: "Skills",
+    skillsSelectAll: "Select all",
+    skillsDeselectAll: "Deselect all",
     skillsLoading: "Loading skills…",
     skillsEmpty: "No skills discovered yet",
     skillsRefresh: "Refresh",

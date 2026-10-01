@@ -3420,6 +3420,8 @@ export default withEnglishFallback({
     templateSelectorDeselectAll: "Bütün seçimləri ləğv et",
     templateSelectorLoading: "Yüklənir...",
     skillsEntry: "Skills",
+    skillsSelectAll: "Hamısını seç",
+    skillsDeselectAll: "Bütün seçimləri ləğv et",
     skillsLoading: "Skills yüklənir…",
     skillsEmpty: "Hələ skill tapılmadı",
     skillsRefresh: "Siyahını yenilə",

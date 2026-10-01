@@ -3504,6 +3504,8 @@ export default withEnglishFallback({
     templateSelectorDeselectAll: "すべて解除",
     templateSelectorLoading: "読み込み中...",
     skillsEntry: "Skills",
+    skillsSelectAll: "すべて選択",
+    skillsDeselectAll: "選択をすべて解除",
     skillsLoading: "Skills を読み込み中…",
     skillsEmpty: "利用可能な Skills がありません",
     skillsRefresh: "一覧を更新",

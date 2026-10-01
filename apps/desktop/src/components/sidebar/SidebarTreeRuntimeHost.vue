@@ -2792,7 +2792,7 @@ function requestDropTableChildObject() {
 }
 
 function canDropTreeNode(node: TreeNode): boolean {
-  if (databaseTypeForNode(node) === "nebula") return false;
+  if (["neo4j", "nebula"].includes(databaseTypeForNode(node) || "")) return false;
   if (isSqlServerLinkedNode(node)) return false;
   if (node.type === "table") return !!node.connectionId && !!node.database;
   if (node.type === "view" || node.type === "materialized_view" || node.type === "procedure" || node.type === "function" || node.type === "event") {
@@ -3135,7 +3135,7 @@ function requestDropSelectedNodes(): boolean {
 }
 
 function requestDropSelectedNode(): boolean {
-  if (currentDatabaseType() === "nebula") return false;
+  if (["neo4j", "nebula"].includes(currentDatabaseType() || "")) return false;
   if (activeNode.value.type === "table") {
     dropTable();
     return true;
@@ -4760,7 +4760,7 @@ const canOpenSqlFileExecution = computed(() => {
 const canExportAllDatabases = computed(() => {
   if (activeNode.value.type !== "connection" || !activeNode.value.connectionId) return false;
   const dbType = connectionStore.getConfig(activeNode.value.connectionId)?.db_type;
-  return !["redis", "mongodb", "dynamodb", "elasticsearch", "easysearch", "meilisearch", "solr", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos", "plugin", "salesforce", "nebula"].includes(dbType || "");
+  return !["redis", "mongodb", "dynamodb", "elasticsearch", "easysearch", "meilisearch", "solr", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos", "plugin", "salesforce", "neo4j", "nebula"].includes(dbType || "");
 });
 
 const canOpenScheduledBackups = computed(() => {
@@ -5867,15 +5867,17 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       });
       return true;
     }
-    if (currentDatabaseType() === "nebula" && node.type === "database") {
+    if (["neo4j", "nebula"].includes(currentDatabaseType() || "") && node.type === "database") {
       if (canCloseDatabaseConnection.value) items.push({ label: t("contextMenu.closeDatabaseConnection"), action: closeDatabaseConnection, icon: Unplug });
       items.push(copyNameMenuItem());
       items.push({ label: "", separator: true });
       if (canOpenObjectBrowser.value) items.push({ label: t("contextMenu.openObjectBrowser"), action: openObjectBrowser, icon: TableProperties });
       items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      if (supportsAiAssistantContext(currentDatabaseType())) items.push(addToAiMenuItem(node));
       const sqlHistoryMenu = savedSqlHistorySubmenu();
       if (sqlHistoryMenu) items.push(sqlHistoryMenu);
       items.push({ label: isNodeDefaultDatabase.value ? t("contextMenu.clearDefaultDatabase") : t("contextMenu.setDefaultDatabase"), action: isNodeDefaultDatabase.value ? clearNodeDefaultDatabase : setNodeAsDefaultDatabase, icon: Database });
+      if (canOpenSqlFileExecution.value) items.push({ label: t("sqlFile.title"), action: openSqlFileExecution, icon: FileCode });
       items.push({ label: "", separator: true });
       items.push({ label: t("contextMenu.refreshChildren"), action: refresh, icon: RefreshCw, shortcut: shortcutRefresh });
       return true;
@@ -6286,13 +6288,15 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       appendPluginTableMenuItems(items, node);
       return true;
     }
-    if (currentDatabaseType() === "nebula") {
+    if (["neo4j", "nebula"].includes(currentDatabaseType() || "")) {
       items.push(copyNameMenuItem());
       items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      if (supportsAiAssistantContext(currentDatabaseType())) items.push(addToAiMenuItem(node));
       items.push({ label: "", separator: true });
       items.push({ label: t("contextMenu.viewData"), action: openDataImmediately, icon: TableProperties });
       items.push({ label: t("contextMenu.openInNewDataTab"), action: openDataInNewTabImmediately, icon: CopyPlus, shortcut: shortcutOpenDataInNewTab.value });
-      items.push({ label: t("contextMenu.viewDdl"), action: openDdl, icon: FileCode });
+      if (currentDatabaseType() === "nebula") items.push({ label: t("contextMenu.viewDdl"), action: openDdl, icon: FileCode });
+      if (currentDatabaseType() === "neo4j") items.push(exportDataSubmenu(false));
       const sqlHistoryMenu = savedSqlHistorySubmenu();
       if (sqlHistoryMenu) items.push(sqlHistoryMenu);
       items.push({ label: "", separator: true });
@@ -6652,7 +6656,8 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
     const mysqlObjectTemplate = node.connectionId ? mysqlObjectTemplateForGroup(connectionStore.getConfig(node.connectionId), node) : null;
     const hasMongoCreateIndexAction = node.type === "group-indexes" && canCreateMongoIndex.value;
     const hasMongoDropAllIndexesAction = node.type === "group-indexes" && canDropAllMongoIndexes.value;
-    const hasGroupAction = (node.type === "group-tables" && canCreateTable.value) || (node.type === "group-views" && !!node.connectionId && !!node.database && currentDatabaseType() !== "nebula") || !!mysqlObjectTemplate || hasMongoCreateIndexAction || hasMongoDropAllIndexesAction;
+    const canCreateGroupView = node.type === "group-views" && !!node.connectionId && !!node.database && !["neo4j", "nebula"].includes(currentDatabaseType() || "");
+    const hasGroupAction = (node.type === "group-tables" && canCreateTable.value) || canCreateGroupView || !!mysqlObjectTemplate || hasMongoCreateIndexAction || hasMongoDropAllIndexesAction;
     const canLoadAllObjectGroup = node.type === "group-tables" || node.type === "group-dolt-system-tables" || node.type === "group-views" || node.type === "group-materialized-views";
     if (node.type === "group-tables" && canCreateTable.value) {
       items.push({ label: t("contextMenu.createTable"), action: createTable, icon: Plus });
@@ -6663,7 +6668,7 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
         items.push({ label: t("contextMenu.pasteTable"), action: openPasteTableDialog, icon: Clipboard });
       }
     }
-    if (node.type === "group-views" && node.connectionId && node.database && currentDatabaseType() !== "nebula") {
+    if (canCreateGroupView) {
       items.push({ label: t("contextMenu.createView"), action: createView, icon: Plus });
     }
     if (node.type === "group-events" && node.connectionId && node.database) {

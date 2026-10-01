@@ -268,6 +268,7 @@ export function supportsTableTruncate(dbType?: DatabaseType): boolean {
     dbType !== "victoriametrics" &&
     dbType !== "manticoresearch" &&
     dbType !== "salesforce" &&
+    dbType !== "neo4j" &&
     dbType !== "nebula"
   );
 }

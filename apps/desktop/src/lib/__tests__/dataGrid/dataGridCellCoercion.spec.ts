@@ -64,6 +64,13 @@ describe("dataGridCellDisplayText", () => {
 });
 
 describe("coerceDataGridCellValue", () => {
+  it.each(["Integer", "Long", "int"])("keeps Neo4j %s edits as exact text for the Cypher builder", (data_type) => {
+    for (const value of ["1001", "9007199254740999", "9223372036854775807", "-9223372036854775808"]) {
+      expect(coerceDataGridCellValue({ value, oldValue: "1", databaseType: "neo4j", columnInfo: { data_type } })).toBe(value);
+      expect(coerceDataGridCellValue({ value: `${value}\n`, oldValue: "1", databaseType: "neo4j", columnInfo: { data_type } })).toBe(value);
+    }
+  });
+
   it.each(["null", "NULL", "Null", "nUlL"])("preserves literal %s input as text", (value) => {
     expect(
       coerceDataGridCellValue({

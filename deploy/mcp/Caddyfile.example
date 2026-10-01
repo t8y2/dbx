@@ -1,9 +1,27 @@
+# Caddy 2.11.4 is verified by scripts/test-mcp-https.py.
 # Configure real DNS and valid HTTPS before exposing this service.
 # Keep the upstream on loopback; never publish port 5225 directly.
+{
+    servers {
+        # Forward an early 401/408/413 before a slow HTTP/1 client finishes
+        # uploading its body. Bound header/body reads without timing out SSE.
+        enable_full_duplex
+        timeouts {
+            read_header 5s
+            read_body 10s
+            idle 2m
+        }
+    }
+}
+
 dbx.example.com {
     @mcp path /mcp /mcp/* /.well-known/oauth-protected-resource/mcp
-    reverse_proxy @mcp 127.0.0.1:5225 {
-        flush_interval -1
+    handle @mcp {
+        reverse_proxy 127.0.0.1:5225 {
+            flush_interval -1
+        }
     }
-    respond 404
+    handle {
+        respond 404
+    }
 }

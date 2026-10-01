@@ -11,6 +11,9 @@ UMask=0077
 StateDirectory=dbx
 StateDirectoryMode=0700
 Environment=DBX_DATA_DIR=/var/lib/dbx
+# Required for the keyring-less service after provisioning its dedicated profile.
+# Set the protected path, never the key itself; preserve the profile's existing key.
+# Environment=DBX_SECRET_KEY_FILE=/etc/dbx/profile.key
 Environment=DBX_MCP_OAUTH_CONFIG_FILE=/etc/dbx/oauth.json
 Environment=DBX_MCP_HTTP_ALLOWED_HOSTS=dbx.example.com
 # Set only exact trusted browser origins when needed. Server-to-server clients

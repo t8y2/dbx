@@ -64,6 +64,27 @@ The provider controls access/refresh token issuance and revocation.
 
 ## Run behind HTTPS
 
+Use the current `Caddyfile.example` from this directory. The initial
+`fork-remote-mcp-2026-09-30` archive included an older example whose unconditional
+`respond 404` ran before its proxy route. Replace that example; the service
+binary itself does not need rebuilding for this deployment correction.
+
+The example uses mutually exclusive [Caddy `handle` blocks](https://caddyserver.com/docs/caddyfile/directives/handle)
+so `/mcp` and protected-resource discovery reach DBX while other paths, including
+health/readiness probes, return 404 at the proxy. Its
+[`enable_full_duplex` setting](https://caddyserver.com/docs/caddyfile/options#enable-full-duplex)
+allows early HTTP/1 401/408/413 responses before an incomplete upload ends.
+Header/body/idle timeouts bound slow readers without imposing a short response
+write timeout on SSE. Merge these server options into an existing global block
+if this proxy also serves other sites. The example was verified with Caddy 2.11.4.
+
+The keyring-less Linux service also needs an explicitly configured profile key,
+for example `DBX_SECRET_KEY_FILE` pointing to an owner-readable protected file.
+Provision or migrate the dedicated profile using DBX's supported data-security
+workflow first. Keep its existing key: generating a replacement key for an
+existing profile can make saved secrets unreadable. Do not put key material in
+command arguments, source, logs, or release assets.
+
 Run locally first, using the supplied service example as a deployment template:
 
 ```sh
@@ -143,6 +164,44 @@ cargo test -p dbx-mcp --locked --no-default-features --features duckdb-sidecar,s
 cargo build -p dbx-cli -p dbx-mcp --locked --no-default-features --features dbx-cli/duckdb-sidecar,dbx-mcp/sqlite-bundled
 ```
 
-Tests generate an ephemeral RSA signing key in memory and use loopback HTTP with
+Rust tests generate an ephemeral RSA signing key in memory and use loopback HTTP with
 synthetic backends. They require no real identity provider, profile, database,
 exported connection file, or credentials. Verify release checksums before use.
+
+### Released-binary HTTPS regression
+
+This optional smoke test runs the actual `Caddyfile.example` and a supplied
+`dbx-mcp` binary. It keeps the production route/timeout configuration and changes
+only fixture host/ports, loopback binding, an ephemeral certificate, and private
+Caddy settings (no admin API, public ACME, HTTP/3, or system trust installation).
+The test CA is trusted only by the Python client. Profiles, signing keys and
+certificates are generated at test time in an owner-only temporary directory and
+removed when the test exits. No generated keys, profiles or reports belong in Git.
+
+Use Python 3.10+ and an existing Caddy 2.11.4 installation from its official
+release. Install the optional test dependencies in a virtual environment:
+
+```sh
+python3 -m venv /tmp/dbx-https-test
+/tmp/dbx-https-test/bin/pip install 'aiohttp==3.13.5' 'cryptography==50.0.0'
+/tmp/dbx-https-test/bin/python scripts/test-mcp-https.py /path/to/dbx-mcp \
+  --caddy /path/to/caddy --protocol 2025-11-25 --report /tmp/dbx-https-2025-11-25.json
+/tmp/dbx-https-test/bin/python scripts/test-mcp-https.py /path/to/dbx-mcp \
+  --caddy /path/to/caddy --protocol 2025-06-18 --report /tmp/dbx-https-2025-06-18.json
+```
+
+The report includes executable hashes and observable TLS 1.2/1.3, certificate
+CA/hostname rejection, HTTPS metadata/audience/challenges, token rejections,
+origin/host/body boundaries, incomplete uploads, initialize/list/call, principal
+session isolation, live SSE and DELETE cleanup. The proxy fallback is exercised
+against `/`, `/healthz`, `/readyz`, and an unknown path. `--caddyfile` can select an
+older or proposed deployment example to reproduce a configuration regression.
+Only the example's supported directives are accepted; unexpected sites, imports,
+listeners, or upstreams fail closed before Caddy starts.
+
+These checks verify loopback HTTP and real encrypted proxy-to-client traffic,
+including both listed MCP protocol versions. They do not test public ingress,
+DNS/ACME provisioning, a real identity provider, HTTP/2/3 client behavior, live
+databases, or a ChatGPT/dot connection. Do not describe them as a public deployment
+or end-to-end OAuth login test. DBX itself remains a plaintext loopback listener;
+TLS terminates at the same-host proxy. No gRPC transport is added.

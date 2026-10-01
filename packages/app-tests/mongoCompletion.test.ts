@@ -1062,6 +1062,63 @@ test("completes enumerated string values in and out of quotes", () => {
   );
 });
 
+test("suggests values that fit query operators and remaining fixed value sets", () => {
+  // $exists takes only a boolean: true / false outside quotes, none inside quotes
+  assert.deepEqual(labels("db.users.find({ name: { $exists: ", { fields }), ["true", "false"]);
+  assert.deepEqual(labels('db.users.find({ name: { $exists: "', { fields }), []);
+
+  // $size takes a non-negative integer: none
+  assert.deepEqual(labels("db.users.find({ name: { $size: ", { fields }), []);
+  assert.deepEqual(labels('db.users.find({ name: { $size: "', { fields }), []);
+
+  // $mod takes numbers: none outside and inside brackets
+  assert.deepEqual(labels("db.users.find({ name: { $mod: ", { fields }), []);
+  assert.deepEqual(labels("db.users.find({ name: { $mod: [", { fields }), []);
+  assert.deepEqual(labels('db.users.find({ name: { $mod: "', { fields }), []);
+
+  // $regex offers a /pattern/ regex literal snippet outside quotes, none inside quotes
+  assert.deepEqual(labels("db.users.find({ name: { $regex: ", { fields }), ["/pattern/"]);
+  const regexItem = buildMongoCompletionItems("db.users.find({ name: { $regex: ", "db.users.find({ name: { $regex: ".length, { fields })[0];
+  assert.equal(regexItem?.label, "/pattern/");
+  assert.equal(regexItem?.type, "snippet");
+  assert.equal(regexItem?.apply, "/${pattern}/");
+  assert.deepEqual(labels('db.users.find({ name: { $regex: "', { fields }), []);
+
+  // $options stays as is
+  assert.deepEqual(labels('db.users.find({ name: { $regex: "a", $options: "', { fields }), ["i", "m", "x", "s", "u"]);
+  assert.deepEqual(labels("db.users.find({ name: { $regex: 'a', $options: ", { fields }), ["i", "m", "x", "s", "u"]);
+
+  // $text boolean options -> true/false; $language -> common codes/names + none
+  assert.deepEqual(labels("db.users.find({ $text: { $caseSensitive: "), ["true", "false"]);
+  assert.deepEqual(labels('db.users.find({ $text: { $caseSensitive: "'), []);
+  assert.deepEqual(labels("db.users.find({ $text: { $diacriticSensitive: "), ["true", "false"]);
+  assert.deepEqual(labels('db.users.find({ $text: { $diacriticSensitive: "'), []);
+  const textLanguages = labels('db.users.find({ $text: { $language: "');
+  for (const code of ["none", "en", "fr", "de", "es", "it", "pt", "ru", "english", "spanish"]) {
+    assert.ok(textLanguages.includes(code), `expected $language to include ${code}`);
+  }
+  assert.ok(labels("db.users.find({ $text: { $language: ").includes("en"));
+
+  // $elemMatch remains unchanged (completing filter fields inside its object)
+  assert.deepEqual(labels("db.users.find({ items: { $elemMatch: { ", { fields }).slice(0, 3), ["_id", "createdAt", "name"]);
+
+  // $gt / $eq / $in still offer the full value list (ObjectId, ISODate, etc.)
+  const gtValues = labels("db.users.find({ age: { $gt: ", { fields });
+  for (const expected of ["ObjectId", "ISODate", "new Date", "NumberLong", "NumberInt", "NumberDecimal", "UUID", "BinData", "Timestamp", "MinKey", "MaxKey", "null", "true", "false"]) {
+    assert.ok(gtValues.includes(expected), `expected $gt to include ${expected}`);
+  }
+  const inValues = labels("db.users.find({ age: { $in: [", { fields });
+  for (const expected of ["ObjectId", "ISODate", "NumberInt"]) {
+    assert.ok(inValues.includes(expected), `expected $in to include ${expected}`);
+  }
+
+  // $merge whenMatched and whenNotMatched options
+  assert.deepEqual(labels('db.users.aggregate([{ $merge: { whenMatched: "'), ["replace", "keepExisting", "merge", "fail"]);
+  assert.deepEqual(labels("db.users.aggregate([{ $merge: { whenMatched: "), ["replace", "keepExisting", "merge", "fail"]);
+  assert.deepEqual(labels('db.users.aggregate([{ $merge: { whenNotMatched: "'), ["insert", "discard", "fail"]);
+  assert.deepEqual(labels("db.users.aggregate([{ $merge: { whenNotMatched: "), ["insert", "discard", "fail"]);
+});
+
 test("completes the collation document wherever it appears", () => {
   const keys = ["alternate", "backwards", "caseFirst", "caseLevel", "locale", "maxVariable", "normalization", "numericOrdering", "strength"];
   assert.deepEqual(labels("db.users.find({}).collation({ "), keys);
@@ -1073,7 +1130,8 @@ test("completes the collation document wherever it appears", () => {
   assert.deepEqual(labels("db.users.find({}).collation({ strength: "), ["1", "2", "3", "4", "5"]);
   // Numbers are not offered inside a quote.
   assert.deepEqual(labels('db.users.find({}).collation({ strength: "'), []);
-  assert.deepEqual(labels('db.users.find({}).collation({ locale: "'), []);
+  assert.deepEqual(labels('db.users.find({}).collation({ locale: "'), ["simple", "en", "fr", "de", "es", "pt", "it", "ru", "zh", "ja", "ko", "ar"]);
+  assert.deepEqual(labels("db.users.find({}).collation({ locale: "), ["simple", "en", "fr", "de", "es", "pt", "it", "ru", "zh", "ja", "ko", "ar"]);
   // The chain continues after collation(), and collation() is a find-cursor method only.
   assert.deepEqual(labels('db.users.find({}).collation({ locale: "en" }).'), ["limit", "sort", "skip", "explain", "collation", "toArray", "pretty"]);
   assert.deepEqual(labels("db.users.aggregate([])."), ["toArray", "pretty"]);
@@ -1129,12 +1187,18 @@ test("every suggested sub-document key and enumerated value parses in the positi
     unit: (value) => `db.users.aggregate([{ $densify: { field: "t", range: { step: 1, unit: ${value} } } }])`,
     bounds: (value) => `db.users.aggregate([{ $densify: { field: "t", range: { step: 1, bounds: ${value} } } }])`,
     fillMethod: (value) => `db.users.aggregate([{ $fill: { output: { score: { method: ${value} } } } }])`,
+    boolean: (value) => `db.users.find({ a: { $exists: ${value} } })`,
+    $regex: (value) => `db.users.find({ a: { $regex: ${value} } })`,
+    $language: (value) => `db.users.find({ $text: { $search: "x", $language: ${value} } })`,
+    locale: (value) => `db.users.find({}).collation({ locale: ${value} })`,
+    whenMatched: (value) => `db.users.aggregate([{ $merge: { into: "out", whenMatched: ${value} } }])`,
+    whenNotMatched: (value) => `db.users.aggregate([{ $merge: { into: "out", whenNotMatched: ${value} } }])`,
   };
   for (const [enumKey, values] of Object.entries(ENUM_VALUES)) {
     const build = valueCommands[enumKey];
     assert.ok(build, `${enumKey} needs a sample command in this test`);
     for (const value of values) {
-      const command = build(value.apply);
+      const command = build(render(value.apply));
       assert.ok(parseMongoCommand(command), `${command} must parse`);
     }
   }

@@ -1270,6 +1270,8 @@ export type QueryResultSourceLabelKind = "source" | "comment";
 
 export interface QueryResult {
   columns: string[];
+  /** Typed Neo4j node properties; source columns remain unchanged for paging. */
+  neo4j_node_cells?: import("@/lib/neo4j/neo4jNodeResult").Neo4jNodeCell[];
   /** One SRID per geometry/geography column (first non-null observed). */
   spatial_columns?: SpatialColumn[];
   /**

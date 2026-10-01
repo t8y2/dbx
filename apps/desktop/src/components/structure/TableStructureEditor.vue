@@ -35,7 +35,8 @@ import { type SqlHighlighter, createShikiSqlHighlighter } from "@/lib/sql/sqlHig
 import { joinSqlStatementsForScript } from "@/lib/sql/sqlBatchScript";
 import { applyDdlDatabaseQualifier, formatDdlForDisplay, formatGeneratedDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
-import { copyToClipboard } from "@/lib/common/clipboard";
+import { copyToClipboard, eventTargetUsesNativeClipboard, isPlainClipboardShortcut } from "@/lib/common/clipboard";
+import { formatTsv } from "@/lib/export/exportFormats";
 import DataGridCopyColumnNamesDialog from "@/components/grid/DataGridCopyColumnNamesDialog.vue";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { queryTimeoutSecsForConcurrentIndex, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
@@ -1234,6 +1235,11 @@ const selectedColumnId = ref<string | null>(null);
 // new rows are inserted and which row copy/add operations anchor to.
 const selectedColumnIds = ref<Set<string>>(new Set());
 const columnSelectionAnchorId = ref<string | null>(null);
+// The editable field rows have their own selection state for batch structure
+// operations. Header selection is a separate mode so clipboard actions do not
+// accidentally apply row copy/drop operations to the field rows.
+const selectedStructureColumnKeys = ref<Set<string>>(new Set());
+const structureColumnSelectionAnchorKey = ref<string | null>(null);
 const highlightedColumnId = ref<string | null>(null);
 const indexSearchInputRef = ref<InstanceType<typeof Input>>();
 const indexSearchText = ref("");
@@ -1506,6 +1512,123 @@ const colLabels = computed(() => {
   }
   return labels;
 });
+
+const copyableStructureColumnLabels = computed(() => colLabels.value.filter((label) => label.key !== "actions"));
+
+function structureColumnSelectionClass(key: string): string {
+  return key !== "actions" && selectedStructureColumnKeys.value.has(key) ? "structure-grid-column-selected" : "";
+}
+
+function structureColumnClipboardValue(column: EditableStructureColumn, key: string): string {
+  switch (key) {
+    case "name":
+      return column.name;
+    case "type":
+      return gaussdbMDataTypeDisplayName(dataTypeBaseInputValue(databaseType.value, column.dataType));
+    case "length": {
+      if (isMysqlEnumDataType(databaseType.value, column.dataType)) return (column.enumValues ?? []).join(", ");
+      if (isPostgresGeometryDataType(databaseType.value, column.dataType)) {
+        return [postgresGeometryTypeValue(column.dataType), postgresGeometrySridValue(column.dataType)].filter(Boolean).join(", ");
+      }
+      return [dataTypeLengthInputValue(databaseType.value, column.dataType), dataTypeLengthUnitValue(databaseType.value, column.dataType)].filter(Boolean).join(" ");
+    }
+    case "nullable":
+      return column.isNullable ? t("structureEditor.yes") : t("structureEditor.no");
+    case "primaryKey":
+      return column.isPrimaryKey ? t("structureEditor.yes") : t("structureEditor.no");
+    case "defaultValue":
+      return column.defaultValue;
+    case "comment":
+      return column.comment;
+    case "characterSet":
+      return columnCharset(column);
+    case "collation":
+      return columnCollation(column);
+    case "extendedProperties":
+      return Object.entries(column.extra)
+        .filter(([, value]) => value !== undefined && value !== false && value !== "")
+        .map(([name, value]) => `${name}: ${typeof value === "object" ? JSON.stringify(value) : String(value)}`)
+        .join("; ");
+    default:
+      return "";
+  }
+}
+
+function structureColumnClipboardText(): string {
+  const labels = copyableStructureColumnLabels.value.filter((label) => selectedStructureColumnKeys.value.has(label.key));
+  if (labels.length === 0) return "";
+  const rows = columns.value.filter((column) => !column.markedForDrop).map((column) => labels.map((label) => structureColumnClipboardValue(column, label.key)));
+  return formatTsv(
+    labels.map((label) => label.label),
+    rows,
+    "",
+  );
+}
+
+function setStructureColumnSelection(keys: Iterable<string>, anchorKey: string | null) {
+  // Clears first: setColumnSelection also resets the header-column keys.
+  clearColumnSelection();
+  selectedStructureColumnKeys.value = new Set(keys);
+  structureColumnSelectionAnchorKey.value = anchorKey;
+}
+
+function selectStructureColumnKey(key: string, event: MouseEvent) {
+  if (key === "actions") return;
+  const labels = copyableStructureColumnLabels.value;
+  const index = labels.findIndex((label) => label.key === key);
+  if (index < 0) return;
+
+  if (event.shiftKey && structureColumnSelectionAnchorKey.value) {
+    const anchorIndex = labels.findIndex((label) => label.key === structureColumnSelectionAnchorKey.value);
+    if (anchorIndex >= 0) {
+      const start = Math.min(anchorIndex, index);
+      const end = Math.max(anchorIndex, index);
+      setStructureColumnSelection(
+        labels.slice(start, end + 1).map((label) => label.key),
+        structureColumnSelectionAnchorKey.value,
+      );
+      return;
+    }
+  }
+
+  if (event.metaKey || event.ctrlKey) {
+    const next = new Set(selectedStructureColumnKeys.value);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    setStructureColumnSelection(next, key);
+    return;
+  }
+
+  setStructureColumnSelection([key], key);
+}
+
+function selectAllStructureColumns() {
+  const keys = copyableStructureColumnLabels.value.map((label) => label.key);
+  if (keys.length > 0) setStructureColumnSelection(keys, keys[0] ?? null);
+}
+
+async function copySelectedStructureColumns() {
+  const text = structureColumnClipboardText();
+  if (!text) return;
+  try {
+    await copyToClipboard(text);
+    toast(t("grid.copied"));
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
+watch(
+  copyableStructureColumnLabels,
+  (labels) => {
+    const allowed = new Set(labels.map((label) => label.key));
+    const next = [...selectedStructureColumnKeys.value].filter((key) => allowed.has(key));
+    if (next.length !== selectedStructureColumnKeys.value.size) selectedStructureColumnKeys.value = new Set(next);
+    if (structureColumnSelectionAnchorKey.value && !allowed.has(structureColumnSelectionAnchorKey.value)) structureColumnSelectionAnchorKey.value = next[0] ?? null;
+  },
+  { flush: "sync" },
+);
+
 const structureColumnRowHeight = computed(() => structureDensityMetric.value.controlHeight + structureDensityMetric.value.cellPaddingY * 2 + 1);
 const columnTableWidth = computed(() => visibleColWidths.value.reduce((total, width) => total + width, 0));
 function columnNeedsVariableGeometryHeight(column: EditableStructureColumn): boolean {
@@ -3013,11 +3136,18 @@ function columnIsSelectable(column: EditableStructureColumn): boolean {
   return !column.markedForDrop && columns.value.some((item) => item.id === column.id);
 }
 
-/** Replace the whole selection state (set + active + shift anchor) atomically. */
+/**
+ * Replace the whole selection state (set + active + shift anchor) atomically.
+ * Header-column selection and row selection are exclusive modes, so any row
+ * selection also clears the header-column keys, mirroring how
+ * `setStructureColumnSelection` clears the row selection.
+ */
 function setColumnSelection(ids: Iterable<string>, activeId: string | null, anchorId: string | null) {
   selectedColumnIds.value = new Set(ids);
   selectedColumnId.value = activeId;
   columnSelectionAnchorId.value = anchorId;
+  selectedStructureColumnKeys.value = new Set();
+  structureColumnSelectionAnchorKey.value = null;
 }
 
 function clearColumnSelection() {
@@ -4560,6 +4690,20 @@ function isPlainModDeleteShortcut(event: KeyboardEvent): boolean {
 
 function onStructureEditorKeydown(event: KeyboardEvent) {
   if (event.defaultPrevented) return;
+  if (activeTab.value === "columns" && !eventTargetUsesNativeClipboard(event)) {
+    if (isPlainClipboardShortcut(event, "a")) {
+      event.preventDefault();
+      event.stopPropagation();
+      selectAllStructureColumns();
+      return;
+    }
+    if (isPlainClipboardShortcut(event, "c") && selectedStructureColumnKeys.value.size > 0) {
+      event.preventDefault();
+      event.stopPropagation();
+      void copySelectedStructureColumns();
+      return;
+    }
+  }
   const focusedColumn = activeTab.value === "columns" ? focusedEditableColumn(event.target) : undefined;
   if (focusedColumn && isShiftEnterShortcut(event) && canAddColumn.value) {
     event.preventDefault();
@@ -5210,11 +5354,13 @@ watch(
                         <th
                           v-for="(columnLabel, i) in colLabels"
                           :key="columnLabel.key"
-                          :class="[structureHeaderCellClass, { 'text-center': columnLabel.key === 'primaryKey' }]"
+                          :class="[structureHeaderCellClass, 'bg-background select-none', { 'text-center': columnLabel.key === 'primaryKey' }]"
+                          :data-column-selected="columnLabel.key === 'actions' ? undefined : selectedStructureColumnKeys.has(columnLabel.key)"
                           :style="{
                             width: visibleColWidths[i] + 'px',
                             minWidth: visibleColWidths[i] + 'px',
                           }"
+                          @click="selectStructureColumnKey(columnLabel.key, $event)"
                         >
                           <template v-if="columnLabel.key === 'actions'">
                             <div class="flex min-w-0 items-center">
@@ -5223,7 +5369,13 @@ watch(
                             </div>
                           </template>
                           <template v-else>{{ columnLabel.label }}</template>
-                          <div v-if="columnLabel.key !== 'actions' && i < colLabels.length - 1" class="absolute right-0 top-0 z-20 h-full w-1 cursor-col-resize hover:bg-primary/30" :class="colResizing?.col === columnWidthIndex(i) ? 'bg-primary/30' : ''" @mousedown="onColResize($event, i)" />
+                          <div
+                            v-if="columnLabel.key !== 'actions' && i < colLabels.length - 1"
+                            class="absolute right-0 top-0 z-20 h-full w-1 cursor-col-resize hover:bg-primary/30"
+                            :class="colResizing?.col === columnWidthIndex(i) ? 'bg-primary/30' : ''"
+                            @mousedown="onColResize($event, i)"
+                            @click.stop
+                          />
                         </th>
                       </tr>
                     </thead>
@@ -5248,7 +5400,7 @@ watch(
                         @dragover="onColumnDragOver(index, $event)"
                         @drop="onColumnDrop(index, $event)"
                       >
-                        <td :class="structureCellClass">
+                        <td :class="[structureCellClass, structureColumnSelectionClass('actions')]">
                           <div class="flex min-w-0 items-center">
                             <div class="flex shrink-0 items-center justify-center gap-1 border-r pr-0.5 text-muted-foreground" :style="{ width: columnOrdinalIndicatorWidth + 'px' }">
                               <span class="tabular-nums">{{ index + 1 }}</span>
@@ -5315,10 +5467,10 @@ watch(
                             </div>
                           </div>
                         </td>
-                        <td :class="structureCellClass">
+                        <td :class="[structureCellClass, structureColumnSelectionClass('name')]">
                           <Input v-model="column.name" :class="[structureControlClass, columnSearchFieldClass(column, column.name)]" :disabled="isColumnNameDisabled(column)" data-column-name-input @blur="commitColumnNameInput(column)" />
                         </td>
-                        <td :class="structureCellClass">
+                        <td :class="[structureCellClass, structureColumnSelectionClass('type')]">
                           <SearchableSelect
                             v-if="!isColumnTypeDisabled(column)"
                             :model-value="dataTypeBaseInputValue(databaseType, column.dataType)"
@@ -5335,7 +5487,7 @@ watch(
                           />
                           <Input v-else :model-value="gaussdbMDataTypeDisplayName(dataTypeBaseInputValue(databaseType, column.dataType))" :class="[structureMonoControlClass, 'w-full']" disabled />
                         </td>
-                        <td v-if="columnEditorControls.length" :class="structureCellClass">
+                        <td v-if="columnEditorControls.length" :class="[structureCellClass, structureColumnSelectionClass('length')]">
                           <Popover v-if="isMysqlEnumDataType(databaseType, column.dataType)">
                             <PopoverTrigger as-child>
                               <Button variant="outline" size="sm" :class="[structureMonoControlClass, 'w-full justify-between px-2']" :disabled="isColumnTypeDisabled(column)">
@@ -5407,13 +5559,13 @@ watch(
                             </Select>
                           </div>
                         </td>
-                        <td v-if="columnEditorControls.nullable" :class="structureCellClass">
+                        <td v-if="columnEditorControls.nullable" :class="[structureCellClass, structureColumnSelectionClass('nullable')]">
                           <label class="flex items-center gap-1.5">
                             <input v-model="column.isNullable" type="checkbox" :class="structureCheckboxClass" :disabled="isColumnNullableDisabled(column)" />
                             <span>{{ column.isNullable ? t("structureEditor.yes") : t("structureEditor.no") }}</span>
                           </label>
                         </td>
-                        <td v-if="columnEditorControls.primaryKey" :class="[structureCellClass, 'text-center']">
+                        <td v-if="columnEditorControls.primaryKey" :class="[structureCellClass, 'text-center', structureColumnSelectionClass('primaryKey')]">
                           <input
                             v-model="column.isPrimaryKey"
                             type="checkbox"
@@ -5426,7 +5578,7 @@ watch(
                             "
                           />
                         </td>
-                        <td v-if="columnEditorControls.defaultValue" :class="structureCellClass">
+                        <td v-if="columnEditorControls.defaultValue" :class="[structureCellClass, structureColumnSelectionClass('defaultValue')]">
                           <div class="flex min-w-0 items-center gap-1">
                             <Input v-model="column.defaultValue" :class="[structureMonoControlClass, 'flex-1']" :disabled="isColumnDefaultDisabled(column)" />
                             <DropdownMenu>
@@ -5443,7 +5595,7 @@ watch(
                             </DropdownMenu>
                           </div>
                         </td>
-                        <td v-if="columnEditorControls.comment" :class="structureCellClass">
+                        <td v-if="columnEditorControls.comment" :class="[structureCellClass, structureColumnSelectionClass('comment')]">
                           <div class="flex min-w-0 items-center gap-1">
                             <Input v-model="column.comment" :class="[structureControlClass, 'flex-1', columnSearchFieldClass(column, column.comment)]" :disabled="isColumnCommentDisabled(column)" />
                             <Popover>
@@ -5471,7 +5623,7 @@ watch(
                             </Popover>
                           </div>
                         </td>
-                        <td v-if="showCharacterSet" :class="structureCellClass">
+                        <td v-if="showCharacterSet" :class="[structureCellClass, structureColumnSelectionClass('characterSet')]">
                           <SearchableSelect
                             :model-value="columnCharset(column)"
                             :options="mysqlCharsetOptions"
@@ -5484,7 +5636,7 @@ watch(
                             @update:model-value="(v: string) => onCharsetChange(column, v)"
                           />
                         </td>
-                        <td v-if="showCharacterSet" :class="structureCellClass">
+                        <td v-if="showCharacterSet" :class="[structureCellClass, structureColumnSelectionClass('collation')]">
                           <SearchableSelect
                             :model-value="columnCollation(column)"
                             :options="collationOptionsForCharset(columnCharset(column))"
@@ -5497,7 +5649,7 @@ watch(
                             @update:model-value="(v: string) => (column.collation = v)"
                           />
                         </td>
-                        <td v-if="showExtendedProperties" :class="structureCellClass">
+                        <td v-if="showExtendedProperties" :class="[structureCellClass, structureColumnSelectionClass('extendedProperties')]">
                           <div :class="structurePropertyListClass">
                             <!-- Manticore Search: character data type properties -->
                             <template v-if="databaseType === 'manticoresearch'">
@@ -6422,6 +6574,15 @@ watch(
 </template>
 
 <style scoped>
+.structure-grid-column-selected {
+  background-color: color-mix(in oklab, var(--primary) 14%, transparent) !important;
+}
+
+.structure-grid-column-selected :deep(input),
+.structure-grid-column-selected :deep(button) {
+  background-color: color-mix(in oklab, var(--primary) 10%, var(--background)) !important;
+}
+
 .structure-ddl-editor :deep(.cm-editor) {
   min-height: 100%;
   background: transparent;

@@ -1,7 +1,24 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import { buildMongoCompletionItems, buildMongoCompletionItemsFromContext, getMongoCompletionContext, getMongoCompletionResultValidFor, getMongoDocumentQueryCompletionContext, inferMongoCompletionFields, shouldAutoOpenMongoCompletion } from "../../apps/desktop/src/lib/mongo/mongoCompletion.ts";
-import { ACCUMULATORS, BULK_WRITE_OPERATION_FIELDS, BULK_WRITE_OPERATIONS, ENUM_VALUES, EXPRESSION_OPERATORS, EXTENDED_JSON_VALUES, KEY_MAP_VALUES, METHOD_OPTION_KEYS, OPERATOR_SUB_KEYS, PIPELINE_STAGES, PUSH_MODIFIERS, QUERY_OPERATORS, STAGE_OPTION_KEYS, UPDATE_OPERATORS, VALUE_SNIPPETS, WINDOW_OPERATORS } from "../../apps/desktop/src/lib/mongo/mongoCompletionTables.ts";
+import {
+  ACCUMULATORS,
+  BULK_WRITE_OPERATION_FIELDS,
+  BULK_WRITE_OPERATIONS,
+  ENUM_VALUES,
+  EXPRESSION_OPERATORS,
+  EXTENDED_JSON_VALUES,
+  KEY_MAP_VALUES,
+  METHOD_OPTION_KEYS,
+  OPERATOR_SUB_KEYS,
+  PIPELINE_STAGES,
+  PUSH_MODIFIERS,
+  QUERY_OPERATORS,
+  STAGE_OPTION_KEYS,
+  UPDATE_OPERATORS,
+  VALUE_SNIPPETS,
+  WINDOW_OPERATORS,
+} from "../../apps/desktop/src/lib/mongo/mongoCompletionTables.ts";
 import { parseMongoCommand } from "../../apps/desktop/src/lib/mongo/mongoShellCommand.ts";
 
 const collections = ["users", "user_events", "order-items", "audit.logs"];
@@ -754,7 +771,10 @@ test("suggests the values a field-to-value map accepts", () => {
 
   // The document browser's sort bar is the same map without a surrounding command.
   const sortBar = getMongoDocumentQueryCompletionContext("{ name: ", "{ name: ".length, "sortKeys");
-  assert.deepEqual(buildMongoCompletionItemsFromContext(sortBar, { fields }).map((item) => item.label), ["-1", "1"]);
+  assert.deepEqual(
+    buildMongoCompletionItemsFromContext(sortBar, { fields }).map((item) => item.label),
+    ["-1", "1"],
+  );
 });
 
 test("every suggested map value parses in the position that offers it", () => {
@@ -775,15 +795,7 @@ test("every suggested map value parses in the position that offers it", () => {
 test("offers nothing rather than top-level snippets inside an unmodelled argument", () => {
   // `db.collection.find` is not something that can be typed inside these parentheses, so the
   // top-level snippets are noise there; the engine stays quiet until the argument is modelled.
-  for (const text of [
-    "db.users.find({}).limit(",
-    "db.users.find({}).skip(",
-    "db.users.drop(",
-    "db.users.renameCollection(",
-    'db.users.dropIndex("',
-    "db.users.estimatedDocumentCount(",
-    'db.createCollection("',
-  ]) {
+  for (const text of ["db.users.find({}).limit(", "db.users.find({}).skip(", "db.users.drop(", "db.users.renameCollection(", 'db.users.dropIndex("', "db.users.estimatedDocumentCount(", 'db.createCollection("']) {
     assert.deepEqual(labels(text, { fields, collections }), [], text);
   }
 
@@ -803,7 +815,10 @@ test("completes commands addressed to another database through getSiblingDB", ()
   // parser rejects chaining it, and accepting that suggestion would produce a statement that
   // cannot run.
   const siblingRoot = labels('db.getSiblingDB("archive").', { collections });
-  assert.deepEqual(siblingRoot, labels("db.", { collections }).filter((label: string) => label !== "getSiblingDB"));
+  assert.deepEqual(
+    siblingRoot,
+    labels("db.", { collections }).filter((label: string) => label !== "getSiblingDB"),
+  );
   assert.ok(!siblingRoot.includes("getSiblingDB"));
   assert.equal(getMongoCompletionContext('db.getSiblingDB("archive").', 'db.getSiblingDB("archive").'.length).database, "archive");
   assert.deepEqual(labels('db.getSiblingDB("archive").user_ev', { collections }), ["user_events"]);
@@ -816,10 +831,7 @@ test("completes commands addressed to another database through getSiblingDB", ()
   assert.ok(labels('db.getSiblingDB("archive").users.find({}).', { fields }).includes("limit"));
   assert.ok(labels("db.getSiblingDB('archive').users.updateOne({}, { $s", { fields }).includes("$set"));
   assert.deepEqual(labels('db.getSiblingDB("archive").getCollection("user_ev', { collections }), ["user_events"]);
-  assert.equal(
-    getMongoCompletionContext('db.getSiblingDB("archive").getCollection("users").', 'db.getSiblingDB("archive").getCollection("users").'.length).collection,
-    "users",
-  );
+  assert.equal(getMongoCompletionContext('db.getSiblingDB("archive").getCollection("users").', 'db.getSiblingDB("archive").getCollection("users").'.length).collection, "users");
 });
 
 test("completes bulkWrite operations, their fields, and the shapes inside them", () => {
@@ -857,11 +869,7 @@ test("every suggested bulkWrite operation and field parses", () => {
     arrayFilters: '[{ "e.f": 1 }]',
   };
 
-  assert.deepEqual(
-    BULK_WRITE_OPERATIONS.map((operation) => operation.label).sort(),
-    Object.keys(BULK_WRITE_OPERATION_FIELDS).sort(),
-    "every offered operation needs a field list, and vice versa",
-  );
+  assert.deepEqual(BULK_WRITE_OPERATIONS.map((operation) => operation.label).sort(), Object.keys(BULK_WRITE_OPERATION_FIELDS).sort(), "every offered operation needs a field list, and vice versa");
 
   for (const [operation, fieldSpecs] of Object.entries(BULK_WRITE_OPERATION_FIELDS)) {
     // Every field of an operation at once, so each one is exercised against the parser.
@@ -928,7 +936,10 @@ test("completes database names after use and inside getSiblingDB", () => {
   // A field that happens to be called `use` is a key, not the command: the filter keeps its own suggestions.
   const insideFilter = labels("db.users.find({ use ", { databases, fields });
   assert.notEqual(getMongoCompletionContext("db.users.find({ use ", 20).mode, "database");
-  assert.ok(insideFilter.every((label) => !databases.includes(label)), insideFilter.join(", "));
+  assert.ok(
+    insideFilter.every((label) => !databases.includes(label)),
+    insideFilter.join(", "),
+  );
   // Neither is `use` inside a string or a comment.
   assert.deepEqual(labels('db.users.find({ name: "use ', { databases, fields }), []);
   assert.deepEqual(labels("// use ", { databases }), []);
@@ -986,7 +997,10 @@ test("completes the keys of an operator's own sub-document", () => {
   assert.deepEqual(labels("db.users.aggregate([{ $match: { $text: { ", { fields }), ["$caseSensitive", "$diacriticSensitive", "$language", "$search"]);
   assert.deepEqual(labels("db.users.bulkWrite([{ deleteMany: { filter: { $text: { ", { fields }), ["$caseSensitive", "$diacriticSensitive", "$language", "$search"]);
   const bar = getMongoDocumentQueryCompletionContext("{ $text: { ", "{ $text: { ".length, "filter");
-  assert.deepEqual(buildMongoCompletionItemsFromContext(bar).map((item) => item.label), ["$caseSensitive", "$diacriticSensitive", "$language", "$search"]);
+  assert.deepEqual(
+    buildMongoCompletionItemsFromContext(bar).map((item) => item.label),
+    ["$caseSensitive", "$diacriticSensitive", "$language", "$search"],
+  );
   // A field that happens to be called `text` is still a field, and `$not` still wraps field operators.
   assert.ok(labels("db.users.find({ text: { $", { fields }).includes("$gt"));
   assert.ok(labels("db.users.find({ name: { $not: { $", { fields }).includes("$regex"));
@@ -1042,7 +1056,10 @@ test("completes enumerated string values in and out of quotes", () => {
   assert.deepEqual(labels("db.users.find({}).explain(1, "), []);
   // The document browser's filter bar shares the value sets.
   const bar = getMongoDocumentQueryCompletionContext('{ name: { $type: "', '{ name: { $type: "'.length, "filter");
-  assert.deepEqual(buildMongoCompletionItemsFromContext(bar).map((item) => item.label), types);
+  assert.deepEqual(
+    buildMongoCompletionItemsFromContext(bar).map((item) => item.label),
+    types,
+  );
 });
 
 test("completes the collation document wherever it appears", () => {
@@ -1204,7 +1221,20 @@ test("ranks everyday operators above the long tail", () => {
 });
 
 test("snippet templates use placeholder syntax CodeMirror actually honours", () => {
-  const templates = [...QUERY_OPERATORS, ...UPDATE_OPERATORS, ...PUSH_MODIFIERS, ...PIPELINE_STAGES, ...ACCUMULATORS, ...WINDOW_OPERATORS, ...EXPRESSION_OPERATORS, ...VALUE_SNIPPETS, ...EXTENDED_JSON_VALUES, ...Object.values(STAGE_OPTION_KEYS).flat(), ...Object.values(OPERATOR_SUB_KEYS).flat(), ...Object.values(ENUM_VALUES).flat()];
+  const templates = [
+    ...QUERY_OPERATORS,
+    ...UPDATE_OPERATORS,
+    ...PUSH_MODIFIERS,
+    ...PIPELINE_STAGES,
+    ...ACCUMULATORS,
+    ...WINDOW_OPERATORS,
+    ...EXPRESSION_OPERATORS,
+    ...VALUE_SNIPPETS,
+    ...EXTENDED_JSON_VALUES,
+    ...Object.values(STAGE_OPTION_KEYS).flat(),
+    ...Object.values(OPERATOR_SUB_KEYS).flat(),
+    ...Object.values(ENUM_VALUES).flat(),
+  ];
   assert.ok(templates.length > 200);
 
   for (const { label, apply } of templates) {
@@ -1328,4 +1358,87 @@ test("completes $densify and $fill stage options and value modes", () => {
   assert.deepEqual(labels("db.users.aggregate([{ $fill: { output: { amount: { "), ["method", "value"]);
   assert.deepEqual(labels("db.users.aggregate([{ $fill: { output: { amount: { method: '"), ["linear", "locf"]);
   assert.deepEqual(labels("db.users.aggregate([{ $fill: { output: { amount: { value: '", { fields }), ["$_id", "$createdAt", "$name", "$profile.email"]);
+});
+
+test("completes joined-collection fields inside $lookup, $graphLookup and $unionWith", () => {
+  // $lookup foreignField targets joined collection
+  const lookupForeign = getMongoCompletionContext('db.users.aggregate([{ $lookup: { from: "orders", localField: "name", foreignField: "', 'db.users.aggregate([{ $lookup: { from: "orders", localField: "name", foreignField: "'.length);
+  assert.equal(lookupForeign.collection, "orders");
+  assert.equal(lookupForeign.mode, "fieldPath");
+
+  // $lookup sub-pipeline runs over joined collection
+  const lookupPipelineMatch = getMongoCompletionContext('db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $match: { ', 'db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $match: { '.length);
+  assert.equal(lookupPipelineMatch.collection, "orders");
+  assert.equal(lookupPipelineMatch.mode, "filterField");
+
+  const lookupPipelineProject = getMongoCompletionContext('db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $project: { ', 'db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $project: { '.length);
+  assert.equal(lookupPipelineProject.collection, "orders");
+  assert.equal(lookupPipelineProject.mode, "field");
+
+  // $graphLookup connectToField and connectFromField target joined collection
+  const graphConnectTo = getMongoCompletionContext('db.users.aggregate([{ $graphLookup: { from: "orders", connectToField: "', 'db.users.aggregate([{ $graphLookup: { from: "orders", connectToField: "'.length);
+  assert.equal(graphConnectTo.collection, "orders");
+  assert.equal(graphConnectTo.mode, "fieldPath");
+
+  const graphConnectFrom = getMongoCompletionContext('db.users.aggregate([{ $graphLookup: { from: "orders", connectFromField: "', 'db.users.aggregate([{ $graphLookup: { from: "orders", connectFromField: "'.length);
+  assert.equal(graphConnectFrom.collection, "orders");
+  assert.equal(graphConnectFrom.mode, "fieldPath");
+
+  // $graphLookup restrictSearchWithMatch targets joined collection
+  const graphRestrict = getMongoCompletionContext('db.users.aggregate([{ $graphLookup: { from: "orders", restrictSearchWithMatch: { ', 'db.users.aggregate([{ $graphLookup: { from: "orders", restrictSearchWithMatch: { '.length);
+  assert.equal(graphRestrict.collection, "orders");
+  assert.equal(graphRestrict.mode, "filterField");
+
+  // $unionWith sub-pipeline runs over joined collection
+  const unionPipelineMatch = getMongoCompletionContext('db.users.aggregate([{ $unionWith: { coll: "orders", pipeline: [{ $match: { ', 'db.users.aggregate([{ $unionWith: { coll: "orders", pipeline: [{ $match: { '.length);
+  assert.equal(unionPipelineMatch.collection, "orders");
+  assert.equal(unionPipelineMatch.mode, "filterField");
+});
+
+test("keeps localField and startWith on outer collection at top level", () => {
+  const lookupLocal = getMongoCompletionContext('db.users.aggregate([{ $lookup: { from: "orders", localField: "', 'db.users.aggregate([{ $lookup: { from: "orders", localField: "'.length);
+  assert.equal(lookupLocal.collection, "users");
+  assert.equal(lookupLocal.mode, "fieldPath");
+
+  const graphStartWith = getMongoCompletionContext('db.users.aggregate([{ $graphLookup: { from: "orders", startWith: "', 'db.users.aggregate([{ $graphLookup: { from: "orders", startWith: "'.length);
+  assert.equal(graphStartWith.collection, "users");
+  assert.equal(graphStartWith.mode, "fieldRef");
+});
+
+test("resolves collections for nested join stages inside a sub-pipeline", () => {
+  const nestedLookupForeign = getMongoCompletionContext('db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $lookup: { from: "items", foreignField: "', 'db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $lookup: { from: "items", foreignField: "'.length);
+  assert.equal(nestedLookupForeign.collection, "items");
+
+  const nestedSubPipeline = getMongoCompletionContext('db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $lookup: { from: "items", pipeline: [{ $match: { ', 'db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $lookup: { from: "items", pipeline: [{ $match: { '.length);
+  assert.equal(nestedSubPipeline.collection, "items");
+
+  // Nested localField and startWith resolve to the enclosing sub-pipeline's input collection
+  const nestedLocalField = getMongoCompletionContext('db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $lookup: { from: "items", localField: "', 'db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $lookup: { from: "items", localField: "'.length);
+  assert.equal(nestedLocalField.collection, "orders");
+
+  const nestedStartWith = getMongoCompletionContext('db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $graphLookup: { from: "items", startWith: "', 'db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $graphLookup: { from: "items", startWith: "'.length);
+  assert.equal(nestedStartWith.collection, "orders");
+
+  // Nested $lookup with no from typed yet falls back to sub-pipeline input
+  const nestedMissingFrom = getMongoCompletionContext('db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $lookup: { foreignField: "', 'db.users.aggregate([{ $lookup: { from: "orders", pipeline: [{ $lookup: { foreignField: "'.length);
+  assert.equal(nestedMissingFrom.collection, "orders");
+});
+
+test("falls back to outer collection when from or coll is missing or untyped at top level", () => {
+  const missingFromLookup = getMongoCompletionContext('db.users.aggregate([{ $lookup: { foreignField: "', 'db.users.aggregate([{ $lookup: { foreignField: "'.length);
+  assert.equal(missingFromLookup.collection, "users");
+
+  const missingCollUnion = getMongoCompletionContext("db.users.aggregate([{ $unionWith: { pipeline: [{ $match: { ", "db.users.aggregate([{ $unionWith: { pipeline: [{ $match: { ".length);
+  assert.equal(missingCollUnion.collection, "users");
+
+  const fromAfterCursor = getMongoCompletionContext('db.users.aggregate([{ $lookup: { foreignField: " }, from: "orders" }])', 'db.users.aggregate([{ $lookup: { foreignField: "'.length);
+  assert.equal(fromAfterCursor.collection, "users");
+});
+
+test("handles from values containing commas or braces without confusing scan", () => {
+  const commaFrom = getMongoCompletionContext('db.users.aggregate([{ $lookup: { from: "orders,archive", foreignField: "', 'db.users.aggregate([{ $lookup: { from: "orders,archive", foreignField: "'.length);
+  assert.equal(commaFrom.collection, "orders,archive");
+
+  const braceFrom = getMongoCompletionContext('db.users.aggregate([{ $lookup: { from: "orders{2024}", foreignField: "', 'db.users.aggregate([{ $lookup: { from: "orders{2024}", foreignField: "'.length);
+  assert.equal(braceFrom.collection, "orders{2024}");
 });

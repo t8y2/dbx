@@ -36,6 +36,16 @@ test("puts each SELECT field on its own line even when the statement fits on one
   assert.equal(await formatSqlText(formatted, "postgres"), formatted);
 });
 
+test("aligns explicit SELECT aliases to the widest expression", async () => {
+  const formatted = await formatSqlText("select bh.id as unique_value, bh.title as title, bh.house_type as type from biz_house bh", "mysql");
+
+  assert.equal(
+    formatted,
+    "SELECT bh.id         AS unique_value,\n       bh.title      AS title,\n       bh.house_type AS type\nFROM biz_house bh",
+  );
+  assert.equal(await formatSqlText(formatted, "mysql"), formatted);
+});
+
 test("collapses a single-field statement that fits on one line", async () => {
   const formatted = await formatSqlText("select id from users where active = 1 order by id", "postgres");
 

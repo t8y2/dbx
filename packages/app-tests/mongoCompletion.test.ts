@@ -17,6 +17,7 @@ import {
   STAGE_OPTION_KEYS,
   UPDATE_OPERATORS,
   VALUE_SNIPPETS,
+  WINDOW_OPERATORS,
 } from "../../apps/desktop/src/lib/mongo/mongoCompletionTables.ts";
 import { parseMongoCommand } from "../../apps/desktop/src/lib/mongo/mongoShellCommand.ts";
 
@@ -1098,6 +1099,8 @@ test("every suggested sub-document key and enumerated value parses in the positi
     collation: (body) => `db.users.find({}).collation({ ${body} })`,
     timeseries: (body) => `db.createCollection("x", { timeseries: { ${body} } })`,
     clusteredIndex: (body) => `db.createCollection("x", { clusteredIndex: { ${body} } })`,
+    range: (body) => `db.users.aggregate([{ $densify: { field: "t", range: { ${body} } } }])`,
+    fillOutput: (body) => `db.users.aggregate([{ $fill: { output: { score: { ${body} } } } }])`,
   };
   for (const [operator, keys] of Object.entries(OPERATOR_SUB_KEYS)) {
     const build = keyCommands[operator];
@@ -1123,6 +1126,9 @@ test("every suggested sub-document key and enumerated value parses in the positi
     validationLevel: (value) => `db.createCollection("x", { validationLevel: ${value} })`,
     validationAction: (value) => `db.createCollection("x", { validationAction: ${value} })`,
     granularity: (value) => `db.createCollection("x", { timeseries: { timeField: "t", granularity: ${value} } })`,
+    unit: (value) => `db.users.aggregate([{ $densify: { field: "t", range: { step: 1, unit: ${value} } } }])`,
+    bounds: (value) => `db.users.aggregate([{ $densify: { field: "t", range: { step: 1, bounds: ${value} } } }])`,
+    fillMethod: (value) => `db.users.aggregate([{ $fill: { output: { score: { method: ${value} } } } }])`,
   };
   for (const [enumKey, values] of Object.entries(ENUM_VALUES)) {
     const build = valueCommands[enumKey];
@@ -1221,6 +1227,7 @@ test("snippet templates use placeholder syntax CodeMirror actually honours", () 
     ...PUSH_MODIFIERS,
     ...PIPELINE_STAGES,
     ...ACCUMULATORS,
+    ...WINDOW_OPERATORS,
     ...EXPRESSION_OPERATORS,
     ...VALUE_SNIPPETS,
     ...EXTENDED_JSON_VALUES,
@@ -1277,6 +1284,80 @@ test("infers dotted MongoDB fields from sampled documents", () => {
   assert.ok(inferred.find((field) => field.name === "profile.email" && field.type === "string"));
   assert.ok(inferred.find((field) => field.name === "profile.age" && field.type === "number"));
   assert.ok(inferred.find((field) => field.name === "tags.label" && field.type === "string"));
+});
+
+test("completes $setWindowFields stage options, sortBy key map, and output window operators", () => {
+  assert.deepEqual(labels("db.users.aggregate([{ $setWindowFields: { "), ["output", "partitionBy", "sortBy"]);
+  assert.deepEqual(labels("db.users.aggregate([{ $setWindowFields: { partitionBy: '", { fields }), ["$_id", "$createdAt", "$name", "$profile.email"]);
+  assert.deepEqual(labels("db.users.aggregate([{ $setWindowFields: { sortBy: { ", { fields }), ["_id", "createdAt", "name", "profile.email"]);
+  assert.deepEqual(labels("db.users.aggregate([{ $setWindowFields: { sortBy: { name: ", { fields }), ["-1", "1"]);
+  assert.deepEqual(labels("db.users.aggregate([{ $setWindowFields: { output: { ", { fields }), ["_id", "createdAt", "name", "profile.email"]);
+
+  const windowOps = labels("db.users.aggregate([{ $setWindowFields: { output: { r: { $");
+  const expectedOperators = [
+    "$rank",
+    "$denseRank",
+    "$documentNumber",
+    "$shift",
+    "$expMovingAvg",
+    "$derivative",
+    "$integral",
+    "$covariancePop",
+    "$covarianceSamp",
+    "$locf",
+    "$linearFill",
+    "$sum",
+    "$avg",
+    "$min",
+    "$max",
+    "$count",
+    "$first",
+    "$last",
+    "$push",
+    "$addToSet",
+    "$stdDevPop",
+    "$stdDevSamp",
+    "$top",
+    "$bottom",
+    "$topN",
+    "$bottomN",
+    "$firstN",
+    "$lastN",
+    "$maxN",
+    "$minN",
+    "$median",
+    "$percentile",
+  ];
+  for (const op of expectedOperators) {
+    assert.ok(windowOps.includes(op), op);
+  }
+  assert.equal(windowOps.includes("window"), false);
+
+  const bareOutputBody = labels("db.users.aggregate([{ $setWindowFields: { output: { r: { ");
+  assert.ok(bareOutputBody.includes("window"));
+  assert.ok(bareOutputBody.includes("$rank"));
+
+  const windowPrefix = labels("db.users.aggregate([{ $setWindowFields: { output: { r: { win");
+  assert.ok(windowPrefix.includes("window"));
+});
+
+test("completes $densify and $fill stage options and value modes", () => {
+  assert.deepEqual(labels("db.users.aggregate([{ $densify: { "), ["field", "partitionByFields", "range"]);
+  assert.deepEqual(labels("db.users.aggregate([{ $densify: { field: '", { fields }), ["_id", "createdAt", "name", "profile.email"]);
+  assert.deepEqual(labels("db.users.aggregate([{ $densify: { partitionByFields: ['", { fields }), ["_id", "createdAt", "name", "profile.email"]);
+  assert.deepEqual(labels("db.users.aggregate([{ $densify: { range: { "), ["bounds", "step", "unit"]);
+  assert.ok(labels("db.users.aggregate([{ $densify: { range: { unit: '").includes("hour"));
+  assert.ok(labels("db.users.aggregate([{ $densify: { range: { bounds: '").includes("full"));
+
+  assert.deepEqual(labels("db.users.aggregate([{ $fill: { "), ["output", "partitionBy", "partitionByFields", "sortBy"]);
+  assert.deepEqual(labels("db.users.aggregate([{ $fill: { partitionBy: '", { fields }), ["$_id", "$createdAt", "$name", "$profile.email"]);
+  assert.deepEqual(labels("db.users.aggregate([{ $fill: { partitionByFields: ['", { fields }), ["_id", "createdAt", "name", "profile.email"]);
+  assert.deepEqual(labels("db.users.aggregate([{ $fill: { sortBy: { ", { fields }), ["_id", "createdAt", "name", "profile.email"]);
+  assert.deepEqual(labels("db.users.aggregate([{ $fill: { sortBy: { name: ", { fields }), ["-1", "1"]);
+  assert.deepEqual(labels("db.users.aggregate([{ $fill: { output: { ", { fields }), ["_id", "createdAt", "name", "profile.email"]);
+  assert.deepEqual(labels("db.users.aggregate([{ $fill: { output: { amount: { "), ["method", "value"]);
+  assert.deepEqual(labels("db.users.aggregate([{ $fill: { output: { amount: { method: '"), ["linear", "locf"]);
+  assert.deepEqual(labels("db.users.aggregate([{ $fill: { output: { amount: { value: '", { fields }), ["$_id", "$createdAt", "$name", "$profile.email"]);
 });
 
 test("completes joined-collection fields inside $lookup, $graphLookup and $unionWith", () => {

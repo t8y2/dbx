@@ -136,7 +136,7 @@ export const PIPELINE_STAGES: MongoOperatorSpec[] = specs([
   ["$graphLookup", "Performs a recursive search on a collection", '$graphLookup: { from: "${collection}", startWith: "$${field}", connectFromField: "${field}", connectToField: "_id", as: "${as}" }'],
   ["$geoNear", "Orders documents by proximity to a point", '$geoNear: { near: { type: "Point", coordinates: [0, 0] }, distanceField: "${distance}" }'],
   ["$setWindowFields", "Adds fields computed over a window of documents", '$setWindowFields: { partitionBy: "$${field}", sortBy: { ${field}: 1 }, output: {} }'],
-  ["$densify", "Fills gaps in a sequence of field values", '$densify: { field: "${field}", range: { step: 1, unit: "${unit}" } }'],
+  ["$densify", "Fills gaps in a sequence of field values", '$densify: { field: "${field}", range: { step: 1, bounds: "${full}" } }'],
   ["$fill", "Fills null or missing field values", "$fill: { output: { ${field}: { value: ${} } } }"],
   ["$documents", "Returns literal documents", "$documents: [${}]"],
   ["$redact", "Restricts document content based on a condition", "$redact: { ${} }"],
@@ -171,6 +171,37 @@ export const ACCUMULATORS: MongoOperatorSpec[] = specs([
   ["$median", "Approximates the median", '$median: { input: "$${field}", method: "approximate" }'],
   ["$percentile", "Approximates the requested percentiles", '$percentile: { input: "$${field}", p: [0.95], method: "approximate" }'],
 ]);
+
+export const WINDOW_OPERATORS: MongoOperatorSpec[] = specs([
+  ["$rank", "Returns the document's rank relative to other documents", "$rank: {}"],
+  ["$denseRank", "Returns the document's dense rank relative to other documents", "$denseRank: {}"],
+  ["$documentNumber", "Returns the document's position within the window", "$documentNumber: {}"],
+  ["$shift", "Returns a value from a document at a given offset", '$shift: { output: "$${field}", by: 1, default: null }'],
+  ["$expMovingAvg", "Exponential moving average", '$expMovingAvg: { input: "$${field}", N: 3 }'],
+  ["$derivative", "Average rate of change over an interval", '$derivative: { input: "$${field}", unit: "${unit}" }'],
+  ["$integral", "Approximation of the area under the curve", '$integral: { input: "$${field}", unit: "${unit}" }'],
+  ["$covariancePop", "Population covariance between two numeric expressions", '$covariancePop: ["$${field1}", "$${field2}"]'],
+  ["$covarianceSamp", "Sample covariance between two numeric expressions", '$covarianceSamp: ["$${field1}", "$${field2}"]'],
+  ["$locf", "Last observation carried forward", '$locf: "$${field}"'],
+  ["$linearFill", "Fills null and missing values by linear interpolation", '$linearFill: "$${field}"'],
+]);
+
+const WINDOW_SPEC: Spec = ["window", "Window boundary specification", 'window: { documents: ["unbounded", "current"] }'];
+
+function dedupeSpecsByLabel(...lists: readonly MongoOperatorSpec[][]): MongoOperatorSpec[] {
+  const seen = new Set<string>();
+  const deduped: MongoOperatorSpec[] = [];
+  for (const list of lists) {
+    for (const spec of list) {
+      if (seen.has(spec.label)) continue;
+      seen.add(spec.label);
+      deduped.push(spec);
+    }
+  }
+  return deduped;
+}
+
+export const WINDOW_FUNCTION_OPERATORS: MongoOperatorSpec[] = [...dedupeSpecsByLabel(WINDOW_OPERATORS, ACCUMULATORS), ...specs([WINDOW_SPEC])];
 
 export const EXPRESSION_OPERATORS: MongoOperatorSpec[] = specs([
   // Conditional
@@ -416,6 +447,15 @@ export const OPERATOR_SUB_KEYS: Record<string, MongoOperatorSpec[]> = {
     ["backwards", "Compare secondary differences from the end", "backwards: false"],
     ["normalization", "Normalize text to Unicode NFD first", "normalization: false"],
   ]),
+  range: specs([
+    ["step", "Step size to densify by", "step: 1"],
+    ["unit", "Time unit for date densification", 'unit: "${unit}"'],
+    ["bounds", "Boundary condition for the range", 'bounds: "${full}"'],
+  ]),
+  fillOutput: specs([
+    ["value", "Value or expression to fill with", "value: ${}"],
+    ["method", "Fill method", 'method: "${linear}"'],
+  ]),
 };
 
 const BSON_TYPE_ALIASES: Spec[] = [
@@ -509,6 +549,25 @@ export const ENUM_VALUES: Record<string, MongoOperatorSpec[]> = {
     ["3", "Base letters, accents and case", "3"],
     ["4", "Also punctuation, with alternate: shifted", "4"],
     ["5", "Identical, including code points", "5"],
+  ]),
+  unit: specs([
+    ["millisecond", "Densify by milliseconds", '"millisecond"'],
+    ["second", "Densify by seconds", '"second"'],
+    ["minute", "Densify by minutes", '"minute"'],
+    ["hour", "Densify by hours", '"hour"'],
+    ["day", "Densify by days", '"day"'],
+    ["week", "Densify by weeks", '"week"'],
+    ["month", "Densify by months", '"month"'],
+    ["quarter", "Densify by quarters", '"quarter"'],
+    ["year", "Densify by years", '"year"'],
+  ]),
+  bounds: specs([
+    ["full", "Densify across entire range", '"full"'],
+    ["partition", "Densify within each partition", '"partition"'],
+  ]),
+  fillMethod: specs([
+    ["linear", "Linear interpolation between surrounding values", '"linear"'],
+    ["locf", "Last observation carried forward", '"locf"'],
   ]),
 };
 
@@ -710,6 +769,17 @@ export const STAGE_OPTION_KEYS: Record<string, MongoOperatorSpec[]> = {
     ["includeLocs", "Field holding the matched location", 'includeLocs: "${location}"'],
   ]),
   $replaceRoot: specs([["newRoot", "Expression producing the new root document", 'newRoot: "$${field}"']]),
+  $densify: specs([
+    ["field", "Field whose values will be densified", 'field: "${field}"'],
+    ["partitionByFields", "Fields that partition the documents", 'partitionByFields: ["${field}"]'],
+    ["range", "Range specification to densify", 'range: { step: 1, bounds: "${full}" }'],
+  ]),
+  $fill: specs([
+    ["partitionBy", "Expression to partition by", 'partitionBy: "$${field}"'],
+    ["partitionByFields", "Fields that partition the documents", 'partitionByFields: ["${field}"]'],
+    ["sortBy", "Sort order for evaluating values", "sortBy: { ${field}: 1 }"],
+    ["output", "Fields to fill", "output: { ${field}: { value: ${} } }"],
+  ]),
 };
 
 /** Literal values that are worth completing in value position. */

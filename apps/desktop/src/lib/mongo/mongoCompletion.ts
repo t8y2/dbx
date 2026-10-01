@@ -17,6 +17,7 @@ import {
   TOP_LEVEL_QUERY_OPERATORS,
   UPDATE_OPERATORS,
   VALUE_SNIPPETS,
+  WINDOW_FUNCTION_OPERATORS,
   mongoOperatorItemType,
   type MongoOperatorSpec,
 } from "@/lib/mongo/mongoCompletionTables";
@@ -51,6 +52,7 @@ export type MongoCompletionMode =
   | "pushModifier"
   | "expression"
   | "accumulator"
+  | "windowOperator"
   | "stage"
   | "stageOption"
   | "methodOption"
@@ -318,6 +320,8 @@ const STAGE_OPTION_VALUE_MODES: Record<string, Record<string, MongoCompletionMod
   $setWindowFields: { partitionBy: "fieldRef" },
   $geoNear: { key: "fieldPath" },
   $replaceRoot: { newRoot: "fieldRef" },
+  $densify: { field: "fieldPath" },
+  $fill: { partitionBy: "fieldRef" },
 };
 
 export function getMongoCompletionContext(text: string, cursor: number): MongoCompletionContext {
@@ -481,6 +485,9 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
       break;
     case "accumulator":
       items = specItems(ACCUMULATORS, prefix, "accumulator", 100);
+      break;
+    case "windowOperator":
+      items = specItems(WINDOW_FUNCTION_OPERATORS, prefix, "window operator", 100);
       break;
     case "stage": {
       const kind = context.pipelineKind;
@@ -1250,6 +1257,56 @@ function classifyStageOptions(stage: string, scan: MongoCallScan, bodyIndex: num
       stage,
       ...(collection ? { collection } : {}),
     };
+  }
+
+  const optionHolder = scan.stack[bodyIndex + 1];
+  const optionKey = optionHolder?.key ?? "";
+
+  if (optionKey === "sortBy") {
+    return { ...classifyKeyMap(scan, bodyIndex + 1, "sort"), stage };
+  }
+
+  if (optionKey === "output") {
+    if (stage === "$setWindowFields") {
+      if (depth === 1) {
+        if (!scan.inValue) return { mode: "field", stage };
+        return { mode: "none", stage };
+      }
+      if (depth === 2) {
+        if (!scan.inValue) return { mode: "windowOperator", stage };
+        return { mode: "fieldRef", stage };
+      }
+      if (scan.inValue) return { mode: "fieldRef", stage };
+      return { mode: innermost(scan)?.kind === "object" ? "expression" : "none", stage };
+    }
+
+    if (stage === "$fill") {
+      if (depth === 1) {
+        if (!scan.inValue) return { mode: "field", stage };
+        return { mode: "none", stage };
+      }
+      if (depth === 2) {
+        if (!scan.inValue) return { mode: "operatorField", operator: "fillOutput", stage };
+        if (scan.valueKey === "method") return { mode: "enumValue", enumKey: "fillMethod", stage };
+        if (scan.valueKey === "value") return { mode: "fieldRef", stage };
+        return { mode: "none", stage };
+      }
+    }
+  }
+
+  if (optionKey === "range" && stage === "$densify") {
+    if (depth === 1) {
+      if (!scan.inValue) return { mode: "operatorField", operator: "range", stage };
+      if (scan.valueKey === "unit") return { mode: "enumValue", enumKey: "unit", stage };
+      if (scan.valueKey === "bounds") return { mode: "enumValue", enumKey: "bounds", stage };
+      if (scan.valueKey === "step") return { mode: scan.inString ? "none" : "value", stage };
+      return { mode: "none", stage };
+    }
+    return { mode: "none", stage };
+  }
+
+  if (optionKey === "partitionByFields") {
+    if (innermost(scan)?.kind === "array") return { mode: "fieldPath", stage };
   }
 
   if (scan.inValue) return { mode: "fieldRef", stage };

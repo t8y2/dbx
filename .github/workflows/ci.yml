@@ -351,10 +351,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/win7-aws-lc-install
-          # Key covers the workspace Cargo.lock too: a main-workspace aws-lc-sys
-          # bump must rebuild the prebuilt artifacts instead of reusing the
-          # cached headers/lib for a stale version.
-          key: win7-aws-lc-v3-${{ runner.os }}-${{ env.WIN7_NIGHTLY_TOOLCHAIN }}-${{ hashFiles('Cargo.lock', '.github/fixtures/win7-aws-lc-cache/Cargo.lock') }}
+          # The fixture manifest and lockfile define the prebuilt AWS-LC artifact.
+          key: win7-aws-lc-v3-${{ runner.os }}-${{ env.WIN7_NIGHTLY_TOOLCHAIN }}-${{ hashFiles('.github/fixtures/win7-aws-lc-cache/Cargo.toml', '.github/fixtures/win7-aws-lc-cache/Cargo.lock') }}
 
       - name: Build Win7 AWS-LC cache
         if: steps.aws-lc-cache.outputs.cache-hit != 'true'
@@ -449,7 +447,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/win7-openssl-install
-          key: win7-openssl-v1-${{ runner.os }}-${{ env.WIN7_NIGHTLY_TOOLCHAIN }}-${{ hashFiles('Cargo.lock', '.github/fixtures/win7-openssl-cache/Cargo.lock') }}
+          key: win7-openssl-v1-${{ runner.os }}-${{ env.WIN7_NIGHTLY_TOOLCHAIN }}-${{ hashFiles('.github/fixtures/win7-openssl-cache/Cargo.toml', '.github/fixtures/win7-openssl-cache/Cargo.lock') }}
 
       - name: Build Win7 OpenSSL cache
         if: steps.openssl-cache.outputs.cache-hit != 'true'

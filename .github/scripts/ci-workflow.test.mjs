@@ -169,6 +169,13 @@ test("Windows compatibility jobs cache Rust compilation without wrapping C or C+
   assert.doesNotMatch(win7, /^\s+(?:CC|CXX):/m);
 });
 
+test("Win7 TLS cache keys ignore the workspace lockfile", () => {
+  const win7 = job("windows-win7-bundle");
+  assert.ok(win7.includes("hashFiles('.github/fixtures/win7-aws-lc-cache/Cargo.toml', '.github/fixtures/win7-aws-lc-cache/Cargo.lock')"));
+  assert.ok(win7.includes("hashFiles('.github/fixtures/win7-openssl-cache/Cargo.toml', '.github/fixtures/win7-openssl-cache/Cargo.lock')"));
+  assert.doesNotMatch(win7, /key: win7-(?:aws-lc|openssl).*hashFiles\('Cargo\.lock'/);
+});
+
 test("the planner uses the exact event base and preserves a single workflow cancellation scope", () => {
   const changes = job("changes");
   assert.ok(changes.includes("github.event.pull_request.base.sha || github.event.before"));

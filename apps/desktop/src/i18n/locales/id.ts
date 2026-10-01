@@ -385,7 +385,8 @@ export default withEnglishFallback({
   },
   multiDbExecute: {
     manualTransaction: "Transaksi manual",
-    manualWarning: "Setiap target memiliki transaksinya sendiri. Commit dan rollback berlaku untuk satu target pada satu waktu; commit lintas database tidak bersifat atomik. Perintah DDL dan transaksi eksplisit dapat melakukan commit secara independen. Pembatalan menunggu pernyataan aktif selesai sebelum rollback.",
+    manualWarning:
+      "Setiap target memiliki transaksinya sendiri. Commit dan rollback berlaku untuk satu target pada satu waktu; commit lintas database tidak bersifat atomik. Perintah DDL dan transaksi eksplisit dapat melakukan commit secara independen. Pembatalan menunggu pernyataan aktif selesai sebelum rollback.",
     pendingCommit: "Menunggu commit",
     rolledBack: "Di-rollback",
     commit: "Commit",
@@ -3174,7 +3175,8 @@ export default withEnglishFallback({
     exportEncrypted: "Ekspor terenkripsi",
     exportUnencrypted: "Ekspor tanpa enkripsi",
     unencryptedWarningTitle: "Ekspor tanpa enkripsi?",
-    unencryptedWarningDescription: "File konfigurasi yang tidak dienkripsi dapat berisi kata sandi database, kredensial SSH Tunnel, dan informasi sensitif lainnya. Siapa pun yang dapat mengakses file tersebut dapat membaca kredensial ini. Gunakan ini hanya untuk migrasi sementara di lingkungan tepercaya.",
+    unencryptedWarningDescription:
+      "File konfigurasi yang tidak dienkripsi dapat berisi kata sandi database, kredensial SSH Tunnel, dan informasi sensitif lainnya. Siapa pun yang dapat mengakses file tersebut dapat membaca kredensial ini. Gunakan ini hanya untuk migrasi sementara di lingkungan tepercaya.",
     confirmUnencryptedExport: "Ekspor tanpa enkripsi",
     decryptImport: "Dekripsi",
     wrongPassphrase: "Passphrase salah atau file rusak",
@@ -5005,7 +5007,8 @@ export default withEnglishFallback({
     applySql: "Terapkan SQL",
     applySuccess: "Operasi pengguna diterapkan",
     applyFailed: "Eksekusi gagal: {message}",
-    enableDdlAnyPrivHint: "Petunjuk: DM8 menonaktifkan pemberian hak akses DDL ANY secara default (ENABLE_DDL_ANY_PRIV=0). Untuk memberikan hak akses tipe ANY, jalankan sebagai SYSDBA: sp_set_para_value(1,'ENABLE_DDL_ANY_PRIV',1). Untuk hak akses non-ANY, pastikan akun saat ini memiliki ADMIN OPTION untuk hak akses tersebut.",
+    enableDdlAnyPrivHint:
+      "Petunjuk: DM8 menonaktifkan pemberian hak akses DDL ANY secara default (ENABLE_DDL_ANY_PRIV=0). Untuk memberikan hak akses tipe ANY, jalankan sebagai SYSDBA: sp_set_para_value(1,'ENABLE_DDL_ANY_PRIV',1). Untuk hak akses non-ANY, pastikan akun saat ini memiliki ADMIN OPTION untuk hak akses tersebut.",
     anyPrivilegeDisabled: "Hak akses tipe ANY dinonaktifkan oleh DM8 (ENABLE_DDL_ANY_PRIV=0) dan tidak dapat diberikan atau dicabut",
   },
   damengRoleAdmin: {
@@ -5046,7 +5049,8 @@ export default withEnglishFallback({
     applySql: "Terapkan SQL",
     applySuccess: "Operasi peran diterapkan",
     applyFailed: "Eksekusi gagal: {message}",
-    enableDdlAnyPrivHint: "Petunjuk: DM8 menonaktifkan pemberian hak akses DDL ANY secara default (ENABLE_DDL_ANY_PRIV=0). Untuk memberikan hak akses tipe ANY, jalankan sebagai SYSDBA: sp_set_para_value(1,'ENABLE_DDL_ANY_PRIV',1). Untuk hak akses non-ANY, pastikan akun saat ini memiliki ADMIN OPTION untuk hak akses tersebut.",
+    enableDdlAnyPrivHint:
+      "Petunjuk: DM8 menonaktifkan pemberian hak akses DDL ANY secara default (ENABLE_DDL_ANY_PRIV=0). Untuk memberikan hak akses tipe ANY, jalankan sebagai SYSDBA: sp_set_para_value(1,'ENABLE_DDL_ANY_PRIV',1). Untuk hak akses non-ANY, pastikan akun saat ini memiliki ADMIN OPTION untuk hak akses tersebut.",
     anyPrivilegeDisabled: "Hak akses tipe ANY dinonaktifkan oleh DM8 (ENABLE_DDL_ANY_PRIV=0) dan tidak dapat diberikan atau dicabut",
   },
   objects: {
@@ -5326,7 +5330,8 @@ export default withEnglishFallback({
       real: "Afinitas REAL menyimpan nilai floating-point IEEE 754. Cocok untuk pengukuran aproksimatif, bukan untuk uang atau perhitungan desimal yang eksak.",
       text: "Afinitas TEXT menyimpan teks dalam encoding database. VARCHAR(n) dan CHAR(n) tidak memaksakan n di SQLite; tambahkan constraint CHECK jika batas panjang itu penting.",
       blob: "Afinitas BLOB menyimpan byte persis seperti yang diberikan, tanpa konversi tipe.",
-      numeric: "Afinitas NUMERIC mencoba mengonversi teks numerik yang valid ke INTEGER terlebih dahulu, lalu REAL; ini bukan storage class SQLite yang terpisah. Deklarasi DATE, DATETIME, dan TIME juga memiliki afinitas NUMERIC; simpan secara konsisten sebagai TEXT ISO-8601, REAL Julian-day, atau INTEGER Unix-time.",
+      numeric:
+        "Afinitas NUMERIC mencoba mengonversi teks numerik yang valid ke INTEGER terlebih dahulu, lalu REAL; ini bukan storage class SQLite yang terpisah. Deklarasi DATE, DATETIME, dan TIME juga memiliki afinitas NUMERIC; simpan secara konsisten sebagai TEXT ISO-8601, REAL Julian-day, atau INTEGER Unix-time.",
     },
     length: "Panjang",
     lengthUnit: "Satuan panjang",
@@ -7755,7 +7760,8 @@ export default withEnglishFallback({
     noDifferences: "Data identik, tidak diperlukan SQL sinkronisasi",
     syncSuccess: "Sinkronisasi data berhasil dieksekusi",
     truncatedTitle: "Beberapa tabel tidak dibandingkan secara lengkap",
-    truncatedHint: "Tabel dengan baris lebih banyak daripada yang dapat dibaca dalam satu kali perbandingan hanya dibandingkan sampai baris pertamanya, sehingga baris yang ditambahkan, diubah, atau dihapus setelah titik itu tidak dilaporkan. Persempit rentang dengan filter dan bandingkan secara bertahap.",
+    truncatedHint:
+      "Tabel dengan baris lebih banyak daripada yang dapat dibaca dalam satu kali perbandingan hanya dibandingkan sampai baris pertamanya, sehingga baris yang ditambahkan, diubah, atau dihapus setelah titik itu tidak dilaporkan. Persempit rentang dengan filter dan bandingkan secara bertahap.",
     truncatedTable: "{table}: {source} baris sumber, {target} baris target, hanya {budget} baris pertama yang dibandingkan",
     truncatedBadge: "Hanya {budget} baris pertama yang dibandingkan",
   },
@@ -8338,7 +8344,8 @@ export default withEnglishFallback({
     sqlShortcutsDatabaseTypes: "Database",
     sqlShortcutsDatabaseTypesAll: "Semua database",
     sqlShortcutsDatabaseTypesSelected: "{count} dipilih",
-    sqlShortcutsDatabaseTypesHint: "Biarkan sebagai semua database, atau batasi ke jenis tertentu. Saat dibatasi, berpindah database tetap menyimpan setiap isi secara terpisah; gunakan Terapkan ke semua yang dipilih untuk menyalin template saat ini. Pintasan yang sama dapat diulang di jenis yang tidak tumpang tindih.",
+    sqlShortcutsDatabaseTypesHint:
+      "Biarkan sebagai semua database, atau batasi ke jenis tertentu. Saat dibatasi, berpindah database tetap menyimpan setiap isi secara terpisah; gunakan Terapkan ke semua yang dipilih untuk menyalin template saat ini. Pintasan yang sama dapat diulang di jenis yang tidak tumpang tindih.",
     sqlShortcutsPreview: "Pratinjau SQL",
     sqlShortcutsPreviewDatabase: "Pratinjau dialek",
     sqlShortcutsSelectLimitHint: "Saat dijalankan, SQL dihasilkan untuk dialek koneksi aktif.",
@@ -8497,7 +8504,8 @@ export default withEnglishFallback({
     vimModeDescription: "Gunakan pengeditan modal bergaya Vim di editor SQL",
     autoCloseBrackets: "Tutup kurung otomatis",
     restoreSqlFromSourcePaste: "Pulihkan SQL yang ditempel dari kode sumber",
-    restoreSqlFromSourcePasteDescription: "Saat menempelkan SQL yang dirangkai dari literal string dalam file sumber Java, JavaScript, Python, atau sejenisnya (tanda kutip, tanda plus, baris baru yang di-escape), pulihkan menjadi SQL polos. Hanya penggabungan yang jelas yang ditulis ulang; selain itu ditempel apa adanya.",
+    restoreSqlFromSourcePasteDescription:
+      "Saat menempelkan SQL yang dirangkai dari literal string dalam file sumber Java, JavaScript, Python, atau sejenisnya (tanda kutip, tanda plus, baris baru yang di-escape), pulihkan menjadi SQL polos. Hanya penggabungan yang jelas yang ditulis ulang; selain itu ditempel apa adanya.",
     autoCloseBracketsDescription: "Secara otomatis menyisipkan kurung dan tanda kutip penutup saat mengetik yang pembuka",
     sqlCompletionSection: "Pelengkapan SQL",
     insertSpaceAfterCompletion: "Sisipkan spasi setelah pelengkapan",
@@ -9166,7 +9174,8 @@ export default withEnglishFallback({
   },
   driverStore: {
     jreDirRemoveFailed: "Gagal menghapus direktori JRE lama: {path} (galat asli: {error})",
-    jreDirRemoveFailedWindows: "Gagal menghapus direktori JRE lama: {path}\nKemungkinan penyebab:\n  - proses dbx Agent / java masih menggunakan direktori ini\n  - perangkat lunak antivirus sedang memindainya\nTutup proses apa pun yang mungkin menggunakan direktori ini, atau mulai ulang dbx dan coba lagi.\n(galat asli: {error})",
+    jreDirRemoveFailedWindows:
+      "Gagal menghapus direktori JRE lama: {path}\nKemungkinan penyebab:\n  - proses dbx Agent / java masih menggunakan direktori ini\n  - perangkat lunak antivirus sedang memindainya\nTutup proses apa pun yang mungkin menggunakan direktori ini, atau mulai ulang dbx dan coba lagi.\n(galat asli: {error})",
     jreInUseByDrivers: "JRE {jre} sedang digunakan oleh driver: {drivers}. Hapus driver tersebut terlebih dahulu.",
     offlinePackageRegistryMissing: "agent-registry.json tidak ditemukan di dalam ZIP; ini bukan paket driver offline yang valid.",
     progressJreExtract: "Mengekstrak JRE...",

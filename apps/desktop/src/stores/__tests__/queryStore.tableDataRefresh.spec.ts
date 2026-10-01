@@ -188,6 +188,60 @@ describe("queryStore table data refresh", () => {
     expect(store.tabs.find((tab) => tab.id === archiveTabId)?.result).toBeUndefined();
   });
 
+  it("does not build batch INSERT metadata while data-tab metadata is pending", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "users", "data", "public");
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    const result = {
+      columns: ["id"],
+      rows: [[1]],
+      sourceStatement: "SELECT * FROM public.users",
+    };
+    tab.tableMeta = {
+      database: "app",
+      schema: "public",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [],
+      primaryKeys: [],
+    };
+    tab.tableMetaPending = true;
+    tab.result = result;
+    tab.results = [result];
+
+    await expect(store.resolveResultMetadataForBatch(tabId, tab.result!)).resolves.toBeUndefined();
+  });
+
+  it("maps active aliased query results to their source columns", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "Query", "query");
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    const result = {
+      columns: ["id"],
+      rows: [["root"]],
+      sourceStatement: "SELECT name AS id FROM users",
+    };
+    tab.tableMeta = {
+      database: "app",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [
+        { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+        { name: "name", data_type: "text", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+      ],
+      primaryKeys: ["id"],
+    };
+    tab.result = result;
+    tab.results = [result];
+
+    const metadata = await store.resolveResultMetadataForBatch(tabId, tab.result!);
+
+    expect(metadata?.queryAnalysis?.selectStar).toBe(false);
+    expect(metadata?.querySourceColumns).toEqual(["name"]);
+  });
+
   it("uses JDBC ResultSet offset pagination for Caché data tabs", async () => {
     mocks.getConnectionConfig.mockReturnValue({
       id: "cache-1",

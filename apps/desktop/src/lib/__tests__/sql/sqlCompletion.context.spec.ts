@@ -51,6 +51,34 @@ describe("SQL completion replacement", () => {
 });
 
 describe("sqlCompletion keyword snippets", () => {
+  it.each(["mysql", "postgres", "oracle"] as const)("offers the REPLACE keyword in %s CREATE OR statements", (databaseType) => {
+    for (const text of ["CREATE OR ", "CREATE OR r", "CREATE OR repla", "-- heading\nCREATE /* comment */ OR repla"]) {
+      const items = buildSqlCompletionItems(text, text.length, { tables: [], columnsByTable: new Map(), databaseType });
+      expect(items[0], text).toMatchObject({ label: "REPLACE", type: "keyword" });
+      expect(items[0].apply ?? items[0].label).toBe("REPLACE");
+    }
+  });
+
+  it("preserves REPLACE function completion in SELECT expressions", () => {
+    const text = "SELECT repla";
+    const items = buildSqlCompletionItems(text, text.length, { tables: [], columnsByTable: new Map(), databaseType: "mysql" });
+    expect(items[0]).toMatchObject({ label: "REPLACE", type: "function" });
+    expect(items[0]?.apply).toMatch(/^REPLACE\(/);
+  });
+
+  it.each(["sqlserver", "sqlite"] as const)("does not suggest unsupported CREATE OR REPLACE syntax on %s", (databaseType) => {
+    const text = "CREATE OR repla";
+    const items = buildSqlCompletionItems(text, text.length, { tables: [], columnsByTable: new Map(), databaseType });
+    expect(items.some((item) => item.type === "keyword" && item.label === "REPLACE")).toBe(false);
+  });
+
+  it("honors lower-case keyword preferences for CREATE OR REPLACE", () => {
+    const text = "create or repla";
+    const items = buildSqlCompletionItems(text, text.length, { tables: [], columnsByTable: new Map(), databaseType: "postgres", keywordCase: "lower" });
+    expect(items[0]).toMatchObject({ label: "replace", type: "keyword" });
+    expect(items[0].apply ?? items[0].label).toBe("replace");
+  });
+
   it("auto-opens and suggests SELECT when typing sel", () => {
     const sql = "sel";
     const items = buildSqlCompletionItems(sql, sql.length, {

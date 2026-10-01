@@ -603,6 +603,39 @@ describe("sqlCompletion database functions", () => {
     expect(ntileItems.find((item) => item.label === "ntile")?.apply).toBe("ntile(${buckets})");
   });
 
+  it("suggests ClickHouse FINAL and query modifiers as keywords", () => {
+    const sql = "SELECT * FROM events FI";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "clickhouse",
+      tables: [{ name: "events", type: "table" }],
+      columnsByTable: new Map(),
+    });
+
+    expect(items.find((item) => item.label === "FINAL")).toMatchObject({ type: "keyword" });
+  });
+
+  it("suggests ClickHouse PREWHERE and SETTINGS as keywords", () => {
+    const sql = "SELECT * FROM events SETT";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "clickhouse",
+      tables: [{ name: "events", type: "table" }],
+      columnsByTable: new Map(),
+    });
+
+    expect(items.find((item) => item.label === "SETTINGS")).toMatchObject({ type: "keyword" });
+  });
+
+  it("does not leak ClickHouse FINAL to MySQL", () => {
+    const sql = "SELECT * FROM events FI";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "mysql",
+      tables: [{ name: "events", type: "table" }],
+      columnsByTable: new Map(),
+    });
+
+    expect(items.some((item) => item.label === "FINAL")).toBe(false);
+  });
+
   it("does not leak ClickHouse-only functions to MySQL", () => {
     const sql = "SELECT tostart";
     const items = buildSqlCompletionItems(sql, sql.length, {

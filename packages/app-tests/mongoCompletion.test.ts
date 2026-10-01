@@ -790,6 +790,44 @@ test("completes database names after use and inside getSiblingDB", () => {
   assert.deepEqual(labels("// use ", { databases }), []);
 });
 
+test("honours a preceding use command and resolves active database", () => {
+  // `use <db>` switches the active database for following commands in the script.
+  const context = getMongoCompletionContext("use analytics\ndb.", "use analytics\ndb.".length);
+  assert.equal(context.database, "analytics");
+  assert.equal(context.mode, "collection");
+
+  // Plain db root after `use` still offers getSiblingDB, unlike an explicit db.getSiblingDB(…) root.
+  const items = labels("use x\ndb.", { collections });
+  assert.ok(items.includes("getSiblingDB"));
+  assert.ok(items.includes("users"));
+
+  // Field completion inside a command carries the database set by preceding `use`.
+  const fieldContext = getMongoCompletionContext("use analytics\ndb.users.find({ ", "use analytics\ndb.users.find({ ".length);
+  assert.equal(fieldContext.database, "analytics");
+  assert.equal(fieldContext.collection, "users");
+  assert.ok(labels("use analytics\ndb.users.find({ na", { fields }).includes("name"));
+
+  // An explicit db.getSiblingDB("b") on the current command wins over an earlier `use a`.
+  const siblingOverride = getMongoCompletionContext('use a\ndb.getSiblingDB("b").users.find({ ', 'use a\ndb.getSiblingDB("b").users.find({ '.length);
+  assert.equal(siblingOverride.database, "b");
+  assert.equal(siblingOverride.collection, "users");
+
+  // `use` inside comments or argument objects does not set the active database.
+  assert.equal(getMongoCompletionContext("db.users.find({ use: 1 })", "db.users.find({ use: 1 })".length).database, undefined);
+  assert.equal(getMongoCompletionContext("// use x\ndb.", "// use x\ndb.".length).database, undefined);
+  assert.equal(getMongoCompletionContext("/* use x */\ndb.", "/* use x */\ndb.".length).database, undefined);
+
+  // Across multiple `use` commands, the last one before the cursor wins.
+  assert.equal(getMongoCompletionContext("use first\nuse second\ndb.", "use first\nuse second\ndb.".length).database, "second");
+
+  // getSiblingDB on a previous command does not leak into a later plain db command.
+  assert.equal(getMongoCompletionContext('use a\ndb.getSiblingDB("b").users.find({});\ndb.', 'use a\ndb.getSiblingDB("b").users.find({});\ndb.'.length).database, "a");
+
+  // Long scripts with thousands of commands resolve without O(n^2) slicing overhead.
+  const longScript = "db.users.find({});\n".repeat(2000) + "use big\ndb.";
+  assert.equal(getMongoCompletionContext(longScript, longScript.length).database, "big");
+});
+
 test("completes the keys of an operator's own sub-document", () => {
   // `{ field: { $… } }` takes the field operators, but `$text` and the geo operators hold
   // documents with their own keys, where `$gt` and friends are nonsense.

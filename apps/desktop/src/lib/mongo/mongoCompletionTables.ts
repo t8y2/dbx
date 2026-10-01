@@ -16,6 +16,7 @@
  *   QUERY_OPERATORS      → filter documents (`find`, `$match`, …)
  *   UPDATE_OPERATORS     → update documents (`updateOne`, `findOneAndUpdate`, …)
  *   PUSH_MODIFIERS       → the object value of `$push` / `$addToSet`
+ *   PROJECTION_OPERATORS → projection documents (`find`, `findOne`, `findOneAndUpdate`, …)
  *   PIPELINE_STAGES      → elements of an aggregation pipeline array
  *   ACCUMULATORS         → the output fields of `$group`
  *   EXPRESSION_OPERATORS → aggregation expression position (`$project`, `$expr`, …)
@@ -110,6 +111,13 @@ export const PUSH_MODIFIERS: MongoOperatorSpec[] = specs([
   ["$slice", "Limits the array length after the push", "$slice: ${}"],
   ["$sort", "Sorts the array elements after the push", "$sort: { ${field}: 1 }"],
   ["$position", "Insert position for $each", "$position: 0"],
+]);
+
+/** Projection operators, valid inside a projected field's object value in find-style projections. */
+export const PROJECTION_OPERATORS: MongoOperatorSpec[] = specs([
+  ["$slice", "Limits the number of elements projected from an array", "$slice: ${}"],
+  ["$elemMatch", "Projects the first array element matching a condition", "$elemMatch: { ${} }"],
+  ["$meta", "Projects metadata associated with the document", '$meta: "textScore"'],
 ]);
 
 export const PIPELINE_STAGES: MongoOperatorSpec[] = specs([
@@ -493,6 +501,10 @@ export const ENUM_VALUES: Record<string, MongoOperatorSpec[]> = {
     ["x", "Ignore whitespace and # comments in the pattern", '"x"'],
     ["s", "Dot matches newlines", '"s"'],
     ["u", "Unicode character classes", '"u"'],
+  ]),
+  $meta: specs([
+    ["textScore", "Access the text search score", '"textScore"'],
+    ["indexKey", "Access the index key for the document", '"indexKey"'],
   ]),
   geometryType: specs([
     ["Point", "Single position", '"Point"'],

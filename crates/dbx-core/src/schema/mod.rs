@@ -18,6 +18,8 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 mod agent_pg_sequences;
+#[cfg(all(test, unix))]
+mod external_table_filter_tests;
 mod kingbase;
 mod mongodb_columns;
 pub mod plugin_metadata;
@@ -2260,8 +2262,8 @@ async fn list_tables_once(
             let driver_id = driver_id.clone();
             let config = config.clone();
             let session = session.clone();
+            let force_local_table_name_filter = table_name_filter.is_some_and(|filter| !filter.is_empty());
             if uses_presto_like_information_schema_tables(&config.db_type) {
-                let force_local_table_name_filter = table_name_filter.is_some_and(|filter| !filter.is_empty());
                 return external_driver_presto_like_tables(
                     session,
                     config.as_ref(),
@@ -2282,11 +2284,15 @@ async fn list_tables_once(
             if let Some(object_types) = object_types {
                 params["object_types"] = serde_json::json!(object_types);
             }
-            if let Some(limit) = limit {
-                params["limit"] = serde_json::json!(limit);
-            }
-            if let Some(offset) = offset {
-                params["offset"] = serde_json::json!(offset);
+            // Include/exclude name patterns are evaluated in core, so the plugin
+            // must return the full candidate list before core applies pagination.
+            if !force_local_table_name_filter {
+                if let Some(limit) = limit {
+                    params["limit"] = serde_json::json!(limit);
+                }
+                if let Some(offset) = offset {
+                    params["offset"] = serde_json::json!(offset);
+                }
             }
             return session
                 .invoke_with_timeout::<Vec<db::TableInfo>>(
@@ -2296,7 +2302,9 @@ async fn list_tables_once(
                 )
                 .await
                 .map(|tables| {
-                    let final_offset = if external_driver_paging_likely_applied(&driver_id, limit, tables.len()) {
+                    let final_offset = if !force_local_table_name_filter
+                        && external_driver_paging_likely_applied(&driver_id, limit, tables.len())
+                    {
                         Some(0)
                     } else {
                         offset

@@ -47,6 +47,7 @@ export type MongoCompletionMode =
   | "pullCondition"
   | "fieldPath"
   | "fieldRef"
+  | "indexName"
   | "value"
   | "valueWrapper"
   | "queryOperator"
@@ -72,6 +73,11 @@ export type MongoPipelineKind = "aggregate" | "update" | "facet" | "join" | "vie
 export interface MongoCompletionField {
   name: string;
   type?: string;
+}
+
+export interface MongoCompletionIndex {
+  name: string;
+  keyPattern?: string;
 }
 
 export interface MongoCompletionItem {
@@ -117,6 +123,7 @@ export interface MongoCompletionInput {
   databases?: string[];
   collections?: string[];
   fields?: MongoCompletionField[];
+  indexes?: Array<string | MongoCompletionIndex>;
 }
 
 const COLLECTION_METHODS = [
@@ -242,7 +249,7 @@ const ROOT_SNIPPET_BOOST: Record<(typeof ROOT_SNIPPETS)[number]["label"], number
 };
 
 /** Role of each positional argument, by collection helper. Drives cursor classification. */
-type MongoArgRole = "filter" | "update" | "replacement" | "document" | "documents" | "operations" | "pipeline" | "projection" | "keys" | "sortKeys" | "fieldName" | "options" | "collation" | "verbosity" | "name";
+type MongoArgRole = "filter" | "update" | "replacement" | "document" | "documents" | "operations" | "pipeline" | "projection" | "keys" | "sortKeys" | "fieldName" | "indexName" | "options" | "collation" | "verbosity" | "name";
 
 const METHOD_ARG_ROLES: Record<string, readonly MongoArgRole[]> = {
   find: ["filter", "projection"],
@@ -267,6 +274,8 @@ const METHOD_ARG_ROLES: Record<string, readonly MongoArgRole[]> = {
   sort: ["sortKeys"],
   collation: ["collation"],
   explain: ["verbosity"],
+  dropIndex: ["indexName"],
+  dropIndexes: ["indexName"],
   // Database-level helpers whose argument is a document.
   createCollection: ["name", "options"],
   runCommand: ["options"],
@@ -417,7 +426,7 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
 
   const call = findInnermostMongoCall(beforeCursor);
   // Top-level snippets belong at the start of a command. Inside an argument list — of a method
-  // this engine does not model (`limit(`, `drop(`, `dropIndex("`, `runCommand({`, …) or after a
+  // this engine does not model (`limit(`, `drop(`, `renameCollection(`, `runCommand({`, …) or after a
   // `use` — they are noise: `db.collection.find` is not something you can type there.
   if (!call) return isInsideCallArguments(beforeCursor) || isAfterUseKeyword(beforeCursor) || isAfterShowKeyword(beforeCursor) ? at("none") : at("root");
 
@@ -489,6 +498,9 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
     case "fieldRef":
       items = fieldRefItems(prefix, fields);
       break;
+    case "indexName":
+      items = indexNameItems(prefix, input.indexes ?? [], context.method);
+      break;
     case "value":
       // Shell constructors first; the extended JSON spellings need their own braces here.
       items = [...specItems(VALUE_SNIPPETS, prefix, "value", 100), ...specItems(BRACED_EXTENDED_JSON_VALUES, prefix, "extended JSON value", 90)];
@@ -559,6 +571,11 @@ export function mongoCompletionNeedsFields(mode: MongoCompletionMode): boolean {
 /** Modes whose items are built from the database's collection names. */
 export function mongoCompletionNeedsCollections(mode: MongoCompletionMode): boolean {
   return mode === "collection" || mode === "collectionOrMethod" || mode === "collectionRef";
+}
+
+/** Modes whose items are built from the target collection's indexes. */
+export function mongoCompletionNeedsIndexes(mode: MongoCompletionMode): boolean {
+  return mode === "indexName";
 }
 
 /** Modes whose items are built from the connection's database names. */
@@ -712,6 +729,20 @@ export function inferMongoCompletionFields(documents: unknown[]): MongoCompletio
   return [...typeByPath.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([name, types]) => ({ name, type: [...types].sort().join(" | ") }));
 }
 
+/** Formats MongoDB index keys into a key pattern string, e.g. `{ name: 1, age: -1 }`. */
+export function formatMongoIndexKeyPattern(keys?: readonly { field: string; direction: string | number }[] | null): string | undefined {
+  if (!keys || keys.length === 0) return undefined;
+  const parts = keys.map((key) => {
+    let dir: string | number = key.direction;
+    if (dir === "1" || dir === 1) dir = 1;
+    else if (dir === "-1" || dir === -1) dir = -1;
+    else if (typeof dir === "string" && /^-?\d+$/.test(dir)) dir = Number(dir);
+    else if (typeof dir === "string") dir = JSON.stringify(dir);
+    return `${key.field}: ${dir}`;
+  });
+  return `{ ${parts.join(", ")} }`;
+}
+
 /* ------------------------------------------------------------------ *
  * Cursor classification
  * ------------------------------------------------------------------ */
@@ -863,6 +894,13 @@ function classifyCursorInCall(method: string, scan: MongoCallScan): MongoCursorC
     // A bare string argument naming a field, e.g. distinct("category").
     case "fieldName":
       return { mode: scan.stack.length === 0 ? "fieldPath" : "none" };
+    case "indexName":
+      if (method === "dropIndexes") {
+        const isBare = scan.stack.length === 0;
+        const isInArray = scan.stack.length === 1 && scan.stack[0].kind === "array";
+        return isBare || isInArray ? { mode: "indexName", method } : { mode: "none" };
+      }
+      return scan.stack.length === 0 ? { mode: "indexName", method } : { mode: "none" };
     case "pipeline":
       return classifyPipeline(scan);
     case "operations":
@@ -1100,6 +1138,7 @@ function classifyMethodOptions(method: string, scan: MongoCallScan): MongoCursor
 
   if (depth === 0) {
     if (scan.inValue) {
+      if (method === "aggregate" && scan.valueKey === "hint") return { mode: "indexName", method };
       const enumKey = OPTION_VALUE_ENUMS[scan.valueKey ?? ""];
       if (enumKey) return { mode: "enumValue", enumKey, method };
       if (OPTION_COLLECTION_KEYS[method]?.has(scan.valueKey ?? "")) return { mode: "collectionRef", method };
@@ -1505,6 +1544,26 @@ function collectionRefItems(prefix: string, collections: string[]): MongoComplet
         boost: startsWithPrefix(collection, prefix) ? 120 : 90,
       };
     });
+}
+
+function indexNameItems(prefix: string, indexes: Array<string | MongoCompletionIndex>, method?: string): MongoCompletionItem[] {
+  const normalizedPrefix = normalizeMongoKeyPrefix(prefix);
+  const normalized = indexes.map((item) => (typeof item === "string" ? { name: item } : item));
+  const excludeProtected = method === "dropIndex" || method === "dropIndexes";
+  const candidates = excludeProtected ? normalized.filter((idx) => idx.name !== "_id_") : normalized;
+
+  return dedupeAndSort(
+    candidates
+      .filter((idx) => matchesFuzzyPrefix(idx.name, normalizedPrefix))
+      .slice(0, 100)
+      .map((idx) => ({
+        label: idx.name,
+        type: "keyword" as const,
+        detail: idx.keyPattern || undefined,
+        apply: quoteMongoString(idx.name, prefix),
+        boost: startsWithPrefix(idx.name, normalizedPrefix) ? 120 : 90,
+      })),
+  );
 }
 
 function methodItems(prefix: string): MongoCompletionItem[] {

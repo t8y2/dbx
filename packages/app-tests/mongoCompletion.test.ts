@@ -1,6 +1,16 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { buildMongoCompletionItems, buildMongoCompletionItemsFromContext, getMongoCompletionContext, getMongoCompletionResultValidFor, getMongoDocumentQueryCompletionContext, inferMongoCompletionFields, shouldAutoOpenMongoCompletion } from "../../apps/desktop/src/lib/mongo/mongoCompletion.ts";
+import {
+  buildMongoCompletionItems,
+  buildMongoCompletionItemsFromContext,
+  formatMongoIndexKeyPattern,
+  getMongoCompletionContext,
+  getMongoCompletionResultValidFor,
+  getMongoDocumentQueryCompletionContext,
+  inferMongoCompletionFields,
+  mongoCompletionNeedsIndexes,
+  shouldAutoOpenMongoCompletion,
+} from "../../apps/desktop/src/lib/mongo/mongoCompletion.ts";
 import {
   ACCUMULATORS,
   BULK_WRITE_OPERATION_FIELDS,
@@ -982,6 +992,115 @@ test("completes both arguments of distinct", () => {
   assert.deepEqual(filterArg.slice(0, 4), ["_id", "createdAt", "name", "profile.email"]);
   assert.ok(filterArg.includes("$or"), "a filter argument offers whole-filter operators after the fields");
   assert.ok(labels('db.users.distinct("name", { age: { $g', { fields }).includes("$gte"));
+});
+
+test("completes index names in dropIndex, dropIndexes and aggregate hint", () => {
+  const sampleIndexes = [
+    { name: "_id_", keyPattern: "{ _id: 1 }" },
+    { name: "email_1", keyPattern: "{ email: 1 }" },
+    { name: "name_age_idx", keyPattern: "{ name: 1, age: -1 }" },
+  ];
+
+  // Needs-helper correctly identifies indexName mode.
+  assert.equal(mongoCompletionNeedsIndexes("indexName"), true);
+  assert.equal(mongoCompletionNeedsIndexes("collection"), false);
+  assert.equal(mongoCompletionNeedsIndexes("none"), false);
+
+  // dropIndex excludes _id_ and completes index names of the collection.
+  const dropIndexText = 'db.users.dropIndex("';
+  const dropIndexCtx = getMongoCompletionContext(dropIndexText, dropIndexText.length);
+  assert.equal(dropIndexCtx.mode, "indexName");
+  assert.equal(dropIndexCtx.collection, "users");
+  assert.equal(dropIndexCtx.prefix, '"');
+
+  const dropIndexItems = buildMongoCompletionItems(dropIndexText, dropIndexText.length, { indexes: sampleIndexes });
+  assert.deepEqual(
+    dropIndexItems.map((item) => item.label),
+    ["email_1", "name_age_idx"],
+  );
+  assert.equal(
+    dropIndexItems.find((i) => i.label === "_id_"),
+    undefined,
+  );
+  assert.equal(dropIndexItems.find((i) => i.label === "name_age_idx")?.detail, "{ name: 1, age: -1 }");
+  assert.equal(dropIndexItems[0]?.apply, '"email_1"');
+
+  // dropIndex handles string-only index inputs as well.
+  const stringIndexItems = buildMongoCompletionItems(dropIndexText, dropIndexText.length, { indexes: ["_id_", "username_1"] });
+  assert.deepEqual(
+    stringIndexItems.map((item) => item.label),
+    ["username_1"],
+  );
+
+  // dropIndex replaces existing closing quote when completing an emptied quote pair.
+  const dropIndexEmpty = 'db.users.dropIndex("")';
+  const dropIndexEmptyCursor = dropIndexEmpty.indexOf('""') + 1;
+  const dropIndexEmptyContext = getMongoCompletionContext(dropIndexEmpty, dropIndexEmptyCursor);
+  const dropIndexEmptyItem = buildMongoCompletionItems(dropIndexEmpty, dropIndexEmptyCursor, { indexes: sampleIndexes }).find((i) => i.label === "email_1");
+  assert.equal(dropIndexEmptyContext.replaceClosingQuote, '"');
+  assert.equal(dropIndexEmptyItem?.replaceClosingQuote, '"');
+  assert.equal(dropIndexEmpty.slice(0, dropIndexEmptyContext.from) + dropIndexEmptyItem?.apply + dropIndexEmpty.slice(dropIndexEmptyCursor + 1), 'db.users.dropIndex("email_1")');
+
+  // dropIndexes (bare string argument) excludes _id_.
+  const dropIndexesBareText = 'db.users.dropIndexes("';
+  const dropIndexesBareCtx = getMongoCompletionContext(dropIndexesBareText, dropIndexesBareText.length);
+  assert.equal(dropIndexesBareCtx.mode, "indexName");
+  assert.equal(dropIndexesBareCtx.collection, "users");
+  const dropIndexesBareItems = buildMongoCompletionItems(dropIndexesBareText, dropIndexesBareText.length, { indexes: sampleIndexes });
+  assert.deepEqual(
+    dropIndexesBareItems.map((item) => item.label),
+    ["email_1", "name_age_idx"],
+  );
+
+  // dropIndexes (array of string index names) excludes _id_.
+  const dropIndexesArrayText = 'db.users.dropIndexes(["';
+  const dropIndexesArrayCtx = getMongoCompletionContext(dropIndexesArrayText, dropIndexesArrayText.length);
+  assert.equal(dropIndexesArrayCtx.mode, "indexName");
+  assert.equal(dropIndexesArrayCtx.collection, "users");
+  const dropIndexesArrayItems = buildMongoCompletionItems(dropIndexesArrayText, dropIndexesArrayText.length, { indexes: sampleIndexes });
+  assert.deepEqual(
+    dropIndexesArrayItems.map((item) => item.label),
+    ["email_1", "name_age_idx"],
+  );
+
+  // Subsequent items in dropIndexes array also complete index names.
+  const dropIndexesNextArrayText = 'db.users.dropIndexes(["email_1", "';
+  const dropIndexesNextArrayCtx = getMongoCompletionContext(dropIndexesNextArrayText, dropIndexesNextArrayText.length);
+  assert.equal(dropIndexesNextArrayCtx.mode, "indexName");
+  assert.equal(dropIndexesNextArrayCtx.collection, "users");
+  const dropIndexesNextItems = buildMongoCompletionItems(dropIndexesNextArrayText, dropIndexesNextArrayText.length, { indexes: sampleIndexes });
+  assert.deepEqual(
+    dropIndexesNextItems.map((item) => item.label),
+    ["email_1", "name_age_idx"],
+  );
+
+  // aggregate({ hint: "..." }) includes _id_ (hinting _id_ is allowed in MongoDB).
+  const aggHintText = 'db.users.aggregate([], { hint: "';
+  const aggHintCtx = getMongoCompletionContext(aggHintText, aggHintText.length);
+  assert.equal(aggHintCtx.mode, "indexName");
+  assert.equal(aggHintCtx.collection, "users");
+  const aggHintItems = buildMongoCompletionItems(aggHintText, aggHintText.length, { indexes: sampleIndexes });
+  assert.deepEqual(
+    aggHintItems.map((item) => item.label),
+    ["_id_", "email_1", "name_age_idx"],
+  );
+  assert.equal(aggHintItems.find((i) => i.label === "_id_")?.detail, "{ _id: 1 }");
+
+  // find().hint() is NOT in find chain and does not offer index completion.
+  const findHintText = 'db.users.find({}).hint("';
+  assert.notEqual(getMongoCompletionContext(findHintText, findHintText.length).mode, "indexName");
+
+  // Key pattern formatter formats directions properly.
+  assert.equal(
+    formatMongoIndexKeyPattern([
+      { field: "name", direction: "1" },
+      { field: "age", direction: "-1" },
+    ]),
+    "{ name: 1, age: -1 }",
+  );
+  assert.equal(formatMongoIndexKeyPattern([{ field: "loc", direction: "2dsphere" }]), '{ loc: "2dsphere" }');
+  assert.equal(formatMongoIndexKeyPattern([]), undefined);
+  assert.equal(formatMongoIndexKeyPattern(null), undefined);
 });
 
 test("completes database names after use and inside getSiblingDB", () => {

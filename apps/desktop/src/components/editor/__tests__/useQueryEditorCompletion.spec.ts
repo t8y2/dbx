@@ -60,6 +60,7 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}, configureMetad
     listRedisCompletionKeys: vi.fn(async () => ["user:1"]),
     listMongoCompletionCollections: vi.fn(async () => ["users"]),
     listMongoCompletionFields: vi.fn(async () => []),
+    listMongoCompletionIndexes: vi.fn(async () => []),
     listElasticsearchCompletionIndices: vi.fn(async () => ["users"]),
     listElasticsearchCompletionFields: vi.fn(async () => []),
   };
@@ -273,6 +274,21 @@ describe("QueryEditor completion provider ownership", () => {
     // A fresh key still gets its separator.
     expect(await accept("db.users.find({ na", 18)).toEqual({ doc: "db.users.find({ name: ", cursor: 22 });
     expect(await accept("db.users.find({ na })", 18)).toEqual({ doc: "db.users.find({ name:  })", cursor: 22 });
+  });
+
+  it("completes MongoDB index names in dropIndex and replaces closing quote", async () => {
+    const doc = 'db.users.dropIndex("")';
+    const cursor = doc.indexOf('""') + 1;
+    const { store, provide, currentView } = createHarness({ databaseType: "mongodb", modelValue: doc });
+    store.listMongoCompletionIndexes.mockResolvedValue([{ name: "email_1", keyPattern: "{ email: 1 }" }]);
+    currentView.dispatch({ selection: { anchor: cursor } });
+    const result = await provide();
+    expect(store.listMongoCompletionIndexes).toHaveBeenCalledWith("connection", "demo", "users");
+    const option = result?.options.find((candidate) => candidate.displayLabel === "email_1" || candidate.label === "email_1");
+    expect(option).toBeDefined();
+    expect(option?.detail).toBe("{ email: 1 }");
+    (option!.apply as (view: EditorView, completion: unknown, from: number, to: number) => void)(currentView, option, result!.from, cursor);
+    expect(currentView.state.doc.toString()).toBe('db.users.dropIndex("email_1")');
   });
 
   it.each(["redis", "mongodb", "mysql"] as const)("does not query %s metadata without a connection", async (databaseType) => {

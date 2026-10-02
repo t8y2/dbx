@@ -1239,6 +1239,57 @@ describe("connectionStore completion assistant", () => {
     expect(getColumns.mock.calls.map((call) => call[3])).toEqual(["users", "orders", "users"]);
   });
 
+  it("caches Mongo completion indexes and invalidates them via invalidateCompletionTableCache and invalidateCompletionCache", async () => {
+    const mongoListIndexSpecs = vi.fn().mockResolvedValue([
+      {
+        name: "email_1",
+        keys: [{ field: "email", direction: "1" }],
+        is_unique: true,
+        is_primary: false,
+        is_sparse: false,
+        expire_after_seconds: null,
+        partial_filter_expression: null,
+        background: false,
+        bucket_size: null,
+        hidden: false,
+        properties_complete: true,
+        extra_options: null,
+      },
+    ]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      mongoListIndexSpecs,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [
+      {
+        ...postgresConnection(),
+        id: "mongo-1",
+        name: "MongoDB",
+        db_type: "mongodb",
+      },
+    ];
+    store.connectedIds.add("mongo-1");
+
+    const first = await store.listMongoCompletionIndexes("mongo-1", "app", "users");
+    expect(first).toEqual([{ name: "email_1", keyPattern: "{ email: 1 }" }]);
+    const second = await store.listMongoCompletionIndexes("mongo-1", "app", "users");
+    expect(second).toEqual([{ name: "email_1", keyPattern: "{ email: 1 }" }]);
+    expect(mongoListIndexSpecs).toHaveBeenCalledTimes(1);
+
+    expect(store.invalidateCompletionTableCache("mongo-1", "app", "users")).toBeGreaterThan(0);
+    await store.listMongoCompletionIndexes("mongo-1", "app", "users");
+    expect(mongoListIndexSpecs).toHaveBeenCalledTimes(2);
+
+    store.invalidateCompletionCache("mongo-1", "app");
+    await store.listMongoCompletionIndexes("mongo-1", "app", "users");
+    expect(mongoListIndexSpecs).toHaveBeenCalledTimes(3);
+  });
+
   it("does not let an invalidated column request overwrite fresh metadata", async () => {
     const staleColumns = deferred<unknown[]>();
     const freshColumns = deferred<unknown[]>();

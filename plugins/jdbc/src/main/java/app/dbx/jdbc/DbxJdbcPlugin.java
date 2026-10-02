@@ -732,7 +732,17 @@ public final class DbxJdbcPlugin {
             throw new SQLException("JDBC logical sessions require the same selected driver");
         }
         if (connectionState() != DEFAULT_CONNECTION_STATE) logicalDriverKey = driverKey;
+        String driverClass = optionalText(connection, "jdbc_driver_class");
         if (driverKey.equals(registeredDriverKey) && registeredDriver != null) {
+            if (driverClass != null) {
+                LegacyJdbcDriverClass.load(
+                    driverClass,
+                    optionalText(connection, "connection_string"),
+                    registeredDriverClassLoader != null
+                        ? registeredDriverClassLoader
+                        : Thread.currentThread().getContextClassLoader()
+                );
+            }
             if (registeredDriverClassLoader != null) {
                 Thread.currentThread().setContextClassLoader(registeredDriverClassLoader);
             }
@@ -757,9 +767,10 @@ public final class DbxJdbcPlugin {
         Thread.currentThread().setContextClassLoader(loader);
         registeredDriverClassLoader = loader;
 
-        String driverClass = optionalText(connection, "jdbc_driver_class");
         if (driverClass != null) {
-            Constructor<?> constructor = Class.forName(driverClass, true, loader).getDeclaredConstructor();
+            Constructor<?> constructor = LegacyJdbcDriverClass.load(
+                driverClass, optionalText(connection, "connection_string"), loader
+            ).getDeclaredConstructor();
             constructor.setAccessible(true);
             Driver driver = (Driver) constructor.newInstance();
             registeredDriver = new DriverShim(driver);

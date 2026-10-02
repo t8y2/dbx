@@ -13,7 +13,7 @@ export function supportsDatabaseSchemaQualifier(dbType?: DatabaseType): boolean 
 }
 
 export function supportsDatabaseNameCompletion(dbType?: DatabaseType): boolean {
-  return !!dbType && ((!isSchemaAware(dbType) && !isSingleDatabase(dbType)) || dbType === "sqlserver");
+  return !!dbType && ((!isSchemaAware(dbType) && !isSingleDatabase(dbType)) || dbType === "sqlserver" || dbType === "snowflake");
 }
 
 /**

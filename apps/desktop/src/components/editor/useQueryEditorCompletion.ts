@@ -1071,6 +1071,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     });
     const shouldLoadTables = !schemaLookupDatabase && (completionContext.suggestTables || (!!completionContext.qualifier && !isReferencedTableQualifier(completionContext)));
     const tableLookupTarget = resolveSqlCompletionTableLookupTarget({
+      databaseType: props.databaseType,
       currentDatabase: scope.database,
       currentSchema: scope.schema,
       supportsDatabaseQualifier: supportsDatabaseQualifierCompletion(),
@@ -1233,6 +1234,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       knownSchemas: currentDatabaseSchemaNames,
     });
     const tableLookupTarget = resolveSqlCompletionTableLookupTarget({
+      databaseType: props.databaseType,
       currentDatabase: database,
       currentSchema: scope.schema,
       supportsDatabaseQualifier: supportsDatabaseQualifierCompletion(),
@@ -1443,6 +1445,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     });
     const shouldLoadTables = !schemaLookupDatabase && (completionContext.suggestTables || (!!completionContext.qualifier && !isReferencedTableQualifier(completionContext)));
     const tableLookupTarget = resolveSqlCompletionTableLookupTarget({
+      databaseType: props.databaseType,
       currentDatabase: scope.database,
       currentSchema: scope.schema,
       supportsDatabaseQualifier: supportsDatabaseQualifierCompletion(),

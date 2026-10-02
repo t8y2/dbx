@@ -12,6 +12,7 @@ import {
   METHOD_OPTION_KEYS,
   OPERATOR_SUB_KEYS,
   PIPELINE_STAGES,
+  PROJECTION_OPERATORS,
   PUSH_MODIFIERS,
   QUERY_OPERATORS,
   STAGE_OPTION_KEYS,
@@ -828,6 +829,49 @@ test("every suggested map value parses in the position that offers it", () => {
   }
 });
 
+test("suggests projection operators in find projections", () => {
+  const ops = ["$elemMatch", "$meta", "$slice"];
+  assert.deepEqual(labels("db.users.find({}, { tags: { ", { fields }), ops);
+  assert.deepEqual(labels("db.users.find({}, { tags: { $", { fields }), ops);
+  assert.deepEqual(labels("db.users.findOne({}, { tags: { ", { fields }), ops);
+  assert.deepEqual(labels("db.users.findOneAndUpdate({}, { $set: { a: 1 } }, { projection: { tags: { ", { fields }), ops);
+  assert.deepEqual(labels("db.users.findOneAndDelete({}, { projection: { tags: { ", { fields }), ops);
+
+  // Positional operator form needs nothing new and still completes map values
+  assert.deepEqual(labels('db.users.find({}, { "tags.$": ', { fields }), ["0", "1"]);
+
+  // $slice takes only numbers, so completion offers nothing
+  assert.deepEqual(labels("db.users.find({}, { tags: { $slice: ", { fields }), []);
+  assert.deepEqual(labels("db.users.find({}, { tags: { $slice: [", { fields }), []);
+
+  // $meta value enum in and out of quotes
+  assert.deepEqual(labels('db.users.find({}, { score: { $meta: "', { fields }), ["textScore", "indexKey"]);
+  assert.deepEqual(labels('db.users.find({}, { score: { $meta: "text', { fields }), ["textScore"]);
+  assert.deepEqual(labels("db.users.find({}, { score: { $meta: ", { fields }), ["textScore", "indexKey"]);
+
+  const quotedMeta = buildMongoCompletionItems('db.users.find({}, { score: { $meta: "', 'db.users.find({}, { score: { $meta: "'.length);
+  const unquotedMeta = buildMongoCompletionItems("db.users.find({}, { score: { $meta: ", "db.users.find({}, { score: { $meta: ".length);
+  assert.equal(quotedMeta.find((item) => item.label === "textScore")?.apply, '"textScore"');
+  assert.equal(unquotedMeta.find((item) => item.label === "textScore")?.apply, '"textScore"');
+  assert.equal(getMongoCompletionContext('db.users.find({}, { score: { $meta: "" } })', 'db.users.find({}, { score: { $meta: "'.length).replaceClosingQuote, '"');
+
+  // $elemMatch body completes fields and filter operators
+  assert.deepEqual(labels("db.users.find({}, { tags: { $elemMatch: { ", { fields }).slice(0, 3), ["_id", "createdAt", "name"]);
+  assert.ok(labels("db.users.find({}, { tags: { $elemMatch: { score: { ", { fields }).includes("$gt"));
+  assert.ok(labels("db.users.find({}, { tags: { $elemMatch: { score: { $gt: ", { fields }).includes("NumberInt"));
+});
+
+test("every suggested projection operator parses", () => {
+  const render = (op: { label: string; apply: string }) => {
+    if (op.label === "$elemMatch") return "$elemMatch: { score: 1 }";
+    return op.apply.replace(/\$\{([^{}]*)\}/g, (_, name: string) => name || "1");
+  };
+  for (const op of PROJECTION_OPERATORS) {
+    const command = `db.users.find({}, { tags: { ${render(op)} } })`;
+    assert.ok(parseMongoCommand(command), `${command} must parse`);
+  }
+});
+
 test("offers nothing rather than top-level snippets inside an unmodelled argument", () => {
   // `db.collection.find` is not something that can be typed inside these parentheses, so the
   // top-level snippets are noise there; the engine stays quiet until the argument is modelled.
@@ -1207,6 +1251,7 @@ test("every suggested sub-document key and enumerated value parses in the positi
 
   const valueCommands: Record<string, (value: string) => string> = {
     $type: (value) => `db.users.find({ a: { $type: ${value} } })`,
+    $meta: (value) => `db.users.find({}, { score: { $meta: ${value} } })`,
     bsonType: (value) => `db.users.find({ $jsonSchema: { bsonType: ${value} } })`,
     $options: (value) => `db.users.find({ a: { $regex: "x", $options: ${value} } })`,
     geometryType: (value) => `db.users.find({ loc: { $geoIntersects: { $geometry: { type: ${value}, coordinates: [] } } } })`,
@@ -1385,6 +1430,7 @@ test("snippet templates use placeholder syntax CodeMirror actually honours", () 
     ...QUERY_OPERATORS,
     ...UPDATE_OPERATORS,
     ...PUSH_MODIFIERS,
+    ...PROJECTION_OPERATORS,
     ...PIPELINE_STAGES,
     ...ACCUMULATORS,
     ...WINDOW_OPERATORS,

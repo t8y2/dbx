@@ -12,6 +12,7 @@ import {
   BULK_WRITE_OPERATIONS,
   KEY_MAP_VALUES,
   METHOD_OPTION_KEYS,
+  PROJECTION_OPERATORS,
   OPERATOR_SUB_KEYS,
   STAGE_OPTION_KEYS,
   TOP_LEVEL_QUERY_OPERATORS,
@@ -51,6 +52,7 @@ export type MongoCompletionMode =
   | "queryOperator"
   | "updateOperator"
   | "pushModifier"
+  | "projectionOperator"
   | "expression"
   | "accumulator"
   | "windowOperator"
@@ -503,6 +505,9 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
       break;
     case "pushModifier":
       items = specItems(PUSH_MODIFIERS, prefix, "array update modifier", 100);
+      break;
+    case "projectionOperator":
+      items = specItems(PROJECTION_OPERATORS, prefix, "projection operator", 100);
       break;
     case "expression":
       items = [...specItems(EXPRESSION_OPERATORS, prefix, "aggregation expression", 100), ...fieldRefItems(prefix, fields, 80)];
@@ -1031,14 +1036,43 @@ function classifyDocument(scan: MongoCallScan, rootIndex: number): MongoCompleti
  * Keys are field names; values are the small fixed set `keyMap` names.
  */
 function classifyKeyMap(scan: MongoCallScan, rootIndex: number, keyMap: string): MongoCursorClass {
+  if (keyMap === "projection") return classifyFindProjection(scan, rootIndex);
   const inner = innermost(scan);
   if (!inner || inner.kind !== "object" || innerDepth(scan, rootIndex) !== 0) return { mode: "none" };
   if (scan.inValue) return { mode: scan.inString ? "none" : "keyMapValue", keyMap };
   return { mode: "field" };
 }
 
-/** Option keys whose value is a field-to-value map, so the cursor completes field names there. */
-const FIELD_MAP_OPTION_KEYS = new Set(["sort", "projection"]);
+/**
+ * A find-style projection: `find({}, { ... })`, `findOne({}, { ... })`, or `{ projection: { ... } }`.
+ * At the root level, keys are field names and values are 1/0. One level in, keys are projection
+ * operators (`$slice`, `$elemMatch`, `$meta`).
+ */
+function classifyFindProjection(scan: MongoCallScan, rootIndex: number): MongoCursorClass {
+  const inner = innermost(scan);
+  const depth = innerDepth(scan, rootIndex);
+  if (!inner || depth < 0) return { mode: "none" };
+
+  const elemMatchIndex = findContainerIndex(scan, rootIndex, "$elemMatch");
+  if (elemMatchIndex >= 0) return classifyFilter(scan, elemMatchIndex);
+
+  if (depth === 0) {
+    if (inner.kind !== "object") return { mode: "none" };
+    if (scan.inValue) return { mode: scan.inString ? "none" : "keyMapValue", keyMap: "projection" };
+    return { mode: "field" };
+  }
+
+  if (depth === 1) {
+    if (inner.kind !== "object") return { mode: "none" };
+    if (scan.inValue) {
+      if (scan.valueKey === "$meta") return { mode: "enumValue", enumKey: "$meta" };
+      return { mode: "none" };
+    }
+    return { mode: "projectionOperator" };
+  }
+
+  return { mode: "none" };
+}
 
 /** Option keys whose value is a fixed set of strings. */
 const OPTION_VALUE_ENUMS: Record<string, string> = { returnDocument: "returnDocument", validationLevel: "validationLevel", validationAction: "validationAction" };
@@ -1076,10 +1110,13 @@ function classifyMethodOptions(method: string, scan: MongoCallScan): MongoCursor
 
   // Which option's value holds the cursor, however deep.
   const option = scan.stack[1]?.key ?? "";
-  // `{ sort: { … } }` and `{ projection: { … } }` are field maps one level in.
-  if (depth === 1 && inner.kind === "object" && FIELD_MAP_OPTION_KEYS.has(option)) {
+  if (option === "projection") {
+    return { ...classifyKeyMap(scan, 1, "projection"), method };
+  }
+  // `{ sort: { … } }` is a field map one level in.
+  if (depth === 1 && inner.kind === "object" && option === "sort") {
     if (!scan.inValue) return { mode: "field", method };
-    return { mode: scan.inString ? "none" : "keyMapValue", method, keyMap: option };
+    return { mode: scan.inString ? "none" : "keyMapValue", method, keyMap: "sort" };
   }
   if (FILTER_OPTION_KEYS.has(option)) return { ...classifyFilter(scan, 1), method };
   if (option === "arrayFilters") return { ...classifyFilter(scan, 2), method };

@@ -25,6 +25,8 @@ mod mongodb_columns;
 pub mod plugin_metadata;
 #[cfg(test)]
 mod plugin_metadata_tests;
+#[cfg(test)]
+mod sqlserver_temporal_ddl_tests;
 
 macro_rules! extract_pool {
     ($pool:expr, $variant:ident) => {
@@ -9124,15 +9126,34 @@ struct TableDdlOptions {
     include_postgres_access: bool,
     include_partitions: bool,
     portable_oracle: bool,
+    include_sqlserver_temporal: bool,
 }
 
 impl TableDdlOptions {
-    const SINGLE_RELATION: Self =
-        Self { include_postgres_access: false, include_partitions: false, portable_oracle: false };
-    const RELATION_EXPORT: Self =
-        Self { include_postgres_access: false, include_partitions: false, portable_oracle: true };
-    const EXPORT: Self = Self { include_postgres_access: false, include_partitions: true, portable_oracle: true };
-    const DISPLAY: Self = Self { include_postgres_access: true, include_partitions: true, portable_oracle: false };
+    const SINGLE_RELATION: Self = Self {
+        include_postgres_access: false,
+        include_partitions: false,
+        portable_oracle: false,
+        include_sqlserver_temporal: false,
+    };
+    const RELATION_EXPORT: Self = Self {
+        include_postgres_access: false,
+        include_partitions: false,
+        portable_oracle: true,
+        include_sqlserver_temporal: false,
+    };
+    const EXPORT: Self = Self {
+        include_postgres_access: false,
+        include_partitions: true,
+        portable_oracle: true,
+        include_sqlserver_temporal: false,
+    };
+    const DISPLAY: Self = Self {
+        include_postgres_access: true,
+        include_partitions: true,
+        portable_oracle: false,
+        include_sqlserver_temporal: true,
+    };
 }
 
 pub async fn get_table_ddl_core(
@@ -9400,7 +9421,8 @@ async fn get_table_ddl_once(
         }
         if let Some(client) = extract_pool!(pool_handle.as_ref(), SqlServer) {
             let mut client = lock_sqlserver_metadata_client(&client).await?;
-            return build_sqlserver_ddl(&mut client, schema, table).await;
+            return build_sqlserver_ddl_with_temporal(&mut client, schema, table, options.include_sqlserver_temporal)
+                .await;
         }
         if let Some(client) = extract_pool!(pool_handle.as_ref(), Agent) {
             if let Some(config) = db_config.as_ref().filter(|config| is_agent_postgres_metadata_fallback_config(config))
@@ -14844,6 +14866,19 @@ fn render_postgres_table_ddl_with_constraints_and_partition_info(
     ddl
 }
 
+fn sqlserver_temporal_period_mismatches(
+    temporal: &db::sqlserver::SqlServerTemporalTableMetadata,
+    generated_clauses: &HashMap<String, String>,
+) -> bool {
+    [(&temporal.start_column, "START"), (&temporal.end_column, "END")].into_iter().any(|(column, kind)| {
+        column.as_deref().is_some_and(|name| {
+            generated_clauses
+                .get(name)
+                .is_some_and(|clause| !clause.starts_with(&format!("GENERATED ALWAYS AS ROW {kind}")))
+        })
+    })
+}
+
 fn sqlserver_identity_clause(extra: Option<&str>) -> Option<String> {
     let extra = extra?.trim();
     let lower = extra.to_ascii_lowercase();
@@ -14878,6 +14913,15 @@ pub async fn build_sqlserver_ddl(
     schema: &str,
     table: &str,
 ) -> Result<String, String> {
+    build_sqlserver_ddl_with_temporal(client, schema, table, false).await
+}
+
+async fn build_sqlserver_ddl_with_temporal(
+    client: &mut db::sqlserver::SqlServerClient,
+    schema: &str,
+    table: &str,
+    include_temporal: bool,
+) -> Result<String, String> {
     // The computed-column definitions come from the same metadata query as the
     // columns, so the DDL path reads the richer driver record instead of the
     // flattened `ColumnInfo` (which cannot carry `AS (...) PERSISTED`).
@@ -14885,6 +14929,8 @@ pub async fn build_sqlserver_ddl(
     let indexes = db::sqlserver::list_indexes(client, schema, table).await?;
     let fkeys = db::sqlserver::list_foreign_keys(client, schema, table).await?;
     let table_comment = db::sqlserver::get_table_comment(client, schema, table).await?;
+    let temporal =
+        if include_temporal { db::sqlserver::get_temporal_table_metadata(client, schema, table).await? } else { None };
 
     let columns = metadata.iter().map(|metadata| metadata.column.clone()).collect::<Vec<_>>();
     let computed_clauses = metadata
@@ -14899,15 +14945,54 @@ pub async fn build_sqlserver_ddl(
         })
         .collect::<HashMap<_, _>>();
 
-    Ok(render_sqlserver_table_ddl_with_computed(
+    let generated_clauses = if include_temporal {
+        metadata
+            .iter()
+            .filter_map(|column| {
+                let kind = match column.generated_always_type {
+                    1 => "START",
+                    2 => "END",
+                    _ => return None,
+                };
+                Some((
+                    column.column.name.clone(),
+                    format!("GENERATED ALWAYS AS ROW {kind}{}", if column.is_hidden { " HIDDEN" } else { "" }),
+                ))
+            })
+            .collect::<HashMap<_, _>>()
+    } else {
+        HashMap::new()
+    };
+    if include_temporal && !generated_clauses.is_empty() && temporal.is_none() {
+        return Err("SQL Server temporal period metadata is unavailable".to_string());
+    }
+    if let Some(temporal) = temporal.as_ref() {
+        if sqlserver_temporal_period_mismatches(temporal, &generated_clauses) {
+            return Err(
+                "SQL Server temporal period and column metadata do not match; refresh the table definition".to_string()
+            );
+        }
+    }
+    Ok(render_sqlserver_table_ddl_details(
         schema,
         table,
         &columns,
-        &computed_clauses,
         &indexes,
         &fkeys,
         table_comment.as_deref(),
+        SqlServerDdlDetails {
+            computed_clauses: Some(&computed_clauses),
+            generated_clauses: Some(&generated_clauses),
+            temporal: temporal.as_ref(),
+        },
     ))
+}
+
+#[derive(Default)]
+struct SqlServerDdlDetails<'a> {
+    computed_clauses: Option<&'a HashMap<String, String>>,
+    generated_clauses: Option<&'a HashMap<String, String>>,
+    temporal: Option<&'a db::sqlserver::SqlServerTemporalTableMetadata>,
 }
 
 fn sqlserver_fk_action_clause(kind: &str, value: Option<&str>) -> String {
@@ -14946,16 +15031,56 @@ pub fn render_sqlserver_table_ddl_with_computed(
     fkeys: &[db::ForeignKeyInfo],
     table_comment: Option<&str>,
 ) -> String {
+    render_sqlserver_table_ddl_details(
+        schema,
+        table,
+        columns,
+        indexes,
+        fkeys,
+        table_comment,
+        SqlServerDdlDetails { computed_clauses: Some(computed_clauses), ..Default::default() },
+    )
+}
+
+fn render_sqlserver_table_ddl_details(
+    schema: &str,
+    table: &str,
+    columns: &[db::ColumnInfo],
+    indexes: &[db::IndexInfo],
+    fkeys: &[db::ForeignKeyInfo],
+    table_comment: Option<&str>,
+    details: SqlServerDdlDetails<'_>,
+) -> String {
     let table_name = format!("{}.{}", sqlserver_ident(schema), sqlserver_ident(table));
     let mut ddl = format!("CREATE TABLE {table_name} (\n");
+    if let Some(temporal) = details.temporal {
+        if let (Some(schema), Some(table)) = (&temporal.parent_schema, &temporal.parent_table) {
+            let parent = format!("{}.{}", sqlserver_ident(schema), sqlserver_ident(table)).chars().fold(
+                String::new(),
+                |mut text, character| {
+                    if character.is_control() || matches!(character, '\u{2028}' | '\u{2029}') {
+                        text.extend(character.escape_default());
+                    } else {
+                        text.push(character);
+                    }
+                    text
+                },
+            );
+            ddl.insert_str(0, &format!("-- History table for {parent}\n"));
+        }
+    }
     let col_lines: Vec<String> = columns
         .iter()
         .map(|c| {
             // A computed column can never have a default, and its `data_type`
             // is only the derived result type: rendering either would emit a
             // table that differs from the one being scripted.
-            if let Some(clause) =
-                computed_clauses.get(&c.name).map(String::as_str).map(str::trim).filter(|clause| !clause.is_empty())
+            if let Some(clause) = details
+                .computed_clauses
+                .and_then(|clauses| clauses.get(&c.name))
+                .map(String::as_str)
+                .map(str::trim)
+                .filter(|clause| !clause.is_empty())
             {
                 let mut line = format!("  {} {clause}", sqlserver_ident(&c.name));
                 if !c.is_nullable {
@@ -14966,6 +15091,9 @@ pub fn render_sqlserver_table_ddl_with_computed(
             let mut line = format!("  {} {}", sqlserver_ident(&c.name), c.data_type);
             if let Some(identity) = sqlserver_identity_clause(c.extra.as_deref()) {
                 line.push_str(&format!(" {identity}"));
+            }
+            if let Some(clause) = details.generated_clauses.and_then(|clauses| clauses.get(&c.name)) {
+                line.push_str(&format!(" {clause}"));
             }
             if !c.is_nullable {
                 line.push_str(" NOT NULL");
@@ -15007,7 +15135,34 @@ pub fn render_sqlserver_table_ddl_with_computed(
             ref_columns
         ));
     }
-    ddl.push_str("\n);\n");
+    if let Some(temporal) = details.temporal {
+        if let (Some(start), Some(end)) = (&temporal.start_column, &temporal.end_column) {
+            ddl.push_str(&format!(
+                ",\n  PERIOD FOR SYSTEM_TIME ({}, {})",
+                sqlserver_ident(start),
+                sqlserver_ident(end)
+            ));
+        }
+    }
+    ddl.push_str("\n)");
+    if let Some(temporal) = details.temporal.filter(|metadata| metadata.temporal_type == 2) {
+        if let (Some(schema), Some(table)) = (&temporal.history_schema, &temporal.history_table) {
+            ddl.push_str(&format!(
+                " WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = {}.{}",
+                sqlserver_ident(schema),
+                sqlserver_ident(table)
+            ));
+            if let (Some(period), Some(unit)) =
+                (temporal.retention_period.filter(|period| *period >= 0), temporal.retention_unit.as_deref())
+            {
+                if matches!(unit, "DAY" | "WEEK" | "MONTH" | "YEAR") {
+                    ddl.push_str(&format!(", HISTORY_RETENTION_PERIOD = {period} {unit}"));
+                }
+            }
+            ddl.push_str("))");
+        }
+    }
+    ddl.push_str(";\n");
 
     if let Some(comment) = table_comment.filter(|comment| !comment.trim().is_empty()) {
         ddl.push_str(&format!(

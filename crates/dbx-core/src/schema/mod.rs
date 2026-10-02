@@ -12390,6 +12390,27 @@ mod ddl_tests {
         assert!(!ddl.contains("CREATE UNIQUE INDEX \"pk_accounts\""), "ddl: {ddl}");
         assert!(!ddl.contains("CREATE UNIQUE INDEX \"uq_accounts_code\""), "ddl: {ddl}");
         assert!(ddl.contains("CREATE UNIQUE INDEX \"idx_accounts_display_name\""), "ddl: {ddl}");
+
+        // A full catalog definition remains authoritative even if index/column
+        // metadata has a different order or omits constraint options.
+        let mut constraints = constraints;
+        constraints[0].name = "Primary\"Key".to_string();
+        constraints[0].definition =
+            "PRIMARY KEY (\"from_store_no\", \"id\", \"bh\") INCLUDE (payload) DEFERRABLE".to_string();
+        let ddl = render_postgres_table_ddl_with_constraints_and_partition_info(
+            "public",
+            "psckdmx",
+            &postgres_primary_key_columns(),
+            &[postgres_primary_index(&["bh", "from_store_no", "id"])],
+            &[],
+            &constraints,
+            &[],
+            None,
+            &db::postgres::PostgresTablePartitionInfo::default(),
+            &db::postgres::PostgresTablePartitionLocalObjects::default(),
+        );
+        assert!(ddl.contains("CONSTRAINT \"Primary\"\"Key\" PRIMARY KEY (\"from_store_no\", \"id\", \"bh\") INCLUDE (payload) DEFERRABLE"), "ddl: {ddl}");
+        assert_eq!(ddl.matches("PRIMARY KEY").count(), 1);
     }
 
     #[test]
@@ -12536,6 +12557,244 @@ mod ddl_tests {
             ddl.contains("USING btree (\"id\" ASC NULLS LAST, \"id\" DESC NULLS FIRST)"),
             "expected per-key ordering and NULLS placement, got: {ddl}"
         );
+    }
+
+    fn postgres_primary_index(keys: &[&str]) -> db::IndexInfo {
+        db::IndexInfo {
+            name: "psckdmx_pkey".to_string(),
+            columns: keys.iter().map(|key| (*key).to_string()).collect(),
+            is_unique: true,
+            is_primary: true,
+            filter: None,
+            index_type: Some("btree".to_string()),
+            included_columns: None,
+            comment: None,
+            key_is_expression: Vec::new(),
+            column_opclasses: Vec::new(),
+            key_options: Vec::new(),
+            constraint_backed: true,
+        }
+    }
+
+    fn postgres_primary_key_columns() -> Vec<db::ColumnInfo> {
+        let mut columns = vec![
+            column("id", "integer"),
+            column("bh", "character varying"),
+            column("from_store_no", "character varying"),
+        ];
+        for column in &mut columns {
+            column.is_primary_key = true;
+            column.is_nullable = false;
+        }
+        columns[0].extra = Some("serial".to_string());
+        columns[0].column_default = Some("nextval('psckdmx_id_seq'::regclass)".to_string());
+        columns
+    }
+
+    fn postgres_ddl_tree_node(oid: i64, table: &str) -> db::postgres::PostgresPartitionTreeNode {
+        db::postgres::PostgresPartitionTreeNode {
+            oid,
+            schema: "public".to_string(),
+            table: table.to_string(),
+            parent_oid: None,
+            parent_schema: None,
+            parent_table: None,
+            partition_info: db::postgres::PostgresTablePartitionInfo::default(),
+        }
+    }
+
+    // Exercise the same tree renderer used by pg_ddl_with_partitions / View DDL,
+    // including its intentionally absent full constraint definitions.
+    fn postgres_render_test_tree(
+        nodes: &[db::postgres::PostgresPartitionTreeNode],
+        columns: &HashMap<i64, Vec<db::ColumnInfo>>,
+        indexes: &HashMap<i64, Vec<db::IndexInfo>>,
+        local_objects: &HashMap<i64, db::postgres::PostgresTablePartitionLocalObjects>,
+    ) -> String {
+        let mut children = HashMap::<_, Vec<_>>::new();
+        for node in nodes {
+            if let Some(parent) = node.parent_oid {
+                children.entry(parent).or_default().push(node);
+            }
+        }
+        let mut ddl = String::new();
+        render_postgres_partition_tree_node(
+            &nodes[0],
+            &children,
+            columns,
+            indexes,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            local_objects,
+            &mut ddl,
+        );
+        ddl
+    }
+
+    #[test]
+    fn postgres_partition_tree_ddl_preserves_primary_key_order() {
+        for partition_key in [None, Some("LIST (from_store_no)")] {
+            for (keys, expected) in [
+                (["from_store_no", "bh", "id"], "PRIMARY KEY (\"from_store_no\", \"bh\", \"id\")"),
+                (["bh", "from_store_no", "id"], "PRIMARY KEY (\"bh\", \"from_store_no\", \"id\")"),
+            ] {
+                let mut root = postgres_ddl_tree_node(1, "psckdmx");
+                root.partition_info.key = partition_key.map(str::to_string);
+                let ddl = postgres_render_test_tree(
+                    &[root],
+                    &HashMap::from([(1, postgres_primary_key_columns())]),
+                    &HashMap::from([(1, vec![postgres_primary_index(&keys)])]),
+                    &HashMap::new(),
+                );
+                assert!(ddl.contains(expected), "ddl: {ddl}");
+                assert!(
+                    ddl.starts_with(concat!(
+                        "CREATE TABLE \"public\".\"psckdmx\" (\n",
+                        "  \"id\" serial NOT NULL,\n",
+                        "  \"bh\" character varying NOT NULL,\n",
+                        "  \"from_store_no\" character varying NOT NULL,\n",
+                    )),
+                    "physical columns changed: {ddl}"
+                );
+                assert!(!ddl.contains("nextval"), "serial default duplicated: {ddl}");
+                assert_eq!(ddl.contains("PARTITION BY LIST (from_store_no)"), partition_key.is_some());
+                assert_eq!(ddl.matches("PRIMARY KEY").count(), 1);
+                assert!(!ddl.contains("CREATE UNIQUE INDEX"), "primary index duplicated: {ddl}");
+            }
+        }
+    }
+
+    #[test]
+    fn postgres_partition_tree_ddl_preserves_nested_primary_key_locality() {
+        let mut root = postgres_ddl_tree_node(1, "psckdmx");
+        root.partition_info.key = Some("LIST (from_store_no)".to_string());
+        let mut child = postgres_ddl_tree_node(2, "psckdmx_store");
+        child.parent_oid = Some(1);
+        child.partition_info = db::postgres::PostgresTablePartitionInfo {
+            is_partition: true,
+            parent_schema: Some("public".to_string()),
+            parent_table: Some(root.table.clone()),
+            bound: Some("FOR VALUES IN ('store')".to_string()),
+            key: Some("HASH (bh)".to_string()),
+            ..Default::default()
+        };
+        let mut leaf = postgres_ddl_tree_node(3, "psckdmx_store_0");
+        leaf.parent_oid = Some(2);
+        leaf.partition_info = db::postgres::PostgresTablePartitionInfo {
+            is_partition: true,
+            parent_schema: Some("public".to_string()),
+            parent_table: Some(child.table.clone()),
+            bound: Some("FOR VALUES WITH (modulus 2, remainder 0)".to_string()),
+            ..Default::default()
+        };
+        let nodes = [root, child, leaf];
+        let mut columns = (1..=3).map(|oid| (oid, postgres_primary_key_columns())).collect::<HashMap<_, _>>();
+        let mut indexes = (1..=3)
+            .map(|oid| (oid, vec![postgres_primary_index(&["bh", "from_store_no", "id"])]))
+            .collect::<HashMap<_, _>>();
+        let mut local_objects = HashMap::new();
+        for local_child_key in [false, true] {
+            if local_child_key {
+                // A parent without a PK can have a partition with its own PK;
+                // the grandchild inherits that constraint.
+                for column in columns.get_mut(&1).unwrap() {
+                    column.is_primary_key = false;
+                }
+                indexes.remove(&1);
+                local_objects.insert(
+                    2,
+                    db::postgres::PostgresTablePartitionLocalObjects { has_primary_key: true, ..Default::default() },
+                );
+            }
+            let ddl = postgres_render_test_tree(&nodes, &columns, &indexes, &local_objects);
+            let statements = ddl.split("\n\n").collect::<Vec<_>>();
+            assert_eq!(statements.len(), 3, "ddl: {ddl}");
+            assert_eq!(ddl.matches("PRIMARY KEY (\"bh\", \"from_store_no\", \"id\")").count(), 1, "ddl: {ddl}");
+            assert_eq!(statements[0].contains("PRIMARY KEY"), !local_child_key);
+            assert_eq!(statements[1].contains("PRIMARY KEY"), local_child_key);
+            assert!(!statements[2].contains("PRIMARY KEY"));
+            assert!(statements[1]
+                .starts_with("CREATE TABLE \"public\".\"psckdmx_store\" PARTITION OF \"public\".\"psckdmx\""));
+            assert!(statements[1].contains("FOR VALUES IN ('store') PARTITION BY HASH (bh);"));
+            assert!(statements[2]
+                .contains("PARTITION OF \"public\".\"psckdmx_store\" FOR VALUES WITH (modulus 2, remainder 0);"));
+            assert_eq!(ddl.matches("\"id\" serial NOT NULL").count(), 1);
+
+            // View DDL can also start at a partition whose parent is outside the tree.
+            let subtree = postgres_render_test_tree(&nodes[1..], &columns, &indexes, &local_objects);
+            assert_eq!(subtree.matches("PRIMARY KEY").count(), usize::from(local_child_key));
+        }
+    }
+
+    #[test]
+    fn postgres_partition_tree_ddl_primary_key_excludes_include_and_quotes_names() {
+        let mut root = postgres_ddl_tree_node(1, "Order\"Lines");
+        root.schema = "Sales".to_string();
+        let mut columns = vec![column("Id", "integer"), column("Store\"No", "text"), column("payload", "text")];
+        columns[0].is_primary_key = true;
+        columns[1].is_primary_key = true;
+        columns[2].column_default = Some("'unchanged'::text".to_string());
+        let mut primary = postgres_primary_index(&["Store\"No", "Id"]);
+        primary.included_columns = Some(vec!["payload".to_string()]);
+        let mut unique = postgres_primary_index(&["Id", "Store\"No"]);
+        unique.name = "other_unique".to_string();
+        unique.is_primary = false;
+        unique.constraint_backed = false;
+        let ddl = postgres_render_test_tree(
+            &[root],
+            &HashMap::from([(1, columns)]),
+            &HashMap::from([(1, vec![unique, primary])]),
+            &HashMap::new(),
+        );
+        assert!(ddl.contains("PRIMARY KEY (\"Store\"\"No\", \"Id\")"), "ddl: {ddl}");
+        assert!(ddl.contains("\"payload\" text DEFAULT 'unchanged'::text"));
+        assert!(ddl.contains("CREATE UNIQUE INDEX \"other_unique\" ON \"Sales\".\"Order\"\"Lines\" USING btree (\"Id\", \"Store\"\"No\");"));
+    }
+
+    #[test]
+    fn postgres_partition_tree_ddl_primary_key_metadata_fallback() {
+        let mut unique = postgres_primary_index(&["bh", "id"]);
+        unique.is_primary = false;
+        unique.constraint_backed = false;
+        for indexes in [vec![], vec![postgres_primary_index(&[])], vec![unique.clone()]] {
+            let ddl = postgres_render_test_tree(
+                &[postgres_ddl_tree_node(1, "psckdmx")],
+                &HashMap::from([(1, postgres_primary_key_columns())]),
+                &HashMap::from([(1, indexes)]),
+                &HashMap::new(),
+            );
+            assert!(ddl.contains("PRIMARY KEY (\"id\", \"bh\", \"from_store_no\")"), "ddl: {ddl}");
+        }
+        for has_key in [false, true] {
+            let mut id = column("id", "integer");
+            id.is_primary_key = has_key;
+            for indexes in [vec![], if has_key { vec![postgres_primary_index(&["id"])] } else { vec![unique.clone()] }]
+            {
+                let ddl = postgres_render_test_tree(
+                    &[postgres_ddl_tree_node(1, "psckdmx")],
+                    &HashMap::from([(1, vec![id.clone()])]),
+                    &HashMap::from([(1, indexes)]),
+                    &HashMap::new(),
+                );
+                assert_eq!(ddl.contains("PRIMARY KEY (\"id\")"), has_key, "ddl: {ddl}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn postgres_partition_tree_ddl_propagates_metadata_errors() {
+        // No host/user is configured, so checkout fails without contacting a
+        // database. Metadata failures must not produce a successful empty DDL.
+        let manager = deadpool_postgres::Manager::new(tokio_postgres::Config::new(), tokio_postgres::NoTls);
+        let pool = deadpool_postgres::Pool::builder(manager)
+            .runtime(deadpool_postgres::Runtime::Tokio1)
+            .max_size(1)
+            .build()
+            .unwrap();
+        let error = pg_ddl_with_partitions(&pool, "public", "psckdmx").await.unwrap_err();
+        assert!(!error.is_empty());
     }
 
     #[test]
@@ -14660,7 +14919,15 @@ fn render_postgres_table_ddl_with_constraints_and_partition_info(
         .collect::<Vec<_>>();
     if !is_partition || partition_local_objects.has_primary_key {
         if primary_constraints.is_empty() {
-            let pks: Vec<&str> = columns.iter().filter(|c| c.is_primary_key).map(|c| c.name.as_str()).collect();
+            // The partition-tree / View DDL path has indexes but no full
+            // constraint definitions. Index keys preserve catalog order and
+            // already exclude INCLUDE columns; table columns are in physical
+            // order. Keep the column-based fallback for missing key metadata.
+            let pks: Vec<&str> = indexes
+                .iter()
+                .find(|index| index.is_primary && !index.columns.is_empty())
+                .map(|index| index.columns.iter().map(String::as_str).collect())
+                .unwrap_or_else(|| columns.iter().filter(|c| c.is_primary_key).map(|c| c.name.as_str()).collect());
             if !pks.is_empty() {
                 definition_lines.push(format!(
                     "  PRIMARY KEY ({})",

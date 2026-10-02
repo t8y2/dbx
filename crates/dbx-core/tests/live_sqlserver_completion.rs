@@ -527,6 +527,7 @@ async fn live_sqlserver_bulk_imports_zero_fraction_xlsx_numbers_into_bigint() {
         column_comments: Vec::new(),
         rows: vec![vec![serde_json::json!(1.0), serde_json::json!("xlsx")]],
         numeric_column_right_align: false,
+        auto_filter: None,
     })
     .expect("build SQL Server XLSX integer fixture");
     let path = dir.join("zero-fraction-integer.xlsx");

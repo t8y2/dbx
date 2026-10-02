@@ -555,6 +555,7 @@ interface DataGridProps {
   /** Column names captured with a document-store local-filter snapshot. */
   localColumnFilterColumns?: string[];
   exportSql?: string;
+  pageSql?: string;
   onExecuteSql?: (sql: string) => Promise<void>;
   fullExportResult?: (onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => Promise<QueryResult | undefined>;
   queryResultExportRequest?: (options: {
@@ -8059,7 +8060,7 @@ function sqlWithDisplayDatabaseName(sql: string): string {
 
 async function syncUserFacingSql() {
   const generation = ++userFacingSqlGeneration;
-  const executionSql = props.sql?.trim() ?? "";
+  const executionSql = (props.pageSql || props.sql)?.trim() ?? "";
   const includeDatabaseName = settingsStore.editorSettings.generateSqlIncludeDatabaseName;
   const shouldRebuildSql = executionSql.includes("__DBX_LARGE_VALUE_BYTES_") || includeDatabaseName;
   if (props.context !== "table-data" || !shouldRebuildSql || !props.tableMeta?.tableName) {
@@ -8101,7 +8102,7 @@ async function syncUserFacingSql() {
 }
 
 watch(
-  () => [props.sql, props.context, props.tableMeta, props.pageLimit, props.pageOffset, props.executedPageLimit, props.executedPageOffset, currentWhereInput(), effectiveOrderBy(), settingsStore.editorSettings.generateSqlIncludeDatabaseName],
+  () => [props.sql, props.pageSql, props.context, props.tableMeta, props.pageLimit, props.pageOffset, props.executedPageLimit, props.executedPageOffset, currentWhereInput(), effectiveOrderBy(), settingsStore.editorSettings.generateSqlIncludeDatabaseName],
   () => void syncUserFacingSql(),
   { immediate: true },
 );
@@ -8150,6 +8151,7 @@ const {
   extractorOptions: computed(() => settingsStore.editorSettings.dataGridExtractorOptions),
   sql: computed(() => props.sql),
   exportSql: computed(() => props.exportSql),
+  pageSql: computed(() => props.pageSql),
   tableMeta: computed(() => (props.tableMeta ? { ...props.tableMeta } : undefined)),
   includeDatabaseName: computed(() => settingsStore.editorSettings.generateSqlIncludeDatabaseName),
   copyInsertTargetLabel: computed(() => props.tableMeta?.tableName ?? props.customSaveHandler?.targetLabel),

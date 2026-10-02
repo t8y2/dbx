@@ -250,6 +250,7 @@ fn query_sql_worksheets(request: &QueryResultExportRequest) -> Vec<XlsxWorksheet
         column_comments: Vec::new(),
         rows: split_excel_cell_text(&request.sql).into_iter().map(|sql| vec![Value::String(sql)]).collect(),
         numeric_column_right_align: false,
+        auto_filter: Some(false),
     }]
 }
 

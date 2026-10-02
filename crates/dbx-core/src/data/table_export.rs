@@ -2940,6 +2940,7 @@ mod tests {
             column_comments: vec![],
             rows: vec![vec![json!(1_700_000_000_000_i64), json!(21.5)]],
             numeric_column_right_align: false,
+            auto_filter: None,
         })
         .unwrap();
         let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
@@ -4157,6 +4158,7 @@ esac"#,
                 vec![json!(3), Value::Null, json!(0)],
             ],
             numeric_column_right_align: false,
+            auto_filter: None,
         };
         let workbook = build_xlsx_workbook(&data).expect("XLSX build should succeed");
 

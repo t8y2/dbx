@@ -341,6 +341,102 @@ export function parkEditorNativeSelection(currentView: EditorView, options: Edit
 }
 
 /**
+ * How long a scroll may go without another event before the scroll park is
+ * released. Long enough to bridge the gaps between wheel notches and between
+ * momentum frames, short enough that the browser selection is back before a
+ * user who stopped scrolling would notice anything missing.
+ */
+export const NATIVE_SELECTION_SCROLL_PARK_IDLE_MS = 200;
+
+export interface EditorNativeSelectionScrollParkOptions extends EditorNativeSelectionParkOptions {
+  /** Override {@link NATIVE_SELECTION_SCROLL_PARK_IDLE_MS}; read once. */
+  idleMs?: number;
+}
+
+/**
+ * Parks the browser selection while a long selection is being scrolled.
+ *
+ * Scrolling a selection long enough to be worth parking costs the same
+ * per-run text-services operation the drag park exists for, and it costs it on
+ * every scroll event rather than on every pointer move, which is what makes
+ * scrolling a select-all document stall for a second at a time. Nothing about
+ * the scroll needs the browser selection: CodeMirror paints the selection
+ * itself, the viewport moves without it, and it is handed back to CodeMirror
+ * the moment the scroll goes quiet.
+ *
+ * The park lives for the length of a scroll burst — from the first `wheel` or
+ * `scroll` event until {@link NATIVE_SELECTION_SCROLL_PARK_IDLE_MS} after the
+ * last one — and only while the editor's own selection is long enough for the
+ * park to be worth it. `scroll` is what covers a scrollbar drag and a keyboard
+ * scroll, neither of which produces a `wheel` event; the first non-modifier key
+ * ends the burst as well, so typing quickly after a scroll never lands inside a
+ * parked window.
+ *
+ * @returns a cleanup function that removes the listeners and releases the park.
+ */
+export function keepNativeSelectionParkedWhileScrolling(currentView: EditorView, options: EditorNativeSelectionScrollParkOptions = {}): () => void {
+  const idleMs = options.idleMs ?? NATIVE_SELECTION_SCROLL_PARK_IDLE_MS;
+  const doc = currentView.dom.ownerDocument;
+  let park: EditorNativeSelectionPark | null = null;
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const release = () => {
+    if (idleTimer !== null) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+    park?.release();
+    park = null;
+  };
+
+  // A burst re-parks as soon as the wheel turns again, so the handle is created
+  // once per burst and reused: creating one per event would add a frame loop
+  // and a pair of clipboard listeners per notch.
+  const holdParked = () => {
+    if (!park && isLargeEditorSelection(currentView)) {
+      park = createNativeSelectionPark(currentView, {
+        shouldKeepParked: () => isLargeEditorSelection(currentView),
+        suppressWrites: true,
+        finalizeClipboardText: options.finalizeClipboardText ?? ((text: string) => text),
+      });
+    }
+    if (idleTimer !== null) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      idleTimer = null;
+      release();
+    }, idleMs);
+  };
+
+  const endBurstOnKey = (event: KeyboardEvent) => {
+    if (event.key === "Shift" || event.key === "Alt" || event.key === "Control" || event.key === "Meta") return;
+    release();
+  };
+
+  // A press anywhere ends the burst before anything else reads the selection:
+  // a click places a caret and a press on selected text starts the drag park,
+  // and either one wants the browser selection back under CodeMirror's control.
+  // Captured on the document so it releases ahead of the drag guard's own
+  // capture listener on `contentDOM`.
+  const endBurstOnPointerDown = () => release();
+
+  // Read-only listeners: parking must never change how a scroll behaves. The
+  // scrollbar drag that `scroll` covers also arrives here as a `wheel`-less
+  // pointer gesture, which is why the guard is not built on the pointer.
+  currentView.scrollDOM.addEventListener("wheel", holdParked, { passive: true });
+  currentView.scrollDOM.addEventListener("scroll", holdParked, { passive: true });
+  doc.addEventListener("keydown", endBurstOnKey, true);
+  doc.addEventListener("pointerdown", endBurstOnPointerDown, true);
+
+  return () => {
+    currentView.scrollDOM.removeEventListener("wheel", holdParked);
+    currentView.scrollDOM.removeEventListener("scroll", holdParked);
+    doc.removeEventListener("keydown", endBurstOnKey, true);
+    doc.removeEventListener("pointerdown", endBurstOnPointerDown, true);
+    release();
+  };
+}
+
+/**
  * Parks the browser selection for the length of a pointer gesture.
  *
  * Call this on pointer down and `release()` on pointer up: the browser

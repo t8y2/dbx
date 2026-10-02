@@ -99,6 +99,7 @@ import { createQueryEditorSqlShortcutDomHandler, isCharacterProducingShortcut } 
 import { createQueryEditorReplaceShortcutBindings, createQueryEditorReplaceShortcutHandler, createQueryEditorSearchKeymap } from "@/lib/editor/queryEditorSearchKeymap";
 import { createQueryEditorEscapeHandler } from "@/lib/editor/queryEditorEscape";
 import { buildQueryEditorLineNumbersExtension, createQueryEditorLineNumberAlignmentExtension } from "@/lib/editor/queryEditorLineNumbers";
+import { keepGuttersAttachedDuringSync } from "@/lib/editor/codemirrorGutterSync";
 import { searchKeymapWithoutModD } from "@/lib/editor/codemirrorSearchKeymap";
 import { defaultKeymapForGlobalShortcuts } from "@/lib/editor/codemirrorDefaultKeymap";
 import { createShowWhitespaceExtension } from "@/lib/editor/codemirrorShowWhitespace";
@@ -544,7 +545,7 @@ const {
 const hoverContent = createQueryEditorHoverContent({ isDark, t, toast });
 const { resolveSqlHoverTooltip } = useQueryEditorHover({ props, contextMenuOpen, settingsStore, connectionStore, metadata: completionMetadata, createHoverDom: hoverContent.createHoverDom, semanticCompletionEnabled: SEMANTIC_SQL_COMPLETION_ENABLED, maxCompletionTables: MAX_COMPLETION_TABLES });
 const pointerInteractions = useQueryEditorPointer({ props, clearTableNavigationHover: () => clearTableNavigationHover(), emit });
-const { registerEditorScrollbarPointerGuard, registerEditorNativeSelectionDragGuard, startEditorSelectionDrag } = pointerInteractions;
+const { registerEditorScrollbarPointerGuard, registerEditorNativeSelectionDragGuard, registerEditorNativeSelectionScrollGuard, startEditorSelectionDrag } = pointerInteractions;
 const tableDrop = useQueryEditorTableDrop({ props, view, editorRef, settingsStore });
 const { hasDroppedTableReference, insertDroppedTableReference, queryEditorDropCaret, queryEditorDropCaretStyle, showQueryEditorDropCaretAt, hideQueryEditorDropCaret, registerTableReferenceDropListener, unregisterTableReferenceDropListener } = tableDrop;
 const objectNavigation = useQueryEditorObjectNavigation({
@@ -1934,6 +1935,7 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
         createQueryEditorLineNumberAlignmentExtension(ViewPlugin),
         currentStatementFrameExtension,
         highlightActiveLineGutter(),
+        keepGuttersAttachedDuringSync(ViewPlugin),
         highlightSpecialChars(),
         initializedRuntime.historyResetComp.of(history()),
         foldGutter({
@@ -2186,6 +2188,10 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
         // such a copy happens rather than here, because that is the only moment
         // the normalizer is used.
         registerEditorNativeSelectionDragGuard(view.value, { finalizeClipboardText: (text) => clipboardLineEndings(text) });
+        // The same park, held for the length of a scroll burst: scrolling a
+        // long selection costs macOS 26/27 the same per-run serialization on
+        // every scroll event that a drag pays per pointer move.
+        registerEditorNativeSelectionScrollGuard(view.value, { finalizeClipboardText: (text) => clipboardLineEndings(text) });
         view.value.scrollDOM.addEventListener("scroll", scheduleEditorViewportEmit, {
           passive: true,
         });

@@ -152,6 +152,7 @@ impl PoolKind {
     fn is_available_for_routing(&self) -> bool {
         match self {
             Self::Agent(client) => client.is_runtime_available(),
+            Self::ExternalDriver { session, .. } => session.is_available(),
             _ => true,
         }
     }
@@ -1860,6 +1861,23 @@ impl AppState {
         config: &ConnectionConfig,
     ) -> Result<ConnectionTestResult, String> {
         let params = serde_json::json!({ "connection": config });
+        if driver_id == "jdbc" && is_embedded_h2_jdbc(config) {
+            let PoolKind::ExternalDriver { session, .. } = self.external_driver_pool(driver_id, config).await? else {
+                unreachable!();
+            };
+            let result = session
+                .invoke_with_timeout::<serde_json::Value>(
+                    "testConnection",
+                    params,
+                    Some(external_driver_connect_timeout(config)),
+                )
+                .await;
+            session.shutdown().await;
+            return result.map(|response| {
+                ConnectionTestResult::success("Connection successful")
+                    .with_database_info(database_info_from_protocol_value(&response))
+            });
+        }
         let env = self.external_driver_runtime_env(driver_id)?;
         let response = self
             .plugins
@@ -1877,7 +1895,17 @@ impl AppState {
 
     pub async fn external_driver_pool(&self, driver_id: &str, config: &ConnectionConfig) -> Result<PoolKind, String> {
         let env = self.external_driver_runtime_env(driver_id)?;
-        let session = self.plugins.start_driver_session_for_connection(driver_id, env, &config.name).await?;
+        let session = if driver_id == "jdbc" && is_embedded_h2_jdbc(config) {
+            let runtime_key = serde_json::to_string(&(
+                &config.jdbc_driver_class,
+                &config.jdbc_driver_paths,
+                &config.agent_java_options,
+            ))
+            .map_err(|error| error.to_string())?;
+            self.plugins.start_shared_jdbc_session_for_connection(&runtime_key, env, &config.name).await?
+        } else {
+            self.plugins.start_driver_session_for_connection(driver_id, env, &config.name).await?
+        };
         let params = serde_json::json!({ "connection": config });
         let result = session
             .invoke_with_timeout::<serde_json::Value>("connect", params, Some(external_driver_connect_timeout(config)))
@@ -4515,9 +4543,9 @@ impl AppState {
                     }
                 }
                 PoolKind::PluginConnection(handle) => !handle.is_running(),
+                PoolKind::ExternalDriver { session, .. } => !session.is_available(),
                 PoolKind::Sqlite(_)
                 | PoolKind::DuckDbWorker(_)
-                | PoolKind::ExternalDriver { .. }
                 | PoolKind::MessageQueue
                 | PoolKind::Nacos
                 | PoolKind::Consul(_) => false,
@@ -6432,6 +6460,22 @@ fn normalize_client_session_id(client_session_id: Option<&str>) -> Option<String
     client_session_id.map(str::trim).filter(|session| !session.is_empty()).map(|session| session.replace(':', "_"))
 }
 
+fn is_embedded_h2_jdbc(config: &ConnectionConfig) -> bool {
+    if config.db_type != DatabaseType::Jdbc {
+        return false;
+    }
+    let Some(url) = config.connection_string.as_deref() else { return false };
+    let normalized = url.trim().to_ascii_lowercase();
+    let Some(location) = normalized.strip_prefix("jdbc:h2:") else { return false };
+    !location.starts_with("tcp:")
+        && !location.starts_with("ssl:")
+        && !location.starts_with("mem:")
+        && !location.is_empty()
+}
+
+#[cfg(all(test, unix))]
+mod h2_jdbc_tests;
+
 pub fn task_client_session_id(task_kind: &str, task_id: &str) -> String {
     format!("{task_kind}:{task_id}")
 }
@@ -7118,7 +7162,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    fn mysql_config(database: Option<&str>) -> ConnectionConfig {
+    pub(super) fn mysql_config(database: Option<&str>) -> ConnectionConfig {
         ConnectionConfig {
             oracle_oci_nls_lang: None,
             oracle_oci_tns_admin: None,
@@ -8019,7 +8063,7 @@ mod tests {
         assert_eq!(params["connection_string"], "jdbc:sap://hana.example.com:30013/?databaseName=TENANT1&encrypt=true");
     }
 
-    async fn test_app_state() -> (AppState, std::path::PathBuf) {
+    pub(super) async fn test_app_state() -> (AppState, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("dbx-core-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();

@@ -40,8 +40,8 @@ final class InterSystemsNumericTest {
                 Fixture fixture = new Fixture(url, type, values, null);
                 JsonNode query = fixture.query("executeQuery");
                 assertFalse(query.has("error"), query.toString());
-                for (int i = 0; i < values.length; i++) {
-                    assertValue(values[i], query.path("result").path("rows").path(i).path(0));
+                for (int rowIndex = 0; rowIndex < values.length; rowIndex++) {
+                    assertValue(values[rowIndex], query.path("result").path("rows").path(rowIndex).path(0));
                 }
                 JsonNode page = fixture.query("executeQueryPage");
                 int row = 0;
@@ -137,12 +137,12 @@ final class InterSystemsNumericTest {
         }
 
         void install() throws Exception {
-            Connection connection = proxy(Connection.class, (p, m, a) -> switch (m.getName()) {
+            Connection connection = proxy(Connection.class, (proxyInstance, invokedMethod, arguments) -> switch (invokedMethod.getName()) {
                 case "createStatement" -> statement();
                 case "getAutoCommit" -> true;
-                default -> defaultValue(m.getReturnType());
+                default -> defaultValue(invokedMethod.getReturnType());
             });
-            set("registeredDriver", proxy(Driver.class, (p, m, a) -> defaultValue(m.getReturnType())));
+            set("registeredDriver", proxy(Driver.class, (proxyInstance, invokedMethod, arguments) -> defaultValue(invokedMethod.getReturnType())));
             set("registeredDriverKey", key("driverKey"));
             set("sharedConnection", connection);
             set("sharedConnectionKey", key("connectionKey"));
@@ -166,23 +166,23 @@ final class InterSystemsNumericTest {
 
         Statement statement() {
             ResultSet result = resultSet();
-            return proxy(Statement.class, (p, m, a) -> switch (m.getName()) {
+            return proxy(Statement.class, (proxyInstance, invokedMethod, arguments) -> switch (invokedMethod.getName()) {
                 case "execute" -> true;
                 case "getResultSet", "executeQuery" -> result;
                 case "close" -> { closedStatements++; yield null; }
-                default -> defaultValue(m.getReturnType());
+                default -> defaultValue(invokedMethod.getReturnType());
             });
         }
 
         ResultSet resultSet() {
             int[] row = { -1 };
-            ResultSetMetaData meta = proxy(ResultSetMetaData.class, (p, m, a) -> switch (m.getName()) {
+            ResultSetMetaData meta = proxy(ResultSetMetaData.class, (proxyInstance, invokedMethod, arguments) -> switch (invokedMethod.getName()) {
                 case "getColumnCount" -> 1;
                 case "getColumnType" -> type;
                 case "getColumnLabel", "getColumnName" -> "value";
-                default -> defaultValue(m.getReturnType());
+                default -> defaultValue(invokedMethod.getReturnType());
             });
-            return proxy(ResultSet.class, (p, m, a) -> switch (m.getName()) {
+            return proxy(ResultSet.class, (proxyInstance, invokedMethod, arguments) -> switch (invokedMethod.getName()) {
                 case "next" -> ++row[0] < values.length;
                 case "getMetaData" -> meta;
                 case "getBigDecimal" -> {
@@ -205,7 +205,7 @@ final class InterSystemsNumericTest {
                 case "getString" -> values[row[0]];
                 case "getBoolean" -> true;
                 case "getBytes" -> new byte[] { 1, 2 };
-                default -> defaultValue(m.getReturnType());
+                default -> defaultValue(invokedMethod.getReturnType());
             });
         }
     }
@@ -219,9 +219,17 @@ final class InterSystemsNumericTest {
     }
 
     private static void set(String name, Object value) throws Exception {
-        Field field = DbxJdbcPlugin.class.getDeclaredField(name);
+        Object target = null;
+        Class<?> owner = DbxJdbcPlugin.class;
+        if (name.startsWith("sharedConnection")) {
+            Method method = owner.getDeclaredMethod("connectionState");
+            method.setAccessible(true);
+            target = method.invoke(null);
+            owner = target.getClass();
+        }
+        Field field = owner.getDeclaredField(name);
         field.setAccessible(true);
-        field.set(null, value);
+        field.set(target, value);
     }
 
     private static <T> T proxy(Class<T> type, InvocationHandler handler) {

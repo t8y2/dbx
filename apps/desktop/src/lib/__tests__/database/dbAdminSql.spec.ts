@@ -602,14 +602,29 @@ describe("buildDuplicateTableStructurePlan", () => {
     expect(plan.executeAsScript).toBe(true);
   });
 
-  it.each(["columns", "tableComment"])("does not create a SQL Server clone when %s metadata cannot be loaded", async (metadata) => {
+  it("does not create a SQL Server clone when column metadata cannot be loaded", async () => {
     apiMock.listIndexes.mockResolvedValue([]);
     apiMock.getColumns.mockResolvedValue([]);
     apiMock.getTableComment.mockResolvedValue(null);
     const error = new Error("comment metadata unavailable");
-    (metadata === "columns" ? apiMock.getColumns : apiMock.getTableComment).mockRejectedValueOnce(error);
+    apiMock.getColumns.mockRejectedValueOnce(error);
     await expect(buildDuplicateTableStructurePlan({ connectionId: "mssql-1", database: "app", databaseType: "sqlserver", sourceName: "source", targetName: "copy" })).rejects.toBe(error);
     expect(apiMock.buildDuplicateTableStructureSql).not.toHaveBeenCalled();
+  });
+
+  it("keeps SQL Server cloning available when optional table comment loading fails", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    apiMock.listIndexes.mockResolvedValue([]);
+    apiMock.getColumns.mockResolvedValue([]);
+    apiMock.getTableComment.mockRejectedValue(new Error("Table comment lookup is not available in the web backend"));
+    apiMock.buildDuplicateTableStructureSql.mockResolvedValue("SELECT TOP 0 * INTO [copy] FROM [source];");
+
+    const plan = await buildDuplicateTableStructurePlan({ connectionId: "mssql-web", database: "app", databaseType: "sqlserver", sourceName: "source", targetName: "copy" });
+
+    expect(apiMock.buildDuplicateTableStructureSql).toHaveBeenCalledWith(expect.objectContaining({ tableComment: null, columnComments: [], primaryKeyColumns: [] }));
+    expect(plan).toEqual({ sql: "SELECT TOP 0 * INTO [copy] FROM [source];", sourceColumns: [], executeAsScript: false });
+    expect(warning).toHaveBeenCalledOnce();
+    warning.mockRestore();
   });
 
   it("forwards the connection identifier quote so dual-dialect clones stay executable", async () => {

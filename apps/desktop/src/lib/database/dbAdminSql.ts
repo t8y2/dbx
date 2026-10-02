@@ -300,7 +300,14 @@ export async function buildDuplicateTableStructurePlan(options: DuplicateTableSt
     const [columns, indexes, tableComment] = await Promise.all([
       options.sourceColumns ? Promise.resolve(options.sourceColumns) : api.getColumns(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog),
       api.listIndexes(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog),
-      options.tableComment == null ? api.getTableComment(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog) : Promise.resolve(options.tableComment),
+      // The web backend's getTableComment is a throwing placeholder, and SQL Server table lists
+      // report `comment: null` for tables without one, so a hard failure would break web cloning.
+      options.tableComment == null
+        ? api.getTableComment(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog).catch((error) => {
+            console.warn(`Failed to load SQL Server table comment for table clone: ${options.sourceName}`, error);
+            return null;
+          })
+        : Promise.resolve(options.tableComment),
     ]);
     const columnComments = collectDuplicateTableColumnComments(columns);
     const primaryKeyColumns = indexes.find((index) => index.is_primary && index.columns.length > 0)?.columns ?? [];

@@ -3108,6 +3108,7 @@ export default withEnglishFallback({
     scanAllRemaining: "Просканировать оставшиеся {count}",
     results: "Результаты",
     openResult: "Открыть",
+    openInTab: "Открыть во вкладке",
     waiting: "Ожидание совпадений...",
     noResults: "Пока нет совпадений",
     errors: "Сбой при обработке некоторых таблиц",

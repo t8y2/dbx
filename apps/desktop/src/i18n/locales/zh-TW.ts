@@ -3063,6 +3063,7 @@ export default withEnglishFallback({
     scanAllRemaining: "掃描剩餘 {count} 張",
     results: "搜尋結果",
     openResult: "開啟",
+    openInTab: "以分頁方式開啟",
     waiting: "搜尋中……",
     noResults: "暫無搜尋結果",
     errors: "部分資料表搜尋失敗",

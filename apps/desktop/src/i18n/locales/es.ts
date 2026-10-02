@@ -3210,6 +3210,7 @@ export default withEnglishFallback({
     scanAllRemaining: "Analizar las {count} restantes",
     results: "Resultados",
     openResult: "Abrir",
+    openInTab: "Abrir en pestaña",
     waiting: "Esperando coincidencias...",
     noResults: "Sin coincidencias aún",
     errors: "Algunas tablas fallaron",

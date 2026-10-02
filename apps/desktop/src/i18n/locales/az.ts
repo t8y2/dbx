@@ -2870,6 +2870,7 @@ export default withEnglishFallback({
     scanAllRemaining: "Qalan {count} cədvəli skan et",
     results: "Nəticələr",
     openResult: "Aç",
+    openInTab: "Vərəqdə aç",
     waiting: "Uyğunluqlar gözlənilir...",
     noResults: "Hələ uyğunluq yoxdur",
     errors: "Bəzi cədvəllərdə əməliyyat uğursuz oldu",

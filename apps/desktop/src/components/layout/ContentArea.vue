@@ -123,6 +123,7 @@ const NacosAdminConsole = defineAsyncComponent(() => import("@/components/nacos/
 const NacosAccessControlConsole = defineAsyncComponent(() => import("@/components/nacos/NacosAccessControlConsole.vue"));
 const NacosDashboard = defineAsyncComponent(() => import("@/components/nacos/NacosDashboard.vue"));
 const DoltVersionControl = defineAsyncComponent(() => import("@/components/dolt/DoltVersionControl.vue"));
+const DatabaseSearchPanel = defineAsyncComponent(() => import("@/components/search/DatabaseSearchPanel.vue"));
 const DatabaseBrowser = defineAsyncComponent(() => import("@/components/objects/DatabaseBrowser.vue"));
 const ObjectBrowser = defineAsyncComponent(() => import("@/components/objects/ObjectBrowser.vue"));
 const TableStructureEditor = defineAsyncComponent(() => import("@/components/structure/TableStructureEditor.vue"));
@@ -361,6 +362,7 @@ const etcdDashboardRef = ref<{ refresh?: () => boolean }>();
 const zookeeperKeyBrowserRef = ref<SearchableBrowserHandle>();
 const consulOverviewRef = ref<{ refresh?: () => boolean }>();
 const consulWorkspaceRef = ref<SearchableBrowserHandle>();
+const databaseSearchPanelRef = ref<{ focusSearch: () => boolean }>();
 const databaseBrowserRef = ref<SearchableBrowserHandle>();
 const objectBrowserRef = ref<SearchableBrowserHandle>();
 const pluginFilesystemTabRef = ref<{ refresh: () => Promise<unknown> }>();
@@ -1258,6 +1260,7 @@ function focusSearch(target: Element | null = null): boolean {
   if (props.activeTab.mode === "zookeeper") return zookeeperKeyBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "consul") return consulWorkspaceRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "databases") return databaseBrowserRef.value?.focusSearch() ?? false;
+  if (props.activeTab.mode === "database-search") return databaseSearchPanelRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "objects") return objectBrowserRef.value?.focusSearch(target) ?? false;
   if (props.activeTab.mode === "structure") return tableStructureEditorRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "query") {
@@ -3168,6 +3171,26 @@ defineExpose({
           :connection-id="activeTab.connectionId || undefined"
           :root-uri="activeTab.pluginFilesystem.rootUri"
           :initial-uri="activeTab.pluginFilesystem.currentUri"
+        />
+      </div>
+    </template>
+    <!-- Database Search mode -->
+    <template v-else-if="activeTab.mode === 'database-search'">
+      <div class="min-w-0 flex-1 min-h-0">
+        <DatabaseSearchPanel
+          ref="databaseSearchPanelRef"
+          :key="activeTab.id"
+          :connection-id="activeTab.connectionId"
+          :database="activeTab.database"
+          :schema="activeTab.schema"
+          :initial-state="activeTab.databaseSearchState"
+          @update:state="
+            (state) => {
+              activeTab.databaseSearchState = state;
+              queryStore.updateDatabaseSearchState(activeTab.id, state);
+            }
+          "
+          @open-target="(target) => emit('openDatabaseSearchTarget', activeTab.id, target)"
         />
       </div>
     </template>

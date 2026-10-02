@@ -3157,6 +3157,7 @@ export default withEnglishFallback({
     scanAllRemaining: "Pindai {count} sisanya",
     results: "Hasil",
     openResult: "Buka",
+    openInTab: "Buka di Tab",
     waiting: "Menunggu kecocokan...",
     noResults: "Belum ada kecocokan",
     errors: "Beberapa tabel gagal",

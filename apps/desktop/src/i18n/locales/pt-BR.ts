@@ -3066,6 +3066,7 @@ export default withEnglishFallback({
     scanAllRemaining: "Verificar {count} restantes",
     results: "Resultados",
     openResult: "Abrir",
+    openInTab: "Abrir em aba",
     waiting: "Aguardando correspondências...",
     noResults: "Nenhuma correspondência ainda",
     errors: "Algumas tabelas falharam",

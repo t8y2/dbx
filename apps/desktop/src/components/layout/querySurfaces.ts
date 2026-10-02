@@ -1,4 +1,5 @@
 import type { ConnectionConfig, ObjectBrowserFilter, ObjectBrowserViewport, QueryTab, TabOutputView } from "@/types/database";
+import type { NavigationTarget } from "@/composables/useNavigationTargets";
 import type { DataGridReloadIntent } from "@/lib/dataGrid/dataGridToolbar";
 import type { DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
@@ -101,6 +102,7 @@ export interface ContentAreaSurfaceEmits {
   editTableStructure: [tabId: string, target: SqlObjectNavigationTarget];
   openObjectSource: [tabId: string, target: SqlObjectNavigationTarget, initialEditing: boolean];
   openObjectTable: [tabId: string, target: { tableName: string; schema?: string; tableType?: string; catalog?: string; comment?: string | null }];
+  openDatabaseSearchTarget: [tabId: string, target: NavigationTarget];
   objectSchemaChange: [tabId: string, schema: string | undefined];
   objectBrowserViewportChange: [tabId: string, viewport: ObjectBrowserViewport];
   objectBrowserSearchChange: [tabId: string, query: string];

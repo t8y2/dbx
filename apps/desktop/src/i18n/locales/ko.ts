@@ -2972,6 +2972,7 @@ export default withEnglishFallback({
     scanAllRemaining: "남은 {count}개 스캔",
     results: "결과",
     openResult: "열기",
+    openInTab: "탭으로 열기",
     waiting: "일치 항목을 기다리는 중...",
     noResults: "아직 일치 항목이 없습니다",
     errors: "일부 테이블이 실패했습니다",

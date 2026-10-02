@@ -3253,6 +3253,7 @@ export default {
     scanAllRemaining: "Scan remaining {count}",
     results: "Results",
     openResult: "Open",
+    openInTab: "Open in Tab",
     waiting: "Waiting for matches...",
     noResults: "No matches yet",
     errors: "Some tables failed",

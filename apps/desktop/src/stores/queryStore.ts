@@ -14,6 +14,7 @@ import type {
   BatchSqlExecution,
   BatchStatementExecutionItem,
   ConnectionConfig,
+  DatabaseSearchTabState,
   DatabaseType,
   IndexInfo,
   NacosConfigEditorViewport,
@@ -3318,6 +3319,36 @@ export const useQueryStore = defineStore("query", () => {
     return registerOpenTab(tab);
   }
 
+  function openDatabaseSearch(connectionId: string, database: string, schema?: string, initialState?: DatabaseSearchTabState) {
+    const existing = tabs.value.find((tab) => tab.mode === "database-search" && tab.connectionId === connectionId && tab.database === database && (tab.schema || "") === (schema || ""));
+    if (existing) {
+      if (initialState) {
+        existing.databaseSearchState = {
+          ...existing.databaseSearchState,
+          ...initialState,
+        };
+      }
+      switchTab(existing.id);
+      return existing.id;
+    }
+
+    const id = uuid();
+    const tab: QueryTab = {
+      id,
+      title: "Database Search",
+      connectionId,
+      database,
+      schema,
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "database-search",
+      databaseSearchState: initialState,
+    };
+    return registerOpenTab(tab);
+  }
+
   function openDatabaseBrowser(connectionId: string) {
     const existing = tabs.value.find((tab) => tab.mode === "databases" && tab.connectionId === connectionId);
     if (existing) {
@@ -5331,6 +5362,12 @@ export const useQueryStore = defineStore("query", () => {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab || tab.mode !== "objects" || tab.objectBrowser?.filter === filter) return;
     tab.objectBrowser = { ...tab.objectBrowser, filter };
+  }
+
+  function updateDatabaseSearchState(id: string, state: DatabaseSearchTabState) {
+    const tab = tabs.value.find((t) => t.id === id);
+    if (!tab || tab.mode !== "database-search") return;
+    tab.databaseSearchState = state;
   }
 
   function updateNacosConfigEditorViewport(connectionId: string, namespace: string, viewport: NacosConfigEditorViewport) {
@@ -9571,6 +9608,7 @@ export const useQueryStore = defineStore("query", () => {
     updateObjectBrowserViewport,
     updateObjectBrowserSearch,
     updateObjectBrowserFilter,
+    updateDatabaseSearchState,
     updateNacosConfigEditorViewport,
     setAutoCommit,
     markManualTransactionDirty,
@@ -9579,6 +9617,7 @@ export const useQueryStore = defineStore("query", () => {
     ensureManualTransactionSession,
     renameTab,
     openDatabaseBrowser,
+    openDatabaseSearch,
     openDriverProfileWorkspace,
     openObjectBrowser,
     openMongoGridFs,

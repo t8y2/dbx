@@ -3165,6 +3165,7 @@ export default withEnglishFallback({
     scanAllRemaining: "扫描剩余 {count} 张",
     results: "查找结果",
     openResult: "打开",
+    openInTab: "以页签方式打开",
     waiting: "等待命中结果...",
     noResults: "暂无命中结果",
     errors: "部分表查找失败",

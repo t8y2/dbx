@@ -21,6 +21,7 @@ import {
   tabDisplayTitles,
   syncTabTitleNumbers,
   tabIconClass,
+  tabModeLabel,
   tabTooltipLines,
   tabularResultItems,
   dirtyTabTitleStyle,
@@ -37,6 +38,7 @@ const translations: Record<string, string> = {
   "tree.events": "Events",
   "connectionGroup.ungroupedLabel": "Ungrouped",
   "editor.noDatabase": "No database",
+  "databaseSearch.title": "Search Database",
 };
 
 const translate = (key: string) => translations[key] ?? key;
@@ -472,6 +474,17 @@ describe("tab group presentation", () => {
   it("uses the selected MySQL event name for event editor tabs", () => {
     expect(tabDisplayTitle(queryTab({ mode: "objects", objectBrowser: { objectType: "tables", initialObjectFilter: "events", eventName: "cleanup_sessions" } }), translate)).toBe("cleanup_sessions@db");
     expect(tabDisplayTitle(queryTab({ mode: "objects", objectBrowser: { objectType: "tables", initialObjectFilter: "events" } }), translate)).toBe("Events@db");
+  });
+
+  it("formats database-search tab titles with database and schema scope", () => {
+    expect(tabDisplayTitle(queryTab({ mode: "database-search", database: "shop", schema: "public" }), translate)).toBe("Search Database@shop.public");
+    expect(tabDisplayTitle(queryTab({ mode: "database-search", database: "shop" }), translate)).toBe("Search Database@shop");
+    expect(tabModeLabel(queryTab({ mode: "database-search" }), translate)).toBe("Search Database");
+
+    const settings = useSettingsStore();
+    settings.editorSettings.compactTabTitle = true;
+    expect(tabDisplayTitle(queryTab({ mode: "database-search", database: "shop" }), translate)).toBe("Search Database");
+    settings.editorSettings.compactTabTitle = false;
   });
 
   it("uses the live database and branch context for Dolt version control tabs", () => {

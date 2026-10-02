@@ -3064,6 +3064,7 @@ export default withEnglishFallback({
     scanAllRemaining: "Scansiona le {count} rimanenti",
     results: "Risultati",
     openResult: "Apri",
+    openInTab: "Apri in scheda",
     waiting: "In attesa di corrispondenze...",
     noResults: "Nessuna corrispondenza finora",
     errors: "Alcune tabelle non sono riuscite",

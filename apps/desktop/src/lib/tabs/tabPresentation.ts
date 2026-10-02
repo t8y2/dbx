@@ -287,6 +287,11 @@ export function tabDisplayTitle(tab: QueryTab, t: Translate): string {
     if (compact) return t("tabs.users");
     return `${t("tabs.users")}@${connectionDisplayName(tab.connectionId)}`;
   }
+  if (tab.mode === "database-search") {
+    const scope = tab.schema ? `${database}.${tab.schema}` : database;
+    if (compact) return t("databaseSearch.title");
+    return `${t("databaseSearch.title")}@${scope}`;
+  }
   return tab.title;
 }
 
@@ -677,6 +682,7 @@ export function tabModeLabel(tab: QueryTab, t: Translate): string {
   if (tab.mode === "objects") return t("tabs.objects");
   if (tab.mode === "users") return t("tabs.users");
   if (tab.mode === "dolt-version-control") return t("doltVersionControl.title");
+  if (tab.mode === "database-search") return t("databaseSearch.title");
   return tab.mode;
 }
 

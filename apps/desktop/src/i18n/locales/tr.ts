@@ -2848,6 +2848,7 @@ export default withEnglishFallback({
     scanAllRemaining: "Kalan {count} tanesini tara",
     results: "Sonuçlar",
     openResult: "Aç",
+    openInTab: "Sekmede Aç",
     waiting: "Eşleşmeler bekleniyor...",
     noResults: "Henüz eşleşme yok",
     errors: "Bazı tablolar başarısız oldu",

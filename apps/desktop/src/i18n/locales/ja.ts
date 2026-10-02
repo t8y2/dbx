@@ -3090,6 +3090,7 @@ export default withEnglishFallback({
     scanAllRemaining: "残り{count}テーブルをスキャン",
     results: "結果",
     openResult: "開く",
+    openInTab: "タブで開く",
     waiting: "一致を待機中...",
     noResults: "一致する結果はまだありません",
     errors: "一部のテーブルで失敗しました",

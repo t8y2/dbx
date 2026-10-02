@@ -34,6 +34,7 @@ export const contentSurfaceEventNames = [
   "editTableStructure",
   "openObjectSource",
   "openObjectTable",
+  "openDatabaseSearchTarget",
   "objectSchemaChange",
   "objectBrowserViewportChange",
   "objectBrowserSearchChange",

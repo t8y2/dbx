@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  autoRedisValueFormat,
   canRenderRedisValueFormat,
+  detectedRedisStructuredCodec,
   formatRedisMemberDetail,
   formatRedisStringValue,
   getRedisMemberSelectionKey,
+  isRedisJsonContainerValue,
   jsonToXmlText,
   jsonToYamlText,
   normalizeRedisJsonDraft,
@@ -274,6 +277,53 @@ describe("redisValuePresentation", () => {
     expect(detail.javaSerialized?.formattedText).toBe('"sometext"');
     expect(canRenderRedisValueFormat(detail, "json")).toBe(false);
     expect(canRenderRedisValueFormat(formatRedisMemberDetail("plain-text"), "utf8")).toBe(true);
+  });
+
+  it("auto-opens JSON containers pretty-printed when no format was pinned", () => {
+    const detail = formatRedisMemberDetail('{"role":"reader"}', { allowJsonText: true });
+    expect(autoRedisValueFormat(detail, null)).toBe("json");
+  });
+
+  it("keeps scalar JSON and plain text on the raw utf8 view", () => {
+    expect(autoRedisValueFormat(formatRedisMemberDetail("123", { allowJsonText: true }), null)).toBe("utf8");
+    expect(autoRedisValueFormat(formatRedisMemberDetail("plain-text", { allowJsonText: true }), null)).toBe("utf8");
+  });
+
+  it("lets a pinned format preference win over JSON detection", () => {
+    const detail = formatRedisMemberDetail('{"role":"reader"}', { allowJsonText: true });
+    expect(autoRedisValueFormat(detail, "utf8")).toBe("utf8");
+    expect(autoRedisValueFormat(detail, "json")).toBe("json");
+  });
+
+  it("keeps non-reusable view preferences falling back to the value default", () => {
+    const detail = formatRedisMemberDetail('{"role":"reader"}', { allowJsonText: true });
+    expect(autoRedisValueFormat(detail, "hex")).toBe("utf8");
+  });
+
+  it("still honors binary inspection views on non-editable blobs", () => {
+    const detail = formatRedisMemberDetail({
+      raw_base64: Buffer.from([0x00, 0x01, 0x02]).toString("base64"),
+      encoding: "binary",
+    });
+
+    expect(autoRedisValueFormat(detail, "hex")).toBe("hex");
+    expect(autoRedisValueFormat(detail, null)).toBe("hex");
+  });
+
+  it("maps detected structured payloads to their codec", () => {
+    const java = formatRedisMemberDetail({ raw_base64: "rO0ABXQACHNvbWV0ZXh0", encoding: "binary" });
+    expect(detectedRedisStructuredCodec(java)).toBe("javaserialize");
+
+    const plain = formatRedisMemberDetail("plain-text", { allowJsonText: true });
+    expect(detectedRedisStructuredCodec(plain)).toBeNull();
+  });
+
+  it("treats only objects and arrays as JSON containers", () => {
+    expect(isRedisJsonContainerValue({ a: 1 })).toBe(true);
+    expect(isRedisJsonContainerValue([1])).toBe(true);
+    expect(isRedisJsonContainerValue("123")).toBe(false);
+    expect(isRedisJsonContainerValue(null)).toBe(false);
+    expect(isRedisJsonContainerValue(undefined)).toBe(false);
   });
 
   it("keeps legacy Pickle payloads out of conservative auto-detection", () => {

@@ -461,6 +461,36 @@ export function preferredRedisValueFormat(value: unknown, preferred?: RedisValue
   return detail.defaultFormat;
 }
 
+/**
+ * Issue #10922: a string payload that parses into a JSON object or array opens
+ * pretty-printed instead of raw, matching RedisInsight. `stored` is the
+ * persisted format preference; null means the user never pinned a format, so
+ * detection wins. Scalar JSON ("123", "\"text\"") renders identically in both
+ * views, so it never triggers the switch.
+ */
+export function autoRedisValueFormat(detail: RedisMemberDetail, stored: RedisValueFormat | null): RedisValueFormat {
+  if (stored != null && shouldReuseRedisValueFormatPreference(detail, stored)) return stored;
+  if (stored == null && isRedisJsonContainerValue(detail.json?.value)) return "json";
+  return detail.defaultFormat;
+}
+
+export function isRedisJsonContainerValue(value: unknown): boolean {
+  return typeof value === "object" && value !== null;
+}
+
+/**
+ * Codec with a deterministic magic prefix that `formatRedisMemberDetail`
+ * already decoded for this payload, or null. Protobuf is deliberately
+ * excluded: without a schema its wire format matches too many byte strings.
+ */
+export function detectedRedisStructuredCodec(detail: RedisMemberDetail): RedisValueCodec | null {
+  if (detail.javaSerialized) return "javaserialize";
+  if (detail.pickle) return "pickle";
+  if (detail.msgpack) return "msgpack";
+  if (detail.phpSerialized) return "phpserialize";
+  return null;
+}
+
 export function canRenderRedisValueFormat(detail: RedisMemberDetail, format: RedisValueFormat): boolean {
   return !isJsonDerivedView(format) || Boolean(detail.json);
 }

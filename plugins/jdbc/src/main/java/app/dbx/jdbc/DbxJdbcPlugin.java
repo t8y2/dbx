@@ -881,6 +881,16 @@ public final class DbxJdbcPlugin {
         return false;
     }
 
+    private static boolean usesFullPrecisionIntegers(JsonNode connection) {
+        String url = jdbcUrl(connection);
+        if (urlMatchesPrefix(url, "jdbc:cache:") || urlMatchesPrefix(url, "jdbc:iris:")) {
+            return true;
+        }
+        String driverClass = optionalText(connection, "jdbc_driver_class");
+        return "com.intersys.jdbc.CacheDriver".equals(driverClass)
+            || "com.intersystems.jdbc.IRISDriver".equals(driverClass);
+    }
+
     private static boolean isPrestoOrTrinoConnection(JsonNode connection) {
         String url = jdbcUrl(connection);
         if (urlMatchesPrefix(url, "jdbc:presto:") || urlMatchesPrefix(url, "jdbc:trino:")) {
@@ -1022,6 +1032,7 @@ public final class DbxJdbcPlugin {
         boolean preserveOracleDateTime = isOracleUrl(jdbcUrl(connection));
         ZoneId timestampZone = tdengineTimestampZone(connection, conn);
         boolean bitStringColumns = usesBitStringColumns(connection);
+        boolean fullPrecisionIntegers = usesFullPrecisionIntegers(connection);
         try (Statement statement = conn.createStatement()) {
             applyStatementOptions(statement, maxRows, fetchSize, timeoutSecs, quirks);
             String trimmedSql = trimStatementSql(sql);
@@ -1051,7 +1062,7 @@ public final class DbxJdbcPlugin {
                         }
                         ArrayNode row = MAPPER.createArrayNode();
                         for (int i = 1; i <= columnCount; i++) {
-                            row.add(MAPPER.valueToTree(readValue(rs, meta, i, preserveOracleDateTime, timestampZone, bitStringColumns)));
+                            row.add(MAPPER.valueToTree(readValue(rs, meta, i, preserveOracleDateTime, timestampZone, bitStringColumns, fullPrecisionIntegers)));
                         }
                         rows.add(row);
                     }
@@ -1146,6 +1157,7 @@ public final class DbxJdbcPlugin {
         private final boolean preserveOracleDateTime;
         private final ZoneId timestampZone;
         private final boolean bitStringColumns;
+        private final boolean fullPrecisionIntegers;
         private int rowsReturned;
         private ArrayNode pendingRow;
 
@@ -1161,7 +1173,8 @@ public final class DbxJdbcPlugin {
             boolean restoreAutoCommit,
             boolean preserveOracleDateTime,
             ZoneId timestampZone,
-            boolean bitStringColumns
+            boolean bitStringColumns,
+            boolean fullPrecisionIntegers
         ) {
             this.id = id;
             this.statement = statement;
@@ -1175,6 +1188,7 @@ public final class DbxJdbcPlugin {
             this.preserveOracleDateTime = preserveOracleDateTime;
             this.timestampZone = timestampZone;
             this.bitStringColumns = bitStringColumns;
+            this.fullPrecisionIntegers = fullPrecisionIntegers;
         }
     }
 
@@ -1243,7 +1257,8 @@ public final class DbxJdbcPlugin {
                 restoreAutoCommit,
                 preserveOracleDateTime,
                 timestampZone,
-                bitStringColumns
+                bitStringColumns,
+                usesFullPrecisionIntegers(connection)
             );
             QUERY_SESSIONS.put(sessionId, session);
             try {
@@ -1316,7 +1331,7 @@ public final class DbxJdbcPlugin {
                     closeQuerySession(session.id);
                     return queryPageResult(session, rows, false, false);
                 }
-                row = readRow(session.resultSet, session.meta, session.preserveOracleDateTime, session.timestampZone, session.bitStringColumns);
+                row = readRow(session.resultSet, session.meta, session.preserveOracleDateTime, session.timestampZone, session.bitStringColumns, session.fullPrecisionIntegers);
             }
             rows.add(row);
             session.rowsReturned++;
@@ -1334,7 +1349,7 @@ public final class DbxJdbcPlugin {
             return queryPageResult(session, rows, false, false);
         }
 
-        session.pendingRow = readRow(session.resultSet, session.meta, session.preserveOracleDateTime, session.timestampZone, session.bitStringColumns);
+        session.pendingRow = readRow(session.resultSet, session.meta, session.preserveOracleDateTime, session.timestampZone, session.bitStringColumns, session.fullPrecisionIntegers);
         return queryPageResult(session, rows, false, true);
     }
 
@@ -1389,11 +1404,12 @@ public final class DbxJdbcPlugin {
         ResultSetMetaData meta,
         boolean preserveOracleDateTime,
         ZoneId timestampZone,
-        boolean bitStringColumns
+        boolean bitStringColumns,
+        boolean fullPrecisionIntegers
     ) throws SQLException {
         ArrayNode row = MAPPER.createArrayNode();
         for (int i = 1; i <= meta.getColumnCount(); i++) {
-            row.add(MAPPER.valueToTree(readValue(rs, meta, i, preserveOracleDateTime, timestampZone, bitStringColumns)));
+            row.add(MAPPER.valueToTree(readValue(rs, meta, i, preserveOracleDateTime, timestampZone, bitStringColumns, fullPrecisionIntegers)));
         }
         return row;
     }
@@ -4356,7 +4372,24 @@ public final class DbxJdbcPlugin {
         ZoneId timestampZone,
         boolean bitStringColumns
     ) throws SQLException {
+        return readValue(rs, meta, index, preserveOracleDateTime, timestampZone, bitStringColumns, false);
+    }
+
+    private static Object readValue(
+        ResultSet rs,
+        ResultSetMetaData meta,
+        int index,
+        boolean preserveOracleDateTime,
+        ZoneId timestampZone,
+        boolean bitStringColumns,
+        boolean fullPrecisionIntegers
+    ) throws SQLException {
         int columnType = meta.getColumnType(index);
+
+        if (fullPrecisionIntegers && (columnType == Types.TINYINT || columnType == Types.SMALLINT
+            || columnType == Types.INTEGER || columnType == Types.BIGINT)) {
+            return rs.getBigDecimal(index);
+        }
 
         if (columnType == Types.BOOLEAN) {
             boolean boolValue = rs.getBoolean(index);

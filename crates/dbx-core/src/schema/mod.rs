@@ -14858,6 +14858,19 @@ fn render_postgres_table_ddl_with_constraints_and_partition_info(
     ddl
 }
 
+fn sqlserver_temporal_period_mismatches(
+    temporal: &db::sqlserver::SqlServerTemporalTableMetadata,
+    generated_clauses: &HashMap<String, String>,
+) -> bool {
+    [(&temporal.start_column, "START"), (&temporal.end_column, "END")].into_iter().any(|(column, kind)| {
+        column.as_deref().is_some_and(|name| {
+            generated_clauses
+                .get(name)
+                .is_some_and(|clause| !clause.starts_with(&format!("GENERATED ALWAYS AS ROW {kind}")))
+        })
+    })
+}
+
 fn sqlserver_identity_clause(extra: Option<&str>) -> Option<String> {
     let extra = extra?.trim();
     let lower = extra.to_ascii_lowercase();
@@ -14946,18 +14959,10 @@ async fn build_sqlserver_ddl_with_temporal(
         return Err("SQL Server temporal period metadata is unavailable".to_string());
     }
     if let Some(temporal) = temporal.as_ref() {
-        for (column, kind) in [(&temporal.start_column, "START"), (&temporal.end_column, "END")] {
-            if let Some(name) = column {
-                if !generated_clauses
-                    .get(name)
-                    .is_some_and(|clause| clause.starts_with(&format!("GENERATED ALWAYS AS ROW {kind}")))
-                {
-                    return Err(
-                        "SQL Server temporal period and column metadata do not match; refresh the table definition"
-                            .to_string(),
-                    );
-                }
-            }
+        if sqlserver_temporal_period_mismatches(temporal, &generated_clauses) {
+            return Err(
+                "SQL Server temporal period and column metadata do not match; refresh the table definition".to_string()
+            );
         }
     }
     Ok(render_sqlserver_table_ddl_details(

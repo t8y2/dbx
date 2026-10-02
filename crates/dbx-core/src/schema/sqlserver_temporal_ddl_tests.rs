@@ -1,4 +1,4 @@
-use super::{render_sqlserver_table_ddl_details, SqlServerDdlDetails};
+use super::{render_sqlserver_table_ddl_details, sqlserver_temporal_period_mismatches, SqlServerDdlDetails};
 use crate::db::{sqlserver::SqlServerTemporalTableMetadata, ColumnInfo};
 use std::collections::HashMap;
 
@@ -35,6 +35,29 @@ fn render(temporal: &SqlServerTemporalTableMetadata) -> String {
         None,
         SqlServerDdlDetails { generated_clauses: Some(&generated), temporal: Some(temporal), ..Default::default() },
     )
+}
+
+#[test]
+fn period_columns_without_generated_clauses_are_not_a_mismatch() {
+    let temporal = metadata();
+    let unrelated = HashMap::from([("unrelated".to_string(), "GENERATED ALWAYS AS ROW END".to_string())]);
+    assert!(!sqlserver_temporal_period_mismatches(&temporal, &unrelated));
+    assert!(!sqlserver_temporal_period_mismatches(&temporal, &HashMap::new()));
+}
+
+#[test]
+fn generated_clause_with_wrong_period_kind_is_a_mismatch() {
+    let temporal = metadata();
+    let swapped = HashMap::from([
+        ("ValidFrom".to_string(), "GENERATED ALWAYS AS ROW END".to_string()),
+        ("ValidTo".to_string(), "GENERATED ALWAYS AS ROW START".to_string()),
+    ]);
+    assert!(sqlserver_temporal_period_mismatches(&temporal, &swapped));
+    let correct = HashMap::from([
+        ("ValidFrom".to_string(), "GENERATED ALWAYS AS ROW START HIDDEN".to_string()),
+        ("ValidTo".to_string(), "GENERATED ALWAYS AS ROW END".to_string()),
+    ]);
+    assert!(!sqlserver_temporal_period_mismatches(&temporal, &correct));
 }
 
 #[test]

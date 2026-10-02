@@ -19,7 +19,9 @@ tables = [{'name': 'T%04d' % i, 'table_type': 'TABLE'} for i in range(1005)]
 for line in sys.stdin:
     request = json.loads(line)
     params = request.get('params', {})
-    if request['method'] == 'listTables':
+    if request['method'] == 'listDatabases':
+        result = [{'name': params['connection']['database']}]
+    elif request['method'] == 'listTables':
         with pathlib.Path(__file__).with_name('calls.jsonl').open('a') as log:
             log.write(json.dumps(params) + '\n')
         start = params.get('offset', 0)
@@ -75,6 +77,18 @@ for line in sys.stdin:
         })
         .await;
     (dir, state)
+}
+
+#[tokio::test]
+async fn enumeration_preserves_external_jdbc_plugin_even_with_agent_vendor_config() {
+    let (_directory, state) = jdbc_state().await;
+    state.configs.write().await.get_mut("jdbc-tables").unwrap().db_type = crate::models::connection::DatabaseType::Hive;
+
+    let databases = super::list_databases_core(&state, "jdbc-tables").await.unwrap();
+
+    assert_eq!(databases[0].name, "demo");
+    assert!(state.pool_handle("jdbc-tables:role:metadata").await.is_none());
+    state.shutdown(Duration::from_secs(2)).await;
 }
 
 #[tokio::test]

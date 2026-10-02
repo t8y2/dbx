@@ -187,7 +187,8 @@ describe("Windows 7 fixed WebView2 runtime bundle", () => {
     expect(appCargoToml).toContain('custom-protocol = ["tauri/custom-protocol"]');
     expect(appBuildScript).toContain("CARGO_FEATURE_CUSTOM_PROTOCOL");
     expect(appBuildScript).toContain("CARGO_CFG_TARGET_VENDOR");
-    expect(ciWorkflow).toContain("--release --features custom-protocol --target x86_64-win7-windows-msvc");
+    expect(ciWorkflow).toContain("build --locked --package dbx --release --features custom-protocol");
+    expect(ciWorkflow).toContain("--target x86_64-win7-windows-msvc --timings");
     expect(releaseWorkflow).toContain("--release --features custom-protocol --target x86_64-win7-windows-msvc");
     expect(ciWorkflow).toContain("TAURI_CONFIG = Get-Content src-tauri/tauri.webview2-win7-fixed.conf.json -Raw");
     expect(releaseWorkflow).toContain("TAURI_CONFIG = Get-Content src-tauri/tauri.webview2-win7-fixed.conf.json -Raw");

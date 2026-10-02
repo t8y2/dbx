@@ -1,0 +1,5 @@
+# sccache hashes proc-macro DLLs as downstream compiler inputs.
+target-applies-to-host = false
+
+[host.x86_64-pc-windows-msvc]
+rustflags = ["-Clink-arg=/Brepro"]

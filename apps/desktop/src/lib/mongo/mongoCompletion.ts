@@ -43,6 +43,7 @@ export type MongoCompletionMode =
   | "cursorMethod"
   | "field"
   | "filterField"
+  | "pullCondition"
   | "fieldPath"
   | "fieldRef"
   | "value"
@@ -476,6 +477,10 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
       // Fields lead; `$and` / `$or` and the other whole-filter operators follow once `$` is typed.
       items = [...fieldItems(prefix, fields), ...specItems(TOP_LEVEL_QUERY_OPERATORS, prefix, "query operator", 80)];
       break;
+    case "pullCondition":
+      // Fields lead; query operators follow once `$` is typed.
+      items = [...fieldItems(prefix, fields), ...specItems(FIELD_QUERY_OPERATORS, prefix, "query operator", 80)];
+      break;
     case "fieldPath":
       items = fieldPathItems(prefix, fields);
       break;
@@ -543,7 +548,7 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
 
 /** Modes whose items are built from the target collection's sampled fields. */
 export function mongoCompletionNeedsFields(mode: MongoCompletionMode): boolean {
-  return mode === "field" || mode === "filterField" || mode === "fieldPath" || mode === "fieldRef" || mode === "expression";
+  return mode === "field" || mode === "filterField" || mode === "pullCondition" || mode === "fieldPath" || mode === "fieldRef" || mode === "expression";
 }
 
 /** Modes whose items are built from the database's collection names. */
@@ -990,6 +995,16 @@ function classifyUpdateArgument(scan: MongoCallScan, rootIndex: number): MongoCu
 function classifyUpdate(scan: MongoCallScan, rootIndex: number): MongoCursorClass {
   const inner = innermost(scan);
   if (!inner || innerDepth(scan, rootIndex) < 0) return { mode: "none" };
+
+  const pullIndex = findContainerIndex(scan, rootIndex, "$pull");
+  if (pullIndex >= 0 && scan.stack.length > pullIndex + 1) {
+    const classified = classifyFilter(scan, pullIndex + 1);
+    if (innerDepth(scan, pullIndex + 1) === 0 && classified.mode === "filterField") {
+      return { ...classified, mode: "pullCondition" };
+    }
+    return classified;
+  }
+
   const parent = scan.stack[scan.stack.length - 2];
   if (scan.inValue) {
     // `$currentDate: { at: { $type: "timestamp" } }`.
@@ -1067,6 +1082,7 @@ function classifyMethodOptions(method: string, scan: MongoCallScan): MongoCursor
     return { mode: scan.inString ? "none" : "keyMapValue", method, keyMap: option };
   }
   if (FILTER_OPTION_KEYS.has(option)) return { ...classifyFilter(scan, 1), method };
+  if (option === "arrayFilters") return { ...classifyFilter(scan, 2), method };
   if (option === "pipeline" && scan.stack[1]?.kind === "array") {
     return { ...classifyPipeline(scan, findPipelineArrayIndex(scan.stack), method === "createCollection" ? "view" : "aggregate"), method };
   }

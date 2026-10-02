@@ -4366,11 +4366,52 @@ public final class DbxJdbcPlugin {
             throw new SQLException("Object source not found");
         }
 
+        if (isSybaseConnection(connection) && "VIEW".equals(normalizeObjectType(objectType))) {
+            return sybaseViewObjectSource(connection, conn, database, schema, name, objectType);
+        }
+
         if ("TABLE".equals(normalizeObjectType(objectType))) {
             return genericTableObjectSource(connection, database, schema, name);
         }
 
         throw new SQLException("Object source is not supported by this JDBC driver");
+    }
+
+    private static JsonNode sybaseViewObjectSource(
+        JsonNode connection,
+        Connection conn,
+        String database,
+        String schema,
+        String name,
+        String objectType
+    ) throws SQLException {
+        applyExecutionContext(connection, conn, database, schema);
+        String sql = "SELECT sc.text FROM sysobjects so, syscomments sc "
+            + "WHERE user_name(so.uid) = ? AND so.name = ? AND sc.id = so.id ORDER BY sc.colid";
+        StringBuilder source = new StringBuilder();
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, schema);
+            ps.setString(2, name);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String fragment = rs.getString(1);
+                    if (fragment != null) {
+                        source.append(fragment);
+                    }
+                }
+            }
+        }
+        String ddl = source.toString();
+        if (ddl.isBlank()) {
+            throw new SQLException("Object source not found");
+        }
+
+        ObjectNode item = MAPPER.createObjectNode();
+        item.put("name", name);
+        item.put("object_type", objectType);
+        putNullable(item, "schema", emptyToNull(schema));
+        item.put("source", ddl);
+        return item;
     }
 
     /**

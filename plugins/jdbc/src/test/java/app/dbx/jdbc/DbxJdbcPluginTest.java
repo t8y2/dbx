@@ -4477,6 +4477,96 @@ final class DbxJdbcPluginTest {
         );
     }
 
+    private static final class SybaseViewSourceDriver implements Driver {
+        private final String url;
+        private final List<String> calls;
+        private final String[] fragments;
+
+        private SybaseViewSourceDriver(String url, List<String> calls, String... fragments) {
+            this.url = url;
+            this.calls = calls;
+            this.fragments = fragments;
+        }
+
+        @Override
+        public Connection connect(String candidateUrl, Properties info) {
+            return acceptsURL(candidateUrl) ? sybaseViewSourceConnection(calls, fragments) : null;
+        }
+
+        @Override
+        public boolean acceptsURL(String candidateUrl) {
+            return url.equals(candidateUrl);
+        }
+
+        @Override
+        public DriverPropertyInfo[] getPropertyInfo(String candidateUrl, Properties info) {
+            return new DriverPropertyInfo[0];
+        }
+
+        @Override
+        public int getMajorVersion() {
+            return 1;
+        }
+
+        @Override
+        public int getMinorVersion() {
+            return 0;
+        }
+
+        @Override
+        public boolean jdbcCompliant() {
+            return false;
+        }
+
+        @Override
+        public java.util.logging.Logger getParentLogger() {
+            return java.util.logging.Logger.getGlobal();
+        }
+    }
+
+    private static Connection sybaseViewSourceConnection(List<String> calls, String[] fragments) {
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "prepareStatement" -> {
+                    calls.add("sql:" + args[0]);
+                    ResultSet rows = rowsResultSet(
+                        new String[] { "text" },
+                        java.util.Arrays.stream(fragments)
+                            .map(fragment -> new Object[] { fragment })
+                            .toArray(Object[][]::new)
+                    );
+                    yield (PreparedStatement) Proxy.newProxyInstance(
+                        DbxJdbcPluginTest.class.getClassLoader(),
+                        new Class<?>[] { PreparedStatement.class },
+                        (statementProxy, statementMethod, statementArgs) -> switch (statementMethod.getName()) {
+                            case "setString" -> {
+                                calls.add("bind:" + statementArgs[0] + ":" + statementArgs[1]);
+                                yield null;
+                            }
+                            case "executeQuery" -> rows;
+                            case "close" -> null;
+                            default -> defaultValue(statementMethod.getReturnType());
+                        }
+                    );
+                }
+                case "setCatalog" -> {
+                    calls.add("catalog:" + args[0]);
+                    yield null;
+                }
+                case "setSchema" -> {
+                    calls.add("schema:" + args[0]);
+                    yield null;
+                }
+                case "getAutoCommit", "isValid" -> true;
+                case "isClosed" -> false;
+                case "close" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
     private static final class SybaseMetadataDriver implements Driver {
         private final List<String> calls;
 
@@ -5444,6 +5534,121 @@ final class DbxJdbcPluginTest {
             assertTrue(calls.contains("columns:appdb:dbo:orders"), calls.toString());
             assertTrue(calls.contains("columns:appdb:<null>:orders"), calls.toString());
             assertTrue(calls.contains("primaryKeys:appdb:<null>:orders"), calls.toString());
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
+    void getObjectSourceReturnsOrderedSybaseViewSourceWithBoundIdentity() throws Exception {
+        List<String> calls = new ArrayList<>();
+        String url = "jdbc:sybase:Tds:sybase-view-source-test:5000";
+        Driver driver = new SybaseViewSourceDriver(
+            url,
+            calls,
+            "CREATE VIEW active_users",
+            " AS SELECT id",
+            " FROM users WHERE active = 1"
+        );
+        DriverManager.registerDriver(driver);
+        String connection = """
+            {
+              "connection_string": "%s",
+              "connect_timeout_secs": 30
+            }
+            """.formatted(url);
+        try {
+            JsonNode response = request("getObjectSource", """
+                {
+                  "connection": %s,
+                  "database": "appdb",
+                  "schema": "reporting'owner",
+                  "name": "active_'users",
+                  "object_type": "VIEW"
+                }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals(
+                "CREATE VIEW active_users AS SELECT id FROM users WHERE active = 1",
+                response.path("result").path("source").asText()
+            );
+            assertEquals("reporting'owner", response.path("result").path("schema").asText());
+            assertEquals("VIEW", response.path("result").path("object_type").asText());
+            assertEquals(List.of(
+                "catalog:appdb",
+                "schema:reporting'owner",
+                "sql:SELECT sc.text FROM sysobjects so, syscomments sc "
+                    + "WHERE user_name(so.uid) = ? AND so.name = ? AND sc.id = so.id ORDER BY sc.colid",
+                "bind:1:reporting'owner",
+                "bind:2:active_'users"
+            ), calls);
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
+    void getObjectSourceSupportsJtdsSybaseViewSource() throws Exception {
+        List<String> calls = new ArrayList<>();
+        String url = "jdbc:jtds:sybase://sybase-view-source-test:5000/appdb";
+        Driver driver = new SybaseViewSourceDriver(url, calls, "CREATE VIEW audit_log AS SELECT 1");
+        DriverManager.registerDriver(driver);
+        String connection = """
+            { "connection_string": "%s", "connect_timeout_secs": 30 }
+            """.formatted(url);
+        try {
+            JsonNode response = request("getObjectSource", """
+                {
+                  "connection": %s,
+                  "database": "appdb",
+                  "schema": "dbo",
+                  "name": "audit_log",
+                  "object_type": "VIEW"
+                }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals(
+                "CREATE VIEW audit_log AS SELECT 1",
+                response.path("result").path("source").asText()
+            );
+            assertTrue(calls.contains("bind:1:dbo"), calls.toString());
+            assertTrue(calls.contains("bind:2:audit_log"), calls.toString());
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
+    void getObjectSourceReportsMissingOrEmptySybaseViewSource() throws Exception {
+        assertSybaseViewSourceNotFound("jdbc:sybase:Tds:sybase-view-missing-test:5000");
+        assertSybaseViewSourceNotFound("jdbc:sybase:Tds:sybase-view-empty-test:5000", null, "");
+    }
+
+    private static void assertSybaseViewSourceNotFound(String url, String... fragments) throws Exception {
+        List<String> calls = new ArrayList<>();
+        Driver driver = new SybaseViewSourceDriver(url, calls, fragments);
+        DriverManager.registerDriver(driver);
+        String connection = """
+            { "connection_string": "%s", "connect_timeout_secs": 30 }
+            """.formatted(url);
+        try {
+            JsonNode response = request("getObjectSource", """
+                {
+                  "connection": %s,
+                  "database": "appdb",
+                  "schema": "dbo",
+                  "name": "missing_view",
+                  "object_type": "VIEW"
+                }
+                """.formatted(connection));
+
+            assertTrue(response.has("error"), response.toString());
+            assertEquals(
+                "Object source not found",
+                response.path("error").path("message").asText()
+            );
         } finally {
             closeAndDeregister(connection, driver);
         }

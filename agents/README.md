@@ -27,6 +27,7 @@ Each agent runs as a standalone process and communicates with DBX via stdin/stdo
 | gbase8a | GBase 8a | External GBase 8a JDBC |
 | gbase8s | GBase 8s | External GBase 8s JDBC |
 | oracle | Oracle 10g+ | go-ora native agent |
+| oracle-oci | Oracle OCI (thick driver) | godror native agent (Windows x64, CGO; shares `drivers/oracle-go`, built with `-tags oci`) |
 | h2 | H2 | H2 JDBC |
 | snowflake | Snowflake | Snowflake JDBC |
 | trino | Trino (Presto) | Trino JDBC |

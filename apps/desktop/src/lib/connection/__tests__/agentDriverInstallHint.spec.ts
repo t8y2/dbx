@@ -47,6 +47,21 @@ describe("NebulaGraph driver installation", () => {
   });
 });
 
+describe("Oracle driver installation", () => {
+  it("routes the OCI profile to the dedicated oracle-oci agent", () => {
+    expect(agentDriverInstallKey("oracle", "oci")).toBe("oracle-oci");
+    expect(showAgentDriverInstallHint("oracle", [], "oci")).toBe(true);
+    expect(showAgentDriverInstallHint("oracle", [{ db_type: "oracle-oci", installed: true }], "oci")).toBe(false);
+  });
+
+  it("keeps plain Oracle connections on the thin agent", () => {
+    for (const profile of [undefined, "oracle"]) {
+      expect(agentDriverInstallKey("oracle", profile)).toBe("oracle");
+      expect(showAgentDriverInstallHint("oracle", [{ db_type: "oracle", installed: true }], profile)).toBe(false);
+    }
+  });
+});
+
 describe("shouldApplyDriverStoreFocus", () => {
   it("applies when the driver first appears after a list load", () => {
     expect(shouldApplyDriverStoreFocus(null, "driver:mysql", false)).toBe(true);

@@ -607,10 +607,11 @@ mod tests {
             .expect("manifest launch should resolve");
 
         assert_eq!(launch.program, driver_dir.join("bin").join("dameng-agent"));
-        assert_eq!(
-            launch.args,
-            vec!["--config".to_string(), driver_dir.join("config.json").to_string_lossy().to_string()]
-        );
+        // 比较 Path：模板里写的是正斜杠，而 Path::join 在 Windows 上产出反斜杠，
+        // 直接比字符串会在 Windows 上误报。
+        assert_eq!(launch.args.len(), 2);
+        assert_eq!(launch.args[0], "--config");
+        assert_eq!(std::path::PathBuf::from(&launch.args[1]), driver_dir.join("config.json"));
         assert_eq!(launch.working_dir.as_deref(), Some(driver_dir.as_path()));
     }
 
@@ -1123,13 +1124,31 @@ impl AgentManager {
         jre_key: &str,
         extra_java_args: &[String],
     ) -> Result<AgentLaunchSpec, String> {
+        self.resolve_agent_launch_spec_with_launch_env(state, driver_key, jre_key, extra_java_args, &[])
+    }
+
+    /// Same as [`Self::resolve_agent_launch_spec_with_extra_args`] but also
+    /// attaches `env` to the resolved spec.
+    ///
+    /// The entries become part of the launch fingerprint, so two connections
+    /// requesting different environments never share an agent process.
+    pub fn resolve_agent_launch_spec_with_launch_env(
+        &self,
+        state: &AgentState,
+        driver_key: &str,
+        jre_key: &str,
+        extra_java_args: &[String],
+        env: &[(String, String)],
+    ) -> Result<AgentLaunchSpec, String> {
         if driver_key == "dameng" {
             validate_dameng_java_system_properties(extra_java_args)?;
         }
         let driver_dir = self.driver_dir(driver_key);
         let config_path = self.driver_launch_config_path(driver_key);
         if config_path.exists() {
-            return self.resolve_configured_agent_launch_spec(driver_key, &driver_dir, &config_path);
+            return Ok(self
+                .resolve_configured_agent_launch_spec(driver_key, &driver_dir, &config_path)?
+                .with_env(env.iter().cloned()));
         }
 
         let native_path = self.driver_native_path(driver_key);
@@ -1145,7 +1164,7 @@ impl AgentManager {
             } else {
                 (native_path, driver_dir)
             };
-            return Ok(AgentLaunchSpec::new(native_path).with_working_dir(driver_dir));
+            return Ok(AgentLaunchSpec::new(native_path).with_working_dir(driver_dir).with_env(env.iter().cloned()));
         }
 
         let jar_path = self.driver_jar_path(driver_key);
@@ -1156,7 +1175,8 @@ impl AgentManager {
                     "{driver_key} driver jar is invalid or corrupt. Please reinstall it from the Driver Manager."
                 ));
             }
-            return Ok(AgentLaunchSpec::java_jar_with_extra_args(java, jar_path, extra_java_args));
+            return Ok(AgentLaunchSpec::java_jar_with_extra_args(java, jar_path, extra_java_args)
+                .with_env(env.iter().cloned()));
         }
 
         Err(format!("{driver_key} driver is not installed. Please install it from the Driver Manager."))
@@ -1364,11 +1384,44 @@ impl AgentManager {
         crate::agent_runtime::spawn_connection_client(self, db_type, driver_profile, extra_java_args).await
     }
 
+    /// Spawns a dedicated agent process carrying `env` (Oracle OCI connections).
+    pub async fn spawn_with_env(
+        &self,
+        db_type: &DatabaseType,
+        driver_profile: Option<&str>,
+        env: &[(String, String)],
+    ) -> Result<AgentDriverClient, String> {
+        crate::agent_runtime::spawn_connection_client_with_env(self, db_type, driver_profile, &[], env).await
+    }
+
+    /// One-shot daemon call variant that hands `env` to the agent process.
+    pub async fn call_daemon_method_with_timeout_and_env<T: serde::de::DeserializeOwned + Send + 'static>(
+        &self,
+        db_type: &DatabaseType,
+        driver_profile: Option<&str>,
+        method: AgentMethod,
+        params: serde_json::Value,
+        timeout_duration: Option<Duration>,
+        env: &[(String, String)],
+    ) -> Result<T, String> {
+        crate::agent_runtime::call_daemon_method_with_timeout_and_env(
+            self,
+            db_type,
+            driver_profile,
+            method,
+            params,
+            timeout_duration,
+            env,
+        )
+        .await
+    }
+
     pub async fn spawn_shared_connection_client(
         &self,
         db_type: &DatabaseType,
         driver_profile: Option<&str>,
         extra_java_args: &[String],
+        agent_env: &[(String, String)],
         agent_session_id: String,
         connect_params: serde_json::Value,
         connect_timeout: std::time::Duration,
@@ -1378,6 +1431,7 @@ impl AgentManager {
             db_type,
             driver_profile,
             extra_java_args,
+            agent_env,
             agent_session_id,
             connect_params,
             connect_timeout,

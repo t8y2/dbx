@@ -627,7 +627,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     });
   }
 
-  async function onSort(tabId: string | undefined, column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode: DataGridSortMode = "database") {
+  async function onSort(tabId: string | undefined, column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode: DataGridSortMode = "database", effectiveOrderBy?: string) {
     const tab = resolveActionTab(tabId);
     if (!tab) return;
     tab.resultSortColumn = direction ? column : undefined;
@@ -649,10 +649,11 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       tab.whereInput = whereInput ?? "";
       const config = connectionStore.getConfig(tab.connectionId);
       const quotedColumn = quoteIdent(tab, column);
-      const orderBy = direction ? `${config?.db_type === "neo4j" ? `n.${quotedColumn}` : quotedColumn} ${direction.toUpperCase()}` : undefined;
+      const headerOrderBy = direction ? `${config?.db_type === "neo4j" ? `n.${quotedColumn}` : quotedColumn} ${direction.toUpperCase()}` : undefined;
+      const orderBy = effectiveOrderBy === undefined ? headerOrderBy : effectiveOrderBy.trim() || undefined;
       const limit = tableDataPageLimit(tab);
       const pagination = { limit, offset: 0 };
-      tab.orderByInput = orderBy;
+      tab.orderByInput = headerOrderBy;
       const sql = await buildTableSql(tab, { orderBy, whereInput, limit, offset: pagination.offset });
       queryStore.updateSql(tab.id, sql);
       await queryStore.executeTabSql(tab.id, sql, {

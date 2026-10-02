@@ -185,30 +185,57 @@ func (s *server) getColumns(label string) ([]columnInfo, error) {
 			return nil, err
 		}
 	}
-	result := make([]columnInfo, 0, len(records))
-	seen := map[string]struct{}{}
+	return propertyColumns(records), nil
+}
+
+func propertyColumns(records []*neo4j.Record) []columnInfo {
+	columns := map[string]*columnInfo{}
+	typesByName := map[string]map[string]struct{}{}
 	for _, record := range records {
 		name := recordString(record, "propertyName")
 		if name == "" {
 			continue
 		}
-		if _, exists := seen[name]; exists {
-			continue
+		column := columns[name]
+		if column == nil {
+			column = &columnInfo{Name: name}
+			columns[name] = column
+			typesByName[name] = map[string]struct{}{}
 		}
-		seen[name] = struct{}{}
-		types := recordStringSlice(record, "propertyTypes")
-		dataType := "Unknown"
+		column.IsNullable = column.IsNullable || !recordBool(record, "mandatory")
+		for _, kind := range recordStringSlice(record, "propertyTypes") {
+			typesByName[name][propertyTypeName(kind)] = struct{}{}
+		}
+	}
+	result := make([]columnInfo, 0, len(columns))
+	for name, column := range columns {
+		types := make([]string, 0, len(typesByName[name]))
+		for kind := range typesByName[name] {
+			types = append(types, kind)
+		}
+		sort.Strings(types)
+		column.DataType = "Unknown"
 		if len(types) > 0 {
-			dataType = strings.Join(types, " | ")
+			column.DataType = strings.Join(types, " | ")
 		}
-		result = append(result, columnInfo{
-			Name:       name,
-			DataType:   dataType,
-			IsNullable: !recordBool(record, "mandatory"),
-		})
+		result = append(result, *column)
 	}
 	sort.Slice(result, func(left, right int) bool { return result[left].Name < result[right].Name })
-	return result, nil
+	return result
+}
+
+func propertyTypeName(kind string) string {
+	if element, ok := strings.CutSuffix(kind, "Array"); ok {
+		return propertyTypeName(element) + "Array"
+	}
+	switch kind {
+	case "Long":
+		return "Integer"
+	case "Double":
+		return "Float"
+	default:
+		return kind
+	}
 }
 
 func (s *server) listIndexes(label string) ([]indexInfo, error) {

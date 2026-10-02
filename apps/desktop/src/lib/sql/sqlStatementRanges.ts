@@ -214,7 +214,8 @@ function splitElasticsearchRestRequestRanges(sql: string): RawStatement[] | unde
 type QuoteState = "none" | "single" | "double" | "backtick" | "bracket" | "dollar";
 
 function usesBracketIdentifierQuotes(databaseType?: DatabaseType): boolean {
-  return databaseType !== "doris" && databaseType !== "starrocks";
+  // IRIS uses `[` as its Contains operator, with no matching `]`.
+  return databaseType !== "doris" && databaseType !== "starrocks" && databaseType !== "iris";
 }
 
 const COMMON_SOFT_STATEMENT_START_KEYWORDS = [

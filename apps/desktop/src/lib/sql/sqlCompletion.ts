@@ -19,6 +19,11 @@ import { containsHan, orderedSubsequenceSpan, pinyinFirstLetters } from "@/lib/c
 import { quoteTableIdentifier, quoteTableIdentifierIfNeeded } from "@/lib/table/tableSelectSql";
 import { driverProfileCompletionObjects, driverProfileCompletionTableMetadata, driverProfileCompletionTables, driverProfileRoutineSignatures } from "@/lib/database/driverProfileExtensions";
 import { DORIS_FUNCTION_DOCS, DORIS_FUNCTION_SIGNATURES } from "@/lib/sql/doris/functions";
+import { DUCKDB_FUNCTION_SIGNATURES } from "@/lib/sql/functionSignatures/duckdb";
+import { HIVE_SPARK_FUNCTION_APPLY_TEMPLATES, HIVE_SPARK_FUNCTION_SIGNATURES } from "@/lib/sql/functionSignatures/hiveSpark";
+import { ORACLE_FUNCTION_APPLY_TEMPLATES, ORACLE_FUNCTION_SIGNATURES } from "@/lib/sql/functionSignatures/oracle";
+import { POSTGRES_FUNCTION_APPLY_TEMPLATES, POSTGRES_FUNCTION_SIGNATURES } from "@/lib/sql/functionSignatures/postgres";
+import { TRINO_FUNCTION_APPLY_TEMPLATES, TRINO_FUNCTION_SIGNATURES } from "@/lib/sql/functionSignatures/trino";
 import { rejectsAliasReferenceInHaving } from "@/lib/database/databaseFeatureSupport";
 import { isOracleCompletionDatabase } from "@/lib/sql/oracleCompletionSession";
 import { normalizeSqlTableCompletionSchemaQualification, type SqlTableCompletionSchemaQualification } from "@/lib/sql/sqlCompletionSchemaQualification";
@@ -456,6 +461,10 @@ const MYSQL_SQL_KEYWORDS = [
 
 const MANTICORESEARCH_SQL_KEYWORDS = ["FACET", "MATCH", "SHOW", "SHOW META", "SHOW TABLES", "CALL", "CALL PQ", "PQ", "META", "TABLES", "OPTION", "WITHIN GROUP ORDER BY"];
 
+// ClickHouse query grammar adds FINAL, PREWHERE, SAMPLE and the TOTALS/ROLLUP/
+// CUBE grouping modifiers plus DDL vocabulary. Keep them scoped to ClickHouse.
+const CLICKHOUSE_SQL_KEYWORDS = ["FINAL", "PREWHERE", "SAMPLE", "TOTALS", "ROLLUP", "CUBE", "GLOBAL", "ARRAY", "ENGINE", "PARTITION", "TTL", "CODEC", "SETTINGS", "FORMAT", "OUTFILE", "ATTACH", "DETACH", "OPTIMIZE", "SYSTEM", "KILL", "MATERIALIZED", "PROJECTION", "GRANULARITY"];
+
 const SQLITE_SQL_KEYWORDS = ["AUTOINCREMENT", "INTEGER", "BLOB", "BOOLEAN", "WITHOUT ROWID", "VACUUM", "PRAGMA", "JSON_EXTRACT", "JSON_SET", "STRFTIME"];
 
 // DuckDB extends the common SQL grammar with analytical clauses, relation
@@ -693,7 +702,7 @@ const DATABASE_SQL_KEYWORDS: Partial<Record<DatabaseType, string[]>> = {
   "oceanbase-oracle": ORACLE_SQL_KEYWORDS,
   manticoresearch: MANTICORESEARCH_SQL_KEYWORDS,
   duckdb: ["COMMENT", ...DUCKDB_SQL_KEYWORDS],
-  clickhouse: ["COMMENT"],
+  clickhouse: ["COMMENT", ...CLICKHOUSE_SQL_KEYWORDS],
   doris: ["COMMENT", "MATERIALIZED", "MATERIALIZED VIEW", "DISTRIBUTED BY HASH", "DUPLICATE KEY", "AGGREGATE KEY", "UNIQUE KEY", "PRIMARY KEY", "PROPERTIES", "PARTITION BY", "BUCKETS", "LATERAL VIEW", "EXPLODE", "ARRAY", "MAP", "STRUCT", "BITMAP", "HLL"],
   starrocks: ["COMMENT", "MATERIALIZED", "MATERIALIZED VIEW", "DISTRIBUTED BY HASH", "DUPLICATE KEY", "PROPERTIES", "PARTITION BY", "BUCKETS", "LATERAL VIEW"],
   dameng: ["COMMENT"],
@@ -1030,17 +1039,6 @@ const SQL_FUNCTION_SIGNATURES = new Map<string, string[]>([
   ["JSON_OBJECTAGG", ["key", "value"]],
 ]);
 
-const POSTGRES_FUNCTION_SIGNATURES = new Map<string, string[]>([
-  ["JSONB_BUILD_OBJECT", ["key", "value", "...pairs"]],
-  ["JSONB_AGG", ["expression"]],
-  ["TO_JSONB", ["value"]],
-  ["JSONB_SET", ["target", "path", "new_value"]],
-  ["ARRAY_AGG", ["expression"]],
-  ["STRING_AGG", ["expression", "delimiter"]],
-  ["GEN_RANDOM_UUID", []],
-  ["NOW", []],
-]);
-
 const MYSQL_FUNCTION_SIGNATURES = new Map<string, string[]>([
   ["CONVERT", ["expression", "type"]],
   ["DATE_FORMAT", ["date", "format"]],
@@ -1160,7 +1158,7 @@ const MYSQL_FUNCTION_SIGNATURES = new Map<string, string[]>([
 ]);
 
 /** Keywords that may also exist as built-in functions; keep both completion entries. */
-const DUAL_ROLE_SQL_KEYWORDS = new Set(["LEFT", "RIGHT", "IF", "TRUNCATE", "REPEAT", "DATABASE", "SCHEMA", "USER", "CURRENT_USER"]);
+const DUAL_ROLE_SQL_KEYWORDS = new Set(["LEFT", "RIGHT", "IF", "EXISTS", "TRUNCATE", "REPEAT", "DATABASE", "SCHEMA", "USER", "CURRENT_USER"]);
 
 const SQLITE_FUNCTION_SIGNATURES = new Map<string, string[]>([
   ["JSON_EXTRACT", ["json", "path"]],
@@ -1232,9 +1230,14 @@ const MANTICORESEARCH_FUNCTION_SIGNATURES = new Map<string, string[]>([
   ["SECOND", ["timestamp"]],
 ]);
 
+// 同一 SQL 方言族的兼容库共享一张函数表（以及函数插入模板），避免为每个兼容库重复维护同一份数据
+const MYSQL_COMPAT_FUNCTION_DATABASES = new Set<DatabaseType>(["mysql", "goldendb"]);
+const POSTGRES_COMPAT_FUNCTION_DATABASES = new Set<DatabaseType>(["postgres", "redshift", "kingbase", "highgo", "uxdb", "vastbase", "gaussdb", "opengauss", "sundb"]);
+const ORACLE_COMPAT_FUNCTION_DATABASES = new Set<DatabaseType>(["oracle", "oceanbase-oracle", "dameng", "yashandb", "oscar", "xugu"]);
+const HIVE_SPARK_COMPAT_FUNCTION_DATABASES = new Set<DatabaseType>(["hive", "spark", "databricks", "impala", "transwarp", "kyuubi", "argo"]);
+const TRINO_COMPAT_FUNCTION_DATABASES = new Set<DatabaseType>(["trino", "prestosql"]);
+
 const DATABASE_FUNCTION_SIGNATURES: Partial<Record<DatabaseType, Map<string, string[]>>> = {
-  mysql: MYSQL_FUNCTION_SIGNATURES,
-  postgres: POSTGRES_FUNCTION_SIGNATURES,
   sqlite: SQLITE_FUNCTION_SIGNATURES,
   rqlite: SQLITE_FUNCTION_SIGNATURES,
   turso: SQLITE_FUNCTION_SIGNATURES,
@@ -1243,7 +1246,33 @@ const DATABASE_FUNCTION_SIGNATURES: Partial<Record<DatabaseType, Map<string, str
   manticoresearch: MANTICORESEARCH_FUNCTION_SIGNATURES,
   doris: DORIS_FUNCTION_SIGNATURES,
   starrocks: DORIS_FUNCTION_SIGNATURES,
+  duckdb: DUCKDB_FUNCTION_SIGNATURES,
 };
+
+// 方言族注册：MySQL 兼容库、PostgreSQL 兼容库、Oracle 兼容库、Hive/Spark 兼容库、Trino/Presto
+for (const [databaseTypes, signatures] of [
+  [MYSQL_COMPAT_FUNCTION_DATABASES, MYSQL_FUNCTION_SIGNATURES],
+  [POSTGRES_COMPAT_FUNCTION_DATABASES, POSTGRES_FUNCTION_SIGNATURES],
+  [ORACLE_COMPAT_FUNCTION_DATABASES, ORACLE_FUNCTION_SIGNATURES],
+  [HIVE_SPARK_COMPAT_FUNCTION_DATABASES, HIVE_SPARK_FUNCTION_SIGNATURES],
+  [TRINO_COMPAT_FUNCTION_DATABASES, TRINO_FUNCTION_SIGNATURES],
+] as Array<[ReadonlySet<DatabaseType>, Map<string, string[]>]>) {
+  for (const databaseType of databaseTypes) DATABASE_FUNCTION_SIGNATURES[databaseType] = signatures;
+}
+
+/**
+ * 取当前方言的「函数插入模板」：EXTRACT / POSITION / LISTAGG / PERCENTILE_CONT 这类函数的参数
+ * 不是逗号列表，必须按模板插入；模板与签名表同源于方言族。DuckDB 沿用 PG 风格语法，共用 PG 模板。
+ */
+function functionApplyTemplate(databaseType: DatabaseType | undefined, name: string): string | undefined {
+  if (!databaseType) return undefined;
+  if (ORACLE_COMPAT_FUNCTION_DATABASES.has(databaseType)) return ORACLE_FUNCTION_APPLY_TEMPLATES.get(name);
+  if (databaseType === "duckdb" || POSTGRES_COMPAT_FUNCTION_DATABASES.has(databaseType)) return POSTGRES_FUNCTION_APPLY_TEMPLATES.get(name);
+  if (HIVE_SPARK_COMPAT_FUNCTION_DATABASES.has(databaseType)) return HIVE_SPARK_FUNCTION_APPLY_TEMPLATES.get(name);
+  if (TRINO_COMPAT_FUNCTION_DATABASES.has(databaseType)) return TRINO_FUNCTION_APPLY_TEMPLATES.get(name);
+  if (MYSQL_COMPAT_FUNCTION_DATABASES.has(databaseType)) return MYSQL_FUNCTION_APPLY_TEMPLATES.get(name);
+  return undefined;
+}
 
 const MYSQL_FUNCTION_APPLY_TEMPLATES = new Map<string, string>([
   ["DATE_ADD", "DATE_ADD(${date}, INTERVAL ${expr} ${unit})"],
@@ -5534,12 +5563,12 @@ function buildFunctionSnippetItems(prefix: string, functionDescriptions: Map<str
     if (!matchesPrefix(name, prefix)) continue;
     const functionName = applySqlFunctionCase(name, functionCase);
     const paramStr = parameters.length > 0 ? parameters.map((p) => `\${${applyGeneratedSqlTemplateKeywordCase(p, keywordCase)}}`).join(", ") : "";
-    const mysqlApply = databaseType === "mysql" ? MYSQL_FUNCTION_APPLY_TEMPLATES.get(name) : undefined;
+    const applyTemplate = functionApplyTemplate(databaseType, name);
     items.push({
       label: functionName,
       type: "function" as const,
       detail: activeFunctionDescriptions(databaseType).get(name) ?? functionDescriptions.get(name) ?? "function",
-      apply: mysqlApply ? `${functionName}${applyGeneratedSqlTemplateKeywordCase(mysqlApply.slice(name.length), keywordCase)}` : `${functionName}(${paramStr})`,
+      apply: applyTemplate ? `${functionName}${applyGeneratedSqlTemplateKeywordCase(applyTemplate.slice(name.length), keywordCase)}` : `${functionName}(${paramStr})`,
       boost: computeBoost(name, prefix) + 300,
     });
   }

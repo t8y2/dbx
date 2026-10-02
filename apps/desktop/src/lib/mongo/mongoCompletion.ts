@@ -17,6 +17,7 @@ import {
   TOP_LEVEL_QUERY_OPERATORS,
   UPDATE_OPERATORS,
   VALUE_SNIPPETS,
+  WINDOW_FUNCTION_OPERATORS,
   mongoOperatorItemType,
   type MongoOperatorSpec,
 } from "@/lib/mongo/mongoCompletionTables";
@@ -51,6 +52,7 @@ export type MongoCompletionMode =
   | "pushModifier"
   | "expression"
   | "accumulator"
+  | "windowOperator"
   | "stage"
   | "stageOption"
   | "methodOption"
@@ -59,6 +61,9 @@ export type MongoCompletionMode =
   | "keyMapValue"
   | "operatorField"
   | "enumValue";
+
+/** Kind of aggregation or update pipeline holding the cursor. */
+export type MongoPipelineKind = "aggregate" | "update" | "facet" | "join" | "view";
 
 export interface MongoCompletionField {
   name: string;
@@ -84,10 +89,14 @@ export interface MongoCompletionContext {
   replaceClosingQuote?: '"' | "'";
   /** Collection the cursor's command targets, used to load field metadata. */
   collection?: string;
-  /** Database the cursor's command targets when reached through `db.getSiblingDB(…)`, used instead of the editor's active database. */
+  /** Database the cursor's command targets when reached through `db.getSiblingDB(…)` or `use <db>`, used instead of the editor's active database. */
   database?: string;
+  /** Whether the command's root is an explicit `db.getSiblingDB(…)`, which disallows chaining another getSiblingDB. */
+  siblingRoot?: boolean;
   /** Enclosing aggregation stage (`$lookup`, `$group`, …), when inside one. */
   stage?: string;
+  /** Kind of pipeline array holding the cursor, when inside a pipeline. */
+  pipelineKind?: MongoPipelineKind;
   /** Collection method whose options object the cursor sits in. */
   method?: string;
   /** bulkWrite operation (`updateOne`, `deleteMany`, …) whose body the cursor sits in. */
@@ -194,6 +203,15 @@ const CURSOR_METHODS = [
  */
 const CURSOR_COUNT_METHOD = { label: "count", detail: "Count the documents matched by find()", apply: "count()" } as const;
 
+/**
+ * Cursor methods that change nothing: results are always materialised, so DBX
+ * drops these calls at execution time. Accepted after both find() and aggregate().
+ */
+const NOOP_CURSOR_METHODS = [
+  { label: "toArray", detail: "Materialise cursor results into an array", apply: "toArray()" },
+  { label: "pretty", detail: "Format results for display", apply: "pretty()" },
+] as const;
+
 const ROOT_SNIPPETS = [
   { label: "db.collection.find", detail: "Find documents", apply: "db.${collection}.find({})" },
   { label: "db.collection.aggregate", detail: "Aggregation pipeline", apply: "db.${collection}.aggregate([\n  { $match: {} }\n])" },
@@ -261,6 +279,32 @@ const OPTION_STAGES = new Set(Object.keys(STAGE_OPTION_KEYS));
 /** The stages an update pipeline accepts: those that rewrite the document without reshaping the result set. */
 const UPDATE_PIPELINE_STAGES = PIPELINE_STAGES.filter((stage) => ["$set", "$addFields", "$unset", "$project", "$replaceRoot", "$replaceWith"].includes(stage.label));
 
+/** Stages that write or merge results, illegal inside sub-pipelines and view definitions. */
+const SUB_PIPELINE_FORBIDDEN_STAGES = new Set(["$out", "$merge"]);
+
+/** Stages MongoDB rejects inside a $facet branch: writes, nesting, metadata/source stages, and $geoNear. */
+const FACET_FORBIDDEN_STAGES = new Set(["$out", "$merge", "$facet", "$collStats", "$indexStats", "$planCacheStats", "$geoNear", "$documents", "$changeStream"]);
+
+/** Stages accepted in join sub-pipelines ($lookup, $unionWith) and view definitions. */
+const SUB_PIPELINE_STAGES = PIPELINE_STAGES.filter((stage) => !SUB_PIPELINE_FORBIDDEN_STAGES.has(stage.label));
+
+/** Stages accepted inside a $facet branch. */
+const FACET_PIPELINE_STAGES = PIPELINE_STAGES.filter((stage) => !FACET_FORBIDDEN_STAGES.has(stage.label));
+
+function pipelineStagesFor(kind?: MongoPipelineKind): MongoOperatorSpec[] {
+  switch (kind) {
+    case "update":
+      return UPDATE_PIPELINE_STAGES;
+    case "facet":
+      return FACET_PIPELINE_STAGES;
+    case "join":
+    case "view":
+      return SUB_PIPELINE_STAGES;
+    default:
+      return PIPELINE_STAGES;
+  }
+}
+
 /** Stages taking a bare `"$field"` string, completed as a field reference. */
 const FIELD_REF_STAGES = new Set(["$unwind", "$sortByCount", "$replaceWith"]);
 
@@ -276,6 +320,8 @@ const STAGE_OPTION_VALUE_MODES: Record<string, Record<string, MongoCompletionMod
   $setWindowFields: { partitionBy: "fieldRef" },
   $geoNear: { key: "fieldPath" },
   $replaceRoot: { newRoot: "fieldRef" },
+  $densify: { field: "fieldPath" },
+  $fill: { partitionBy: "fieldRef" },
 };
 
 export function getMongoCompletionContext(text: string, cursor: number): MongoCompletionContext {
@@ -292,7 +338,16 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
   const usePrefix = matchUseDatabasePrefix(beforeCursor);
   if (usePrefix) return { mode: "database", prefix: usePrefix.prefix, from: usePrefix.from };
 
-  if (endsAtDbRootDot(beforeCursor)) return { mode: "collection", prefix: "", from: safeCursor, collection, database };
+  if (endsAtDbRootDot(beforeCursor)) {
+    return {
+      mode: "collection",
+      prefix: "",
+      from: safeCursor,
+      collection,
+      database,
+      siblingRoot: endsAtSiblingRootDot(beforeCursor),
+    };
+  }
 
   const getSiblingDbPrefix = matchGetSiblingDbPrefix(beforeCursor);
   if (getSiblingDbPrefix) {
@@ -318,12 +373,14 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
 
   const collectionPrefix = matchDbCollectionPrefix(beforeCursor);
   if (collectionPrefix) {
+    const isSibling = matchSiblingCollectionPrefix(beforeCursor);
     return {
       mode: collectionPrefix.prefix.includes(".") ? "collectionOrMethod" : "collection",
       prefix: collectionPrefix.prefix,
       from: collectionPrefix.from,
       collection,
       database,
+      ...(isSibling ? { siblingRoot: true } : {}),
     };
   }
 
@@ -334,6 +391,7 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
 
   const cursorChain = matchCursorMethodDot(beforeCursor);
   if (cursorChain) {
+    if (cursorChain.terminal) return at("none");
     const methodPrefix = readMethodPrefix(beforeCursor);
     return { mode: "cursorMethod", prefix: methodPrefix.prefix, from: methodPrefix.from, collection, database, stage: cursorChain.countable ? "countable" : cursorChain.find ? "find" : undefined };
   }
@@ -352,6 +410,7 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
     ...at(classified.mode, classified.stage, classified.method, classified.bulkWriteOperation, classified.keyMap),
     ...(classified.operator ? { operator: classified.operator } : {}),
     ...(classified.enumKey ? { enumKey: classified.enumKey } : {}),
+    ...(classified.pipelineKind ? { pipelineKind: classified.pipelineKind } : {}),
     collection: classified.collection ?? collection,
   };
 }
@@ -377,7 +436,7 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
       items = databaseItems(prefix, input.databases ?? []);
       break;
     case "collection":
-      items = collectionItems(prefix, collections, context.database !== undefined);
+      items = collectionItems(prefix, collections, context.siblingRoot ?? false);
       break;
     case "collectionOrMethod":
       items = collectionOrMethodItems(prefix, collections);
@@ -427,9 +486,15 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
     case "accumulator":
       items = specItems(ACCUMULATORS, prefix, "accumulator", 100);
       break;
-    case "stage":
-      items = context.stage === "update" ? specItems(UPDATE_PIPELINE_STAGES, prefix, "update stage", 100) : specItems(PIPELINE_STAGES, prefix, "aggregation stage", 100);
+    case "windowOperator":
+      items = specItems(WINDOW_FUNCTION_OPERATORS, prefix, "window operator", 100);
       break;
+    case "stage": {
+      const kind = context.pipelineKind;
+      const detail = kind === "update" ? "update stage" : "aggregation stage";
+      items = specItems(pipelineStagesFor(kind), prefix, detail, 100);
+      break;
+    }
     case "stageOption":
       items = specItems(STAGE_OPTION_KEYS[context.stage ?? ""] ?? [], prefix, `${context.stage} option`, 100);
       break;
@@ -628,6 +693,8 @@ interface MongoContainer {
   kind: MongoContainerKind;
   /** Key this container is the value of, e.g. `age` in `{ age: { … } }`. */
   key: string | null;
+  /** Closed string literal values in this object container, e.g. `{ from: "orders" }`. */
+  stringValues?: Record<string, string>;
 }
 
 interface MongoCallScan {
@@ -644,6 +711,7 @@ interface MongoCallScan {
 interface MongoCursorClass {
   mode: MongoCompletionMode;
   stage?: string;
+  pipelineKind?: MongoPipelineKind;
   collection?: string;
   method?: string;
   bulkWriteOperation?: string;
@@ -674,10 +742,22 @@ function scanMongoCallArguments(text: string, start: number, cursor: number): Mo
     if (quote) {
       if (char === "\\") {
         i++;
+        if (i < cursor) token += text[i];
         continue;
       }
-      if (char === quote) quote = null;
-      else token += char;
+      if (char === quote) {
+        quote = null;
+        if (inValue && valueKey) {
+          const inner = stack[stack.length - 1];
+          if (inner && inner.kind === "object") {
+            inner.stringValues ??= {};
+            inner.stringValues[valueKey] = token;
+          }
+          token = "";
+        }
+      } else {
+        token += char;
+      }
       continue;
     }
     if ((char === "/" && (text[i + 1] === "/" || text[i + 1] === "*")) || (char === "-" && text[i + 1] === "-")) {
@@ -694,7 +774,11 @@ function scanMongoCallArguments(text: string, start: number, cursor: number): Mo
       continue;
     }
     if (char === "{" || char === "[" || char === "(") {
-      stack.push({ kind: char === "{" ? "object" : char === "[" ? "array" : "call", key: inValue ? valueKey : null });
+      stack.push({
+        kind: char === "{" ? "object" : char === "[" ? "array" : "call",
+        key: inValue ? valueKey : null,
+        ...(char === "{" ? { stringValues: {} } : {}),
+      });
       token = "";
       valueKey = null;
       inValue = false;
@@ -957,7 +1041,9 @@ function classifyMethodOptions(method: string, scan: MongoCallScan): MongoCursor
     return { mode: scan.inString ? "none" : "keyMapValue", method, keyMap: option };
   }
   if (FILTER_OPTION_KEYS.has(option)) return { ...classifyFilter(scan, 1), method };
-  if (option === "pipeline" && scan.stack[1]?.kind === "array") return { ...classifyPipeline(scan, 1), method };
+  if (option === "pipeline" && scan.stack[1]?.kind === "array") {
+    return { ...classifyPipeline(scan, findPipelineArrayIndex(scan.stack), method === "createCollection" ? "view" : "aggregate"), method };
+  }
   const valueEnums = SUB_DOCUMENT_OPTION_KEYS[option];
   if (valueEnums) return { ...classifySubDocument(scan, 1, option, valueEnums), method };
   return { mode: "none" };
@@ -1022,27 +1108,64 @@ function classifyBulkWriteOperations(scan: MongoCallScan): MongoCursorClass {
   }
 }
 
+function detectPipelineKind(scan: MongoCallScan, pipelineIndex: number, defaultKind: MongoPipelineKind = "aggregate"): MongoPipelineKind {
+  if (defaultKind === "update") return "update";
+  if (pipelineIndex > 0 && scan.stack[pipelineIndex - 1]?.key === "$facet") return "facet";
+  if (scan.stack[pipelineIndex]?.key === "pipeline") {
+    const parentKey = scan.stack[pipelineIndex - 1]?.key;
+    if (parentKey === "$lookup" || parentKey === "$unionWith") return "join";
+    return defaultKind;
+  }
+  return defaultKind;
+}
+
 /**
- * `kind` is `update` for the pipeline form of an update, which accepts only the
- * stages that rewrite a document; the marker rides in `stage` so the item builder
- * can narrow the list.
+ * Resolves the joined collection for a sub-pipeline inside `$lookup` or `$unionWith`.
+ * The innermost enclosing join stage wins; if its collection option is missing or untyped,
+ * it returns undefined so completion falls back to the outer collection.
  */
-function classifyPipeline(scan: MongoCallScan, pipelineIndex = findPipelineArrayIndex(scan.stack), kind: "aggregate" | "update" = "aggregate"): MongoCursorClass {
+function findSubPipelineJoinedCollection(scan: MongoCallScan, pipelineIndex: number): string | undefined {
+  for (let i = pipelineIndex - 1; i >= 0; i--) {
+    const container = scan.stack[i];
+    if (container?.kind !== "object") continue;
+    if (container.key === "$lookup") {
+      return container.stringValues?.["from"];
+    }
+    if (container.key === "$unionWith") {
+      return container.stringValues?.["coll"];
+    }
+  }
+  return undefined;
+}
+
+/**
+ * `kind` carries the enclosing pipeline flavor (top-level aggregate, update,
+ * $facet branch, join sub-pipeline or view pipeline) so the item builder can
+ * narrow the stage list.
+ */
+function classifyPipeline(scan: MongoCallScan, pipelineIndex = findPipelineArrayIndex(scan.stack), kind?: MongoPipelineKind): MongoCursorClass {
   if (pipelineIndex < 0) return { mode: "none" };
 
   const stageHolder = scan.stack[pipelineIndex + 1];
   if (!stageHolder) return { mode: "none" }; // directly inside the array, no stage object yet
   if (stageHolder.kind !== "object") return { mode: "none" };
 
+  const pipelineKind = detectPipelineKind(scan, pipelineIndex, kind);
+  const subCollection = findSubPipelineJoinedCollection(scan, pipelineIndex);
+
   // `[{ … }]` — the cursor is in the stage object itself.
   if (scan.stack.length - 1 === pipelineIndex + 1) {
-    if (!scan.inValue) return { mode: "stage", stage: kind === "update" ? "update" : undefined };
+    if (!scan.inValue) return { mode: "stage", pipelineKind, ...(subCollection ? { collection: subCollection } : {}) };
     const stage = scan.valueKey ?? "";
-    return { mode: stageStringValueMode(stage), stage };
+    return { mode: stageStringValueMode(stage), stage, ...(subCollection ? { collection: subCollection } : {}) };
   }
 
   const stage = scan.stack[pipelineIndex + 2]?.key ?? "";
-  return classifyStageBody(stage, scan, pipelineIndex + 2);
+  const classified = classifyStageBody(stage, scan, pipelineIndex + 2);
+  return {
+    ...classified,
+    ...(subCollection && !classified.collection ? { collection: subCollection } : {}),
+  };
 }
 
 /**
@@ -1110,9 +1233,80 @@ function classifyStageOptions(stage: string, scan: MongoCallScan, bodyIndex: num
   const depth = innerDepth(scan, bodyIndex);
   if (depth < 0) return { mode: "none", stage };
 
+  const stageBody = scan.stack[bodyIndex];
+
   if (depth === 0) {
-    if (scan.inValue) return { mode: STAGE_OPTION_VALUE_MODES[stage]?.[scan.valueKey ?? ""] ?? "none", stage };
+    if (scan.inValue) {
+      const mode = STAGE_OPTION_VALUE_MODES[stage]?.[scan.valueKey ?? ""] ?? "none";
+      const isJoinedField = (stage === "$lookup" && scan.valueKey === "foreignField") || (stage === "$graphLookup" && (scan.valueKey === "connectToField" || scan.valueKey === "connectFromField"));
+      const collection = isJoinedField ? stageBody?.stringValues?.["from"] : undefined;
+      return {
+        mode,
+        stage,
+        ...(collection ? { collection } : {}),
+      };
+    }
     return { mode: innermost(scan)?.kind === "object" ? "stageOption" : "none", stage };
+  }
+
+  if (stage === "$graphLookup" && scan.stack[bodyIndex + 1]?.key === "restrictSearchWithMatch") {
+    const filterClass = classifyFilter(scan, bodyIndex + 1);
+    const collection = stageBody?.stringValues?.["from"];
+    return {
+      ...filterClass,
+      stage,
+      ...(collection ? { collection } : {}),
+    };
+  }
+
+  const optionHolder = scan.stack[bodyIndex + 1];
+  const optionKey = optionHolder?.key ?? "";
+
+  if (optionKey === "sortBy") {
+    return { ...classifyKeyMap(scan, bodyIndex + 1, "sort"), stage };
+  }
+
+  if (optionKey === "output") {
+    if (stage === "$setWindowFields") {
+      if (depth === 1) {
+        if (!scan.inValue) return { mode: "field", stage };
+        return { mode: "none", stage };
+      }
+      if (depth === 2) {
+        if (!scan.inValue) return { mode: "windowOperator", stage };
+        return { mode: "fieldRef", stage };
+      }
+      if (scan.inValue) return { mode: "fieldRef", stage };
+      return { mode: innermost(scan)?.kind === "object" ? "expression" : "none", stage };
+    }
+
+    if (stage === "$fill") {
+      if (depth === 1) {
+        if (!scan.inValue) return { mode: "field", stage };
+        return { mode: "none", stage };
+      }
+      if (depth === 2) {
+        if (!scan.inValue) return { mode: "operatorField", operator: "fillOutput", stage };
+        if (scan.valueKey === "method") return { mode: "enumValue", enumKey: "fillMethod", stage };
+        if (scan.valueKey === "value") return { mode: "fieldRef", stage };
+        return { mode: "none", stage };
+      }
+    }
+  }
+
+  if (optionKey === "range" && stage === "$densify") {
+    if (depth === 1) {
+      if (!scan.inValue) return { mode: "operatorField", operator: "range", stage };
+      if (scan.valueKey === "unit") return { mode: "enumValue", enumKey: "unit", stage };
+      if (scan.valueKey === "bounds") return { mode: "enumValue", enumKey: "bounds", stage };
+      if (scan.valueKey === "step") return { mode: scan.inString ? "none" : "value", stage };
+      return { mode: "none", stage };
+    }
+    return { mode: "none", stage };
+  }
+
+  if (optionKey === "partitionByFields") {
+    if (innermost(scan)?.kind === "array") return { mode: "fieldPath", stage };
   }
 
   if (scan.inValue) return { mode: "fieldRef", stage };
@@ -1229,9 +1423,13 @@ function methodItems(prefix: string): MongoCompletionItem[] {
   );
 }
 
-/** `collation()` is a find-cursor method only, so it is withheld after `aggregate(…)`. */
+/**
+ * Cursor methods offered after `find(…)` or `aggregate(…)`.
+ * After `aggregate(…)`, only no-op helpers `toArray()` and `pretty()` are accepted;
+ * all other cursor methods are find-only.
+ */
 function cursorMethodItems(prefix: string, countable: boolean, find: boolean): MongoCompletionItem[] {
-  const methods = [...CURSOR_METHODS.filter((method) => find || method.label !== "collation"), ...(countable ? [CURSOR_COUNT_METHOD] : [])];
+  const methods = find ? [...CURSOR_METHODS, ...(countable ? [CURSOR_COUNT_METHOD] : []), ...NOOP_CURSOR_METHODS] : [...NOOP_CURSOR_METHODS];
   return dedupeAndSort(
     methods
       .filter((method) => matchesFuzzyPrefix(method.label, prefix))
@@ -1240,7 +1438,7 @@ function cursorMethodItems(prefix: string, countable: boolean, find: boolean): M
         type: "function" as const,
         detail: method.detail,
         apply: method.apply,
-        boost: method.label === "limit" ? 150 : method.label === "sort" ? 140 : method.label === "skip" ? 130 : method.label === "collation" ? 115 : 120,
+        boost: method.label === "limit" ? 150 : method.label === "sort" ? 140 : method.label === "skip" ? 130 : method.label === "collation" ? 115 : method.label === "toArray" ? 100 : method.label === "pretty" ? 95 : 120,
       })),
   );
 }
@@ -1416,6 +1614,7 @@ function readMethodPrefix(beforeCursor: string): { prefix: string; from: number 
  * accepts either root rather than only a literal `db.`.
  */
 const DB_ROOT = String.raw`db(?:\s*\.\s*getSiblingDB\s*\(\s*(?:"[^"]*"|'[^']*')\s*\))?`;
+const SIBLING_ROOT_PATTERN = String.raw`db\s*\.\s*getSiblingDB\s*\(\s*(?:"[^"]*"|'[^']*')\s*\)`;
 const COLLECTION_REF = String.raw`(?:[A-Za-z_][\w$-]*|getCollection\(["'][^"']+["']\))`;
 
 /** `db.` or `db.getSiblingDB("other").` immediately before the cursor. */
@@ -1423,11 +1622,26 @@ function endsAtDbRootDot(beforeCursor: string): boolean {
   return new RegExp(String.raw`(?:^|[\s;(])${DB_ROOT}\s*\.$`).test(beforeCursor);
 }
 
+function endsAtSiblingRootDot(beforeCursor: string): boolean {
+  return new RegExp(String.raw`(?:^|[\s;(])${SIBLING_ROOT_PATTERN}\s*\.$`).test(beforeCursor);
+}
+
 function matchDbCollectionPrefix(beforeCursor: string): { prefix: string; from: number } | null {
   const match = new RegExp(String.raw`(?:^|[\s;(])${DB_ROOT}\.([A-Za-z_][\w$-]*(?:\.[\w$-]*)*)$`).exec(beforeCursor);
   if (!match) return null;
   const prefix = match[1] ?? "";
   return { prefix, from: beforeCursor.length - prefix.length };
+}
+
+function matchSiblingCollectionPrefix(beforeCursor: string): boolean {
+  return new RegExp(String.raw`(?:^|[\s;(])${SIBLING_ROOT_PATTERN}\s*\.([A-Za-z_][\w$-]*(?:\.[\w$-]*)*)$`).test(beforeCursor);
+}
+
+const MONGO_COMMAND_LINE_START_PATTERN = /(?:use\b|show\s+(?:dbs|databases|collections)\b|db(?:\s*\.|\b))/iy;
+
+function isMongoCommandLineStart(text: string, index: number): boolean {
+  MONGO_COMMAND_LINE_START_PATTERN.lastIndex = index;
+  return MONGO_COMMAND_LINE_START_PATTERN.test(text);
 }
 
 /** Cursor inside the string argument of `db.getSiblingDB(`, with the opening quote as part of the prefix. */
@@ -1462,10 +1676,11 @@ function isAfterCollectionDot(beforeCursor: string): boolean {
 }
 
 /**
- * `db.x.find(…).…` — and whether `count()` is still legal there, which it only
- * is while no other cursor method has been chained on.
+ * `db.x.find(…).…` or `db.x.aggregate(…).…` — matches cursor method chaining positions.
+ * Recognises find chains (including terminal `count()` and `explain()`), and aggregate
+ * chains (which only accept `toArray()` and `pretty()`).
  */
-function matchCursorMethodDot(beforeCursor: string): { find: boolean; countable: boolean } | null {
+function matchCursorMethodDot(beforeCursor: string): { find: boolean; countable: boolean; terminal?: boolean } | null {
   const collectionCall = new RegExp(String.raw`(?:^|[\s;(])${DB_ROOT}\.${COLLECTION_REF}\.(find|aggregate)\s*\(`, "g");
   let lastMatch: RegExpExecArray | null = null;
   let match: RegExpExecArray | null;
@@ -1477,8 +1692,22 @@ function matchCursorMethodDot(beforeCursor: string): { find: boolean; countable:
   if (closeParen < 0) return null;
 
   const chain = beforeCursor.slice(closeParen + 1);
-  if (!/^(?:\s*\.\s*(?:sort|skip|limit|collation)\s*\([^()]*\))*\s*\.\s*[\w$-]*$/.test(chain)) return null;
-  return { find: lastMatch[1] === "find", countable: lastMatch[1] === "find" && /^\s*\.\s*[\w$-]*$/.test(chain) };
+  if (!/\.\s*[\w$-]*$/.test(chain)) return null;
+
+  const isFind = lastMatch[1] === "find";
+  if (/\.\s*(?:count|explain)\s*\([^()]*\)/.test(chain)) {
+    return { find: isFind, countable: false, terminal: true };
+  }
+
+  if (isFind) {
+    if (!/^(?:\s*\.\s*(?:sort|skip|limit|collation|toArray|pretty)\s*\([^()]*\))*\s*\.\s*[\w$-]*$/.test(chain)) return null;
+    return { find: true, countable: /^\s*\.\s*[\w$-]*$/.test(chain) };
+  }
+
+  if (!/^(?:\s*\.\s*(?:toArray|pretty)\s*\([^()]*\))*\s*\.\s*[\w$-]*$/.test(chain)) {
+    return { find: false, countable: false, terminal: true };
+  }
+  return { find: false, countable: false };
 }
 
 function findMatchingParen(text: string, openIndex: number): number {
@@ -1628,15 +1857,76 @@ function extractActiveCollection(text: string, cursor: number): string | undefin
   return lastDirect?.[1];
 }
 
+const USE_COMMAND_PATTERN = /use\s+([a-zA-Z0-9_-]+)(?=[\s;]|$)/iy;
+
 /**
- * The last `db.getSiblingDB("name")` before the cursor decides which database the
- * command targets; plain `db.` references leave it unset so the editor's active
- * database keeps applying.
+ * Resolves the database targeted by the command at the cursor.
+ *
+ * If the current command explicitly addresses another database via `db.getSiblingDB("name")`,
+ * that database takes precedence. Otherwise, the database set by the last preceding top-level
+ * `use <name>` command applies. If neither is present, returns undefined so the editor's active
+ * database continues to apply.
  */
 function extractActiveDatabase(text: string, cursor: number): string | undefined {
-  const before = text.slice(0, cursor);
-  const matches = [...before.matchAll(new RegExp(String.raw`(?:^|[\s;(])db\s*\.\s*getSiblingDB\s*\(\s*(["'])([^"']*)\1\s*\)`, "g"))];
-  return matches[matches.length - 1]?.[2] || undefined;
+  const safeCursor = Math.max(0, Math.min(cursor, text.length));
+  const before = text.slice(0, safeCursor);
+  const masked = maskMongoLiterals(before);
+
+  let parenDepth = 0;
+  let bracketDepth = 0;
+  let braceDepth = 0;
+  let currentCommandStart = 0;
+  let lastUseDb: string | undefined = undefined;
+
+  let i = 0;
+  while (i < masked.length) {
+    const isTopLevel = parenDepth === 0 && bracketDepth === 0 && braceDepth === 0;
+
+    if (isTopLevel) {
+      const prevChar = i > 0 ? masked[i - 1] : "\n";
+      if (/[\s;]/.test(prevChar)) {
+        USE_COMMAND_PATTERN.lastIndex = i;
+        const useMatch = USE_COMMAND_PATTERN.exec(masked);
+        if (useMatch) {
+          lastUseDb = useMatch[1];
+          currentCommandStart = i;
+          i += useMatch[0].length;
+          continue;
+        }
+      }
+
+      if (masked[i] === ";") {
+        let next = i + 1;
+        while (next < masked.length && /\s/.test(masked[next])) next++;
+        currentCommandStart = next;
+      } else if (masked[i] === "\n") {
+        let next = i + 1;
+        while (next < masked.length && (masked[next] === " " || masked[next] === "\t")) next++;
+        if (next < masked.length && isMongoCommandLineStart(masked, next)) {
+          currentCommandStart = next;
+        }
+      }
+    }
+
+    const char = masked[i];
+    if (char === "(") parenDepth++;
+    else if (char === ")") parenDepth = Math.max(0, parenDepth - 1);
+    else if (char === "[") bracketDepth++;
+    else if (char === "]") bracketDepth = Math.max(0, bracketDepth - 1);
+    else if (char === "{") braceDepth++;
+    else if (char === "}") braceDepth = Math.max(0, braceDepth - 1);
+
+    i++;
+  }
+
+  const currentCommandText = before.slice(currentCommandStart);
+  const siblingMatches = [...currentCommandText.matchAll(/(?:^|[\s;(])db\s*\.\s*getSiblingDB\s*\(\s*(?:(["'])([^"']*)\1|[^\s)]+)?\s*\)/gi)];
+  if (siblingMatches.length > 0) {
+    const lastMatch = siblingMatches[siblingMatches.length - 1];
+    return lastMatch?.[2] || undefined;
+  }
+
+  return lastUseDb;
 }
 
 function collectFieldTypes(value: unknown, prefix: string, out: Map<string, Set<string>>, depth: number) {

@@ -21,10 +21,10 @@ capabilities:
   queryExecution: true
   metadataBrowse: true
   objectBrowser: true
-  objectSource: false
+  objectSource: true
   schemaSearch: true
   diagram: true
-  tableDataEdit: false
+  tableDataEdit: true
   tableStructureEdit: true
   tableImport: true
   dataTransfer: false
@@ -32,5 +32,5 @@ capabilities:
   databaseCreate: false
   fieldLineage: false
   sqlExplain: false
-  userAdmin: false
+  userAdmin: true
   driverManagement: true

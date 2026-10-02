@@ -169,6 +169,13 @@ test("Windows compatibility jobs cache Rust compilation without wrapping C or C+
   assert.doesNotMatch(win7, /^\s+(?:CC|CXX):/m);
 });
 
+test("Win7 TLS cache keys ignore the workspace lockfile", () => {
+  const win7 = job("windows-win7-bundle");
+  assert.ok(win7.includes("hashFiles('.github/fixtures/win7-aws-lc-cache/Cargo.toml', '.github/fixtures/win7-aws-lc-cache/Cargo.lock')"));
+  assert.ok(win7.includes("hashFiles('.github/fixtures/win7-openssl-cache/Cargo.toml', '.github/fixtures/win7-openssl-cache/Cargo.lock')"));
+  assert.doesNotMatch(win7, /key: win7-(?:aws-lc|openssl).*hashFiles\('Cargo\.lock'/);
+});
+
 test("the planner uses the exact event base and preserves a single workflow cancellation scope", () => {
   const changes = job("changes");
   assert.ok(changes.includes("github.event.pull_request.base.sha || github.event.before"));
@@ -178,9 +185,11 @@ test("the planner uses the exact event base and preserves a single workflow canc
   assert.ok(changes.includes("node .github/scripts/ci-plan.mjs"));
   assert.doesNotMatch(changes, /fetch-depth:\s*0/);
   assert.doesNotMatch(changes, /dtolnay\/rust-toolchain/);
-  for (const flag of ["rust", "rust_full", "rust_matrix", "agents", "agent_go", "agent_rust", "agent_integration", "plan"]) {
+  for (const flag of ["rust", "rust_full", "rust_matrix", "agents", "agent_go", "agent_rust", "agent_integration",
+    "windows_win7_candidate", "windows_win7_affected_packages", "windows_win7_reasons", "plan"]) {
     assert.ok(changes.includes(`steps.plan.outputs.${flag}`));
   }
+  assert.ok(changes.includes("WIN7_CURRENT: ${{ steps.filter.outputs.windows_win7_bundle }}"));
   assert.ok(workflow.includes("group: ${{ github.workflow }}-${{ github.ref }}"));
   assert.ok(workflow.includes("cancel-in-progress: true"));
 });

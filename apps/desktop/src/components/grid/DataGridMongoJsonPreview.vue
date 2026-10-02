@@ -39,6 +39,7 @@ watch(previewContainer, async (element) => {
       appPalette: () => themePalette.value,
       fontSize: () => settingsStore.editorSettings.fontSize,
       fontFamily: () => settingsStore.editorSettings.tableFontFamily,
+      lineWrapping: () => settingsStore.editorSettings.wordWrap,
     });
     await previewEditor.create(element, props.text, "json");
   } else if (!element && previewEditor) {

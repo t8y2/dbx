@@ -196,7 +196,6 @@ fn ssh_client_config() -> Config {
             kex.push(algorithm);
         }
     }
-    preferred.kex = Cow::Owned(kex);
 
     let mut mac = preferred.mac.into_owned();
     // Keep SHA-1 MAC variants as last-resort fallbacks for legacy SSH proxies.
@@ -221,6 +220,27 @@ fn ssh_client_config() -> Config {
         }
     }
     preferred.cipher = Cow::Owned(ciphers);
+
+    // Move the RFC 8308 / strict-kex extension marker names (ext-info-c,
+    // ext-info-s, kex-strict-*-v00@openssh.com) to the tail of the offer.
+    //
+    // russh's default order places them mid-list, right after
+    // `diffie-hellman-group14-sha256`. Some legacy SSH daemons (reproduced
+    // against Apache MINA SSHD 0.9.5) abort the handshake with a bare TCP EOF
+    // when the offer contains an unknown algorithm name immediately before
+    // `ext-info-c`, so that default order kills the connection before auth.
+    // OpenSSH itself advertises these markers at the end of its kex offer;
+    // RFC 8308 does not require any particular position, so relocating them
+    // keeps extension negotiation fully intact while avoiding the parser bug.
+    let extension_markers = [
+        russh::kex::EXTENSION_SUPPORT_AS_CLIENT,
+        russh::kex::EXTENSION_SUPPORT_AS_SERVER,
+        russh::kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT,
+        russh::kex::EXTENSION_OPENSSH_STRICT_KEX_AS_SERVER,
+    ];
+    kex.retain(|name| !extension_markers.contains(name));
+    kex.extend(extension_markers);
+    preferred.kex = Cow::Owned(kex);
 
     Config {
         nodelay: true,
@@ -2226,6 +2246,51 @@ mod tests {
         tunnel.connect_timeout_secs = 0;
 
         assert_eq!(effective_hop_timeout(&tunnel), default_ssh_connect_timeout_secs());
+    }
+
+    #[test]
+    fn ssh_client_config_moves_extension_markers_to_kex_tail() {
+        let config = ssh_client_config();
+        let kex = config.preferred.kex;
+        let len = kex.len();
+        let position = |needle: russh::kex::Name| kex.iter().position(|algorithm| *algorithm == needle).unwrap();
+
+        // In the config proposal the four extension markers occupy the last
+        // four slots, in the same relative order russh ships them. On the wire
+        // russh's write_kex filters out the two server-role markers, so only
+        // the client-role pair (ext-info-c, kex-strict-c-v00@openssh.com)
+        // actually reaches the server.
+        assert_eq!(kex[len - 4], russh::kex::EXTENSION_SUPPORT_AS_CLIENT);
+        assert_eq!(kex[len - 3], russh::kex::EXTENSION_SUPPORT_AS_SERVER);
+        assert_eq!(kex[len - 2], russh::kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT);
+        assert_eq!(kex[len - 1], russh::kex::EXTENSION_OPENSSH_STRICT_KEX_AS_SERVER);
+
+        // Every key-exchange algorithm that actually performs a DH/ECDH
+        // exchange stays ahead of the markers, so a server scanning the offer
+        // left-to-right still selects a real exchange before reaching them.
+        let nistp256_index = position(russh::kex::ECDH_SHA2_NISTP256);
+        let group14_sha1_index = position(russh::kex::DH_G14_SHA1);
+        assert!(nistp256_index < len - 4);
+        assert!(group14_sha1_index < len - 4);
+    }
+
+    #[test]
+    fn ssh_client_config_keeps_each_extension_marker_once() {
+        let config = ssh_client_config();
+        let kex = config.preferred.kex;
+        for marker in [
+            russh::kex::EXTENSION_SUPPORT_AS_CLIENT,
+            russh::kex::EXTENSION_SUPPORT_AS_SERVER,
+            russh::kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT,
+            russh::kex::EXTENSION_OPENSSH_STRICT_KEX_AS_SERVER,
+        ] {
+            // Relocation must not duplicate (retain + extend, not append-only).
+            assert_eq!(
+                kex.iter().filter(|algorithm| **algorithm == marker).count(),
+                1,
+                "extension marker appears more than once: {marker:?}"
+            );
+        }
     }
 
     #[test]

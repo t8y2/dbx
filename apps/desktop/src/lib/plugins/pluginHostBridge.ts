@@ -163,7 +163,7 @@ export interface PluginHostBridgeApi {
   generateAiText?(pluginName: string, input: PluginAiGenerateRequest): Promise<string>;
   openAiConversation?(request: AiPluginConversationRequest): Promise<void>;
   setAiRecommendations?(update: PluginAiRecommendationHostUpdate): void;
-  openWorkbench?(pluginId: string, contributionId: string, context?: PluginWorkbenchContext, options?: { forceNew?: boolean }): Promise<void> | void;
+  openWorkbench?(pluginId: string, contributionId: string, context?: PluginWorkbenchContext, options?: { forceNew?: boolean; target?: "tab" }): Promise<void> | void;
   /**
    * §4/§5 command execution asked from a plugin webview: the same registry
    * path as menu execution — enablement (§5.4), §4.1 singleton reuse,
@@ -685,7 +685,11 @@ export class PluginHostBridge {
       this.requirePermission("host.workbench");
       if (!this.api.openWorkbench) throw new Error("Host workbench navigation is unavailable");
       const input = requireRecord(params, "host.openWorkbench params");
-      await this.api.openWorkbench(this.plugin.manifest.id, requireProtocolName(input.contributionId, "workbench contribution"), isRecord(input.context) ? input.context : undefined, { forceNew: input.forceNew === true });
+      // `target: "tab"` lets a dock-hosted webview ask for a main-workbench
+      // tab instead of another dock entry (e.g. the SSH dock's "open session
+      // in tab" button). Surfaces that ignore it keep the old behavior, so
+      // older handlers stay compatible.
+      await this.api.openWorkbench(this.plugin.manifest.id, requireProtocolName(input.contributionId, "workbench contribution"), isRecord(input.context) ? input.context : undefined, { forceNew: input.forceNew === true, target: input.target === "tab" ? "tab" : undefined });
       return null;
     }
     if (method === "host.executeCommand") {
@@ -1239,7 +1243,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         const asset = await request('ui.readAsset', { path });
         return URL.createObjectURL(new Blob([decode(asset.dataBase64)], { type: asset.contentType }));
       },
-      openWorkbench: (contributionId, childContext, options) => request('host.openWorkbench', { contributionId, context: childContext, forceNew: !!(options && options.forceNew) }),
+      openWorkbench: (contributionId, childContext, options) => request('host.openWorkbench', { contributionId, context: childContext, forceNew: !!(options && options.forceNew), target: options && options.target === "tab" ? "tab" : undefined }),
       // §4/§5 command execution from a webview — the same registry path a menu
       // placement takes (enablement, §4.1 reuse, host-authored context),
       // scoped to the plugin's own declared commands. The optional context

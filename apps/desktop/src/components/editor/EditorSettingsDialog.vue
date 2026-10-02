@@ -92,6 +92,7 @@ import {
   type DataGridFilterEditorView,
   type DataGridToolbarLayout,
   type MultiStatementDefaultView,
+  type ResultTabNamingMode,
   type OpenTabsRestoreMode,
   type AppCloseUnsavedTabsMode,
   type SidebarObjectInfoMode,
@@ -732,6 +733,8 @@ const editShowColumnCommentsInHeader = ref(settingsStore.editorSettings.showColu
 const editShowColumnTypesInHeader = ref(settingsStore.editorSettings.showColumnTypesInHeader);
 const editShowColumnHeaderTooltips = ref(settingsStore.editorSettings.showColumnHeaderTooltips);
 const editShowResultSourceDatabase = ref(settingsStore.editorSettings.showResultSourceDatabase);
+const editResultTabNamingMode = ref<ResultTabNamingMode>(settingsStore.editorSettings.resultTabNamingMode);
+const editResultTabPreferComments = ref(settingsStore.editorSettings.resultTabPreferComments);
 const editDataGridShowTransposeFieldMetadata = ref(settingsStore.editorSettings.dataGridShowTransposeFieldMetadata);
 const editColorizeDataGridCellTypes = ref(settingsStore.editorSettings.colorizeDataGridCellTypes);
 const editShowIndexIndicatorsInHeader = ref(settingsStore.editorSettings.showIndexIndicatorsInHeader);
@@ -1082,6 +1085,8 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     showColumnTypesInHeader: editShowColumnTypesInHeader.value,
     showColumnHeaderTooltips: editShowColumnHeaderTooltips.value,
     showResultSourceDatabase: editShowResultSourceDatabase.value,
+    resultTabNamingMode: editResultTabNamingMode.value,
+    resultTabPreferComments: editResultTabPreferComments.value,
     dataGridShowTransposeFieldMetadata: editDataGridShowTransposeFieldMetadata.value,
     colorizeDataGridCellTypes: editColorizeDataGridCellTypes.value,
     dataGridTypeColorSchemes: editDataGridTypeColorSchemes.value,
@@ -1748,6 +1753,8 @@ function syncEditorSettingsDraftFromStore() {
   editShowColumnTypesInHeader.value = settingsStore.editorSettings.showColumnTypesInHeader;
   editShowColumnHeaderTooltips.value = settingsStore.editorSettings.showColumnHeaderTooltips;
   editShowResultSourceDatabase.value = settingsStore.editorSettings.showResultSourceDatabase;
+  editResultTabNamingMode.value = settingsStore.editorSettings.resultTabNamingMode;
+  editResultTabPreferComments.value = settingsStore.editorSettings.resultTabPreferComments;
   editDataGridShowTransposeFieldMetadata.value = settingsStore.editorSettings.dataGridShowTransposeFieldMetadata;
   editColorizeDataGridCellTypes.value = settingsStore.editorSettings.colorizeDataGridCellTypes;
   editDataGridTypeColorSchemes.value = cloneDataGridTypeColorSchemes(settingsStore.editorSettings.dataGridTypeColorSchemes);
@@ -1889,6 +1896,8 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   showColumnTypesInHeader: editShowColumnTypesInHeader,
   showColumnHeaderTooltips: editShowColumnHeaderTooltips,
   showResultSourceDatabase: editShowResultSourceDatabase,
+  resultTabNamingMode: editResultTabNamingMode,
+  resultTabPreferComments: editResultTabPreferComments,
   dataGridShowTransposeFieldMetadata: editDataGridShowTransposeFieldMetadata,
   colorizeDataGridCellTypes: editColorizeDataGridCellTypes,
   dataGridTypeColorSchemes: editDataGridTypeColorSchemes,
@@ -2067,6 +2076,7 @@ const crossScopeShortcutPairCount = computed(() => countShortcutConflictPairs(cr
 const sqlShortcutConflicts = computed(() => findSqlShortcutConflicts(editSqlShortcuts.value, editShortcuts.value));
 const hasSqlShortcutConflicts = computed(() => sqlShortcutConflicts.value.length > 0);
 const shortcutSearchQuery = ref("");
+const collapsedShortcutScopes = ref<Set<ShortcutScope>>(new Set());
 const formatterEditorShortcutIds: ShortcutActionId[] = [
   "formatSql",
   "toggleLineComment",
@@ -2155,6 +2165,24 @@ const shortcutScopeGroups = computed<ShortcutScopeGroup[]>(() =>
     };
   }).filter((group) => group.definitions.length > 0),
 );
+
+function shortcutScopeContentId(scope: ShortcutScope): string {
+  return `shortcut-scope-content-${scope}`;
+}
+
+function isShortcutScopeExpanded(group: ShortcutScopeGroup): boolean {
+  // Keep manually collapsed groups visible while searching so matching rows
+  // cannot be hidden. The Set itself is left untouched, so clearing search
+  // restores the user's previous collapsed state.
+  return shortcutSearchQuery.value.trim().length > 0 || !collapsedShortcutScopes.value.has(group.scope);
+}
+
+function toggleShortcutScope(scope: ShortcutScope) {
+  const next = new Set(collapsedShortcutScopes.value);
+  if (next.has(scope)) next.delete(scope);
+  else next.add(scope);
+  collapsedShortcutScopes.value = next;
+}
 
 function isShortcutModified(definition: ShortcutDefinition): boolean {
   return editShortcuts.value[definition.id] !== definition.defaultShortcut;
@@ -2442,6 +2470,8 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editShowColumnTypesInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader;
     editShowColumnHeaderTooltips.value = DEFAULT_EDITOR_SETTINGS.showColumnHeaderTooltips;
     editShowResultSourceDatabase.value = DEFAULT_EDITOR_SETTINGS.showResultSourceDatabase;
+    editResultTabNamingMode.value = DEFAULT_EDITOR_SETTINGS.resultTabNamingMode;
+    editResultTabPreferComments.value = DEFAULT_EDITOR_SETTINGS.resultTabPreferComments;
     editDataGridShowTransposeFieldMetadata.value = DEFAULT_EDITOR_SETTINGS.dataGridShowTransposeFieldMetadata;
     editColorizeDataGridCellTypes.value = DEFAULT_EDITOR_SETTINGS.colorizeDataGridCellTypes;
     // Back to the built-in palette, but keep the user's saved schemes available.
@@ -8467,16 +8497,43 @@ onUnmounted(() => {
                   </div>
                   <Switch id="show-column-header-tooltips" v-model="editShowColumnHeaderTooltips" />
                 </div>
-                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
-                    <Label for="show-result-source-database">
-                      {{ t("settings.showResultSourceDatabase") }}
-                    </Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.showResultSourceDatabaseDescription") }}
-                    </p>
+                <div class="settings-item space-y-3 rounded-md border bg-muted/20 p-3">
+                  <div class="flex items-center justify-between gap-4">
+                    <div class="min-w-0 space-y-1">
+                      <Label>{{ t("settings.resultTabNamingMode") }}</Label>
+                      <p class="text-xs text-muted-foreground">
+                        {{ t("settings.resultTabNamingModeDescription") }}
+                      </p>
+                    </div>
+                    <Select v-model="editResultTabNamingMode">
+                      <SelectTrigger class="h-8 w-48 shrink-0">
+                        <SelectValue :placeholder="t('settings.resultTabNamingMode')" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="source">{{ t("settings.resultTabNamingModeSource") }}</SelectItem>
+                        <SelectItem value="ordinal">{{ t("settings.resultTabNamingModeOrdinal") }}</SelectItem>
+                        <SelectItem value="comment">{{ t("settings.resultTabNamingModeComment") }}</SelectItem>
+                      </SelectContent>
+                    </Select>
                   </div>
-                  <Switch id="show-result-source-database" v-model="editShowResultSourceDatabase" />
+                  <div v-if="editResultTabNamingMode === 'source'" class="flex items-center justify-between gap-4 border-t border-border/60 pt-3">
+                    <div class="space-y-1 pl-1">
+                      <Label for="result-tab-prefer-comments">{{ t("settings.resultTabPreferComments") }}</Label>
+                      <p class="text-xs text-muted-foreground">{{ t("settings.resultTabPreferCommentsDescription") }}</p>
+                    </div>
+                    <Switch id="result-tab-prefer-comments" v-model="editResultTabPreferComments" />
+                  </div>
+                  <div v-if="editResultTabNamingMode === 'source'" class="flex items-center justify-between gap-4 border-t border-border/60 pt-3">
+                    <div class="space-y-1 pl-1">
+                      <Label for="show-result-source-database">
+                        {{ t("settings.showResultSourceDatabase") }}
+                      </Label>
+                      <p class="text-xs text-muted-foreground">
+                        {{ t("settings.showResultSourceDatabaseDescription") }}
+                      </p>
+                    </div>
+                    <Switch id="show-result-source-database" v-model="editShowResultSourceDatabase" />
+                  </div>
                 </div>
                 <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
@@ -9018,7 +9075,17 @@ onUnmounted(() => {
                    圆角改由组头（上）与末行（下）分别承担。 -->
               <div v-else class="flex flex-col gap-2">
                 <section v-for="group in shortcutScopeGroups" :key="group.scope" class="rounded-md border border-border/70 bg-background">
-                  <header class="sticky top-0 z-10 flex items-center gap-2 rounded-t-md border-b border-border/70 bg-popover px-3 py-2">
+                  <header
+                    class="sticky top-0 z-10 flex cursor-pointer items-center gap-2 rounded-t-md border-b border-border/70 bg-popover px-3 py-2 outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                    role="button"
+                    tabindex="0"
+                    :aria-expanded="isShortcutScopeExpanded(group)"
+                    :aria-controls="shortcutScopeContentId(group.scope)"
+                    :aria-label="`${group.label} · ${isShortcutScopeExpanded(group) ? t('settings.shortcutGroupCollapse') : t('settings.shortcutGroupExpand')}`"
+                    @click="toggleShortcutScope(group.scope)"
+                    @keydown.enter.prevent="toggleShortcutScope(group.scope)"
+                    @keydown.space.prevent="toggleShortcutScope(group.scope)"
+                  >
                     <component :is="shortcutScopeIcon(group.scope)" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
                     <h3 class="shrink-0 text-[13px] leading-none font-semibold">{{ group.label }}</h3>
                     <span class="shrink-0 rounded-sm border border-border/80 px-1 font-mono text-[10px] leading-4 text-muted-foreground/75">{{ group.scope }}</span>
@@ -9035,81 +9102,87 @@ onUnmounted(() => {
                       <span class="inline-flex shrink-0 cursor-help items-center gap-1 text-[11px] font-medium tabular-nums text-warning"> <span class="size-[5px] rounded-full bg-current" aria-hidden="true" />{{ group.crossScopeCount }} </span>
                     </LightTooltip>
                     <span class="ml-auto hidden truncate text-[11px] text-muted-foreground xl:block">{{ group.hint }}</span>
+                    <ChevronDown class="settings-shortcut-chevron h-3.5 w-3.5 shrink-0 text-muted-foreground" :class="{ 'settings-shortcut-chevron--expanded': isShortcutScopeExpanded(group) }" aria-hidden="true" />
                   </header>
-                  <div
-                    v-for="(definition, index) in group.definitions"
-                    :key="definition.id"
-                    class="settings-shortcut-row group grid gap-2 border-t border-border/70 px-3 py-2 transition-colors hover:bg-muted/40 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
-                    :class="index === group.definitions.length - 1 ? 'rounded-b-md' : ''"
-                    :data-conflict="shortcutConflictMap[definition.id] ? 'true' : undefined"
-                    :data-cross-scope="shortcutHasCrossScopeConflict(definition) ? 'true' : undefined"
-                  >
-                    <div class="settings-shortcut-label min-w-0">
-                      <div class="flex min-w-0 items-center gap-2">
-                        <Label class="min-w-0 truncate leading-none">{{ t(definition.labelKey) }}</Label>
-                        <!-- scope 已由分组标题承载，行内不再重复散章 -->
-                        <LightTooltip v-if="isShortcutModified(definition)" :text="t('settings.shortcutModifiedTagTooltip')">
-                          <span class="shrink-0 cursor-help rounded-sm border border-border/90 px-1 text-[10px] leading-4 text-muted-foreground">
-                            {{ t("settings.shortcutModifiedTag") }}
-                          </span>
-                        </LightTooltip>
-                      </div>
-                    </div>
-                    <div class="settings-shortcut-actions min-w-0 text-right">
-                      <div class="settings-shortcut-controls flex items-center justify-end gap-1.5">
-                        <!-- 冲突解释改为悬停才出现：默认只留胶囊颜色这一条定位线索。 -->
-                        <LightTooltip side="left" :disabled="editingShortcutId === definition.id" :text="shortcutConflictHintText(definition)" content-class="max-w-[320px]">
-                          <input
-                            :data-shortcut-input="definition.id"
-                            :value="editingShortcutId === definition.id ? '' : formatShortcutPill(editShortcuts[definition.id])"
-                            :style="{
-                              width: editingShortcutId === definition.id ? shortcutPressShortcutInputWidth : `${Math.max(4, formatShortcutPill(editShortcuts[definition.id]).length + 3)}ch`,
-                            }"
-                            readonly
-                            :aria-invalid="shortcutConflicts.includes(definition.id)"
-                            :placeholder="t('settings.shortcutPressShortcut')"
-                            class="settings-shortcut-pill h-7 w-auto min-w-12 max-w-64 shrink-0 cursor-default rounded-[6px] border border-transparent bg-muted px-2.5 text-center font-mono text-[13px] font-semibold text-foreground/75 shadow-inner outline-none selection:bg-transparent placeholder:text-muted-foreground aria-invalid:border-destructive/55 aria-invalid:text-destructive"
-                            :class="editingShortcutId === definition.id ? 'max-w-64 cursor-text border-border/80 bg-background text-left text-foreground shadow-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/35' : ''"
-                            @keydown="(event: KeyboardEvent) => onShortcutKeydown(definition.id, event)"
-                          />
-                        </LightTooltip>
-                        <Button
-                          v-if="editingShortcutId !== definition.id"
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          class="settings-shortcut-action-button settings-shortcut-action-button--fix h-7 w-7 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
-                          :aria-label="t('settings.shortcutPressShortcut')"
-                          @click="focusShortcutInput(definition.id)"
-                        >
-                          <Pencil class="h-4 w-4" />
-                        </Button>
-                        <Button v-else type="button" variant="ghost" size="sm" class="h-7 shrink-0 px-2 text-sm font-medium text-muted-foreground hover:text-foreground" @click="cancelShortcutEdit">
-                          {{ t("settings.cancel") }}
-                        </Button>
-                        <Button
-                          v-if="editingShortcutId !== definition.id"
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          class="settings-shortcut-action-button settings-shortcut-action-button--fix h-7 w-7 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
-                          :aria-label="t('settings.reset')"
-                          @click="resetShortcut(definition.id)"
-                        >
-                          <RotateCcw class="h-4 w-4" />
-                        </Button>
-                        <Button
-                          v-if="editingShortcutId !== definition.id && editShortcuts[definition.id]"
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          class="settings-shortcut-action-button h-7 w-7 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100"
-                          :aria-label="t('settings.shortcutClear')"
-                          @click="clearShortcut(definition.id)"
-                        >
-                          <X class="h-4 w-4" />
-                        </Button>
-                        <span v-else-if="editingShortcutId !== definition.id" class="h-7 w-7 shrink-0" aria-hidden="true" />
+                  <div :id="shortcutScopeContentId(group.scope)" class="settings-shortcut-drawer" :class="{ 'settings-shortcut-drawer--expanded': isShortcutScopeExpanded(group) }" :aria-hidden="!isShortcutScopeExpanded(group)" :inert="!isShortcutScopeExpanded(group)">
+                    <div class="settings-shortcut-drawer-inner">
+                      <div
+                        v-for="(definition, index) in group.definitions"
+                        :key="definition.id"
+                        class="settings-shortcut-row group grid gap-2 border-t border-border/70 px-3 py-2 transition-colors hover:bg-muted/40 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
+                        :class="index === group.definitions.length - 1 ? 'rounded-b-md' : ''"
+                        :style="{ '--shortcut-row-index': index }"
+                        :data-conflict="shortcutConflictMap[definition.id] ? 'true' : undefined"
+                        :data-cross-scope="shortcutHasCrossScopeConflict(definition) ? 'true' : undefined"
+                      >
+                        <div class="settings-shortcut-label min-w-0">
+                          <div class="flex min-w-0 items-center gap-2">
+                            <Label class="min-w-0 truncate leading-none">{{ t(definition.labelKey) }}</Label>
+                            <!-- scope 已由分组标题承载，行内不再重复散章 -->
+                            <LightTooltip v-if="isShortcutModified(definition)" :text="t('settings.shortcutModifiedTagTooltip')">
+                              <span class="shrink-0 cursor-help rounded-sm border border-border/90 px-1 text-[10px] leading-4 text-muted-foreground">
+                                {{ t("settings.shortcutModifiedTag") }}
+                              </span>
+                            </LightTooltip>
+                          </div>
+                        </div>
+                        <div class="settings-shortcut-actions min-w-0 text-right">
+                          <div class="settings-shortcut-controls flex items-center justify-end gap-1.5">
+                            <!-- 冲突解释改为悬停才出现：默认只留胶囊颜色这一条定位线索。 -->
+                            <LightTooltip side="left" :disabled="editingShortcutId === definition.id" :text="shortcutConflictHintText(definition)" content-class="max-w-[320px]">
+                              <input
+                                :data-shortcut-input="definition.id"
+                                :value="editingShortcutId === definition.id ? '' : formatShortcutPill(editShortcuts[definition.id])"
+                                :style="{
+                                  width: editingShortcutId === definition.id ? shortcutPressShortcutInputWidth : `${Math.max(4, formatShortcutPill(editShortcuts[definition.id]).length + 3)}ch`,
+                                }"
+                                readonly
+                                :aria-invalid="shortcutConflicts.includes(definition.id)"
+                                :placeholder="t('settings.shortcutPressShortcut')"
+                                class="settings-shortcut-pill h-7 w-auto min-w-12 max-w-64 shrink-0 cursor-default rounded-[6px] border border-transparent bg-muted px-2.5 text-center font-mono text-[13px] font-semibold text-foreground/75 shadow-inner outline-none selection:bg-transparent placeholder:text-muted-foreground aria-invalid:border-destructive/55 aria-invalid:text-destructive"
+                                :class="editingShortcutId === definition.id ? 'max-w-64 cursor-text border-border/80 bg-background text-left text-foreground shadow-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/35' : ''"
+                                @keydown="(event: KeyboardEvent) => onShortcutKeydown(definition.id, event)"
+                              />
+                            </LightTooltip>
+                            <Button
+                              v-if="editingShortcutId !== definition.id"
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              class="settings-shortcut-action-button settings-shortcut-action-button--fix h-7 w-7 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+                              :aria-label="t('settings.shortcutPressShortcut')"
+                              @click="focusShortcutInput(definition.id)"
+                            >
+                              <Pencil class="h-4 w-4" />
+                            </Button>
+                            <Button v-else type="button" variant="ghost" size="sm" class="h-7 shrink-0 px-2 text-sm font-medium text-muted-foreground hover:text-foreground" @click="cancelShortcutEdit">
+                              {{ t("settings.cancel") }}
+                            </Button>
+                            <Button
+                              v-if="editingShortcutId !== definition.id"
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              class="settings-shortcut-action-button settings-shortcut-action-button--fix h-7 w-7 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+                              :aria-label="t('settings.reset')"
+                              @click="resetShortcut(definition.id)"
+                            >
+                              <RotateCcw class="h-4 w-4" />
+                            </Button>
+                            <Button
+                              v-if="editingShortcutId !== definition.id && editShortcuts[definition.id]"
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              class="settings-shortcut-action-button h-7 w-7 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100"
+                              :aria-label="t('settings.shortcutClear')"
+                              @click="clearShortcut(definition.id)"
+                            >
+                              <X class="h-4 w-4" />
+                            </Button>
+                            <span v-else-if="editingShortcutId !== definition.id" class="h-7 w-7 shrink-0" aria-hidden="true" />
+                          </div>
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -11851,6 +11924,69 @@ LIMIT 100;</pre
  * 书写顺序；aria-invalid 那条能工作是因为变体在生成顺序上排在基类之后。
  * `:not([aria-invalid="true"])` 保证阻断性冲突（红）优先于提示（琥珀）。
  */
+/* Animate only the body: clipping the section would break its sticky header.
+   Fractional grid rows follow the content height and reverse smoothly on rapid toggles. */
+.settings-shortcut-drawer {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    grid-template-rows 340ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 240ms ease;
+}
+
+.settings-shortcut-drawer--expanded {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  visibility: visible;
+  transition-duration: 650ms, 420ms;
+}
+
+.settings-shortcut-drawer-inner {
+  min-height: 0;
+  overflow: hidden;
+  perspective: 900px;
+}
+
+/* Let each shortcut row arrive just after the previous one. The drawer still
+   controls the overall height, while these transitions provide the staged,
+   drawer-like reveal without delaying long groups excessively. */
+.settings-shortcut-drawer-inner > .settings-shortcut-row {
+  opacity: 0;
+  transform: perspective(700px) rotateX(-72deg) translateY(-6px) scaleY(0.86);
+  transform-origin: top center;
+  backface-visibility: hidden;
+  will-change: opacity, transform;
+  transition:
+    opacity 240ms ease,
+    transform 320ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition-delay: 0ms;
+}
+
+.settings-shortcut-drawer--expanded .settings-shortcut-drawer-inner > .settings-shortcut-row {
+  opacity: 1;
+  transform: perspective(700px) rotateX(0deg) translateY(0) scaleY(1);
+  transition-duration: 420ms, 650ms;
+  transition-delay: min(calc(var(--shortcut-row-index) * 85ms), 850ms);
+}
+
+.settings-shortcut-chevron {
+  transition: transform 340ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.settings-shortcut-chevron--expanded {
+  transform: rotate(180deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-shortcut-drawer,
+  .settings-shortcut-chevron,
+  .settings-shortcut-drawer-inner > .settings-shortcut-row {
+    transition: none;
+  }
+}
+
 .settings-shortcut-row[data-cross-scope="true"] .settings-shortcut-pill:not([aria-invalid="true"]) {
   border-color: color-mix(in srgb, var(--warning) 45%, transparent);
 }

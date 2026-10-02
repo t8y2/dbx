@@ -14,13 +14,15 @@ const mocks = vi.hoisted(() => ({
   onChange: undefined as undefined | ((value: string) => void),
   onSaveShortcut: undefined as undefined | ((event: KeyboardEvent) => boolean),
   fontFamily: undefined as undefined | (() => string),
+  lineWrapping: undefined as undefined | (() => boolean),
 }));
 
 vi.mock("@/composables/useCellDetailEditor", () => ({
-  useCellDetailEditor: (options: { onChange?: (value: string) => void; onSaveShortcut?: (event: KeyboardEvent) => boolean; fontFamily: () => string }) => {
+  useCellDetailEditor: (options: { onChange?: (value: string) => void; onSaveShortcut?: (event: KeyboardEvent) => boolean; fontFamily: () => string; lineWrapping?: () => boolean }) => {
     mocks.onChange = options.onChange;
     mocks.onSaveShortcut = options.onSaveShortcut;
     mocks.fontFamily = options.fontFamily;
+    mocks.lineWrapping = options.lineWrapping;
     return {
       create: mocks.create,
       destroy: mocks.destroy,
@@ -33,7 +35,7 @@ vi.mock("@/composables/useCellDetailEditor", () => ({
 }));
 vi.mock("@/composables/useTheme", () => ({ useTheme: () => ({ isDark: ref(false), themePalette: ref({}) }) }));
 vi.mock("@/stores/settingsStore", () => ({
-  useSettingsStore: () => ({ editorSettings: { theme: "default", fontSize: 13, fontFamily: "monospace", tableFontFamily: "'Grid Font', sans-serif" } }),
+  useSettingsStore: () => ({ editorSettings: { theme: "default", fontSize: 13, fontFamily: "monospace", tableFontFamily: "'Grid Font', sans-serif", wordWrap: true } }),
 }));
 vi.mock("@/lib/dataGrid/geometryPreview", () => ({ renderWktOnCanvas: vi.fn() }));
 
@@ -65,6 +67,7 @@ beforeEach(() => {
   mocks.onChange = undefined;
   mocks.onSaveShortcut = undefined;
   mocks.fontFamily = undefined;
+  mocks.lineWrapping = undefined;
   mocks.getValue.mockReturnValue("");
 });
 
@@ -79,6 +82,7 @@ describe("useDataGridCellDetail", () => {
 
     expect(mocks.focus).toHaveBeenCalledOnce();
     expect(mocks.fontFamily?.()).toBe("'Grid Font', sans-serif");
+    expect(mocks.lineWrapping?.()).toBe(true);
 
     composable.detailsEditorContainer.value = undefined;
     await nextTick();

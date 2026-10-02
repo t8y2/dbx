@@ -214,6 +214,62 @@ jobs:
           name: oracle-native
           path: "release-native/dbx-agent-oracle-*"
 
+  # Oracle OCI（thick）变体：同一个 oracle-go 模块加上 `oci` 构建标记，用 CGO 链接
+  # Oracle 客户端，因此需要 gcc（MinGW-w64）与 Instant Client 的 SDK（头文件 + 导入库）。
+  # Instant Client 是分平台的，本任务只产出 Windows x64（当前 OCI 模式仅支持 Windows）。
+  build-oracle-oci-native:
+    needs: [bump-versions]
+    if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'oracle-oci') }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # godror 需要 Go >= 1.21；thin 的 Windows 7 兼容线仍由 build-oracle-native 用 Go 1.20 构建。
+          go-version: "1.25.x"
+          cache-dependency-path: agents/drivers/oracle-go/go.sum
+      - name: Prepare MinGW-w64 and the Oracle Instant Client
+        shell: bash
+        run: |
+          cc="$(command -v gcc || true)"
+          if [ -z "$cc" ]; then
+            choco install mingw -y --no-progress
+            cc="$(ls /c/ProgramData/chocolatey/lib/mingw/tools/install/mingw64/bin/gcc.exe | head -1)"
+          fi
+          mkdir -p instantclient
+          curl -fsSL -o ic-basic.zip "https://download.oracle.com/otn_software/nt/instantclient/2326300/instantclient-basic-windows.x64-23.26.3.0.0.zip"
+          curl -fsSL -o ic-sdk.zip "https://download.oracle.com/otn_software/nt/instantclient/2326300/instantclient-sdk-windows.x64-23.26.3.0.0.zip"
+          tar -xf ic-basic.zip -C instantclient
+          tar -xf ic-sdk.zip -C instantclient
+          ic_dir="$(ls -d "${GITHUB_WORKSPACE}/instantclient"/instantclient_* | head -1)"
+          echo "MinGW gcc: $cc / Instant Client: $ic_dir"
+          {
+            echo "CGO_ENABLED=1"
+            echo "GOOS=windows"
+            echo "GOARCH=amd64"
+            echo "CC=${cc}"
+            echo "CGO_CFLAGS=-I${ic_dir}/sdk/include"
+            echo "CGO_LDFLAGS=-L${ic_dir}/sdk/lib/msvc"
+          } >> "$GITHUB_ENV"
+      - name: Test Oracle agent with the OCI build tag
+        shell: bash
+        working-directory: agents/drivers/oracle-go
+        run: go test -mod=mod -tags oci ./...
+      - name: Build Oracle OCI agent (Windows x64)
+        shell: bash
+        working-directory: agents/drivers/oracle-go
+        run: |
+          mkdir -p ../../../release-native
+          output="../../../release-native/dbx-agent-oracle-oci-windows-x64.exe"
+          # go.mod 的 go 指令保持 1.20（thin 的 Windows 7 兼容线）；OCI 变体要求更高，
+          # 因此允许就地更新 go.mod —— 只影响本任务的检出目录，不会被提交。
+          go build -mod=mod -tags oci -trimpath -ldflags="-s -w" -o "$output" .
+          ls -lh ../../../release-native
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oracle-oci-native
+          path: "release-native/dbx-agent-oracle-oci-*"
+
   build-xugu-native:
     needs: [bump-versions]
     if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'xugu') }}
@@ -1295,7 +1351,7 @@ jobs:
           retention-days: 1
 
   release:
-    needs: [bump-versions, commit-versions, build-agents, build-oracle-native, build-xugu-native, build-rabbitmq-native, build-rocketmq-native, build-etcd-native, build-etcd2-native, build-zookeeper-native, build-cassandra-native, build-hive-native, build-argo-native, build-kingbase-native, build-vastbase-native, build-neo4j-native, build-nebula-native, build-iotdb-native, build-duckdb-native, build-sqlite-worker-native, build-tdengine-native, build-jre, reuse-previous-assets]
+    needs: [bump-versions, commit-versions, build-agents, build-oracle-native, build-oracle-oci-native, build-xugu-native, build-rabbitmq-native, build-rocketmq-native, build-etcd-native, build-etcd2-native, build-zookeeper-native, build-cassandra-native, build-hive-native, build-argo-native, build-kingbase-native, build-vastbase-native, build-neo4j-native, build-nebula-native, build-iotdb-native, build-duckdb-native, build-sqlite-worker-native, build-tdengine-native, build-jre, reuse-previous-assets]
     if: ${{ always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-latest
     steps:
@@ -1434,6 +1490,7 @@ jobs:
               tdengine) echo "TDengine" ;;
               etcd) echo "etcd" ;;
               etcd2) echo "etcd 2.x (v2 API)" ;;
+              oracle-oci) echo "Oracle (OCI)" ;;
               *) echo "$name" ;;
             esac
           }
@@ -1497,7 +1554,7 @@ jobs:
             [ -n "$DRIVERS" ] && DRIVERS="${DRIVERS},"$'\n'
             DRIVERS="${DRIVERS}$(generate_jar_entry "$name" "$label" "$f" "$jre_key" "$version" "$external_driver" "$native_json")"
           done
-          for name in oracle xugu kingbase vastbase neo4j nebula iotdb duckdb sqlite-worker rabbitmq rocketmq zookeeper cassandra hive argo tdengine etcd etcd2; do
+          for name in oracle oracle-oci xugu kingbase vastbase neo4j nebula iotdb duckdb sqlite-worker rabbitmq rocketmq zookeeper cassandra hive argo tdengine etcd etcd2; do
             version=$(get_module_version "$name")
             [ -f "release/dbx-agent-${name}-${version}.jar" ] && continue
             native_json=$(generate_native_platforms "$name" "$version")
@@ -1592,6 +1649,7 @@ jobs:
               tdengine) echo "TDengine" ;;
               etcd) echo "etcd" ;;
               etcd2) echo "etcd 2.x (v2 API)" ;;
+              oracle-oci) echo "Oracle (OCI)" ;;
               *) echo "$name" ;;
             esac
           }

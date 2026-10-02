@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -242,9 +243,35 @@ func normalizeRecord(record *neo4j.Record, width int) []any {
 		return row
 	}
 	for index := 0; index < width && index < len(record.Values); index++ {
-		row[index] = normalizeQueryValue(record.Values[index])
+		if node, ok := record.Values[index].(neo4j.Node); ok {
+			row[index] = normalizeNodeCell(node)
+		} else {
+			row[index] = normalizeQueryValue(record.Values[index])
+		}
 	}
 	return row
+}
+
+type nodeProperty struct {
+	Name  string `json:"name"`
+	Type  string `json:"type"`
+	Value any    `json:"value"`
+}
+
+type nodeCell struct {
+	Marker     string         `json:"__dbx_neo4j_node"`
+	Display    string         `json:"display"`
+	Properties []nodeProperty `json:"properties"`
+}
+
+// Keep the original record keys for cursor paging; the grid projects properties.
+func normalizeNodeCell(node neo4j.Node) nodeCell {
+	properties := make([]nodeProperty, 0, len(node.Props))
+	for name, value := range node.Props {
+		properties = append(properties, nodeProperty{Name: name, Type: neo4jTypeName(value), Value: normalizeQueryValue(value)})
+	}
+	sort.Slice(properties, func(i, j int) bool { return properties[i].Name < properties[j].Name })
+	return nodeCell{Marker: "v1", Display: formatNode(node), Properties: properties}
 }
 
 func normalizeQueryValue(value any) any {

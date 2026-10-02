@@ -20,7 +20,7 @@ import { Input } from "@/components/ui/input";
 import { Download, Square, CheckSquare, Search, X, Loader2, Wrench } from "@lucide/vue";
 import { formatDataTransferDuration, useExportTracker } from "@/composables/useExportTracker";
 import { isQueryTimeoutErrorMessage } from "@/lib/sql/queryError";
-import type { SqlInsertDialect } from "@/lib/export/sqlInsertMode";
+import type { SqlInsertDialect, SqlInsertMode } from "@/lib/export/sqlInsertMode";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -66,6 +66,7 @@ const POSTGRES_ALL_SCHEMAS = "__DBX_ALL_SCHEMAS__";
 const includeStructure = ref(true);
 const includeData = ref(true);
 const insertDialect = ref<SqlInsertDialect>("source");
+const insertMode = ref<SqlInsertMode>("batch");
 const includeObjects = ref(true);
 const includeCreateDatabase = ref(false);
 const dropTableIfExists = ref(false);
@@ -399,6 +400,7 @@ async function startExport() {
           includeStructure: includeStructure.value,
           includeData: includeData.value,
           insertDialect: insertDialect.value,
+          insertMode: insertMode.value,
           includeObjects: includeObjects.value,
           includeCreateDatabase: includeCreateDatabase.value,
           dropTableIfExists: dropTableIfExists.value,
@@ -542,6 +544,7 @@ async function startAllDatabasesExport() {
               includeStructure: includeStructure.value,
               includeData: includeData.value,
               insertDialect: insertDialect.value,
+              insertMode: insertMode.value,
               includeObjects: includeObjects.value,
               includeCreateDatabase: includeCreateDatabase.value,
               dropTableIfExists: dropTableIfExists.value,
@@ -664,6 +667,7 @@ function resetState() {
   includeStructure.value = true;
   includeData.value = true;
   insertDialect.value = "source";
+  insertMode.value = "batch";
   includeObjects.value = true;
   includeCreateDatabase.value = false;
   dropTableIfExists.value = false;
@@ -960,6 +964,20 @@ watch(
               </button>
               <p class="pl-5 text-[11px] text-muted-foreground">
                 {{ t("databaseExport.standardSqlInsertDescription") }}
+              </p>
+            </div>
+            <div v-if="includeData" class="space-y-1">
+              <div class="text-xs font-medium">{{ t("grid.sqlInsertModeTitle") }}</div>
+              <label class="flex cursor-pointer items-center gap-2 text-xs">
+                <input v-model="insertMode" type="radio" value="batch" class="h-3.5 w-3.5" />
+                <span>{{ t("grid.sqlInsertModeBatch") }}</span>
+              </label>
+              <label class="flex cursor-pointer items-center gap-2 text-xs">
+                <input v-model="insertMode" type="radio" value="single" class="h-3.5 w-3.5" />
+                <span>{{ t("grid.sqlInsertModeSingle") }}</span>
+              </label>
+              <p class="pl-5 text-[11px] text-muted-foreground">
+                {{ insertMode === "single" ? t("grid.sqlInsertModeSingleDescription") : t("grid.sqlInsertModeBatchDescription") }}
               </p>
             </div>
             <div class="flex items-center gap-2 cursor-pointer text-xs" @click="includeObjects = !includeObjects">

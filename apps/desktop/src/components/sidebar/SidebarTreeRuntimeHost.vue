@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, watch, onBeforeUnmount, onScopeDispose, inject, reactive, ref, shallowRef } from "vue";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import PluginWorkbenchHost from "@/components/plugins/PluginWorkbenchHost.vue";
+import type { PluginWorkbenchContext } from "@/lib/plugins/pluginHostBridge";
 import { createRoutedSidebarDialogController, routedCanSetCreateDatabaseCharset } from "./sidebarDialogControllerRouting";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import { useSidebarDataOpenRuntime } from "@/composables/useSidebarDataOpenRuntime";
@@ -74,8 +77,9 @@ import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
 import { useToast } from "@/composables/useToast";
 import { createFrontendPluginRegistry } from "@/lib/plugins/frontendPlugin";
 import { activatePluginContextMenuItem, buildPluginConnectionContextMenuInvocation, buildPluginTableContextMenuInvocation } from "@/lib/plugins/pluginContext";
+import { parseDynamicMenuResponse, renderDynamicMenuEntries, type DynamicMenuAction } from "@/lib/plugins/dynamicContextMenu";
 import type { PluginContextMenuInvocation } from "@/lib/plugins/pluginContext";
-import type { InstalledPlugin, PluginContextMenuContribution } from "@/types/database";
+import type { InstalledPlugin, PluginContextMenuContribution, PluginWorkbenchContribution } from "@/types/database";
 import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import type { ColumnInfo, ConnectionConfig, DatabaseType, TreeNode, TreeNodeType } from "@/types/database";
 import * as api from "@/lib/backend/api";
@@ -387,6 +391,7 @@ const savedSqlStore = useSavedSqlStore();
 const { toast } = useToast();
 const installedPlugins = ref<InstalledPlugin[]>([]);
 const sidebarPluginRegistry = computed(() => createFrontendPluginRegistry(installedPlugins.value, appLocale.value));
+const pluginDialog = shallowRef<{ plugin: InstalledPlugin; contribution: PluginWorkbenchContribution; context: PluginWorkbenchContext; title: string } | null>(null);
 
 async function refreshInstalledPlugins() {
   try {
@@ -2787,7 +2792,7 @@ function requestDropTableChildObject() {
 }
 
 function canDropTreeNode(node: TreeNode): boolean {
-  if (databaseTypeForNode(node) === "nebula") return false;
+  if (["neo4j", "nebula"].includes(databaseTypeForNode(node) || "")) return false;
   if (isSqlServerLinkedNode(node)) return false;
   if (node.type === "table") return !!node.connectionId && !!node.database;
   if (node.type === "view" || node.type === "materialized_view" || node.type === "procedure" || node.type === "function" || node.type === "event") {
@@ -3130,7 +3135,7 @@ function requestDropSelectedNodes(): boolean {
 }
 
 function requestDropSelectedNode(): boolean {
-  if (currentDatabaseType() === "nebula") return false;
+  if (["neo4j", "nebula"].includes(currentDatabaseType() || "")) return false;
   if (activeNode.value.type === "table") {
     dropTable();
     return true;
@@ -4755,7 +4760,7 @@ const canOpenSqlFileExecution = computed(() => {
 const canExportAllDatabases = computed(() => {
   if (activeNode.value.type !== "connection" || !activeNode.value.connectionId) return false;
   const dbType = connectionStore.getConfig(activeNode.value.connectionId)?.db_type;
-  return !["redis", "mongodb", "dynamodb", "elasticsearch", "easysearch", "meilisearch", "solr", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos", "plugin", "salesforce", "nebula"].includes(dbType || "");
+  return !["redis", "mongodb", "dynamodb", "elasticsearch", "easysearch", "meilisearch", "solr", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos", "plugin", "salesforce", "neo4j", "nebula"].includes(dbType || "");
 });
 
 const canOpenScheduledBackups = computed(() => {
@@ -5666,7 +5671,7 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
       items.push({ label: t("contextMenu.userAdmin"), action: openUserAdmin, icon: UsersRound });
     }
     if (node.connectionId && connectionSupportsProcessList(connectionStore.getConfig(node.connectionId))) {
-      items.push({ label: t("contextMenu.processList"), action: openProcessList, icon: Activity });
+      items.push({ label: t(currentDatabaseType() === "xugu" ? "processList.transactionTitle" : "contextMenu.processList"), action: openProcessList, icon: Activity });
     }
     if (currentDatabaseType() === "sqlserver") {
       items.push({ label: t("contextMenu.sqlServerTrace"), action: openSqlServerActivityTrace, icon: Activity });
@@ -5862,15 +5867,17 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       });
       return true;
     }
-    if (currentDatabaseType() === "nebula" && node.type === "database") {
+    if (["neo4j", "nebula"].includes(currentDatabaseType() || "") && node.type === "database") {
       if (canCloseDatabaseConnection.value) items.push({ label: t("contextMenu.closeDatabaseConnection"), action: closeDatabaseConnection, icon: Unplug });
       items.push(copyNameMenuItem());
       items.push({ label: "", separator: true });
       if (canOpenObjectBrowser.value) items.push({ label: t("contextMenu.openObjectBrowser"), action: openObjectBrowser, icon: TableProperties });
       items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      if (supportsAiAssistantContext(currentDatabaseType())) items.push(addToAiMenuItem(node));
       const sqlHistoryMenu = savedSqlHistorySubmenu();
       if (sqlHistoryMenu) items.push(sqlHistoryMenu);
       items.push({ label: isNodeDefaultDatabase.value ? t("contextMenu.clearDefaultDatabase") : t("contextMenu.setDefaultDatabase"), action: isNodeDefaultDatabase.value ? clearNodeDefaultDatabase : setNodeAsDefaultDatabase, icon: Database });
+      if (canOpenSqlFileExecution.value) items.push({ label: t("sqlFile.title"), action: openSqlFileExecution, icon: FileCode });
       items.push({ label: "", separator: true });
       items.push({ label: t("contextMenu.refreshChildren"), action: refresh, icon: RefreshCw, shortcut: shortcutRefresh });
       return true;
@@ -6281,13 +6288,15 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       appendPluginTableMenuItems(items, node);
       return true;
     }
-    if (currentDatabaseType() === "nebula") {
+    if (["neo4j", "nebula"].includes(currentDatabaseType() || "")) {
       items.push(copyNameMenuItem());
       items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      if (supportsAiAssistantContext(currentDatabaseType())) items.push(addToAiMenuItem(node));
       items.push({ label: "", separator: true });
       items.push({ label: t("contextMenu.viewData"), action: openDataImmediately, icon: TableProperties });
       items.push({ label: t("contextMenu.openInNewDataTab"), action: openDataInNewTabImmediately, icon: CopyPlus, shortcut: shortcutOpenDataInNewTab.value });
-      items.push({ label: t("contextMenu.viewDdl"), action: openDdl, icon: FileCode });
+      if (currentDatabaseType() === "nebula") items.push({ label: t("contextMenu.viewDdl"), action: openDdl, icon: FileCode });
+      if (currentDatabaseType() === "neo4j") items.push(exportDataSubmenu(false));
       const sqlHistoryMenu = savedSqlHistorySubmenu();
       if (sqlHistoryMenu) items.push(sqlHistoryMenu);
       items.push({ label: "", separator: true });
@@ -6647,7 +6656,8 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
     const mysqlObjectTemplate = node.connectionId ? mysqlObjectTemplateForGroup(connectionStore.getConfig(node.connectionId), node) : null;
     const hasMongoCreateIndexAction = node.type === "group-indexes" && canCreateMongoIndex.value;
     const hasMongoDropAllIndexesAction = node.type === "group-indexes" && canDropAllMongoIndexes.value;
-    const hasGroupAction = (node.type === "group-tables" && canCreateTable.value) || (node.type === "group-views" && !!node.connectionId && !!node.database && currentDatabaseType() !== "nebula") || !!mysqlObjectTemplate || hasMongoCreateIndexAction || hasMongoDropAllIndexesAction;
+    const canCreateGroupView = node.type === "group-views" && !!node.connectionId && !!node.database && !["neo4j", "nebula"].includes(currentDatabaseType() || "");
+    const hasGroupAction = (node.type === "group-tables" && canCreateTable.value) || canCreateGroupView || !!mysqlObjectTemplate || hasMongoCreateIndexAction || hasMongoDropAllIndexesAction;
     const canLoadAllObjectGroup = node.type === "group-tables" || node.type === "group-dolt-system-tables" || node.type === "group-views" || node.type === "group-materialized-views";
     if (node.type === "group-tables" && canCreateTable.value) {
       items.push({ label: t("contextMenu.createTable"), action: createTable, icon: Plus });
@@ -6658,7 +6668,7 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
         items.push({ label: t("contextMenu.pasteTable"), action: openPasteTableDialog, icon: Clipboard });
       }
     }
-    if (node.type === "group-views" && node.connectionId && node.database && currentDatabaseType() !== "nebula") {
+    if (canCreateGroupView) {
       items.push({ label: t("contextMenu.createView"), action: createView, icon: Plus });
     }
     if (node.type === "group-events" && node.connectionId && node.database) {
@@ -6865,17 +6875,19 @@ function appendPluginConnectionMenuItems(items: ContextMenuItem[], node: TreeNod
   if (pluginItems.length === 0) return;
   const config = node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined;
   if (!config) return;
-  const menuItems = pluginItems.flatMap(({ plugin, contribution }) => {
-    const invocation = buildPluginConnectionContextMenuInvocation(contribution.id, config);
-    if (!invocation) return [];
-    return [
-      {
-        label: contribution.label,
-        icon: PlugZap,
-        action: () => activateSidebarPluginContextMenuItem(plugin.manifest.id, contribution, invocation),
-      },
-    ];
-  });
+  const menuItems = pluginItems
+    .filter(({ contribution }) => !contribution.dynamic)
+    .flatMap(({ plugin, contribution }) => {
+      const invocation = buildPluginConnectionContextMenuInvocation(contribution.id, config);
+      if (!invocation) return [];
+      return [
+        {
+          label: contribution.label,
+          icon: PlugZap,
+          action: () => activateSidebarPluginContextMenuItem(plugin.manifest.id, contribution, invocation),
+        },
+      ];
+    });
   if (menuItems.length === 0) return;
   items.push({ label: "", separator: true }, ...menuItems);
 }
@@ -6888,6 +6900,7 @@ function appendPluginTableMenuItems(items: ContextMenuItem[], node: TreeNode) {
 
   const tableItems: ContextMenuItem[] = [];
   for (const { plugin, contribution } of pluginItems) {
+    if (contribution.dynamic) continue;
     const invocation = buildPluginTableContextMenuInvocation(contribution.id, node);
     if (!invocation) continue;
     tableItems.push({
@@ -6898,6 +6911,91 @@ function appendPluginTableMenuItems(items: ContextMenuItem[], node: TreeNode) {
   }
   if (tableItems.length === 0) return;
   items.push({ label: "", separator: true }, ...tableItems);
+}
+
+/** Resolve opt-in contributions only for the row being opened. A failing plugin cannot hold the menu open. */
+function resolveContextMenu(node: TreeNode, staticItems: ContextMenuItem[]): Promise<ContextMenuItem[]> | ContextMenuItem[] {
+  if (node.type !== "connection" && node.type !== "table") return staticItems;
+  const entries = sidebarPluginRegistry.value.listContextMenuItems(node.type).filter(({ contribution }) => contribution.dynamic);
+  if (entries.length === 0) return staticItems;
+  const requests = entries.map(async ({ plugin, contribution }) => {
+    const invocation = node.type === "connection" ? (node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined) : undefined;
+    const target = node.type === "connection" ? (invocation ? buildPluginConnectionContextMenuInvocation(contribution.id, invocation) : null) : buildPluginTableContextMenuInvocation(contribution.id, node);
+    if (!target) return [];
+    try {
+      const ownerPluginId = node.type === "connection" && node.connectionId ? connectionStore.getConfig(node.connectionId)?.plugin_id : undefined;
+      const response = await api.invokePlugin(
+        plugin.manifest.id,
+        `contextMenu/resolve/${contribution.id}`,
+        {
+          ...target.params,
+          locale: appLocale.value,
+          ...(ownerPluginId ? { ownerPluginId } : {}),
+        },
+        500,
+      );
+      const resolved = parseDynamicMenuResponse(response);
+      if (!resolved) return [];
+      const activate = (action: DynamicMenuAction, label: string) => {
+        if (action.type === "open-workbench") {
+          if (action.presentation === "dialog") {
+            const workbench = sidebarPluginRegistry.value.findWorkbench(plugin.manifest.id, action.workbench);
+            if (!workbench) {
+              toast(`Plugin workbench '${plugin.manifest.id}/${action.workbench}' is unavailable`, 5000);
+              return;
+            }
+            pluginDialog.value = { ...workbench, context: target.context, title: label };
+            return;
+          }
+          activateSidebarPluginContextMenuItem(plugin.manifest.id, { ...contribution, label, action }, target);
+          return;
+        }
+        const invoke = () => api.invokePlugin(plugin.manifest.id, target.method, { ...target.params, itemId: action.id });
+        void invoke()
+          .catch(async (error: unknown) => {
+            if (!action.reopenConnectionOnMissing || node.type !== "connection" || !target.connectionId || !String((error as Error)?.message || error).includes("Connection is not active")) throw error;
+            await connectionStore.reopenPluginConnection(target.connectionId, plugin.manifest.id);
+            return invoke();
+          })
+          .then((result) => {
+            const message = (result as { message?: unknown } | null)?.message;
+            if (typeof message === "string" && message.trim()) toast(message, 4000);
+          })
+          .catch((error: unknown) => toast(String((error as Error)?.message || error), 5000));
+      };
+      return renderDynamicMenuEntries(resolved, activate).map((item) => ({ ...item, icon: PlugZap }));
+    } catch {
+      return [];
+    }
+  });
+  return Promise.all(requests).then((groups) => {
+    const dynamicItems = groups.flat();
+    return dynamicItems.length ? [...staticItems, { label: "", separator: true }, ...dynamicItems] : staticItems;
+  });
+}
+
+// Dialog-hosted workbenches navigate away from the modal surface the same way
+// the tab path does (PluginWorkbenchTab): open-workbench swaps the dialog for a
+// workbench tab via queryStore.openPluginWorkbench; open-filesystem opens the
+// declared provider tab. The bridge already scopes both to the owner plugin.
+function openWorkbench(pluginId: string, contributionId: string, context?: PluginWorkbenchContext, options?: { forceNew?: boolean }) {
+  const target = sidebarPluginRegistry.value.findWorkbench(pluginId, contributionId);
+  const contextConnectionId = typeof context?.connectionId === "string" ? context.connectionId : "";
+  const connectionName = contextConnectionId ? connectionStore.getConfig(contextConnectionId)?.name : undefined;
+  pluginDialog.value = null;
+  queryStore.openPluginWorkbench(pluginId, contributionId, { title: connectionName || target?.contribution.label || contributionId, context, forceNew: options?.forceNew === true });
+}
+
+function openFilesystem(pluginId: string, providerId: string, context?: PluginWorkbenchContext) {
+  const target = sidebarPluginRegistry.value.listFilesystemProviders().find((entry) => entry.plugin.manifest.id === pluginId && entry.contribution.id === providerId);
+  if (!target) throw new Error(t("pluginPlatform.filesystemUnavailable", { pluginId, providerId }));
+  pluginDialog.value = null;
+  queryStore.openPluginFilesystem(pluginId, providerId, {
+    title: target.contribution.label,
+    connectionId: typeof context?.connectionId === "string" ? context.connectionId : undefined,
+    rootUri: target.contribution.root_uri,
+    currentUri: typeof context?.uri === "string" ? context.uri : undefined,
+  });
 }
 
 function activateRuntimeNode(node: TreeNode) {
@@ -7025,6 +7123,7 @@ function toggleNode(node: TreeNode) {
 
 defineExpose({
   buildContextMenu,
+  resolveContextMenu,
   handleRowClick,
   handleRowDoubleClick,
   handleRowKeydown,
@@ -7036,4 +7135,27 @@ defineExpose({
 });
 </script>
 
-<template />
+<template>
+  <Dialog
+    :open="!!pluginDialog"
+    @update:open="
+      (open) => {
+        if (!open) pluginDialog = null;
+      }
+    "
+  >
+    <DialogContent class="h-[min(82vh,780px)] max-w-[min(1080px,calc(100vw-2rem))] gap-0 p-0">
+      <DialogTitle class="sr-only">{{ pluginDialog?.title }}</DialogTitle>
+      <PluginWorkbenchHost
+        v-if="pluginDialog"
+        class="min-h-0 size-full overflow-hidden rounded-lg"
+        :plugin="pluginDialog.plugin"
+        :contribution="pluginDialog.contribution"
+        :context="pluginDialog.context"
+        @open-workbench="openWorkbench"
+        @open-filesystem="openFilesystem"
+        @close-tab="pluginDialog = null"
+      />
+    </DialogContent>
+  </Dialog>
+</template>

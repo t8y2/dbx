@@ -1147,7 +1147,12 @@ fn strip_sql_comments_and_literals_with_metadata(sql: &str, detect_mysql_executa
     let mut in_single_quote = false;
     let mut in_double_quote = false;
     let mut in_backtick_quote = false;
+    // The closing `$$` / `$tag$` of the dollar-quoted literal being skipped.
+    let mut in_dollar_quote: Option<String> = None;
     let mut has_mysql_executable_comment = false;
+    // Last character emitted from code position, used to keep a `$` that is
+    // still part of an identifier (`foo$tag$bar`) from opening a literal.
+    let mut previous_code_char: Option<char> = None;
 
     while let Some(ch) = chars.next() {
         if in_line_comment {
@@ -1203,6 +1208,30 @@ fn strip_sql_comments_and_literals_with_metadata(sql: &str, detect_mysql_executa
             continue;
         }
 
+        if let Some(delimiter) = &in_dollar_quote {
+            if ch == '$' {
+                let mut probe = chars.clone();
+                let mut matched = true;
+                for expected in delimiter.chars().skip(1) {
+                    match probe.next() {
+                        Some(actual) if actual == expected => {}
+                        _ => {
+                            matched = false;
+                            break;
+                        }
+                    }
+                }
+                if matched {
+                    for _ in delimiter.chars().skip(1) {
+                        chars.next();
+                    }
+                    in_dollar_quote = None;
+                }
+            }
+            output.push(' ');
+            continue;
+        }
+
         if ch == '-' && chars.peek() == Some(&'-') {
             chars.next();
             in_line_comment = true;
@@ -1223,20 +1252,35 @@ fn strip_sql_comments_and_literals_with_metadata(sql: &str, detect_mysql_executa
         if ch == '\'' {
             in_single_quote = true;
             output.push(' ');
+            previous_code_char = Some(' ');
             continue;
         }
         if ch == '"' {
             in_double_quote = true;
             output.push(' ');
+            previous_code_char = Some(' ');
             continue;
         }
         if ch == '`' {
             in_backtick_quote = true;
             output.push(' ');
+            previous_code_char = Some(' ');
             continue;
+        }
+        if ch == '$' && !previous_code_char.is_some_and(is_identifier_char) {
+            if let Some(delimiter) = dollar_quote_delimiter(&chars) {
+                for _ in delimiter.chars().skip(1) {
+                    chars.next();
+                }
+                in_dollar_quote = Some(delimiter);
+                output.push(' ');
+                previous_code_char = Some(' ');
+                continue;
+            }
         }
 
         output.push(ch);
+        previous_code_char = Some(ch);
     }
 
     (output, has_mysql_executable_comment)
@@ -1251,6 +1295,58 @@ fn is_mysql_executable_comment_start(chars: &std::iter::Peekable<std::str::Chars
         Some('M') => marker.next() == Some('!'),
         _ => false,
     }
+}
+
+fn is_identifier_char(character: char) -> bool {
+    character.is_ascii_alphanumeric() || character == '_' || character == '$'
+}
+
+/// Read a PostgreSQL dollar-quote delimiter — `$$` or `$tag$` — from the
+/// characters that follow an opening `$`, and return it only when the literal is
+/// actually closed later in the statement.
+///
+/// The tag rules mirror PostgreSQL's own lexer (empty, or an identifier that
+/// does not start with a digit) and sqlparser's dollar-quote tokenizer, so the
+/// keyword scan agrees with the AST classifier in `sql_risk` instead of reading
+/// the body of a literal as SQL. Requiring a matching closing delimiter keeps an
+/// unterminated `$$` — which the database rejects anyway — visible to the
+/// keyword scan, so malformed input still fails closed.
+fn dollar_quote_delimiter(chars: &std::iter::Peekable<std::str::Chars<'_>>) -> Option<String> {
+    let mut probe = chars.clone();
+    let delimiter = if probe.peek() == Some(&'$') {
+        "$$".to_string()
+    } else {
+        let mut tag = String::new();
+        while probe.peek().is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == '_') {
+            tag.push(*probe.peek()?);
+            probe.next();
+        }
+        if tag.is_empty() || tag.starts_with(|ch: char| ch.is_ascii_digit()) || probe.peek() != Some(&'$') {
+            return None;
+        }
+        format!("${tag}$")
+    };
+    for _ in delimiter.chars().skip(1) {
+        probe.next();
+    }
+    dollar_quote_is_closed(&mut probe, &delimiter).then_some(delimiter)
+}
+
+/// True when `delimiter` occurs again in `chars`, which is positioned just after
+/// an opening delimiter.
+fn dollar_quote_is_closed(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, delimiter: &str) -> bool {
+    let delimiter: Vec<char> = delimiter.chars().collect();
+    let mut window: Vec<char> = Vec::with_capacity(delimiter.len());
+    for character in chars.by_ref() {
+        window.push(character);
+        if window.len() > delimiter.len() {
+            window.remove(0);
+        }
+        if window == delimiter {
+            return true;
+        }
+    }
+    false
 }
 
 fn read_mysql_executable_comment_body<I>(chars: &mut std::iter::Peekable<I>) -> Option<String>
@@ -1933,6 +2029,51 @@ mod tests {
             }),
             None
         );
+    }
+
+    #[test]
+    fn strip_sql_comments_and_literals_dollar_quoted() {
+        // #9866: the body of a dollar-quoted literal is data, not SQL.
+        assert_eq!(strip_sql_comments_and_literals("SELECT $$hello$$ FROM t"), "SELECT         FROM t");
+        assert_eq!(strip_sql_comments_and_literals("SELECT $tag$hello$tag$ FROM t"), "SELECT         FROM t");
+        // A literal body may contain quotes, comments and its own `$` without ending early.
+        assert_eq!(
+            strip_sql_comments_and_literals("SELECT $f$ a 'b' /* c */ $$ $f$ FROM t"),
+            "SELECT                      FROM t"
+        );
+        // `$1` is a placeholder, not a literal opener.
+        assert_eq!(strip_sql_comments_and_literals("SELECT $1, $2 FROM t"), "SELECT $1, $2 FROM t");
+        // An unterminated `$$` is not a literal, so the text stays visible to the keyword scan.
+        assert_eq!(strip_sql_comments_and_literals("SELECT $$hello FROM t"), "SELECT $$hello FROM t");
+        // `$` continues an identifier, so `foo$tag$bar` is one word and not a literal.
+        assert_eq!(strip_sql_comments_and_literals("SELECT foo$tag$bar FROM t"), "SELECT foo$tag$bar FROM t");
+    }
+
+    #[test]
+    fn contains_dangerous_sql_keyword_ignores_dollar_quoted_literals() {
+        assert!(!contains_dangerous_sql_keyword("SELECT $$INSERT INTO users VALUES (1)$$ FROM t"));
+        assert!(!contains_dangerous_sql_keyword("SELECT $body$DROP TABLE users$body$ FROM t"));
+        assert!(!contains_dangerous_sql_keyword("SELECT $$it''s a DELETE$$ FROM t"));
+        // Nested dollar quotes in a tagged literal must not close it early.
+        assert!(!contains_dangerous_sql_keyword("SELECT $outer$$DELETE FROM t$$$outer$ FROM t"));
+        // An unterminated literal is malformed input and still fails closed.
+        assert!(contains_dangerous_sql_keyword("SELECT $$DELETE FROM users"));
+    }
+
+    #[test]
+    fn is_write_sql_dollar_quoted_literals_stay_read_only() {
+        for database_type in [DatabaseType::Postgres, DatabaseType::Mysql, DatabaseType::SqlServer] {
+            assert!(
+                !is_write_sql_for_database("SELECT $$INSERT INTO t VALUES(1)$$ FROM t", database_type),
+                "dollar-quoted literal must stay read-only for {database_type:?}"
+            );
+        }
+        assert!(!is_write_sql("SELECT $$DROP TABLE users$$ FROM t"));
+        // `SELECT ... INTO` still creates a table, so the write must survive.
+        assert!(is_write_sql_for_database("SELECT $$x$$ INTO backup FROM t", DatabaseType::Postgres));
+        assert!(is_write_sql_for_database("SELECT $$x$$ INTO backup FROM t", DatabaseType::SqlServer));
+        // A write after a literal is unaffected.
+        assert!(is_write_sql_for_database("SELECT $$x$$ FROM t; DELETE FROM t", DatabaseType::Postgres));
     }
 
     #[test]

@@ -51,6 +51,15 @@ Desktop 的文件路径属于本机。Docker/Web 的文件路径属于服务器�
 
 驱动的安装、更新、离线包和运行时监控见 [驱动管理](/cn/docs/driver-management)；自定义 JDBC 见 [JDBC 插件](/cn/docs/plugins)。
 
+### Oracle OCI（thick 驱动）
+
+Oracle 连接默认走 thin 驱动；连接对话框的驱动模式里还可以选 **OCI**，它由独立的 `oracle-oci` Agent（基于 Oracle 调用接口构建的 Go agent）承担，连接由 Oracle 客户端库建立。OCI 驱动目前只提供 Windows x64 版本。
+
+- **Instant Client 目录是全局设置**：填写包含 `oci.dll` 的目录，所有 OCI 连接共用；该目录会被加到 Agent 进程的动态库搜索路径最前面。
+- **NLS_LANG 在 Oracle Client 里是进程级的**，所以分两层配置：一个全局默认值，加上可选的连接级覆盖。一旦某个连接覆盖了 NLS_LANG，它就会独占一个 Agent 进程，字符集不会在连接之间串。
+- **TNS 别名与钱包 / sqlnet.ora**：`TNS_ADMIN` 支持全局默认与连接级覆盖（OCI 模式的连接表单里填写目录，留空跟随全局），任何 OCI 连接都能使用 tnsnames.ora 别名、ADB 钱包与 sqlnet.ora 网络选项（压缩、加密），不必切换到 TNS 连接方式；TNS 连接方式下目录也会随连接串传给 Agent 进程。
+- OCI 只改变客户端库的加载方式；网格编辑、DDL、传输等功能与 thin 驱动一致。
+
 ## 能力等级
 
 DBX 驱动清单使用从连接到操作的能力等级，并允许按数据库覆盖单项能力：

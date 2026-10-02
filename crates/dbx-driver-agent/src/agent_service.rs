@@ -461,13 +461,21 @@ pub fn build_agent_list(am: &AgentManager, registry: Option<&AgentRegistry>) -> 
     let local_state = am.load_state();
     let use_managed_jre = local_state.java_runtime.mode == JavaRuntimeMode::Managed;
     agent_catalog::driver_store_entries()
-        .map(|(key, label)| {
+        .filter_map(|(key, label)| {
             let jar_valid = am.is_driver_jar_valid(key);
             let native_installed = am.driver_native_installed(key);
             let launch_config_installed = am.driver_launch_config_path(key).exists();
             let installed = jar_valid || native_installed || launch_config_installed;
             let local = local_state.installed_drivers.get(key);
             let remote = registry.and_then(|r| agent_registry_driver(r, key));
+            // A driver the registry publishes nothing for on this platform (the
+            // Windows-only Oracle OCI agent on macOS, for example) cannot be
+            // installed here, and offering it would only produce a download or
+            // JRE fetch that must fail. Already-installed entries stay listed so
+            // they can still be upgraded or uninstalled.
+            if !installed && remote.is_some_and(|driver| !driver_installable_on_current_platform(key, driver)) {
+                return None;
+            }
             let remote_requires_java_runtime = remote.is_some_and(remote_driver_requires_java_runtime);
             let requires_java_runtime = if installed {
                 jar_valid && !native_installed && !launch_config_installed
@@ -485,7 +493,7 @@ pub fn build_agent_list(am: &AgentManager, registry: Option<&AgentRegistry>) -> 
                 && use_managed_jre
                 && (!am.is_jre_installed(&jre_key)
                     || remote_jre_version.is_some_and(|version| local_jre_version != Some(version)));
-            AgentDriverInfo {
+            Some(AgentDriverInfo {
                 db_type: key.to_string(),
                 label: label.to_string(),
                 version: remote.map(|r| r.version.clone()).unwrap_or_default(),
@@ -499,13 +507,26 @@ pub fn build_agent_list(am: &AgentManager, registry: Option<&AgentRegistry>) -> 
                 requires_java_runtime,
                 jre: jre_key.clone(),
                 jre_installed: !requires_java_runtime || am.is_jre_installed(&jre_key),
-            }
+            })
         })
         .collect()
 }
 
 fn usable_driver_jar(driver: &crate::agent_manager::DriverInfo) -> Option<&crate::agent_manager::ArtifactInfo> {
     driver.jar.as_ref().filter(|artifact| artifact.size > 0)
+}
+
+/// Whether the registry publishes an artifact this platform can actually run:
+/// a native agent binary built for it, or the Java JAR fallback.
+///
+/// The SQLite SSH worker is the one driver whose binaries execute on the remote
+/// SSH host instead of the desktop, so a `native` set without an entry for this
+/// platform is still installable here (#8987).
+fn driver_installable_on_current_platform(db_type: &str, driver: &crate::agent_manager::DriverInfo) -> bool {
+    if AgentManager::is_sqlite_worker_driver(db_type) {
+        return true;
+    }
+    driver.native.contains_key(AgentManager::current_platform()) || usable_driver_jar(driver).is_some()
 }
 
 fn driver_download_artifact(driver: &crate::agent_manager::DriverInfo) -> Option<&crate::agent_manager::ArtifactInfo> {
@@ -1738,7 +1759,11 @@ async fn install_agent_driver_from_registry(
     let jre_key = &driver.jre;
     let native_artifact = driver.native.get(AgentManager::current_platform());
     let jar_artifact = usable_driver_jar(driver);
-    let requires_java_runtime = native_artifact.is_none();
+    // Java is only required when the JAR fallback is what actually gets
+    // installed. A driver that publishes no artifact for this platform at all
+    // (the Windows-only Oracle OCI agent on macOS, for example) must fail
+    // immediately instead of downloading and unpacking a JRE it cannot use.
+    let requires_java_runtime = native_artifact.is_none() && jar_artifact.is_some();
     let needs_jre = requires_java_runtime && jre_needs_install(am, registry, jre_key);
 
     if needs_jre {
@@ -4899,6 +4924,45 @@ mod agent_registry_install_tests {
         let state = manager.load_state();
         assert_eq!(state.installed_drivers["mongodb"].version, driver_version);
         assert_eq!(state.jre_versions[DEFAULT_JRE_KEY], jre_version);
+    }
+
+    /// The managed JRE is only needed for the JAR fallback. A driver the registry
+    /// publishes for another platform only — the Windows-only Oracle OCI agent on
+    /// macOS — must fail on the missing artifact instead of fetching and
+    /// unpacking a JRE it can never use.
+    #[tokio::test]
+    async fn ensure_agent_runtime_fails_without_fetching_a_jre_when_no_local_artifact_exists() {
+        let _test_guard = ENSURE_AGENT_TEST_LOCK.lock().await;
+        let manager = test_manager("ensure-no-local-artifact");
+        let db_type = "oracle-oci";
+        let foreign_platform =
+            if AgentManager::current_platform() == "windows-x64" { "linux-x64" } else { "windows-x64" };
+        let mut registry = registry_with_jar(
+            db_type,
+            "0.1.0",
+            "https://example.invalid/dbx-agent-oracle-oci-legacy-placeholder.jar",
+            0,
+        );
+        registry.jres = registry_with_jre(DEFAULT_JRE_KEY, "21.0.12", "https://example.invalid/dbx-jre.tar.gz", 8).jres;
+        registry.drivers.get_mut(db_type).unwrap().native.insert(
+            foreign_platform.to_string(),
+            ArtifactInfo {
+                url: format!("https://example.invalid/dbx-agent-oracle-oci-{foreign_platform}"),
+                sha256: None,
+                size: 8,
+                format: None,
+            },
+        );
+        cache_test_registry(registry).await;
+
+        let error = ensure_agent_driver_ready_from(&manager, db_type, DownloadSource::Cnb).await.unwrap_err();
+
+        assert!(error.contains("No driver artifact available"), "{error}");
+        assert!(
+            !manager.is_jre_installed(DEFAULT_JRE_KEY),
+            "the JRE must not be downloaded for an uninstallable driver"
+        );
+        assert!(!manager.is_driver_installed(db_type));
     }
 
     #[tokio::test]

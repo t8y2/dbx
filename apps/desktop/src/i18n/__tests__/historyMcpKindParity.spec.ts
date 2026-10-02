@@ -15,7 +15,7 @@ function historyKindsCluster(source: string): string | undefined {
   return (source.match(/kinds: \{[^}]*\}/g) ?? []).find((cluster) => cluster.includes("redis_command:"));
 }
 
-const LOCALES = ["en", "zh-CN", "zh-TW", "ja", "ko", "es", "it", "pt-BR", "ru", "az", "tr"] as const;
+const LOCALES = ["en", "zh-CN", "zh-TW", "ja", "ko", "es", "it", "pt-BR", "ru", "az", "tr", "id"] as const;
 
 describe("history kinds mcp label parity", () => {
   it.each(LOCALES)("%s: history.kinds declares mcp", (name) => {

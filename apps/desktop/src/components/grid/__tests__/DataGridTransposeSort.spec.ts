@@ -6,7 +6,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import type { QueryResult } from "@/types/database";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { sortDataGridRowIndexes, type DataGridSortDirection, type DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 
 vi.mock("vue-virtual-scroller", async () => {
   const { defineComponent, h } = await import("vue");
@@ -53,26 +52,8 @@ async function settle() {
   await nextTick();
 }
 
-function menuAction(label: string): HTMLButtonElement {
-  const button = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((candidate) => candidate.textContent?.trim() === label);
-  if (!button) throw new Error(`Sort menu action not found: ${label}`);
-  return button;
-}
-
-function transposeField(host: HTMLElement, columnIndex: number): HTMLElement {
-  const field = host.querySelector<HTMLElement>(`[data-grid-transpose-column-index="${columnIndex}"]`);
-  if (!field) throw new Error(`Transpose field not found: ${columnIndex}`);
-  return field.closest<HTMLElement>(".data-grid-transpose-row")!;
-}
-
-function transposeValues(host: HTMLElement, columnIndex: number): string[] {
-  return [...transposeField(host, columnIndex).querySelectorAll<HTMLElement>("[data-grid-transpose-cell]")].map((cell) => cell.textContent?.trim() ?? "");
-}
-
-function transposeRecordHeader(host: HTMLElement, recordIndex: number): HTMLElement {
-  const header = host.querySelector<HTMLElement>(`[data-grid-transpose-record-header][data-grid-transpose-record-index="${recordIndex}"]`);
-  if (!header) throw new Error(`Transpose record header not found: ${recordIndex}`);
-  return header;
+function transposeFieldNames(host: HTMLElement): string[] {
+  return [...host.querySelectorAll<HTMLElement>("[data-grid-transpose-column-index]")].map((field) => field.textContent?.trim().split("\n")[0] ?? "");
 }
 
 function mountGrid() {
@@ -88,25 +69,13 @@ function mountGrid() {
   ];
   const result = ref<QueryResult>(
     markRaw({
-      columns: ["name", "score"],
+      columns: ["zeta", "alpha"],
       column_types: ["varchar", "bigint"],
       rows: originalRows,
       affected_rows: 0,
       execution_time_ms: 0,
     }),
   );
-  const sortColumn = ref<string>();
-  const sortColumnIndex = ref<number>();
-  const sortDirection = ref<DataGridSortDirection>();
-  const sortMode = ref<DataGridSortMode>();
-  const onSort = vi.fn((column: string, columnIndex: number, direction: DataGridSortDirection | null, _whereInput?: string, mode: DataGridSortMode = "database") => {
-    const indexes = direction ? sortDataGridRowIndexes(originalRows, columnIndex, direction, result.value.column_types?.[columnIndex]) : originalRows.map((_, index) => index);
-    result.value = markRaw({ ...result.value, rows: indexes.map((index) => originalRows[index]!) });
-    sortColumn.value = direction ? column : undefined;
-    sortColumnIndex.value = direction ? columnIndex : undefined;
-    sortDirection.value = direction ?? undefined;
-    sortMode.value = direction ? mode : undefined;
-  });
 
   const host = document.createElement("div");
   document.body.append(host);
@@ -122,19 +91,14 @@ function mountGrid() {
                 result: result.value,
                 databaseType: "mysql",
                 context: "table-data",
-                sortColumn: sortColumn.value,
-                sortColumnIndex: sortColumnIndex.value,
-                sortDirection: sortDirection.value,
-                sortMode: sortMode.value,
                 tableMeta: {
                   tableName: "scores",
                   columns: [
-                    { name: "name", data_type: "varchar", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
-                    { name: "score", data_type: "bigint", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+                    { name: "zeta", data_type: "varchar", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+                    { name: "alpha", data_type: "bigint", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
                   ],
-                  primaryKeys: ["name"],
+                  primaryKeys: ["zeta"],
                 },
-                onSort,
               }),
           },
         );
@@ -145,7 +109,7 @@ function mountGrid() {
   app.use(i18n);
   app.mount(host);
   mountedApps.push({ app, host });
-  return { host, onSort };
+  return { host };
 }
 
 async function openTranspose(host: HTMLElement) {
@@ -157,15 +121,6 @@ async function openTranspose(host: HTMLElement) {
   await settle();
 }
 
-async function selectTransposeSort(host: HTMLElement, columnIndex: number, labelKey: string) {
-  const trigger = transposeField(host, columnIndex).querySelector<HTMLButtonElement>("[data-grid-transpose-sort]");
-  if (!trigger) throw new Error(`Transpose sort trigger not found: ${columnIndex}`);
-  trigger.click();
-  await settle();
-  menuAction(i18n.global.t(labelKey)).click();
-  await settle();
-}
-
 afterEach(() => {
   for (const { app, host } of mountedApps.splice(0)) {
     app.unmount();
@@ -174,36 +129,26 @@ afterEach(() => {
 });
 
 describe("DataGrid transpose sorting", () => {
-  it("uses the shared local/database sort actions and keeps the active record and row selection", async () => {
-    const { host, onSort } = mountGrid();
+  it("sorts transpose field rows from the column-name header", async () => {
+    const { host } = mountGrid();
     await settle();
     await openTranspose(host);
-
-    expect(transposeValues(host, 1)).toEqual(["10", "NULL", "2"]);
-    const nextRecordButton = host.querySelector(".lucide-chevron-right")?.closest<HTMLButtonElement>("button");
-    if (!nextRecordButton) throw new Error("Next transpose record button not found");
-    nextRecordButton.click();
+    expect(transposeFieldNames(host)).toEqual(["zeta", "alpha"]);
+    host.querySelector<HTMLButtonElement>("[data-grid-transpose-column-sort]")!.click();
     await settle();
-    expect(transposeRecordHeader(host, 0).classList.contains("transpose-record-header-selected")).toBe(true);
-    expect(transposeRecordHeader(host, 1).classList.contains("transpose-record-header-active")).toBe(true);
+    expect(transposeFieldNames(host)).toEqual(["alpha", "zeta"]);
+  });
 
-    await selectTransposeSort(host, 1, "grid.sortCurrentPageAscending");
-    expect(onSort).toHaveBeenLastCalledWith("score", 1, "asc", undefined, "local");
-    expect(transposeValues(host, 1)).toEqual(["2", "10", "NULL"]);
-    expect(transposeRecordHeader(host, 1).classList.contains("transpose-record-header-selected")).toBe(true);
-    expect(transposeRecordHeader(host, 2).classList.contains("transpose-record-header-active")).toBe(true);
-
-    await selectTransposeSort(host, 1, "grid.sortDatabaseDescending");
-    expect(onSort).toHaveBeenLastCalledWith("score", 1, "desc", undefined, "database");
-    expect(transposeValues(host, 1)).toEqual(["10", "2", "NULL"]);
-    expect(transposeRecordHeader(host, 0).classList.contains("transpose-record-header-selected")).toBe(true);
-    expect(transposeRecordHeader(host, 2).classList.contains("transpose-record-header-active")).toBe(true);
-
-    await selectTransposeSort(host, 1, "grid.clearSort");
-    expect(onSort).toHaveBeenLastCalledWith("score", 1, null, undefined, "database");
-    expect(transposeValues(host, 1)).toEqual(["10", "NULL", "2"]);
-    expect(transposeRecordHeader(host, 0).classList.contains("transpose-record-header-selected")).toBe(true);
-    expect(transposeRecordHeader(host, 1).classList.contains("transpose-record-header-active")).toBe(true);
-    expect(host.querySelector(".transpose-grid-scroller")).not.toBeNull();
+  it("toggles descending field-name order from the same header button", async () => {
+    const { host } = mountGrid();
+    await settle();
+    await openTranspose(host);
+    const trigger = host.querySelector<HTMLButtonElement>("[data-grid-transpose-column-sort]");
+    if (!trigger) throw new Error("Transpose column sort trigger not found");
+    trigger.click();
+    await settle();
+    trigger.click();
+    await settle();
+    expect(transposeFieldNames(host)).toEqual(["zeta", "alpha"]);
   });
 });

@@ -425,8 +425,8 @@ describe("useSidebarDataOpenRuntime", () => {
     });
   });
 
-  it("waits for NebulaGraph properties before building the first table query", async () => {
-    mocks.databaseType = "nebula";
+  it.each(["nebula", "neo4j"])("waits for %s properties before building the first table query", async (databaseType) => {
+    mocks.databaseType = databaseType;
     let releaseMetadata: () => void = () => {};
     const gate = new Promise<void>((resolve) => {
       releaseMetadata = resolve;
@@ -455,7 +455,7 @@ describe("useSidebarDataOpenRuntime", () => {
     releaseMetadata();
     await opening;
 
-    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ databaseType: "nebula", columns: ["name"] }));
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ databaseType, columns: ["name"] }));
     expect(mocks.callOrder).toEqual(["query"]);
   });
 

@@ -146,14 +146,17 @@ describe("sqlFormatter", () => {
     expect(formatted).toBe('CREATE VIEW "TEMP_TEST_VIEW" AS\nSELECT trunc(sysdate) AS dates,\n       -- 测试\n       (SELECT sysdate FROM dual t) AS nows\nFROM dual;');
   });
 
-  it("collapses a short OceanBase Oracle view DDL onto one line (issue #7540)", async () => {
-    // The default style joins a statement that fits the line width onto one
-    // line, so a short view body comes back with its keywords cased rather
-    // than spread over several.
+  it("keeps a short OceanBase Oracle view projection readable (issue #7540)", async () => {
+    // A view body still keeps each projected field on its own line while its
+    // surrounding clauses retain the default layout.
     const singleLine = `create or replace view "APP"."ACTIVE_USERS" as select ID, NAME from USERS where STATUS = 'ACTIVE'`;
     const formatted = await formatSqlForDisplay(singleLine, sqlFormatDialectForDbType("oceanbase-oracle"));
 
-    expect(formatted).toBe(`CREATE OR REPLACE VIEW "APP"."ACTIVE_USERS" AS SELECT ID, NAME FROM USERS WHERE STATUS = 'ACTIVE'`);
+    expect(formatted).toBe(`CREATE OR REPLACE VIEW "APP"."ACTIVE_USERS" AS
+SELECT ID,
+       NAME
+FROM USERS
+WHERE STATUS = 'ACTIVE'`);
     expect(formatted).toContain("'ACTIVE'");
     expect(formatted).toContain('"ACTIVE_USERS"');
   });
@@ -339,7 +342,10 @@ OR inside$$ as note
 
     // Alias casing is the tokenizer's business, not the keyword casing's: the
     // date part stays an identifier, so `keywordCase: "upper"` leaves it alone.
-    expect(formatted).toBe(`SELECT ${identifier}, t.${identifier} FROM material ${identifier} LIMIT 100;`);
+    expect(formatted).toBe(`SELECT ${identifier},
+       t.${identifier}
+FROM material ${identifier}
+LIMIT 100;`);
     expect(formatted).toContain("SELECT");
     expect(formatted).toContain("FROM");
     expect(formatted).toContain("LIMIT");
@@ -458,7 +464,9 @@ OR inside$$ as note
 
     const formatted = await formatSqlForEditing(sql, sqlFormatDialectForDbType("dameng"));
 
-    expect(formatted).toContain('JS1.REC_CREATOR AS "recCreator"');
+    const aliasLines = formatted.split("\n").filter((line) => line.includes(' AS "recCreator'));
+    expect(aliasLines).toHaveLength(2);
+    expect(aliasLines[0]!.indexOf(" AS ")).toBe(aliasLines[1]!.indexOf(" AS "));
     // Known and unknown functions alike are written without a space before the
     // parenthesis.
     expect(formatted).toContain("DECODE(");

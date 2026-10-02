@@ -2250,7 +2250,12 @@ export const useConnectionStore = defineStore("connection", () => {
     return parts.map((part) => encodeURIComponent(part)).join(":");
   }
 
-  function ownerAwareMetadataCacheVersion(config: ConnectionConfig | undefined, version: string): string {
+  function ownerAwareMetadataCacheVersion(config: ConnectionConfig | undefined, version: string, schema?: string): string {
+    if (schema && config?.db_type === "jdbc" && connectionShouldDiscoverJdbcSchemas(config)) {
+      // Older caches contain unrestricted objects and children without schemas.
+      // Keep catalog-only JDBC caches and recognized dialects on their old keys.
+      return `${version}-jdbc-schema-v1`;
+    }
     return config?.db_type === "informix" ? `${version}-informix-owner-v2` : version;
   }
 
@@ -2274,7 +2279,7 @@ export const useConnectionStore = defineStore("connection", () => {
     if (config?.db_type === "opengauss" && databaseCompatibilityMode(config.id, database)?.trim().toUpperCase() === "A") {
       scopedVersion = `${scopedVersion}-a-packages-v1`;
     }
-    return ownerAwareMetadataCacheVersion(config, scopedVersion);
+    return ownerAwareMetadataCacheVersion(config, scopedVersion, schema);
   }
 
   /**
@@ -3079,7 +3084,7 @@ export const useConnectionStore = defineStore("connection", () => {
     if (parent.type === "group-tables") return objectGroupCacheKey(parent);
     if (parent.type !== "database" && parent.type !== "schema" && parent.type !== "linked-server-schema") return null;
     const simpleObjectDisplay = useSettingsStore().editorSettings.sidebarObjectDisplay === "simple";
-    const cacheVersion = ownerAwareMetadataCacheVersion(getConfig(parent.connectionId), simpleObjectDisplay ? "objects-simple-v9" : "objects-grouped-v9");
+    const cacheVersion = ownerAwareMetadataCacheVersion(getConfig(parent.connectionId), simpleObjectDisplay ? "objects-simple-v9" : "objects-grouped-v9", parent.schema);
     return schemaCacheKey(parent.connectionId, parent.database, parent.schema || "", cacheVersion);
   }
 
@@ -6822,7 +6827,7 @@ export const useConnectionStore = defineStore("connection", () => {
             targetParent.objectCount = mergedChildren.length;
             setChildren(targetParent, nextChildren);
             if (!options?.searchFilter) {
-              await savePersistedTreeChildren(schemaCacheKey(parentConnectionId, parentDatabase, parent.schema || "", ownerAwareMetadataCacheVersion(config, "objects-simple-v9")), nextChildren);
+              await savePersistedTreeChildren(schemaCacheKey(parentConnectionId, parentDatabase, parent.schema || "", ownerAwareMetadataCacheVersion(config, "objects-simple-v9", parent.schema)), nextChildren);
             }
             // 该分支只服务 simple 库/模式表列表；搜索分页结果不是全量，不能作为成员依据。
             if (!page.hasMore && !options?.searchFilter) pruneTableVGroupStaleMembers(targetParent, nextChildren, true);

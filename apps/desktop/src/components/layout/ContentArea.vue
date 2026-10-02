@@ -1141,6 +1141,22 @@ function onHandleClickTable(target: SqlObjectNavigationTarget) {
   emit("clickTable", props.activeTab.id, target);
 }
 
+function onLocateObjectTable(target: ContentAreaSurfaceEmits["openObjectTable"][1]) {
+  const isMongo = props.activeConnection?.db_type === "mongodb";
+  emit("locate-tab", {
+    id: props.activeTab.id,
+    title: target.tableName,
+    connectionId: props.activeTab.connectionId,
+    database: props.activeTab.database,
+    schema: target.schema,
+    catalog: target.catalog,
+    mode: isMongo ? "mongo" : "data",
+    sql: isMongo ? target.tableName : "",
+    isExecuting: false,
+    tableMeta: { ...target, columns: [], primaryKeys: [] },
+  });
+}
+
 function onHandleViewTableData(target: SqlObjectNavigationTarget) {
   emit("viewTableData", props.activeTab.id, target);
 }
@@ -3221,6 +3237,7 @@ defineExpose({
           :initial-search-query="activeTab.objectBrowser?.searchQuery"
           :viewport="activeTab.objectBrowser?.viewport"
           @open-table="emit('openObjectTable', activeTab.id, $event)"
+          @locate-table="onLocateObjectTable"
           @schema-change="emit('objectSchemaChange', activeTab.id, $event)"
           @viewport-change="emit('objectBrowserViewportChange', activeTab.id, $event)"
           @search-change="emit('objectBrowserSearchChange', activeTab.id, $event)"

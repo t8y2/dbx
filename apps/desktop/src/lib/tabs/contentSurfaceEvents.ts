@@ -8,6 +8,7 @@ import type { ContentAreaSurfaceEmits } from "@/components/layout/querySurfaces"
  */
 export const contentSurfaceEventNames = [
   "closeTab",
+  "locate-tab",
   "update:activeOutputView",
   "fixWithAi",
   "sendSelectionToAi",

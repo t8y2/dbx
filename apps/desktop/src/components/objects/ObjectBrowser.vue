@@ -175,6 +175,7 @@ import { invalidateObjectMetadataCache } from "@/lib/metadata/objectMetadataCach
 import { invalidateObjectDdl } from "@/lib/metadata/objectDdlCache";
 import { invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
 import { eventEditorInstanceKey, resolveInitialEventEditorRequest } from "@/lib/table/eventEditorRequest";
+import { createLocateTabMenuItem } from "@/lib/tabs/tabMenu";
 
 type ObjectFilter = ObjectBrowserFilter;
 type ObjectBrowserColumnKey = "select" | "name" | "type" | "estimatedRows" | "totalBytes" | "created_at" | "updated_at" | "comment";
@@ -197,6 +198,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   openTable: [target: { tableName: string; schema?: string; tableType?: string; catalog?: string; comment?: string | null }];
+  locateTable: [target: { tableName: string; schema?: string; tableType?: string; catalog?: string }];
   schemaChange: [schema: string | undefined];
   viewportChange: [viewport: ObjectBrowserViewport];
   searchChange: [query: string];
@@ -3640,7 +3642,7 @@ function getTypeMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   return items;
 }
 
-function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
+function getObjectBrowserActionMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   if (isMongodb.value) {
     return [
       { label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
@@ -3654,6 +3656,21 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   if (item.type === "TYPE" || item.type === "TYPE_BODY") return getTypeMenuItems(item);
   if (isSourceOnlyObjectBrowserRow(item)) return getPackageMenuItems(item);
   return getProcFuncMenuItems(item);
+}
+
+function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
+  const items = getObjectBrowserActionMenuItems(item);
+  if (item.type === "TABLE" || item.type === "VIEW" || item.type === "MATERIALIZED_VIEW") {
+    items.push(
+      { label: "", separator: true },
+      createLocateTabMenuItem({
+        t,
+        visible: true,
+        onLocate: () => emit("locateTable", { tableName: item.name, schema: item.schema, tableType: objectBrowserOpenTableType(item), catalog: props.catalog }),
+      }),
+    );
+  }
+  return items;
 }
 </script>
 

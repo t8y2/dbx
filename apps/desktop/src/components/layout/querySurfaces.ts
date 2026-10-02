@@ -76,6 +76,7 @@ export interface ContentAreaSurfaceProps {
  */
 export interface ContentAreaSurfaceEmits {
   closeTab: [tabId: string];
+  "locate-tab": [tab: QueryTab];
   "update:activeOutputView": [tabId: string, value: TabOutputView];
   fixWithAi: [tabId: string, errorMessage: string];
   sendSelectionToAi: [tabId: string, sql: string];

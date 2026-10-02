@@ -6514,10 +6514,18 @@ pub async fn list_object_statistics_core(
     database: &str,
     schema: &str,
 ) -> Result<Vec<db::ObjectStatistics>, String> {
-    retry_metadata_connection(state, connection_id, Some(database), || {
-        list_object_statistics_once(state, connection_id, database, schema)
-    })
-    .await
+    let metadata_session =
+        EphemeralAgentMetadataSession::open(state, connection_id, Some(database), "object-statistics").await;
+    let result = retry_metadata_connection_for_session(
+        state,
+        connection_id,
+        Some(database),
+        metadata_session.client_session_id(),
+        || list_object_statistics_once(state, connection_id, database, schema, metadata_session.client_session_id()),
+    )
+    .await;
+    metadata_session.finish(state, connection_id, Some(database)).await;
+    result
 }
 
 pub async fn list_completion_objects_core(
@@ -6954,8 +6962,10 @@ async fn list_object_statistics_once(
     connection_id: &str,
     database: &str,
     schema: &str,
+    client_session_id: Option<&str>,
 ) -> Result<Vec<db::ObjectStatistics>, String> {
-    let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
+    let pool_key =
+        state.get_or_create_metadata_pool_for_session(connection_id, Some(database), client_session_id).await?;
     let db_config = connection_config(state, connection_id).await;
     let pool_handle = state.pool_handle(&pool_key).await;
     try_sqlserver!(pool_handle, list_object_statistics, schema);

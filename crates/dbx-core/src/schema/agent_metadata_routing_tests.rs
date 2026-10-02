@@ -1,4 +1,7 @@
-use super::{list_databases_core, AppState, ConnectionConfig, DatabaseType, PoolKind};
+use super::{
+    get_table_ddl_core, list_databases_core, list_object_statistics_core, AppState, ConnectionConfig, DatabaseType,
+    PoolKind,
+};
 use crate::db::agent_driver::{AgentDriverClient, PooledAgentClient};
 use serde_json::{json, Value};
 use std::os::unix::fs::PermissionsExt;
@@ -59,6 +62,39 @@ impl AgentFixture {
             PoolKind::Agent(client) => client,
             _ => panic!("expected Agent pool"),
         }
+    }
+
+    async fn wait_for_requests(&self, method: &str, count: usize) -> Vec<Value> {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let requests = self.requests(method);
+                if requests.len() >= count {
+                    return requests;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("expected {count} {method} requests"))
+    }
+
+    async fn foreground(&self) -> Arc<PooledAgentClient> {
+        let key = self.state.get_or_create_metadata_pool_for_session("conn", Some("configured"), None).await.unwrap();
+        self.pool(&key).await
+    }
+
+    async fn assert_only_foreground_remains(&self, foreground: &Arc<PooledAgentClient>) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let ready = self.state.with_connection_pools(|pools| {
+                    pools.len() == 1 && matches!(pools.get("conn:configured:role:metadata"), Some(PoolKind::Agent(client)) if Arc::ptr_eq(client, foreground))
+                }).await;
+                let sessions = self.state.agent_manager.connection_runtimes.lock().await.values()
+                    .filter_map(|cell| cell.get()).map(|runtime| runtime.active_session_count()).sum::<u64>();
+                if ready && sessions == 1 { return; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("ephemeral pool and Agent session must be released");
     }
 
     async fn shutdown(self) {
@@ -230,4 +266,204 @@ async fn enumeration_legacy_sqlserver_reuses_connection_metadata_across_database
     assert_eq!(fixture.requests("connect").len(), 1);
     assert_eq!(metadata_key, "conn:role:metadata");
     fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn statistics_do_not_block_foreground_ddl_on_shared_runtime() {
+    let fixture = AgentFixture::new(DatabaseType::Dameng).await;
+    let foreground = fixture.foreground().await;
+    std::fs::write(fixture.control_path("statistics"), "block").unwrap();
+    let state = fixture.state.clone();
+    let statistics =
+        tokio::spawn(async move { list_object_statistics_core(&state, "conn", "configured", "APP").await });
+    fixture.wait_for_requests("execute_query", 1).await;
+
+    let ddl = tokio::time::timeout(
+        Duration::from_millis(500),
+        get_table_ddl_core(&fixture.state, "conn", "configured", "APP", "EVENTS", None),
+    )
+    .await;
+
+    std::fs::write(fixture.control_path("release-statistics"), "release").unwrap();
+    let result = statistics.await.unwrap().unwrap();
+    assert!(ddl.is_ok(), "foreground DDL waited for background statistics");
+    assert!(ddl.unwrap().unwrap().contains("CREATE TABLE"));
+    assert_eq!(result[0].estimated_rows, Some(12));
+    assert_eq!(result[0].total_bytes, Some(4096));
+    let opens = fixture.requests("open_session");
+    assert_eq!(opens.len(), 2);
+    assert_ne!(
+        fixture.requests("execute_query")[0]["params"]["agentSessionId"],
+        fixture.requests("get_table_ddl")[0]["params"]["agentSessionId"]
+    );
+    assert_eq!(fixture.state.agent_manager.connection_runtimes.lock().await.len(), 1);
+    fixture.assert_only_foreground_remains(&foreground).await;
+    assert_eq!(fixture.requests("close_session").len(), 1);
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn statistics_fallback_reuses_ephemeral_session_and_closes_it() {
+    let fixture = AgentFixture::new(DatabaseType::Dameng).await;
+    let foreground = fixture.foreground().await;
+    std::fs::write(fixture.control_path("statistics"), "fallback").unwrap();
+
+    let result = list_object_statistics_core(&fixture.state, "conn", "configured", "APP").await.unwrap();
+
+    assert_eq!(result[0].estimated_rows, Some(12));
+    assert_eq!(result[0].total_bytes, None);
+    let queries = fixture.requests("execute_query");
+    assert_eq!(queries.len(), 2);
+    assert_eq!(queries[0]["params"]["agentSessionId"], queries[1]["params"]["agentSessionId"]);
+    assert_eq!(fixture.requests("open_session").len(), 2);
+    fixture.wait_for_requests("close_session", 1).await;
+    fixture.assert_only_foreground_remains(&foreground).await;
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn statistics_sql_error_and_timeout_clean_up_without_replaying() {
+    for failure in ["sql", "timeout"] {
+        let fixture = AgentFixture::new(DatabaseType::Dameng).await;
+        let foreground = fixture.foreground().await;
+        std::fs::write(fixture.control_path("statistics"), failure).unwrap();
+
+        let error = list_object_statistics_core(&fixture.state, "conn", "configured", "APP").await.unwrap_err();
+
+        assert!(error.contains(&format!("fixture {failure}")), "{error}");
+        assert_eq!(fixture.requests("execute_query").len(), 2);
+        assert_eq!(fixture.requests("open_session").len(), 2);
+        fixture.wait_for_requests("close_session", 1).await;
+        fixture.assert_only_foreground_remains(&foreground).await;
+        fixture.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn statistics_connection_retry_replaces_only_ephemeral_session() {
+    let fixture = AgentFixture::new(DatabaseType::Dameng).await;
+    let foreground = fixture.foreground().await;
+    std::fs::write(fixture.control_path("statistics"), "retry").unwrap();
+
+    let result = list_object_statistics_core(&fixture.state, "conn", "configured", "APP").await.unwrap();
+
+    assert_eq!(result[0].estimated_rows, Some(12));
+    assert_eq!(fixture.requests("open_session").len(), 3);
+    assert_eq!(fixture.requests("execute_query").len(), 3);
+    fixture.wait_for_requests("close_session", 2).await;
+    fixture.assert_only_foreground_remains(&foreground).await;
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn statistics_abort_closes_busy_session_and_preserves_foreground() {
+    let fixture = AgentFixture::new(DatabaseType::Dameng).await;
+    let foreground = fixture.foreground().await;
+    std::fs::write(fixture.control_path("statistics"), "block").unwrap();
+    let state = fixture.state.clone();
+    let statistics =
+        tokio::spawn(async move { list_object_statistics_core(&state, "conn", "configured", "APP").await });
+    fixture.wait_for_requests("execute_query", 1).await;
+
+    statistics.abort();
+    assert!(statistics.await.unwrap_err().is_cancelled());
+
+    fixture.wait_for_requests("close_session", 1).await;
+    fixture.assert_only_foreground_remains(&foreground).await;
+    assert!(get_table_ddl_core(&fixture.state, "conn", "configured", "APP", "EVENTS", None)
+        .await
+        .unwrap()
+        .contains("CREATE TABLE"));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn statistics_capacity_error_does_not_invalidate_foreground_or_open_extra_sessions() {
+    let fixture = AgentFixture::new(DatabaseType::Dameng).await;
+    let foreground = fixture.foreground().await;
+    std::fs::write(fixture.control_path("capacity"), "1").unwrap();
+
+    let result = list_object_statistics_core(&fixture.state, "conn", "configured", "APP").await;
+
+    assert!(result.is_err(), "statistics bypassed the Agent session limit");
+    assert_eq!(fixture.requests("open_session").len(), 2);
+    assert!(fixture.requests("execute_query").is_empty());
+    fixture.assert_only_foreground_remains(&foreground).await;
+    assert!(get_table_ddl_core(&fixture.state, "conn", "configured", "APP", "EVENTS", None)
+        .await
+        .unwrap()
+        .contains("CREATE TABLE"));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn statistics_dropping_polled_future_closes_busy_session() {
+    let fixture = AgentFixture::new(DatabaseType::Dameng).await;
+    let foreground = fixture.foreground().await;
+    std::fs::write(fixture.control_path("statistics"), "block").unwrap();
+    let mut statistics = Box::pin(list_object_statistics_core(&fixture.state, "conn", "configured", "APP"));
+    tokio::select! {
+        result = &mut statistics => panic!("statistics unexpectedly completed: {result:?}"),
+        _ = fixture.wait_for_requests("execute_query", 1) => {}
+    }
+
+    drop(statistics);
+
+    fixture.wait_for_requests("close_session", 1).await;
+    fixture.assert_only_foreground_remains(&foreground).await;
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn statistics_repeated_requests_release_every_ephemeral_session() {
+    let fixture = AgentFixture::new(DatabaseType::Dameng).await;
+    let foreground = fixture.foreground().await;
+    for _ in 0..4 {
+        let result = list_object_statistics_core(&fixture.state, "conn", "configured", "APP").await.unwrap();
+        assert_eq!(result.len(), 1);
+        fixture.assert_only_foreground_remains(&foreground).await;
+    }
+    let opens = fixture.requests("open_session");
+    let closed = fixture.requests("close_session");
+    assert_eq!(opens.len(), 5);
+    assert_eq!(closed.len(), 4);
+    let opened_sessions =
+        opens[1..].iter().map(|request| request["params"]["agentSessionId"].clone()).collect::<Vec<_>>();
+    assert!(closed.iter().all(|request| opened_sessions.contains(&request["params"]["agentSessionId"])));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn statistics_empty_result_closes_session_without_fallback() {
+    let fixture = AgentFixture::new(DatabaseType::Dameng).await;
+    let foreground = fixture.foreground().await;
+    std::fs::write(fixture.control_path("statistics"), "empty").unwrap();
+
+    assert!(list_object_statistics_core(&fixture.state, "conn", "configured", "APP").await.unwrap().is_empty());
+
+    assert_eq!(fixture.requests("execute_query").len(), 1);
+    fixture.wait_for_requests("close_session", 1).await;
+    fixture.assert_only_foreground_remains(&foreground).await;
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn statistics_native_sqlite_preserves_default_pool() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
+    let state = AppState::new(storage);
+    let config: ConnectionConfig = serde_json::from_value(json!({
+        "id": "sqlite", "name": "SQLite statistics", "db_type": "sqlite",
+        "host": ":memory:", "port": 0, "username": "", "password": "",
+        "keepalive_interval_secs": 0, "idle_timeout_secs": 0
+    }))
+    .unwrap();
+    state.configs.write().await.insert(config.id.clone(), config);
+    let key = state.get_or_create_pool("sqlite", None).await.unwrap();
+
+    assert!(list_object_statistics_core(&state, "sqlite", "", "main").await.unwrap().is_empty());
+
+    assert!(state.with_connection_pools(|pools| pools.len() == 1 && pools.contains_key(&key)).await);
+    assert!(state.agent_manager.connection_runtimes.lock().await.is_empty());
+    state.shutdown(Duration::from_secs(2)).await;
 }

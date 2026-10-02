@@ -146,7 +146,6 @@ export default withEnglishFallback({
     sortByUpdatesFirst: "Pembaruan lebih dulu",
     allRepositories: "Semua repositori",
     marketplaceGuideTitle: "Plugin dikelola oleh pengembang komunitas",
-    showFewerTags: "Tampilkan lebih sedikit",
     marketplaceGuideDescription: "Untuk masalah plugin atau permintaan fitur, silakan buka issue di repositori plugin itu sendiri (gunakan tautan repositori sumber pada kartu plugin); repositori utama DBX hanya menangani masalah aplikasinya sendiri.",
     loadingMarketplace: "Memuat marketplace plugin",
     noMarketplacePlugins: "Tidak ada plugin untuk ditampilkan",

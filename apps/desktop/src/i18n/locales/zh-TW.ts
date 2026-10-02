@@ -231,7 +231,6 @@ export default withEnglishFallback({
     sortByUpdatesFirst: "有更新優先",
     allRepositories: "全部倉庫",
     marketplaceGuideTitle: "外掛由社群開發者維護",
-    showFewerTags: "收合",
     marketplaceGuideDescription: "外掛問題或功能建議請透過外掛卡片上的原始碼倉庫入口，前往對應外掛倉庫提交 Issue；DBX 主倉庫僅受理應用程式本身的問題。",
     loadingMarketplace: "正在載入外掛商店",
     noMarketplacePlugins: "沒有可顯示的外掛",

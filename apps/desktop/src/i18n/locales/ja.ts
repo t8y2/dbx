@@ -231,7 +231,6 @@ export default withEnglishFallback({
     sortByUpdatesFirst: "更新ありを優先",
     allRepositories: "すべてのリポジトリ",
     marketplaceGuideTitle: "プラグインはコミュニティ開発者がメンテナンスしています",
-    showFewerTags: "折りたたむ",
     marketplaceGuideDescription: "プラグインの問題や機能要望は、プラグインカードのソースリポジトリリンクから該当リポジトリに Issue を投稿してください。DBX メインリポジトリはアプリ本体の問題のみを受け付けています。",
     loadingMarketplace: "プラグインマーケットプレイスを読み込み中",
     noMarketplacePlugins: "表示できるプラグインがありません",

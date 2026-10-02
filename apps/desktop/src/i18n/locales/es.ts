@@ -230,7 +230,6 @@ export default withEnglishFallback({
     sortByUpdatesFirst: "Actualizaciones primero",
     allRepositories: "Todos los repositorios",
     marketplaceGuideTitle: "Los plugins los mantienen desarrolladores de la comunidad",
-    showFewerTags: "Menos",
     marketplaceGuideDescription: "Para problemas o sugerencias sobre un plugin, abre una issue en el repositorio del propio plugin (usa el enlace del repositorio de origen en la tarjeta); el repositorio principal de DBX solo atiende problemas de la propia aplicación.",
     loadingMarketplace: "Cargando marketplace de plugins",
     noMarketplacePlugins: "No hay plugins para mostrar",

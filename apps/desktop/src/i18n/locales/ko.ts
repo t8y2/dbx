@@ -230,7 +230,6 @@ export default withEnglishFallback({
     sortByUpdatesFirst: "업데이트 우선",
     allRepositories: "모든 저장소",
     marketplaceGuideTitle: "플러그인은 커뮤니티 개발자가 유지 관리합니다",
-    showFewerTags: "접기",
     marketplaceGuideDescription: "플러그인 문제나 기능 제안은 플러그인 카드의 소스 저장소 링크를 통해 해당 저장소에 Issue를 등록해 주세요. DBX 메인 저장소는 앱 자체의 문제만 처리합니다.",
     loadingMarketplace: "플러그인 마켓플레이스 로드 중",
     noMarketplacePlugins: "표시할 플러그인이 없습니다",

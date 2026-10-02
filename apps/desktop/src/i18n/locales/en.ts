@@ -228,7 +228,6 @@ export default {
     sortByUpdatesFirst: "Updates first",
     allRepositories: "All repositories",
     marketplaceGuideTitle: "Plugins are maintained by community developers",
-    showFewerTags: "Show less",
     marketplaceGuideDescription: "For plugin issues or feature requests, please open an issue in the plugin's own repository (use the source repository link on the plugin card); the main DBX repository only handles issues with the app itself.",
     loadingMarketplace: "Loading plugin marketplace",
     noMarketplacePlugins: "No plugins to show",

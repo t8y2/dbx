@@ -40,38 +40,13 @@ pub struct AgentRuntimeClient {
 
 impl AgentRuntimeClient {
     pub async fn spawn(launch: AgentLaunchSpec, app_version: &str) -> Result<Arc<Self>, String> {
-        let mut child = spawn_agent_process(&launch)?;
-        let child_stdin = child.stdin.take().ok_or("Failed to capture agent stdin")?;
-        let child_stdout = child.stdout.take().ok_or("Failed to capture agent stdout")?;
-        let child_stderr = child.stderr.take().ok_or("Failed to capture agent stderr")?;
-        let stderr_tail = Arc::new(Mutex::new(StderrTail::default()));
-        start_stderr_collector(child_stderr, stderr_tail.clone());
-
-        let mut stdout = BufReader::new(child_stdout);
-        let stdout = tokio::time::timeout(
-            Duration::from_secs(STARTUP_TIMEOUT_SECS),
-            tokio::task::spawn_blocking(move || loop {
-                let line = read_agent_line(&mut stdout, "startup line")?;
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                match serde_json::from_str::<Value>(trimmed) {
-                    Ok(value) if value.get("ready") == Some(&Value::Bool(true)) => return Ok(stdout),
-                    Ok(_) => return Err(format!("Agent did not send ready signal, got: {line}")),
-                    Err(_) => log::warn!("[agent:stdout] ignoring non-JSON line during startup: {trimmed}"),
-                }
-            }),
-        )
-        .await
-        .map_err(|_| format!("Agent startup timed out ({STARTUP_TIMEOUT_SECS}s)"))?
-        .map_err(|e| format!("Agent startup task failed: {e}"))??;
+        let ReadyAgentProcess { child, stdin, stdout, stderr_tail } = spawn_ready_agent_process(&launch).await?;
 
         let runtime = Arc::new(Self {
             child: Arc::new(Mutex::new(child)),
             child_reaper_started: Arc::new(AtomicBool::new(false)),
             child_reaped: Arc::new(AtomicBool::new(false)),
-            stdin: Arc::new(Mutex::new(BufWriter::new(child_stdin))),
+            stdin: Arc::new(Mutex::new(stdin)),
             pending: Arc::new(Mutex::new(HashMap::new())),
             stderr_tail,
             next_id: AtomicU64::new(0),
@@ -873,6 +848,7 @@ const AGENT_STDOUT_NOISE_SAMPLE_CHARS: usize = 160;
 const MAX_AGENT_RESPONSE_BYTES: usize = 512 * 1024 * 1024;
 const AGENT_EXIT_DIAGNOSTIC_WAIT_MS: u64 = 1_000;
 const AGENT_EXIT_DIAGNOSTIC_POLL_MS: u64 = 10;
+const AGENT_STARTUP_RETRY_DELAY_MS: u64 = 100;
 const SHARED_RUNTIME_IDLE_GRACE_SECS: u64 = 30;
 const AGENT_JAVA_OPTS_ENV: &str = "DBX_AGENT_JAVA_OPTS";
 
@@ -1623,6 +1599,87 @@ impl StderrTail {
     }
 }
 
+struct ReadyAgentProcess {
+    child: Child,
+    stdin: BufWriter<ChildStdin>,
+    stdout: BufReader<ChildStdout>,
+    stderr_tail: Arc<Mutex<StderrTail>>,
+}
+
+async fn spawn_ready_agent_process(launch: &AgentLaunchSpec) -> Result<ReadyAgentProcess, String> {
+    match spawn_ready_agent_process_once(launch).await {
+        Ok(process) => Ok(process),
+        Err(error) if is_retryable_agent_startup_error(&error) => {
+            log::warn!("[agent] process exited before startup handshake; retrying once: {error}");
+            tokio::time::sleep(Duration::from_millis(AGENT_STARTUP_RETRY_DELAY_MS)).await;
+            spawn_ready_agent_process_once(launch).await
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn spawn_ready_agent_process_once(launch: &AgentLaunchSpec) -> Result<ReadyAgentProcess, String> {
+    let mut child = spawn_agent_process(launch)?;
+    let child_stdin = child.stdin.take().ok_or("Failed to capture agent stdin")?;
+    let child_stdout = child.stdout.take().ok_or("Failed to capture agent stdout")?;
+    let child_stderr = child.stderr.take().ok_or("Failed to capture agent stderr")?;
+    let stderr_tail = Arc::new(Mutex::new(StderrTail::default()));
+    start_stderr_collector(child_stderr, stderr_tail.clone());
+
+    let mut stdout = BufReader::new(child_stdout);
+    let startup_result = tokio::time::timeout(
+        Duration::from_secs(STARTUP_TIMEOUT_SECS),
+        tokio::task::spawn_blocking(move || loop {
+            let line = read_agent_line(&mut stdout, "startup line")?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<Value>(trimmed) {
+                Ok(value) if value.get("ready") == Some(&Value::Bool(true)) => return Ok(stdout),
+                Ok(_) => return Err(format!("Agent did not send ready signal, got: {line}")),
+                Err(_) => log::warn!("[agent:stdout] ignoring non-JSON line during startup: {trimmed}"),
+            }
+        }),
+    )
+    .await;
+
+    let stdout = match startup_result {
+        Ok(Ok(Ok(stdout))) => stdout,
+        Ok(Ok(Err(error))) => return Err(clean_up_failed_agent_startup(error, &mut child, &stderr_tail)),
+        Ok(Err(error)) => {
+            return Err(clean_up_failed_agent_startup(
+                format!("Agent startup task failed: {error}"),
+                &mut child,
+                &stderr_tail,
+            ));
+        }
+        Err(_) => {
+            return Err(clean_up_failed_agent_startup(
+                format!("Agent startup timed out ({STARTUP_TIMEOUT_SECS}s)"),
+                &mut child,
+                &stderr_tail,
+            ));
+        }
+    };
+
+    Ok(ReadyAgentProcess { child, stdin: BufWriter::new(child_stdin), stdout, stderr_tail })
+}
+
+fn clean_up_failed_agent_startup(error: String, child: &mut Child, stderr_tail: &Arc<Mutex<StderrTail>>) -> String {
+    let error = format_agent_startup_error(&error, child, stderr_tail);
+    if matches!(child.try_wait(), Ok(None)) {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+    error
+}
+
+fn is_retryable_agent_startup_error(error: &str) -> bool {
+    error.contains("Failed to read startup line from agent: end of stream")
+        && !error.contains(AGENT_JAVA_TOO_OLD_MESSAGE)
+}
+
 impl AgentDriverClient {
     /// Spawn an agent process and wait for it to signal readiness.
     ///
@@ -1630,66 +1687,12 @@ impl AgentDriverClient {
     /// they speak the DBX stdin/stdout JSON-RPC protocol.
     /// Blocks (async) until the agent writes `{"ready":true}` to stdout.
     pub async fn spawn(launch: AgentLaunchSpec) -> Result<Self, String> {
-        let mut child = spawn_agent_process(&launch)?;
-
-        let child_stdin = child.stdin.take().ok_or("Failed to capture agent stdin")?;
-        let child_stdout = child.stdout.take().ok_or("Failed to capture agent stdout")?;
-        let child_stderr = child.stderr.take().ok_or("Failed to capture agent stderr")?;
-
-        let stdin = BufWriter::new(child_stdin);
-        let mut stdout = BufReader::new(child_stdout);
-        let stderr_tail = Arc::new(Mutex::new(StderrTail::default()));
-        start_stderr_collector(child_stderr, stderr_tail.clone());
-
-        // Wait for the agent to signal readiness with {"ready":true}.
-        // Some JDBC drivers (e.g. DM8) write banners to stdout during class
-        // loading.  Skip non-JSON lines so driver output doesn't break the
-        // JSON-RPC handshake.
-        let startup_result = tokio::time::timeout(
-            Duration::from_secs(STARTUP_TIMEOUT_SECS),
-            tokio::task::spawn_blocking(move || loop {
-                let line = read_agent_line(&mut stdout, "startup line")?;
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                match serde_json::from_str::<Value>(trimmed) {
-                    Ok(v) if v.get("ready") == Some(&Value::Bool(true)) => return Ok(stdout),
-                    Ok(_) => return Err(format!("Agent did not send ready signal, got: {line}")),
-                    Err(_) => {
-                        log::warn!("[agent:stdout] ignoring non-JSON line during startup: {trimmed}");
-                        continue;
-                    }
-                }
-            }),
-        )
-        .await;
-
-        let ready_stdout = match startup_result {
-            Ok(Ok(Ok(stdout))) => stdout,
-            Ok(Ok(Err(e))) => {
-                return Err(format_agent_startup_error(&e, &mut child, &stderr_tail));
-            }
-            Ok(Err(e)) => {
-                return Err(format_agent_startup_error(
-                    &format!("Agent startup task failed: {e}"),
-                    &mut child,
-                    &stderr_tail,
-                ));
-            }
-            Err(_) => {
-                return Err(format_agent_startup_error(
-                    &format!("Agent startup timed out ({STARTUP_TIMEOUT_SECS}s)"),
-                    &mut child,
-                    &stderr_tail,
-                ));
-            }
-        };
+        let ReadyAgentProcess { child, stdin, stdout, stderr_tail } = spawn_ready_agent_process(&launch).await?;
 
         Ok(Self {
             child: Some(child),
             stdin: Some(stdin),
-            stdout: Some(ready_stdout),
+            stdout: Some(stdout),
             stderr_tail,
             handshake: None,
             next_id: 0,
@@ -3603,14 +3606,14 @@ mod tests {
         agent_object_source_params_with_relation, agent_process_error_hint, agent_proxy_env_vars, agent_schema_params,
         agent_schema_table_params, agent_supports_capability, agent_transaction_params, append_legacy_error_context,
         decode_agent_response, format_agent_process_error, format_agent_startup_error, is_agent_rpc_response_error,
-        is_unsupported_handshake_error, legacy_agent_call_error, mongo_collection_params, mongo_database_params,
-        mongo_document_id_params, parse_agent_java_opts, read_agent_json_response, read_agent_line,
-        read_agent_line_with_limit, start_stderr_collector, validate_dameng_java_system_properties, AgentCallError,
-        AgentCapability, AgentDriverClient, AgentErrorCategory, AgentErrorContext, AgentErrorStage, AgentHandshake,
-        AgentKvMethod, AgentLaunchSpec, AgentMethod, AgentOperationOutcome, AgentRuntimeClient,
-        AgentSessionDisposition, AgentTableReadCloseParams, AgentTableReadPageParams, AgentTableReadStartParams,
-        MongoAgentMethod, StderrTail, AGENT_JAVA_TOO_OLD_MESSAGE, AGENT_PROTOCOL_VERSION,
-        AGENT_STDOUT_NOISE_SAMPLE_CHARS, MAX_CONSECUTIVE_AGENT_STDOUT_NOISE_LINES,
+        is_retryable_agent_startup_error, is_unsupported_handshake_error, legacy_agent_call_error,
+        mongo_collection_params, mongo_database_params, mongo_document_id_params, parse_agent_java_opts,
+        read_agent_json_response, read_agent_line, read_agent_line_with_limit, start_stderr_collector,
+        validate_dameng_java_system_properties, AgentCallError, AgentCapability, AgentDriverClient, AgentErrorCategory,
+        AgentErrorContext, AgentErrorStage, AgentHandshake, AgentKvMethod, AgentLaunchSpec, AgentMethod,
+        AgentOperationOutcome, AgentRuntimeClient, AgentSessionDisposition, AgentTableReadCloseParams,
+        AgentTableReadPageParams, AgentTableReadStartParams, MongoAgentMethod, StderrTail, AGENT_JAVA_TOO_OLD_MESSAGE,
+        AGENT_PROTOCOL_VERSION, AGENT_STDOUT_NOISE_SAMPLE_CHARS, MAX_CONSECUTIVE_AGENT_STDOUT_NOISE_LINES,
     };
     use crate::agent_recovery::{RecoveryDecision, RecoveryPolicy, RecoveryScope};
     use std::io::Cursor;
@@ -4329,6 +4332,54 @@ mod tests {
         assert!(message.contains("Agent requires Java 21"));
         assert!(message.contains("details: Failed to read startup line from agent: end of stream"));
         assert!(message.contains("UnsupportedClassVersionError"));
+    }
+
+    #[test]
+    fn startup_retry_only_accepts_premature_eof_without_java_version_failure() {
+        assert!(is_retryable_agent_startup_error(
+            "Failed to read startup line from agent: end of stream. agent process exited with exit code: 2"
+        ));
+        assert!(!is_retryable_agent_startup_error("Agent startup timed out (15s)"));
+        assert!(!is_retryable_agent_startup_error(&format!(
+            "{AGENT_JAVA_TOO_OLD_MESSAGE}. details: Failed to read startup line from agent: end of stream"
+        )));
+    }
+
+    #[tokio::test]
+    async fn shared_runtime_retries_once_after_premature_startup_eof() {
+        let test_id = uuid::Uuid::new_v4();
+        let script_path = std::env::temp_dir().join(format!("dbx-agent-startup-retry-{test_id}.py"));
+        let counter_path = std::env::temp_dir().join(format!("dbx-agent-startup-retry-{test_id}.count"));
+        std::fs::write(
+            &script_path,
+            r#"import json, pathlib, sys
+counter_path = pathlib.Path(sys.argv[1])
+attempt = int(counter_path.read_text()) + 1 if counter_path.exists() else 1
+counter_path.write_text(str(attempt))
+if attempt == 1:
+    print('transient startup failure', file=sys.stderr, flush=True)
+    sys.exit(2)
+print(json.dumps({'ready': True}), flush=True)
+for line in sys.stdin:
+    request = json.loads(line)
+    result = {'protocolVersion': 2, 'agentProtocolVersion': 2, 'capabilities': ['multi_session']}
+    print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': result}), flush=True)
+"#,
+        )
+        .unwrap();
+
+        let runtime = AgentRuntimeClient::spawn(
+            AgentLaunchSpec::new(test_python())
+                .with_args([script_path.to_string_lossy().to_string(), counter_path.to_string_lossy().to_string()]),
+            "test",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(std::fs::read_to_string(&counter_path).unwrap(), "2");
+        runtime.kill_and_wait().await;
+        let _ = std::fs::remove_file(script_path);
+        let _ = std::fs::remove_file(counter_path);
     }
 
     #[test]

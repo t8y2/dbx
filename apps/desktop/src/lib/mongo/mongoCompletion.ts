@@ -539,6 +539,9 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
     case "indexName":
       items = indexNameItems(prefix, input.indexes ?? [], context.method);
       break;
+    case "indexName":
+      items = indexNameItems(prefix, input.indexes ?? [], context.method);
+      break;
     case "value":
       if (/^new\s+/i.test(prefix)) {
         // Match against what follows `new ` so `new O` still finds `ObjectId("…")`;

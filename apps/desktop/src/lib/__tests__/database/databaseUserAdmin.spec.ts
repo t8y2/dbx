@@ -37,6 +37,27 @@ function connection(dbType: ConnectionConfig["db_type"], driverProfile?: string)
   };
 }
 
+describe("Vastbase password changes", () => {
+  const user = { user: 'fixture"role', host: "LOGIN" };
+
+  it("quotes both passwords and the role in the exact self-change grammar", () => {
+    const provider = getDatabaseUserAdminProvider("vastbase")!;
+    expect(provider.alterPasswordSql!(user, "new'password", "old'password")).toBe(`ALTER ROLE "fixture""role" IDENTIFIED BY 'new''password' REPLACE 'old''password';`);
+  });
+
+  it("allows the server to authorize a reset without the old password", () => {
+    const provider = getDatabaseUserAdminProvider("vastbase")!;
+    expect(provider.alterPasswordSql!(user, "new", "")).toBe('ALTER ROLE "fixture""role" IDENTIFIED BY \'new\';');
+    expect(provider.alterPasswordSql!(user, "new")).toBe('ALTER ROLE "fixture""role" IDENTIFIED BY \'new\';');
+  });
+
+  it("keeps whitespace in old passwords and preserves PostgreSQL and MySQL defaults", () => {
+    expect(getDatabaseUserAdminProvider("vastbase")!.alterPasswordSql!(user, "new", " ")).toContain(" REPLACE ' ';");
+    expect(getDatabaseUserAdminProvider("postgres")!.alterPasswordSql!(user, "new", "old")).toBe('ALTER ROLE "fixture""role" PASSWORD \'new\';');
+    expect(getDatabaseUserAdminProvider("mysql")!.alterPasswordSql!({ user: "fixture", host: "%" }, "new", "old")).toBe("ALTER USER 'fixture'@'%' IDENTIFIED BY 'new';");
+  });
+});
+
 describe("MySQL grant privilege selection", () => {
   const availablePrivileges = ["SELECT", "INSERT", "UPDATE", "EXECUTE"];
 

@@ -4116,6 +4116,10 @@ export default withEnglishFallback({
     blockIoChart: "Blok G/Ç",
   },
   userAdmin: {
+    oldPassword: "Geçerli parola (isteğe bağlı)",
+    oldPasswordHint: "Vastbase'de ilk kullanıcı dışında kendi parolanızı değiştirmek için geçerli parola gerekir. Başka bir kullanıcının parolasını yetkili olarak sıfırlarken boş bırakılabilir.",
+    passwordChangedReconnect: "Parola değiştirildi. Bu bağlantı kesildi ve eski parola temizlendi. Bağlantı ayarlarında Kaydet ve Bağlan seçeneğini kullanıp yeni parolayı girin.",
+    passwordChangedCleanupFailed: "Parola değiştirildi ancak bağlantı temizlenemedi. Otomatik yeniden bağlantı engellendi. DBX'i yeniden başlatmadan önce bu bağlantıyı düzenleyip eski parolayı temizleyin.",
     title: "Kullanıcılar ve Yetkiler",
     unsupported: "MySQL uyumlu ve PostgreSQL uyumlu bağlantılar desteklenir. SQL Server, Oracle ve diğer yetki modelleri daha sonra eklenebilir.",
     newUser: "Yeni Kullanıcı",

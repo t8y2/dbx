@@ -4791,6 +4791,10 @@ export default {
     },
   },
   userAdmin: {
+    oldPassword: "Current password (optional)",
+    oldPasswordHint: "For Vastbase, changing your own password requires the current password, except for the initial user. Authorized resets of another user may leave it empty.",
+    passwordChangedReconnect: "Password changed. This connection is disconnected and its old password has been cleared. To reconnect, use Save & Connect in connection settings and enter the new password.",
+    passwordChangedCleanupFailed: "Password changed, but connection cleanup failed. Automatic reconnection is blocked. Edit this connection to clear the old password before restarting DBX.",
     title: "Users & Privileges",
     unsupported: "MySQL-compatible and PostgreSQL-compatible connections are supported. SQL Server, Oracle, and other permission models can be added next.",
     newUser: "New User",

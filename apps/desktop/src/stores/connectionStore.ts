@@ -683,6 +683,7 @@ export const useConnectionStore = defineStore("connection", () => {
   const connectInFlight = new Map<string, Promise<void>>();
   const disconnectInFlight = new Map<string, Promise<void>>();
   const disconnectInFlightScoped = new Map<string, boolean>();
+  const passwordChangeReconnectRequired = new Map<string, "retiring" | "ready">();
   const cancelDisconnectInFlight = new Map<string, Promise<void>>();
   const activeLocalConnectionAttempts = new Map<string, number>();
   const cancelledLocalConnectionAttempts = new Map<string, Set<number>>();
@@ -4536,15 +4537,16 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
-  async function persistRememberedConnectionPassword(config: ConnectionConfig, rememberPassword: boolean, expectedConfigFingerprint: string): Promise<void> {
-    if (!rememberPassword) return;
+  async function persistRememberedConnectionPassword(config: ConnectionConfig, rememberPassword: boolean, expectedConfigFingerprint: string, localAttempt: number): Promise<void> {
+    if (!rememberPassword || !isCurrentLocalConnectionAttempt(config.id, localAttempt)) return;
     const index = connections.value.findIndex((connection) => connection.id === config.id);
     if (index < 0) return;
     if (connectionConfigFingerprint(connections.value[index]) !== expectedConfigFingerprint) return;
     const nextConnections = [...connections.value];
     nextConnections[index] = { ...nextConnections[index], password: config.password, save_password: true };
     await persistConnections(nextConnections);
-    if (connectionConfigFingerprint(connections.value[index]) !== expectedConfigFingerprint) {
+    const current = getConfig(config.id);
+    if (!isCurrentLocalConnectionAttempt(config.id, localAttempt) || !current || connectionConfigFingerprint(current) !== expectedConfigFingerprint) {
       await persistConnections();
       return;
     }
@@ -4569,12 +4571,19 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function connect(config: ConnectionConfig) {
     config = normalizeConnection(config);
+    const passwordChangeState = passwordChangeReconnectRequired.get(config.id);
+    if (passwordChangeState === "retiring") throw new Error(i18n.global.t("userAdmin.passwordChangedCleanupFailed"));
     const expectedConfigFingerprint = connectionConfigFingerprint(getConfig(config.id) ?? config);
     if (getBlockingDisconnectInFlight(config.id)) await waitForBlockingDisconnectInFlight(config.id);
+    if (passwordChangeReconnectRequired.get(config.id) !== passwordChangeState) throw new Error(i18n.global.t("userAdmin.passwordChangedReconnect"));
     const localAttempt = beginLocalConnectionAttempt(config.id);
     try {
       let rememberPassword = false;
-      if (connectionNeedsPasswordPrompt(config) && (await pluginConnectionPasswordPromptNeeded(config)) && !(await hasSessionCredential(config.id))) {
+      if (passwordChangeState === "ready") {
+        const prompted = await ensureConnectionPassword({ ...config, password: "", save_password: false }, true);
+        config = prompted.config;
+        rememberPassword = prompted.rememberPassword;
+      } else if (connectionNeedsPasswordPrompt(config) && (await pluginConnectionPasswordPromptNeeded(config)) && !(await hasSessionCredential(config.id))) {
         const prompted = await ensureConnectionPassword(config);
         config = prompted.config;
         rememberPassword = prompted.rememberPassword;
@@ -4591,11 +4600,13 @@ export const useConnectionStore = defineStore("connection", () => {
       await ensureLocalConnectionAttemptActiveAfterConnectResult(config.id, localAttempt, id);
       await syncMongoLegacyDriverFallback(id, config);
       await ensureLocalConnectionAttemptActiveAfterConnectResult(config.id, localAttempt, id);
+      passwordChangeReconnectRequired.delete(config.id);
       activeConnectionId.value = id;
       connectedIds.value.add(id);
       if (config.db_type !== "plugin") {
         void refreshConnectedDatabaseInfo(id, { ...config, id });
         await refreshConnectionIdentifierQuote(id, { ...config, id });
+        ensureLocalConnectionAttemptActive(config.id, localAttempt);
         // Compatibility modes warm asynchronously; the QueryEditor watcher and the
         // backend's own A-mode/EXISTS validation make a cold map safe.
         void refreshConnectionDatabaseModes(id, { ...config, id });
@@ -4627,18 +4638,18 @@ export const useConnectionStore = defineStore("connection", () => {
         });
       }
       try {
-        await persistRememberedConnectionPassword(config, rememberPassword, expectedConfigFingerprint);
+        await persistRememberedConnectionPassword(config, rememberPassword, expectedConfigFingerprint, localAttempt);
       } catch (error) {
-        setConnectionError(id, i18n.global.t("connection.rememberPasswordSaveFailed", { message: connectionErrorMessage(error) }));
+        if (isCurrentLocalConnectionAttempt(config.id, localAttempt)) setConnectionError(id, i18n.global.t("connection.rememberPasswordSaveFailed", { message: connectionErrorMessage(error) }));
       }
+      ensureLocalConnectionAttemptActive(config.id, localAttempt);
       return id;
     } catch (e) {
       if (isCancelledLocalConnectionAttempt(config.id, localAttempt)) {
-        clearConnectionError(config.id);
         throw new Error(CONNECTION_ATTEMPT_CANCELLED_MESSAGE);
       }
       if (isCancelledConnectionAttempt(e) || isSupersededConnectionAttempt(e)) {
-        clearConnectionError(config.id);
+        if (isCurrentLocalConnectionAttempt(config.id, localAttempt)) clearConnectionError(config.id);
       } else {
         recordConnectionError(config.id, e);
       }
@@ -4824,6 +4835,21 @@ export const useConnectionStore = defineStore("connection", () => {
     await api.forgetSessionCredential(connectionId);
   }
 
+  async function retirePasswordAfterChange(connectionId: string) {
+    passwordChangeReconnectRequired.set(connectionId, "retiring");
+    connections.value = connections.value.map((config) => (config.id === connectionId ? { ...config, password: "", save_password: false } : config));
+    const results = await Promise.allSettled([disconnect(connectionId), persistConnections()]);
+    try {
+      if (await api.sessionCredentialStatus(connectionId)) await api.forgetSessionCredential(connectionId);
+      if (results.some((result) => result.status === "rejected")) throw new Error();
+      passwordChangeReconnectRequired.set(connectionId, "ready");
+      setConnectionError(connectionId, i18n.global.t("userAdmin.passwordChangedReconnect"));
+    } catch {
+      setConnectionError(connectionId, i18n.global.t("userAdmin.passwordChangedCleanupFailed"));
+      throw new Error(i18n.global.t("userAdmin.passwordChangedCleanupFailed"));
+    }
+  }
+
   async function closeDatabaseConnection(connectionId: string, database: string) {
     if (hasSqlServerActivityTraceForConnection(connectionId, database)) await disposeSqlServerActivityTracesForConnection(connectionId, database);
     cancelObjectDdlLoadsForDatabase(connectionId, database);
@@ -4863,6 +4889,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function ensureConnected(connectionId: string, options: { activate?: boolean; verifyHealth?: boolean; forceReconnect?: boolean; allowPasswordPrompt?: boolean } = {}) {
+    if (passwordChangeReconnectRequired.has(connectionId)) throw new Error(i18n.global.t("userAdmin.passwordChangedReconnect"));
     if (!options.forceReconnect && connectedIds.value.has(connectionId)) {
       // Pure navigation can safely trust the existing connected state. Its
       // destination will perform the real API request, while blocking here on
@@ -4906,6 +4933,7 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     const expectedConfigFingerprint = connectionConfigFingerprint(config);
     if (getBlockingDisconnectInFlight(connectionId)) await waitForBlockingDisconnectInFlight(connectionId);
+    if (passwordChangeReconnectRequired.has(connectionId)) throw new Error(i18n.global.t("userAdmin.passwordChangedReconnect"));
     const existingConnect = connectInFlight.get(connectionId);
     if (existingConnect) {
       await existingConnect;
@@ -4940,32 +4968,33 @@ export const useConnectionStore = defineStore("connection", () => {
       if (config.db_type !== "plugin") {
         void refreshConnectedDatabaseInfo(connectionId, config);
         await refreshConnectionIdentifierQuote(connectionId, config);
+        ensureLocalConnectionAttemptActive(connectionId, localAttempt);
         void refreshConnectionDatabaseModes(connectionId, config);
       }
       markSuccessfulLocalConnectionAttempt(connectionId, localAttempt);
       markConnectionHealthChecked(connectionId);
       clearConnectionError(connectionId);
       try {
-        await persistRememberedConnectionPassword(config, rememberPassword, expectedConfigFingerprint);
+        await persistRememberedConnectionPassword(config, rememberPassword, expectedConfigFingerprint, localAttempt);
       } catch (error) {
-        setConnectionError(connectionId, i18n.global.t("connection.rememberPasswordSaveFailed", { message: connectionErrorMessage(error) }));
+        if (isCurrentLocalConnectionAttempt(connectionId, localAttempt)) setConnectionError(connectionId, i18n.global.t("connection.rememberPasswordSaveFailed", { message: connectionErrorMessage(error) }));
       }
+      ensureLocalConnectionAttemptActive(connectionId, localAttempt);
     })();
     connectInFlight.set(connectionId, connectPromise);
     try {
       await connectPromise;
+      ensureLocalConnectionAttemptActive(connectionId, localAttempt);
       if (options.activate !== false) activeConnectionId.value = connectionId;
     } catch (e) {
       if (isCancelledLocalConnectionAttempt(connectionId, localAttempt)) {
-        clearConnectionError(connectionId);
         throw new Error(CONNECTION_ATTEMPT_CANCELLED_MESSAGE);
       }
       if (isCancelledConnectionAttempt(e)) {
-        clearConnectionError(connectionId);
+        if (isCurrentLocalConnectionAttempt(connectionId, localAttempt)) clearConnectionError(connectionId);
         throw e;
       }
       if (isSupersededConnectionAttempt(e) && connectedIds.value.has(connectionId)) {
-        clearConnectionError(connectionId);
         return;
       }
       // 后台搜索触发的重连失败只留一行提示，避免把完整驱动错误（如旧版 SQL Server 的 TLS 提示）
@@ -10271,6 +10300,7 @@ export const useConnectionStore = defineStore("connection", () => {
     handleConnectionLivenessMessage,
     metadataGenerationFor,
     disconnectAndForgetConnectionPassword,
+    retirePasswordAfterChange,
     hasSessionCredential,
     closeDatabaseConnection,
     ensureConnected,

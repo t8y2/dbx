@@ -4283,6 +4283,10 @@ export default withEnglishFallback({
     summarySize: "サイズ",
   },
   userAdmin: {
+    oldPassword: "現在のパスワード（任意）",
+    oldPasswordHint: "Vastbase では初期ユーザー以外が自分のパスワードを変更するには現在のパスワードが必要です。権限のある他ユーザーのリセットでは省略できます。",
+    passwordChangedReconnect: "パスワードを変更しました。接続を切断し、古いパスワードを消去しました。接続設定で「保存して接続」を選び、新しいパスワードを入力してください。",
+    passwordChangedCleanupFailed: "パスワードは変更されましたが、接続のクリーンアップに失敗しました。自動再接続を停止しました。DBX を再起動する前に接続を編集し、古いパスワードを消去してください。",
     title: "ユーザーと権限",
     unsupported: "MySQL互換およびPostgreSQL互換の接続がサポートされています。SQL Server、Oracle、その他の権限モデルは今後追加予定です。",
     newUser: "新しいユーザー",

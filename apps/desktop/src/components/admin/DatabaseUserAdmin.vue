@@ -77,12 +77,16 @@ const pendingPlan = ref<AuthorizationPlan>();
 const pendingResults = ref<AuthorizationStepResult[]>([]);
 const pendingDanger = ref(false);
 const pendingAfterApply = ref<(() => Promise<void>) | undefined>();
+const pendingPasswordChange = ref<{ connectionId: string; selfChange: boolean }>();
+const passwordReconnectRequired = ref(false);
+const passwordCleanupFailed = ref(false);
 
 const createUser = ref("app_user");
 const createHost = ref("%");
 const createPassword = ref("");
 const newHost = ref("");
 const newPassword = ref("");
+const oldPassword = ref("");
 const privilegeDatabase = ref(restoredUiState.privilegeDatabase ?? (props.connection.database || "*"));
 const privilegeTable = ref(restoredUiState.privilegeTable ?? "*");
 const privilegeScope = ref<PrivilegeScope>(privilegeScopes.includes(restoredUiState.privilegeScope as PrivilegeScope) ? restoredUiState.privilegeScope! : "mysql");
@@ -192,12 +196,14 @@ async function ensureConnection() {
 }
 
 async function loadUsers() {
+  if (passwordReconnectRequired.value) return;
   const userProvider = provider.value;
   if (!userProvider) return;
   loadingUsers.value = true;
   loadError.value = "";
   try {
     await ensureConnection();
+    if (passwordReconnectRequired.value) return;
     let nextUsers: DatabaseUserIdentity[] = [];
     try {
       const result = await api.executeQuery(props.connection.id, "", userProvider.listUsersSql(), undefined, undefined, {
@@ -221,6 +227,7 @@ async function loadUsers() {
 }
 
 async function loadGrants() {
+  if (passwordReconnectRequired.value) return;
   const user = selectedUser.value;
   const userProvider = provider.value;
   if (!user || !userProvider) {
@@ -264,6 +271,7 @@ async function loadGrants() {
 }
 
 async function loadCurrentTableGrants() {
+  if (passwordReconnectRequired.value) return;
   const user = selectedUser.value;
   const userProvider = provider.value;
   if (!user || !userProvider?.tableGrantsSql || !userProvider.parseTableGrants || currentTableGrantsLoading.value) return;
@@ -339,6 +347,7 @@ function togglePrivilege(privilege: string) {
 
 // 加载当前连接下的数据库列表：新增用户弹窗与权限编辑面板的授权范围编辑器共用
 function loadDatabases(): Promise<void> {
+  if (passwordReconnectRequired.value) return Promise.resolve();
   if (databaseLoadPromise) return databaseLoadPromise;
   let request!: Promise<void>;
   request = (async () => {
@@ -347,6 +356,7 @@ function loadDatabases(): Promise<void> {
     createDatabasesLoadError.value = "";
     try {
       await ensureConnection();
+      if (passwordReconnectRequired.value) return;
       const config = props.connection;
       if (provider.value?.authorizationModel === "starrocks") {
         const catalogs = await api.listDorisCatalogs(config.id);
@@ -409,6 +419,7 @@ async function prepareAuthorizationSelections(selections: DatabaseAuthorizationS
 }
 
 function previewSql(sql: string, options: { danger?: boolean; afterApply?: () => Promise<void> } = {}) {
+  pendingPasswordChange.value = undefined;
   pendingSql.value = sql;
   pendingPlan.value = undefined;
   pendingResults.value = [];
@@ -418,35 +429,88 @@ function previewSql(sql: string, options: { danger?: boolean; afterApply?: () =>
 }
 
 async function applyPendingSql() {
-  if (!pendingSql.value.trim()) return;
+  if (!pendingSql.value.trim() || applying.value || passwordReconnectRequired.value) return;
+  const sql = pendingSql.value;
+  const plan = pendingPlan.value;
+  const afterApply = pendingAfterApply.value;
+  const passwordChange = pendingPasswordChange.value;
+  const connection = props.connection;
+  const passwordSecrets = passwordChange ? [newPassword.value, oldPassword.value].filter(Boolean) : [];
   applying.value = true;
   try {
     const result = await executeWithProductionSqlGuard({
-      connection: props.connection,
+      connection,
       database: "",
-      sql: pendingSql.value,
+      sql,
       source: t("production.sourceAdmin"),
       execute: async () => {
-        if (pendingPlan.value) {
-          return executeAuthorizationPlan(pendingPlan.value, (step) => api.executeMulti(props.connection.id, step.database, step.sql, undefined, undefined, { maxRows: 1000, catalog: step.targetCatalog, continueOnError: step.targetCatalog ? false : true }));
+        if (!sqlDialogOpen.value || pendingSql.value !== sql || props.connection.id !== connection.id) return undefined;
+        if (plan) {
+          return executeAuthorizationPlan(plan, (step) => api.executeMulti(connection.id, step.database, step.sql, undefined, undefined, { maxRows: 1000, catalog: step.targetCatalog, continueOnError: step.targetCatalog ? false : true }));
         }
-        const queryResults = await api.executeMulti(props.connection.id, "", pendingSql.value, undefined, undefined, { maxRows: 1000, continueOnError: true });
+        const queryResults = await api.executeMulti(connection.id, "", sql, undefined, undefined, { maxRows: 1000, continueOnError: true });
         const failed = queryResults.find((item) => item.execution_error === true);
         if (failed) throw new Error(String(failed.rows[0]?.[0] ?? t("userAdmin.applyFailedUnknown")));
+        if (passwordChange?.selfChange) {
+          if (props.connection.id === connection.id) {
+            passwordReconnectRequired.value = true;
+            clearPendingSql();
+            passwordDialogOpen.value = false;
+          }
+          try {
+            await connectionStore.retirePasswordAfterChange(passwordChange.connectionId);
+            toast(t("userAdmin.passwordChangedReconnect"), 8000);
+          } catch {
+            if (props.connection.id === connection.id) passwordCleanupFailed.value = true;
+            toast(t("userAdmin.passwordChangedCleanupFailed"), 10000);
+          }
+        }
         return [] as AuthorizationStepResult[];
       },
     });
     if (!result) return;
+    if (passwordChange?.selfChange) return;
+    if (props.connection.id !== connection.id) return;
     pendingResults.value = result;
     const status = result.length > 0 ? authorizationPlanStatus(result) : "success";
     toast(t(status === "success" ? "userAdmin.applySuccess" : status === "partial" ? "userAdmin.applyPartial" : "userAdmin.applyFailedSummary"), status === "success" ? 2500 : 5000);
-    const createSucceeded = !pendingPlan.value || result.some((item) => item.step.id === "create-user" && item.status === "success");
-    if (createSucceeded) await (pendingAfterApply.value?.() ?? Promise.resolve());
-    if (!pendingPlan.value) sqlDialogOpen.value = false;
+    const createSucceeded = !plan || result.some((item) => item.step.id === "create-user" && item.status === "success");
+    if (createSucceeded) await (afterApply?.() ?? Promise.resolve());
+    if (!plan) sqlDialogOpen.value = false;
     await loadUsers();
     await loadGrants();
   } catch (error: any) {
-    toast(t("userAdmin.applyFailed", { message: error?.message || String(error) }), 5000);
+    let message = error?.message || String(error);
+    for (const secret of passwordSecrets) {
+      message = message.replaceAll(secret.replaceAll("'", "''"), "***").replaceAll(secret, "***");
+    }
+    toast(t("userAdmin.applyFailed", { message }), 5000);
+  } finally {
+    applying.value = false;
+  }
+}
+
+function clearPendingSql() {
+  pendingSql.value = "";
+  pendingPlan.value = undefined;
+  pendingResults.value = [];
+  pendingAfterApply.value = undefined;
+  pendingPasswordChange.value = undefined;
+  sqlDialogOpen.value = false;
+  newPassword.value = "";
+  oldPassword.value = "";
+}
+
+async function reconnectAfterPasswordChange() {
+  if (applying.value || passwordCleanupFailed.value) return;
+  applying.value = true;
+  try {
+    await connectionStore.connect(connectionStore.getConfig(props.connection.id) ?? props.connection);
+    passwordReconnectRequired.value = false;
+    await loadUsers();
+    await loadGrants();
+  } catch {
+    toast(t("userAdmin.passwordChangedReconnect"), 8000);
   } finally {
     applying.value = false;
   }
@@ -546,13 +610,15 @@ function previewPasswordChange() {
   const userProvider = provider.value;
   const alterPasswordSql = userProvider?.alterPasswordSql;
   if (!user || !alterPasswordSql || !newPassword.value) return;
-  previewSql(alterPasswordSql(user, newPassword.value), {
+  previewSql(alterPasswordSql(user, newPassword.value, oldPassword.value), {
     danger: true,
     afterApply: async () => {
       passwordDialogOpen.value = false;
       newPassword.value = "";
+      oldPassword.value = "";
     },
   });
+  pendingPasswordChange.value = { connectionId: props.connection.id, selfChange: !!userProvider?.supportsOldPassword && user.user === props.connection.username };
 }
 
 function previewHostChange() {
@@ -667,6 +733,17 @@ function resetPrivilegeDefaults(scope: PrivilegeScope) {
   }
 }
 
+watch(passwordDialogOpen, (open) => {
+  if (open) return;
+  newPassword.value = "";
+  oldPassword.value = "";
+  if (pendingPasswordChange.value) clearPendingSql();
+});
+
+watch(sqlDialogOpen, (open) => {
+  if (!open) clearPendingSql();
+});
+
 watch(
   () => createDialogOpen.value,
   (open) => {
@@ -694,6 +771,10 @@ watch(
 watch(
   () => props.connection.id,
   () => {
+    clearPendingSql();
+    passwordDialogOpen.value = false;
+    passwordReconnectRequired.value = false;
+    passwordCleanupFailed.value = false;
     tableGrantRequestId += 1;
     users.value = [];
     createDatabases.value = [];
@@ -761,19 +842,23 @@ onMounted(() => {
         <Badge variant="outline" class="h-5 rounded-md px-1.5 text-[11px]">{{ connection.name }}</Badge>
       </div>
       <div class="ml-auto flex items-center gap-1.5">
-        <Button variant="outline" size="sm" class="h-7 gap-1.5 px-2 text-xs" @click="loadUsers">
+        <Button variant="outline" size="sm" class="h-7 gap-1.5 px-2 text-xs" :disabled="passwordReconnectRequired" @click="loadUsers">
           <Loader2 v-if="loadingUsers" class="h-3.5 w-3.5 animate-spin" />
           <RefreshCcw v-else class="h-3.5 w-3.5" />
           {{ t("grid.refresh") }}
         </Button>
-        <Button v-if="canCreateUser" size="sm" class="h-7 gap-1.5 px-2 text-xs" @click="openCreateUserDialog">
+        <Button v-if="canCreateUser" size="sm" class="h-7 gap-1.5 px-2 text-xs" :disabled="passwordReconnectRequired" @click="openCreateUserDialog">
           <Plus class="h-3.5 w-3.5" />
           {{ t("userAdmin.newUser") }}
         </Button>
       </div>
     </div>
 
-    <div v-if="!supported" class="flex flex-1 items-center justify-center px-6 text-center text-sm text-muted-foreground">
+    <div v-if="passwordReconnectRequired" class="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center text-sm text-muted-foreground">
+      <p>{{ t(passwordCleanupFailed ? "userAdmin.passwordChangedCleanupFailed" : "userAdmin.passwordChangedReconnect") }}</p>
+      <Button v-if="!passwordCleanupFailed" :disabled="applying" @click="reconnectAfterPasswordChange">{{ t("contextMenu.openConnection") }}</Button>
+    </div>
+    <div v-else-if="!supported" class="flex flex-1 items-center justify-center px-6 text-center text-sm text-muted-foreground">
       {{ t("userAdmin.unsupported") }}
     </div>
 
@@ -1000,6 +1085,10 @@ onMounted(() => {
         <DialogHeader>
           <DialogTitle>{{ t("userAdmin.changePassword") }}</DialogTitle>
         </DialogHeader>
+        <template v-if="provider?.supportsOldPassword">
+          <PasswordInput v-model="oldPassword" :placeholder="t('userAdmin.oldPassword')" autocomplete="current-password" />
+          <p class="text-xs text-muted-foreground">{{ t("userAdmin.oldPasswordHint") }}</p>
+        </template>
         <PasswordInput v-model="newPassword" :placeholder="t('userAdmin.newPassword')" />
         <DialogFooter>
           <Button variant="outline" @click="passwordDialogOpen = false">{{ t("dangerDialog.cancel") }}</Button>

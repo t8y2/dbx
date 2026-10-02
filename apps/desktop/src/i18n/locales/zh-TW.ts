@@ -8562,6 +8562,10 @@ export default withEnglishFallback({
     nacosContextPathHint: "留空時使用目前連線模式的預設值；明確使用服務根路徑請填寫 /，反向代理情境可填寫 /nacos 等前綴。",
   },
   userAdmin: {
+    oldPassword: "舊密碼（選填）",
+    oldPasswordHint: "Vastbase 除初始使用者外，修改自己的密碼需提供舊密碼；有權限重設其他使用者密碼時可留空。",
+    passwordChangedReconnect: "密碼已修改。此連線已中斷並清除舊密碼。請在連線設定中選擇「儲存並連線」，並輸入新密碼。",
+    passwordChangedCleanupFailed: "密碼已修改，但連線清理失敗，已阻止自動重連。重新啟動 DBX 前，請編輯此連線並清除舊密碼。",
     title: "使用者與權限",
     unsupported: "支援 MySQL 相容和 PostgreSQL 相容連線。SQL Server、Oracle 等其他權限模型將在後續版本中新增。",
     newUser: "新增使用者",

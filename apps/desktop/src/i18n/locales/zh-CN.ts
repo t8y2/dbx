@@ -4767,6 +4767,10 @@ export default withEnglishFallback({
     },
   },
   userAdmin: {
+    oldPassword: "旧密码（可选）",
+    oldPasswordHint: "Vastbase 除初始用户外，修改自己的密码需提供旧密码；有权限重置其他用户密码时可留空。",
+    passwordChangedReconnect: "密码已修改。此连接已断开并清除旧密码。请在连接设置中选择“保存并连接”，并输入新密码。",
+    passwordChangedCleanupFailed: "密码已修改，但连接清理失败，已阻止自动重连。重启 DBX 前，请编辑此连接并清除旧密码。",
     title: "用户与权限",
     unsupported: "当前支持 MySQL 兼容与 PostgreSQL 兼容连接。SQL Server、Oracle 等会按各自权限模型继续扩展。",
     newUser: "新建用户",

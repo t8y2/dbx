@@ -4219,6 +4219,10 @@ export default withEnglishFallback({
     doltSystemTables: "Tabelas de sistema do Dolt",
   },
   userAdmin: {
+    oldPassword: "Senha atual (opcional)",
+    oldPasswordHint: "No Vastbase, exceto para o usuário inicial, alterar a própria senha exige a senha atual. Redefinições autorizadas de outro usuário podem omiti-la.",
+    passwordChangedReconnect: "Senha alterada. Esta conexão foi desconectada e a senha antiga foi apagada. Use Salvar e conectar nas configurações da conexão e digite a nova senha.",
+    passwordChangedCleanupFailed: "Senha alterada, mas a limpeza da conexão falhou. A reconexão automática está bloqueada. Edite esta conexão para apagar a senha antiga antes de reiniciar o DBX.",
     title: "Usuários e Privilégios",
     unsupported: "Conexões compatíveis com MySQL e PostgreSQL são suportadas. SQL Server, Oracle e outros modelos de permissão podem ser adicionados em seguida.",
     newUser: "Novo Usuário",

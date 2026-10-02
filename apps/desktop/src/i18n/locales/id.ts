@@ -4695,6 +4695,10 @@ export default withEnglishFallback({
     },
   },
   userAdmin: {
+    oldPassword: "Kata sandi saat ini (opsional)",
+    oldPasswordHint: "Di Vastbase, selain pengguna awal, perubahan kata sandi sendiri memerlukan kata sandi saat ini. Pengaturan ulang pengguna lain yang diizinkan dapat mengosongkannya.",
+    passwordChangedReconnect: "Kata sandi diubah. Koneksi diputus dan kata sandi lama dihapus. Gunakan Simpan dan hubungkan di pengaturan koneksi, lalu masukkan kata sandi baru.",
+    passwordChangedCleanupFailed: "Kata sandi diubah, tetapi pembersihan koneksi gagal. Koneksi ulang otomatis diblokir. Edit koneksi ini untuk menghapus kata sandi lama sebelum memulai ulang DBX.",
     title: "Pengguna & Hak Akses",
     unsupported: "Koneksi yang kompatibel dengan MySQL dan PostgreSQL didukung. SQL Server, Oracle, dan model izin lainnya dapat ditambahkan berikutnya.",
     newUser: "Pengguna Baru",

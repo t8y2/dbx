@@ -4229,6 +4229,10 @@ export default withEnglishFallback({
     blockIoChart: "블록 I/O",
   },
   userAdmin: {
+    oldPassword: "현재 비밀번호(선택 사항)",
+    oldPasswordHint: "Vastbase에서 초기 사용자를 제외한 사용자가 자신의 비밀번호를 변경하려면 현재 비밀번호가 필요합니다. 권한이 있는 다른 사용자 재설정에서는 생략할 수 있습니다.",
+    passwordChangedReconnect: "비밀번호가 변경되었습니다. 연결을 끊고 이전 비밀번호를 지웠습니다. 연결 설정에서 저장 및 연결을 선택하고 새 비밀번호를 입력하세요.",
+    passwordChangedCleanupFailed: "비밀번호가 변경되었지만 연결 정리에 실패했습니다. 자동 재연결이 차단되었습니다. DBX를 다시 시작하기 전에 연결을 편집하여 이전 비밀번호를 지우세요.",
     title: "사용자 및 권한",
     unsupported: "MySQL 호환 및 PostgreSQL 호환 연결을 지원합니다. SQL Server, Oracle 및 기타 권한 모델은 추후 추가될 수 있습니다.",
     newUser: "새 사용자",

@@ -17,6 +17,10 @@ use futures::{SinkExt, StreamExt};
 #[path = "transfer/rebuild_tests.rs"]
 mod rebuild_tests;
 
+#[cfg(test)]
+#[path = "transfer/iris_tests.rs"]
+mod iris_tests;
+
 mod db2;
 mod ddl_plan;
 
@@ -33,7 +37,8 @@ use crate::query::{
 };
 use crate::sql::{split_sql_statements, split_sql_statements_for_database};
 use crate::sql_dialect::{
-    normalize_len_params, qualified_transfer_table, quote_transfer_identifier, transfer_column_identifier,
+    build_iris_table_select_sql, normalize_len_params, qualified_transfer_table, quote_transfer_identifier,
+    transfer_column_identifier,
 };
 
 static CANCELLED: std::sync::LazyLock<RwLock<HashSet<String>>> =
@@ -123,6 +128,7 @@ impl SqlBatchLimits {
         let max_rows = requested_max_rows.max(1).min(match db_type {
             DatabaseType::SqlServer => MAX_SQLSERVER_INSERT_ROWS,
             DatabaseType::Oracle | DatabaseType::OceanbaseOracle => MAX_ORACLE_INSERT_ALL_ROWS,
+            DatabaseType::Iris => 1,
             DatabaseType::Transwarp => 100,
             _ => usize::MAX,
         });
@@ -4479,6 +4485,7 @@ fn generate_upsert_typed_for_transfer(
 
 fn max_transfer_write_rows(db_type: &DatabaseType, mode: &TransferMode) -> usize {
     match (db_type, mode) {
+        (DatabaseType::Iris, _) => 1,
         (DatabaseType::SqlServer, TransferMode::Append | TransferMode::Overwrite) => MAX_SQLSERVER_INSERT_ROWS,
         (
             DatabaseType::Hive
@@ -4913,6 +4920,7 @@ pub(crate) fn generate_insert_typed_sql_batches_from_value_rows_with_options(
     let max_rows = limits.max_rows.max(1).min(match db_type {
         DatabaseType::SqlServer => MAX_SQLSERVER_INSERT_ROWS,
         DatabaseType::Oracle | DatabaseType::OceanbaseOracle => MAX_ORACLE_INSERT_ALL_ROWS,
+        DatabaseType::Iris => 1,
         _ => usize::MAX,
     });
     let target_sql_bytes = limits.target_sql_bytes.max(1);
@@ -5094,6 +5102,7 @@ fn generate_insert_sql_batches_from_value_rows(
     let max_rows = limits.max_rows.max(1).min(match db_type {
         DatabaseType::SqlServer => MAX_SQLSERVER_INSERT_ROWS,
         DatabaseType::Oracle | DatabaseType::OceanbaseOracle => MAX_ORACLE_INSERT_ALL_ROWS,
+        DatabaseType::Iris => 1,
         _ => usize::MAX,
     });
     let target_sql_bytes = limits.target_sql_bytes.max(1);
@@ -5280,6 +5289,7 @@ pub fn pagination_sql(
     let col_list = columns.iter().map(|c| quote_identifier(c, db_type)).collect::<Vec<_>>().join(", ");
 
     match db_type {
+        DatabaseType::Iris => build_iris_table_select_sql(&col_list, &full_table, "", " ORDER BY %ID", limit, offset),
         DatabaseType::Oracle | DatabaseType::OceanbaseOracle => {
             let base_sql = format!("SELECT {col_list} FROM {full_table}");
             oracle_rownum_page_sql(&col_list, base_sql, offset, limit)
@@ -5324,6 +5334,10 @@ pub fn pagination_sql_with_order(
     let order_expression = postgres_order_by_expression(order_by_columns, db_type);
 
     match db_type {
+        DatabaseType::Iris => {
+            let order_by = format!(" ORDER BY {}", order_expression.as_deref().unwrap_or("%ID"));
+            build_iris_table_select_sql(&col_list, &full_table, "", &order_by, limit, offset)
+        }
         DatabaseType::Oracle | DatabaseType::OceanbaseOracle => {
             let order_by = order_expression.map(|value| format!(" ORDER BY {value}")).unwrap_or_default();
             let base_sql = format!("SELECT {col_list} FROM {full_table}{order_by}");
@@ -5412,6 +5426,10 @@ pub fn pagination_sql_with_filter_order_and_identifier_quote(
         });
 
     match db_type {
+        DatabaseType::Iris => {
+            let order_by = format!(" ORDER BY {}", order_expression.as_deref().unwrap_or("%ID"));
+            build_iris_table_select_sql(&col_list, &full_table, &where_clause, &order_by, limit, offset)
+        }
         DatabaseType::Oracle | DatabaseType::OceanbaseOracle => {
             let order_by = order_expression.map(|value| format!(" ORDER BY {value}")).unwrap_or_default();
             let base_sql = format!("SELECT {col_list} FROM {full_table}{where_clause}{order_by}");
@@ -9229,6 +9247,19 @@ fn uses_agent_transfer_cursor(db_type: &DatabaseType) -> bool {
     matches!(db_type, DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Transwarp | DatabaseType::Db2)
 }
 
+fn transfer_upsert_falls_back_to_append(db_type: &DatabaseType) -> bool {
+    matches!(
+        db_type,
+        DatabaseType::ClickHouse
+            | DatabaseType::Hive
+            | DatabaseType::Kyuubi
+            | DatabaseType::Impala
+            | DatabaseType::Argo
+            | DatabaseType::Transwarp
+            | DatabaseType::Iris
+    )
+}
+
 fn transfer_clear_table_sql(table: &str, schema: &str, db_type: &DatabaseType, catalog: Option<&str>) -> String {
     let full_table = qualified_table(table, schema, db_type, catalog);
     match db_type {
@@ -10146,16 +10177,7 @@ where
     // identity values with 544.
     let needs_target_columns = default_rows_only
         || target_table_preexisting
-        || (request.mode == TransferMode::Upsert
-            && !matches!(
-                target_db_type,
-                DatabaseType::ClickHouse
-                    | DatabaseType::Hive
-                    | DatabaseType::Kyuubi
-                    | DatabaseType::Impala
-                    | DatabaseType::Argo
-                    | DatabaseType::Transwarp
-            ))
+        || (request.mode == TransferMode::Upsert && !transfer_upsert_falls_back_to_append(target_db_type))
         || matches!(
             target_db_type,
             DatabaseType::Postgres | DatabaseType::Dameng | DatabaseType::H2 | DatabaseType::SqlServer
@@ -10268,15 +10290,7 @@ where
 
     // Determine effective mode and PK columns for upsert
     let (effective_mode, pk_columns) = if request.mode == TransferMode::Upsert {
-        if matches!(
-            target_db_type,
-            DatabaseType::ClickHouse
-                | DatabaseType::Hive
-                | DatabaseType::Kyuubi
-                | DatabaseType::Impala
-                | DatabaseType::Argo
-                | DatabaseType::Transwarp
-        ) {
+        if transfer_upsert_falls_back_to_append(target_db_type) {
             log::warn!("[transfer] upsert not supported for {:?}, falling back to append", target_db_type);
             (TransferMode::Append, vec![])
         } else {

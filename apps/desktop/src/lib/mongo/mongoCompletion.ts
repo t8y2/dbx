@@ -60,7 +60,8 @@ export type MongoCompletionMode =
   | "bulkWriteField"
   | "keyMapValue"
   | "operatorField"
-  | "enumValue";
+  | "enumValue"
+  | "showSubcommand";
 
 /** Kind of aggregation or update pipeline holding the cursor. */
 export type MongoPipelineKind = "aggregate" | "update" | "facet" | "join" | "view";
@@ -125,6 +126,7 @@ const COLLECTION_METHODS = [
   { label: "distinct", detail: "List the distinct values of a field", apply: 'distinct("${field}")' },
   { label: "insertOne", detail: "Insert one document", apply: "insertOne({})" },
   { label: "insertMany", detail: "Insert multiple documents", apply: "insertMany([{}])" },
+  { label: "insert", detail: "Insert documents (legacy helper)", apply: "insert({})" },
   { label: "updateOne", detail: "Update one matching document", apply: "updateOne({}, { $set: {} })" },
   { label: "updateMany", detail: "Update all matching documents", apply: "updateMany({}, { $set: {} })" },
   { label: "replaceOne", detail: "Replace one matching document", apply: "replaceOne({}, {})" },
@@ -168,6 +170,7 @@ const COLLECTION_METHOD_BOOST: Record<(typeof COLLECTION_METHODS)[number]["label
   stats: 95,
   createIndex: 90,
   count: 80,
+  insert: 80,
   dataSize: 75,
   storageSize: 70,
   totalIndexSize: 65,
@@ -185,6 +188,7 @@ const DATABASE_METHODS = [
   { label: "runCommand", detail: "Run a database command document", apply: "runCommand({ ${} })" },
   { label: "stats", detail: "Show database statistics", apply: "stats()" },
   { label: "serverStatus", detail: "Show server status", apply: "serverStatus()" },
+  { label: "createUser", detail: "Create a database user", apply: 'createUser({ user: "${name}", pwd: "${password}", roles: [] })' },
   { label: "createCollection", detail: "Create a collection", apply: 'createCollection("${name}")' },
   { label: "dropDatabase", detail: "Drop the current database", apply: "dropDatabase()" },
 ] as const;
@@ -217,6 +221,7 @@ const ROOT_SNIPPETS = [
   { label: "db.collection.aggregate", detail: "Aggregation pipeline", apply: "db.${collection}.aggregate([\n  { $match: {} }\n])" },
   { label: "db.getCollection", detail: "Reference a collection by name", apply: 'db.getCollection("${}")' },
   { label: "use", detail: "Switch the active database", apply: "use ${database}" },
+  { label: "show dbs", detail: "List available databases", apply: "show dbs" },
   { label: "db.version", detail: "Show the MongoDB server version", apply: "db.version()" },
   { label: "db.stats", detail: "Show database statistics", apply: "db.stats()" },
   { label: "db.serverStatus", detail: "Show server status", apply: "db.serverStatus()" },
@@ -227,6 +232,7 @@ const ROOT_SNIPPET_BOOST: Record<(typeof ROOT_SNIPPETS)[number]["label"], number
   "db.collection.aggregate": 340,
   "db.getCollection": 330,
   use: 320,
+  "show dbs": 305,
   "db.version": 310,
   "db.stats": 305,
   "db.serverStatus": 300,
@@ -251,6 +257,7 @@ const METHOD_ARG_ROLES: Record<string, readonly MongoArgRole[]> = {
   findOneAndReplace: ["filter", "replacement", "options"],
   insertOne: ["document"],
   insertMany: ["documents"],
+  insert: ["documents"],
   aggregate: ["pipeline", "options"],
   createIndex: ["keys", "options"],
   distinct: ["fieldName", "filter"],
@@ -260,6 +267,7 @@ const METHOD_ARG_ROLES: Record<string, readonly MongoArgRole[]> = {
   // Database-level helpers whose argument is a document.
   createCollection: ["name", "options"],
   runCommand: ["options"],
+  createUser: ["options"],
 };
 
 /** `{ $oid: "..." }` for a bare value position, where the user has not typed the braces yet. */
@@ -338,6 +346,9 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
   const usePrefix = matchUseDatabasePrefix(beforeCursor);
   if (usePrefix) return { mode: "database", prefix: usePrefix.prefix, from: usePrefix.from };
 
+  const showPrefix = matchShowSubcommandPrefix(beforeCursor);
+  if (showPrefix) return { mode: "showSubcommand", prefix: showPrefix.prefix, from: showPrefix.from };
+
   if (endsAtDbRootDot(beforeCursor)) {
     return {
       mode: "collection",
@@ -400,10 +411,10 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
   // Top-level snippets belong at the start of a command. Inside an argument list — of a method
   // this engine does not model (`limit(`, `drop(`, `dropIndex("`, `runCommand({`, …) or after a
   // `use` — they are noise: `db.collection.find` is not something you can type there.
-  if (!call) return isInsideCallArguments(beforeCursor) || isAfterUseKeyword(beforeCursor) ? at("none") : at("root");
+  if (!call) return isInsideCallArguments(beforeCursor) || isAfterUseKeyword(beforeCursor) || isAfterShowKeyword(beforeCursor) ? at("none") : at("root");
 
   const scan = scanMongoCallArguments(text, call.openParenIndex + 1, safeCursor);
-  if (!scan) return isInsideCallArguments(beforeCursor) || isAfterUseKeyword(beforeCursor) ? at("none") : at("root");
+  if (!scan) return isInsideCallArguments(beforeCursor) || isAfterUseKeyword(beforeCursor) || isAfterShowKeyword(beforeCursor) ? at("none") : at("root");
 
   const classified = classifyCursorInCall(call.method, scan);
   return {
@@ -434,6 +445,9 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
       break;
     case "database":
       items = databaseItems(prefix, input.databases ?? []);
+      break;
+    case "showSubcommand":
+      items = showSubcommandItems(prefix);
       break;
     case "collection":
       items = collectionItems(prefix, collections, context.siblingRoot ?? false);
@@ -541,8 +555,8 @@ export function shouldAutoOpenMongoCompletion(text: string, cursor: number): boo
   const previousChar = text[cursor - 1];
   if (!previousChar) return false;
   if (text.slice(0, cursor).endsWith("db.")) return true;
-  // `use ` names a database next; open the list as soon as the space is typed.
-  if (previousChar === " " && matchUseDatabasePrefix(text.slice(0, cursor))) return true;
+  // `use ` and `show ` name a database or subcommand next; open the list as soon as the space is typed.
+  if (previousChar === " " && (matchUseDatabasePrefix(text.slice(0, cursor)) || matchShowSubcommandPrefix(text.slice(0, cursor)))) return true;
   if (previousChar === "$" || previousChar === "." || previousChar === '"' || previousChar === "'") return true;
   if (/[{,[:]/.test(previousChar) || /[{,[:]\s+$/.test(text.slice(0, cursor))) {
     return getMongoCompletionContext(text, cursor).mode !== "none";
@@ -824,7 +838,7 @@ function classifyCursorInCall(method: string, scan: MongoCallScan): MongoCursorC
     case "document":
       return { mode: classifyDocument(scan, 0) };
     case "documents":
-      return { mode: classifyDocument(scan, 1) };
+      return { mode: scan.stack[0]?.kind === "array" ? classifyDocument(scan, 1) : classifyDocument(scan, 0) };
     case "projection":
       return classifyKeyMap(scan, 0, "projection");
     case "keys":
@@ -1335,6 +1349,21 @@ function rootItems(prefix: string): MongoCompletionItem[] {
   return dedupeAndSort([...snippets, ...methods]);
 }
 
+const SHOW_SUBCOMMANDS = [
+  { label: "dbs", detail: "List available databases", apply: "dbs", boost: 210 },
+  { label: "databases", detail: "List available databases", apply: "databases", boost: 200 },
+] as const;
+
+function showSubcommandItems(prefix: string): MongoCompletionItem[] {
+  return SHOW_SUBCOMMANDS.filter((item) => matchesFuzzyPrefix(item.label, prefix)).map((item) => ({
+    label: item.label,
+    type: "keyword" as const,
+    detail: item.detail,
+    apply: item.apply,
+    boost: startsWithPrefix(item.label, prefix) ? item.boost : item.boost - 30,
+  }));
+}
+
 function collectionItems(prefix: string, collections: string[], siblingRoot = false): MongoCompletionItem[] {
   const names = collectionNameItems(prefix, collections);
   const methods = DATABASE_METHODS.filter((method) => (siblingRoot ? method.label !== "getSiblingDB" : true) && matchesFuzzyPrefix(method.label, prefix)).map((method) => ({
@@ -1664,6 +1693,17 @@ function matchUseDatabasePrefix(beforeCursor: string): { prefix: string; from: n
   return { prefix: beforeCursor.slice(beforeCursor.length - prefix.length), from: beforeCursor.length - prefix.length };
 }
 
+/**
+ * Cursor in the bare subcommand after `show`.
+ */
+function matchShowSubcommandPrefix(beforeCursor: string): { prefix: string; from: number } | null {
+  const currentLine = maskMongoLiterals(beforeCursor).split("\n").pop() ?? "";
+  const match = /(?:^|[\s;])show\s+([^\s;"'()]*)$/i.exec(currentLine);
+  if (!match || isInsideCallArguments(beforeCursor)) return null;
+  const prefix = match[1] ?? "";
+  return { prefix: beforeCursor.slice(beforeCursor.length - prefix.length), from: beforeCursor.length - prefix.length };
+}
+
 function matchGetCollectionPrefix(beforeCursor: string): { prefix: string; from: number } | null {
   const match = new RegExp(String.raw`(?:^|[\s;(])${DB_ROOT}\.getCollection\(\s*(["'][^"'\\]*)$`).exec(beforeCursor);
   if (!match) return null;
@@ -1779,6 +1819,12 @@ function isInsideCallArguments(beforeCursor: string): boolean {
 /** After `use` with something `matchUseDatabasePrefix` rejects (a quoted or parenthesised name), so no snippets belong there. */
 function isAfterUseKeyword(beforeCursor: string): boolean {
   return /(?:^|[\s;])use\s+[\w$-]*$/.test(maskMongoLiterals(beforeCursor));
+}
+
+/** After `show` on the current line, to keep root snippets from leaking once arguments/words trail. */
+function isAfterShowKeyword(beforeCursor: string): boolean {
+  const currentLine = maskMongoLiterals(beforeCursor).split("\n").pop() ?? "";
+  return /(?:^|[\s;])show\s+[\w$-]*(?:\s+[\w$-]*)*$/i.test(currentLine);
 }
 
 /** Blank out string/comment CONTENT (preserving length, so offsets stay valid) before pattern matching. */

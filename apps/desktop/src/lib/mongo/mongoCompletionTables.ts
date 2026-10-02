@@ -669,6 +669,13 @@ export const METHOD_OPTION_KEYS: Record<string, MongoOperatorSpec[]> = {
     ["pipeline", "Aggregation pipeline the view applies", "pipeline: [${}]"],
     ["changeStreamPreAndPostImages", "Record document images for change streams", "changeStreamPreAndPostImages: { enabled: true }"],
   ]),
+  createUser: specs([
+    ["user", "User name", 'user: "${name}"'],
+    ["pwd", "User password", 'pwd: "${password}"'],
+    ["roles", "Roles granted to the user", "roles: []"],
+    ["customData", "Arbitrary information stored with the user", "customData: {}"],
+    ["mechanisms", "Authentication mechanisms", "mechanisms: [${}]"],
+  ]),
   // Command documents run as written, so this lists the commands worth typing by hand.
   runCommand: specs([
     ["ping", "Check that the server responds", "ping: 1"],

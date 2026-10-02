@@ -699,6 +699,26 @@ test("stays quiet in the trailing argument of methods that take no options", () 
   }
 });
 
+test("completes legacy insert helper arguments and stays quiet in trailing arguments", () => {
+  assert.ok(labels("db.users.").includes("insert"));
+  assert.ok(labels("db.users.ins").includes("insert"));
+  assert.ok(labels("ins").includes("insert"));
+
+  // Both document and array shapes complete collection fields
+  assert.deepEqual(labels("db.users.insert({ na", { fields }), ["name"]);
+  assert.deepEqual(labels("db.users.insert([{ na", { fields }), ["name"]);
+  assert.ok(labels("db.users.insert({ name: ", { fields }).includes("ObjectId"));
+  assert.ok(labels("db.users.insert([{ name: ", { fields }).includes("ObjectId"));
+
+  // Stays quiet in trailing options argument because insert takes no options
+  assert.deepEqual(labels("db.users.insert({}, { ", { fields, collections }), []);
+  assert.deepEqual(labels("db.users.insert([{}], { ", { fields, collections }), []);
+
+  // Every new insert snippet shape parses
+  assert.ok(parseMongoCommand("db.users.insert({})"));
+  assert.ok(parseMongoCommand("db.users.insert([{}])"));
+});
+
 test("every suggested option key parses on the method that offers it", () => {
   // The option sets mirror the driver's own structs, most of which reject unknown fields, so a
   // key that only exists in this table would complete into a command that fails at Run.
@@ -739,7 +759,7 @@ test("every suggested option key parses on the method that offers it", () => {
   };
 
   for (const [method, options] of Object.entries(METHOD_OPTION_KEYS)) {
-    if (method === "createCollection" || method === "runCommand") continue; // database-level: pinned from their own templates below
+    if (method === "createCollection" || method === "runCommand" || method === "createUser") continue; // database-level: pinned from their own templates below
     const args = callArgs[method];
     assert.ok(args !== undefined, `${method} needs sample arguments in this test`);
     for (const option of options) {
@@ -1189,7 +1209,7 @@ test("completes runCommand command names and their collection arguments", () => 
   assert.ok(labels("db.").includes("runCommand"));
 });
 
-test("every suggested createCollection option and runCommand command parses", () => {
+test("every suggested createCollection option, createUser option and runCommand command parses", () => {
   const render = (apply: string) => apply.replace(/\$\{([^{}]*)\}/g, (_, name: string) => name || "1");
   for (const option of METHOD_OPTION_KEYS.createCollection ?? []) {
     const command = `db.createCollection("x", { ${render(option.apply)} })`;
@@ -1199,6 +1219,10 @@ test("every suggested createCollection option and runCommand command parses", ()
     const command = `db.runCommand({ ${render(spec.apply)} })`;
     assert.ok(parseMongoCommand(command), `${command} must parse`);
   }
+  for (const option of METHOD_OPTION_KEYS.createUser ?? []) {
+    const command = `db.createUser({ ${option.label === "user" ? "" : 'user: "test", '}${render(option.apply)} })`;
+    assert.ok(parseMongoCommand(command), `${command} must parse`);
+  }
 });
 
 test("suggests the use and db.version commands", () => {
@@ -1206,6 +1230,62 @@ test("suggests the use and db.version commands", () => {
   // Database helpers stay reachable after `db.`, alongside the collection names.
   assert.ok(labels("db.vers", { collections }).includes("version"));
   assert.equal(labels("db.getColl", { collections }).includes("getCollection"), true);
+});
+
+test("suggests show dbs and show subcommands", () => {
+  // Typing sh or show at root offers show dbs snippet
+  const shItems = buildMongoCompletionItems("sh", 2);
+  const showSnippet = shItems.find((item) => item.label === "show dbs");
+  assert.ok(showSnippet, "typing sh offers show dbs");
+  assert.equal(showSnippet?.apply, "show dbs");
+  assert.ok(buildMongoCompletionItems("show", 4).some((item) => item.label === "show dbs"));
+  assert.ok(parseMongoCommand("show dbs"), "show dbs snippet must parse");
+
+  // show followed by space offers dbs and databases, and NOT db.* snippets
+  const showSpaceItems = labels("show ");
+  assert.deepEqual(showSpaceItems, ["dbs", "databases"]);
+  assert.equal(showSpaceItems.includes("db.collection.find"), false);
+  assert.equal(showSpaceItems.includes("db.version"), false);
+  assert.equal(showSpaceItems.includes("collections"), false, "show collections is not supported");
+
+  // Subcommand filtering
+  assert.deepEqual(labels("show d"), ["dbs", "databases"]);
+  assert.deepEqual(labels("show db"), ["dbs"]);
+  assert.deepEqual(labels("show dat"), ["databases"]);
+  assert.deepEqual(labels("show col"), []);
+
+  // Context and auto-trigger
+  assert.deepEqual(getMongoCompletionContext("show ", 5), { mode: "showSubcommand", prefix: "", from: 5 });
+  assert.deepEqual(getMongoCompletionContext("show db", 7), { mode: "showSubcommand", prefix: "db", from: 5 });
+  assert.equal(shouldAutoOpenMongoCompletion("show ", 5), true);
+
+  // Stays quiet when extra arguments follow rather than leaking root snippets
+  assert.deepEqual(labels("show dbs extra"), []);
+
+  // Subsequent lines in scripts without semicolons retain root and db completions
+  assert.ok(labels("show dbs\nfi").includes("find"));
+  assert.ok(labels("show dbs\ndb.", { collections }).includes("users"));
+  assert.ok(labels("show dbs\ndb.", { collections }).includes("version"));
+  assert.ok(labels("show dbs\nsh").includes("show dbs"));
+});
+
+test("suggests createUser database helper and its document options", () => {
+  // Offered on db. alongside other database helpers
+  const dbHelpers = labels("db.");
+  assert.ok(dbHelpers.includes("createUser"));
+  const snippet = buildMongoCompletionItems("db.createU", "db.createU".length).find((item) => item.label === "createUser");
+  assert.equal(snippet?.apply, 'createUser({ user: "${name}", pwd: "${password}", roles: [] })');
+
+  // Document argument options
+  const optionLabels = labels("db.createUser({ ");
+  assert.deepEqual(optionLabels, ["customData", "mechanisms", "pwd", "roles", "user"]);
+  assert.deepEqual(labels("db.createUser({ pw"), ["pwd"]);
+
+  // Stays quiet inside sub-arrays/values rather than leaking root snippets
+  assert.deepEqual(labels("db.createUser({ roles: [ "), []);
+
+  // Snippet parses via parseMongoCommand
+  assert.ok(parseMongoCommand('db.createUser({ user: "name", pwd: "password", roles: [] })'));
 });
 
 test("ranks everyday operators above the long tail", () => {

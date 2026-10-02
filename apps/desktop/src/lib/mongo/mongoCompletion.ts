@@ -332,6 +332,11 @@ const STAGE_OPTION_VALUE_MODES: Record<string, Record<string, MongoCompletionMod
   $fill: { partitionBy: "fieldRef" },
 };
 
+/** Enum value key inside a stage's option object, by stage and option key. */
+const STAGE_OPTION_VALUE_ENUMS: Record<string, Record<string, string>> = {
+  $merge: { whenMatched: "whenMatched", whenNotMatched: "whenNotMatched" },
+};
+
 export function getMongoCompletionContext(text: string, cursor: number): MongoCompletionContext {
   const safeCursor = Math.max(0, Math.min(cursor, text.length));
   const beforeCursor = text.slice(0, safeCursor);
@@ -877,11 +882,17 @@ function innermost(scan: MongoCallScan): MongoContainer | undefined {
 /** Query operators whose value is a document with its own keys rather than a field's constraint object. */
 const SUB_DOCUMENT_QUERY_OPERATORS = new Set(["$text", "$geoWithin", "$geoIntersects", "$near", "$nearSphere", "$geometry"]);
 
-/** Value positions in a filter that take a fixed set of strings, by the key and the operator that holds it. */
+/** Value positions in a filter that take a fixed set of values, by the key and the operator that holds it. */
 function filterValueEnum(operator: string | null, key: string | null): string | undefined {
   if (key === "$type") return "$type";
   if (key === "$options") return "$options";
   if (key === "type" && operator === "$geometry") return "geometryType";
+  if (key === "$exists") return "boolean";
+  if (operator === "$text") {
+    if (key === "$caseSensitive" || key === "$diacriticSensitive") return "boolean";
+    if (key === "$language") return "$language";
+  }
+  if (key === "$regex") return "$regex";
   return undefined;
 }
 
@@ -901,6 +912,7 @@ function classifyFilter(scan: MongoCallScan, rootIndex: number): MongoCursorClas
   }
   if (inner.kind !== "object") return { mode: "none" };
   if (scan.inValue) {
+    if (scan.valueKey === "$size" || scan.valueKey === "$mod") return { mode: "none" };
     const enumKey = filterValueEnum(inner.key, scan.valueKey);
     if (enumKey) return { mode: "enumValue", enumKey };
     return { mode: scan.inString ? "none" : "value" };
@@ -1027,7 +1039,7 @@ const FILTER_OPTION_KEYS = new Set(["partialFilterExpression", "validator"]);
 
 /** Option keys whose value is a document with its own fixed keys, and the value sets inside it. */
 const SUB_DOCUMENT_OPTION_KEYS: Record<string, Record<string, string>> = {
-  collation: { caseFirst: "caseFirst", alternate: "alternate", maxVariable: "maxVariable", strength: "strength" },
+  collation: { locale: "locale", caseFirst: "caseFirst", alternate: "alternate", maxVariable: "maxVariable", strength: "strength" },
   timeseries: { granularity: "granularity" },
   clusteredIndex: {},
 };
@@ -1251,6 +1263,8 @@ function classifyStageOptions(stage: string, scan: MongoCallScan, bodyIndex: num
 
   if (depth === 0) {
     if (scan.inValue) {
+      const enumKey = STAGE_OPTION_VALUE_ENUMS[stage]?.[scan.valueKey ?? ""];
+      if (enumKey) return { mode: "enumValue", enumKey, stage };
       const mode = STAGE_OPTION_VALUE_MODES[stage]?.[scan.valueKey ?? ""] ?? "none";
       const isJoinedField = (stage === "$lookup" && scan.valueKey === "foreignField") || (stage === "$graphLookup" && (scan.valueKey === "connectToField" || scan.valueKey === "connectFromField"));
       const collection = isJoinedField ? stageBody?.stringValues?.["from"] : undefined;
@@ -1533,7 +1547,7 @@ function enumValueItems(prefix: string, values: readonly MongoOperatorSpec[], ca
     .filter((value) => !quoted || value.apply.startsWith('"'))
     .map((value) => ({
       label: value.label,
-      type: "keyword" as const,
+      type: mongoOperatorItemType(value.apply),
       detail: value.detail,
       info: `${category} value`,
       apply: quoted ? quoteMongoString(value.label, prefix) : value.apply,

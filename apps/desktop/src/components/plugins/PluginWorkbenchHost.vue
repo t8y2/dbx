@@ -28,7 +28,7 @@ import { useI18n } from "vue-i18n";
 import { useTheme } from "@/composables/useTheme";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { createPluginAiCompletion } from "@/lib/plugins/pluginAiCompletion";
+import { createPluginAiCompletion, type PluginAiConfirmDecision, type PluginAiPromptPreview } from "@/lib/plugins/pluginAiCompletion";
 import { useQueryStore } from "@/stores/queryStore";
 import { OPEN_PLUGIN_AI_CONVERSATION } from "@/lib/ai/aiPluginConversation";
 
@@ -54,16 +54,87 @@ const { t, locale: appLocale } = useI18n();
 const { isDark, themeRevision } = useTheme();
 const settingsStore = useSettingsStore();
 const openAiConversation = inject(OPEN_PLUGIN_AI_CONVERSATION, undefined);
+
+// --- Plugin AI generation consent (E2) --------------------------------------
+// Every host.ai.generateText send is consented through this in-app dialog: it
+// names the destination model, previews the outgoing text (first line, byte
+// size, workbench context) and offers a workbench-session "don't ask again"
+// memory. The memory itself lives inside the aiCompletion instance (in-memory
+// only, never persisted) — the checkbox here just reports the user's choice.
+interface PluginAiConfirmDialogState {
+  title: string;
+  message: string;
+  preview: PluginAiPromptPreview;
+  previewHeading: string;
+  sizeLabel: string;
+  contextLabel: string;
+  rememberLabel: string;
+  continueLabel: string;
+  cancelLabel: string;
+}
+const aiConfirmDialog = ref<PluginAiConfirmDialogState | null>(null);
+const aiConfirmRemember = ref(false);
+let aiConfirmResolve: ((decision: PluginAiConfirmDecision) => void) | undefined;
+
+function formatPluginAiContextLabel(): string {
+  const zh = appLocale.value.startsWith("zh");
+  const parts: string[] = [];
+  const connectionId = typeof props.context?.connectionId === "string" ? props.context.connectionId : "";
+  if (connectionId) {
+    const connectionName = useConnectionStore().getConfig(connectionId)?.name || connectionId;
+    parts.push(`${zh ? "连接" : "Connection"}: ${connectionName}`);
+  }
+  for (const key of ["database", "schema"] as const) {
+    const value = props.context?.[key];
+    if (typeof value === "string" && value.trim()) parts.push(`${zh ? (key === "database" ? "数据库" : "模式") : key === "database" ? "Database" : "Schema"}: ${value.trim()}`);
+  }
+  return parts.join(" · ");
+}
+
+function resolveAiGenerationConfirm(allowed: boolean): void {
+  const resolve = aiConfirmResolve;
+  aiConfirmResolve = undefined;
+  const remember = aiConfirmRemember.value;
+  aiConfirmDialog.value = null;
+  aiConfirmRemember.value = false;
+  // A denial is never remembered: the plugin may legitimately retry, and the
+  // memory option only takes effect together with an explicit allow.
+  resolve?.(allowed ? { allowed: true, remember } : false);
+}
+
 const aiCompletion = createPluginAiCompletion({
   load: () => import("@/lib/backend/tauri").then((api) => api.loadAiConfigs()),
   discover: (config) => import("@/lib/backend/tauri").then((api) => api.aiListModels(config)),
   complete: (request) => import("@/lib/backend/tauri").then((api) => api.aiComplete(request)),
-  confirm: async (pluginName, model) => {
-    const { ask } = await import("@tauri-apps/plugin-dialog");
+  // E1: ride the desktop streaming pipeline (ai_stream + per-session cancel
+  // registry). Only wired here, so the bridge advertises aiCompletionStream
+  // on desktop hosts and leaves it off elsewhere.
+  stream: async (sessionId, request, onChunk) => {
+    const { aiStream } = await tauriFileApi();
+    await aiStream(sessionId, request, onChunk);
+  },
+  cancel: async (sessionId) => {
+    const { aiCancelStream } = await tauriFileApi();
+    return await aiCancelStream(sessionId);
+  },
+  confirm: async (pluginName, model, preview) => {
     const zh = appLocale.value.startsWith("zh");
-    return ask(zh ? `插件「${pluginName}」将把准备的文本发送给「${model.name} / ${model.model}」，并读取生成结果。是否继续？` : `Plugin "${pluginName}" will send its prepared text to "${model.name} / ${model.model}" and receive the generated result. Continue?`, {
-      title: zh ? "插件 AI 生成" : "Plugin AI generation",
-      kind: "info",
+    const message = zh ? `插件「${pluginName}」将把准备的文本发送给「${model.name} / ${model.model}」，并读取生成结果。` : `Plugin "${pluginName}" will send its prepared text to "${model.name} / ${model.model}" and receive the generated result.`;
+    const contextLabel = formatPluginAiContextLabel();
+    return await new Promise<PluginAiConfirmDecision>((resolve) => {
+      aiConfirmResolve = resolve;
+      aiConfirmRemember.value = false;
+      aiConfirmDialog.value = {
+        title: zh ? "插件 AI 生成" : "Plugin AI generation",
+        message,
+        preview,
+        previewHeading: zh ? "将发送的内容（首行）" : "Content to send (first line)",
+        sizeLabel: zh ? `全文 ${preview.bytes} 字节` : `${preview.bytes} bytes total`,
+        contextLabel: contextLabel ? `${zh ? "上下文" : "Context"}: ${contextLabel}` : "",
+        rememberLabel: zh ? "本工作台内不再询问" : "Don't ask again in this workbench",
+        continueLabel: zh ? "继续" : "Continue",
+        cancelLabel: zh ? "取消" : "Cancel",
+      };
     });
   },
 });
@@ -706,6 +777,9 @@ defineExpose({ requestClose });
 onBeforeUnmount(() => {
   disposed = true;
   loadGeneration += 1;
+  // An unanswered consent dialog must not leave the plugin's generation
+  // request (and its busy lock) hanging on a dead workbench.
+  resolveAiGenerationConfirm(false);
   // Best-effort §8.3 close notice for teardown paths that never called
   // requestClose (tab closes, plugin reload): the message still goes out, but
   // delivery of the plugin's cleanup is not guaranteed once the iframe dies.
@@ -741,5 +815,28 @@ onBeforeUnmount(() => {
         {{ t("pluginPlatform.loadingTitle", { title }) }}
       </div>
     </template>
+    <!-- Plugin AI generation consent (E2): destination, outgoing-text preview
+         (first line + byte size + workbench context) and a workbench-session
+         "don't ask again" option. -->
+    <div v-if="aiConfirmDialog" class="absolute inset-0 z-20 flex items-center justify-center bg-black/40 p-4">
+      <div class="w-full max-w-md rounded-xl border border-border bg-background p-4 shadow-lg">
+        <h3 class="text-sm font-semibold text-foreground">{{ aiConfirmDialog.title }}</h3>
+        <p class="mt-2 text-sm text-muted-foreground">{{ aiConfirmDialog.message }}</p>
+        <div class="mt-3 rounded-lg border border-border bg-muted/40 p-3">
+          <p class="text-xs font-medium text-muted-foreground">{{ aiConfirmDialog.previewHeading }}</p>
+          <pre data-testid="plugin-ai-confirm-preview" class="mt-1 max-h-24 overflow-auto whitespace-pre-wrap break-all font-mono text-xs text-foreground">{{ aiConfirmDialog.preview.firstLine || "…" }}</pre>
+          <p class="mt-1 text-xs text-muted-foreground">{{ aiConfirmDialog.sizeLabel }}</p>
+          <p v-if="aiConfirmDialog.contextLabel" class="mt-0.5 text-xs text-muted-foreground">{{ aiConfirmDialog.contextLabel }}</p>
+        </div>
+        <label class="mt-3 flex cursor-pointer items-center gap-2 text-sm text-foreground">
+          <input v-model="aiConfirmRemember" type="checkbox" data-testid="plugin-ai-confirm-remember" class="size-4 accent-[var(--color-primary)]" />
+          {{ aiConfirmDialog.rememberLabel }}
+        </label>
+        <div class="mt-4 flex justify-end gap-2">
+          <button data-testid="plugin-ai-confirm-cancel" class="rounded-md border border-border px-3 py-1.5 text-sm text-foreground hover:bg-muted" @click="resolveAiGenerationConfirm(false)">{{ aiConfirmDialog.cancelLabel }}</button>
+          <button data-testid="plugin-ai-confirm-continue" class="rounded-md bg-primary px-3 py-1.5 text-sm text-primary-foreground hover:opacity-90" @click="resolveAiGenerationConfirm(true)">{{ aiConfirmDialog.continueLabel }}</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>

@@ -1,4 +1,5 @@
-import type { PluginAiProvider, PluginAiModel, PluginAiGenerateRequest } from "./pluginAiCompletion";
+import { PLUGIN_AI_TASKS } from "./pluginAiCompletion";
+import type { PluginAiProvider, PluginAiModel, PluginAiGenerateRequest, PluginAiStreamRequest, PluginAiStreamChunkEvent, PluginAiTask } from "./pluginAiCompletion";
 import type { InstalledPlugin, PluginBinaryEvent, PluginEvent, PluginUiAssetPayload, PluginUiContribution } from "@/types/database";
 import { clonePluginData, snapshotPluginWorkbenchContext } from "./pluginData";
 import { MAX_PLUGIN_PLAN_SQL_CHARS, MAX_PLUGIN_PLAN_TIMEOUT_MS, PLUGIN_PLAN_PERMISSION, type PluginPlanCapabilities, type PluginPlanRequest, type PluginPlanResult } from "@/types/pluginPlan";
@@ -161,6 +162,16 @@ export interface PluginHostBridgeApi {
   listAiModels?(): Promise<PluginAiModel[]>;
   /** Must obtain trusted host consent for every send; never return provider errors or credentials. */
   generateAiText?(pluginName: string, input: PluginAiGenerateRequest): Promise<string>;
+  /**
+   * E1 incremental generation: chunks ride `host.ai.generationChunk` events
+   * scoped to the request's requestId (the same pattern as
+   * `host.download.progress`); the promise resolves with the full text once
+   * the stream completes. Must go through the same host consent as the plain
+   * call.
+   */
+  generateAiTextStream?(pluginName: string, request: PluginAiStreamRequest, onChunk: (chunk: PluginAiStreamChunkEvent) => void): Promise<string>;
+  /** Cancels one active streamed generation of THIS bridge by requestId. */
+  cancelAiGeneration?(requestId: string): Promise<boolean>;
   openAiConversation?(request: AiPluginConversationRequest): Promise<void>;
   setAiRecommendations?(update: PluginAiRecommendationHostUpdate): void;
   openWorkbench?(pluginId: string, contributionId: string, context?: PluginWorkbenchContext, options?: { forceNew?: boolean; target?: "tab" }): Promise<void> | void;
@@ -299,6 +310,8 @@ export class PluginHostBridge {
   private pendingDataAccess = new Map<string, Promise<void>>();
   private inFlightDataQueries = 0;
   private runtimeAiRecommendations: PluginAiRecommendationUpdate | null | undefined;
+  /** Active streamed AI generations of this bridge, by plugin-supplied requestId. */
+  private activeAiStreams = new Set<string>();
 
   /** Bounded audit trail of this session's clipboard read attempts (oldest first). */
   get clipboardAudit(): readonly PluginClipboardAuditEntry[] {
@@ -393,6 +406,10 @@ export class PluginHostBridge {
     this.disposed = true;
     for (const downloadId of this.downloads) void this.api.cancelDownload?.(this.plugin.manifest.id, downloadId).catch(() => undefined);
     this.downloads.clear();
+    // Best-effort: a torn-down workbench must not keep a provider stream
+    // running with nobody to receive its chunks.
+    for (const requestId of this.activeAiStreams) void this.api.cancelAiGeneration?.(requestId).catch(() => undefined);
+    this.activeAiStreams.clear();
     for (const token of this.mediaTokens) void this.api.closeMedia?.(this.plugin.manifest.id, token).catch(() => undefined);
     this.mediaTokens.clear();
     this.publishAiRecommendations({ context: {}, items: [] });
@@ -457,6 +474,9 @@ export class PluginHostBridge {
         ai: !!this.api.openAiConversation,
         aiModelDiscovery: !!this.api.listAiProviders && !!this.api.discoverAiModels,
         aiCompletion: !!this.api.listAiModels && !!this.api.generateAiText,
+        // Streaming generation goes together with per-request cancellation;
+        // advertising both or neither keeps the capability honest.
+        aiCompletionStream: !!this.api.generateAiTextStream && !!this.api.cancelAiGeneration,
         aiRecommendations: !!this.api.openAiConversation && !!this.api.setAiRecommendations,
         // Additive with the same "absence means unsupported" contract: an older
         // host omits these, and a web host has neither.
@@ -615,7 +635,47 @@ export class PluginHostBridge {
       for (const key of ["configId", "model", "prompt"] as const) {
         if (typeof input[key] !== "string" || !input[key].trim() || input[key].length > (key === "prompt" ? 100000 : 256)) throw new Error("Invalid AI " + key);
       }
-      return this.api.generateAiText(this.plugin.manifest.name, { configId: input.configId as string, model: input.model as string, prompt: input.prompt as string });
+      // Task presets are a closed host-owned enum: a plugin picks a template,
+      // it never writes system text. Unknown values fail loudly.
+      const task = input.task === undefined || input.task === null ? undefined : requirePluginAiTask(input.task);
+      return this.api.generateAiText(this.plugin.manifest.name, { configId: input.configId as string, model: input.model as string, prompt: input.prompt as string, ...(task === undefined ? {} : { task }) });
+    }
+    if (method === "host.ai.generateTextStream") {
+      this.requirePermission("host.ai");
+      // Same conjunction the aiCompletionStream capability advertises: a host
+      // that cannot cancel does not stream.
+      if (!this.api.generateAiTextStream || !this.api.cancelAiGeneration) throw new Error("DBX AI text generation streaming is unavailable");
+      const input = requireRecord(params, "AI generation request");
+      for (const key of ["configId", "model", "prompt"] as const) {
+        if (typeof input[key] !== "string" || !input[key].trim() || input[key].length > (key === "prompt" ? 100000 : 256)) throw new Error("Invalid AI " + key);
+      }
+      const requestId = requireProtocolName(input.requestId, "AI requestId");
+      if (this.activeAiStreams.has(requestId)) throw new Error("Duplicate AI requestId");
+      const task = input.task === undefined || input.task === null ? undefined : requirePluginAiTask(input.task);
+      this.activeAiStreams.add(requestId);
+      try {
+        // Same event channel as host.download.progress: incremental chunks are
+        // delivered as host.ai.generationChunk events that plugins filter by
+        // requestId; the call itself resolves with the full text.
+        return await this.api.generateAiTextStream(this.plugin.manifest.name, { configId: input.configId as string, model: input.model as string, prompt: input.prompt as string, requestId, ...(task === undefined ? {} : { task }) }, (chunk) => {
+          if (!this.activeAiStreams.has(requestId)) return;
+          this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "event", method: "host.ai.generationChunk", params: { requestId, delta: chunk.delta, done: chunk.done === true } });
+        });
+      } finally {
+        this.activeAiStreams.delete(requestId);
+      }
+    }
+    if (method === "host.ai.cancelGeneration") {
+      const input = requireRecord(params, "AI cancel request");
+      const requestId = requireProtocolName(input.requestId, "AI requestId");
+      // Scoped like host.cancelDownload: a workbench may only cancel the
+      // streams it started. Unknown or finished ids answer { cancelled: false }.
+      if (!this.activeAiStreams.has(requestId) || !this.api.cancelAiGeneration) return { cancelled: false };
+      const cancelled = (await this.api.cancelAiGeneration(requestId)) === true;
+      // A confirmed cancel also stops chunk forwarding immediately; the
+      // stream's own settle path becomes a no-op delete.
+      if (cancelled) this.activeAiStreams.delete(requestId);
+      return { cancelled };
     }
     if (method === "host.ai.openConversation") {
       this.requirePermission("host.ai");
@@ -1226,6 +1286,13 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         discoverModels: (configId) => request('host.ai.discoverModels', {configId}),
         listModels: () => request('host.ai.listModels'),
         generateText: (options) => request('host.ai.generateText', options),
+        // E1 streaming: chunk events arrive as host.ai.generationChunk, filter
+        // them by options.requestId via onEvent; the promise resolves with the
+        // full text when the stream finishes. Gate on capabilities.aiCompletionStream.
+        generateTextStream: (options) => request('host.ai.generateTextStream', options),
+        // Cancels one active streamed generation by its requestId; resolves
+        // { cancelled: boolean } and only ever touches this workbench's streams.
+        cancelGeneration: (requestId) => request('host.ai.cancelGeneration', { requestId }),
         openConversation: (options) => request('host.ai.openConversation', options),
         setRecommendations: (update) => request('host.ai.setRecommendations', update),
         clearRecommendations: () => request('host.ai.clearRecommendations'),
@@ -1405,6 +1472,12 @@ function validRequestMessage(value: Record<string, unknown>): value is Record<st
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
   if (!isRecord(value)) throw new Error(`${label} must be an object`);
   return value;
+}
+
+/** A host-owned AI task preset (E3): the enum is closed, so unknown values fail here. */
+function requirePluginAiTask(value: unknown): PluginAiTask {
+  if (typeof value !== "string" || !PLUGIN_AI_TASKS.includes(value as PluginAiTask)) throw new Error("Invalid AI task");
+  return value as PluginAiTask;
 }
 
 function requireProtocolName(value: unknown, label: string): string {

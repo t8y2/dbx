@@ -1408,6 +1408,19 @@ mod tests {
     }
 
     #[test]
+    fn per_sheet_auto_filter_overrides_the_workbook_flag() {
+        let data = XlsxWorksheetData::new(Some("Data".to_string()), vec!["id".to_string()], vec![vec![json!(1)]]);
+        let sql = XlsxWorksheetData {
+            auto_filter: Some(false),
+            ..XlsxWorksheetData::new(Some("SQL".to_string()), vec!["SQL".to_string()], vec![vec![json!("SELECT 1")]])
+        };
+        let workbook = build_xlsx_workbook_multi_with_auto_filter(&[data, sql], true, None).expect("build workbook");
+
+        assert!(read_zip_entry(&workbook, "xl/worksheets/sheet1.xml").contains("<autoFilter"));
+        assert!(!read_zip_entry(&workbook, "xl/worksheets/sheet2.xml").contains("<autoFilter"));
+    }
+
+    #[test]
     fn writes_safe_numeric_strings_as_numbers_for_numeric_columns() {
         let workbook = build_xlsx_workbook(&XlsxWorksheetData {
             sheet_name: Some("Amounts".to_string()),

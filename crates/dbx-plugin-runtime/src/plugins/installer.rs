@@ -468,8 +468,16 @@ impl PluginPackageInstaller {
                 // and discovery does not see it any more. An antivirus scanner holding a freshly
                 // extracted binary may fail this rename with error 5 / 32, hence the retry, and a
                 // rename that keeps failing leaves the container untouched for a clean failure.
-                retry_transient_lock(delays, || rename(&plugin_dir, &tombstone))
-                    .map_err(|error| format!("Failed to uninstall plugin '{plugin_id}': {error}"))?;
+                retry_transient_lock(delays, || {
+                    let res = rename(&plugin_dir, &tombstone);
+                    if let Err(ref err) = res {
+                        if cfg!(windows) && err.raw_os_error() == Some(5) {
+                            ensure_tree_writable(&plugin_dir);
+                        }
+                    }
+                    res
+                })
+                .map_err(|error| format!("Failed to uninstall plugin '{plugin_id}': {error}"))?;
             }
             self.sweep_plugin_trash(delays, &mut remove_dir_all);
             Ok(())
@@ -498,6 +506,12 @@ impl PluginPackageInstaller {
             let removed = retry_transient_lock(delays, || match remove_dir_all(&tombstone) {
                 // Already gone (or not a directory): nothing left to clean up.
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => {
+                    if cfg!(windows) && error.raw_os_error() == Some(5) {
+                        ensure_tree_writable(&tombstone);
+                    }
+                    Err(error)
+                }
                 result => result,
             });
             if let Err(error) = removed {
@@ -1138,8 +1152,13 @@ fn open_install_lock(root_dir: &Path) -> Result<File, String> {
 // Antivirus scanners briefly hold handles on freshly extracted plugin binaries, which fails
 // directory renames with ERROR_ACCESS_DENIED (5) or ERROR_SHARING_VIOLATION (32); the scan
 // normally finishes well inside this retry window.
-const TRANSIENT_LOCK_RETRY_DELAYS: [Duration; 3] =
-    [Duration::from_millis(200), Duration::from_millis(400), Duration::from_millis(800)];
+const TRANSIENT_LOCK_RETRY_DELAYS: [Duration; 5] = [
+    Duration::from_millis(200),
+    Duration::from_millis(400),
+    Duration::from_millis(800),
+    Duration::from_millis(1500),
+    Duration::from_millis(2000),
+];
 
 pub(crate) fn rename_with_transient_lock_retry(src: &Path, dst: &Path) -> std::io::Result<()> {
     retry_transient_lock(&TRANSIENT_LOCK_RETRY_DELAYS, || std::fs::rename(src, dst))
@@ -1152,7 +1171,11 @@ fn retry_transient_lock<T>(
     for delay in delays {
         match operation() {
             Ok(value) => return Ok(value),
-            Err(error) if cfg!(windows) && is_windows_lock_error(&error) => std::thread::sleep(*delay),
+            Err(error) if cfg!(windows) && is_windows_lock_error(&error) => {
+                // If a file in the directory has the read-only attribute set on Windows,
+                // renames and removals fail with ERROR_ACCESS_DENIED (5). Ensure write permissions.
+                std::thread::sleep(*delay);
+            }
             Err(error) => return Err(error),
         }
     }
@@ -1161,6 +1184,27 @@ fn retry_transient_lock<T>(
 
 fn is_windows_lock_error(error: &std::io::Error) -> bool {
     matches!(error.raw_os_error(), Some(5 | 32))
+}
+
+#[allow(clippy::permissions_set_readonly_false)]
+fn ensure_tree_writable(path: &Path) {
+    if !path.exists() {
+        return;
+    }
+    if let Ok(metadata) = std::fs::metadata(path) {
+        let mut permissions = metadata.permissions();
+        if permissions.readonly() {
+            permissions.set_readonly(false);
+            let _ = std::fs::set_permissions(path, permissions);
+        }
+    }
+    if path.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.flatten() {
+                ensure_tree_writable(&entry.path());
+            }
+        }
+    }
 }
 
 /// Tombstone path for one logical uninstall: `.trash/<plugin id>`, or `.trash/<plugin id>-<n>`, the
@@ -1294,7 +1338,7 @@ mod tests {
     use zip::write::SimpleFileOptions;
 
     use super::{
-        is_activation_record_file, read_install_identity, retry_transient_lock, sha256_hex,
+        ensure_tree_writable, is_activation_record_file, read_install_identity, retry_transient_lock, sha256_hex,
         validate_package_expectation, write_json_atomically, PluginInstallPolicy, PluginPackageExpectation,
         PluginPackageInstaller, PluginSignatureStatus, PluginTrustStore, ACTIVATIONS_DIR, INSTALL_LOCK_FILE,
         PLUGIN_CHECKSUMS_FILE, PLUGIN_SIGNATURE_FILE, PLUGIN_TRASH_DIR, VERSIONS_DIR,
@@ -2367,5 +2411,23 @@ mod tests {
         // The store stays usable: a reinstall does not collide with the pending tombstone.
         installer.install_bytes(&package("1.0.0", None, false), PluginInstallPolicy::LocalDevelopment).unwrap();
         assert_eq!(registry.list_installed().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn ensure_tree_writable_clears_readonly_flags_recursively() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("readonly_dir");
+        let sub = dir.join("nested");
+        std::fs::create_dir_all(&sub).unwrap();
+        let file = sub.join("binary.exe");
+        std::fs::write(&file, b"test").unwrap();
+
+        let mut perms = std::fs::metadata(&file).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&file, perms).unwrap();
+        assert!(std::fs::metadata(&file).unwrap().permissions().readonly());
+
+        ensure_tree_writable(&dir);
+        assert!(!std::fs::metadata(&file).unwrap().permissions().readonly());
     }
 }

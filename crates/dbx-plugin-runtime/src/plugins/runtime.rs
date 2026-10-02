@@ -358,7 +358,15 @@ impl PluginSidecarSession {
         self.status.send_replace(PluginSessionStatus::new(PluginSessionState::Stopping, None));
         // Let any open user prompt resolve and close its dialog.
         self.prompts.close();
-        let kill_result = self.child.lock().await.kill().await;
+        let mut child = self.child.lock().await;
+        let kill_result = child.kill().await;
+        // tokio's kill() is start_kill() + wait(), so a successful kill has
+        // already reaped the child; this bounded wait only covers the rare
+        // kill-failure path where the process is still alive. The OS releases
+        // the executable image lock when the session (holding kill_on_drop
+        // Child) drops, which uninstall performs before renaming the plugin
+        // directory (fixes os error 5 / access denied on uninstall).
+        let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
         let message = kill_result.err().map(|error| error.to_string());
         fail_pending(&self.pending, "Plugin session stopped").await;
         self.status.send_replace(PluginSessionStatus::new(PluginSessionState::Stopped, message));

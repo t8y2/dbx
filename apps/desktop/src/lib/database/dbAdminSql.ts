@@ -297,7 +297,19 @@ export async function buildDuplicateTableStructurePlan(options: DuplicateTableSt
   // cloned table silently loses its primary key (t8y2/dbx#8931). Load the source primary key and
   // let the backend append an `ALTER TABLE ... ADD CONSTRAINT ... PRIMARY KEY` for it.
   if (options.databaseType === "sqlserver") {
-    const indexes = await api.listIndexes(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog);
+    const [columns, indexes, tableComment] = await Promise.all([
+      options.sourceColumns ? Promise.resolve(options.sourceColumns) : api.getColumns(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog),
+      api.listIndexes(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog),
+      // The web backend's getTableComment is a throwing placeholder, and SQL Server table lists
+      // report `comment: null` for tables without one, so a hard failure would break web cloning.
+      options.tableComment == null
+        ? api.getTableComment(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog).catch((error) => {
+            console.warn(`Failed to load SQL Server table comment for table clone: ${options.sourceName}`, error);
+            return null;
+          })
+        : Promise.resolve(options.tableComment),
+    ]);
+    const columnComments = collectDuplicateTableColumnComments(columns);
     const primaryKeyColumns = indexes.find((index) => index.is_primary && index.columns.length > 0)?.columns ?? [];
     const primaryKeyConstraintName = sqlServerClonePrimaryKeyConstraintName(indexes, options.targetName);
     const sql = await buildDuplicateTableStructureSql({
@@ -305,13 +317,13 @@ export async function buildDuplicateTableStructurePlan(options: DuplicateTableSt
       schema: options.schema,
       sourceName: options.sourceName,
       targetName: options.targetName,
-      tableComment: options.tableComment,
-      columnComments: [],
+      tableComment,
+      columnComments,
       primaryKeyColumns,
       primaryKeyConstraintName,
       identifierQuote: options.identifierQuote,
     });
-    return { sql, sourceColumns: options.sourceColumns, executeAsScript: primaryKeyColumns.length > 0 || duplicateTableStructureRequiresScript(sql) };
+    return { sql, sourceColumns: columns, executeAsScript: primaryKeyColumns.length > 0 || !!tableComment?.trim() || columnComments.length > 0 || duplicateTableStructureRequiresScript(sql) };
   }
 
   let sourceColumns = options.sourceColumns;

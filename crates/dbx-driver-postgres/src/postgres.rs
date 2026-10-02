@@ -16,13 +16,15 @@ use std::fmt::Write as _;
 use std::fs::File;
 use std::future::Future;
 use std::io::BufReader;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
-use tokio::task::JoinHandle;
-use tokio_postgres::config::SslMode;
+use tokio::net::TcpStream;
+use tokio::task::{JoinHandle, JoinSet};
+use tokio_postgres::config::{Host, SslMode};
 use tokio_postgres::tls::{MakeTlsConnect, TlsConnect};
 use tokio_postgres::types::{FromSql, Kind, Type};
 use tokio_postgres::{AsyncMessage, NoTls, Row, SimpleQueryMessage, Socket};
@@ -2561,6 +2563,125 @@ fn postgres_client_keys() -> &'static Mutex<PostgresClientKeys> {
 /// (`RAISE NOTICE`/`WARNING`, etc.) into a per-backend buffer instead of
 /// discarding them. Query execution drains the buffer so notices are
 /// attached to the `QueryResult` of the statement that raised them.
+/// Delay between staggered TCP connection attempts when a hostname resolves
+/// to several addresses (Happy Eyeballs, RFC 8305 §4): short enough that
+/// falling back to a reachable address feels instant, long enough that a
+/// healthy preferred address still wins the race.
+const HAPPY_EYEBALLS_STAGGER: Duration = Duration::from_millis(250);
+
+/// Dial `addr` once. Split out so the happy-eyeballs racer below stays readable.
+async fn dial_socket_addr_once(addr: SocketAddr) -> std::io::Result<TcpStream> {
+    TcpStream::connect(addr).await
+}
+
+/// Connect to the first reachable address in `addrs`, racing the attempts
+/// with a short stagger instead of trying them strictly one after another.
+/// See [`happy_eyeballs_dial_with`] for the racing semantics.
+async fn happy_eyeballs_dial(addrs: &[SocketAddr], stagger: Duration) -> std::io::Result<TcpStream> {
+    happy_eyeballs_dial_with(addrs, stagger, dial_socket_addr_once).await
+}
+
+/// Racing dial with an injectable per-address dial function, so tests can
+/// script a hanging address deterministically (the dial is the external
+/// boundary; the racing orchestration is the behavior under test).
+///
+/// The first address is dialed immediately; each further address is started
+/// after `stagger` unless an earlier attempt already failed, in which case the
+/// next address is tried at once. The first successful dial wins and the
+/// remaining attempts are aborted. When every attempt fails, the last error
+/// is returned.
+async fn happy_eyeballs_dial_with<F, Fut>(
+    addrs: &[SocketAddr],
+    stagger: Duration,
+    dial: F,
+) -> std::io::Result<TcpStream>
+where
+    F: Fn(SocketAddr) -> Fut + Send,
+    Fut: Future<Output = std::io::Result<TcpStream>> + Send + 'static,
+{
+    let mut remaining = addrs.iter();
+    let mut in_flight: JoinSet<std::io::Result<TcpStream>> = JoinSet::new();
+    let mut last_err: Option<std::io::Error> = None;
+
+    let Some(first) = remaining.next() else {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "no socket addresses to dial"));
+    };
+    in_flight.spawn(dial(*first));
+
+    loop {
+        tokio::select! {
+            biased;
+            result = in_flight.join_next(), if !in_flight.is_empty() => {
+                match result {
+                    Some(Ok(Ok(stream))) => {
+                        in_flight.abort_all();
+                        return Ok(stream);
+                    }
+                    Some(Ok(Err(err))) => last_err = Some(err),
+                    Some(Err(join_err)) => {
+                        last_err = Some(std::io::Error::other(join_err.to_string()));
+                    }
+                    // Unreachable: this arm is disabled while the set is empty.
+                    None => break,
+                }
+                // A finished attempt immediately frees the way for the next address.
+                if let Some(addr) = remaining.next() {
+                    in_flight.spawn(dial(*addr));
+                } else if in_flight.is_empty() {
+                    break;
+                }
+            }
+            _ = tokio::time::sleep(stagger), if remaining.len() > 0 => {
+                if let Some(addr) = remaining.next() {
+                    in_flight.spawn(dial(*addr));
+                }
+            }
+        }
+    }
+
+    Err(last_err
+        .unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no socket addresses to dial")))
+}
+
+/// Resolve a single-host PostgreSQL config ahead of the driver's own dial and
+/// pin it to the first reachable resolved address (Happy Eyeballs, RFC 8305).
+///
+/// The winning IP is passed as `hostaddr`, so the driver's dial goes straight
+/// to the reachable address while TLS still validates against the original
+/// hostname. Returns the config unchanged when there is nothing to race:
+/// several hosts, an explicit `hostaddr`, a Unix socket, an IP literal, a
+/// single resolved address, or an inconclusive probe (the driver's own dial
+/// then surfaces the real error).
+async fn pin_postgres_hostaddr(pg_config: &tokio_postgres::Config) -> tokio_postgres::Config {
+    let mut pg_config = pg_config.clone();
+    let [Host::Tcp(host)] = pg_config.get_hosts() else {
+        return pg_config;
+    };
+    if !pg_config.get_hostaddrs().is_empty() || host.parse::<IpAddr>().is_ok() {
+        return pg_config;
+    }
+    let port = pg_config.get_ports().first().copied().unwrap_or(5432);
+    let Ok(resolved) = tokio::net::lookup_host((host.as_str(), port)).await else {
+        return pg_config;
+    };
+    let mut addrs: Vec<SocketAddr> = resolved.collect();
+    addrs.sort();
+    addrs.dedup();
+    if addrs.len() < 2 {
+        return pg_config;
+    }
+    // The probe only picks the address; the driver's own dial (with its
+    // connect_timeout and TLS setup) still opens the real connection.
+    let probe =
+        tokio::time::timeout(super::tcp_probe_timeout(), happy_eyeballs_dial(&addrs, HAPPY_EYEBALLS_STAGGER)).await;
+    if let Ok(Ok(winner)) = probe {
+        if let Ok(addr) = winner.peer_addr() {
+            pg_config.hostaddr(addr.ip());
+        }
+    }
+    pg_config
+}
+
 struct NoticeCapturingConnect<T>
 where
     T: MakeTlsConnect<Socket> + Clone + Sync + Send + 'static,
@@ -2587,6 +2708,10 @@ where
         let tls = self.tls.clone();
         let pg_config = pg_config.clone();
         Box::pin(async move {
+            // Prefer the first reachable resolved address so an unreachable
+            // IPv6 address cannot burn the whole connect timeout before IPv4
+            // is tried (issue #10955).
+            let pg_config = pin_postgres_hostaddr(&pg_config).await;
             let (client, mut connection) = pg_config.connect(tls).await?;
             // No query can complete before the connection is being driven, so
             // the notice buffer is handed to the driver task through a slot
@@ -15649,5 +15774,95 @@ mod tests {
             assert!(sql.contains("c.relkind IN ('r','m','f','p')"));
             assert!(sql.contains("WHERE n.nspname = $1"));
         }
+    }
+
+    // Issue #10955: a hostname resolving to both IPv6 and IPv4 must connect
+    // through the reachable address instead of stalling on the unreachable
+    // one until the pool's create timeout fires.
+
+    #[tokio::test]
+    async fn happy_eyeballs_dial_does_not_wait_for_hung_first_attempt() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let reachable = listener.local_addr().unwrap();
+        let bad_ip: IpAddr = "192.0.2.1".parse().unwrap();
+        let unreachable = SocketAddr::new(bad_ip, reachable.port());
+        let started = Instant::now();
+        let stream = tokio::time::timeout(
+            Duration::from_secs(10),
+            happy_eyeballs_dial_with(&[unreachable, reachable], Duration::from_millis(50), |addr| async move {
+                if addr.ip() == bad_ip {
+                    // The unreachable IPv6/NAT64 address from #10955: the
+                    // SYN is never answered, so this dial never resolves.
+                    futures::future::pending::<std::io::Result<TcpStream>>().await
+                } else {
+                    TcpStream::connect(addr).await
+                }
+            }),
+        )
+        .await
+        .expect("dial must not stall on the unreachable address")
+        .expect("dial must succeed through the reachable address");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "fallback must be near-instant, not wait out the hung attempt"
+        );
+        assert_eq!(stream.peer_addr().unwrap(), reachable);
+    }
+
+    #[tokio::test]
+    async fn happy_eyeballs_dial_tries_next_address_on_fast_failure() {
+        let closed_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let refused = closed_listener.local_addr().unwrap();
+        drop(closed_listener);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let reachable = listener.local_addr().unwrap();
+        let started = Instant::now();
+        let stream = happy_eyeballs_dial(&[refused, reachable], Duration::from_millis(50))
+            .await
+            .expect("dial must fall through to the reachable address");
+        assert!(started.elapsed() < Duration::from_secs(5), "a refused address must not cost a full stagger");
+        assert_eq!(stream.peer_addr().unwrap(), reachable);
+    }
+
+    #[tokio::test]
+    async fn happy_eyeballs_dial_succeeds_with_single_address() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stream = happy_eyeballs_dial(&[addr], Duration::from_millis(50))
+            .await
+            .expect("a single reachable address must connect");
+        assert_eq!(stream.peer_addr().unwrap(), addr);
+    }
+
+    #[tokio::test]
+    async fn happy_eyeballs_dial_reports_error_when_all_addresses_refused() {
+        let first = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let second = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let closed: Vec<SocketAddr> = [&first, &second].into_iter().map(|l| l.local_addr().unwrap()).collect();
+        drop(first);
+        drop(second);
+        let started = Instant::now();
+        happy_eyeballs_dial(&closed, Duration::from_millis(50))
+            .await
+            .expect_err("all addresses refused: the dial must fail");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "refused dials must fail fast instead of waiting out a stagger"
+        );
+    }
+
+    #[tokio::test]
+    async fn pin_postgres_hostaddr_leaves_ip_literal_alone() {
+        let config = tokio_postgres::Config::from_str("host=127.0.0.1 port=5432 user=dbx connect_timeout=2").unwrap();
+        let pinned = pin_postgres_hostaddr(&config).await;
+        assert!(pinned.get_hostaddrs().is_empty());
+    }
+
+    #[tokio::test]
+    async fn pin_postgres_hostaddr_keeps_explicit_hostaddr() {
+        let mut config = tokio_postgres::Config::from_str("host=localhost port=5432 user=dbx").unwrap();
+        config.hostaddr("127.0.0.1".parse().unwrap());
+        let pinned = pin_postgres_hostaddr(&config).await;
+        assert_eq!(pinned.get_hostaddrs().first(), Some(&"127.0.0.1".parse().unwrap()));
     }
 }

@@ -8759,7 +8759,12 @@ export const useConnectionStore = defineStore("connection", () => {
     if (cached) return cached;
     return withCompletionInFlight(`${cacheKey}:mongo-fields`, async () => {
       await ensureConnected(connectionId);
-      const result = await api.mongoFindDocuments(connectionId, database, collection, 0, 20, "{}");
+      let result;
+      try {
+        result = await api.mongoAggregateDocuments(connectionId, database, collection, '[{"$sample":{"size":100}}]', 100, JSON.stringify({ maxTimeMS: 5000 }));
+      } catch {
+        result = await api.mongoFindDocuments(connectionId, database, collection, 0, 100, "{}");
+      }
       const fields = inferMongoCompletionFields(result.documents ?? []);
       mongoCompletionFieldsCache.value[cacheKey] = fields;
       evictOldestCacheEntries(mongoCompletionFieldsCache.value, COMPLETION_CACHE_MAX);

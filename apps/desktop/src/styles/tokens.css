@@ -105,6 +105,7 @@
 }
 
 :root {
+  color-scheme: light;
   --background: rgb(255 255 255);
   --foreground: rgb(10 10 10);
   --dbx-foreground-rgb: 10, 10, 10;
@@ -169,6 +170,7 @@
 }
 
 .dark {
+  color-scheme: dark;
   --background: rgb(19 20 22);
   --foreground: rgb(215 215 219);
   --dbx-foreground-rgb: 215, 215, 219;

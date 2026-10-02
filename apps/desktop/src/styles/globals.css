@@ -1579,6 +1579,17 @@ html.dbx-data-grid-native-selection-blocked [role="textbox"] * {
     cursor: pointer;
     user-select: none;
   }
+  select {
+    color-scheme: light;
+  }
+  .dark select,
+  html.dark select {
+    color-scheme: dark;
+  }
+  select option {
+    background-color: var(--popover);
+    color: var(--popover-foreground);
+  }
   [role="tab"] {
     user-select: none;
   }

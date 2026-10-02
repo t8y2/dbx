@@ -42,6 +42,12 @@ const PACKAGE_RELEASE_PATHS = [
   "packages/mcp-win32-x64/",
   "crates/dbx-mcp/",
   "crates/dbx-cli/",
+  // dbx-core (and the crates it forwards) is statically linked into both
+  // binaries, so its changes ship in the next npm release too.
+  "crates/dbx-core/",
+  "crates/dbx-drivers/",
+  "crates/dbx-sql/",
+  "crates/dbx-types/",
   "skills/dbx/",
   "crates/dbx-driver-mongodb/src/mongo_shell.rs",
   "Cargo.toml",

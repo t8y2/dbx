@@ -6,7 +6,7 @@ mod store;
 #[cfg(test)]
 mod tests;
 
-pub use models::{BackupConfig, BackupFile, BackupRun, BackupSchedule, Migration, RunRequest};
+pub use models::{BackupConfig, BackupFile, BackupRun, BackupSchedule, BackupTableTarget, Migration, RunRequest};
 pub use service::{BackupCommand, BackupService};
 pub use store::{BackupSnapshot, BackupStore};
 

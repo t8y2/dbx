@@ -318,6 +318,22 @@ describe("redisValuePresentation", () => {
     expect(detectedRedisStructuredCodec(plain)).toBeNull();
   });
 
+  it("auto-detects msgpack only when the decoded value is a container", () => {
+    // {"a":1} encoded as msgpack.
+    const container = formatRedisMemberDetail({
+      raw_base64: Buffer.from([0x81, 0xa1, 0x61, 0x01]).toString("base64"),
+      encoding: "binary",
+    });
+    expect(detectedRedisStructuredCodec(container)).toBe("msgpack");
+
+    // Single ASCII bytes are valid msgpack fixints, so scalar payloads must
+    // stay undetected: a counter key of "1" must not render as 49.
+    for (const scalar of ["1", "0", "Y", "é"]) {
+      const detail = formatRedisMemberDetail(scalar, { allowJsonText: true });
+      expect(detectedRedisStructuredCodec(detail)).toBeNull();
+    }
+  });
+
   it("treats only objects and arrays as JSON containers", () => {
     expect(isRedisJsonContainerValue({ a: 1 })).toBe(true);
     expect(isRedisJsonContainerValue([1])).toBe(true);

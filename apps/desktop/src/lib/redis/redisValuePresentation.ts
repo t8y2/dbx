@@ -479,14 +479,18 @@ export function isRedisJsonContainerValue(value: unknown): boolean {
 }
 
 /**
- * Codec with a deterministic magic prefix that `formatRedisMemberDetail`
- * already decoded for this payload, or null. Protobuf is deliberately
- * excluded: without a schema its wire format matches too many byte strings.
+ * Codec that `formatRedisMemberDetail` already decoded for this payload, or
+ * null. Java serialization, Pickle, and PHP serialization have deterministic
+ * magic prefixes; Protobuf is deliberately excluded because without a schema
+ * its wire format matches too many byte strings. Msgpack has no magic prefix
+ * -- any single byte is a valid msgpack scalar -- so its detection
+ * additionally requires the decoded value to be a container, matching the
+ * JSON auto-format guard above.
  */
 export function detectedRedisStructuredCodec(detail: RedisMemberDetail): RedisValueCodec | null {
   if (detail.javaSerialized) return "javaserialize";
   if (detail.pickle) return "pickle";
-  if (detail.msgpack) return "msgpack";
+  if (detail.msgpack && isRedisJsonContainerValue(detail.msgpack.value)) return "msgpack";
   if (detail.phpSerialized) return "phpserialize";
   return null;
 }

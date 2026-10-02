@@ -523,7 +523,8 @@ function applyAutoMapping() {
     columnMapping.value = Object.fromEntries(currentPreview.columns.map((source) => [source, source]));
     return;
   }
-  columnMapping.value = autoMapImportColumns(currentPreview.columns, targetColumnNames.value);
+  const headerless = titleRow.value === 0 && (isDelimitedFormat(sourceFormat.value) || sourceFormat.value === "excel");
+  columnMapping.value = autoMapImportColumns(currentPreview.columns, targetColumnNames.value, headerless ? "position" : "name");
 }
 
 function applySuggestedColumnDataTypes(currentPreview = preview.value) {

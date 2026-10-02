@@ -7710,6 +7710,10 @@ export const useQueryStore = defineStore("query", () => {
           firstPageUsesActualSql: hiddenPrimaryKeys.length > 0,
         });
         const canPaginateSqlServerUseScript = !!sqlServerUseScript && !!plan.pageSql && typeof plan.pageLimit === "number" && typeof plan.pageOffset === "number";
+        if (plan.paginationError) throw new Error(plan.paginationError);
+        if (effectiveDbType === "oceanbase-oracle" && tab.autoCommit === false && plan.useAgentResultSession && !plan.pageSql && pagination.offset > 0 && !pagination.sessionId) {
+          throw new Error("This query requires an existing result session for offset pagination in a manual transaction");
+        }
         if (sqlServerUseScript && !canPaginateSqlServerUseScript) {
           sqlToExecute = sqlBeforePagination;
         } else {

@@ -1039,12 +1039,12 @@ describe("queryStore hidden primary key editing", () => {
     expect(store.tabs.find((tab) => tab.id === tabId)?.result?.large_value_cells).toEqual([{ row_index: 0, column_index: 1, original_bytes: 81920 }]);
   });
 
-  it("continues the Oracle cursor for page 2 in a manual transaction", async () => {
-    getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
+  it.each(["oracle", "oceanbase-oracle"])("continues the %s cursor for page 2 in a manual transaction", async (databaseType) => {
+    getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: databaseType, database: "ORCL", query_timeout_secs: 30 });
     analyzeEditableQueryEditability.mockResolvedValue({ editable: false, reason: "complex-query" });
     prepareQueryPaginationExecutionPlan.mockImplementation(async (options) => ({
       sqlToExecute: options.sql,
-      pageSql: options.sql,
+      pageSql: databaseType === "oceanbase-oracle" ? undefined : options.sql,
       pageLimit: options.pagination.limit,
       pageOffset: options.pagination.offset,
       countSql: undefined,
@@ -2047,6 +2047,94 @@ describe("queryStore hidden primary key editing", () => {
         countHint: expectedCountHint,
       }),
     );
+  });
+
+  it("advances an OceanBase duplicate projection cursor through an offset jump and next page", async () => {
+    getConnectionConfig.mockReturnValue({ id: "ob-1", name: "OceanBase", db_type: "oceanbase-oracle", database: "app", query_timeout_secs: 30 });
+    analyzeEditableQueryEditability.mockResolvedValue({ editable: false, reason: "complex-query" });
+    prepareQueryPaginationExecutionPlan.mockImplementation(async (options) => ({
+      sqlToExecute: options.sql,
+      pageSql: undefined,
+      pageLimit: options.pagination.limit,
+      pageOffset: options.pagination.offset,
+      countSql: undefined,
+      useAgentResultSession: true,
+    }));
+    let row = 0;
+    executeMulti.mockImplementation(async () => [
+      {
+        columns: ["NAME", "NAME"],
+        rows: Array.from({ length: 2 }, () => [++row, row]),
+        affected_rows: 0,
+        execution_time_ms: 1,
+        session_id: "ob-cursor",
+        has_more: row < 8,
+      },
+    ]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("ob-1", "app", "Query");
+    const sql = "SELECT a.name, a.* FROM people a ORDER BY a.id";
+    await store.executeTabSql(tabId, sql, { pagination: { limit: 2, offset: 4 } });
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.result?.rows).toEqual([
+      [5, 5],
+      [6, 6],
+    ]);
+    expect(executeMulti).toHaveBeenCalledTimes(3);
+    expect(executeMulti.mock.calls[0]![5]).toEqual(expect.objectContaining({ pageSize: 2, fetchSize: 2, resultSessionId: undefined }));
+    expect(executeMulti.mock.calls[0]![5].maxRows).toBeGreaterThan(2);
+    expect(executeMulti.mock.calls[1]![5].resultSessionId).toBe("ob-cursor");
+    await store.executeTabSql(tabId, sql, { pagination: { limit: 2, offset: 6, sessionId: "ob-cursor" } });
+    expect(executeMulti).toHaveBeenCalledTimes(4);
+    expect(executeMulti.mock.calls[3]![2]).toBe(sql);
+    expect(tab.result?.rows).toEqual([
+      [7, 7],
+      [8, 8],
+    ]);
+    expect(tab.result?.columns).toEqual(["NAME", "NAME"]);
+  });
+
+  it("does not execute an OceanBase offset plan rejected without a cursor", async () => {
+    getConnectionConfig.mockReturnValue({ id: "ob-1", name: "OceanBase", db_type: "oceanbase-oracle", database: "app", query_timeout_secs: 30 });
+    analyzeEditableQueryEditability.mockResolvedValue({ editable: false, reason: "complex-query" });
+    prepareQueryPaginationExecutionPlan.mockImplementation(async () => ({
+      sqlToExecute: "",
+      pageSql: undefined,
+      pageLimit: undefined,
+      pageOffset: undefined,
+      countSql: undefined,
+      useAgentResultSession: false,
+      paginationError: "This query requires an Agent result session for offset pagination",
+    }));
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("ob-1", "app", "Query");
+    await store.executeTabSql(tabId, "SELECT name, name FROM people", { pagination: { limit: 2, offset: 4 } });
+    expect(JSON.stringify(store.tabs.find((item) => item.id === tabId)?.result)).toContain("requires an Agent result session");
+    expect(executeMulti).not.toHaveBeenCalled();
+    expect(executeInManualTransaction).not.toHaveBeenCalled();
+  });
+
+  it("rejects a fresh OceanBase manual-transaction offset instead of repeating the first page", async () => {
+    getConnectionConfig.mockReturnValue({ id: "ob-1", name: "OceanBase", db_type: "oceanbase-oracle", database: "app", query_timeout_secs: 30 });
+    analyzeEditableQueryEditability.mockResolvedValue({ editable: false, reason: "complex-query" });
+    prepareQueryPaginationExecutionPlan.mockImplementation(async (options) => ({
+      sqlToExecute: options.sql,
+      pageSql: undefined,
+      pageLimit: options.pagination.limit,
+      pageOffset: options.pagination.offset,
+      countSql: undefined,
+      useAgentResultSession: true,
+    }));
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("ob-1", "app", "Query");
+    store.setAutoCommit(tabId, false);
+    await store.executeTabSql(tabId, "SELECT name, name FROM people", { pagination: { limit: 2, offset: 4 } });
+    expect(JSON.stringify(store.tabs.find((item) => item.id === tabId)?.result)).toContain("requires an existing result session");
+    expect(executeMulti).not.toHaveBeenCalled();
+    expect(executeInManualTransaction).not.toHaveBeenCalled();
   });
 
   it("stops appending when a SQL Server query has no bounded next-page plan", async () => {

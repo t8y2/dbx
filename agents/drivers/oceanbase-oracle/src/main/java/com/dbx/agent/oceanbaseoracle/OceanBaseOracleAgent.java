@@ -100,7 +100,13 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     @Override
     public QueryPageResult executeQueryPage(String sql, String schema, QueryPageOptions options) {
         try (QueryTiming timing = QueryTiming.begin()) {
-            QueryPageResult result = super.executeQueryPage(sql, schema, options);
+            long prepareStarted = System.nanoTime();
+            Connection connection = requireConnected();
+            uncheckedVoid(() -> beforeQueryExecution(connection, options.getTimeoutSecs()));
+            QueryTiming.record("session_prepare", prepareStarted);
+            QueryPageResult result = JdbcExecutor.current().executeBoundedPage(
+                connection, sql, schema, this::setSchemaSQL, this::resetSchemaSQL, options, resultValueReader()
+            );
             result.setQuery_timings_ms(timing.finish());
             return result;
         }

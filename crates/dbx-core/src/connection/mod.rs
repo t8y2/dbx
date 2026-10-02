@@ -1478,14 +1478,13 @@ impl AppState {
         }?;
         let pool_database = metadata_pool_database(Some(&config), database);
         let mut base_pool_keys =
-            vec![base_pool_key_for_with_catalog(Some(config.db_type), connection_id, pool_database, None, false)];
+            vec![base_pool_key_for_config(Some(&config), connection_id, pool_database, None, false)];
         // MongoDB document operations use a connection-level pool and send the
         // requested database in the command. A host connection can therefore
         // legitimately be registered either under the selected database or
         // under the connection-level key; probe both without creating either.
         if config.db_type == DatabaseType::MongoDb {
-            let connection_pool_key =
-                base_pool_key_for_with_catalog(Some(config.db_type), connection_id, None, None, false);
+            let connection_pool_key = base_pool_key_for_config(Some(&config), connection_id, None, None, false);
             if !base_pool_keys.contains(&connection_pool_key) {
                 base_pool_keys.push(connection_pool_key);
             }
@@ -2657,11 +2656,10 @@ impl AppState {
             configs.get(connection_id).ok_or("Connection config not found")?.clone()
         };
         validate_connection_url_params(&config)?;
-        let db_type = Some(config.db_type);
         let validate_existing_pool = should_validate_existing_pool_before_reuse(config.db_type);
         let catalog = catalog.map(str::trim).filter(|value| !value.is_empty());
 
-        let base_pool_key = base_pool_key_for_with_catalog(db_type, connection_id, database, catalog, false);
+        let base_pool_key = base_pool_key_for_config(Some(&config), connection_id, database, catalog, false);
         let pool_key = pool_key_for_session_role(Some(&config), base_pool_key.clone(), client_session_id, session_role);
 
         loop {
@@ -4678,14 +4676,13 @@ impl AppState {
             let configs = self.configs.read().await;
             configs.get(connection_id).cloned()
         };
-        let db_type = config.as_ref().map(|config| config.db_type);
         let catalog = catalog.map(str::trim).filter(|value| !value.is_empty());
         let pool_database = if session_role == AgentSessionRole::Metadata {
             metadata_pool_database(config.as_ref(), database)
         } else {
             database
         };
-        let base_pool_key = base_pool_key_for_with_catalog(db_type, connection_id, pool_database, catalog, true);
+        let base_pool_key = base_pool_key_for_config(config.as_ref(), connection_id, pool_database, catalog, true);
         let pool_key = pool_key_for_session_role(config.as_ref(), base_pool_key, client_session_id, session_role);
         if self.uses_forwarded_transport(connection_id).await {
             self.remove_connection_pools(connection_id).await;
@@ -4788,13 +4785,12 @@ impl AppState {
             let configs = self.configs.read().await;
             configs.get(connection_id).cloned()
         };
-        let db_type = config.as_ref().map(|config| config.db_type);
         let pool_database = if session_role == AgentSessionRole::Metadata {
             metadata_pool_database(config.as_ref(), database)
         } else {
             database
         };
-        let base_pool_key = base_pool_key_for(db_type, connection_id, pool_database, false);
+        let base_pool_key = base_pool_key_for_config(config.as_ref(), connection_id, pool_database, None, false);
         let pool_key =
             pool_key_for_session_role(config.as_ref(), base_pool_key.clone(), Some(client_session_id), session_role);
         if pool_key == base_pool_key {
@@ -4832,9 +4828,8 @@ impl AppState {
             let configs = self.configs.read().await;
             configs.get(connection_id).cloned()
         };
-        let db_type = config.as_ref().map(|config| config.db_type);
         let pool_database = metadata_pool_database(config.as_ref(), database);
-        let base_pool_key = base_pool_key_for(db_type, connection_id, pool_database, false);
+        let base_pool_key = base_pool_key_for_config(config.as_ref(), connection_id, pool_database, None, false);
         let pool_key =
             pool_key_for_session_role(config.as_ref(), base_pool_key, client_session_id, AgentSessionRole::Metadata);
         self.detach_pool_by_key(&pool_key, true).await
@@ -4852,9 +4847,8 @@ impl AppState {
             let configs = self.configs.read().await;
             configs.get(connection_id).cloned()
         };
-        let db_type = config.as_ref().map(|config| config.db_type);
         let pool_database = metadata_pool_database(config.as_ref(), database);
-        let base_pool_key = base_pool_key_for(db_type, connection_id, pool_database, false);
+        let base_pool_key = base_pool_key_for_config(config.as_ref(), connection_id, pool_database, None, false);
         let pool_key =
             pool_key_for_session_role(config.as_ref(), base_pool_key, client_session_id, AgentSessionRole::Metadata);
         if let Some(session_id) = agent_session_id {
@@ -4903,8 +4897,7 @@ impl AppState {
             let configs = self.configs.read().await;
             configs.get(connection_id).cloned()
         };
-        let db_type = config.as_ref().map(|config| config.db_type);
-        let base_pool_key = base_pool_key_for(db_type, connection_id, database, false);
+        let base_pool_key = base_pool_key_for_config(config.as_ref(), connection_id, database, None, false);
         let pool_key = pool_key_for_session_role(config.as_ref(), base_pool_key.clone(), Some(&session), session_role);
         if pool_key == base_pool_key {
             return Ok(None);
@@ -5059,19 +5052,24 @@ impl AppState {
     }
 
     pub async fn close_database_pool(&self, connection_id: &str, database: Option<&str>) -> Result<bool, String> {
-        let (db_type, default_database) = {
+        let config = {
             let configs = self.configs.read().await;
-            configs
-                .get(connection_id)
-                .map_or((None, None), |config| (Some(config.db_type), config.effective_database().map(str::to_string)))
+            configs.get(connection_id).cloned()
         };
+        let db_type = config.as_ref().map(|config| config.db_type);
+        let default_database = config.as_ref().and_then(|config| config.effective_database());
         if database.is_some() && db_type.is_some_and(|db_type| shares_database_pool_with_connection(&db_type)) {
             return Ok(false);
         }
-        let target_database = database.map(str::trim).filter(|database| !database.is_empty());
-        let mut base_pool_keys = vec![base_pool_key_for(db_type, connection_id, target_database, false)];
-        if target_database.is_some() && target_database == default_database.as_deref() {
-            let connection_pool_key = base_pool_key_for(db_type, connection_id, None, false);
+        let target_database = if config.as_ref().is_some_and(is_postgres_jdbc) {
+            database.filter(|database| !database.trim().is_empty())
+        } else {
+            database.map(str::trim).filter(|database| !database.is_empty())
+        };
+        let mut base_pool_keys =
+            vec![base_pool_key_for_config(config.as_ref(), connection_id, target_database, None, false)];
+        if target_database.is_some() && target_database == default_database {
+            let connection_pool_key = base_pool_key_for_config(config.as_ref(), connection_id, None, None, false);
             if !base_pool_keys.contains(&connection_pool_key) {
                 base_pool_keys.push(connection_pool_key);
             }
@@ -6473,8 +6471,16 @@ fn is_embedded_h2_jdbc(config: &ConnectionConfig) -> bool {
         && !location.is_empty()
 }
 
+fn is_postgres_jdbc(config: &ConnectionConfig) -> bool {
+    config.db_type == DatabaseType::Jdbc
+        && config.connection_string.as_deref().is_some_and(|url| url.trim().starts_with("jdbc:postgresql:"))
+}
+
 #[cfg(all(test, unix))]
 mod h2_jdbc_tests;
+
+#[cfg(all(test, unix))]
+mod postgres_jdbc_tests;
 
 pub fn task_client_session_id(task_kind: &str, task_id: &str) -> String {
     format!("{task_kind}:{task_id}")
@@ -6668,7 +6674,9 @@ fn pool_key_for_session_role(
     let pool_key = session_scoped_pool_key_for(config, base_pool_key, client_session_id);
     if session_role == AgentSessionRole::Metadata
         && config.is_some_and(|config| {
-            database_capabilities::is_agent_type(&config.db_type) || sqlserver_uses_legacy_driver(config)
+            database_capabilities::is_agent_type(&config.db_type)
+                || sqlserver_uses_legacy_driver(config)
+                || is_postgres_jdbc(config)
         })
     {
         // The legacy SQL Server Agent borrows one connection-level pool for metadata across
@@ -6839,6 +6847,35 @@ fn extract_auth_token_from_params(params: &str) -> Option<String> {
             k == "auth_token" || k == "authtoken" || k == "auth-token"
         })
         .map(|(_, value)| value.trim().to_string())
+}
+
+fn base_pool_key_for_config(
+    config: Option<&ConnectionConfig>,
+    connection_id: &str,
+    database: Option<&str>,
+    catalog: Option<&str>,
+    include_elasticsearch_single_pool: bool,
+) -> String {
+    if config.is_some_and(is_postgres_jdbc) {
+        let key = match database.filter(|database| !database.trim().is_empty()) {
+            Some(database) => format!(
+                "{connection_id}:database:{}",
+                percent_encoding::utf8_percent_encode(database, percent_encoding::NON_ALPHANUMERIC)
+            ),
+            None => connection_id.to_string(),
+        };
+        return match catalog.map(str::trim).filter(|catalog| !catalog.is_empty()) {
+            Some(catalog) => format!("{key}:catalog:{catalog}"),
+            None => key,
+        };
+    }
+    base_pool_key_for_with_catalog(
+        config.map(|config| config.db_type),
+        connection_id,
+        database,
+        catalog,
+        include_elasticsearch_single_pool,
+    )
 }
 
 fn base_pool_key_for(

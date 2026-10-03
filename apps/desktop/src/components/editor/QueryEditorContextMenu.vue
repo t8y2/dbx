@@ -1,7 +1,35 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useI18n } from "vue-i18n";
-import { AlignLeft, Camera, CaseLower, CaseSensitive, CaseUpper, ClipboardPaste, Code2, Columns3, Download, Eye, FileCode, Highlighter, MessageSquareText, Minimize2, Pencil, PencilRuler, Play, Copy, List, Scissors, Search, Sparkles, Table2, TextSelect, Trash2, WandSparkles } from "@lucide/vue";
+import {
+  AlignLeft,
+  Camera,
+  CaseLower,
+  CaseSensitive,
+  CaseUpper,
+  ClipboardPaste,
+  Code2,
+  Columns3,
+  Download,
+  Eye,
+  FileCode,
+  GitBranch,
+  Highlighter,
+  MessageSquareText,
+  Minimize2,
+  Pencil,
+  PencilRuler,
+  Play,
+  Copy,
+  List,
+  Scissors,
+  Search,
+  Sparkles,
+  Table2,
+  TextSelect,
+  Trash2,
+  WandSparkles,
+} from "@lucide/vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { canFormatSqlForDatabaseType } from "@/lib/sql/sqlFormatter";
 import { supportsQueryEditorBlockComments } from "@/lib/database/databaseFeatureSupport";
@@ -20,11 +48,14 @@ export interface QueryEditorContextMenuState {
   contextObjectTarget: SqlObjectNavigationTarget | null;
   shortcuts: ShortcutSettings;
   expandSelectStar: (() => void) | undefined;
+  canExplain?: boolean;
+  hasContent?: boolean;
 }
 
 export interface QueryEditorContextMenuActions {
   executeFromContextMenu: () => void;
   executeInNewResultTabFromContextMenu: () => void;
+  explainFromContextMenu?: () => void;
   requestPreviewChanges: (sql?: string) => void;
   exportQueryFromContextMenu: (format: "csv" | "xlsx" | "txt") => void;
   toggleCommentFromContextMenu: () => void;
@@ -131,6 +162,13 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
             shortcut: shortcuts.executeSqlInNewResultTab,
           },
           {
+            label: t("toolbar.explainPlan"),
+            action: actions.explainFromContextMenu,
+            disabled: state.canExplain === false || !canExecuteContextSql,
+            icon: GitBranch,
+            shortcut: shortcuts.explainSql,
+          },
+          {
             label: t("editor.previewChanges"),
             action: () => void actions.requestPreviewChanges(props.getState().previewContextSql),
             disabled: !state.previewContextSql,
@@ -171,9 +209,9 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
       shortcut: shortcuts.toggleBlockComment,
     },
     {
-      label: t("editor.contextMenu.formatSelectionSql"),
+      label: canCopySelectedSql ? t("editor.contextMenu.formatSelectionSql") : t("toolbar.formatSql"),
       action: () => void actions.formatCurrentSql(),
-      disabled: state.readOnly || !canCopySelectedSql || !canFormatSqlForDatabaseType(state.databaseType),
+      disabled: state.readOnly || (!canCopySelectedSql && !canExecuteContextSql && !state.hasContent) || !canFormatSqlForDatabaseType(state.databaseType),
       icon: AlignLeft,
       shortcut: shortcuts.formatSql,
     },

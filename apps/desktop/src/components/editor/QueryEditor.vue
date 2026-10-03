@@ -967,6 +967,12 @@ function executeInNewResultTabFromContextMenu() {
   focusEditor();
 }
 
+function explainFromContextMenu() {
+  if (!canExecuteContextSql.value) return;
+  emit("explain");
+  focusEditor();
+}
+
 function exportQueryFromContextMenu(format: "csv" | "xlsx" | "txt") {
   const sql = executableSql.value;
   if (!sql.trim()) return;
@@ -1192,6 +1198,7 @@ function selectSqlLineFromGutter(currentView: EditorViewType, line: { from: numb
 const contextMenuActions: QueryEditorContextMenuActions = {
   executeFromContextMenu,
   executeInNewResultTabFromContextMenu,
+  explainFromContextMenu,
   requestPreviewChanges,
   exportQueryFromContextMenu,
   toggleCommentFromContextMenu,
@@ -1230,6 +1237,8 @@ function getContextMenuState(): QueryEditorContextMenuState {
     contextObjectTarget: contextObjectTarget.value,
     shortcuts: settingsStore.editorSettings.shortcuts,
     expandSelectStar: target ? () => void expandSelectStar(target) : undefined,
+    canExplain: props.canExplain ?? (canExecuteContextSql.value && !props.readOnly && !props.hideExecutionControls),
+    hasContent: (view.value?.state.doc.length ?? 0) > 0,
   };
 }
 

@@ -50,6 +50,11 @@ const MAX_DROP_FOLDER_DEPTH: usize = 8;
 /// but not free, and an unbounded session of large folder drops should fail
 /// loudly at the door instead of growing forever.
 const MAX_DROPPED_FILES: usize = 10_000;
+/// Per-call cap on the renderer's claim list. Every claim still has to match
+/// a native-drop grant, but the list length is renderer input: a real OS drop
+/// payload never approaches this, so the cap only bounds the grant scans and
+/// warn lines one open call can make the host produce.
+const MAX_DROP_PATHS: usize = 256;
 /// A drop grant expires. Consent is anchored to the drop event: a path from a
 /// drag that happened minutes ago must not open in a renderer that never saw
 /// it. Generous enough for the immediate open flow, including slow
@@ -665,6 +670,28 @@ mod tests {
         let result = open_dropped_plugin_files(&state, "main", OWNER, &[root.to_string_lossy().into_owned()]);
         assert_eq!(result.files.len(), MAX_DROP_FOLDER_FILES, "expansion stops at the cap");
         assert!(result.truncated, "partial delivery is visible on the wire, not just the host log");
+        for handle in &result.files {
+            close_plugin_file(&state, OWNER, &handle.handle_id).expect("close");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dropped_path_claim_list_is_capped() {
+        let root = std::env::temp_dir().join(format!("dbx-plugin-path-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let mut paths = Vec::new();
+        for index in 0..(MAX_DROP_PATHS + 8) {
+            let path = root.join(format!("f{index:03}.txt"));
+            std::fs::write(&path, b"x").expect("write");
+            paths.push(path.to_string_lossy().into_owned());
+        }
+        let state = PluginFileState::new();
+        state.register_dropped_paths("main", paths.clone());
+        let result = open_dropped_plugin_files(&state, "main", OWNER, &paths);
+        assert_eq!(result.files.len(), MAX_DROP_PATHS, "the claim list stops at the cap");
+        assert!(result.truncated, "a capped claim list is partial delivery on the wire, not just the host log");
         for handle in &result.files {
             close_plugin_file(&state, OWNER, &handle.handle_id).expect("close");
         }

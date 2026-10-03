@@ -460,7 +460,9 @@ function onHostFileDrop(event: Event): void {
         return;
       }
       if (files.length) bridge?.forwardFileDrop(files, { dropId, truncated });
-      else console.error("[DBX][plugin-workbench:drop] no dropped files could be opened", paths);
+      // The count only: the webview console is not the place to echo the
+      // user's local paths.
+      else console.error("[DBX][plugin-workbench:drop] no dropped files could be opened from", paths.length, "claimed path(s)");
     } catch (error) {
       console.error("[DBX][plugin-workbench:drop]", error);
     }

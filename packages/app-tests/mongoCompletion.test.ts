@@ -1964,3 +1964,48 @@ test("handles from values containing commas or braces without confusing scan", (
   const braceFrom = getMongoCompletionContext('db.users.aggregate([{ $lookup: { from: "orders{2024}", foreignField: "', 'db.users.aggregate([{ $lookup: { from: "orders{2024}", foreignField: "'.length);
   assert.equal(braceFrom.collection, "orders{2024}");
 });
+
+// A `db.other.` inside a string or a comment is literal content. Reading it as the command under
+// the cursor loads the wrong collection's fields, and — when the literal happens to be preceded
+// by a space — even swaps the whole method list to that collection.
+test("reads the active collection from code, not from string or comment contents", () => {
+  const comment = "db.users.find({ /* db.orders. */ na";
+  const string = 'db.users.find({ note: "db.orders." }, na';
+  const singleQuoted = "db.users.find({ note: 'db.orders.' , na";
+
+  assert.equal(getMongoCompletionContext(comment, comment.length).collection, "users");
+  assert.equal(getMongoCompletionContext(string, string.length).collection, "users");
+  assert.equal(getMongoCompletionContext(singleQuoted, singleQuoted.length).collection, "users");
+
+  // An unterminated string whose contents start with a space must not look like a `db.` root.
+  for (const text of ['db.users.find({ note: " db.orders.', "db.users.find({ note: ' x db.orders.", 'db.users.find({ a: "x" }, { b: " db.orders.']) {
+    const context = getMongoCompletionContext(text, text.length);
+    assert.equal(context.collection, "users", text);
+    assert.notEqual(context.mode, "collectionOrMethod", text);
+    assert.deepEqual(labels(text, { collections }), [], text);
+  }
+
+  // A quoted name in a real root still resolves, even though the same regexes match it.
+  const dotted = 'db.getCollection("audit.logs").find({ na';
+  const sibling = 'db.getSiblingDB("analytics").users.find({ na';
+  assert.equal(getMongoCompletionContext(dotted, dotted.length).collection, "audit.logs");
+  assert.equal(getMongoCompletionContext(sibling, sibling.length).collection, "users");
+});
+
+// `findMatchingParen` walks the find() chain, so a comment in the arguments must not unbalance it:
+// an unmatched parenthesis in a comment there used to hide the call's own `)`.
+test("keeps the find chain completable when a comment holds an unbalanced parenthesis", () => {
+  const open = "db.users.find({ /* ( */ status: 1 }).li";
+  const close = "db.users.find({ /* ) */ status: 1 }).li";
+  const balanced = "db.users.find({ /* (legacy) */ status: 1 }).li";
+  const lineComment = "db.users.find({\n  // filter by (legacy) status\n  status: 1\n}).li";
+
+  assert.equal(getMongoCompletionContext(open, open.length).mode, "cursorMethod");
+  assert.equal(getMongoCompletionContext(close, close.length).mode, "cursorMethod");
+  assert.deepEqual(labels(open, { fields }), ["limit"]);
+  assert.deepEqual(labels(close, { fields }), ["limit"]);
+  // Balanced parentheses, line comments and strings were already handled; keep them working.
+  assert.deepEqual(labels(balanced, { fields }), ["limit"]);
+  assert.deepEqual(labels(lineComment, { fields }), ["limit"]);
+  assert.deepEqual(labels('db.users.find({ note: "(x" }).li', { fields }), ["limit"]);
+});

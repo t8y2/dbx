@@ -2423,20 +2423,25 @@ watch([() => props.clientSessionId, () => props.completionContextVersion], () =>
   scheduleSemanticDiagnostics();
 });
 
-watch([() => props.databaseType, () => props.dialect, () => props.syntaxDialect, sqlDriverProfile], () => {
-  executableStatementRangeCache = null;
-  statementBoundaries.invalidate();
-  if (!view.value || !codeMirrorRuntime.sqlLanguageComp || !codeMirrorRuntime.buildSqlLanguageExtension || !codeMirrorRuntime.sqlSemanticHighlightComp || !codeMirrorRuntime.buildSqlSemanticHighlightExtension || !codeMirrorRuntime.sqlSignatureComp || !codeMirrorRuntime.buildSqlSignatureExtension)
-    return;
-  // Signature tooltips depend on the external dialect, so refresh them even when the document and selection stay unchanged.
-  view.value.dispatch({
-    effects: [
-      codeMirrorRuntime.sqlLanguageComp.reconfigure(codeMirrorRuntime.buildSqlLanguageExtension()),
-      codeMirrorRuntime.sqlSemanticHighlightComp.reconfigure(codeMirrorRuntime.buildSqlSemanticHighlightExtension()),
-      codeMirrorRuntime.sqlSignatureComp.reconfigure(codeMirrorRuntime.buildSqlSignatureExtension()),
-    ],
-  });
-});
+watch(
+  [() => props.tabId, () => props.databaseType, () => props.dialect, () => props.syntaxDialect, sqlDriverProfile],
+  () => {
+    executableStatementRangeCache = null;
+    statementBoundaries.invalidate();
+    if (!view.value || !codeMirrorRuntime.sqlLanguageComp || !codeMirrorRuntime.buildSqlLanguageExtension || !codeMirrorRuntime.sqlSemanticHighlightComp || !codeMirrorRuntime.buildSqlSemanticHighlightExtension || !codeMirrorRuntime.sqlSignatureComp || !codeMirrorRuntime.buildSqlSignatureExtension)
+      return;
+    // Signature tooltips depend on the external dialect, so refresh them even when the document and selection stay unchanged.
+    view.value.dispatch({
+      effects: [
+        codeMirrorRuntime.sqlLanguageComp.reconfigure(codeMirrorRuntime.buildSqlLanguageExtension()),
+        codeMirrorRuntime.sqlSemanticHighlightComp.reconfigure(codeMirrorRuntime.buildSqlSemanticHighlightExtension()),
+        codeMirrorRuntime.sqlSignatureComp.reconfigure(codeMirrorRuntime.buildSqlSignatureExtension()),
+      ],
+    });
+    applyEditorCompletionExtension();
+  },
+  { flush: "post" },
+);
 
 // openGauss compatibility mode is loaded asynchronously from the backend into a
 // dedicated store map (not the sidebar tree). A restored tab may open before the

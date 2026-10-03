@@ -19,6 +19,7 @@ import {
 } from "@/stores/settingsStore";
 import type { AiConfigItem } from "@/types/ai";
 import { DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION } from "@/lib/dataGrid/dataGridCopyExtractor";
+import { DEFAULT_MONO_FONT_FAMILY } from "@/lib/app/appFonts";
 
 describe("normalizeEditorSettings", () => {
   it("preserves comment-first naming for existing settings and permits opting out", () => {
@@ -601,6 +602,17 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({}).tableFontFamily).toBe(defaultFontFamily);
     expect(normalizeEditorSettings({ tableFontFamily: "'IBM Plex Mono', monospace" }).tableFontFamily).toBe("'IBM Plex Mono', monospace");
     expect(normalizeEditorSettings({ tableFontFamily: "   " }).tableFontFamily).toBe(defaultFontFamily);
+  });
+
+  it("defaults the editor font with CJK fallbacks and migrates legacy default presets", () => {
+    expect(normalizeEditorSettings({}).fontFamily).toBe(DEFAULT_MONO_FONT_FAMILY);
+    expect(
+      normalizeEditorSettings({
+        fontFamily: "'Fira Code', 'Cascadia Code', 'Cascadia Mono', 'JetBrains Mono', monospace",
+      }).fontFamily,
+    ).toBe(DEFAULT_MONO_FONT_FAMILY);
+    expect(normalizeEditorSettings({ fontFamily: "'Custom Mono', monospace" }).fontFamily).toBe("'Custom Mono', monospace");
+    expect(normalizeEditorSettings({ fontFamily: "   " }).fontFamily).toBe(DEFAULT_MONO_FONT_FAMILY);
   });
 
   it("shows cell detail metadata by default and preserves collapsed state", () => {

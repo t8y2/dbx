@@ -3,7 +3,7 @@ import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { aiConfigToItem, generateId, getConfigKey } from "@/lib/ai/aiConfigList";
 import { AI_CONVERSATION_FONT_FAMILY_DEFAULT, AI_CONVERSATION_FONT_SIZE_DEFAULT, normalizeAiConversationFontFamily, normalizeAiConversationFontSize } from "@/lib/ai/aiTypography";
-import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY } from "@/lib/app/appFonts";
+import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_MONO_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY } from "@/lib/app/appFonts";
 import { emitAlwaysOnTopToolbarVisibilityChanged } from "@/lib/app/windowAlwaysOnTop";
 import { defaultBackgroundImageSettings, normalizeBackgroundImageSettings, type BackgroundImageSettings } from "@/lib/app/appBackgroundImage";
 import * as api from "@/lib/backend/api";
@@ -1154,7 +1154,7 @@ export const EXECUTE_MODE_CURRENT_DEFAULT_VERSION = 1;
 export const SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION = 1;
 
 export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
-  fontFamily: "'Fira Code', 'Cascadia Code', 'Cascadia Mono', 'JetBrains Mono', monospace",
+  fontFamily: DEFAULT_MONO_FONT_FAMILY,
   fontSize: 13,
   uiFontFamily: DEFAULT_UI_FONT_FAMILY,
   aiFontFamily: AI_CONVERSATION_FONT_FAMILY_DEFAULT,
@@ -1368,10 +1368,13 @@ function normalizeUiScale(value: unknown): number {
   return Math.min(MAX_UI_SCALE, Math.max(MIN_UI_SCALE, Math.round(value * 100) / 100));
 }
 
+const LEGACY_DEFAULT_MONO_FONT_FAMILY = "'Fira Code', 'Cascadia Code', 'Cascadia Mono', 'JetBrains Mono', monospace";
+
 function normalizeFontFamily(value: unknown, fallback: string): string {
   if (typeof value !== "string") return fallback;
   const trimmed = value.trim();
-  return trimmed || fallback;
+  if (!trimmed || trimmed === LEGACY_DEFAULT_MONO_FONT_FAMILY) return fallback;
+  return trimmed;
 }
 
 function normalizeDrawerWidth(value: unknown, min: number, fallback: number): number {

@@ -1116,6 +1116,7 @@ mod tests {
             ssh_agent_sock_path: String::new(),
             auth_method: "key".to_string(),
             allow_exec_channel_proxy: false,
+            proxy_command: String::new(),
         }
     }
 

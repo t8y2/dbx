@@ -627,6 +627,74 @@ mod tests {
         drop(client);
     }
     #[tokio::test]
+    async fn idle_sse_streams_do_not_starve_tools_or_session_cleanup() {
+        let backend = Arc::new(HttpTestBackend::new());
+        let (url, manager, cancellation, server_task) =
+            start_http_test_server(backend.clone(), std::time::Duration::from_secs(30)).await;
+        let (client, inner_session_id) = open_active_transaction(&url).await;
+        let id = manager.sessions.read().await.keys().next().unwrap().to_string();
+        let http = reqwest::Client::new();
+        let mut streams = Vec::new();
+        // Keep all GET bodies open, including rmcp's shadow streams. These
+        // carry notifications, not executing SQL, and must not consume the
+        // operation budget or force an existing transaction to be discarded.
+        let mut rejected = None;
+        for _ in 0..33 {
+            let stream = http
+                .get(&url)
+                .bearer_auth("http-test-token")
+                .header("mcp-session-id", &id)
+                .header("accept", "text/event-stream")
+                .send()
+                .await
+                .unwrap();
+            if stream.status() == 429 {
+                rejected = Some(stream);
+                break;
+            }
+            assert_eq!(stream.status(), 200);
+            streams.push(stream);
+        }
+        // The SDK client owns one common GET; the raw client fills the rest.
+        assert!((31..=32).contains(&streams.len()));
+        let excess = rejected.expect("SSE connections must remain bounded");
+        for _ in 0..80 {
+            let listed = client.call_tool(CallToolRequestParams::new("dbx_list_connections")).await.unwrap();
+            assert_ne!(listed.is_error, Some(true));
+        }
+        let query = client
+            .call_tool(
+                CallToolRequestParams::new("dbx_execute_query").with_arguments(
+                    serde_json::from_value(json!({
+                        "connection_id": "mysql",
+                        "database": "app",
+                        "session_id": inner_session_id,
+                        "sql": "SELECT 1"
+                    }))
+                    .unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_ne!(query.is_error, Some(true));
+        assert_eq!(query.structured_content.as_ref().unwrap()["transaction_state"], "active");
+        assert_eq!(excess.text().await.unwrap(), "MCP SSE stream limit reached");
+        assert_eq!(backend.disconnects.load(Ordering::SeqCst), 0);
+        assert!(!backend.sql.lock().unwrap().iter().any(|sql| sql == "ROLLBACK"));
+        assert_eq!(manager.sessions.read().await.len(), 1);
+        let response =
+            http.delete(&url).bearer_auth("http-test-token").header("mcp-session-id", &id).send().await.unwrap();
+        assert_eq!(response.status(), 202);
+        wait_for_disposal(&backend).await;
+        for stream in streams {
+            tokio::time::timeout(std::time::Duration::from_secs(2), stream.bytes()).await.unwrap().unwrap();
+        }
+        drop(client);
+        cancellation.cancel();
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn oauth_http_discovery_authorization_isolation_limits_and_read_only() {
         use crate::oauth::test_issuer::issuer;
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();

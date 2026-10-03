@@ -43,6 +43,7 @@ pub struct HttpAuth {
     sessions: Arc<Mutex<HashMap<String, SessionBinding>>>,
     slots: Arc<Semaphore>,
     requests: Arc<Semaphore>,
+    streams: Arc<Semaphore>,
     controls: Arc<Semaphore>,
     uploads: Arc<Semaphore>,
     initialize: Arc<tokio::sync::Mutex<()>>,
@@ -91,6 +92,7 @@ impl HttpAuth {
             sessions: Default::default(),
             slots: Arc::new(Semaphore::new(64)),
             requests: Arc::new(Semaphore::new(32)),
+            streams: Arc::new(Semaphore::new(32)),
             controls: Arc::new(Semaphore::new(8)),
             uploads: Arc::new(Semaphore::new(40)),
             initialize: Default::default(),
@@ -317,7 +319,7 @@ pub async fn authorize_request(State(auth): State<HttpAuth>, mut request: Reques
     if method == axum::http::Method::POST {
         let _upload = match auth.uploads.clone().try_acquire_owned() {
             Ok(permit) => permit,
-            Err(_) => return (StatusCode::TOO_MANY_REQUESTS, "MCP upload limit reached").into_response(),
+            Err(_) => return capacity_exceeded("uploads", 40, "MCP upload limit reached"),
         };
         let (parts, body) = request.into_parts();
         let body_deadline = deadline.min(tokio::time::Instant::now() + Duration::from_secs(5));
@@ -331,10 +333,20 @@ pub async fn authorize_request(State(auth): State<HttpAuth>, mut request: Reques
         });
         request = Request::from_parts(parts, axum::body::Body::from(bytes));
     }
-    let semaphore = if control { &auth.controls } else { &auth.requests };
+    // Notification streams are long-lived and may overlap during reconnects.
+    // Give them their own bounded budget so idle GETs cannot consume every
+    // permit needed to execute tools, initialize, or refresh a session. POST
+    // operations still retain their permit through the handler and response.
+    let (semaphore, budget, limit, message) = if control {
+        (&auth.controls, "controls", 8, "MCP request limit reached")
+    } else if method == axum::http::Method::GET {
+        (&auth.streams, "sse_streams", 32, "MCP SSE stream limit reached")
+    } else {
+        (&auth.requests, "requests", 32, "MCP request limit reached")
+    };
     let request_permit = match semaphore.clone().try_acquire_owned() {
         Ok(permit) => permit,
-        Err(_) => return (StatusCode::TOO_MANY_REQUESTS, "MCP request limit reached").into_response(),
+        Err(_) => return capacity_exceeded(budget, limit, message),
     };
     // Never forward a bearer secret into SDK request Parts/handler extensions.
     request.headers_mut().remove(header::AUTHORIZATION);
@@ -366,7 +378,7 @@ pub async fn authorize_request(State(auth): State<HttpAuth>, mut request: Reques
         } else {
             match auth.slots.clone().try_acquire_owned() {
                 Ok(slot) => (Some(slot), tokio_util::sync::CancellationToken::new(), SESSION_TTL),
-                Err(_) => return (StatusCode::TOO_MANY_REQUESTS, "MCP session limit reached").into_response(),
+                Err(_) => return capacity_exceeded("sessions", 64, "MCP session limit reached"),
             }
         }
     };
@@ -428,6 +440,13 @@ pub(crate) struct HttpRequestDeadline {
     pub deadline: tokio::time::Instant,
     pub _permit: Arc<OwnedSemaphorePermit>,
     pub session_cancellation: tokio_util::sync::CancellationToken,
+}
+
+fn capacity_exceeded(budget: &'static str, limit: usize, message: &'static str) -> Response {
+    // Rejections happen before the normal response audit. Record only the
+    // exhausted resource, never an owner, session ID, token, URL, or body.
+    log::warn!(target: "dbx_mcp::audit", "MCP HTTP admission rejected: budget={budget} limit={limit} status=429");
+    (StatusCode::TOO_MANY_REQUESTS, message).into_response()
 }
 
 fn bearer_token(value: Option<&HeaderValue>) -> Option<&str> {
@@ -587,7 +606,7 @@ mod tests {
         assert!(auth.host_is_allowed(&uri, &headers));
     }
     #[tokio::test]
-    async fn stream_permits_are_held_and_cancellation_has_reserved_capacity() {
+    async fn stream_and_operation_budgets_are_independent_and_control_capacity_is_reserved() {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -601,7 +620,8 @@ mod tests {
                         "bearer must not reach handler Parts"
                     );
                     assert!(request.extensions().get::<HttpRequestDeadline>().is_some());
-                    if request.method() == axum::http::Method::GET {
+                    if request.method() == axum::http::Method::GET || request.headers().contains_key("x-hold-response")
+                    {
                         let stream = futures::stream::once(async {
                             Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"data: test\n\n"))
                         })
@@ -637,7 +657,35 @@ mod tests {
             assert_eq!(response.status(), 200);
             streams.push(response);
         }
+        assert_eq!(auth.streams.available_permits(), 0);
+        assert_eq!(auth.requests.available_permits(), 32);
+        let mut operations = Vec::new();
+        for _ in 0..32 {
+            let response = client
+                .post(&url)
+                .bearer_auth("synthetic-token")
+                .header("mcp-session-id", "synthetic-session")
+                .header("x-hold-response", "1")
+                .body("{}")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200);
+            operations.push(response);
+        }
         assert_eq!(auth.requests.available_permits(), 0);
+        assert_eq!(
+            client
+                .post(&url)
+                .bearer_auth("synthetic-token")
+                .header("mcp-session-id", "synthetic-session")
+                .body("{}")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            429
+        );
         assert_eq!(
             client
                 .get(&url)
@@ -649,6 +697,47 @@ mod tests {
                 .status(),
             429
         );
+        // A disconnected HTTP response must release its own budget without
+        // requiring DELETE or reclaiming unrelated in-flight operations.
+        drop(streams.pop());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while auth.streams.available_permits() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a dropped GET must release its stream permit before DELETE");
+        assert_eq!(auth.requests.available_permits(), 0);
+        let replacement = client
+            .get(&url)
+            .bearer_auth("synthetic-token")
+            .header("mcp-session-id", "synthetic-session")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(replacement.status(), 200);
+        streams.push(replacement);
+        assert_eq!(auth.streams.available_permits(), 0);
+        drop(operations.pop());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while auth.requests.available_permits() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a dropped POST response must release its request permit before DELETE");
+        let replacement = client
+            .post(&url)
+            .bearer_auth("synthetic-token")
+            .header("mcp-session-id", "synthetic-session")
+            .header("x-hold-response", "1")
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(replacement.status(), 200);
+        operations.push(replacement);
+        assert_eq!(auth.requests.available_permits(), 0);
         assert_eq!(
             client
                 .post(&url)
@@ -673,13 +762,14 @@ mod tests {
             200
         );
         drop(streams);
+        drop(operations);
         tokio::time::timeout(Duration::from_secs(2), async {
-            while auth.requests.available_permits() < 32 {
+            while auth.requests.available_permits() < 32 || auth.streams.available_permits() < 32 {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("dropped streams must release all request permits");
+        .expect("dropped responses must release both bounded budgets");
         stop.cancel();
         task.await.unwrap();
     }

@@ -28,6 +28,8 @@ import {
   type SelectableDataCompareRow,
 } from "@/composables/useDataCompareSession";
 import CompareKeyColumnsSelect from "@/components/diff/CompareKeyColumnsSelect.vue";
+import DataCompareConfigSelector from "@/components/diff/DataCompareConfigSelector.vue";
+import { useDataCompareConfig, type DataCompareConfig, type DataCompareConfigSnapshot } from "@/composables/useDataCompareConfig";
 import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { supportsTransaction } from "@/lib/database/databaseFeatureSupport";
@@ -41,6 +43,16 @@ const SYNC_EXECUTE_BATCH_SIZE = 500;
 const { t } = useI18n();
 const { toast } = useToast();
 const store = useConnectionStore();
+const {
+  configs: dataCompareConfigs,
+  activeConfigId: dataCompareConfigId,
+  activeConfig: activeDataCompareConfig,
+  createConfig: createDataCompareConfig,
+  updateConfig: updateDataCompareConfig,
+  renameConfig: renameDataCompareConfig,
+  deleteConfig: deleteDataCompareConfig,
+  duplicateConfig: duplicateDataCompareConfig,
+} = useDataCompareConfig();
 const open = defineModel<boolean>("open", { default: false });
 
 const props = defineProps<{
@@ -111,6 +123,9 @@ const activeSessionId = ref<string | null>(props.sessionId ?? null);
 let syncPlanRequestId = 0;
 let initializingPrefill = false;
 let initializingPrefillGeneration = 0;
+/** Set while a saved config is being applied so programmatic form writes are not re-saved. */
+let suppressConfigSave = false;
+let configSaveTimer: ReturnType<typeof setTimeout> | undefined;
 let componentUnmounted = false;
 let shownSessionError = "";
 
@@ -455,6 +470,103 @@ async function restoreDataCompareSession(session: DataCompareSession): Promise<v
     await nextTick();
     if (generation === initializingPrefillGeneration) initializingPrefill = false;
   }
+}
+
+/** Selection-only snapshot persisted by the config selector. */
+function dataCompareConfigSnapshot(): DataCompareConfigSnapshot {
+  return {
+    sourceConnectionId: sourceConnectionId.value,
+    sourceDatabase: sourceDatabase.value,
+    sourceSchema: sourceSchema.value,
+    selectedSourceTables: [...selectedSourceTables.value],
+    targetConnectionId: targetConnectionId.value,
+    targetDatabase: targetDatabase.value,
+    targetSchema: targetSchema.value,
+    targetTable: targetTable.value,
+    detailPreviewLimit: detailPreviewLimit.value,
+    keyColumnsByTable: buildSessionKeyColumnsByTable(),
+  };
+}
+
+/**
+ * Rebuild the dialog selection from a saved config. Option lists are re-read
+ * from the live connection (never restored from storage) so a config can not
+ * resurrect a table that no longer exists; the saved table selection is then
+ * intersected with what the connection actually returns.
+ */
+async function applyDataCompareConfig(config: DataCompareConfig): Promise<void> {
+  if (comparing.value || executionLocked.value) return;
+  const generation = ++initializingPrefillGeneration;
+  initializingPrefill = true;
+  suppressConfigSave = true;
+  clearResult();
+  shownSessionError = "";
+  try {
+    sourceConnectionId.value = config.sourceConnectionId;
+    if (!config.sourceConnectionId) return;
+    await loadDatabases(config.sourceConnectionId, "source");
+    if (generation !== initializingPrefillGeneration) return;
+    if (config.sourceDatabase) sourceDatabase.value = config.sourceDatabase;
+    if (config.sourceDatabase) await loadSchemas("source", config.sourceSchema);
+    if (generation !== initializingPrefillGeneration) return;
+
+    targetConnectionId.value = config.targetConnectionId;
+    if (config.targetConnectionId) {
+      await loadDatabases(config.targetConnectionId, "target");
+      if (generation !== initializingPrefillGeneration) return;
+      if (config.targetDatabase) targetDatabase.value = config.targetDatabase;
+      if (config.targetDatabase) await loadSchemas("target", config.targetSchema);
+      if (generation !== initializingPrefillGeneration) return;
+    }
+
+    resetSelectedSourceTables(config.selectedSourceTables);
+    if (sourceSchema.value) await loadTables("source");
+    if (targetSchema.value) await loadTables("target");
+    if (generation !== initializingPrefillGeneration) return;
+    // loadTables prefers the dialog's prefill table when present; the saved
+    // config must win, so re-apply the selection and drop tables that vanished.
+    const availableTables = config.selectedSourceTables.filter((table) => sourceTables.value.includes(table));
+    resetSelectedSourceTables(availableTables);
+    sourceTable.value = availableTables.length === 1 ? (availableTables[0] ?? "") : "";
+    if (config.targetTable && targetTables.value.includes(config.targetTable)) targetTable.value = config.targetTable;
+    keyColumnOverrides.value = normalizeKeyColumnOverrides(config.keyColumnsByTable);
+    resetTableColumnMetadata();
+    if (config.detailPreviewLimit) detailPreviewLimit.value = config.detailPreviewLimit;
+    void prefetchSelectedTableColumns(selectedSourceTableNames.value);
+  } catch (error) {
+    toast(String(error), 5000);
+  } finally {
+    await nextTick();
+    if (generation === initializingPrefillGeneration) initializingPrefill = false;
+    suppressConfigSave = false;
+  }
+}
+
+function handleDataCompareConfigSelect(id: string) {
+  dataCompareConfigId.value = id;
+  const config = dataCompareConfigs.value.find((item) => item.id === id);
+  if (config) void applyDataCompareConfig(config);
+}
+
+function handleSaveDataCompareConfig() {
+  createDataCompareConfig(t("dataCompare.defaultConfigName"), dataCompareConfigSnapshot());
+  toast(t("dataCompare.configSaved"), 3000);
+}
+
+function handleRenameDataCompareConfig(id: string, name: string) {
+  renameDataCompareConfig(id, name);
+}
+
+function handleDuplicateDataCompareConfig() {
+  const id = dataCompareConfigId.value;
+  if (id) duplicateDataCompareConfig(id);
+}
+
+function handleDeleteDataCompareConfig() {
+  const id = dataCompareConfigId.value;
+  // The form keeps the current selection; only the saved entry is removed so a
+  // delete can never clear what the user is looking at.
+  if (id) deleteDataCompareConfig(id);
 }
 
 function applyDataCompareSession(session: DataCompareSession | undefined): void {
@@ -1002,6 +1114,21 @@ watch(targetTable, () => {
   if (initializingPrefill) return;
   clearResult();
 });
+// Keep the selected config in sync with the form so "saved" really means the
+// current selection. Debounced because table multi-select toggles fire rapidly.
+watch(
+  () => [sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, sourceTableSelection.value.join("\u0000"), targetConnectionId.value, targetDatabase.value, targetSchema.value, targetTable.value, detailPreviewLimit.value, JSON.stringify(keyColumnOverrides.value)],
+  () => {
+    if (suppressConfigSave || initializingPrefill || !dataCompareConfigId.value) return;
+    if (configSaveTimer) clearTimeout(configSaveTimer);
+    const configId = dataCompareConfigId.value;
+    configSaveTimer = setTimeout(() => {
+      configSaveTimer = undefined;
+      if (componentUnmounted || configId !== dataCompareConfigId.value) return;
+      updateDataCompareConfig(configId, dataCompareConfigSnapshot());
+    }, 400);
+  },
+);
 watch(
   [() => open.value, () => props.sessionId],
   async ([value, sessionId]) => {
@@ -1025,6 +1152,10 @@ watch(
     if (props.prefillConnectionId) {
       const generation = ++initializingPrefillGeneration;
       initializingPrefill = true;
+      // A prefill is an ad-hoc compare started from another screen; it must not
+      // be silently written into whichever config happened to be selected.
+      dataCompareConfigId.value = "";
+      suppressConfigSave = true;
       try {
         sourceConnectionId.value = props.prefillConnectionId;
         await loadDatabases(props.prefillConnectionId, "source");
@@ -1041,7 +1172,13 @@ watch(
       } finally {
         await nextTick();
         if (generation === initializingPrefillGeneration) initializingPrefill = false;
+        suppressConfigSave = false;
       }
+      return;
+    }
+    const savedConfig = activeDataCompareConfig.value;
+    if (savedConfig) {
+      await applyDataCompareConfig(savedConfig);
     }
   },
   { immediate: true },
@@ -1058,6 +1195,7 @@ watch(
 );
 onBeforeUnmount(() => {
   componentUnmounted = true;
+  if (configSaveTimer) clearTimeout(configSaveTimer);
   if (!executing.value && txnSessionId.value) void finishTransaction(false);
 });
 </script>
@@ -1071,6 +1209,19 @@ onBeforeUnmount(() => {
           {{ t("dataCompare.title") }}
         </DialogTitle>
       </DialogHeader>
+
+      <div class="flex flex-wrap items-center gap-2 border-b pb-2">
+        <DataCompareConfigSelector
+          :configs="dataCompareConfigs"
+          :active-config-id="dataCompareConfigId"
+          :disabled="comparing || executionLocked"
+          @update:active-config-id="handleDataCompareConfigSelect"
+          @create="handleSaveDataCompareConfig"
+          @rename="handleRenameDataCompareConfig"
+          @duplicate="handleDuplicateDataCompareConfig"
+          @delete="handleDeleteDataCompareConfig"
+        />
+      </div>
 
       <div class="flex-1 min-h-0 min-w-0 overflow-auto">
         <fieldset :disabled="executionLocked" class="space-y-4 py-2">

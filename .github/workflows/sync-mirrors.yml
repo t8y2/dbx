@@ -19,6 +19,8 @@ concurrency:
 
 jobs:
   sync-cnb:
+    # A fork release must not publish to the upstream project's mirrors.
+    if: github.repository == 't8y2/dbx'
     name: Sync to CNB
     runs-on: ubuntu-latest
     steps:
@@ -40,6 +42,8 @@ jobs:
           git push cnb --tags --force
 
   sync-atomgit:
+    # A fork release must not publish to the upstream project's mirrors.
+    if: github.repository == 't8y2/dbx'
     name: Sync to AtomGit
     runs-on: ubuntu-latest
     steps:
@@ -61,6 +65,8 @@ jobs:
           git push atomgit --tags --force
 
   sync-gitee:
+    # A fork release must not publish to the upstream project's mirrors.
+    if: github.repository == 't8y2/dbx'
     name: Sync to Gitee
     runs-on: ubuntu-latest
     steps:

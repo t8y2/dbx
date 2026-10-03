@@ -12,6 +12,19 @@ function job(name, content = workflow) {
   return jobs.slice(definitions[index].index, definitions[index + 1]?.index ?? jobs.length);
 }
 
+test("every mirror publication job is restricted to the upstream repository", () => {
+  const mirrors = readFileSync(new URL("../workflows/sync-mirrors.yml", import.meta.url), "utf8");
+  const definitions = [...mirrors.slice(mirrors.indexOf("\njobs:\n") + 7).matchAll(/^  ([\w-]+):\s*$/gm)];
+  assert.deepEqual(definitions.map((match) => match[1]).sort(), ["sync-atomgit", "sync-cnb", "sync-gitee"]);
+  for (const definition of definitions) {
+    const content = job(definition[1], mirrors);
+    // Job-level gating prevents checkout, secret access, and forced mirror pushes
+    // for every trigger in a fork, including manually dispatched runs.
+    assert.match(content, /^    if: github\.repository == 't8y2\/dbx'\s*$/m);
+    assert.ok(content.indexOf("    if:") < content.indexOf("    steps:"));
+  }
+});
+
 test("fast checks run format and contracts before graph resolution or compilation", () => {
   const fast = job("fast-checks");
   for (const command of ["cargo fmt --check", "node --test scripts/core-architecture.test.mjs", "node scripts/sync-connection-types.mjs --check", "node .github/scripts/ci-lockfiles.mjs", "node .github/scripts/ci-rust-coverage.mjs"]) assert.ok(fast.includes(command));

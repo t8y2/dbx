@@ -435,7 +435,7 @@ A result view contributes a plugin-rendered visualization for query results. DBX
 
 A result view declares display metadata only: it carries no UI of its own and never names a workbench. The opened contribution id reaches the plugin UI in the init payload (`dbx-plugin-init` detail `contributionId`), so a plugin that declares several result views selects the matching one inside its single UI entrypoint.
 
-The `context.result` snapshot is bounded — `{ columns, rows (<= 500), truncated }` plus `sql`, `connectionId`, and `database`. Plugins that need more rows can re-run a read-only statement with [`queryData`](#read-only-data-queries) (requires `host.data:read` and the user's consent for that connection). Requires a UI entrypoint.
+The `context.result` snapshot is bounded — `{ columns, rows (<= 500), truncated }` plus `sql`, `connectionId`, `database`, and `schema`. Plugins that need more rows can re-run a read-only statement with [`queryData`](#read-only-data-queries) (requires `host.data:read` and the user's consent for that connection). Requires a UI entrypoint.
 
 ### `context-menu`
 

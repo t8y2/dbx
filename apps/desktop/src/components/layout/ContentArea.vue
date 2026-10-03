@@ -1382,13 +1382,19 @@ function openPluginResultView(pluginId: string, contributionId: string, label: s
   // bounded snapshot — plugins that need more rows re-run the statement through
   // `host.queryData` (host.data:read, with the user's consent).
   const cappedRows = result.rows.slice(0, 500);
+  const connectionId = activeResultConnectionId.value || "";
+  const database = activeResultDatabase.value || "";
+  const schema = activeResultSchema.value || "";
   queryStore.openPluginWorkbench(pluginId, contributionId, {
     title: label,
-    connectionId: props.activeTab.connectionId || "",
-    database: props.activeTab.database || "",
+    connectionId,
+    database,
     context: {
-      connectionId: props.activeTab.connectionId || "",
-      database: props.activeTab.database || "",
+      connectionId,
+      database,
+      // The plugin re-runs `sql` through `host.queryData`, whose backend sets
+      // search_path from this; without it unqualified table names miss.
+      schema,
       sql: resultSqlForGrid(props.activeTab),
       result: { columns: result.columns, rows: cappedRows, truncated: result.rows.length > cappedRows.length },
     },

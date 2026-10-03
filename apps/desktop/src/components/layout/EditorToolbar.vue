@@ -51,7 +51,7 @@ import { supportsQueryExecution } from "@/lib/database/databaseFeatureSupport";
 import { connectionIsDorisFamilyCatalogCapable } from "@/lib/database/databaseFeatureSupport";
 import { hexToRgba } from "@/lib/common/color";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
-import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
+import { formatShortcutDisplay, formatShortcutTooltip } from "@/lib/editor/shortcutDisplay";
 import { resolveNextEditorToolbarTier, type EditorToolbarTier } from "@/lib/tabs/editorToolbarLayout";
 import { canSaveSqlTab } from "@/lib/tabs/sqlTabSaveTarget";
 import { looksLikeDmlStatement } from "@/lib/sql/dmlChangePreview";
@@ -304,10 +304,14 @@ const supportsTransaction = computed(() => supportsTransactionFeature(props.acti
 const hasDefaultDatabaseOption = computed(() => activeDatabaseOptions.value.includes(""));
 const schemaDatabaseKey = computed(() => props.activeTab.database || (isSingleDb.value ? "_" : ""));
 const saveTooltip = computed(() => {
-  if (props.activeTab.objectSource) return t("objects.saveSource");
-  if (props.activeTab.externalSqlPath) return t("toolbar.saveSqlFile");
-  return t("toolbar.saveSql");
+  let label = t("toolbar.saveSql");
+  if (props.activeTab.objectSource) label = t("objects.saveSource");
+  else if (props.activeTab.externalSqlPath) label = t("toolbar.saveSqlFile");
+  return formatShortcutTooltip(label, settingsStore.editorSettings.shortcuts.saveSql);
 });
+const explainPlanTooltip = computed(() => formatShortcutTooltip(t("toolbar.explainPlan"), settingsStore.editorSettings.shortcuts.explainSql));
+const formatSqlTooltip = computed(() => formatShortcutTooltip(t("toolbar.formatSql"), settingsStore.editorSettings.shortcuts.formatSql));
+const exPasteSqlInConditionTooltip = computed(() => formatShortcutTooltip(t("toolbar.exPasteSqlInCondition"), settingsStore.editorSettings.shortcuts.exPasteSqlInCondition));
 const isObjectSourceTab = computed(() => !!props.activeTab.objectSource || !!props.activeTab.sourceLoad);
 const objectSourceRefreshing = computed(() => !!props.activeTab.sourceLoad && !props.activeTab.sourceLoad.error);
 
@@ -318,11 +322,7 @@ function refreshObjectSource() {
 }
 const executeShortcutDisplay = computed(() => formatShortcutDisplay(settingsStore.editorSettings.shortcuts.executeSql));
 const executeShortcutTooltip = computed(() => t("toolbar.executeShortcut", { shortcut: executeShortcutDisplay.value }));
-const executeInNewResultTabShortcutDisplay = computed(() => formatShortcutDisplay(settingsStore.editorSettings.shortcuts.executeSqlInNewResultTab));
-const executeInNewResultTabTooltip = computed(() => {
-  const label = t("settings.shortcutExecuteSqlInNewResultTab");
-  return executeInNewResultTabShortcutDisplay.value ? `${label} (${executeInNewResultTabShortcutDisplay.value})` : label;
-});
+const executeInNewResultTabTooltip = computed(() => formatShortcutTooltip(t("settings.shortcutExecuteSqlInNewResultTab"), settingsStore.editorSettings.shortcuts.executeSqlInNewResultTab));
 // executableSql 在无选区时可能是整篇文档；只要有 DML 语句出现就显示预览按钮，
 // 具体"当前语句"由编辑器（QueryEditor）按执行模式解析。
 const DML_KEYWORD_RE = /(^|\s)(update|insert|delete)\s/i;
@@ -580,7 +580,7 @@ async function changeCatalog(selectedCatalog: string) {
             <GitBranch v-else class="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
-        <TooltipContent>{{ activeTab.isExplaining ? t("toolbar.stopExplain") : t("toolbar.explainPlan") }}</TooltipContent>
+        <TooltipContent>{{ activeTab.isExplaining ? t("toolbar.stopExplain") : explainPlanTooltip }}</TooltipContent>
       </Tooltip>
       <!-- Autotrace (DM) / EXPLAIN ANALYZE (Postgres) / actual plan (SQL Server) toggle -->
       <Tooltip v-if="showExplainAnalyzeToggle">
@@ -606,7 +606,7 @@ async function changeCatalog(selectedCatalog: string) {
             <AlignLeft class="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
-        <TooltipContent>{{ t("toolbar.formatSql") }}</TooltipContent>
+        <TooltipContent>{{ formatSqlTooltip }}</TooltipContent>
       </Tooltip>
       <Tooltip v-if="showCompressButton">
         <TooltipTrigger as-child>
@@ -741,7 +741,7 @@ async function changeCatalog(selectedCatalog: string) {
             <ClipboardPaste class="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
-        <TooltipContent>{{ t("toolbar.exPasteSqlInCondition") }}</TooltipContent>
+        <TooltipContent>{{ exPasteSqlInConditionTooltip }}</TooltipContent>
       </Tooltip>
       <Tooltip v-if="showMultiExecuteButton">
         <TooltipTrigger as-child>

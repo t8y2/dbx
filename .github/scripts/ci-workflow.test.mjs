@@ -66,6 +66,22 @@ test("frontend tests use two shards on separate runners", () => {
   assert.doesNotMatch(job("frontend-typecheck"), /vitest|oxfmt|oxlint/);
 });
 
+test("frontend type checking has a dedicated heap budget without changing other frontend jobs", () => {
+  const content = job("frontend-typecheck");
+  assert.match(content, /NODE_OPTIONS: --max-old-space-size=8192/);
+  assert.match(content, /name: Type-check frontend\s+run: pnpm exec vue-tsc --noEmit --project apps\/desktop\/tsconfig\.json/);
+  for (const name of ["frontend-checks", "frontend-test"]) assert.doesNotMatch(job(name), /NODE_OPTIONS:/);
+});
+
+test("Windows 7 bundling uses the tested retry script and still audits the installer", () => {
+  const content = job("windows-win7-bundle");
+  assert.ok(content.includes("run: ./.github/scripts/bundle-win7-installer.ps1"));
+  assert.doesNotMatch(content, /bundle-win7-installer\.test\.ps1/);
+  assert.ok(content.includes("assert-win7-installer-content.ps1"));
+  assert.ok(content.indexOf("bundle-win7-installer.ps1") < content.indexOf("assert-win7-installer-content.ps1"));
+  assert.ok(job("github-scripts").includes("run: ./.github/scripts/bundle-win7-installer.test.ps1"));
+});
+
 test("every old Agent stage has an independent owner and Java packaging remains strict", () => {
   assert.ok(job("agent-checks").includes("python3 -m unittest discover"));
   assert.ok(job("agent-checks").includes("python3 scripts/validate_agents.py"));

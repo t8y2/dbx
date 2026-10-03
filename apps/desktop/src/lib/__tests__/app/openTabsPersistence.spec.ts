@@ -21,6 +21,25 @@ function roundTrip(tabs: QueryTab[]) {
 }
 
 describe("openTabsPersistence originalSql round-trip", () => {
+  it("preserves retained result source connections independently of the editor connection", () => {
+    const base = { title: "Result", sequence: 1, sql: "SELECT 1", createdAt: 1 };
+    const [restored] = roundTrip([
+      queryTab({
+        connectionId: "editor",
+        resultRuns: [
+          { ...base, id: "ordinary", connectionId: "test" },
+          { ...base, id: "multi", connectionId: "editor", multiDbExecution: { kind: "multi-db", batchId: "batch", target: { connectionId: "production", database: "app" }, status: "success" } },
+          { ...base, id: "legacy" },
+          { ...base, id: "explicit-undefined", connectionId: undefined },
+        ],
+      }),
+    ]);
+    expect(restored.connectionId).toBe("editor");
+    expect(restored.resultRuns?.map((run) => run.connectionId)).toEqual(["test", "production", undefined, undefined]);
+    expect(restored.resultRuns?.[2]).not.toHaveProperty("connectionId");
+    expect(restored.resultRuns?.[3]).not.toHaveProperty("connectionId");
+  });
+
   it("preserves per-tab output view state across a round-trip", () => {
     const [restored] = roundTrip([queryTab({ uiState: { activeOutputView: "chart", redisResultViewMode: "console", resultPaneOpen: false } })]);
 

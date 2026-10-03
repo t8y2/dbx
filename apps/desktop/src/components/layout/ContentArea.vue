@@ -12,6 +12,7 @@ import { hasQueryOutput as tabHasQueryOutput } from "@/lib/query/queryOutput";
 import { batchResultInsertRequest } from "@/lib/query/queryResultBatchInsert";
 import { batchSqlRecoveryState, type BatchSqlRecoveryAction } from "@/lib/query/batchSqlRecovery";
 import type { CSSProperties } from "vue";
+import { hexToRgba } from "@/lib/common/color";
 import { useI18n } from "vue-i18n";
 import { provideTabUiState } from "@/lib/tabs/tabUiState";
 import {
@@ -506,6 +507,21 @@ const activeQueryError = computed(() => {
   return String(result.rows[0]?.[0] ?? "");
 });
 const hasQueryOutput = computed(() => tabHasQueryOutput(props.activeTab));
+function resultRunConnectionId(runId?: string) {
+  const run = props.activeTab.resultRuns?.find((item) => item.id === runId);
+  return run?.multiDbExecution?.kind === "multi-db" ? run.multiDbExecution.target.connectionId : (run?.connectionId ?? props.activeTab.connectionId);
+}
+
+function resultRunColor(runId?: string) {
+  return connectionStore.getConfig(resultRunConnectionId(runId))?.color || "";
+}
+
+function resultRunColorStyle(runId: string, active: boolean): CSSProperties | undefined {
+  const color = resultRunColor(runId);
+  return color ? { borderColor: hexToRgba(color, active ? 0.72 : 0.35), backgroundColor: hexToRgba(color, active ? 0.14 : 0.05) } : undefined;
+}
+
+const activeResultColor = computed(() => (hasQueryOutput.value ? resultRunColor(props.activeTab.activeResultRunId) : ""));
 // 结果集页签/列表的名称是否带库名，由编辑器设置控制（默认带库名）
 const includeResultSourceDatabase = computed(() => settingsStore.editorSettings.showResultSourceDatabase);
 const resultTabNamingMode = computed(() => settingsStore.editorSettings.resultTabNamingMode);
@@ -1897,7 +1913,7 @@ defineExpose({
           </div>
         </Pane>
         <Pane v-if="(resultsPaneOpen || resultOnly) && !editorOnly" class="min-h-0" :size="resultOnly ? 100 : resultsPaneSize" :min-size="resultOnly ? 100 : 20">
-          <div class="h-full flex flex-col">
+          <div data-query-result-surface class="h-full flex flex-col border border-transparent" :style="activeResultColor ? { borderColor: activeResultColor } : undefined">
             <!--
               The shared result surface (resultOnly) is always mounted regardless of
               whether the active tab has run a query yet, and this toolbar is the only
@@ -1935,6 +1951,7 @@ defineExpose({
                           role="presentation"
                           class="group/result-run inline-flex h-7 shrink-0 select-none items-center overflow-hidden rounded-md border transition-colors"
                           :class="run.active ? 'border-border bg-background text-foreground shadow-sm' : 'border-transparent text-muted-foreground hover:border-border/70 hover:bg-background/70 hover:text-foreground'"
+                          :style="resultRunColorStyle(run.id, run.active)"
                           @contextmenu="onContextMenu"
                         >
                           <button
@@ -1948,6 +1965,7 @@ defineExpose({
                             @click="selectResultRunFromTab(run.id)"
                             @keydown="onResultRunTabKeydown($event, runIndex)"
                           >
+                            <span v-if="resultRunColor(run.id)" data-result-connection-color class="h-2 w-2 shrink-0 rounded-full" :style="{ backgroundColor: resultRunColor(run.id) }" aria-hidden="true" />
                             <Pin v-if="run.pinned" class="h-3 w-3 shrink-0 fill-current text-primary" />
                             {{ run.title || run.sourceLabel || resultRunFallbackLabel(run.sequence) }}
                           </button>
@@ -1969,6 +1987,7 @@ defineExpose({
                   <DropdownMenu>
                     <DropdownMenuTrigger as-child>
                       <Button variant="ghost" size="sm" class="h-6 max-w-48 gap-1 px-2 text-xs">
+                        <span v-if="activeResultColor" data-result-connection-color class="h-2 w-2 shrink-0 rounded-full" :style="{ backgroundColor: activeResultColor }" aria-hidden="true" />
                         <span class="min-w-0 truncate">{{ activeResultRunItem ? activeResultRunItem.title || activeResultRunItem.sourceLabel || resultRunFallbackLabel(activeResultRunItem.sequence) : t("tabs.resultRuns") }}</span>
                         <ChevronDown class="h-3.5 w-3.5 shrink-0" />
                       </Button>
@@ -1976,6 +1995,7 @@ defineExpose({
                     <DropdownMenuContent align="start" class="w-48">
                       <CustomContextMenu v-for="run in resultRuns" :key="run.id" :items="() => resultRunContextMenuItems(run)" v-slot="{ onContextMenu }">
                         <DropdownMenuItem class="flex items-center gap-2 pr-1" @select="selectResultRunFromTab(run.id)" @contextmenu="onContextMenu">
+                          <span v-if="resultRunColor(run.id)" data-result-connection-color class="h-2 w-2 shrink-0 rounded-full" :style="{ backgroundColor: resultRunColor(run.id) }" aria-hidden="true" />
                           <Check v-if="run.active" class="h-3.5 w-3.5 shrink-0" />
                           <span v-else class="h-3.5 w-3.5 shrink-0" />
                           <Pin v-if="run.pinned" class="h-3 w-3 shrink-0 fill-current text-primary" />
@@ -2004,6 +2024,7 @@ defineExpose({
                   :can-export-xlsx="activeOutputView === 'result' && redisResultViewMode === 'grid' && !!activeTab.result && hasTabularResult && !activeElasticsearchJsonResponse"
                   :active-index="activeTab.activeResultIndex ?? 0"
                   :active="activeOutputView === 'result'"
+                  :connection-color="activeResultColor"
                   @select="selectResultItem"
                   @copy-sql="copySelectedResultSql"
                   @copy-query-sql="copySelectedResultQueries"

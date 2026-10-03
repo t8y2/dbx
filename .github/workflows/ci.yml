@@ -162,6 +162,10 @@ jobs:
         shell: pwsh
         run: ./.github/scripts/install-mcp-powershell.test.ps1
 
+      - name: Windows installer bundling tests
+        shell: pwsh
+        run: ./.github/scripts/bundle-win7-installer.test.ps1
+
   packages:
     needs: changes
     if: needs.changes.outputs.packages == 'true'
@@ -543,19 +547,7 @@ jobs:
 
       - name: Bundle Windows 7 fixed-runtime test installer with zlib
         shell: pwsh
-        run: |
-          $bundleDir = "target/x86_64-win7-windows-msvc/release/bundle/nsis"
-          pnpm tauri bundle --bundles nsis --target x86_64-win7-windows-msvc `
-            --config src-tauri/tauri.webview2-win7-fixed.conf.json `
-            --config .github/fixtures/win7-nsis-zlib-config.json
-          $installer = Get-ChildItem $bundleDir -Filter "*.exe" |
-            Sort-Object LastWriteTimeUtc -Descending |
-            Select-Object -First 1
-          if (!$installer) {
-            Write-Error "Missing Windows 7 fixed-runtime installer in ${bundleDir}"
-            exit 1
-          }
-          Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256
+        run: ./.github/scripts/bundle-win7-installer.ps1
 
       - name: Audit Windows 7 installer contents
         shell: pwsh

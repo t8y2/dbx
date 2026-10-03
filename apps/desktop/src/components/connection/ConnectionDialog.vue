@@ -3940,7 +3940,7 @@ const postgresClientKeyPath = computed({
 // Firebird 的 Java 驱动（Jaybird）默认按 JVM 编码（UTF-8）解码 CHARACTER SET NONE
 // 字段，历史数据若以 GBK 等编码存放就会显示为乱码。这里把连接字符集映射到 JDBC URL 的
 // charSet 参数（复用通用 URL 参数通道），交给用户按数据实际编码选择。
-const FIREBIRD_CHARSET_OPTIONS = ["UTF8", "GBK", "GB18030", "BIG5", "ISO8859_1", "WIN1252"];
+const FIREBIRD_CHARSET_OPTIONS = ["UTF8", "GBK", "GB18030", "BIG5", "ISO8859_1", "Cp1252"];
 const firebirdCharsetItems = computed(() => {
   const current = getUrlParam(form.value.url_params, "charSet");
   return current && !FIREBIRD_CHARSET_OPTIONS.includes(current) ? [current, ...FIREBIRD_CHARSET_OPTIONS] : FIREBIRD_CHARSET_OPTIONS;

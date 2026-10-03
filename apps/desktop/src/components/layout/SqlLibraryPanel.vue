@@ -26,7 +26,7 @@ import { savedSqlFolderBranchFileCount } from "@/lib/savedSql/savedSqlFolderCoun
 import { collectSavedSqlDirectoryImportFiles } from "@/lib/savedSql/savedSqlDirectoryImport";
 import { savedSqlBatchErrorMessage, savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
 import { savedSqlDatabaseScopeKey } from "@/lib/savedSql/savedSqlDatabaseTree";
-import { ensureSqlExtension, nextAvailableSqlName } from "@/lib/savedSql/savedSqlFileName";
+import { ensureSqlExtension, extractCandidateDatabaseFromName, nextAvailableSqlName } from "@/lib/savedSql/savedSqlFileName";
 import { savedSqlImportTarget } from "@/lib/savedSql/savedSqlImportTarget";
 import { savedSqlExecutionTargetFromTab, type SavedSqlOpenTargetMode } from "@/lib/savedSql/savedSqlExecutionTarget";
 import { uniqueSavedSqlExportFileName, exportSavedSqlFileContent } from "@/lib/savedSql/savedSqlExport";
@@ -228,11 +228,20 @@ async function importDirectoryIntoLibrary(targetFolder?: SavedSqlFolder) {
 
     const folderCache = new Map<string, SavedSqlFolder>();
     const takenNamesByScope = new Map<string, Set<string>>();
-    const folderConnectionId = targetFolder?.connectionId ?? "";
+    const folderConnectionId = targetFolder?.connectionId || connectionStore.activeConnectionId || "";
+    const folderFiles = targetFolder ? savedSqlStore.filesInFolder(targetFolder.id) : [];
+    const folderFallbackDb = folderFiles.find((f) => f.database)?.database;
+    const activeTab = queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId);
+    const activeTabDb = activeTab?.connectionId === folderConnectionId && activeTab.database ? activeTab.database : undefined;
+    const config = folderConnectionId ? connectionStore.getConfig(folderConnectionId) : undefined;
+    const defaultDb = config ? targetDefaultDatabase(config) || config.database : "";
+    const fallbackDb = folderFallbackDb || activeTabDb || defaultDb || "";
 
     for (const file of importFiles) {
       const sourceTarget = resolveExternalSqlFileTarget(file.path, (connectionId) => !!connectionStore.getConfig(connectionId), unassociatedExternalSqlFileTarget());
-      const importTarget = savedSqlImportTarget(sourceTarget, targetFolder);
+      const candidateDb = extractCandidateDatabaseFromName(file.name) || (file.folderNames.length > 0 ? extractCandidateDatabaseFromName(file.folderNames[file.folderNames.length - 1]) : undefined);
+      const effectiveFallbackDb = candidateDb || fallbackDb;
+      const importTarget = savedSqlImportTarget(sourceTarget, targetFolder, effectiveFallbackDb);
       const folderId = await resolveImportedFolder(folderConnectionId, targetFolder?.id, file.folderNames, folderCache);
       const nameScopeKey = savedSqlImportNameScopeKey(importTarget, folderId);
       let takenNames = takenNamesByScope.get(nameScopeKey);
@@ -349,6 +358,11 @@ function folderFileCount(folderId: string) {
   return savedSqlFolderBranchFileCount(folderId, savedSqlStore.allFolders, filesInFolder);
 }
 
+function allFilesInFolderBranch(folderId: string): SavedSqlFile[] {
+  const branchFolderIds = [folderId, ...descendantFolders(folderId).map((f) => f.id)];
+  return savedSqlStore.allFiles.filter((file) => file.folderId && branchFolderIds.includes(file.folderId));
+}
+
 type SqlLibraryRow = { type: "folder"; folder: SavedSqlFolder; depth: number; folderIndex: number } | { type: "file"; file: SavedSqlFile; depth: number };
 
 const visibleFolderRows = computed<SqlLibraryRow[]>(() => {
@@ -455,7 +469,15 @@ async function openNewQueryInFolder(folder?: SavedSqlFolder) {
   const connectionId = folder?.connectionId || connectionStore.activeConnectionId || connectionStore.connections[0]?.id;
   if (!connectionId) return;
 
-  const target = { connectionId, database: "" };
+  const folderFiles = folder ? savedSqlStore.filesInFolder(folder.id) : [];
+  const folderFallbackDb = folderFiles.find((f) => f.database)?.database;
+  const activeTab = queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId);
+  const activeTabDb = activeTab?.connectionId === connectionId && activeTab.database ? activeTab.database : undefined;
+  const config = connectionStore.getConfig(connectionId);
+  const defaultDb = config ? targetDefaultDatabase(config) || config.database : "";
+  const database = folderFallbackDb || activeTabDb || defaultDb || "";
+
+  const target = { connectionId, database };
   const filesInTargetFolder = folder ? savedSqlStore.filesInFolder(folder.id) : savedSqlStore.filesWithoutFolder();
   const takenNames = new Set(filesInTargetFolder.filter((file) => savedSqlDatabaseScopeKey(file) === savedSqlDatabaseScopeKey(target)).map((file) => file.name));
   const name = uniqueImportedName("new_query.sql", takenNames);
@@ -464,7 +486,7 @@ async function openNewQueryInFolder(folder?: SavedSqlFolder) {
       connectionId,
       folderId: folder?.id,
       name,
-      database: "",
+      database,
       sql: "",
     });
     const tabId = queryStore.openSavedSql(file);
@@ -1005,7 +1027,7 @@ const contextMenuItems = computed<CtxMenuItem[]>(() => {
 
   // If there's selection, show batch delete option
   if (hasSelection.value) {
-    const selectedFiles = Array.from(selectedFileIds.value);
+    const selectedFiles = [...new Set([...Array.from(selectedFileIds.value), ...Array.from(selectedFolderIds.value).flatMap((folderId) => allFilesInFolderBranch(folderId).map((f) => f.id))])];
     return [
       {
         label: t("sqlLibrary.changeTarget", { count: selectedFiles.length }),
@@ -1071,9 +1093,16 @@ const contextMenuItems = computed<CtxMenuItem[]>(() => {
       },
     ];
   }
+  const folderFiles = allFilesInFolderBranch(target.id);
   return [
     { label: t("savedSql.newSubfolder"), action: () => openNewFolderInput(target.id), icon: FolderPlus },
     { label: t("savedSql.newQuery"), action: () => openNewQueryInFolder(target), icon: FilePlus },
+    {
+      label: t("sqlLibrary.changeTarget", { count: folderFiles.length }),
+      action: () => openChangeTarget(folderFiles.map((f) => f.id)),
+      icon: ArrowRightLeft,
+      disabled: folderFiles.length === 0,
+    },
     { label: t("sqlLibrary.importIntoFolder"), action: () => importDirectoryIntoLibrary(target), icon: Download },
     { label: t("sqlLibrary.exportFolder"), action: () => exportFolderContents(target), icon: Upload },
     { label: "", separator: true },

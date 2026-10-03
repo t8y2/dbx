@@ -51,3 +51,14 @@ export function nextAvailableSqlName(baseName: string, takenNames: ReadonlySet<s
   while (normalizedTakenNames.has(format(index).toLocaleLowerCase())) index++;
   return format(index);
 }
+
+/**
+ * Extracts a candidate database name from a filename or folder name when users name
+ * files like `dbname - query.sql` or organize queries with database prefixes.
+ */
+export function extractCandidateDatabaseFromName(name: string): string | undefined {
+  const stripped = stripSqlExtension(name).trim();
+  const match = /^([a-zA-Z0-9_]+)\s*[-–—]\s*.+/.exec(stripped);
+  if (match && match[1]) return match[1];
+  return undefined;
+}

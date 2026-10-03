@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ensureSqlExtension, nextAvailableSqlName, stripSqlExtension } from "@/lib/savedSql/savedSqlFileName";
+import { ensureSqlExtension, extractCandidateDatabaseFromName, nextAvailableSqlName, stripSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 
 describe("savedSqlFileName", () => {
   it("appends .sql when missing", () => {
@@ -16,6 +16,19 @@ describe("savedSqlFileName", () => {
 
   it("strips .sql extension case-insensitively", () => {
     expect(stripSqlExtension("report.SQL")).toBe("report");
+  });
+
+  it("extracts candidate database from prefix with hyphen separator", () => {
+    expect(extractCandidateDatabaseFromName("aisp_aikf - 全量呼入数据.sql")).toBe("aisp_aikf");
+    expect(extractCandidateDatabaseFromName("prod_db - test_query.sql")).toBe("prod_db");
+    expect(extractCandidateDatabaseFromName("my_db-report.sql")).toBe("my_db");
+    expect(extractCandidateDatabaseFromName("F56 - ai稽核.sql")).toBe("F56");
+  });
+
+  it("returns undefined when no candidate database prefix exists", () => {
+    expect(extractCandidateDatabaseFromName("query.sql")).toBeUndefined();
+    expect(extractCandidateDatabaseFromName("plain_name")).toBeUndefined();
+    expect(extractCandidateDatabaseFromName("最近10天转写.sql")).toBeUndefined();
   });
 });
 

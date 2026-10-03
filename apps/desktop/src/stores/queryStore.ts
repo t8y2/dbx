@@ -140,6 +140,7 @@ import type { SavedSqlFile } from "@/types/database";
 import i18n, { currentLocale } from "@/i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
 import type { SqlExecutionTargetContext } from "@/lib/database/sqlExecutionTargetRegistry";
+import { targetDefaultDatabase } from "@/lib/database/sqlExecutionTargetCapabilities";
 import type { DriverProfileWorkspaceScope } from "@/lib/database/driverProfileExtensions";
 import type { MultiDbExecutionTarget, MultiDbResultRunExecution } from "@/types/sqlExecution";
 
@@ -5457,8 +5458,12 @@ export const useQueryStore = defineStore("query", () => {
 
   function openSavedSql(file: SavedSqlFile, options: OpenSavedSqlOptions = {}) {
     const targetMode = options.targetMode ?? useSettingsStore().editorSettings.savedSqlOpenTargetMode;
-    const currentTarget = targetMode === "current" ? currentSavedSqlExecutionTarget() : undefined;
-    const target = resolveSavedSqlExecutionTarget(file, targetMode, currentTarget);
+    const currentTarget = currentSavedSqlExecutionTarget();
+    const resolvedCurrent = targetMode === "current" ? currentTarget : undefined;
+    const effectiveConnectionId = file.connectionId || resolvedCurrent?.connectionId || currentTarget?.connectionId || "";
+    const connection = effectiveConnectionId ? useConnectionStore().getConfig(effectiveConnectionId) : undefined;
+    const fallbackDb = connection ? targetDefaultDatabase(connection) || connection.database : undefined;
+    const target = resolveSavedSqlExecutionTarget(file, targetMode, resolvedCurrent ?? currentTarget, fallbackDb);
     const existing = tabs.value.find((tab) => tab.savedSqlId === file.id);
     if (existing) {
       persistSavedSqlEditorPosition(existing);

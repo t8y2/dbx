@@ -50,12 +50,31 @@ async function load() {
   }
 }
 
-async function refresh() {
+async function refresh(options: { silent?: boolean } = {}) {
+  const silent = options.silent === true;
   deferred.value = false;
   loading.value = true;
   error.value = "";
   try {
-    if (props.connectionId) await connectionStore.ensureConnected(props.connectionId);
+    if (props.connectionId) {
+      if (connectionStore.connectedIds.has(props.connectionId)) {
+        // Mirror PluginWorkbenchTab: an open connection's sidecar registry can
+        // still be wiped (iframe reload, tab restore) and ensureConnected's
+        // health fast-path would not heal that — force a re-push; it no-ops
+        // when a push just happened. Silent restore overrides the recent-health
+        // TTL (the SPA's boot restore can mark a connection healthy without
+        // delivering credentials to the sidecar) and parks on the prompt when
+        // the push cannot run (dbx-plugin-ssh#144).
+        const pushed = await connectionStore.repushPluginConnection(props.connectionId, { ignoreRecentHealthCheck: silent });
+        if (silent && pushed === false) {
+          loading.value = false;
+          deferred.value = true;
+          return;
+        }
+      } else {
+        await connectionStore.ensureConnected(props.connectionId, silent ? { allowPasswordPrompt: false } : undefined);
+      }
+    }
     if (fileManagerRef.value?.refresh) {
       loading.value = false;
       return await fileManagerRef.value.refresh();
@@ -63,15 +82,30 @@ async function refresh() {
     await load();
   } catch (cause) {
     loading.value = false;
+    if (silent) {
+      // Silent recovery (tab restore after a page refresh, or a filesystem
+      // tab opened for a not-yet-connected connection) must not surface an
+      // error card nor trigger an interactive credential prompt from the
+      // background: park on the explicit reload prompt so the user can retry
+      // interactively (dbx-plugin-ssh#144).
+      error.value = "";
+      deferred.value = !!props.connectionId;
+      return;
+    }
     error.value = cause instanceof Error ? cause.message : String(cause);
   }
 }
 
 function start() {
-  deferred.value = !!props.connectionId && !connectionStore.connectedIds.has(props.connectionId);
-  if (deferred.value) {
-    loading.value = false;
-    error.value = "";
+  if (props.connectionId && !connectionStore.connectedIds.has(props.connectionId)) {
+    // A restored tab (page refresh) or a link for a closed connection used to
+    // park here from a one-shot snapshot: even when the SPA's boot connect
+    // replay landed a moment later nothing re-checked, so the tab dead-ended
+    // on the reload prompt (dbx-plugin-ssh#144, same reproduction as the
+    // workbench tab). Self-heal silently first and only park when silent
+    // recovery cannot proceed (interactive credentials required, connection
+    // gone).
+    void refresh({ silent: true });
     return;
   }
   void load();

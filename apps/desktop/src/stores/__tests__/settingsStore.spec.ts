@@ -5,7 +5,9 @@ import {
   AI_PROVIDER_PARTNER_PRESETS,
   AI_PROVIDER_PRESETS,
   DEFAULT_CUSTOM_THEMES,
+  DEFAULT_CUSTOM_THEME_COLORS,
   DEFAULT_EDITOR_SETTINGS,
+  type CustomThemeColors,
   EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
   SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
   enforceRightSidebarPanelExclusivity,
@@ -129,6 +131,39 @@ describe("normalizeEditorSettings", () => {
     ).toEqual({
       "connection:local": { name: "Local services", color: "#e11d48" },
     });
+  });
+
+  it("preserves optional UI colors in customThemes and customThemeColors", () => {
+    const customColors: CustomThemeColors = {
+      ...DEFAULT_CUSTOM_THEME_COLORS,
+      background: "#101010",
+      foreground: "#f0f0f0",
+      activeLine: "#202020",
+      selection: "#303030",
+      cursor: "#ff00ff",
+      gutterBackground: "#151515",
+      lineNumber: "#666666",
+      matchingBracket: "#444444",
+    };
+    const normalized = normalizeEditorSettings({
+      customThemeColors: customColors,
+      customThemes: [
+        {
+          id: "custom-1",
+          name: "My Custom",
+          colors: customColors,
+          ddlColors: DEFAULT_CUSTOM_THEMES[0].ddlColors,
+        },
+      ],
+    });
+    expect(normalized.customThemeColors.activeLine).toBe("#202020");
+    expect(normalized.customThemeColors.selection).toBe("#303030");
+    expect(normalized.customThemeColors.cursor).toBe("#ff00ff");
+    expect(normalized.customThemeColors.gutterBackground).toBe("#151515");
+    expect(normalized.customThemeColors.lineNumber).toBe("#666666");
+    expect(normalized.customThemeColors.matchingBracket).toBe("#444444");
+    expect(normalized.customThemes[0].colors.activeLine).toBe("#202020");
+    expect(normalized.customThemes[0].colors.gutterBackground).toBe("#151515");
   });
 
   it("normalizes customThemes when empty or absent by seeding DEFAULT_CUSTOM_THEMES", () => {

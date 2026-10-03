@@ -350,6 +350,42 @@ describe("settingsTransfer", () => {
     expect(result.value.editorSettings.customThemes).toEqual([validTheme]);
   });
 
+  it("accepts custom theme items with optional UI colors", () => {
+    const base = DEFAULT_EDITOR_SETTINGS.customThemes[0];
+    const validTheme = {
+      ...base,
+      id: "t1",
+      name: "T1",
+      colors: {
+        ...base.colors,
+        background: "#282c34",
+        foreground: "#abb2bf",
+        activeLine: "#2c313a",
+        selection: "#3e4451",
+        cursor: "#528bff",
+        gutterBackground: "#21252b",
+        lineNumber: "#4b5263",
+        matchingBracket: "#515a6b",
+      },
+    };
+    const result = parseSettingsTransferFile(fileWith({ customThemes: [validTheme] }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.editorSettings.customThemes).toEqual([validTheme]);
+  });
+
+  it("rejects custom theme items with wrong-typed optional UI colors", () => {
+    const base = DEFAULT_EDITOR_SETTINGS.customThemes[0];
+    const result = parseSettingsTransferFile(
+      fileWith({
+        customThemes: [{ ...base, id: "t1", name: "T1", colors: { ...base.colors, activeLine: 123 } }],
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.detail).toContain("customThemes");
+  });
+
   it("rejects null custom theme items instead of crashing", () => {
     const result = parseSettingsTransferFile(fileWith({ customThemes: [null] }));
     expect(result.ok).toBe(false);

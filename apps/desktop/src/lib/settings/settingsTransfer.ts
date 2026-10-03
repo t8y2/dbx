@@ -349,7 +349,7 @@ const CUSTOM_THEME_DDL_COLORS_SHAPE = valueKindShape(DEFAULT_CUSTOM_THEME_DDL_CO
  * cover them and a wrong-typed value (e.g. `background: {}`) would otherwise
  * pass validation and reach the persisted settings.
  */
-const CUSTOM_THEME_OPTIONAL_COLOR_KEYS = ["background", "foreground"] as const;
+const CUSTOM_THEME_OPTIONAL_COLOR_KEYS = ["background", "foreground", "activeLine", "selection", "cursor", "gutterBackground", "lineNumber", "matchingBracket"] as const;
 
 function hasValidOptionalColorKinds(value: unknown): boolean {
   if (!isPlainObject(value)) return false;

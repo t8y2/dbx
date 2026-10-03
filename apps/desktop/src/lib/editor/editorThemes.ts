@@ -92,10 +92,10 @@ const customThemeColors = {
   invalid: "#f38ba8", // 无效字符
 };
 
-export function resolveCustomThemeBackgrounds(colors?: Pick<CustomThemeColors, "background">, isDark: boolean = true): { background: string; gutterBackground: string } {
+export function resolveCustomThemeBackgrounds(colors?: Pick<CustomThemeColors, "background" | "gutterBackground">, isDark: boolean = true): { background: string; gutterBackground: string } {
   return {
     background: colors?.background ?? (isDark ? "#1e1e2e" : "#fafafa"),
-    gutterBackground: colors?.background ?? customThemeColors.gutterBackground,
+    gutterBackground: colors?.gutterBackground ?? colors?.background ?? customThemeColors.gutterBackground,
   };
 }
 

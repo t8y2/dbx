@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
 import type { CustomTheme, CustomThemeColors } from "@/stores/settingsStore";
-import { DEFAULT_CUSTOM_THEMES, DEFAULT_CUSTOM_THEME_COLORS, DEFAULT_CUSTOM_THEME_DDL_COLORS } from "@/stores/settingsStore";
+import { DEFAULT_CUSTOM_THEMES, DEFAULT_CUSTOM_THEME_COLORS, DEFAULT_CUSTOM_THEME_DDL_COLORS, DEFAULT_CUSTOM_THEME_OPTIONAL_COLORS } from "@/stores/settingsStore";
 import { Plus, Trash2, Copy, Pencil, ChevronDown, Palette } from "@lucide/vue";
 import { useToast } from "@/composables/useToast";
 import { useI18n } from "vue-i18n";
@@ -70,6 +70,10 @@ const localColors = computed({
   },
 });
 
+function getDisplayColor(key: keyof CustomThemeColors): string {
+  return localColors.value[key] ?? DEFAULT_CUSTOM_THEME_OPTIONAL_COLORS[key] ?? "#000000";
+}
+
 watch(
   localThemes,
   () => {
@@ -91,6 +95,12 @@ const colorItems = [
   { key: "builtin" as const, label: t("settings.customThemeBuiltin"), example: "FOUND, SQLERRM", num: "⑩" },
   { key: "background" as const, label: t("settings.customThemeBackground"), example: "Editor background", num: "⑪" },
   { key: "foreground" as const, label: t("settings.customThemeForeground"), example: "Default text color", num: "⑫" },
+  { key: "activeLine" as const, label: t("settings.customThemeActiveLine"), example: "Current line highlight", num: "⑬" },
+  { key: "selection" as const, label: t("settings.customThemeSelection"), example: "Selection background", num: "⑭" },
+  { key: "cursor" as const, label: t("settings.customThemeCursor"), example: "Cursor line/caret", num: "⑮" },
+  { key: "gutterBackground" as const, label: t("settings.customThemeGutterBackground"), example: "Gutter background", num: "⑯" },
+  { key: "lineNumber" as const, label: t("settings.customThemeLineNumber"), example: "Line numbers", num: "⑰" },
+  { key: "matchingBracket" as const, label: t("settings.customThemeMatchingBracket"), example: "Matching bracket highlight", num: "⑱" },
 ];
 
 // Preset color themes (including all built-in themes)
@@ -537,7 +547,7 @@ function handleImport() {
                     <!-- Color square + dropdown arrow -->
                     <div class="relative">
                       <button type="button" class="flex items-center gap-0.5 rounded border p-0.5 hover:bg-muted transition-colors" @click.stop="togglePalette(item.key)">
-                        <div class="h-6 w-6 rounded-sm" :style="{ backgroundColor: localColors[item.key] }" />
+                        <div class="h-6 w-6 rounded-sm" :style="{ backgroundColor: getDisplayColor(item.key) }" />
                         <ChevronDown class="h-3 w-3 text-muted-foreground pointer-events-none" />
                       </button>
                       <!-- Palette popup -->
@@ -548,8 +558,8 @@ function handleImport() {
                           </div>
                         </div>
                         <div class="mt-2 pt-2 border-t flex items-center gap-2">
-                          <input type="color" :value="localColors[item.key]" @input="handleColorChange(item.key, ($event.target as HTMLInputElement).value)" class="h-6 w-6 cursor-pointer rounded border-0 p-0" />
-                          <input type="text" :value="localColors[item.key]" @input="handleColorChange(item.key, ($event.target as HTMLInputElement).value)" class="w-20 rounded border px-2 py-0.5 text-xs font-mono" />
+                          <input type="color" :value="getDisplayColor(item.key)" @input="handleColorChange(item.key, ($event.target as HTMLInputElement).value)" class="h-6 w-6 cursor-pointer rounded border-0 p-0" />
+                          <input type="text" :value="getDisplayColor(item.key)" @input="handleColorChange(item.key, ($event.target as HTMLInputElement).value)" class="w-20 rounded border px-2 py-0.5 text-xs font-mono" />
                         </div>
                       </div>
                     </div>

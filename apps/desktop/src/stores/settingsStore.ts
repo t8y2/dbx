@@ -769,7 +769,24 @@ export interface CustomThemeColors {
   builtin: string;
   background?: string;
   foreground?: string;
+  activeLine?: string;
+  selection?: string;
+  cursor?: string;
+  gutterBackground?: string;
+  lineNumber?: string;
+  matchingBracket?: string;
 }
+
+export const DEFAULT_CUSTOM_THEME_OPTIONAL_COLORS: Partial<Record<keyof CustomThemeColors, string>> = {
+  background: "#1e1e2e",
+  foreground: "#cdd6f4",
+  activeLine: "#313244",
+  selection: "#313244",
+  cursor: "#f5e0dc",
+  gutterBackground: "#181825",
+  lineNumber: "#6c7086",
+  matchingBracket: "#45475a",
+};
 
 export const DEFAULT_CUSTOM_THEME_COLORS: CustomThemeColors = {
   keyword: "#cba6f7",

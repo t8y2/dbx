@@ -9037,6 +9037,8 @@ export default {
     mcpToolPeekMessages: "Read Kafka messages",
     mcpToolSendMessage: "Send message queue message",
     mcpToolAddConnection: "Add connection",
+    mcpToolGetConnection: "Get connection details",
+    mcpToolUpdateConnection: "Update connection",
     mcpToolDuplicateConnection: "Duplicate connection",
     mcpToolRemoveConnection: "Remove connection",
     mcpToolOpenTable: "Open table in DBX",

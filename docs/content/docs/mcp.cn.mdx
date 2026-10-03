@@ -123,6 +123,8 @@ DBX MCP 当前提供以下工具（具体可用工具取决于构建功能及权
 | `dbx_list_connections` | 列出当前 MCP 会话可见的连接 |
 | `dbx_list_databases` | 列出连接中可通过 MCP 访问的数据库，并遵守该连接的数据库范围 |
 | `dbx_add_connection` | 添加连接到 DBX 存储 |
+| `dbx_get_connection` | 查看不含凭据的连接配置 |
+| `dbx_update_connection` | 局部修改配置，保留未提供的字段和凭据 |
 | `dbx_duplicate_connection` | 复制一个连接及其完整配置 |
 | `dbx_remove_connection` | 从 DBX 存储删除连接 |
 | `dbx_list_tables` | 列出表、视图或集合 |
@@ -413,3 +415,17 @@ DBX 在 **设置 → MCP** 中保存一份权威策略，并在每次请求时�
 - 已安装 DBX，并至少配置一个数据库连接
 - Agent/JDBC 数据库需要匹配的 Agent、驱动和 JRE
 - 使用两个桌面 UI 工具时，需要保持 DBX 桌面端运行
+
+## Connection configuration CRUD / 连接配置管理
+
+`dbx_get_connection` accepts `connection_id` or `connection_name`, and returns safe settings as JSON. `dbx_update_connection` uses the same selector plus a `changes` object, for example:
+
+```json
+{"connection_id":"saved-id","changes":{"read_only":false,"name":"Renamed"}}
+```
+
+Updates support `name`, `note`, `host`, `port`, `username`, `password`, `database`, `driver_profile`, `ssl`, `read_only`, `save_password`, `is_production`, and the four `*_timeout_secs` / `keepalive_interval_secs` settings documented in the CLI guide. Omitted fields and unrelated secrets remain unchanged. Empty `password` clears it; null clears `database` or `driver_profile`. IDs and database types cannot change. Unsupported fields fail validation.
+
+`dbx_add_connection` also accepts `read_only`. `dbx_remove_connection` requires `confirmed: true` after the caller has reviewed the exact target and obtained confirmation. Removal deletes saved configuration and credentials, cannot be undone by MCP, and does not touch database contents. Keep an authorized DBX backup if recovery is needed. All mutations recheck global read-only and connection scope in the storage transaction; update is unavailable in scoped AI sessions. The per-connection `read_only` field can be edited only when the global management policy allows it. Updating invalidates cached connections and pinned transactions.
+
+中文：详情和局部更新按 ID 或名称选择连接；`changes` 只写需要修改的字段。未提供的密码及隧道/插件凭据保持不变，空字符串密码表示明确清除，`database`/`driver_profile` 用 null 清除。新增支持 `read_only`；删除须确认目标后传 `confirmed: true`，会删除配置与凭据，无法通过 MCP 撤销，业务数据不受影响。所有修改在存储事务中重新检查全局只读和连接范围，限定范围的 AI 会话不开放更新；不能通过修改连接自身的 `read_only` 绕过全局只读。

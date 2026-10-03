@@ -4,6 +4,7 @@
 // is shared by every PluginWorkbenchHost instance, so only the first boot of a
 // plugin version pays the read/decode/inline pipeline.
 import * as api from "@/lib/backend/api";
+import { COMPONENT_PLUGINS_UPDATED_EVENT } from "@/lib/updates/componentUpdateEvents";
 
 export interface PluginUiHtml {
   html: string;
@@ -17,6 +18,7 @@ export interface PluginUiHtml {
 
 const cache = new Map<string, PluginUiHtml>();
 const LIMIT = 4;
+let cacheGeneration = 0;
 
 export function getCachedPluginUiHtml(key: string): PluginUiHtml | undefined {
   const hit = cache.get(key);
@@ -36,6 +38,7 @@ export function setCachedPluginUiHtml(key: string, value: PluginUiHtml): void {
 
 /** Test and plugin-uninstall escape hatch. */
 export function clearPluginUiHtmlCache(): void {
+  cacheGeneration++;
   cache.clear();
   inFlight.clear();
 }
@@ -125,15 +128,30 @@ export function getOrLoadPluginUiHtml(key: string, pluginId: string): Promise<Pl
   if (hit) return Promise.resolve(hit);
   let load = inFlight.get(key);
   if (!load) {
+    const generation = cacheGeneration;
     load = loadPluginUiHtml(pluginId)
       .then((value) => {
-        setCachedPluginUiHtml(key, value);
+        // A plugin change may arrive while its old UI document is still being
+        // read. Do not let that pre-invalidation request repopulate the cache.
+        if (cacheGeneration === generation) setCachedPluginUiHtml(key, value);
         return value;
       })
       .finally(() => {
-        inFlight.delete(key);
+        // A post-invalidation load may already own this key.
+        if (cacheGeneration === generation) inFlight.delete(key);
       });
     inFlight.set(key, load);
   }
   return load;
+}
+
+// The plugin set can change from entry points other than the plugin center (the update center
+// dispatches COMPONENT_PLUGINS_UPDATED_EVENT from App.vue while the center is closed; batch
+// uninstall dispatches only dbx:plugins-changed), and a same-version reinstall reuses the
+// id:version key. Invalidate on both events here, at the cache owner — the same contract the
+// icon resolver follows — so workbench tabs opened after an install/update/uninstall read the
+// new ui build instead of the stale inlined bytes.
+if (typeof window !== "undefined") {
+  window.addEventListener(COMPONENT_PLUGINS_UPDATED_EVENT, clearPluginUiHtmlCache);
+  window.addEventListener("dbx:plugins-changed", clearPluginUiHtmlCache);
 }

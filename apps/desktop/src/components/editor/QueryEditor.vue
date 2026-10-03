@@ -75,6 +75,7 @@ import { restoreSqlFromSourcePaste } from "@/lib/sql/sqlSourcePaste";
 import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
 
 import { createQueryEditorExecutionViewportOwnership, isQueryEditorPositionVisible } from "@/lib/editor/queryEditorExecutionViewport";
+import { mapQueryEditorFormatSelection } from "@/lib/editor/queryEditorFormatSelection";
 import { joinQueryEditorLines } from "@/lib/editor/queryEditorJoinLines";
 
 import { resolveSqlSingleQuoteKeyAction } from "@/lib/sql/sqlQuoteCaret";
@@ -1670,9 +1671,11 @@ async function formatCurrentSql() {
   const to = formatsSelection ? selection.to : originalState.doc.length;
   const source = originalState.sliceDoc(from, to);
   if (!source.trim()) return;
+  const formatDialect = props.formatDialect ?? props.dialect ?? "generic";
 
   try {
     let formatted: string;
+    let formattedAsSql = false;
     if (props.databaseType === "mongodb") {
       formatted = formatMongoShellText(source, settingsStore.editorSettings.sqlFormatter);
     } else {
@@ -1695,7 +1698,8 @@ async function formatCurrentSql() {
           toast(t("toolbar.formatAutoDetectFailed"), 3000);
           return;
         } else {
-          formatted = await formatSqlForEditing(source, props.formatDialect ?? props.dialect ?? "generic", settingsStore.editorSettings.sqlFormatter);
+          formattedAsSql = true;
+          formatted = await formatSqlForEditing(source, formatDialect, settingsStore.editorSettings.sqlFormatter);
         }
       }
     }
@@ -1703,9 +1707,13 @@ async function formatCurrentSql() {
       return;
     }
     if (formatted === source) return;
+    // The semantic mapper's contract is SQL-only. Mongo shell, Elasticsearch,
+    // JSON, and XML keep the replacement selection behavior used before the
+    // SQL caret-preservation fix.
+    const replacementSelection = formattedAsSql ? mapQueryEditorFormatSelection(source, formatted, { anchor: selection.anchor - from, head: selection.head - from }, formatDialect) : formatsSelection ? { anchor: 0, head: formatted.length } : { anchor: formatted.length, head: formatted.length };
     currentView.dispatch({
       changes: { from, to, insert: formatted },
-      selection: formatsSelection ? { anchor: from, head: from + formatted.length } : { anchor: from + formatted.length },
+      selection: { anchor: from + replacementSelection.anchor, head: from + replacementSelection.head },
     });
   } catch (e: any) {
     emit("formatError", String(e?.message || e));

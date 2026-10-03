@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 import type { ConnectionConfig, SidebarLayout, TunnelProfile } from "@/types/database";
-import { buildConnectionConfigBundle, parseConnectionConfigObject, prepareConnectionConfigImport, scrubConnectionForPlaintextExport, scrubTunnelProfileForPlaintextExport, selectConnectionConfigBundle, snapshotConnectionsForExport } from "./connectionConfigTransfer";
+import {
+  buildConnectionConfigBundle,
+  parseConnectionConfigObject,
+  prepareConnectionConfigImport,
+  scrubConnectionForPlaintextExport,
+  scrubTunnelProfileForPlaintextExport,
+  selectConnectionConfigBundle,
+  snapshotConnectionsForExport,
+  serializePlaintextConnectionConfigBundle,
+} from "./connectionConfigTransfer";
 
 function conn(id: string, name: string, extras: Partial<ConnectionConfig> = {}): ConnectionConfig {
   return {
@@ -91,6 +100,40 @@ describe("connectionConfigTransfer", () => {
 
     expect(parsed.connections[0].sidebar_auto_load_all_tables).toBe(true);
     expect(imported.connections[0]).toMatchObject({ id: "imported-id", sidebar_auto_load_all_tables: true });
+  });
+
+  it("includes all selected credentials only with explicit plaintext opt-in without mutating the source", () => {
+    const source = conn("a", "A", {
+      password: 'synthetic^%密码\\"password',
+      redis_sentinel_password: "sentinel-secret",
+      init_script: "SET @test_secret = 'synthetic'",
+      connection_string: "postgres://user:synthetic@localhost/db",
+      url_params: "token=synthetic-token&sslmode=require",
+      connection_secrets: { api_key: "plugin-secret" },
+      external_config: { auth: { kind: "apiKey", value: "external-secret" } },
+      transport_layers: [
+        { type: "ssh", id: "ssh", host: "localhost", port: 22, user: "test", password: "ssh-secret", key_passphrase: "key-secret", profile_id: "tunnel-1" },
+        { type: "proxy", id: "proxy", host: "localhost", port: 1080, password: "proxy-secret" },
+      ],
+    });
+    const profile = { ...tunnel1, password: "profile-secret", key_passphrase: "profile-key-secret" } as TunnelProfile;
+    const bundle = buildConnectionConfigBundle([source, conn("b", "Unselected")], layout, [profile, tunnel2], ["a"]);
+    const before = JSON.stringify(bundle);
+    for (const optIn of [undefined, false]) {
+      const redacted = JSON.parse(serializePlaintextConnectionConfigBundle(bundle, optIn));
+      expect(redacted.connections).toHaveLength(1);
+      expect(redacted.connections[0].password).toBe("");
+      expect(redacted.connections[0].connection_secrets).toEqual({});
+      expect(redacted.tunnelProfiles[0].password).toBe("");
+      expect(JSON.stringify(bundle)).toBe(before);
+    }
+    const exported = parseConnectionConfigObject(JSON.parse(serializePlaintextConnectionConfigBundle(bundle, true)));
+    expect(exported.connections).toEqual([source]);
+    expect(exported.tunnelProfiles).toEqual([profile]);
+    expect(exported.layout).toEqual(bundle.layout);
+    expect(JSON.stringify(bundle)).toBe(before);
+    // A subsequent redacted export cannot inherit the previous opt-in.
+    expect(JSON.parse(serializePlaintextConnectionConfigBundle(bundle)).connections[0].password).toBe("");
   });
 
   it("keeps stable ids and removes secrets from plaintext exports", () => {

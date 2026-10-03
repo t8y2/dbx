@@ -759,6 +759,7 @@ mod tests {
     fn transfer_request(source: &str, target: &str, dir: &std::path::Path) -> TransferRequest {
         let db = dir.join("main.db").to_string_lossy().to_string();
         TransferRequest {
+            table_filters: std::collections::HashMap::new(),
             transfer_id: "transfer-entry-test".to_string(),
             source_connection_id: source.to_string(),
             source_database: db.clone(),

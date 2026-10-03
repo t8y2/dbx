@@ -154,6 +154,7 @@ async fn live_sqlite_to_sqlserver_keeps_sixty_four_bit_integer_values() {
         state.get_or_create_pool(&sqlserver_connection_id, Some(&target_db)).await.expect("target pool");
 
     let request = TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: format!("live-sqlite-int-{suffix}"),
         source_connection_id: sqlite_connection_id.clone(),
         source_database: "main".to_string(),

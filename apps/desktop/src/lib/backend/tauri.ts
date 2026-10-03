@@ -5446,6 +5446,13 @@ export interface TransferRequest {
   quoteTargetColumnNames: boolean;
   ownershipPolicy?: TransferOwnershipPolicy;
   batchSize: number;
+  /**
+   * Optional per-source-table transfer filter.
+   * Key = source table name; value = a bare `WHERE` predicate
+   * (`id <= 90000`) or a complete `SELECT`
+   * (`select * from t_order where id <= 90000`). Missing/empty = full table.
+   */
+  tableFilters?: Record<string, string>;
   dropTargetBeforeCreate: boolean;
   dropTargetConfirmed: boolean;
 }

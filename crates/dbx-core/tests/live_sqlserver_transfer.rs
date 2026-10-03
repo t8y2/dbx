@@ -166,6 +166,7 @@ async fn live_sqlserver_transfer_rebuild_releases_constraint_and_index_names() {
     let target_pool_key = state.get_or_create_pool(&connection_id, Some(&target_db)).await.expect("target pool");
 
     let request = TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: format!("live-sqlserver-rebuild-{suffix}"),
         source_connection_id: connection_id.clone(),
         source_database: source_db.clone(),
@@ -327,6 +328,7 @@ async fn live_sqlserver_transfer_overwrite_handles_existing_identity_target() {
     state.configs.write().await.insert(connection_id.clone(), live_sqlserver_config(&connection_id, &database));
     let pool_key = state.get_or_create_pool(&connection_id, Some(&database)).await.expect("create SQL Server pool");
     let request = TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: format!("live-sqlserver-8690-transfer-{suffix}"),
         source_connection_id: connection_id.clone(),
         source_database: database.clone(),
@@ -444,6 +446,7 @@ async fn live_sqlserver_keyset_pagination_copies_every_row() {
     let target_pool_key = state.get_or_create_pool(&target_connection_id, Some(&target_db)).await.expect("target pool");
 
     let request = TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: format!("live-sqlserver-keyset-{suffix}"),
         source_connection_id: source_connection_id.clone(),
         source_database: source_db.clone(),
@@ -565,6 +568,7 @@ async fn live_sqlserver_progress_read_survives_total_duration_beyond_timeout() {
     let target_pool_key = state.get_or_create_pool(&target_connection_id, Some(&target_db)).await.expect("target pool");
 
     let request = TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: format!("live-sqlserver-progress-{suffix}"),
         source_connection_id: source_connection_id.clone(),
         source_database: source_db.clone(),
@@ -684,6 +688,7 @@ async fn live_sqlserver_keyset_uniqueidentifier_datetime2_composite_key() {
     let target_pool_key = state.get_or_create_pool(&target_connection_id, Some(&target_db)).await.expect("target pool");
 
     let request = TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: format!("live-sqlserver-typed-{suffix}"),
         source_connection_id: source_connection_id.clone(),
         source_database: source_db.clone(),
@@ -796,6 +801,7 @@ async fn live_sqlserver_transfer_new_identity_target_keeps_explicit_identity_val
     let target_pool_key = state.get_or_create_pool(&connection_id, Some(&target_db)).await.expect("target pool");
 
     let request = TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: format!("live-sqlserver-identity-{suffix}"),
         source_connection_id: connection_id.clone(),
         source_database: source_db.clone(),

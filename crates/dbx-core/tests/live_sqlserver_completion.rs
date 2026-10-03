@@ -1390,6 +1390,7 @@ async fn live_sqlserver_transfer_table_skips_rowversion_insert_column() {
         .await
         .expect("connect target transfer pool");
     let request = dbx_core::transfer::TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: format!("live-sqlserver-rowversion-{suffix}"),
         source_connection_id: "live-sqlserver-rowversion".to_string(),
         source_database: database.clone(),

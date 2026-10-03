@@ -242,6 +242,7 @@ async fn live_postgres_transfer_upserts_generated_always_identity_values() {
         .insert(target_connection_id.to_string(), postgres_test_config(target_connection_id, &target_database));
 
     let request = TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: format!("live-always-transfer-{suffix}"),
         source_connection_id: source_connection_id.to_string(),
         source_database: source_database.clone(),
@@ -419,6 +420,7 @@ async fn live_postgres_structure_only_preserves_table_indexes() {
         .insert(target_connection_id.to_string(), postgres_test_config(target_connection_id, &target_database));
 
     let mut request = TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: format!("live-structure-only-transfer-{suffix}"),
         source_connection_id: source_connection_id.to_string(),
         source_database: source_database.clone(),
@@ -703,6 +705,7 @@ async fn live_postgres_transfer_preserves_data_and_schema_objects() {
         .insert(target_connection_id.to_string(), postgres_test_config(target_connection_id, &target_database));
 
     let request = TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: format!("live-transfer-{suffix}"),
         source_connection_id: source_connection_id.to_string(),
         source_database: source_database.clone(),
@@ -1005,6 +1008,7 @@ async fn live_postgres_transfer_skips_create_ddl_for_existing_target_table() {
         .insert(target_connection_id.to_string(), postgres_test_config(target_connection_id, &target_database));
 
     let request = TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: format!("live-existing-transfer-{suffix}"),
         source_connection_id: source_connection_id.to_string(),
         source_database: source_database.clone(),
@@ -1129,6 +1133,7 @@ async fn live_postgres_transfer_creates_selected_sequence_before_referencing_tab
         .insert(target_connection_id.to_string(), postgres_test_config(target_connection_id, &target_database));
 
     let request = TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: format!("live-sequence-transfer-{suffix}"),
         source_connection_id: source_connection_id.to_string(),
         source_database: source_database.clone(),
@@ -1320,6 +1325,7 @@ async fn live_postgres_transfer_drop_target_rebuilds_structure_and_indexes() {
 
     let transfer_id = format!("transfer-{suffix}");
     let request = TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: transfer_id.clone(),
         source_connection_id: connection_id.clone(),
         source_database: database.to_string(),
@@ -1521,6 +1527,7 @@ impl PostgresRebuildFixture {
             source_pool_key,
             target_pool_key,
             request: TransferRequest {
+                table_filters: std::collections::HashMap::new(),
                 transfer_id: format!("{label}-{suffix}"),
                 source_connection_id,
                 source_database,
@@ -1844,6 +1851,7 @@ async fn live_postgres_keyset_pagination_copies_every_row() {
         .insert(target_connection_id.to_string(), postgres_test_config(target_connection_id, &target_database));
 
     let request = TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: format!("live-pg-keyset-{suffix}"),
         source_connection_id: source_connection_id.to_string(),
         source_database: source_database.clone(),
@@ -1956,6 +1964,7 @@ async fn live_postgres_progress_read_survives_total_duration_beyond_timeout() {
         .insert(target_connection_id.to_string(), postgres_test_config(target_connection_id, &target_database));
 
     let request = TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: format!("live-pg-progress-{suffix}"),
         source_connection_id: source_connection_id.to_string(),
         source_database: source_database.clone(),
@@ -2062,6 +2071,7 @@ async fn live_postgres_keyset_large_batch_copies_every_row() {
         .insert(target_connection_id.to_string(), postgres_test_config(target_connection_id, &target_database));
 
     let request = TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: format!("live-pg-largebatch-{suffix}"),
         source_connection_id: source_connection_id.to_string(),
         source_database: source_database.clone(),

@@ -11,6 +11,7 @@ pub mod docs;
 pub mod document_store;
 pub mod etcd;
 pub(crate) mod export_download;
+pub mod favorites;
 pub mod hbase;
 pub mod history;
 pub mod jdbc;

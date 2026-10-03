@@ -1,4 +1,5 @@
 import { redisGroupingZhCN as redisGrouping } from "./redisGrouping";
+import { favoritesZhCN as favorites } from "./favorites";
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/zh-CN";
 import { dataDictionaryZhCN as dataDictionary } from "./dataDictionaryMessages";
@@ -7,6 +8,7 @@ import { meilisearchManagementZhCN } from "./meilisearchManagement";
 import { mongodbDatabaseDumpZhCN as mongoDump } from "./mongodbDatabaseDump";
 
 export default withEnglishFallback({
+  favorites,
   cellTransform: {
     title: "转换预览",
     description: "将当前内容转换后查看或复制，不改变原值和编辑草稿。",

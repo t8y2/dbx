@@ -13145,6 +13145,122 @@ mod ddl_tests {
     }
 
     #[test]
+    fn postgres_table_ddl_emits_inherits_for_traditional_child() {
+        // A traditional-inheritance child is neither a declarative partition
+        // nor a foreign table: it renders as a plain `CREATE TABLE` with an
+        // `INHERITS (parent...)` clause so the dependency survives a structure
+        // transfer (issue #10803).
+        let columns = vec![column("id", "integer"), column("name", "text")];
+        let partition_info = db::postgres::PostgresTablePartitionInfo {
+            inherits_parents: vec![db::postgres::PostgresInheritsParent {
+                schema: "public".to_string(),
+                table: "person".to_string(),
+            }],
+            ..Default::default()
+        };
+        let ddl = render_postgres_table_ddl_with_partition_info(
+            "public",
+            "employee",
+            &columns,
+            &[],
+            &[],
+            &[],
+            None,
+            &partition_info,
+            &db::postgres::PostgresTablePartitionLocalObjects::default(),
+        );
+        assert!(ddl.contains("CREATE TABLE \"public\".\"employee\""), "ddl: {ddl}");
+        assert!(ddl.contains(" INHERITS (\"public\".\"person\")"), "ddl: {ddl}");
+        assert!(!ddl.contains("PARTITION OF"), "ddl: {ddl}");
+        assert!(!ddl.contains("PARTITION BY"), "ddl: {ddl}");
+        // The clause sits between the column list and the closing semicolon.
+        let head = ddl.find("CREATE TABLE").unwrap();
+        let inherits = ddl.find("INHERITS").unwrap();
+        let semi = ddl.rfind(';').unwrap();
+        assert!(head < inherits && inherits < semi, "INHERITS must follow columns and precede ';': {ddl}");
+    }
+
+    #[test]
+    fn postgres_table_ddl_emits_inherits_with_multiple_parents() {
+        let columns = vec![column("id", "integer")];
+        let partition_info = db::postgres::PostgresTablePartitionInfo {
+            inherits_parents: vec![
+                db::postgres::PostgresInheritsParent { schema: "public".to_string(), table: "p1".to_string() },
+                db::postgres::PostgresInheritsParent { schema: "public".to_string(), table: "p2".to_string() },
+            ],
+            ..Default::default()
+        };
+        let ddl = render_postgres_table_ddl_with_partition_info(
+            "public",
+            "child",
+            &columns,
+            &[],
+            &[],
+            &[],
+            None,
+            &partition_info,
+            &db::postgres::PostgresTablePartitionLocalObjects::default(),
+        );
+        assert!(ddl.contains(" INHERITS (\"public\".\"p1\", \"public\".\"p2\")"), "ddl: {ddl}");
+    }
+
+    #[test]
+    fn postgres_table_ddl_emits_inherits_with_cross_schema_parent() {
+        // Cross-schema ancestry: the parent lives in a different schema, so
+        // the `INHERITS` clause must schema-qualify it (issue #10803).
+        let columns = vec![column("id", "integer")];
+        let partition_info = db::postgres::PostgresTablePartitionInfo {
+            inherits_parents: vec![db::postgres::PostgresInheritsParent {
+                schema: "archive".to_string(),
+                table: "person".to_string(),
+            }],
+            ..Default::default()
+        };
+        let ddl = render_postgres_table_ddl_with_partition_info(
+            "public",
+            "employee",
+            &columns,
+            &[],
+            &[],
+            &[],
+            None,
+            &partition_info,
+            &db::postgres::PostgresTablePartitionLocalObjects::default(),
+        );
+        assert!(ddl.contains(" INHERITS (\"archive\".\"person\")"), "ddl: {ddl}");
+        assert!(ddl.contains("CREATE TABLE \"public\".\"employee\""), "ddl: {ddl}");
+    }
+
+    #[test]
+    fn postgres_table_ddl_skips_inherits_for_foreign_table() {
+        // A foreign table never takes `INHERITS` (PostgreSQL rejects it); even
+        // if inherits_parents were populated, the clause is suppressed.
+        let columns = vec![column("id", "integer")];
+        let partition_info = db::postgres::PostgresTablePartitionInfo {
+            is_foreign: true,
+            foreign_server: Some("loopback".to_string()),
+            inherits_parents: vec![db::postgres::PostgresInheritsParent {
+                schema: "public".to_string(),
+                table: "person".to_string(),
+            }],
+            ..Default::default()
+        };
+        let ddl = render_postgres_table_ddl_with_partition_info(
+            "public",
+            "remote_emp",
+            &columns,
+            &[],
+            &[],
+            &[],
+            None,
+            &partition_info,
+            &db::postgres::PostgresTablePartitionLocalObjects::default(),
+        );
+        assert!(ddl.starts_with("CREATE FOREIGN TABLE"), "ddl: {ddl}");
+        assert!(!ddl.contains("INHERITS"), "ddl: {ddl}");
+    }
+
+    #[test]
     fn postgres_table_ddl_keeps_composite_foreign_key_together() {
         let columns = vec![column("a", "integer"), column("b", "integer"), column("c", "integer")];
         let foreign_keys = vec![
@@ -15036,7 +15152,22 @@ fn render_postgres_table_ddl_with_constraints_and_partition_info(
         };
         format!("{create} {table_name} PARTITION OF {parent_name}{definitions} {bound}")
     } else {
-        format!("{create} {table_name} (\n{}\n)", definition_lines.join(",\n"))
+        let mut head = format!("{create} {table_name} (\n{}\n)", definition_lines.join(",\n"));
+        // A traditional-inheritance child is neither a declarative partition
+        // nor a foreign table. Emit `INHERITS (parent...)` so the dependency
+        // survives a structure transfer. The column list above still carries
+        // the inherited columns; PostgreSQL merges them with the parents'
+        // definitions (matching types/defaults merge, conflicting ones raise).
+        if !partition_info.is_foreign && !partition_info.inherits_parents.is_empty() {
+            let parents = partition_info
+                .inherits_parents
+                .iter()
+                .map(|parent| format!("{}.{}", pg_ident(&parent.schema), pg_ident(&parent.table)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            head.push_str(&format!(" INHERITS ({parents})"));
+        }
+        head
     };
     if let Some(server) = partition_info.foreign_server.as_deref().filter(|server| !server.trim().is_empty()) {
         ddl.push_str(&format!(" SERVER {}", pg_ident(server)));

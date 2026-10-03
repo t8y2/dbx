@@ -225,7 +225,17 @@ async fn postgres_legacy_table_ddl_uses_compatible_partition_probe() {
     assert!(ddl.contains("FOREIGN KEY"), "ddl: {ddl}");
     assert!(ddl.contains("CREATE INDEX \"child_name_idx\""), "ddl: {ddl}");
     assert!(ddl.contains("CREATE TRIGGER child_bi"), "ddl: {ddl}");
-    assert_eq!(partition_info, PostgresTablePartitionInfo::default());
+    // The 9.x child uses traditional `INHERITS`, so it is not a declarative
+    // partition, but it must carry its parent in `inherits_parents` and the
+    // rendered DDL must emit `INHERITS (parent)` (issue #10803).
+    assert!(!partition_info.is_partition, "partition_info: {partition_info:?}");
+    assert!(!partition_info.is_foreign, "partition_info: {partition_info:?}");
+    assert_eq!(partition_info.inherits_parents.len(), 1, "partition_info: {partition_info:?}");
+    assert_eq!(partition_info.inherits_parents[0].table, "parent", "partition_info: {partition_info:?}");
+    assert!(partition_info.parent_schema.is_none(), "partition_info: {partition_info:?}");
+    assert!(partition_info.bound.is_none(), "partition_info: {partition_info:?}");
+    assert!(ddl.contains("INHERITS"), "ddl: {ddl}");
+    assert!(ddl.contains("\"parent\""), "ddl: {ddl}");
     assert!(!ddl.contains("PARTITION OF"), "ddl: {ddl}");
     assert!(ddl_with_partitions.contains("CREATE TABLE"), "ddl_with_partitions: {ddl_with_partitions}");
     assert!(!ddl_with_partitions.contains("PARTITION OF"), "ddl_with_partitions: {ddl_with_partitions}");

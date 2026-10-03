@@ -8,7 +8,8 @@ mod state;
 mod web_mcp;
 
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::process::ExitCode;
 use std::sync::Arc;
 
 use argon2::password_hash::rand_core::OsRng;
@@ -453,18 +454,28 @@ fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
     router
 }
 
-fn main() {
+fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if help_requested(&args) {
         print!("{HELP_TEXT}");
-        return;
+        return ExitCode::SUCCESS;
     }
 
     let runtime = dbx_core::scheduled_backup::worker_runtime().expect("Failed to build tokio runtime");
-    runtime.block_on(serve());
+    match runtime.block_on(serve()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
-async fn serve() {
+fn web_mcp_startup_error(error: String) -> String {
+    format!("Failed to start DBX Web: invalid Web MCP configuration: {error}")
+}
+
+async fn serve() -> Result<(), String> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -539,7 +550,7 @@ async fn serve() {
     let web_mcp = Arc::new(if migration_ready {
         WebMcpRuntime::load(&app_state.storage, !password_disabled && password_hash.is_some())
             .await
-            .expect("Invalid DBX Web MCP configuration")
+            .map_err(web_mcp_startup_error)?
     } else {
         WebMcpRuntime::disabled()
     });
@@ -1451,7 +1462,7 @@ async fn serve() {
         .layer(CompressionLayer::new().compress_when(web_compression_predicate()))
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
-    let mcp_router = web_mcp_router(&web_state).expect("Invalid DBX Web MCP configuration");
+    let mcp_router = web_mcp_router(&web_state).map_err(web_mcp_startup_error)?;
     app = app.merge(
         mcp_router
             .layer(middleware::from_fn_with_state(web_state.clone(), web_mcp_demo_gate))

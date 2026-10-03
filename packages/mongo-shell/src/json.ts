@@ -721,6 +721,42 @@ function randomHex(bytes: number): string {
   return Array.from(values, (value) => value.toString(16).padStart(2, "0")).join("");
 }
 
+const SIMPLE_JS_ESCAPES: Record<string, string> = {
+  n: "\n",
+  t: "\t",
+  r: "\r",
+  b: "\b",
+  f: "\f",
+  v: "\v",
+  "0": "\0",
+  "'": "'",
+  '"': '"',
+  "\\": "\\",
+  "/": "/",
+};
+
+/** Decode one JS string escape starting at `index` (the backslash). `length` counts source chars. */
+function decodeJsStringEscape(source: string, index: number): { value: string; length: number } {
+  const next = source[index + 1];
+  if (next === undefined) return { value: "\\", length: 1 };
+  if (next === "x") {
+    const hex = source.slice(index + 2, index + 4);
+    if (/^[0-9a-fA-F]{2}$/.test(hex)) return { value: String.fromCharCode(Number.parseInt(hex, 16)), length: 4 };
+  }
+  if (next === "u") {
+    const braced = /^\{([0-9a-fA-F]+)\}/.exec(source.slice(index + 2));
+    if (braced) {
+      const codePoint = Number.parseInt(braced[1]!, 16);
+      if (codePoint <= 0x10ffff) return { value: String.fromCodePoint(codePoint), length: 2 + braced[0].length };
+    }
+    const hex = source.slice(index + 2, index + 6);
+    if (/^[0-9a-fA-F]{4}$/.test(hex)) return { value: String.fromCharCode(Number.parseInt(hex, 16)), length: 6 };
+  }
+  // An unknown escape keeps just the escaped char (matching JavaScript).
+  const simple = SIMPLE_JS_ESCAPES[next];
+  return simple !== undefined ? { value: simple, length: 2 } : { value: next, length: 2 };
+}
+
 function convertSingleQuotedStrings(source: string): string {
   let result = "";
   let copiedUntil = 0;
@@ -750,11 +786,12 @@ function convertSingleQuotedStrings(source: string): string {
       continue;
     }
 
-    if (escaped) {
-      value += char;
-      escaped = false;
-    } else if (char === "\\") {
-      escaped = true;
+    // Decode JS escapes so the re-encoded JSON string keeps the same value: `'a\nb'`
+    // must become `"a\nb"`, not `"anb"` (which dropped the backslash entirely).
+    if (char === "\\") {
+      const escape = decodeJsStringEscape(source, i);
+      value += escape.value;
+      i += escape.length - 1;
     } else if (char === "'") {
       result += source.slice(copiedUntil, start) + JSON.stringify(value);
       copiedUntil = i + 1;

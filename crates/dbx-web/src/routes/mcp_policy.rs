@@ -450,6 +450,36 @@ async fn ensure_write_with_risk(
     Ok(())
 }
 
+/// Reject a `createUser` whose `roles[].db` names a database outside the MCP scope or a production
+/// database; the active-database check alone does not cover role target databases.
+pub async fn ensure_mongo_create_user_role_scope(
+    state: &Arc<WebState>,
+    headers: &HeaderMap,
+    connection_id: &str,
+    user_json: &str,
+) -> Result<(), AppError> {
+    if !is_mcp_request(headers) {
+        return Ok(());
+    }
+    let role_databases = dbx_core::mcp_policy::mongo_create_user_role_databases(user_json).map_err(AppError::from)?;
+    if role_databases.is_empty() {
+        return Ok(());
+    }
+    let (policy, group_paths) = load_policy_context(state).await?;
+    ensure_allowed(&policy, group_paths.get(connection_id), connection_id)?;
+    let config = load_connection(state, connection_id).await?;
+    for database in role_databases {
+        let database = dbx_core::mcp_policy::resolve_database(&database, config.database.as_deref());
+        ensure_database_in_scope(&policy, connection_id, &database)?;
+        if dbx_core::production_safety::is_production_database(&config, &database) {
+            return Err(AppError::from(format!(
+                "PRODUCTION_DATABASE_READ_ONLY: createUser role targeting production database '{database}' is blocked."
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub async fn ensure_sql(
     state: &Arc<WebState>,
     headers: &HeaderMap,

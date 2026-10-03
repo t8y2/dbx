@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import { expandNestedJsonStringsForCopy } from "../../apps/desktop/src/lib/common/jsonCopyValue.ts";
+import { normalizeJsonArgument } from "../mongo-shell/src/json.ts";
 
 test("expands nested JSON strings for copied rows", () => {
   const value = {
@@ -35,6 +36,11 @@ test("recursively expands JSON strings in arrays and objects", () => {
   assert.deepEqual(expandNestedJsonStringsForCopy(value), {
     items: [{ id: 1, meta: { ok: true } }, "plain text"],
   });
+});
+
+test("normalizes single-quoted JS strings without losing escapes", () => {
+  assert.equal(normalizeJsonArgument("{note: 'line\\nnext', path: 'C:\\\\temp'}"), '{"note": "line\\nnext", "path": "C:\\\\temp"}');
+  assert.equal(normalizeJsonArgument("{quote: 'it\\'s ok'}"), '{"quote": "it\'s ok"}');
 });
 
 test("keeps non-object JSON-like cell strings unchanged", () => {

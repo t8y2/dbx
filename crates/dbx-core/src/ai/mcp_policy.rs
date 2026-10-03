@@ -237,6 +237,35 @@ pub fn mongo_pipeline_output_databases(pipeline_json: &str, active_database: &st
     Ok(databases)
 }
 
+/// Databases named by the `roles` of a `createUser` document. A bare string role applies to the
+/// active database (already scope-checked by the caller), so it is not returned here.
+pub fn mongo_create_user_role_databases(user_json: &str) -> Result<Vec<String>, String> {
+    let value: serde_json::Value = serde_json::from_str(user_json)
+        .map_err(|_| "QUERY_ERROR: MongoDB createUser document must be valid JSON.".to_string())?;
+    let Some(roles) = value.get("roles") else {
+        return Ok(Vec::new());
+    };
+    let roles = roles
+        .as_array()
+        .ok_or_else(|| "QUERY_ERROR: MongoDB createUser roles must be an array.".to_string())?;
+    let mut databases = Vec::new();
+    for role in roles {
+        if role.is_string() {
+            continue;
+        }
+        let role = role
+            .as_object()
+            .ok_or_else(|| "QUERY_ERROR: MongoDB createUser role must be a string or object.".to_string())?;
+        let database = role
+            .get("db")
+            .and_then(serde_json::Value::as_str)
+            .filter(|database| !database.is_empty())
+            .ok_or_else(|| "QUERY_ERROR: MongoDB createUser role must specify a database.".to_string())?;
+        databases.push(database.to_string());
+    }
+    Ok(databases)
+}
+
 /// Reject cross-database MongoDB writes while database-specific rules exist.
 pub fn ensure_mongo_database_execution_scope(
     policy: &McpGlobalPolicy,
@@ -267,8 +296,8 @@ pub fn ensure_mongo_database_execution_scope(
 #[cfg(test)]
 mod tests {
     use super::{
-        connection_allows_salesforce_dml, effective_database_execution_policy, resolve_database,
-        MCP_EXECUTION_POLICY_VERSION,
+        connection_allows_salesforce_dml, effective_database_execution_policy, mongo_create_user_role_databases,
+        resolve_database, MCP_EXECUTION_POLICY_VERSION,
     };
     use crate::storage::{McpConnectionPolicy, McpDatabasePolicy, McpGlobalPolicy};
 
@@ -328,6 +357,22 @@ mod tests {
         // the global mode verbatim; the implicit (false, false) values must
         // not narrow allow_dangerous_sql on upgrade.
         assert_eq!(effective_database_execution_policy(&policy, "conn", "db"), (false, true));
+    }
+
+    #[test]
+    fn create_user_role_databases_extracts_cross_database_targets() {
+        assert_eq!(
+            mongo_create_user_role_databases(r#"{"roles":["read",{"role":"readWrite","db":"sales"}]}"#)
+                .unwrap(),
+            vec!["sales"]
+        );
+        assert!(mongo_create_user_role_databases(r#"{"roles":[]}"#).unwrap().is_empty());
+    }
+
+    #[test]
+    fn create_user_role_databases_rejects_malformed_role_targets() {
+        assert!(mongo_create_user_role_databases(r#"{"roles":"readWrite"}"#).is_err());
+        assert!(mongo_create_user_role_databases(r#"{"roles":[{"role":"readWrite"}]}"#).is_err());
     }
 
     #[test]

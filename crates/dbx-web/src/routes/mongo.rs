@@ -694,6 +694,8 @@ pub async fn create_user(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let database = super::mcp_policy::resolve_database(&state, &headers, &req.connection_id, &req.database).await?;
     super::mcp_policy::ensure_dangerous_write(&state, &headers, &req.connection_id, &database, "Create user").await?;
+    super::mcp_policy::ensure_mongo_create_user_role_scope(&state, &headers, &req.connection_id, &req.user_json)
+        .await?;
     ensure_writable(&state.app, &req.connection_id, "Create user").await?;
     let affected_rows = dbx_core::mongo_ops::mongo_create_user_core(
         &state.app,

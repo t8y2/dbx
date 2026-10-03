@@ -1445,6 +1445,16 @@ impl DbxMcpServer {
                 Ok(command) => command,
                 Err(error) => return error,
             };
+            // `show dbs` is database discovery; never dispatch it through a command path that may
+            // return databases outside the caller's MCP allowlist.
+            let is_show_databases = match &command {
+                MongoCommand::ShowDatabases => true,
+                MongoCommand::InDatabase { command, .. } => matches!(command.as_ref(), MongoCommand::ShowDatabases),
+                _ => false,
+            };
+            if is_show_databases {
+                return self.list_databases_for_resolved(&resolved).await;
+            }
             return match self.backend.execute_mongo_command(connection, &database, &command).await {
                 Ok(result) => match explicit_cell_window {
                     Some(window) => match format_query_result_as_text(&result, 100, window) {
@@ -4848,6 +4858,20 @@ fn validate_mongo_command_with_groups(
             ensure_database_in_scope(database_scope, &output_database)?;
         }
     }
+    if let MongoCommand::CreateUser { user_json, .. } = command_to_validate {
+        let role_databases = dbx_core::mcp_policy::mongo_create_user_role_databases(user_json)
+            .map_err(|error| tool_error("QUERY_ERROR", error))?;
+        for role_database in role_databases {
+            let role_database = dbx_core::mcp_policy::resolve_database(&role_database, Some(target_database));
+            ensure_database_in_scope(database_scope, &role_database)?;
+            if is_production_database(connection, &role_database) {
+                return Err(tool_error(
+                    "PRODUCTION_DATABASE_READ_ONLY",
+                    format!("MongoDB createUser role targeting production database '{role_database}' is blocked."),
+                ));
+            }
+        }
+    }
     let effective_policy = effective_policy_for_database_with_groups(policy, group_ids, connection, target_database);
     let permissions = mcp_permissions(connection, &effective_policy);
     let production_database = match command_to_validate {
@@ -6701,6 +6725,42 @@ mod tests {
         assert!(!is_database_discovery_sql("show tables"));
     }
 
+    #[tokio::test]
+    async fn mongo_show_dbs_uses_scoped_database_discovery() {
+        let mongo = connection("mongo", "mongo", "mongodb", "operations");
+        let backend = Arc::new(FakeBackend {
+            connections: vec![mongo],
+            policy: McpGlobalPolicy {
+                connection_policies: vec![dbx_core::storage::McpConnectionPolicy {
+                    connection_id: "mongo".to_string(),
+                    read_only: true,
+                    allow_dangerous_sql: false,
+                    database_scope: McpDatabaseScope::Selected,
+                    allowed_databases: vec!["operations".to_string()],
+                    database_policies: Vec::new(),
+                    execution_mode_configured: false,
+                    execution_mode_policy_version: None,
+                    allow_salesforce_dml: false,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+        let result = server
+            .execute_query(Parameters(ExecuteQueryRequest {
+                selector: selector("mongo"),
+                database: None,
+                sql: "show dbs".to_string(),
+                session_id: None,
+                cell_char_offset: None,
+                cell_char_limit: None,
+                max_rows: None,
+            }))
+            .await;
+        assert_eq!(result_text(&result), "- operations");
+    }
+
     #[test]
     fn schema_scope_is_a_hard_bound() {
         let dameng = connection("dameng-1", "Dameng", "dameng", "APPDB");
@@ -6742,6 +6802,38 @@ mod tests {
         );
         let error = invalid.resolve_redis_database(None, &resolved).unwrap_err();
         assert!(result_text(&error).contains("INVALID_DATABASE_SCOPE"));
+    }
+
+    #[test]
+    fn mongo_create_user_roles_must_remain_in_scope_and_out_of_production() {
+        let mut mongo = connection("mongo", "mongo", "mongodb", "operations");
+        mongo.production_databases = vec!["production".to_string()];
+        let policy = McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: true,
+            allowed_connection_ids: None,
+            ..Default::default()
+        };
+
+        let outside_scope = validate_mongo_command(
+            &mongo,
+            &policy,
+            &DatabaseScope::Selected(vec!["operations".to_string()]),
+            "operations",
+            r#"db.createUser({user:"app",pwd:"secret",roles:[{role:"readWrite",db:"sales"}]})"#,
+        )
+        .unwrap_err();
+        assert!(result_text(&outside_scope).contains("DATABASE_OUT_OF_SCOPE"));
+
+        let production = validate_mongo_command(
+            &mongo,
+            &policy,
+            &DatabaseScope::All,
+            "operations",
+            r#"db.createUser({user:"app",pwd:"secret",roles:[{role:"readWrite",db:"production"}]})"#,
+        )
+        .unwrap_err();
+        assert!(result_text(&production).contains("PRODUCTION_DATABASE_READ_ONLY"));
     }
 
     #[test]

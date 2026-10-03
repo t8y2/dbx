@@ -2792,11 +2792,9 @@ fn extended_json_document_id_filter(id: &str) -> Option<Document> {
         return None;
     }
     let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
-    let bson = json_value_to_bson(&value);
-    if matches!(bson, Bson::Document(_)) {
-        return None;
-    }
-    Some(doc! { "_id": bson })
+    // Compound subdocument `_id` values are valid BSON keys too; retain the decoded
+    // document rather than falling back to a string filter that cannot match them.
+    Some(doc! { "_id": json_value_to_bson(&value) })
 }
 
 pub async fn delete_documents(
@@ -3154,10 +3152,18 @@ fn json_value_to_bson(value: &serde_json::Value) -> Bson {
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 Bson::Int64(i)
-            } else if let Some(f) = n.as_f64() {
-                Bson::Double(f)
             } else {
-                Bson::Null
+                let text = n.to_string();
+                if json_number_is_integer(&text) {
+                    // Do not round large integer IDs into Double. Decimal128 is exact within its
+                    // range; outside that range preserve the digits rather than silently corrupting them.
+                    Bson::try_from(serde_json::json!({ "$numberDecimal": text.clone() }))
+                        .unwrap_or_else(|_| Bson::String(text))
+                } else if let Some(f) = n.as_f64() {
+                    Bson::Double(f)
+                } else {
+                    Bson::Null
+                }
             }
         }
         serde_json::Value::String(s) => {
@@ -3172,6 +3178,11 @@ fn json_value_to_bson(value: &serde_json::Value) -> Bson {
             Bson::Document(doc)
         }
     }
+}
+
+fn json_number_is_integer(text: &str) -> bool {
+    let digits = text.strip_prefix('-').unwrap_or(text);
+    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn parse_extended_json_value(obj: &serde_json::Map<String, serde_json::Value>) -> Result<Option<Bson>, String> {
@@ -3252,6 +3263,11 @@ fn json_filter_value_to_bson(value: &serde_json::Value, field_name: Option<&str>
             Bson::Array(arr.iter().map(|item| json_filter_value_to_bson(item, None)).collect())
         }
         serde_json::Value::Object(obj) => {
+            // Decode any canonical Extended JSON wrapper recognized by the shared parser before
+            // interpreting the document as query operators.
+            if let Ok(Some(value)) = parse_extended_json_value(obj) {
+                return value;
+            }
             if obj.len() == 1 {
                 // Shell constructor wrappers (UUID/BinData/Timestamp/MinKey/MaxKey),
                 // $regularExpression, and the numeric type wrappers decode through
@@ -3790,6 +3806,17 @@ mod tests {
     }
 
     #[test]
+    fn document_id_filters_keep_compound_extended_json_ids() {
+        let filters = document_id_filters(r#"{"tenant":"acme","sequence":{"$numberInt":"7"}}"#);
+        assert_eq!(filters.len(), 1);
+        let Some(Bson::Document(id)) = filters[0].get("_id") else {
+            panic!("expected compound document _id");
+        };
+        assert_eq!(id.get_str("tenant").unwrap(), "acme");
+        assert_eq!(id.get_i32("sequence").unwrap(), 7);
+    }
+
+    #[test]
     fn document_id_filters_use_string_only_for_non_hex_ids() {
         let id = "customer-42";
         let filters = document_id_filters(id);
@@ -3845,6 +3872,12 @@ mod tests {
         assert_eq!(filters.len(), 2);
         assert!(matches!(filters[0].get("_id"), Some(Bson::Int64(42))));
         assert!(matches!(filters[1].get("_id"), Some(Bson::String(value)) if value == "42"));
+    }
+
+    #[test]
+    fn json_value_to_bson_does_not_round_large_unsigned_integers() {
+        let value = serde_json::from_str::<serde_json::Value>("18446744073709551615").unwrap();
+        assert!(matches!(json_value_to_bson(&value), Bson::Decimal128(_)));
     }
 
     #[test]

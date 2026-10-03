@@ -51,6 +51,12 @@ test("preserves strings, regex literals, and comments", () => {
     );
 });
 
+test("preserves whitespace and newlines inside template literals", () => {
+    const source = "db.users.find({ note: `first line  \nsecond line\n` })";
+    const formatted = formatMongoShellText(source);
+    assert.ok(formatted.includes("first line  \nsecond line\n`"));
+});
+
 test("respects tab indentation setting", () => {
     assert.equal(
         formatMongoShellText("db.users.find({name:'Ada'})", { useTabs: true, tabWidth: 4 }),

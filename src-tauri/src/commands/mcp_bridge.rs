@@ -1175,6 +1175,34 @@ async fn ensure_mcp_mongo_pipeline_target_allowed_by_id(
     Ok(())
 }
 
+pub(crate) async fn ensure_mcp_create_user_role_scope(
+    state: &Arc<AppState>,
+    connection_id: &str,
+    user_json: &str,
+) -> Result<(), String> {
+    let role_databases = dbx_core::mcp_policy::mongo_create_user_role_databases(user_json)?;
+    if role_databases.is_empty() {
+        return Ok(());
+    }
+    let (policy, group_paths) = load_mcp_policy_context(state).await?;
+    ensure_connection_in_mcp_scope_with_groups(&policy, group_paths.get(connection_id), connection_id)?;
+    let configs = state.storage.load_connections().await.map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))?;
+    let config = configs
+        .iter()
+        .find(|config| config.id == connection_id)
+        .ok_or_else(|| format!("Connection with id '{connection_id}' not found"))?;
+    for database in role_databases {
+        let database = dbx_core::mcp_policy::resolve_database(&database, config.database.as_deref());
+        ensure_database_in_mcp_scope(&policy, connection_id, &database)?;
+        if dbx_core::production_safety::is_production_database(config, &database) {
+            return Err(format!(
+                "PRODUCTION_DATABASE_READ_ONLY: createUser role targeting production database '{database}' is blocked."
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn mongo_pipeline_output_databases(pipeline_json: &str, active_database: &str) -> Result<Vec<String>, String> {
     dbx_core::mcp_policy::mongo_pipeline_output_databases(pipeline_json, active_database)
 }

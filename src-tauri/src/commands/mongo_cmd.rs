@@ -414,6 +414,8 @@ pub async fn mongo_create_user(
             "Create user",
         )
         .await?;
+        crate::commands::mcp_bridge::ensure_mcp_create_user_role_scope(state.inner(), &connection_id, &user_json)
+            .await?;
     }
     ensure_connection_writable(&state, &connection_id, "Create user").await?;
     let affected_rows = dbx_core::mongo_ops::mongo_create_user_core(

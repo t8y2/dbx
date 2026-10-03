@@ -324,10 +324,64 @@ function trimTrailingSpaces(state: FormatState) {
 }
 
 function cleanupFormattedMongoText(text: string): string {
-  return text
-    .split("\n")
-    .map((line) => line.replace(/[ \t]+$/g, ""))
-    .join("\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+  // Collapse blank-line runs and trailing spaces only OUTSIDE string/template literals, comments
+  // and regex literals: those spans are copied verbatim so formatting cannot rewrite their content
+  // (a multi-line template literal must keep its own spaces and newlines).
+  let result = "";
+  let index = 0;
+  while (index < text.length) {
+    const char = text[index] ?? "";
+    const next = text[index + 1] ?? "";
+
+    if (char === '"' || char === "'" || char === "`") {
+      const literal = readQuotedLiteral(text, index, char);
+      result += literal.value;
+      index = literal.end + 1;
+      continue;
+    }
+    if (char === "/" && next === "/") {
+      const comment = readLineComment(text, index);
+      result += comment.value;
+      index = comment.end + 1;
+      continue;
+    }
+    if (char === "/" && next === "*") {
+      const comment = readBlockComment(text, index);
+      result += comment.value;
+      index = comment.end + 1;
+      continue;
+    }
+    if (char === "/" && looksLikeRegexLiteral(text, index)) {
+      const regex = readRegexLiteral(text, index);
+      result += regex.value;
+      index = regex.end + 1;
+      continue;
+    }
+
+    if (char === " " || char === "\t") {
+      let runEnd = index;
+      while (runEnd < text.length && (text[runEnd] === " " || text[runEnd] === "\t")) runEnd++;
+      const after = text[runEnd] ?? "";
+      if (after === "\n" || after === "") {
+        index = runEnd;
+        continue;
+      }
+      result += text.slice(index, runEnd);
+      index = runEnd;
+      continue;
+    }
+
+    if (char === "\n") {
+      let runEnd = index;
+      while (runEnd < text.length && text[runEnd] === "\n") runEnd++;
+      const count = runEnd - index;
+      result += count >= 3 ? "\n\n" : "\n".repeat(count);
+      index = runEnd;
+      continue;
+    }
+
+    result += char;
+    index++;
+  }
+  return result.trim();
 }

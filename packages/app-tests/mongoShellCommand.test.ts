@@ -41,6 +41,17 @@ import type { MongoWriteCommand } from "../../apps/desktop/src/lib/mongo/mongoSh
 import { buildMongoUpdateDocument as buildMongoDocumentUpdate, formatMongoShellLiteral as formatMongoDocumentShellLiteral, mongoDocumentGridDisplayText, mongoDocumentGridEditorText, mongoDocumentGridValue } from "../../apps/desktop/src/lib/mongo/mongoDocumentValues.ts";
 import { normalizeJsonArgument } from "../mongo-shell/src/json.ts";
 
+test("parseMongoFindCommand rejects unmodeled chained calls", () => {
+  for (const source of [
+    "db.users.find({}).forEach(doc => db.secret.drop())",
+    "db.users.find({}).explain()",
+    "db.users.find({}).project({name: 1})",
+  ]) {
+    assert.equal(parseMongoFindCommand(source), null, source);
+  }
+  assert.ok(parseMongoFindCommand("db.users.find({}).sort({name: 1}).limit(5)"));
+});
+
 test("parseMongoFindCommand parses db collection find with an empty JSON filter", () => {
   assert.deepEqual(parseMongoFindCommand("db.users.find({})"), {
     collection: "users",

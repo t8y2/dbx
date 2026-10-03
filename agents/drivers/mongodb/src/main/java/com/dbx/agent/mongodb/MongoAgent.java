@@ -1598,7 +1598,7 @@ public final class MongoAgent {
         String collection = params.get("collection").getAsString();
         String docJson = params.get("doc_json").getAsString();
 
-        Document doc = Document.parse(docJson);
+        Document doc = documentForWrite(docJson);
         c.getDatabase(database).getCollection(collection).insertOne(doc);
         Object insertedId = convertValue(doc.get("_id"));
         return Collections.singletonMap("inserted_id", insertedId);

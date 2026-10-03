@@ -637,7 +637,10 @@ export function formatMongoShellLiteral(value: unknown): string {
 
 export function serializeMongoDocumentId(value: unknown): string {
   if (typeof value === "string") return `__dbx_mongo_string_id__${JSON.stringify(value)}`;
-  if (isMongoExtendedJsonId(value)) return JSON.stringify(value);
+  // An extended-JSON wrapper ($date/$numberInt/…), an array or a compound subdocument id must be
+  // JSON-encoded so the backend can decode it; `String(value)` would yield "[object Object]" and
+  // the update/delete would silently match nothing.
+  if (value !== null && typeof value === "object") return JSON.stringify(value);
   return String(value);
 }
 

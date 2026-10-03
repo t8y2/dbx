@@ -6593,6 +6593,8 @@ export default withEnglishFallback({
     infiniteScrollDescription: "滾動到底部時自動載入下一批資料，無需手動翻頁或載入。",
     dataGridShowWhitespace: "顯示空白字元",
     dataGridShowWhitespaceDescription: "在資料儲存格中將空格顯示為 ·，定位字元顯示為 →。複製和編輯的值保持不變。",
+    dataGridStripedRows: "資料表格斑馬紋",
+    dataGridStripedRowsDescription: "開啟後，資料表格奇偶列交替顯示不同背景色，便於橫向對齊瀏覽。",
     flatteningMultiLineText: "扁平多行文本",
     flatteningMultiLineTextDescription: "多行文本合併為單行顯示，換行符顯示為 ¶ 。",
     regexMaxMatchCount: "全部選取最大數量",

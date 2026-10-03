@@ -8131,6 +8131,8 @@ export default {
     infiniteScrollDescription: "Automatically load the next batch when scrolling to the bottom.",
     dataGridShowWhitespace: "Show whitespace",
     dataGridShowWhitespaceDescription: "Show spaces as · and tabs as → in data cells. Copied and edited values remain unchanged.",
+    dataGridStripedRows: "Zebra stripes",
+    dataGridStripedRowsDescription: "When enabled, alternating rows in the data grid display different background colors.",
     flatteningMultiLineText: "Flattening Multi-line Text",
     flatteningMultiLineTextDescription: "Multi-line text merged into single line display, with line breaks shown as ¶ .",
     regexMaxMatchCount: "Maximum select-all matches",

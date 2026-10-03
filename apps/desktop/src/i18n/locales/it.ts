@@ -7243,6 +7243,8 @@ export default withEnglishFallback({
     infiniteScrollDescription: "Carica automaticamente il blocco successivo quando scorri fino in fondo.",
     dataGridShowWhitespace: "Mostra spazi bianchi",
     dataGridShowWhitespaceDescription: "Mostra gli spazi come · e le tabulazioni come → nelle celle. I valori copiati e modificati restano invariati.",
+    dataGridStripedRows: "Righe alternate (zebra)",
+    dataGridStripedRowsDescription: "Se attivato, le righe pari e dispari nella griglia dei dati mostrano colori di sfondo diversi.",
     flatteningMultiLineText: "Pianifica automaticamente i testi multi-riga",
     flatteningMultiLineTextDescription: "Se attivo, i testi multi-riga nei risultati vengono automaticamente pianificati in una singola colonna.",
     regexMaxMatchCount: "Numero massimo di corrispondenze per Seleziona tutte",

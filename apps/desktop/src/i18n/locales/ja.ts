@@ -8100,6 +8100,8 @@ export default withEnglishFallback({
     infiniteScrollDescription: "末尾までスクロールしたときに、次のデータを自動的に読み込みます。",
     dataGridShowWhitespace: "空白文字を表示",
     dataGridShowWhitespaceDescription: "データセルのスペースを ·、タブを → で表示します。コピーや編集する値は変わりません。",
+    dataGridStripedRows: "ゼブラストライプ",
+    dataGridStripedRowsDescription: "有効にすると、データグリッドの奇数行と偶数行が異なる背景色で交互に表示されます。",
     flatteningMultiLineText: "多行テキストを展開",
     flatteningMultiLineTextDescription: "複数行のテキストを1行に結合して表示し、改行文字は¶として表示する。",
     regexMaxMatchCount: "すべての一致を選択する最大数",

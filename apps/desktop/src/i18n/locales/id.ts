@@ -7924,6 +7924,8 @@ export default withEnglishFallback({
     infiniteScrollDescription: "Memuat batch berikutnya secara otomatis saat menggulir ke bawah.",
     dataGridShowWhitespace: "Tampilkan spasi putih",
     dataGridShowWhitespaceDescription: "Tampilkan spasi sebagai · dan tab sebagai → pada sel data. Nilai yang disalin dan diedit tetap tidak berubah.",
+    dataGridStripedRows: "Garis zebra",
+    dataGridStripedRowsDescription: "Jika diaktifkan, baris ganjil dan genap pada kisi data akan menampilkan warna latar belakang yang berbeda.",
     flatteningMultiLineText: "Meratakan Teks Multi-baris",
     flatteningMultiLineTextDescription: "Teks multi-baris digabungkan menjadi tampilan satu baris, dengan pemutus baris ditampilkan sebagai ¶.",
     regexMaxMatchCount: "Jumlah maksimum hasil cocok pilih-semua",

@@ -7465,6 +7465,8 @@ export default withEnglishFallback({
     infiniteScrollDescription: "Carga automáticamente el siguiente lote al desplazarse hasta el final.",
     dataGridShowWhitespace: "Mostrar espacios en blanco",
     dataGridShowWhitespaceDescription: "Mostrar espacios como · y tabulaciones como → en las celdas. Los valores copiados y editados no cambian.",
+    dataGridStripedRows: "Filas alternas (cebra)",
+    dataGridStripedRowsDescription: "Cuando esté activado, las filas pares e impares de la cuadrícula de datos muestran diferentes colores de fondo.",
     flatteningMultiLineText: "Aplastar texto multilínea",
     flatteningMultiLineTextDescription: "El texto multilínea se fusiona en una sola línea de visualización, con los saltos de línea mostrados como ¶ .",
     regexMaxMatchCount: "Máximo de coincidencias al seleccionar todas",

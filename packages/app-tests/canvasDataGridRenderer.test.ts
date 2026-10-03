@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { canvasDataGridActionReservedWidth, fitCanvasText, resolveCanvasCellTextLayout, resolveCanvasDataGridRowFill } from "../../apps/desktop/src/lib/dataGrid/canvasDataGridRenderer.ts";
+import { canvasDataGridActionReservedWidth, fitCanvasText, resolveCanvasCellTextLayout, resolveCanvasDataGridRowBase, resolveCanvasDataGridRowFill } from "../../apps/desktop/src/lib/dataGrid/canvasDataGridRenderer.ts";
 import { DATA_GRID_DARK_STRIPED_ROW_BG, DATA_GRID_LIGHT_STRIPED_ROW_BG, resolveDataGridPaintTheme } from "../../apps/desktop/src/lib/dataGrid/dataGridPaintTheme.ts";
 
 function measureContext(charWidth = 1): CanvasRenderingContext2D {
@@ -69,4 +69,30 @@ test("data grid paint theme resolves cellDirty token", () => {
   const getVar = (name: string) => (name === "--data-grid-cell-dirty-bg" ? "rgb(166, 210, 255)" : "");
 
   assert.equal(resolveDataGridPaintTheme({ getVar, isDark: false }).cellDirty, "rgb(166, 210, 255)");
+});
+
+test("canvas row base respects stripedRows option", () => {
+  const theme = {
+    background: "bg-base",
+    rowMuted: "row-muted",
+    rowNew: "row-new",
+    rowDeleted: "row-deleted",
+  };
+
+  const evenRow = { displayIndex: 0, isDeleted: false, isNew: false, isDraft: false };
+  const oddRow = { displayIndex: 1, isDeleted: false, isNew: false, isDraft: false };
+  const newRow = { displayIndex: 0, isDeleted: false, isNew: true, isDraft: false };
+
+  // With stripedRows enabled (default or explicit true)
+  assert.equal(resolveCanvasDataGridRowBase(theme, evenRow, { isActive: false }), "bg-base");
+  assert.equal(resolveCanvasDataGridRowBase(theme, oddRow, { isActive: false }), "row-muted");
+  assert.equal(resolveCanvasDataGridRowBase(theme, oddRow, { isActive: false, stripedRows: true }), "row-muted");
+
+  // With stripedRows disabled
+  assert.equal(resolveCanvasDataGridRowBase(theme, evenRow, { isActive: false, stripedRows: false }), "bg-base");
+  assert.equal(resolveCanvasDataGridRowBase(theme, oddRow, { isActive: false, stripedRows: false }), "bg-base");
+
+  // New row takes precedence when not active
+  assert.equal(resolveCanvasDataGridRowBase(theme, newRow, { isActive: false, stripedRows: false }), "row-new");
+  assert.equal(resolveCanvasDataGridRowBase(theme, newRow, { isActive: false, stripedRows: true }), "row-new");
 });

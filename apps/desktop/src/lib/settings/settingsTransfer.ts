@@ -167,6 +167,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "dataGridAutoTransposeSingleRow",
     "dataGridCellDetailButtonVisible",
     "dataGridCrosshairHighlight",
+    "dataGridStripedRows",
     "flatteningMultiLineText",
     "dataGridShowWhitespace",
     "pageSize",

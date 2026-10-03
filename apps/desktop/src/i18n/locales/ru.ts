@@ -8449,6 +8449,8 @@ export default withEnglishFallback({
     infiniteScrollDescription: "Автоматически загружать следующую порцию при прокрутке до конца.",
     dataGridShowWhitespace: "Показывать пробельные символы",
     dataGridShowWhitespaceDescription: "Показывать пробелы как ·, а табуляции как → в ячейках данных. Копируемые и редактируемые значения не меняются.",
+    dataGridStripedRows: "Чередование строк (зебра)",
+    dataGridStripedRowsDescription: "Если включено, четные и нечетные строки в таблице данных отображаются с чередующимся фоном.",
     flatteningMultiLineText: "Объединение многострочного текста",
     flatteningMultiLineTextDescription: "Многострочный текст отображается одной строкой, переносы строк показаны как ¶ .",
     regexMaxMatchCount: "Максимум совпадений при выборе всех",

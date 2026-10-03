@@ -72,6 +72,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "dataGridAutoTransposeSingleRow",
   "dataGridCellDetailButtonVisible",
   "dataGridCrosshairHighlight",
+  "dataGridStripedRows",
   "pageSize",
   "tableOpenPageSize",
   "tableOpenSortMode",

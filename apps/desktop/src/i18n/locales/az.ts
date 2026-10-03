@@ -7254,6 +7254,8 @@ export default withEnglishFallback({
     infiniteScrollDescription: "Aşağıya sürüşdürdükdə növbəti toplunu avtomatik yüklə.",
     dataGridShowWhitespace: "Boşluq simvollarını göstər",
     dataGridShowWhitespaceDescription: "Verilənlər xanalarında boşluqları ·, tabulyasiyaları → kimi göstərir. Kopyalanan və redaktə edilən dəyərlər dəyişmir.",
+    dataGridStripedRows: "Zebra zolaqları",
+    dataGridStripedRowsDescription: "Aktiv olduqda verilənlər cədvəlində tək və cüt sətirlər fərqli fon rənglərində göstərilir.",
     flatteningMultiLineText: "Çoxsətirli mətnin bir sətrə birləşdirilməsi",
     flatteningMultiLineTextDescription: "Çoxsətirli mətn bir sətirdə göstərilir, sətir keçidləri ¶ kimi göstərilir.",
     regexMaxMatchCount: "Hamısını seçmək üçün maksimum uyğunluq sayı",

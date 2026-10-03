@@ -103,6 +103,7 @@ export interface DrawCanvasDataGridOptions {
   booleanDisplayMode?: "checkbox" | "dropdown";
   flatteningMultiLineEnabled: boolean;
   showWhitespace?: boolean;
+  stripedRows?: boolean;
   /** 行号栏取值：`view` = 当前视图序号（默认，与筛选前一致），`source` = 筛选前的原始行号 */
   rowNumberMode?: "view" | "source";
 }
@@ -150,6 +151,15 @@ export function resolveCanvasBackingStoreMetrics(options: { width: number; heigh
     scaleY: pixelHeight / height,
     measured: measurementMatches,
   };
+}
+
+export function resolveCanvasDataGridRowBase(theme: Pick<DataGridPaintTheme, "rowDeleted" | "rowNew" | "rowMuted" | "background">, item: Pick<CanvasDataGridRow, "isDeleted" | "isNew" | "isDraft" | "displayIndex">, options: { isActive: boolean; stripedRows?: boolean }): string {
+  const { isActive, stripedRows = true } = options;
+  if (item.isDeleted) return theme.rowDeleted;
+  if (item.isNew && !isActive) return theme.rowNew;
+  if (item.isDraft && !isActive) return theme.rowMuted;
+  if (stripedRows && item.displayIndex % 2 === 1 && !isActive) return theme.rowMuted;
+  return theme.background;
 }
 
 export function resolveCanvasDataGridRowFill(theme: Pick<DataGridPaintTheme, "cellActive" | "cellSelected">, rowBase: string, options: { isActive: boolean; isDeleted: boolean; isSelected: boolean }): string {
@@ -368,6 +378,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions): boolean 
     booleanDisplayMode = "dropdown",
     flatteningMultiLineEnabled,
     showWhitespace = false,
+    stripedRows = true,
     rowNumberMode = "view",
   } = options;
   // 框选热路径：整次绘制只判断一次。常见情况（单矩形 / 多列且每段都是多格）可跳过逐格 kind 查询
@@ -430,7 +441,10 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions): boolean 
     const rowIsActive = isRowActive(item.displayIndex);
     const rowSelectionVisual = rowCellsUseSelectionVisual(item.id);
 
-    const rowBase = item.isDeleted ? theme.rowDeleted : item.isNew && !rowIsActive ? theme.rowNew : item.isDraft && !rowIsActive ? theme.rowMuted : item.displayIndex % 2 === 1 && !rowIsActive ? theme.rowMuted : theme.background;
+    const rowBase = resolveCanvasDataGridRowBase(theme, item, {
+      isActive: rowIsActive,
+      stripedRows,
+    });
     const rowFill = resolveCanvasDataGridRowFill(theme, rowBase, {
       isActive: rowIsActive,
       isDeleted: item.isDeleted,

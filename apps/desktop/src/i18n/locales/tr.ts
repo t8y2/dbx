@@ -7138,6 +7138,8 @@ export default withEnglishFallback({
     infiniteScrollDescription: "En alta kaydırıldığında sonraki grubu otomatik yükle.",
     dataGridShowWhitespace: "Boşluk karakterlerini göster",
     dataGridShowWhitespaceDescription: "Veri hücrelerinde boşlukları ·, sekmeleri → olarak gösterir. Kopyalanan ve düzenlenen değerler değişmez.",
+    dataGridStripedRows: "Zebra çizgileri",
+    dataGridStripedRowsDescription: "Etkinleştirildiğinde veri tablosundaki tek ve çift satırlar farklı arka plan renkleriyle dönüşümlü olarak gösterilir.",
     flatteningMultiLineText: "Çok Satırlı Metni Düzleştirme",
     flatteningMultiLineTextDescription: "Çok satırlı metin, satır sonları ¶ ile gösterilerek tek satırda birleştirilir.",
     regexMaxMatchCount: 'En fazla "tümünü seç" eşleşmesi',

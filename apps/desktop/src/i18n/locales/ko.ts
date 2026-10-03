@@ -7047,6 +7047,8 @@ export default withEnglishFallback({
     infiniteScrollDescription: "목록 하단으로 스크롤할 때 다음 데이터 묶음을 자동으로 불러옵니다.",
     dataGridShowWhitespace: "공백 문자 표시",
     dataGridShowWhitespaceDescription: "데이터 셀의 공백을 ·, 탭을 →로 표시합니다. 복사하거나 편집하는 값은 변경되지 않습니다.",
+    dataGridStripedRows: "줄무늬 행",
+    dataGridStripedRowsDescription: "활성화하면 데이터 그리드의 홀수 행과 짝수 행에 교차 배경색이 표시됩니다.",
     flatteningMultiLineText: "멀티라인 텍스트 단순화",
     flatteningMultiLineTextDescription: "다중 행 텍스트를 단일 행으로 병합하여 표시하고, 개행 문자는 ¶로 표시합니다.",
     tableColumnTemplateFields: "새 테이블 미리 정의된 필드",

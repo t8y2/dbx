@@ -92,6 +92,18 @@ fn large_value_preview_kind(
                 None
             }
         }
+        Some(DatabaseType::Db2) => {
+            if matches!(base.as_str(), "blob" | "binary" | "varbinary" | "longvarbinary") {
+                Some(LargeValuePreviewKind::Binary)
+            } else if matches!(base.as_str(), "clob" | "dbclob")
+                || (matches!(base.as_str(), "char" | "character" | "varchar" | "graphic" | "vargraphic")
+                    && declared_data_type_length(data_type).is_some_and(|length| length > preview_size))
+            {
+                Some(LargeValuePreviewKind::Text)
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
@@ -149,6 +161,17 @@ fn build_large_value_preview_columns(options: &TableDataSelectSqlOptions) -> Opt
                 (format!("left({quoted}::text, {prefix_size}) AS {quoted}"), "V")
             }
             Some(DatabaseType::Postgres) => (format!("left({quoted}, {prefix_size}) AS {quoted}"), "T"),
+            // DB2 的 SUBSTR 第三参数越界会报 SQL0138N，而 BLOB/CLOB 长度不定，故用
+            // CASE WHEN LENGTH(..) 把预览长度夹在实际长度内，对短值不报错；SUBSTR 对 BLOB
+            // 返回 BLOB、对 CLOB/字符列返回 VARCHAR，agent 侧 BLOB 再转 0x 前缀的 hex 字符串。
+            Some(DatabaseType::Db2) if kind == LargeValuePreviewKind::Binary => (
+                format!("SUBSTR({quoted}, 1, CASE WHEN LENGTH({quoted}) >= {prefix_size} THEN {prefix_size} ELSE LENGTH({quoted}) END) AS {quoted}"),
+                "B",
+            ),
+            Some(DatabaseType::Db2) => (
+                format!("SUBSTR({quoted}, 1, CASE WHEN LENGTH({quoted}) >= {prefix_size} THEN {prefix_size} ELSE LENGTH({quoted}) END) AS {quoted}"),
+                "T",
+            ),
             _ => return None,
         };
         let marker = if database_type == Some(DatabaseType::Mysql) {

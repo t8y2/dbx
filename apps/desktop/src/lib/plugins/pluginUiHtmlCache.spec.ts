@@ -67,6 +67,21 @@ describe("pluginUiHtmlCache", () => {
     expect(getCachedPluginUiHtml("io.dbx.ssh@0.4.88")).toBeUndefined();
   });
 
+  it("does not repopulate the cache when an invalidated load completes", async () => {
+    let resolveStale!: (value: { dataBase64: string }) => void;
+    mocks.readPluginUiEntry.mockReturnValueOnce(new Promise((resolve) => (resolveStale = resolve)));
+    const staleLoad = getOrLoadPluginUiHtml("io.dbx.ssh@0.4.88", "io.dbx.ssh");
+
+    window.dispatchEvent(new Event("dbx:plugins-changed"));
+    mocks.readPluginUiEntry.mockResolvedValueOnce(uiEntryPayload("<html>fresh</html>"));
+    const freshLoad = getOrLoadPluginUiHtml("io.dbx.ssh@0.4.88", "io.dbx.ssh");
+    resolveStale(uiEntryPayload("<html>stale</html>"));
+
+    await expect(staleLoad).resolves.toEqual({ html: "<html>stale</html>", entryDirectory: "" });
+    await expect(freshLoad).resolves.toEqual({ html: "<html>fresh</html>", entryDirectory: "" });
+    expect(getCachedPluginUiHtml("io.dbx.ssh@0.4.88")).toEqual({ html: "<html>fresh</html>", entryDirectory: "" });
+  });
+
   it("getOrLoad resolves from the cache without touching the bridge", async () => {
     setCachedPluginUiHtml("io.dbx.ssh@0.4.88", { html: "cached", entryDirectory: "" });
     await expect(getOrLoadPluginUiHtml("io.dbx.ssh@0.4.88", "io.dbx.ssh")).resolves.toEqual({ html: "cached", entryDirectory: "" });

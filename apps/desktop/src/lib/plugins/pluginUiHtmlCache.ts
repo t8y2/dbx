@@ -18,6 +18,7 @@ export interface PluginUiHtml {
 
 const cache = new Map<string, PluginUiHtml>();
 const LIMIT = 4;
+let cacheGeneration = 0;
 
 export function getCachedPluginUiHtml(key: string): PluginUiHtml | undefined {
   const hit = cache.get(key);
@@ -37,6 +38,7 @@ export function setCachedPluginUiHtml(key: string, value: PluginUiHtml): void {
 
 /** Test and plugin-uninstall escape hatch. */
 export function clearPluginUiHtmlCache(): void {
+  cacheGeneration++;
   cache.clear();
   inFlight.clear();
 }
@@ -126,13 +128,17 @@ export function getOrLoadPluginUiHtml(key: string, pluginId: string): Promise<Pl
   if (hit) return Promise.resolve(hit);
   let load = inFlight.get(key);
   if (!load) {
+    const generation = cacheGeneration;
     load = loadPluginUiHtml(pluginId)
       .then((value) => {
-        setCachedPluginUiHtml(key, value);
+        // A plugin change may arrive while its old UI document is still being
+        // read. Do not let that pre-invalidation request repopulate the cache.
+        if (cacheGeneration === generation) setCachedPluginUiHtml(key, value);
         return value;
       })
       .finally(() => {
-        inFlight.delete(key);
+        // A post-invalidation load may already own this key.
+        if (cacheGeneration === generation) inFlight.delete(key);
       });
     inFlight.set(key, load);
   }

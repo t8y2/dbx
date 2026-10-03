@@ -26,7 +26,7 @@ import { savedSqlFolderBranchFileCount } from "@/lib/savedSql/savedSqlFolderCoun
 import { collectSavedSqlDirectoryImportFiles } from "@/lib/savedSql/savedSqlDirectoryImport";
 import { savedSqlBatchErrorMessage, savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
 import { savedSqlDatabaseScopeKey } from "@/lib/savedSql/savedSqlDatabaseTree";
-import { ensureSqlExtension, stripSqlExtension } from "@/lib/savedSql/savedSqlFileName";
+import { ensureSqlExtension, nextAvailableSqlName } from "@/lib/savedSql/savedSqlFileName";
 import { savedSqlImportTarget } from "@/lib/savedSql/savedSqlImportTarget";
 import { savedSqlExecutionTargetFromTab, type SavedSqlOpenTargetMode } from "@/lib/savedSql/savedSqlExecutionTarget";
 import { uniqueSavedSqlExportFileName, exportSavedSqlFileContent } from "@/lib/savedSql/savedSqlExport";
@@ -92,23 +92,11 @@ function sanitizeFileSystemSegment(name: string) {
 }
 
 function uniqueImportedName(name: string, takenNames: Set<string>) {
-  const normalized = ensureSqlExtension(name);
-  const normalizedTakenNames = new Set([...takenNames].map((takenName) => ensureSqlExtension(takenName).toLocaleLowerCase()));
-  if (!normalizedTakenNames.has(normalized.toLocaleLowerCase())) {
-    takenNames.add(normalized);
-    return normalized;
-  }
-
-  const base = stripSqlExtension(normalized);
-  let counter = 2;
-  while (true) {
-    const candidate = `${base} (${counter}).sql`;
-    if (!normalizedTakenNames.has(candidate.toLocaleLowerCase())) {
-      takenNames.add(candidate);
-      return candidate;
-    }
-    counter++;
-  }
+  const resolved = nextAvailableSqlName(name, takenNames);
+  // Batch importers reuse one set across files, so the picked name has to stay
+  // taken for the rest of their loop.
+  takenNames.add(resolved);
+  return resolved;
 }
 
 function savedSqlImportNameScopeKey(target: Pick<SavedSqlFile, "connectionId" | "catalog" | "database">, folderId?: string) {

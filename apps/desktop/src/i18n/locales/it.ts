@@ -744,6 +744,7 @@ export default withEnglishFallback({
     renameFile: "Rinomina SQL",
     renameFailed: "Impossibile rinominare SQL: {message}",
     nameConflict: 'Esiste già un SQL denominato "{name}" in questa posizione',
+    nameAdjusted: 'Esisteva già un SQL con questo nome qui, quindi è stato salvato come "{name}"',
     deleteFile: "Elimina SQL",
     deleteFileConfirm: "Eliminare “{name}”?",
     createFolderOption: "Crea cartella “{name}”",

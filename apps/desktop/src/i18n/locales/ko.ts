@@ -747,6 +747,7 @@ export default withEnglishFallback({
     renameFile: "SQL 이름 변경",
     renameFailed: "SQL 이름 변경 실패: {message}",
     nameConflict: '이 위치에 "{name}"이라는 SQL이 이미 있습니다',
+    nameAdjusted: '이 위치에 같은 이름의 SQL이 있어 "{name}"(으)로 저장했습니다',
     deleteFile: "SQL 삭제",
     deleteFileConfirm: "“{name}”을(를) 삭제하시겠습니까?",
     createFolderOption: "폴더 “{name}” 만들기",

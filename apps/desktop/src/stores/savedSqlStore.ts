@@ -3,7 +3,7 @@ import { computed, ref } from "vue";
 import { uuid } from "@/lib/common/utils";
 import * as api from "@/lib/backend/api";
 import { forgetSavedSqlEditorPosition } from "@/lib/app/savedSqlEditorPosition";
-import { ensureSqlExtension } from "@/lib/savedSql/savedSqlFileName";
+import { ensureSqlExtension, nextAvailableSqlName } from "@/lib/savedSql/savedSqlFileName";
 import { nextSavedSqlCopyName } from "@/lib/savedSql/savedSqlClipboard";
 import { savedSqlBatchReassignment, type SavedSqlBatchTargetSelection } from "@/lib/savedSql/savedSqlBatchTarget";
 import { savedSqlDatabaseScopeKey } from "@/lib/savedSql/savedSqlDatabaseTree";
@@ -72,6 +72,14 @@ interface SavedSqlNameScope {
   name: string;
 }
 
+/** Where a saved SQL name has to be unique: one folder of one database scope. */
+interface SavedSqlNameScopeInput {
+  connectionId: string;
+  catalog?: string;
+  database: string;
+  folderId?: string;
+}
+
 interface PendingSavedSqlName {
   owners: Map<string, number>;
 }
@@ -79,7 +87,16 @@ interface PendingSavedSqlName {
 export class SavedSqlNameConflictError extends Error {
   readonly code = "SAVED_SQL_NAME_CONFLICT";
 
-  constructor(readonly fileName: string) {
+  /**
+   * The next free name in the same scope, so a caller that generated the
+   * colliding name can retry automatically instead of dead-ending the user on
+   * an error. Absent when the caller supplied the name itself and silently
+   * saving under a different one would be wrong.
+   */
+  constructor(
+    readonly fileName: string,
+    readonly suggestedName?: string,
+  ) {
     super(`SQL "${fileName}" already exists in this location.`);
     this.name = "SavedSqlNameConflictError";
   }
@@ -258,7 +275,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     const nameKey = savedSqlNameKey(file.name);
     if (!options.allowExisting) {
       const persistedConflict = files.value.some((candidate) => candidate.id !== file.id && savedSqlNameScopeKey(candidate) === scopeKey && savedSqlNameKey(candidate.name) === nameKey);
-      if (persistedConflict) throw new SavedSqlNameConflictError(file.name);
+      if (persistedConflict) throw savedSqlNameConflict(file);
     }
 
     let pendingNames = pendingNamesByScope.get(scopeKey);
@@ -267,7 +284,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
       pendingNamesByScope.set(scopeKey, pendingNames);
     }
     const pending = pendingNames.get(nameKey);
-    if (!options.allowExisting && pending && [...pending.owners.keys()].some((ownerId) => ownerId !== file.id)) throw new SavedSqlNameConflictError(file.name);
+    if (!options.allowExisting && pending && [...pending.owners.keys()].some((ownerId) => ownerId !== file.id)) throw savedSqlNameConflict(file);
     if (pending) pending.owners.set(file.id, (pending.owners.get(file.id) ?? 0) + 1);
     else pendingNames.set(nameKey, { owners: new Map([[file.id, 1]]) });
 
@@ -288,6 +305,23 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
 
   function pendingFileNames(scopeKey: string): string[] {
     return [...(pendingNamesByScope.get(scopeKey)?.keys() ?? [])];
+  }
+
+  /**
+   * A conflict that tells the caller where to go next. The suggestion is
+   * resolved against the same scope `reserveFileName` just rejected, including
+   * names reserved by saves that are still in flight, so it is free at the
+   * moment of the conflict. A concurrent writer can still take it in between,
+   * which is why callers retry rather than assume the name is reserved.
+   */
+  function savedSqlNameConflict(file: SavedSqlNameScope): SavedSqlNameConflictError {
+    return new SavedSqlNameConflictError(file.name, nextAvailableSqlName(file.name, takenFileNames(file)));
+  }
+
+  /** Names already occupied in one library scope, including in-flight saves. */
+  function takenFileNames(scope: SavedSqlNameScopeInput): Set<string> {
+    const scopeKey = savedSqlNameScopeKey(scope);
+    return new Set([...files.value.filter((file) => savedSqlNameScopeKey(file) === scopeKey).map((file) => file.name), ...pendingFileNames(scopeKey)]);
   }
 
   async function ensureFileContent(id: string) {
@@ -608,9 +642,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
       const sourceFolder = source.folderId ? folders.value.find((folder) => folder.id === source.folderId) : undefined;
       const folderId = sourceFolder?.connectionId === normalizedTarget.connectionId ? source.folderId : undefined;
       const copyScope = { ...normalizedTarget, folderId };
-      const scopeKey = savedSqlNameScopeKey(copyScope);
-      const takenNames = new Set([...files.value.filter((file) => savedSqlNameScopeKey(file) === scopeKey).map((file) => file.name), ...pendingFileNames(scopeKey)]);
-      const name = nextSavedSqlCopyName(source.name, takenNames);
+      const name = nextSavedSqlCopyName(source.name, takenFileNames(copyScope));
       const keepSourceScope = savedSqlDatabaseScopeKey(source) === savedSqlDatabaseScopeKey(normalizedTarget);
       const saved = await saveFile({
         connectionId: normalizedTarget.connectionId,

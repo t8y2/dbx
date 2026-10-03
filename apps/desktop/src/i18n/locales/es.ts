@@ -753,6 +753,7 @@ export default withEnglishFallback({
     renameFile: "Renombrar SQL",
     renameFailed: "Error al renombrar SQL: {message}",
     nameConflict: 'Ya existe un SQL llamado "{name}" en esta ubicación',
+    nameAdjusted: 'Ya existía un SQL con ese nombre aquí, así que se guardó como "{name}"',
     deleteFile: "Eliminar SQL",
     deleteFileConfirm: "¿Eliminar “{name}”?",
     createFolderOption: "Crear carpeta “{name}”",

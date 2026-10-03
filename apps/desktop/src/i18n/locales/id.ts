@@ -678,6 +678,7 @@ export default withEnglishFallback({
     renameFile: "Ganti Nama SQL",
     renameFailed: "Gagal mengganti nama SQL: {message}",
     nameConflict: 'SQL bernama "{name}" sudah ada di lokasi ini',
+    nameAdjusted: 'SQL dengan nama ini sudah ada di sini, disimpan sebagai "{name}"',
     deleteFile: "Hapus SQL",
     deleteFileConfirm: "Hapus “{name}”?",
     createFolderOption: "Buat folder “{name}”",

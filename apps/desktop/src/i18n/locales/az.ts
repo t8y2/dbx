@@ -523,6 +523,7 @@ export default withEnglishFallback({
     renameFile: "SQL-in adını dəyiş",
     renameFailed: "SQL-in adını dəyişmək mümkün olmadı: {message}",
     nameConflict: 'Bu yerdə "{name}" adlı SQL artıq mövcuddur',
+    nameAdjusted: 'Bu yerdə eyni adlı SQL var idi, "{name}" kimi saxlanıldı',
     deleteFile: "SQL-i sil",
     deleteFileConfirm: "“{name}” silinsin?",
     createFolderOption: "“{name}” qovluğunu yarat",

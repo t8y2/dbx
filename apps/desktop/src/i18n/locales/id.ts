@@ -7745,6 +7745,7 @@ export default withEnglishFallback({
     tabGroupDatabaseType: "Kelompokkan berdasarkan jenis database",
     tabGroupDatabase: "Kelompokkan berdasarkan database",
     tabGroupConnection: "Kelompokkan berdasarkan koneksi",
+    tabGroupSidebar: "Kelompokkan berdasarkan koneksi, database, dan tabel",
     tabSort: "Urutkan berdasarkan",
     tabSortManual: "Urutan manual",
     tabSortCreated: "Waktu pembuatan",

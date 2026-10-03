@@ -6403,6 +6403,7 @@ export default withEnglishFallback({
     tabGroupDatabaseType: "依資料庫類型分組",
     tabGroupDatabase: "依資料庫分組",
     tabGroupConnection: "依連線分組",
+    tabGroupSidebar: "依連線、資料庫與資料表分組",
     tabSort: "排序方式",
     tabSortManual: "手動排序",
     tabSortCreated: "依建立時間",

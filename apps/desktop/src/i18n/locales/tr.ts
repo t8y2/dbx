@@ -6963,6 +6963,7 @@ export default withEnglishFallback({
     tabGroupDatabaseType: "Veritabanı türüne göre grupla",
     tabGroupDatabase: "Veritabanına göre grupla",
     tabGroupConnection: "Bağlantıya göre grupla",
+    tabGroupSidebar: "Bağlantı, veritabanı ve tabloya göre grupla",
     tabSort: "Sıralama ölçütü",
     tabSortManual: "Elle sıralama",
     tabSortCreated: "Oluşturulma zamanı",

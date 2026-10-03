@@ -7920,6 +7920,7 @@ export default withEnglishFallback({
     tabGroupDatabaseType: "按数据库类型分组",
     tabGroupDatabase: "按数据库分组",
     tabGroupConnection: "按连接分组",
+    tabGroupSidebar: "按连接、库和表分组",
     tabSort: "排序方式",
     tabSortManual: "手动排序",
     tabSortCreated: "按创建时间",

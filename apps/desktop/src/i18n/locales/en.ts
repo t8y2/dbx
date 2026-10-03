@@ -7934,6 +7934,7 @@ export default {
     tabGroupDatabaseType: "Group by database type",
     tabGroupDatabase: "Group by database",
     tabGroupConnection: "Group by connection",
+    tabGroupSidebar: "Group by connection, database and table",
     tabSort: "Sort by",
     tabSortManual: "Manual order",
     tabSortCreated: "Creation time",

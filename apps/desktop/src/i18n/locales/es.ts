@@ -7271,6 +7271,7 @@ export default withEnglishFallback({
     tabGroupDatabaseType: "Agrupar por tipo de base de datos",
     tabGroupDatabase: "Agrupar por base de datos",
     tabGroupConnection: "Agrupar por conexión",
+    tabGroupSidebar: "Agrupar por conexión, base de datos y tabla",
     tabSort: "Ordenar por",
     tabSortManual: "Orden manual",
     tabSortCreated: "Hora de creación",

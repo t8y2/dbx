@@ -460,6 +460,10 @@
     box-shadow 150ms ease;
 }
 
+.tab-group-header--hidden {
+  display: none;
+}
+
 .tab-group-header:focus-visible {
   box-shadow: 0 0 0 2px var(--ring);
 }
@@ -475,6 +479,10 @@
     box-shadow 150ms ease,
     opacity 120ms ease,
     transform 120ms ease;
+}
+
+.tab-group-entry .tab-group-tab {
+  margin-inline-start: var(--tab-group-depth-offset, 0rem);
 }
 
 .tab-group-marker {
@@ -1177,6 +1185,10 @@ html.dbx-legacy-webview .vertical-tab-layout .app-tab-pill:not(.tab-group-tab)[d
   padding-inline: 0.55rem;
 }
 
+.vertical-tab-layout[data-group-mode="sidebar"] .tab-group-header-content {
+  padding-inline-start: calc(0.55rem + var(--tab-group-depth-offset, 0rem));
+}
+
 .vertical-tab-layout .tab-group-header:hover .tab-group-header-content,
 .vertical-tab-layout .tab-group-header--active .tab-group-header-content {
   background: var(--tab-group-soft);
@@ -1200,6 +1212,83 @@ html.dbx-legacy-webview .vertical-tab-layout .app-tab-pill:not(.tab-group-tab)[d
   pointer-events: none;
 }
 
+/* Sidebar mode uses row-local guide segments. Keeping the guides on each
+ * rendered row makes sibling databases connect correctly and naturally
+ * shortens the rail when a group is collapsed. */
+.vertical-tab-layout[data-group-mode="sidebar"] .tab-group-header::after,
+.vertical-tab-layout[data-group-mode="sidebar"] .tab-group-tab::before,
+.vertical-tab-layout[data-group-mode="sidebar"] .tab-group-tab::after {
+  display: none;
+}
+
+.vertical-tab-layout[data-group-mode="sidebar"] .tab-group-header,
+.vertical-tab-layout[data-group-mode="sidebar"] .tab-group-entry {
+  position: relative;
+}
+
+.vertical-tab-layout[data-group-mode="sidebar"] .tab-group-header {
+  --tab-tree-guide-before: -0.35rem;
+  --tab-tree-guide-after: calc(0rem - var(--tab-group-header-gap));
+}
+
+.vertical-tab-layout[data-group-mode="sidebar"] .tab-tree-guides {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  pointer-events: none;
+}
+
+.vertical-tab-layout[data-group-mode="sidebar"] .tab-tree-guide {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  /* Keep the guide's center aligned with the marker and its branches. */
+  left: calc(var(--tab-tree-guide-base-x) + var(--tab-tree-guide-depth) * 0.75rem - 0.5px);
+  width: 1px;
+  color: var(--tab-tree-parent-color);
+  opacity: 0.35;
+}
+
+.vertical-tab-layout[data-group-mode="sidebar"] .tab-tree-guide[data-depth="1"] {
+  color: var(--tab-tree-child-color);
+}
+
+/* Every non-final sibling owns a full-height rail and a centered branch.
+ * Only the final sibling ends the rail at its center. Header rails also own
+ * their margins, so collapsed subtrees leave no gaps between database rows. */
+.vertical-tab-layout[data-group-mode="sidebar"] .tab-tree-guide::before {
+  content: "";
+  position: absolute;
+  top: var(--tab-tree-guide-before, 0);
+  bottom: var(--tab-tree-guide-after, 0);
+  left: 0;
+  width: 1px;
+  background: currentColor;
+}
+
+.vertical-tab-layout[data-group-mode="sidebar"] .tab-tree-guide--start::before {
+  top: 50%;
+}
+
+.vertical-tab-layout[data-group-mode="sidebar"] .tab-tree-guide--last-branch::before {
+  bottom: 50%;
+}
+
+.vertical-tab-layout[data-group-mode="sidebar"] .tab-tree-guide--branch::after,
+.vertical-tab-layout[data-group-mode="sidebar"] .tab-tree-guide--last-branch::after {
+  content: "";
+  position: absolute;
+  top: calc(50% - 0.5px);
+  left: 0.5px;
+  width: calc(var(--tab-tree-guide-child-x) - (var(--tab-tree-guide-base-x) + var(--tab-tree-guide-depth) * 0.75rem));
+  height: 1px;
+  background: currentColor;
+}
+
+.vertical-tab-layout[data-group-mode="sidebar"] .tab-group-entry--collapsed .tab-tree-guides {
+  display: none;
+}
+
 .vertical-tab-layout .tab-group-header:not(.tab-group-header--collapsed) .tab-group-marker {
   position: relative;
   z-index: 2;
@@ -1207,8 +1296,8 @@ html.dbx-legacy-webview .vertical-tab-layout .app-tab-pill:not(.tab-group-tab)[d
 
 .vertical-tab-layout .tab-group-tab {
   position: relative;
-  width: calc(100% - var(--tab-group-tab-inset) - 0.25rem);
-  margin-inline: var(--tab-group-tab-inset) 0.25rem;
+  width: calc(100% - var(--tab-group-tab-inset) - var(--tab-group-vertical-depth-offset, 0rem) - 0.25rem);
+  margin-inline: calc(var(--tab-group-tab-inset) + var(--tab-group-vertical-depth-offset, 0rem)) 0.25rem;
   padding-inline: 0.2rem 0.25rem !important;
   border-color: transparent;
 }

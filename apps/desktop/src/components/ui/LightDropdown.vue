@@ -41,6 +41,7 @@ const props = withDefaults(
     closeOnSelect?: boolean;
     label?: string;
     matchTriggerWidth?: boolean;
+    maxHeight?: string;
   }>(),
   {
     ariaLabel: undefined,
@@ -65,6 +66,7 @@ const props = withDefaults(
     closeOnSelect: true,
     label: undefined,
     matchTriggerWidth: true,
+    maxHeight: "min(420px, calc(100vh - 16px))",
   },
 );
 
@@ -85,7 +87,7 @@ const menuStyle = computed(() => ({
   left: `${x.value}px`,
   top: `${y.value}px`,
   minWidth: props.matchTriggerWidth ? `${minWidth.value}px` : undefined,
-  maxHeight: "min(420px, calc(100vh - 16px))",
+  maxHeight: props.maxHeight,
 }));
 
 function onScroll(event: Event) {

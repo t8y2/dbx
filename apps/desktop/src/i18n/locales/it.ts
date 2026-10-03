@@ -7049,6 +7049,7 @@ export default withEnglishFallback({
     tabGroupDatabaseType: "Raggruppa per tipo di database",
     tabGroupDatabase: "Raggruppa per database",
     tabGroupConnection: "Raggruppa per connessione",
+    tabGroupSidebar: "Raggruppa per connessione, database e tabella",
     tabSort: "Ordina per",
     tabSortManual: "Ordine manuale",
     tabSortCreated: "Data di creazione",

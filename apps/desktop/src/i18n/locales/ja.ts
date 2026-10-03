@@ -7080,6 +7080,7 @@ export default withEnglishFallback({
     tabGroupDatabaseType: "データベース種別でグループ化",
     tabGroupDatabase: "データベースごとにグループ化",
     tabGroupConnection: "接続ごとにグループ化",
+    tabGroupSidebar: "接続、データベース、テーブルでグループ化",
     tabSort: "並べ替え",
     tabSortManual: "手動順",
     tabSortCreated: "作成日時",

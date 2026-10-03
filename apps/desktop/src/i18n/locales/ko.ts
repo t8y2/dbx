@@ -6855,6 +6855,7 @@ export default withEnglishFallback({
     tabGroupDatabaseType: "데이터베이스 유형별 그룹화",
     tabGroupDatabase: "데이터베이스별 그룹화",
     tabGroupConnection: "연결별 그룹화",
+    tabGroupSidebar: "연결, 데이터베이스 및 테이블별 그룹화",
     tabSort: "정렬 기준",
     tabSortManual: "수동 순서",
     tabSortCreated: "생성 시간",

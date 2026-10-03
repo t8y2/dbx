@@ -7081,6 +7081,7 @@ export default withEnglishFallback({
     tabGroupDatabaseType: "Verilənlər bazasının növünə görə qruplaşdır",
     tabGroupDatabase: "Verilənlər bazasına görə qruplaşdır",
     tabGroupConnection: "Əlaqəyə görə qruplaşdır",
+    tabGroupSidebar: "Əlaqə, verilənlər bazası və cədvələ görə qruplaşdır",
     tabSort: "Sıralama meyarı",
     tabSortManual: "Əl ilə sıralama",
     tabSortCreated: "Yaradılma vaxtı",

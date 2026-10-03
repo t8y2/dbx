@@ -8264,6 +8264,7 @@ export default withEnglishFallback({
     tabGroupDatabaseType: "Группировать по типу базы данных",
     tabGroupDatabase: "Группировать по базе данных",
     tabGroupConnection: "Группировать по подключению",
+    tabGroupSidebar: "Группировать по подключению, базе данных и таблице",
     tabSort: "Сортировать по",
     tabSortManual: "Ручной порядок",
     tabSortCreated: "Время создания",

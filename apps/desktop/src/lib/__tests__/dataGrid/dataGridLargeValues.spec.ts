@@ -48,6 +48,10 @@ describe("data grid large-value metadata", () => {
       columnTypes: ["bigint", "longtext"],
       largeValuePreviewSize: TABLE_DATA_CELL_PREVIEW_SIZE,
     });
+    expect(tableDataLargeValuePreviewOptions("db2", [columns[0]!, column("payload", "blob")], ["id"], 100)).toEqual({
+      columnTypes: ["bigint", "blob"],
+      largeValuePreviewSize: TABLE_DATA_CELL_PREVIEW_SIZE,
+    });
     expect(tableDataLargeValuePreviewOptions("sqlite", columns, ["id"], 100)).toEqual({});
     expect(tableDataLargeValuePreviewOptions("mysql", columns, [], 100)).toEqual({});
     expect(tableDataLargeValuePreviewOptions("mysql", [columns[0]!], ["id"], 100)).toEqual({});
@@ -124,6 +128,8 @@ describe("data grid large-value metadata", () => {
     expect(isTableDataVisiblePreviewColumn("postgres", "jsonb")).toBe(true);
     expect(isTableDataVisiblePreviewColumn("postgres", "text[]")).toBe(false);
     expect(isTableDataVisiblePreviewColumn("postgres", "vector(1536)")).toBe(false);
+    expect(isTableDataVisiblePreviewColumn("db2", "clob")).toBe(true);
+    expect(isTableDataVisiblePreviewColumn("db2", "blob")).toBe(false);
     expect(isTableDataVisiblePreviewColumn("oracle", "clob")).toBe(false);
   });
 

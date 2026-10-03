@@ -1356,6 +1356,71 @@ describe("queryStore hidden primary key editing", () => {
     expect(executeMulti).toHaveBeenCalledWith("oracle-1", "ORCL", 'SELECT PAYLOAD, "ID" AS "__DBX_PK_0" FROM APP.DOCUMENTS', undefined, expect.any(String), expect.objectContaining({ tableDataPreview: true, timeoutSecs: 30 }));
   });
 
+  it("defers DB2 BLOB materialization for a stable-key star query", async () => {
+    getConnectionConfig.mockReturnValue({ id: "db2-1", name: "DB2", db_type: "db2", database: "MAXIMO", query_timeout_secs: 60 });
+    getColumns.mockResolvedValue([
+      { name: "MAFAPPDATAID", data_type: "BIGINT", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      { name: "APP", data_type: "BLOB", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    listIndexes.mockResolvedValue([{ name: "MAFAPPDATA_PK", columns: ["MAFAPPDATAID"], is_unique: true, is_primary: true }]);
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: {
+        schema: undefined,
+        tableName: "MAFAPPDATA",
+        tableAlias: "mf",
+        selectStar: true,
+        columns: [],
+      },
+    });
+    executeMulti.mockResolvedValue([
+      {
+        columns: ["MAFAPPDATAID", "APP"],
+        rows: [[1, "<BLOB>"]],
+        affected_rows: 0,
+        execution_time_ms: 57,
+        large_value_cells: [{ row_index: 0, column_index: 1, original_bytes: 64 * 1024 * 1024 }],
+      },
+    ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("db2-1", "MAXIMO", "Query", "query", "MAXIMO");
+    store.setAutoCommit(tabId, true);
+
+    await store.executeTabSql(tabId, "select * from MAFAPPDATA mf");
+
+    expect(executeMulti).toHaveBeenCalledWith("db2-1", "MAXIMO", "select * from MAFAPPDATA mf", "MAXIMO", expect.any(String), expect.objectContaining({ tableDataPreview: true, timeoutSecs: 60 }));
+    expect(store.tabs.find((tab) => tab.id === tabId)?.result?.large_value_cells).toEqual([{ row_index: 0, column_index: 1, original_bytes: 64 * 1024 * 1024 }]);
+  });
+
+  it("keeps deferred DB2 LOB handling disabled without a stable key", async () => {
+    getConnectionConfig.mockReturnValue({ id: "db2-1", name: "DB2", db_type: "db2", database: "MAXIMO", query_timeout_secs: 60 });
+    getColumns.mockResolvedValue([{ name: "APP", data_type: "BLOB", is_nullable: true, column_default: null, is_primary_key: false, extra: null }]);
+    listIndexes.mockResolvedValue([]);
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: {
+        schema: undefined,
+        tableName: "MAFAPPDATA",
+        tableAlias: "mf",
+        selectStar: true,
+        columns: [],
+      },
+    });
+    executeMulti.mockResolvedValue([{ columns: ["APP"], rows: [["0x01"]], affected_rows: 0, execution_time_ms: 1 }]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("db2-1", "MAXIMO", "Query", "query", "MAXIMO");
+    store.setAutoCommit(tabId, true);
+
+    await store.executeTabSql(tabId, "select * from MAFAPPDATA mf");
+
+    expect(executeMulti).toHaveBeenCalledOnce();
+    expect(executeMulti.mock.calls[0]?.[5]).not.toHaveProperty("tableDataPreview");
+  });
+
   it("keeps deferred Oracle LOBs disabled for views", async () => {
     getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
     getColumns.mockResolvedValue([

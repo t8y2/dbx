@@ -8378,8 +8378,12 @@ fn apply_sync_tunnel_profiles_in_tx(
         let mut sanitized = profile.clone();
         sanitized.scrub_secrets();
         let json = serde_json::to_string(&sanitized).map_err(|e| e.to_string())?;
-        tx.execute("INSERT INTO tunnel_profiles (id, config_json) VALUES (?1, ?2)", params![profile.id(), json])
-            .map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT INTO tunnel_profiles (id, config_json) VALUES (?1, ?2) \
+             ON CONFLICT(id) DO UPDATE SET config_json = excluded.config_json",
+            params![profile.id(), json],
+        )
+        .map_err(|e| e.to_string())?;
         if sanitized != profile {
             persist_secret_in_tx(
                 tx,

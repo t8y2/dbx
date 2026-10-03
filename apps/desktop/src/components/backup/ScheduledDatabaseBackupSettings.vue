@@ -32,6 +32,7 @@ import {
   type DatabaseBackupRun,
   type DatabaseBackupSchedule,
 } from "@/lib/backup/scheduledDatabaseBackup";
+import { databaseBackupTableSelectionScopeKey, normalizeDatabaseBackupTableTargets, type DatabaseBackupTableSelectionState } from "@/lib/backup/scheduledDatabaseBackup";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
 
@@ -85,6 +86,27 @@ const databaseOptions = ref<string[]>([]);
 const allDatabases = ref(true);
 const selectedDatabases = ref<string[]>([]);
 const tablePatternsInput = ref("");
+const scheduleTableSelectionState = ref<DatabaseBackupTableSelectionState>({ scopeKey: "", ready: false });
+const oneShotTableSelectionState = ref<DatabaseBackupTableSelectionState>({ scopeKey: "", ready: false });
+function tableScopeReady(config: DatabaseBackupExecutionConfig, state: DatabaseBackupTableSelectionState): boolean {
+  if (config.tableFilterMode !== "selected") return config.tableFilterMode === "all" || normalizeDatabaseBackupTablePatterns(tablePatternsInput.value).length > 0;
+  const targets = config.selectedTables ?? [];
+  return (
+    !allDatabases.value &&
+    selectedDatabases.value.length > 0 &&
+    targets.length > 0 &&
+    targets.every((target) => selectedDatabases.value.includes(target.database)) &&
+    state.ready &&
+    state.scopeKey === databaseBackupTableSelectionScopeKey(config.connectionId, connectionStore.getConfig(config.connectionId)?.db_type, selectedDatabases.value)
+  );
+}
+function backupTablePayload(config: DatabaseBackupExecutionConfig) {
+  return {
+    tablePatterns: config.tableFilterMode === "include" || config.tableFilterMode === "exclude" ? normalizeDatabaseBackupTablePatterns(tablePatternsInput.value) : [],
+    // Override any inactive selection carried by the draft before JSON serialization.
+    selectedTables: config.tableFilterMode === "selected" ? normalizeDatabaseBackupTableTargets(config.selectedTables) : undefined,
+  };
+}
 const expandedRunIds = reactive(new Set<string>());
 const selectedRunIds = reactive(new Set<string>());
 const historyConnectionId = ref("");
@@ -187,7 +209,7 @@ function databaseLoadIsCurrent(generation: number, dialog: BackupDialogKind, tar
 const canSave = computed(() => {
   const hasContent = draft.value.includeStructure || draft.value.includeData || draft.value.includeObjects;
   const hasDatabaseScope = allDatabases.value || selectedDatabases.value.length > 0;
-  const hasTableScope = draft.value.tableFilterMode === "all" || normalizeDatabaseBackupTablePatterns(tablePatternsInput.value).length > 0;
+  const hasTableScope = tableScopeReady(draft.value, scheduleTableSelectionState.value);
   return (
     !!draft.value.name.trim() &&
     !!draft.value.connectionId &&
@@ -236,7 +258,7 @@ const oneShotOutputPathPreview = computed(() => {
 const canStartOneShot = computed(() => {
   const hasContent = oneShotDraft.value.includeStructure || oneShotDraft.value.includeData || oneShotDraft.value.includeObjects;
   const hasDatabaseScope = allDatabases.value || selectedDatabases.value.length > 0;
-  const hasTableScope = oneShotDraft.value.tableFilterMode === "all" || normalizeDatabaseBackupTablePatterns(tablePatternsInput.value).length > 0;
+  const hasTableScope = tableScopeReady(oneShotDraft.value, oneShotTableSelectionState.value);
   return !!oneShotDraft.value.connectionId && !!oneShotDraft.value.destinationDirectory.trim() && databaseBackupFileNamePatternIsValid(oneShotDraft.value.fileNamePattern || "") && hasContent && hasDatabaseScope && hasTableScope && !oneShotStarting.value && !loadingDatabases.value;
 });
 
@@ -319,6 +341,7 @@ async function loadDatabases(dialog: BackupDialogKind, targetDraft: DatabaseBack
     allDatabases.value = true;
     targetDraft.tableFilterMode = "all";
     targetDraft.tablePatterns = [];
+    targetDraft.selectedTables = [];
     tablePatternsInput.value = "";
   }
   if (!connectionId) {
@@ -357,12 +380,15 @@ async function loadDatabases(dialog: BackupDialogKind, targetDraft: DatabaseBack
 }
 
 function resetDatabaseScope(targetDraft: DatabaseBackupExecutionConfig) {
+  scheduleTableSelectionState.value = { scopeKey: "", ready: false };
+  oneShotTableSelectionState.value = { scopeKey: "", ready: false };
   databaseOptions.value = [];
   databaseLoadError.value = "";
   allDatabases.value = true;
   selectedDatabases.value = [];
   targetDraft.tableFilterMode = "all";
   targetDraft.tablePatterns = [];
+  targetDraft.selectedTables = [];
   tablePatternsInput.value = "";
 }
 
@@ -376,6 +402,7 @@ async function openCreateSchedule() {
 }
 
 async function openEditSchedule(schedule: DatabaseBackupSchedule) {
+  scheduleTableSelectionState.value = { scopeKey: "", ready: false };
   oneShotDialogOpen.value = false;
   editingScheduleId.value = schedule.id;
   draft.value = { ...schedule, databases: [...schedule.databases], tablePatterns: [...schedule.tablePatterns] };
@@ -397,6 +424,7 @@ async function changeConnection(connectionId: string) {
   selectedDatabases.value = [];
   targetDraft.tableFilterMode = "all";
   targetDraft.tablePatterns = [];
+  targetDraft.selectedTables = [];
   tablePatternsInput.value = "";
   if (!wasSelectingSpecificDatabases) {
     allDatabases.value = true;
@@ -439,7 +467,7 @@ async function submitSchedule() {
     await saveSchedule({
       ...draft.value,
       databases: allDatabases.value ? [] : [...selectedDatabases.value],
-      tablePatterns: draft.value.tableFilterMode === "all" ? [] : normalizeDatabaseBackupTablePatterns(tablePatternsInput.value),
+      ...backupTablePayload(draft.value),
     });
     scheduleDialogOpen.value = false;
     toast(t(editingScheduleId.value ? "databaseBackup.scheduleUpdated" : "databaseBackup.scheduleCreated"), 2500);
@@ -451,6 +479,7 @@ async function submitSchedule() {
 }
 
 async function openOneShotBackup() {
+  oneShotTableSelectionState.value = { scopeKey: "", ready: false };
   scheduleDialogOpen.value = false;
   const nextDraft = newBackupConfig();
   oneShotDraft.value = nextDraft;
@@ -467,7 +496,7 @@ async function startOneShotBackup() {
       {
         ...oneShotDraft.value,
         databases: allDatabases.value ? [] : [...selectedDatabases.value],
-        tablePatterns: oneShotDraft.value.tableFilterMode === "all" ? [] : normalizeDatabaseBackupTablePatterns(tablePatternsInput.value),
+        ...backupTablePayload(oneShotDraft.value),
       },
       t("databaseBackup.oneShotName"),
     );
@@ -898,6 +927,7 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
           @toggle-database="toggleDatabase"
           @update:all-databases="setAllDatabases"
           @update:table-patterns-input="(value: string) => (tablePatternsInput = value)"
+          @table-selection-state="(state) => (scheduleTableSelectionState = state)"
           @update:run-directory-pattern="(value: string) => (draft.runDirectoryPattern = value)"
         />
 
@@ -983,6 +1013,7 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
         @toggle-database="toggleDatabase"
         @update:all-databases="setAllDatabases"
         @update:table-patterns-input="(value: string) => (tablePatternsInput = value)"
+        @table-selection-state="(state) => (oneShotTableSelectionState = state)"
       />
 
       <DialogFooter>

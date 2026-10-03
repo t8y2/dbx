@@ -77,6 +77,8 @@
 @import "./tokens.css";
 
 :root {
+  --dbx-dialog-top-z-index: 50;
+  --dbx-floating-layer-z-index: 51;
   --data-grid-type-integer-fg: #1d4ed8;
   --data-grid-type-numeric-fg: #0e7490;
   --data-grid-type-string-fg: #166534;
@@ -98,6 +100,12 @@
   --data-grid-type-identifier-fg: #fcd34d;
   --data-grid-type-binary-fg: #fca5a5;
   --data-grid-type-spatial-fg: #6ee7b7;
+}
+
+/* Reka caches the content's computed z-index on its positioning wrapper.
+ * Keep it above the live dialog stack through positioning and stack updates. */
+[data-dbx-floating-layer] {
+  z-index: max(var(--dbx-floating-layer-z-index, 51), var(--dbx-floating-content-z-index, 0)) !important;
 }
 
 /* The column-info tooltip re-derives its type hues from these softer 400-level
@@ -1579,6 +1587,17 @@ html.dbx-data-grid-native-selection-blocked [role="textbox"] * {
     cursor: pointer;
     user-select: none;
   }
+  select {
+    color-scheme: light;
+  }
+  .dark select,
+  html.dark select {
+    color-scheme: dark;
+  }
+  select option {
+    background-color: var(--popover);
+    color: var(--popover-foreground);
+  }
   [role="tab"] {
     user-select: none;
   }
@@ -1815,7 +1834,7 @@ html.dbx-legacy-webview [data-slot="dialog-positioner"] {
   right: 0 !important;
   bottom: 0 !important;
   left: 0 !important;
-  z-index: 50 !important;
+  z-index: var(--dbx-dialog-top-z-index, 50);
   display: flex !important;
   align-items: center !important;
   justify-content: center !important;

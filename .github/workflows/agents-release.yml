@@ -237,10 +237,39 @@ jobs:
             cc="$(ls /c/ProgramData/chocolatey/lib/mingw/tools/install/mingw64/bin/gcc.exe | head -1)"
           fi
           mkdir -p instantclient
-          curl -fsSL -o ic-basic.zip "https://download.oracle.com/otn_software/nt/instantclient/2326300/instantclient-basic-windows.x64-23.26.3.0.0.zip"
-          curl -fsSL -o ic-sdk.zip "https://download.oracle.com/otn_software/nt/instantclient/2326300/instantclient-sdk-windows.x64-23.26.3.0.0.zip"
-          tar -xf ic-basic.zip -C instantclient
-          tar -xf ic-sdk.zip -C instantclient
+          # Oracle's CDN intermittently answers runner IPs with an HTML page
+          # (HTTP 200) instead of the archive; validate the zip magic and retry
+          # with diagnostics so a bad response fails loudly instead of
+          # surfacing later as "tar: This does not look like a tar archive".
+          fetch_ic() {
+            local name="$1" url="$2"
+            for attempt in 1 2 3; do
+              curl -fSL --retry 5 --retry-delay 5 --retry-all-errors -o "$name" "$url" || true
+              if [ "$(head -c 2 "$name" 2>/dev/null)" = "PK" ]; then
+                echo "$name: $(wc -c < "$name") bytes, zip magic OK (attempt $attempt)"
+                return 0
+              fi
+              echo "::warning::$name attempt $attempt was not a zip; first 200 bytes:"
+              head -c 200 "$name" 2>/dev/null || echo "(no file written)"
+              sleep 10
+            done
+            echo "::error::$name could not be downloaded as a valid zip after 3 attempts"
+            return 1
+          }
+          fetch_ic ic-basic.zip "https://download.oracle.com/otn_software/nt/instantclient/2326300/instantclient-basic-windows.x64-23.26.3.0.0.zip"
+          fetch_ic ic-sdk.zip "https://download.oracle.com/otn_software/nt/instantclient/2326300/instantclient-sdk-windows.x64-23.26.3.0.0.zip"
+          # Git-bash ships GNU tar, which cannot extract zip archives (bsdtar on
+          # macOS can, which is why this looked fine locally). Use 7-Zip from the
+          # runner image, falling back to PowerShell Expand-Archive.
+          extract_ic() {
+            if command -v 7z >/dev/null 2>&1; then
+              7z x -y -oinstantclient "$1" >/dev/null
+            else
+              powershell.exe -NoProfile -Command "Expand-Archive -Path '$1' -DestinationPath 'instantclient' -Force"
+            fi
+          }
+          extract_ic ic-basic.zip
+          extract_ic ic-sdk.zip
           ic_dir="$(ls -d "${GITHUB_WORKSPACE}/instantclient"/instantclient_* | head -1)"
           echo "MinGW gcc: $cc / Instant Client: $ic_dir"
           {

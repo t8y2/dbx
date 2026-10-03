@@ -673,7 +673,7 @@ fn format_export_sql_literal_typed(
     }
     if sqlserver_unicode_string {
         if let Some(text) = value.as_str() {
-            return format!("N{}", quote_export_sql_string(text));
+            return format!("N{}", quote_standard_export_sql_string(text));
         }
     }
     format_export_sql_literal_for_database(value, database_type)
@@ -704,10 +704,14 @@ fn format_postgres_json_export_literal(value: &Value) -> String {
     quote_postgres_string_literal(&text)
 }
 
-fn quote_export_sql_string(text: &str) -> String {
-    format!("'{}'", text.replace('\\', "\\\\").replace('\'', "''"))
-}
-
+/// Quotes a string literal for ANSI-SQL-family export targets (SQL Server,
+/// SQLite, Oracle, DuckDB, and every other engine that falls through to this
+/// default quoting path, plus the dialect-neutral `format_standard_sql_literal`
+/// caller). These dialects do not treat backslash as an escape character --
+/// only a doubled quote mark escapes an embedded `'`. Escaping backslashes
+/// would corrupt any value that legitimately contains one (e.g. JSON text
+/// with `\u00e9` escapes), turning `\u00e9` into `\\u00e9` on export/import
+/// round-trips.
 fn quote_standard_export_sql_string(text: &str) -> String {
     format!("'{}'", text.replace('\'', "''"))
 }
@@ -753,13 +757,17 @@ fn quote_export_sql_string_for_database(text: &str, database_type: Option<Databa
         database_type if is_mysql_compatible_export_literal_target(database_type) => {
             quote_mysql_compatible_export_sql_string(text)
         }
-        _ => quote_export_sql_string(text),
+        // Not MySQL-wire targets, but both engines interpret backslash escape
+        // sequences in string literals, so they must keep MySQL-style escaping
+        // for round-trip correctness.
+        Some(DatabaseType::ClickHouse | DatabaseType::Snowflake) => quote_mysql_compatible_export_sql_string(text),
+        _ => quote_standard_export_sql_string(text),
     }
 }
 
 fn quote_dameng_export_sql_string(text: &str) -> String {
     if !text.contains('\0') {
-        return quote_export_sql_string(text);
+        return quote_standard_export_sql_string(text);
     }
 
     let mut parts = Vec::new();
@@ -768,7 +776,7 @@ fn quote_dameng_export_sql_string(text: &str) -> String {
             parts.push("CHR(0)".to_string());
         }
         if !segment.is_empty() {
-            parts.push(quote_export_sql_string(segment));
+            parts.push(quote_standard_export_sql_string(segment));
         }
     }
     parts.join(" || ")
@@ -863,10 +871,10 @@ fn format_export_temporal_literal(
     let column_type = column_type?;
     if database_type == Some(DatabaseType::SqlServer) {
         return crate::sqlserver_temporal::normalize_sqlserver_temporal_literal(text, Some(column_type))
-            .map(|text| quote_export_sql_string(&text));
+            .map(|text| quote_standard_export_sql_string(&text));
     }
     let kind = export_temporal_column_kind(database_type, column_type)?;
-    format_rfc3339_export_temporal_text(text, kind, database_type).map(|text| quote_export_sql_string(&text))
+    format_rfc3339_export_temporal_text(text, kind, database_type).map(|text| quote_standard_export_sql_string(&text))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1139,14 +1147,14 @@ fn format_xugu_spatial_export_literal_with_srid(
     let text = value.as_str().map_or_else(|| value.to_string(), ToString::to_string);
     let trimmed = text.trim_start();
     if trimmed.len() > 5 && trimmed[..5].eq_ignore_ascii_case("SRID=") {
-        return Some(format!("ST_GeomFromEWKT({})", quote_export_sql_string(&text)));
+        return Some(format!("ST_GeomFromEWKT({})", quote_standard_export_sql_string(&text)));
     }
     if let Some(srid) = srid.filter(|srid| *srid != 0) {
-        return Some(format!("ST_GeomFromEWKT({})", quote_export_sql_string(&format!("SRID={srid};{text}"))));
+        return Some(format!("ST_GeomFromEWKT({})", quote_standard_export_sql_string(&format!("SRID={srid};{text}"))));
     }
     // Xugu accepts a plain WKT string for both GEOMETRY and GEOGRAPHY. Keep
     // that form for SRID 0/legacy values rather than inventing a constructor.
-    Some(quote_export_sql_string(&text))
+    Some(quote_standard_export_sql_string(&text))
 }
 
 /// Database exports encode MySQL spatial cells as `DBX_WKB:<srid>:<hex>` while
@@ -5682,6 +5690,59 @@ mod tests {
                 "INSERT INTO \"public\".\"flags\" (\"enabled\", \"disabled\", \"unknown\") VALUES (TRUE, FALSE, NULL);"
             ]
         );
+    }
+
+    #[test]
+    fn ansi_export_keeps_backslashes_literal_and_doubles_quotes() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
+            schema: None,
+            table_name: Some("t".to_string()),
+            qualified_table_name: None,
+            columns: vec!["note".to_string()],
+            column_types: vec![Some("nvarchar(255)".to_string())],
+            column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![vec![json!(r"C:\new\it's")]],
+            batch_size: Some(10),
+        })
+        .unwrap();
+
+        assert_eq!(statements, vec!["INSERT INTO [t] ([note]) VALUES (N'C:\\new\\it''s');"]);
+    }
+
+    #[test]
+    fn clickhouse_and_snowflake_export_escape_backslashes() {
+        for database_type in [DatabaseType::ClickHouse, DatabaseType::Snowflake] {
+            let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+                database_type: Some(database_type),
+                identifier_quote: None,
+                schema: None,
+                table_name: Some("t".to_string()),
+                qualified_table_name: None,
+                columns: vec!["note".to_string()],
+                column_types: vec![Some("String".to_string())],
+                column_extras: Vec::new(),
+                spatial_columns: Vec::new(),
+                spatial_values: Vec::new(),
+                rows: vec![vec![json!(r"C:\new\it's")]],
+                batch_size: Some(10),
+            })
+            .unwrap();
+
+            let expected = match database_type {
+                DatabaseType::ClickHouse => r"INSERT INTO `t` (`note`) VALUES ('C:\\new\\it''s');",
+                DatabaseType::Snowflake => r#"INSERT INTO "t" ("note") VALUES ('C:\\new\\it''s');"#,
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                statements,
+                vec![expected],
+                "backslash-escaping dialect {database_type:?} must double backslashes"
+            );
+        }
     }
 
     #[test]

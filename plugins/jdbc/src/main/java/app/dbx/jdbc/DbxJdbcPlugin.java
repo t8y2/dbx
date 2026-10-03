@@ -166,11 +166,28 @@ public final class DbxJdbcPlugin {
         new JdbcDriverQuirkRule("jdbc:taos-rs:", TAOS_QUIRKS)
     );
     private static String registeredDriverKey = "";
+    private static String logicalDriverKey;
     private static Driver registeredDriver;
-    private static String sharedConnectionKey = "";
-    private static Connection sharedConnection;
-    private static boolean manualTransactionActive;
-    private static final Map<String, QuerySession> QUERY_SESSIONS = new HashMap<>();
+    private static ClassLoader registeredDriverClassLoader;
+    private static final JdbcConnectionState DEFAULT_CONNECTION_STATE = new JdbcConnectionState();
+    private static final ThreadLocal<JdbcConnectionState> CONNECTION_STATE =
+        ThreadLocal.withInitial(() -> DEFAULT_CONNECTION_STATE);
+    private static final Map<String, JdbcConnectionState> LOGICAL_SESSIONS = new java.util.concurrent.ConcurrentHashMap<>();
+    private static volatile boolean shuttingDown;
+
+    private static final class JdbcConnectionState {
+        String sharedConnectionKey = "";
+        Connection sharedConnection;
+        boolean manualTransactionActive;
+        final Map<String, QuerySession> querySessions = new HashMap<>();
+        volatile Statement activeStatement;
+        volatile boolean closing;
+        final java.util.concurrent.locks.ReentrantLock operation = new java.util.concurrent.locks.ReentrantLock();
+    }
+
+    private static JdbcConnectionState connectionState() {
+        return CONNECTION_STATE.get();
+    }
 
     record JdbcDriverQuirks(
         boolean skipExecutionContext,
@@ -266,6 +283,7 @@ public final class DbxJdbcPlugin {
     }
 
     public static void main(String[] args) throws Exception {
+        java.util.concurrent.ExecutorService requests = java.util.concurrent.Executors.newCachedThreadPool();
         try (
             BufferedReader reader = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
             BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(System.out, StandardCharsets.UTF_8))
@@ -275,21 +293,128 @@ public final class DbxJdbcPlugin {
                 if (line.isBlank()) {
                     continue;
                 }
+                JsonNode incoming = MAPPER.readTree(line);
+                if (incoming.path("params").hasNonNull("jdbcSessionId")) {
+                    JdbcConnectionState retainedState = retainLogicalState(incoming);
+                    requests.execute(() -> {
+                        try {
+                            writeResponse(writer, handleRequest(incoming, retainedState));
+                        } catch (Exception error) {
+                            System.err.println("JDBC session response failed: " + error.getClass().getSimpleName());
+                        }
+                    });
+                    continue;
+                }
+                if ("close".equals(incoming.path("method").asText())) shuttingDown = true;
                 ObjectNode response = handleLine(line);
-                writer.write(MAPPER.writeValueAsString(response));
-                writer.newLine();
-                writer.flush();
+                writeResponse(writer, response);
                 if (response.path("_dbx_close").asBoolean(false)) {
                     break;
                 }
             }
         } finally {
+            shuttingDown = true;
+            for (JdbcConnectionState state : LOGICAL_SESSIONS.values()) {
+                closeLogicalSession(state);
+            }
+            LOGICAL_SESSIONS.clear();
+            requests.shutdown();
             closeSharedConnection();
+        }
+    }
+
+    private static void writeResponse(BufferedWriter writer, ObjectNode response) throws IOException {
+        synchronized (writer) {
+            writer.write(MAPPER.writeValueAsString(response));
+            writer.newLine();
+            writer.flush();
+        }
+    }
+
+    private static void closeLogicalSession(JdbcConnectionState state) {
+        state.closing = true;
+        boolean locked = false;
+        while (!locked) {
+            Statement statement = state.activeStatement;
+            if (statement != null) {
+                try {
+                    statement.cancel();
+                } catch (SQLException ignored) {
+                }
+            }
+            try {
+                locked = state.operation.tryLock(50, java.util.concurrent.TimeUnit.MILLISECONDS);
+            } catch (InterruptedException ignored) {
+            }
+        }
+        try {
+            JdbcConnectionState previous = connectionState();
+            CONNECTION_STATE.set(state);
+            try {
+                closeSharedConnection();
+            } finally {
+                CONNECTION_STATE.set(previous);
+            }
+        } finally {
+            state.operation.unlock();
+        }
+    }
+
+    private static JdbcConnectionState retainLogicalState(JsonNode request) {
+        JsonNode params = request.path("params");
+        if (!params.hasNonNull("jdbcSessionId") || shuttingDown) return null;
+        String sessionId = params.path("jdbcSessionId").asText();
+        String method = request.path("method").asText();
+        if ("openJdbcSession".equals(method)) {
+            return LOGICAL_SESSIONS.computeIfAbsent(sessionId, ignored -> new JdbcConnectionState());
+        }
+        if ("closeJdbcSession".equals(method)) {
+            JdbcConnectionState state = LOGICAL_SESSIONS.remove(sessionId);
+            if (state != null) state.closing = true;
+            return state;
+        }
+        return LOGICAL_SESSIONS.get(sessionId);
+    }
+
+    private static JsonNode handleLogicalSession(String method, JsonNode params, JsonNode connection,
+                                                  JdbcConnectionState state) throws Exception {
+        String id = requireText(params, "jdbcSessionId");
+        if ("closeJdbcSession".equals(method)) {
+            if (state != null) closeLogicalSession(state);
+            return okResult();
+        }
+        if (state == null) throw new SQLException("Unknown JDBC logical session");
+        state.operation.lock();
+        try {
+            if (shuttingDown || state.closing) throw new SQLException("JDBC logical session is closed");
+            if ("openJdbcSession".equals(method)) return okResult();
+            CONNECTION_STATE.set(state);
+            try {
+                registerDrivers(connection);
+                return handle(method, params, connection);
+            } catch (Exception | LinkageError error) {
+                if ("connect".equals(method)
+                    && (state.sharedConnection == null || !isPostgresJdbcUrl(optionalText(connection, "connection_string")))) {
+                    closeSharedConnection();
+                    state.closing = true;
+                    LOGICAL_SESSIONS.remove(id, state);
+                }
+                throw error;
+            } finally {
+                state.activeStatement = null;
+                CONNECTION_STATE.remove();
+            }
+        } finally {
+            state.operation.unlock();
         }
     }
 
     private static ObjectNode handleLine(String line) throws Exception {
         JsonNode request = MAPPER.readTree(line);
+        return handleRequest(request, retainLogicalState(request));
+    }
+
+    private static ObjectNode handleRequest(JsonNode request, JdbcConnectionState retainedState) throws Exception {
         JsonNode id = request.path("id");
         ObjectNode response = MAPPER.createObjectNode();
         response.set("id", id.isMissingNode() ? MAPPER.getNodeFactory().numberNode(1) : id);
@@ -299,7 +424,19 @@ public final class DbxJdbcPlugin {
             String method = requireText(request, "method");
             JsonNode params = request.path("params");
             connection = params.path("connection");
+            if ("jdbcSessionProtocol".equals(method)) {
+                response.set("result", MAPPER.createObjectNode().put("version", 2));
+                return response;
+            }
+            if (params.hasNonNull("jdbcSessionId")) {
+                response.set("result", handleLogicalSession(method, params, connection, retainedState));
+                return response;
+            }
             if ("close".equals(method)) {
+                for (JdbcConnectionState state : LOGICAL_SESSIONS.values()) {
+                    closeLogicalSession(state);
+                }
+                LOGICAL_SESSIONS.clear();
                 closeSharedConnection();
                 ObjectNode result = MAPPER.createObjectNode();
                 result.put("ok", true);
@@ -391,6 +528,15 @@ public final class DbxJdbcPlugin {
     }
 
     private static JsonNode handle(String method, JsonNode params, JsonNode connection) throws Exception {
+        String database = optionalText(params, "database");
+        if (isPostgresJdbcUrl(optionalText(connection, "connection_string"))) {
+            database = postgresDatabase(params);
+            if (database != null) {
+                ObjectNode targeted = connection.deepCopy();
+                targeted.put("database", database);
+                connection = targeted;
+            }
+        }
         return switch (method) {
             case "testConnection" -> connectionTestResult(openConnection(connection));
             case "connect" -> {
@@ -403,7 +549,7 @@ public final class DbxJdbcPlugin {
             case "executeQuery" -> executeQuery(
                 connection,
                 requireText(params, "sql"),
-                optionalText(params, "database"),
+                database,
                 optionalText(params, "schema"),
                 positiveInt(params, "maxRows", MAX_ROWS),
                 nonNegativeInt(params, "fetchSize", 0),
@@ -412,13 +558,13 @@ public final class DbxJdbcPlugin {
             );
             case "beginManualTransaction", "begin_manual_transaction" -> beginManualTransaction(
                 connection,
-                optionalText(params, "database"),
+                database,
                 optionalText(params, "schema")
             );
             case "executeInManualTransaction", "execute_in_manual_transaction" -> executeInManualTransaction(
                 connection,
                 requireText(params, "sql"),
-                optionalText(params, "database"),
+                database,
                 optionalText(params, "schema"),
                 positiveInt(params, "maxRows", MAX_ROWS),
                 nonNegativeInt(params, "fetchSize", 0),
@@ -430,7 +576,7 @@ public final class DbxJdbcPlugin {
             case "executeQueryPage", "execute_query_page" -> executeQueryPage(
                 connection,
                 requireText(params, "sql"),
-                optionalText(params, "database"),
+                database,
                 optionalText(params, "schema"),
                 positiveInt(params, "pageSize", 100),
                 positiveInt(params, "maxRows", MAX_ROWS),
@@ -443,10 +589,10 @@ public final class DbxJdbcPlugin {
             );
             case "closeQuerySession", "close_query_session" -> closeQuerySessionResult(requireText(params, "sessionId"));
             case "listDatabases" -> listDatabases(connection);
-            case "listSchemas" -> listSchemas(connection, optionalText(params, "database"));
+            case "listSchemas" -> listSchemas(connection, database);
             case "listTables" -> listTables(
                 connection,
-                optionalText(params, "database"),
+                database,
                 optionalText(params, "schema"),
                 optionalText(params, "filter"),
                 nonNegativeInt(params, "limit", 0),
@@ -455,7 +601,7 @@ public final class DbxJdbcPlugin {
             );
             case "listObjects", "list_objects" -> listObjects(
                 connection,
-                optionalText(params, "database"),
+                database,
                 optionalText(params, "schema"),
                 optionalText(params, "filter"),
                 nonNegativeInt(params, "limit", 0),
@@ -464,28 +610,28 @@ public final class DbxJdbcPlugin {
             );
             case "listIndexes", "list_indexes" -> listIndexes(
                 connection,
-                optionalText(params, "database"),
+                database,
                 optionalText(params, "schema"),
                 requireText(params, "table")
             );
-            case "listDataTypes", "list_data_types" -> listDataTypes(connection, optionalText(params, "database"));
+            case "listDataTypes", "list_data_types" -> listDataTypes(connection, database);
             case "getObjectSource", "get_object_source" -> getObjectSource(
                 connection,
-                optionalText(params, "database"),
+                database,
                 optionalText(params, "schema"),
                 requireText(params, "name"),
                 requireText(params, "object_type")
             );
             case "getColumns" -> getColumns(
                 connection,
-                optionalText(params, "database"),
+                database,
                 optionalText(params, "schema"),
                 requireText(params, "table")
             );
             case "getExplainInfo" -> getExplainInfo(
                 connection,
                 requireText(params, "sql"),
-                optionalText(params, "database"),
+                database,
                 optionalText(params, "schema"),
                 nonNegativeInt(params, "timeoutSecs", -1),
                 optionalText(params, "mode")
@@ -590,9 +736,26 @@ public final class DbxJdbcPlugin {
         T get() throws SQLException;
     }
 
-    private static void registerDrivers(JsonNode connection) throws Exception {
+    private static synchronized void registerDrivers(JsonNode connection) throws Exception {
         String driverKey = driverKey(connection);
+        if (logicalDriverKey != null && !logicalDriverKey.equals(driverKey)) {
+            throw new SQLException("JDBC logical sessions require the same selected driver");
+        }
+        if (connectionState() != DEFAULT_CONNECTION_STATE) logicalDriverKey = driverKey;
+        String driverClass = optionalText(connection, "jdbc_driver_class");
         if (driverKey.equals(registeredDriverKey) && registeredDriver != null) {
+            if (driverClass != null) {
+                LegacyJdbcDriverClass.load(
+                    driverClass,
+                    optionalText(connection, "connection_string"),
+                    registeredDriverClassLoader != null
+                        ? registeredDriverClassLoader
+                        : Thread.currentThread().getContextClassLoader()
+                );
+            }
+            if (registeredDriverClassLoader != null) {
+                Thread.currentThread().setContextClassLoader(registeredDriverClassLoader);
+            }
             return;
         }
         closeSharedConnection();
@@ -612,10 +775,12 @@ public final class DbxJdbcPlugin {
             ? Thread.currentThread().getContextClassLoader()
             : new URLClassLoader(urls.toArray(URL[]::new), DbxJdbcPlugin.class.getClassLoader());
         Thread.currentThread().setContextClassLoader(loader);
+        registeredDriverClassLoader = loader;
 
-        String driverClass = optionalText(connection, "jdbc_driver_class");
         if (driverClass != null) {
-            Constructor<?> constructor = Class.forName(driverClass, true, loader).getDeclaredConstructor();
+            Constructor<?> constructor = LegacyJdbcDriverClass.load(
+                driverClass, optionalText(connection, "connection_string"), loader
+            ).getDeclaredConstructor();
             constructor.setAccessible(true);
             Driver driver = (Driver) constructor.newInstance();
             registeredDriver = new DriverShim(driver);
@@ -647,11 +812,17 @@ public final class DbxJdbcPlugin {
             throw new IllegalArgumentException("JDBC URL is required.");
         }
         String key = connectionKey(connection);
-        if (sharedConnection != null && key.equals(sharedConnectionKey) && !isConnectionClosed(sharedConnection)) {
-            configureOrdinaryAutoCommit(sharedConnection);
-            return sharedConnection;
+        JdbcConnectionState state = connectionState();
+        if (state.sharedConnection != null && key.equals(state.sharedConnectionKey) && !isConnectionClosed(state.sharedConnection)) {
+            configureOrdinaryAutoCommit(state.sharedConnection);
+            return state.sharedConnection;
         }
-        closeSharedConnection();
+        boolean postgres = isPostgresJdbcUrl(url);
+        if (postgres && state.sharedConnection != null
+            && (state.manualTransactionActive || hasActiveQuerySession(state.sharedConnection))) {
+            throw new SQLException("Cannot change PostgreSQL database while a transaction or query session is active");
+        }
+        if (!postgres) closeSharedConnection();
 
         JdbcUrlCredentials urlCredentials = extractJdbcUrlCredentials(url);
         url = urlCredentials.url;
@@ -679,10 +850,24 @@ public final class DbxJdbcPlugin {
         // Prefer the explicitly registered driver. DriverManager.getConnection only catches
         // SQLException; Hive/Inceptor drivers may throw UnsupportedOperationException for optional
         // methods, which aborts connect before the intended driver is reached.
-        sharedConnection = connectWithRegisteredDriver(url, properties);
-        sharedConnectionKey = key;
-        configureOrdinaryAutoCommit(sharedConnection);
-        return sharedConnection;
+        Connection opened = connectWithRegisteredDriver(url, properties);
+        if (postgres) {
+            try {
+                configureOrdinaryAutoCommit(opened);
+            } catch (SQLException | RuntimeException | Error error) {
+                try {
+                    opened.close();
+                } catch (SQLException closeError) {
+                    error.addSuppressed(closeError);
+                }
+                throw error;
+            }
+            closeSharedConnection();
+        }
+        state.sharedConnection = opened;
+        state.sharedConnectionKey = key;
+        configureOrdinaryAutoCommit(state.sharedConnection);
+        return state.sharedConnection;
     }
 
     private static Connection connectWithRegisteredDriver(String url, Properties properties) throws SQLException {
@@ -732,14 +917,14 @@ public final class DbxJdbcPlugin {
     }
 
     private static void configureOrdinaryAutoCommit(Connection jdbcConnection) throws SQLException {
-        if (manualTransactionActive || hasActiveQuerySession(jdbcConnection) || jdbcConnection.getAutoCommit()) {
+        if (connectionState().manualTransactionActive || hasActiveQuerySession(jdbcConnection) || jdbcConnection.getAutoCommit()) {
             return;
         }
         jdbcConnection.setAutoCommit(true);
     }
 
     private static boolean hasActiveQuerySession(Connection jdbcConnection) {
-        return QUERY_SESSIONS.values().stream().anyMatch(session -> session.connection == jdbcConnection);
+        return connectionState().querySessions.values().stream().anyMatch(session -> session.connection == jdbcConnection);
     }
 
     private static boolean isPhoenixConnection(JsonNode connection, String url) {
@@ -879,6 +1064,16 @@ public final class DbxJdbcPlugin {
             }
         }
         return false;
+    }
+
+    private static boolean usesFullPrecisionIntegers(JsonNode connection) {
+        String url = jdbcUrl(connection);
+        if (urlMatchesPrefix(url, "jdbc:cache:") || urlMatchesPrefix(url, "jdbc:iris:")) {
+            return true;
+        }
+        String driverClass = optionalText(connection, "jdbc_driver_class");
+        return "com.intersys.jdbc.CacheDriver".equals(driverClass)
+            || "com.intersystems.jdbc.IRISDriver".equals(driverClass);
     }
 
     private static boolean isPrestoOrTrinoConnection(JsonNode connection) {
@@ -1022,7 +1217,10 @@ public final class DbxJdbcPlugin {
         boolean preserveOracleDateTime = isOracleUrl(jdbcUrl(connection));
         ZoneId timestampZone = tdengineTimestampZone(connection, conn);
         boolean bitStringColumns = usesBitStringColumns(connection);
+        boolean fullPrecisionIntegers = usesFullPrecisionIntegers(connection);
         try (Statement statement = conn.createStatement()) {
+            connectionState().activeStatement = statement;
+            if (connectionState().closing) throw new SQLException("JDBC logical session is closed");
             applyStatementOptions(statement, maxRows, fetchSize, timeoutSecs, quirks);
             String trimmedSql = trimStatementSql(sql);
             String effectiveSql = rewritePhoenixSystemCatalogQuery(connection, conn, trimmedSql);
@@ -1051,7 +1249,7 @@ public final class DbxJdbcPlugin {
                         }
                         ArrayNode row = MAPPER.createArrayNode();
                         for (int i = 1; i <= columnCount; i++) {
-                            row.add(MAPPER.valueToTree(readValue(rs, meta, i, preserveOracleDateTime, timestampZone, bitStringColumns)));
+                            row.add(MAPPER.valueToTree(readValue(rs, meta, i, preserveOracleDateTime, timestampZone, bitStringColumns, fullPrecisionIntegers)));
                         }
                         rows.add(row);
                     }
@@ -1069,7 +1267,7 @@ public final class DbxJdbcPlugin {
 
     private static ObjectNode beginManualTransaction(JsonNode connection, String database, String schema)
         throws SQLException {
-        if (manualTransactionActive) {
+        if (connectionState().manualTransactionActive) {
             throw new SQLException("A manual transaction is already active");
         }
         Connection conn = openConnection(connection);
@@ -1080,7 +1278,7 @@ public final class DbxJdbcPlugin {
         }
         applyExecutionContext(connection, conn, database, schema);
         conn.setAutoCommit(false);
-        manualTransactionActive = true;
+        connectionState().manualTransactionActive = true;
         return okResult();
     }
 
@@ -1102,7 +1300,7 @@ public final class DbxJdbcPlugin {
         Connection conn = activeManualTransactionConnection(null);
         conn.commit();
         conn.setAutoCommit(true);
-        manualTransactionActive = false;
+        connectionState().manualTransactionActive = false;
         return okResult();
     }
 
@@ -1110,18 +1308,19 @@ public final class DbxJdbcPlugin {
         Connection conn = activeManualTransactionConnection(null);
         conn.rollback();
         conn.setAutoCommit(true);
-        manualTransactionActive = false;
+        connectionState().manualTransactionActive = false;
         return okResult();
     }
 
     private static Connection activeManualTransactionConnection(JsonNode connection) throws SQLException {
-        if (!manualTransactionActive || sharedConnection == null || sharedConnection.isClosed()) {
+        JdbcConnectionState state = connectionState();
+        if (!state.manualTransactionActive || state.sharedConnection == null || state.sharedConnection.isClosed()) {
             throw new SQLException("No manual transaction is active");
         }
-        if (connection != null && !connectionKey(connection).equals(sharedConnectionKey)) {
+        if (connection != null && !connectionKey(connection).equals(state.sharedConnectionKey)) {
             throw new SQLException("The manual transaction belongs to a different JDBC connection");
         }
-        return sharedConnection;
+        return state.sharedConnection;
     }
 
     private static ObjectNode okResult() {
@@ -1146,6 +1345,7 @@ public final class DbxJdbcPlugin {
         private final boolean preserveOracleDateTime;
         private final ZoneId timestampZone;
         private final boolean bitStringColumns;
+        private final boolean fullPrecisionIntegers;
         private int rowsReturned;
         private ArrayNode pendingRow;
 
@@ -1161,7 +1361,8 @@ public final class DbxJdbcPlugin {
             boolean restoreAutoCommit,
             boolean preserveOracleDateTime,
             ZoneId timestampZone,
-            boolean bitStringColumns
+            boolean bitStringColumns,
+            boolean fullPrecisionIntegers
         ) {
             this.id = id;
             this.statement = statement;
@@ -1175,6 +1376,7 @@ public final class DbxJdbcPlugin {
             this.preserveOracleDateTime = preserveOracleDateTime;
             this.timestampZone = timestampZone;
             this.bitStringColumns = bitStringColumns;
+            this.fullPrecisionIntegers = fullPrecisionIntegers;
         }
     }
 
@@ -1199,11 +1401,13 @@ public final class DbxJdbcPlugin {
         Statement statement;
         try {
             statement = createPagedQueryStatement(conn);
+            connectionState().activeStatement = statement;
         } catch (Exception | LinkageError error) {
             restorePagedQueryTransaction(conn, restoreAutoCommit);
             throw error;
         }
         try {
+            if (connectionState().closing) throw new SQLException("JDBC logical session is closed");
             applyStatementOptions(statement, maxRows, fetchSize, timeoutSecs, quirks);
             String trimmedSql = trimStatementSql(sql);
             String effectiveSql = rewritePhoenixSystemCatalogQuery(connection, conn, trimmedSql);
@@ -1243,13 +1447,14 @@ public final class DbxJdbcPlugin {
                 restoreAutoCommit,
                 preserveOracleDateTime,
                 timestampZone,
-                bitStringColumns
+                bitStringColumns,
+                usesFullPrecisionIntegers(connection)
             );
-            QUERY_SESSIONS.put(sessionId, session);
+            connectionState().querySessions.put(sessionId, session);
             try {
                 return readQuerySessionPage(session, pageSize);
             } catch (Exception | LinkageError error) {
-                QUERY_SESSIONS.remove(sessionId);
+                connectionState().querySessions.remove(sessionId);
                 throw error;
             }
         } catch (Exception | LinkageError error) {
@@ -1294,7 +1499,7 @@ public final class DbxJdbcPlugin {
     }
 
     private static JsonNode fetchQueryPage(String sessionId, int pageSize) throws SQLException {
-        QuerySession session = QUERY_SESSIONS.get(sessionId);
+        QuerySession session = connectionState().querySessions.get(sessionId);
         if (session == null) {
             throw new IllegalArgumentException("Unknown query session: " + sessionId);
         }
@@ -1302,6 +1507,8 @@ public final class DbxJdbcPlugin {
     }
 
     private static JsonNode readQuerySessionPage(QuerySession session, int pageSize) throws SQLException {
+        connectionState().activeStatement = session.statement;
+        if (connectionState().closing) throw new SQLException("JDBC logical session is closed");
         int effectivePageSize = Math.max(1, pageSize);
         ArrayNode rows = MAPPER.createArrayNode();
         boolean truncated = false;
@@ -1316,7 +1523,7 @@ public final class DbxJdbcPlugin {
                     closeQuerySession(session.id);
                     return queryPageResult(session, rows, false, false);
                 }
-                row = readRow(session.resultSet, session.meta, session.preserveOracleDateTime, session.timestampZone, session.bitStringColumns);
+                row = readRow(session.resultSet, session.meta, session.preserveOracleDateTime, session.timestampZone, session.bitStringColumns, session.fullPrecisionIntegers);
             }
             rows.add(row);
             session.rowsReturned++;
@@ -1334,7 +1541,7 @@ public final class DbxJdbcPlugin {
             return queryPageResult(session, rows, false, false);
         }
 
-        session.pendingRow = readRow(session.resultSet, session.meta, session.preserveOracleDateTime, session.timestampZone, session.bitStringColumns);
+        session.pendingRow = readRow(session.resultSet, session.meta, session.preserveOracleDateTime, session.timestampZone, session.bitStringColumns, session.fullPrecisionIntegers);
         return queryPageResult(session, rows, false, true);
     }
 
@@ -1361,7 +1568,7 @@ public final class DbxJdbcPlugin {
     }
 
     private static boolean closeQuerySession(String sessionId) {
-        QuerySession session = QUERY_SESSIONS.remove(sessionId);
+        QuerySession session = connectionState().querySessions.remove(sessionId);
         if (session == null) {
             return false;
         }
@@ -1378,7 +1585,7 @@ public final class DbxJdbcPlugin {
     }
 
     private static void closeAllQuerySessions() {
-        List<String> sessionIds = new ArrayList<>(QUERY_SESSIONS.keySet());
+        List<String> sessionIds = new ArrayList<>(connectionState().querySessions.keySet());
         for (String sessionId : sessionIds) {
             closeQuerySession(sessionId);
         }
@@ -1389,11 +1596,12 @@ public final class DbxJdbcPlugin {
         ResultSetMetaData meta,
         boolean preserveOracleDateTime,
         ZoneId timestampZone,
-        boolean bitStringColumns
+        boolean bitStringColumns,
+        boolean fullPrecisionIntegers
     ) throws SQLException {
         ArrayNode row = MAPPER.createArrayNode();
         for (int i = 1; i <= meta.getColumnCount(); i++) {
-            row.add(MAPPER.valueToTree(readValue(rs, meta, i, preserveOracleDateTime, timestampZone, bitStringColumns)));
+            row.add(MAPPER.valueToTree(readValue(rs, meta, i, preserveOracleDateTime, timestampZone, bitStringColumns, fullPrecisionIntegers)));
         }
         return row;
     }
@@ -3488,22 +3696,23 @@ public final class DbxJdbcPlugin {
     }
 
     private static void closeSharedConnection() {
+        JdbcConnectionState state = connectionState();
         closeAllQuerySessions();
-        if (sharedConnection != null) {
-            if (manualTransactionActive) {
+        if (state.sharedConnection != null) {
+            if (state.manualTransactionActive) {
                 try {
-                    sharedConnection.rollback();
+                    state.sharedConnection.rollback();
                 } catch (SQLException ignored) {
                 }
             }
             try {
-                sharedConnection.close();
+                state.sharedConnection.close();
             } catch (SQLException ignored) {
             }
-            sharedConnection = null;
-            sharedConnectionKey = "";
+            state.sharedConnection = null;
+            state.sharedConnectionKey = "";
         }
-        manualTransactionActive = false;
+        state.manualTransactionActive = false;
     }
 
     private static String driverKey(JsonNode connection) {
@@ -3512,6 +3721,7 @@ public final class DbxJdbcPlugin {
 
     private static String connectionKey(JsonNode connection) {
         String connectionString = optionalText(connection, "connection_string");
+        if (isPostgresJdbcUrl(connectionString)) connectionString = jdbcUrl(connection);
         String jdbcxSecurityKey = isJdbcxUrl(connectionString)
             ? "|jdbcxHighPrivilegeExtensions=" + jdbcxHighPrivilegeExtensionsEnabled(connection)
             : "";
@@ -3559,7 +3769,51 @@ public final class DbxJdbcPlugin {
 
     static String jdbcUrl(JsonNode connection) {
         String url = appendJdbcUrlParams(optionalText(connection, "connection_string"), optionalText(connection, "url_params"));
+        url = postgresDatabaseUrl(url, postgresDatabase(connection));
         return jdbcUrlWithPasswordKey(url, optionalText(connection, "password"));
+    }
+
+    private static boolean isPostgresJdbcUrl(String url) {
+        return url != null && url.startsWith("jdbc:postgresql:");
+    }
+
+    private static String postgresDatabase(JsonNode node) {
+        String database = node.path("database").asText(null);
+        return database == null || database.isBlank() ? null : database;
+    }
+
+    private static String postgresDatabaseUrl(String url, String database) {
+        if (!isPostgresJdbcUrl(url) || database == null) return url;
+        String prefix = "jdbc:postgresql:";
+        int queryStart = url.indexOf('?');
+        String location = url.substring(prefix.length(), queryStart < 0 ? url.length() : queryStart);
+        String authority = "";
+        String originalDatabase = location;
+        if (location.equals("//") || location.equals("///")) {
+            originalDatabase = "";
+        } else if (location.startsWith("//")) {
+            int slash = location.indexOf('/', 2);
+            if (slash < 0 || location.indexOf('/', slash + 1) >= 0) {
+                throw new IllegalArgumentException("Invalid PostgreSQL JDBC URL database path");
+            }
+            authority = location.substring(0, slash + 1);
+            originalDatabase = location.substring(slash + 1);
+        } else if (location.startsWith("/")) {
+            throw new IllegalArgumentException("Invalid PostgreSQL JDBC URL database path");
+        }
+        try {
+            URLDecoder.decode(originalDatabase, StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException error) {
+            throw new IllegalArgumentException("Invalid PostgreSQL JDBC URL database encoding");
+        }
+        String targeted = prefix + authority + URLEncoder.encode(database, StandardCharsets.UTF_8);
+        if (queryStart < 0) return targeted;
+        List<String> parameters = new ArrayList<>();
+        for (String part : url.substring(queryStart + 1).split("&", -1)) {
+            String name = partName(part);
+            if (!name.equals("PGDBNAME") && !name.equals("dbname")) parameters.add(part);
+        }
+        return targeted + "?" + String.join("&", parameters);
     }
 
     private record JdbcUrlCredentials(String url, String username, String password) {}
@@ -4356,7 +4610,24 @@ public final class DbxJdbcPlugin {
         ZoneId timestampZone,
         boolean bitStringColumns
     ) throws SQLException {
+        return readValue(rs, meta, index, preserveOracleDateTime, timestampZone, bitStringColumns, false);
+    }
+
+    private static Object readValue(
+        ResultSet rs,
+        ResultSetMetaData meta,
+        int index,
+        boolean preserveOracleDateTime,
+        ZoneId timestampZone,
+        boolean bitStringColumns,
+        boolean fullPrecisionIntegers
+    ) throws SQLException {
         int columnType = meta.getColumnType(index);
+
+        if (fullPrecisionIntegers && (columnType == Types.TINYINT || columnType == Types.SMALLINT
+            || columnType == Types.INTEGER || columnType == Types.BIGINT)) {
+            return rs.getBigDecimal(index);
+        }
 
         if (columnType == Types.BOOLEAN) {
             boolean boolValue = rs.getBoolean(index);

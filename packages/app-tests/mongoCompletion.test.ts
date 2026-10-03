@@ -1,6 +1,16 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { buildMongoCompletionItems, buildMongoCompletionItemsFromContext, getMongoCompletionContext, getMongoCompletionResultValidFor, getMongoDocumentQueryCompletionContext, inferMongoCompletionFields, shouldAutoOpenMongoCompletion } from "../../apps/desktop/src/lib/mongo/mongoCompletion.ts";
+import {
+  buildMongoCompletionItems,
+  buildMongoCompletionItemsFromContext,
+  formatMongoIndexKeyPattern,
+  getMongoCompletionContext,
+  getMongoCompletionResultValidFor,
+  getMongoDocumentQueryCompletionContext,
+  inferMongoCompletionFields,
+  mongoCompletionNeedsIndexes,
+  shouldAutoOpenMongoCompletion,
+} from "../../apps/desktop/src/lib/mongo/mongoCompletion.ts";
 import {
   ACCUMULATORS,
   BULK_WRITE_OPERATION_FIELDS,
@@ -12,6 +22,7 @@ import {
   METHOD_OPTION_KEYS,
   OPERATOR_SUB_KEYS,
   PIPELINE_STAGES,
+  PROJECTION_OPERATORS,
   PUSH_MODIFIERS,
   QUERY_OPERATORS,
   STAGE_OPTION_KEYS,
@@ -457,6 +468,16 @@ test("suggests fields under an update operator and array modifiers under $push",
   const modifiers = labels("db.users.updateOne({}, { $push: { tags: { ", { fields });
   assert.ok(modifiers.includes("$each"));
   assert.equal(modifiers.includes("$set"), false);
+
+  const pullOperators = labels("db.users.updateOne({}, { $pull: { tags: { $", { fields });
+  assert.ok(pullOperators.includes("$gte"));
+  assert.ok(pullOperators.includes("$in"));
+  assert.equal(pullOperators.includes("$set"), false);
+  assert.equal(pullOperators.includes("name"), false);
+
+  assert.deepEqual(labels("db.users.updateOne({}, { $pull: { tags: { na", { fields }), ["name"]);
+  assert.ok(labels("db.users.updateOne({}, { $pull: { tags: { $in: [").includes("ObjectId"));
+  assert.equal(labels("db.users.updateOne({}, { $pullAll: { tags: [").length, 0);
 });
 
 test("suggests fields inside a $match stage rather than operators", () => {
@@ -519,6 +540,153 @@ test("suggests quoted field references in aggregation expression positions", () 
   // Also offered unquoted, where accepting the item supplies the quotes.
   const projection = buildMongoCompletionItems("db.users.aggregate([{ $project: { upper: ", "db.users.aggregate([{ $project: { upper: ".length, { fields });
   assert.equal(projection.find((item) => item.label === "$name")?.apply, '"$name"');
+});
+
+test("suggests field references in elements of expression operator arrays across stages and $expr", () => {
+  // Elements of an expression operator's array argument get suggestions
+  // $project
+  const projectConcat = labels('db.users.aggregate([{ $project: { n: { $concat: ["$', { fields });
+  assert.ok(projectConcat.includes("$name"));
+  assert.ok(projectConcat.includes("$profile.email"));
+
+  // Bare element outside quotes offers field references (with quoted apply)
+  const projectAddBare = buildMongoCompletionItems("db.users.aggregate([{ $project: { n: { $add: [", "db.users.aggregate([{ $project: { n: { $add: [".length, { fields });
+  const nameItem = projectAddBare.find((item) => item.label === "$name");
+  assert.equal(nameItem?.apply, '"$name"');
+
+  // Inside { within an array, offers expression operators
+  const projectAddObject = labels("db.users.aggregate([{ $project: { n: { $add: [ { $", { fields });
+  assert.ok(projectAddObject.includes("$multiply"));
+  assert.ok(projectAddObject.includes("$sum"));
+
+  // $expr in $match
+  const matchExpr = labels('db.users.aggregate([{ $match: { $expr: { $gt: ["$', { fields });
+  assert.ok(matchExpr.includes("$name"));
+  assert.ok(matchExpr.includes("$profile.email"));
+
+  // $expr in find()
+  const findExpr = labels('db.users.find({ $expr: { $eq: ["$', { fields });
+  assert.ok(findExpr.includes("$name"));
+  assert.ok(findExpr.includes("$profile.email"));
+
+  // $addFields
+  const addFieldsSum = labels("db.users.aggregate([{ $addFields: { n: { $sum: [", { fields });
+  assert.ok(addFieldsSum.includes("$name"));
+
+  // $set
+  const setMultiply = labels('db.users.aggregate([{ $set: { n: { $multiply: ["$', { fields });
+  assert.ok(setMultiply.includes("$name"));
+
+  // $group accumulators
+  const groupSum = labels('db.users.aggregate([{ $group: { _id: "$_id", total: { $sum: ["$', { fields });
+  assert.ok(groupSum.includes("$name"));
+  const groupSumObject = labels('db.users.aggregate([{ $group: { _id: "$_id", total: { $sum: [ { $', { fields });
+  assert.ok(groupSumObject.includes("$multiply"));
+
+  // Update pipeline stages
+  const updatePipeline = labels('db.users.updateOne({}, [{ $set: { n: { $concat: ["$', { fields });
+  assert.ok(updatePipeline.includes("$name"));
+
+  // Plain filter $in / $nin / $all unchanged
+  const plainInQuoted = labels('db.users.find({ age: { $in: ["$', { fields });
+  assert.equal(plainInQuoted.length, 0);
+  const plainInBare = labels("db.users.find({ age: { $in: [", { fields });
+  assert.equal(plainInBare.includes("$name"), false);
+  assert.ok(plainInBare.includes("ObjectId"));
+});
+
+test("suggests accumulator operators as expressions in $project and other stages", () => {
+  const projectOps = labels("db.users.aggregate([{ $project: { n: { $ma");
+  assert.ok(projectOps.includes("$max"));
+
+  const maxItem = buildMongoCompletionItems("db.users.aggregate([{ $project: { n: { $max", "db.users.aggregate([{ $project: { n: { $max".length).find((i) => i.label === "$max");
+  assert.equal(maxItem?.apply, "$max: [${}, ${}]");
+
+  const sumItem = buildMongoCompletionItems("db.users.aggregate([{ $project: { n: { $sum", "db.users.aggregate([{ $project: { n: { $sum".length).find((i) => i.label === "$sum");
+  assert.equal(sumItem?.apply, "$sum: [${}, ${}]");
+
+  const avgItem = buildMongoCompletionItems("db.users.aggregate([{ $project: { n: { $avg", "db.users.aggregate([{ $project: { n: { $avg".length).find((i) => i.label === "$avg");
+  assert.equal(avgItem?.apply, "$avg: [${}, ${}]");
+
+  const minItem = buildMongoCompletionItems("db.users.aggregate([{ $project: { n: { $min", "db.users.aggregate([{ $project: { n: { $min".length).find((i) => i.label === "$min");
+  assert.equal(minItem?.apply, "$min: [${}, ${}]");
+
+  const stdDevPopItem = buildMongoCompletionItems("db.users.aggregate([{ $project: { n: { $stdDevPop", "db.users.aggregate([{ $project: { n: { $stdDevPop".length).find((i) => i.label === "$stdDevPop");
+  assert.equal(stdDevPopItem?.apply, "$stdDevPop: [${}, ${}]");
+
+  const stdDevSampItem = buildMongoCompletionItems("db.users.aggregate([{ $project: { n: { $stdDevSamp", "db.users.aggregate([{ $project: { n: { $stdDevSamp".length).find((i) => i.label === "$stdDevSamp");
+  assert.equal(stdDevSampItem?.apply, "$stdDevSamp: [${}, ${}]");
+});
+
+test("suggests system and scoped user variables when typing '$$'", () => {
+  // Single '$' offers fields, not variables
+  const singleDollar = labels('db.users.aggregate([{ $project: { n: "$', { fields });
+  assert.ok(singleDollar.includes("$name"));
+  assert.equal(singleDollar.includes("$$ROOT"), false);
+
+  // '$$' switches to variables
+  const varsInProject = labels('db.users.aggregate([{ $project: { n: "$$');
+  assert.ok(varsInProject.includes("$$ROOT"));
+  assert.ok(varsInProject.includes("$$CURRENT"));
+  assert.ok(varsInProject.includes("$$NOW"));
+  assert.ok(varsInProject.includes("$$CLUSTER_TIME"));
+  assert.ok(varsInProject.includes("$$REMOVE"));
+  assert.ok(varsInProject.includes("$$DESCEND"));
+  assert.ok(varsInProject.includes("$$PRUNE"));
+  assert.ok(varsInProject.includes("$$KEEP"));
+
+  // $redact ranks $$DESCEND / $$PRUNE / $$KEEP higher
+  const redactText = 'db.users.aggregate([{ $redact: { $cond: { if: 1, then: "$$';
+  const projectText = 'db.users.aggregate([{ $project: { n: "$$';
+  const redactVars = buildMongoCompletionItems(redactText, redactText.length);
+  const redactDescend = redactVars.find((i) => i.label === "$$DESCEND");
+  const projectDescend = buildMongoCompletionItems(projectText, projectText.length).find((i) => i.label === "$$DESCEND");
+  assert.ok((redactDescend?.boost ?? 0) > (projectDescend?.boost ?? 0));
+
+  // In expression array
+  const concatVars = labels('db.users.aggregate([{ $project: { n: { $concat: ["$$');
+  assert.ok(concatVars.includes("$$ROOT"));
+
+  // In find $expr
+  const findExprVars = labels('db.users.find({ $expr: { $eq: ["$$');
+  assert.ok(findExprVars.includes("$$ROOT"));
+
+  // $map scope: as: "item" offers $$item only inside in:
+  const mapIn = labels('db.users.aggregate([{ $project: { n: { $map: { input: "$arr", as: "item", in: "$$');
+  assert.ok(mapIn.includes("$$item"));
+  assert.ok(mapIn.includes("$$ROOT"));
+
+  const mapInNested = labels('db.users.aggregate([{ $project: { n: { $map: { input: "$arr", as: "item", in: { $concat: ["$$');
+  assert.ok(mapInNested.includes("$$item"));
+
+  const mapInput = labels('db.users.aggregate([{ $project: { n: { $map: { as: "item", input: "$$');
+  assert.equal(mapInput.includes("$$item"), false);
+
+  // $map without as defaults to $$this
+  const mapDefault = labels('db.users.aggregate([{ $project: { n: { $map: { input: "$arr", in: "$$');
+  assert.ok(mapDefault.includes("$$this"));
+
+  // $filter scope: as: "item" offers $$item inside cond, not input
+  const filterCond = labels('db.users.aggregate([{ $project: { n: { $filter: { input: "$arr", as: "item", cond: "$$');
+  assert.ok(filterCond.includes("$$item"));
+  const filterInput = labels('db.users.aggregate([{ $project: { n: { $filter: { as: "item", input: "$$');
+  assert.equal(filterInput.includes("$$item"), false);
+
+  // $reduce scope: offers $$value and $$this inside in
+  const reduceIn = labels('db.users.aggregate([{ $project: { n: { $reduce: { input: "$arr", initialValue: 0, in: "$$');
+  assert.ok(reduceIn.includes("$$value"));
+  assert.ok(reduceIn.includes("$$this"));
+  const reduceInit = labels('db.users.aggregate([{ $project: { n: { $reduce: { input: "$arr", in: "$$value", initialValue: "$$');
+  assert.equal(reduceInit.includes("$$value"), false);
+
+  // $let.vars scope
+  const letIn = labels('db.users.aggregate([{ $project: { n: { $let: { vars: { total: 10, discount: 2 }, in: "$$');
+  assert.ok(letIn.includes("$$total"));
+  assert.ok(letIn.includes("$$discount"));
+
+  // $lookup.let scope
+  const lookupLet = labels('db.users.aggregate([{ $lookup: { from: "orders", let: { order_id: "$_id" }, pipeline: [{ $project: { n: "$$');
+  assert.ok(lookupLet.includes("$$order_id"));
 });
 
 test("suggests $lookup option keys and collections for its from option", () => {
@@ -690,6 +858,12 @@ test("suggests the option keys of methods that take an options argument", () => 
   // A `sort` or `projection` option holds field names.
   assert.deepEqual(labels("db.users.findOneAndUpdate({}, {$set:{a:1}}, { sort: { na", { fields }), ["name"]);
   assert.deepEqual(labels("db.users.findOneAndDelete({}, { projection: { na", { fields }), ["name"]);
+
+  // An `arrayFilters` option holds filter documents.
+  assert.deepEqual(labels('db.users.updateOne({}, { $set: { "tags.$[e].x": 1 } }, { arrayFilters: [{ na', { fields }), ["name"]);
+  assert.ok(labels('db.users.updateOne({}, { $set: { "tags.$[e].x": 1 } }, { arrayFilters: [{ "tags.x": { $', { fields }).includes("$gte"));
+  assert.deepEqual(labels('db.users.updateMany({}, { $set: { "tags.$[e].x": 1 } }, { arrayFilters: [{ na', { fields }), ["name"]);
+  assert.deepEqual(labels('db.users.findOneAndUpdate({}, { $set: { "tags.$[e].x": 1 } }, { arrayFilters: [{ na', { fields }), ["name"]);
 });
 
 test("stays quiet in the trailing argument of methods that take no options", () => {
@@ -697,6 +871,26 @@ test("stays quiet in the trailing argument of methods that take no options", () 
   for (const text of ["db.users.find({}, {}, { ", "db.users.insertOne({}, { ", "db.users.insertMany([], { ", "db.users.deleteOne({}, { ", "db.users.deleteMany({}, { ", "db.users.countDocuments({}, { "]) {
     assert.deepEqual(labels(text, { fields, collections }), [], text);
   }
+});
+
+test("completes legacy insert helper arguments and stays quiet in trailing arguments", () => {
+  assert.ok(labels("db.users.").includes("insert"));
+  assert.ok(labels("db.users.ins").includes("insert"));
+  assert.ok(labels("ins").includes("insert"));
+
+  // Both document and array shapes complete collection fields
+  assert.deepEqual(labels("db.users.insert({ na", { fields }), ["name"]);
+  assert.deepEqual(labels("db.users.insert([{ na", { fields }), ["name"]);
+  assert.ok(labels("db.users.insert({ name: ", { fields }).includes("ObjectId"));
+  assert.ok(labels("db.users.insert([{ name: ", { fields }).includes("ObjectId"));
+
+  // Stays quiet in trailing options argument because insert takes no options
+  assert.deepEqual(labels("db.users.insert({}, { ", { fields, collections }), []);
+  assert.deepEqual(labels("db.users.insert([{}], { ", { fields, collections }), []);
+
+  // Every new insert snippet shape parses
+  assert.ok(parseMongoCommand("db.users.insert({})"));
+  assert.ok(parseMongoCommand("db.users.insert([{}])"));
 });
 
 test("every suggested option key parses on the method that offers it", () => {
@@ -739,7 +933,7 @@ test("every suggested option key parses on the method that offers it", () => {
   };
 
   for (const [method, options] of Object.entries(METHOD_OPTION_KEYS)) {
-    if (method === "createCollection" || method === "runCommand") continue; // database-level: pinned from their own templates below
+    if (method === "createCollection" || method === "runCommand" || method === "createUser") continue; // database-level: pinned from their own templates below
     const args = callArgs[method];
     assert.ok(args !== undefined, `${method} needs sample arguments in this test`);
     for (const option of options) {
@@ -789,6 +983,49 @@ test("every suggested map value parses in the position that offers it", () => {
     for (const value of values) {
       assert.ok(parseMongoCommand(build(value.label)), build(value.label));
     }
+  }
+});
+
+test("suggests projection operators in find projections", () => {
+  const ops = ["$elemMatch", "$meta", "$slice"];
+  assert.deepEqual(labels("db.users.find({}, { tags: { ", { fields }), ops);
+  assert.deepEqual(labels("db.users.find({}, { tags: { $", { fields }), ops);
+  assert.deepEqual(labels("db.users.findOne({}, { tags: { ", { fields }), ops);
+  assert.deepEqual(labels("db.users.findOneAndUpdate({}, { $set: { a: 1 } }, { projection: { tags: { ", { fields }), ops);
+  assert.deepEqual(labels("db.users.findOneAndDelete({}, { projection: { tags: { ", { fields }), ops);
+
+  // Positional operator form needs nothing new and still completes map values
+  assert.deepEqual(labels('db.users.find({}, { "tags.$": ', { fields }), ["0", "1"]);
+
+  // $slice takes only numbers, so completion offers nothing
+  assert.deepEqual(labels("db.users.find({}, { tags: { $slice: ", { fields }), []);
+  assert.deepEqual(labels("db.users.find({}, { tags: { $slice: [", { fields }), []);
+
+  // $meta value enum in and out of quotes
+  assert.deepEqual(labels('db.users.find({}, { score: { $meta: "', { fields }), ["textScore", "indexKey"]);
+  assert.deepEqual(labels('db.users.find({}, { score: { $meta: "text', { fields }), ["textScore"]);
+  assert.deepEqual(labels("db.users.find({}, { score: { $meta: ", { fields }), ["textScore", "indexKey"]);
+
+  const quotedMeta = buildMongoCompletionItems('db.users.find({}, { score: { $meta: "', 'db.users.find({}, { score: { $meta: "'.length);
+  const unquotedMeta = buildMongoCompletionItems("db.users.find({}, { score: { $meta: ", "db.users.find({}, { score: { $meta: ".length);
+  assert.equal(quotedMeta.find((item) => item.label === "textScore")?.apply, '"textScore"');
+  assert.equal(unquotedMeta.find((item) => item.label === "textScore")?.apply, '"textScore"');
+  assert.equal(getMongoCompletionContext('db.users.find({}, { score: { $meta: "" } })', 'db.users.find({}, { score: { $meta: "'.length).replaceClosingQuote, '"');
+
+  // $elemMatch body completes fields and filter operators
+  assert.deepEqual(labels("db.users.find({}, { tags: { $elemMatch: { ", { fields }).slice(0, 3), ["_id", "createdAt", "name"]);
+  assert.ok(labels("db.users.find({}, { tags: { $elemMatch: { score: { ", { fields }).includes("$gt"));
+  assert.ok(labels("db.users.find({}, { tags: { $elemMatch: { score: { $gt: ", { fields }).includes("NumberInt"));
+});
+
+test("every suggested projection operator parses", () => {
+  const render = (op: { label: string; apply: string }) => {
+    if (op.label === "$elemMatch") return "$elemMatch: { score: 1 }";
+    return op.apply.replace(/\$\{([^{}]*)\}/g, (_, name: string) => name || "1");
+  };
+  for (const op of PROJECTION_OPERATORS) {
+    const command = `db.users.find({}, { tags: { ${render(op)} } })`;
+    assert.ok(parseMongoCommand(command), `${command} must parse`);
   }
 });
 
@@ -902,6 +1139,115 @@ test("completes both arguments of distinct", () => {
   assert.deepEqual(filterArg.slice(0, 4), ["_id", "createdAt", "name", "profile.email"]);
   assert.ok(filterArg.includes("$or"), "a filter argument offers whole-filter operators after the fields");
   assert.ok(labels('db.users.distinct("name", { age: { $g', { fields }).includes("$gte"));
+});
+
+test("completes index names in dropIndex, dropIndexes and aggregate hint", () => {
+  const sampleIndexes = [
+    { name: "_id_", keyPattern: "{ _id: 1 }" },
+    { name: "email_1", keyPattern: "{ email: 1 }" },
+    { name: "name_age_idx", keyPattern: "{ name: 1, age: -1 }" },
+  ];
+
+  // Needs-helper correctly identifies indexName mode.
+  assert.equal(mongoCompletionNeedsIndexes("indexName"), true);
+  assert.equal(mongoCompletionNeedsIndexes("collection"), false);
+  assert.equal(mongoCompletionNeedsIndexes("none"), false);
+
+  // dropIndex excludes _id_ and completes index names of the collection.
+  const dropIndexText = 'db.users.dropIndex("';
+  const dropIndexCtx = getMongoCompletionContext(dropIndexText, dropIndexText.length);
+  assert.equal(dropIndexCtx.mode, "indexName");
+  assert.equal(dropIndexCtx.collection, "users");
+  assert.equal(dropIndexCtx.prefix, '"');
+
+  const dropIndexItems = buildMongoCompletionItems(dropIndexText, dropIndexText.length, { indexes: sampleIndexes });
+  assert.deepEqual(
+    dropIndexItems.map((item) => item.label),
+    ["email_1", "name_age_idx"],
+  );
+  assert.equal(
+    dropIndexItems.find((i) => i.label === "_id_"),
+    undefined,
+  );
+  assert.equal(dropIndexItems.find((i) => i.label === "name_age_idx")?.detail, "{ name: 1, age: -1 }");
+  assert.equal(dropIndexItems[0]?.apply, '"email_1"');
+
+  // dropIndex handles string-only index inputs as well.
+  const stringIndexItems = buildMongoCompletionItems(dropIndexText, dropIndexText.length, { indexes: ["_id_", "username_1"] });
+  assert.deepEqual(
+    stringIndexItems.map((item) => item.label),
+    ["username_1"],
+  );
+
+  // dropIndex replaces existing closing quote when completing an emptied quote pair.
+  const dropIndexEmpty = 'db.users.dropIndex("")';
+  const dropIndexEmptyCursor = dropIndexEmpty.indexOf('""') + 1;
+  const dropIndexEmptyContext = getMongoCompletionContext(dropIndexEmpty, dropIndexEmptyCursor);
+  const dropIndexEmptyItem = buildMongoCompletionItems(dropIndexEmpty, dropIndexEmptyCursor, { indexes: sampleIndexes }).find((i) => i.label === "email_1");
+  assert.equal(dropIndexEmptyContext.replaceClosingQuote, '"');
+  assert.equal(dropIndexEmptyItem?.replaceClosingQuote, '"');
+  assert.equal(dropIndexEmpty.slice(0, dropIndexEmptyContext.from) + dropIndexEmptyItem?.apply + dropIndexEmpty.slice(dropIndexEmptyCursor + 1), 'db.users.dropIndex("email_1")');
+
+  // dropIndexes (bare string argument) excludes _id_.
+  const dropIndexesBareText = 'db.users.dropIndexes("';
+  const dropIndexesBareCtx = getMongoCompletionContext(dropIndexesBareText, dropIndexesBareText.length);
+  assert.equal(dropIndexesBareCtx.mode, "indexName");
+  assert.equal(dropIndexesBareCtx.collection, "users");
+  const dropIndexesBareItems = buildMongoCompletionItems(dropIndexesBareText, dropIndexesBareText.length, { indexes: sampleIndexes });
+  assert.deepEqual(
+    dropIndexesBareItems.map((item) => item.label),
+    ["email_1", "name_age_idx"],
+  );
+
+  // dropIndexes (array of string index names) excludes _id_.
+  const dropIndexesArrayText = 'db.users.dropIndexes(["';
+  const dropIndexesArrayCtx = getMongoCompletionContext(dropIndexesArrayText, dropIndexesArrayText.length);
+  assert.equal(dropIndexesArrayCtx.mode, "indexName");
+  assert.equal(dropIndexesArrayCtx.collection, "users");
+  const dropIndexesArrayItems = buildMongoCompletionItems(dropIndexesArrayText, dropIndexesArrayText.length, { indexes: sampleIndexes });
+  assert.deepEqual(
+    dropIndexesArrayItems.map((item) => item.label),
+    ["email_1", "name_age_idx"],
+  );
+
+  // Subsequent items in dropIndexes array also complete index names.
+  const dropIndexesNextArrayText = 'db.users.dropIndexes(["email_1", "';
+  const dropIndexesNextArrayCtx = getMongoCompletionContext(dropIndexesNextArrayText, dropIndexesNextArrayText.length);
+  assert.equal(dropIndexesNextArrayCtx.mode, "indexName");
+  assert.equal(dropIndexesNextArrayCtx.collection, "users");
+  const dropIndexesNextItems = buildMongoCompletionItems(dropIndexesNextArrayText, dropIndexesNextArrayText.length, { indexes: sampleIndexes });
+  assert.deepEqual(
+    dropIndexesNextItems.map((item) => item.label),
+    ["email_1", "name_age_idx"],
+  );
+
+  // aggregate({ hint: "..." }) includes _id_ (hinting _id_ is allowed in MongoDB).
+  const aggHintText = 'db.users.aggregate([], { hint: "';
+  const aggHintCtx = getMongoCompletionContext(aggHintText, aggHintText.length);
+  assert.equal(aggHintCtx.mode, "indexName");
+  assert.equal(aggHintCtx.collection, "users");
+  const aggHintItems = buildMongoCompletionItems(aggHintText, aggHintText.length, { indexes: sampleIndexes });
+  assert.deepEqual(
+    aggHintItems.map((item) => item.label),
+    ["_id_", "email_1", "name_age_idx"],
+  );
+  assert.equal(aggHintItems.find((i) => i.label === "_id_")?.detail, "{ _id: 1 }");
+
+  // find().hint() is NOT in find chain and does not offer index completion.
+  const findHintText = 'db.users.find({}).hint("';
+  assert.notEqual(getMongoCompletionContext(findHintText, findHintText.length).mode, "indexName");
+
+  // Key pattern formatter formats directions properly.
+  assert.equal(
+    formatMongoIndexKeyPattern([
+      { field: "name", direction: "1" },
+      { field: "age", direction: "-1" },
+    ]),
+    "{ name: 1, age: -1 }",
+  );
+  assert.equal(formatMongoIndexKeyPattern([{ field: "loc", direction: "2dsphere" }]), '{ loc: "2dsphere" }');
+  assert.equal(formatMongoIndexKeyPattern([]), undefined);
+  assert.equal(formatMongoIndexKeyPattern(null), undefined);
 });
 
 test("completes database names after use and inside getSiblingDB", () => {
@@ -1062,6 +1408,63 @@ test("completes enumerated string values in and out of quotes", () => {
   );
 });
 
+test("suggests values that fit query operators and remaining fixed value sets", () => {
+  // $exists takes only a boolean: true / false outside quotes, none inside quotes
+  assert.deepEqual(labels("db.users.find({ name: { $exists: ", { fields }), ["true", "false"]);
+  assert.deepEqual(labels('db.users.find({ name: { $exists: "', { fields }), []);
+
+  // $size takes a non-negative integer: none
+  assert.deepEqual(labels("db.users.find({ name: { $size: ", { fields }), []);
+  assert.deepEqual(labels('db.users.find({ name: { $size: "', { fields }), []);
+
+  // $mod takes numbers: none outside and inside brackets
+  assert.deepEqual(labels("db.users.find({ name: { $mod: ", { fields }), []);
+  assert.deepEqual(labels("db.users.find({ name: { $mod: [", { fields }), []);
+  assert.deepEqual(labels('db.users.find({ name: { $mod: "', { fields }), []);
+
+  // $regex offers a /pattern/ regex literal snippet outside quotes, none inside quotes
+  assert.deepEqual(labels("db.users.find({ name: { $regex: ", { fields }), ["/pattern/"]);
+  const regexItem = buildMongoCompletionItems("db.users.find({ name: { $regex: ", "db.users.find({ name: { $regex: ".length, { fields })[0];
+  assert.equal(regexItem?.label, "/pattern/");
+  assert.equal(regexItem?.type, "snippet");
+  assert.equal(regexItem?.apply, "/${pattern}/");
+  assert.deepEqual(labels('db.users.find({ name: { $regex: "', { fields }), []);
+
+  // $options stays as is
+  assert.deepEqual(labels('db.users.find({ name: { $regex: "a", $options: "', { fields }), ["i", "m", "x", "s", "u"]);
+  assert.deepEqual(labels("db.users.find({ name: { $regex: 'a', $options: ", { fields }), ["i", "m", "x", "s", "u"]);
+
+  // $text boolean options -> true/false; $language -> common codes/names + none
+  assert.deepEqual(labels("db.users.find({ $text: { $caseSensitive: "), ["true", "false"]);
+  assert.deepEqual(labels('db.users.find({ $text: { $caseSensitive: "'), []);
+  assert.deepEqual(labels("db.users.find({ $text: { $diacriticSensitive: "), ["true", "false"]);
+  assert.deepEqual(labels('db.users.find({ $text: { $diacriticSensitive: "'), []);
+  const textLanguages = labels('db.users.find({ $text: { $language: "');
+  for (const code of ["none", "en", "fr", "de", "es", "it", "pt", "ru", "english", "spanish"]) {
+    assert.ok(textLanguages.includes(code), `expected $language to include ${code}`);
+  }
+  assert.ok(labels("db.users.find({ $text: { $language: ").includes("en"));
+
+  // $elemMatch remains unchanged (completing filter fields inside its object)
+  assert.deepEqual(labels("db.users.find({ items: { $elemMatch: { ", { fields }).slice(0, 3), ["_id", "createdAt", "name"]);
+
+  // $gt / $eq / $in still offer the full value list (ObjectId, ISODate, etc.)
+  const gtValues = labels("db.users.find({ age: { $gt: ", { fields });
+  for (const expected of ["ObjectId", "ISODate", "new Date", "NumberLong", "NumberInt", "NumberDecimal", "UUID", "BinData", "Timestamp", "MinKey", "MaxKey", "null", "true", "false"]) {
+    assert.ok(gtValues.includes(expected), `expected $gt to include ${expected}`);
+  }
+  const inValues = labels("db.users.find({ age: { $in: [", { fields });
+  for (const expected of ["ObjectId", "ISODate", "NumberInt"]) {
+    assert.ok(inValues.includes(expected), `expected $in to include ${expected}`);
+  }
+
+  // $merge whenMatched and whenNotMatched options
+  assert.deepEqual(labels('db.users.aggregate([{ $merge: { whenMatched: "'), ["replace", "keepExisting", "merge", "fail"]);
+  assert.deepEqual(labels("db.users.aggregate([{ $merge: { whenMatched: "), ["replace", "keepExisting", "merge", "fail"]);
+  assert.deepEqual(labels('db.users.aggregate([{ $merge: { whenNotMatched: "'), ["insert", "discard", "fail"]);
+  assert.deepEqual(labels("db.users.aggregate([{ $merge: { whenNotMatched: "), ["insert", "discard", "fail"]);
+});
+
 test("completes the collation document wherever it appears", () => {
   const keys = ["alternate", "backwards", "caseFirst", "caseLevel", "locale", "maxVariable", "normalization", "numericOrdering", "strength"];
   assert.deepEqual(labels("db.users.find({}).collation({ "), keys);
@@ -1073,7 +1476,8 @@ test("completes the collation document wherever it appears", () => {
   assert.deepEqual(labels("db.users.find({}).collation({ strength: "), ["1", "2", "3", "4", "5"]);
   // Numbers are not offered inside a quote.
   assert.deepEqual(labels('db.users.find({}).collation({ strength: "'), []);
-  assert.deepEqual(labels('db.users.find({}).collation({ locale: "'), []);
+  assert.deepEqual(labels('db.users.find({}).collation({ locale: "'), ["simple", "en", "fr", "de", "es", "pt", "it", "ru", "zh", "ja", "ko", "ar"]);
+  assert.deepEqual(labels("db.users.find({}).collation({ locale: "), ["simple", "en", "fr", "de", "es", "pt", "it", "ru", "zh", "ja", "ko", "ar"]);
   // The chain continues after collation(), and collation() is a find-cursor method only.
   assert.deepEqual(labels('db.users.find({}).collation({ locale: "en" }).'), ["limit", "sort", "skip", "explain", "collation", "toArray", "pretty"]);
   assert.deepEqual(labels("db.users.aggregate([])."), ["toArray", "pretty"]);
@@ -1113,6 +1517,7 @@ test("every suggested sub-document key and enumerated value parses in the positi
 
   const valueCommands: Record<string, (value: string) => string> = {
     $type: (value) => `db.users.find({ a: { $type: ${value} } })`,
+    $meta: (value) => `db.users.find({}, { score: { $meta: ${value} } })`,
     bsonType: (value) => `db.users.find({ $jsonSchema: { bsonType: ${value} } })`,
     $options: (value) => `db.users.find({ a: { $regex: "x", $options: ${value} } })`,
     geometryType: (value) => `db.users.find({ loc: { $geoIntersects: { $geometry: { type: ${value}, coordinates: [] } } } })`,
@@ -1129,12 +1534,18 @@ test("every suggested sub-document key and enumerated value parses in the positi
     unit: (value) => `db.users.aggregate([{ $densify: { field: "t", range: { step: 1, unit: ${value} } } }])`,
     bounds: (value) => `db.users.aggregate([{ $densify: { field: "t", range: { step: 1, bounds: ${value} } } }])`,
     fillMethod: (value) => `db.users.aggregate([{ $fill: { output: { score: { method: ${value} } } } }])`,
+    boolean: (value) => `db.users.find({ a: { $exists: ${value} } })`,
+    $regex: (value) => `db.users.find({ a: { $regex: ${value} } })`,
+    $language: (value) => `db.users.find({ $text: { $search: "x", $language: ${value} } })`,
+    locale: (value) => `db.users.find({}).collation({ locale: ${value} })`,
+    whenMatched: (value) => `db.users.aggregate([{ $merge: { into: "out", whenMatched: ${value} } }])`,
+    whenNotMatched: (value) => `db.users.aggregate([{ $merge: { into: "out", whenNotMatched: ${value} } }])`,
   };
   for (const [enumKey, values] of Object.entries(ENUM_VALUES)) {
     const build = valueCommands[enumKey];
     assert.ok(build, `${enumKey} needs a sample command in this test`);
     for (const value of values) {
-      const command = build(value.apply);
+      const command = build(render(value.apply));
       assert.ok(parseMongoCommand(command), `${command} must parse`);
     }
   }
@@ -1189,7 +1600,7 @@ test("completes runCommand command names and their collection arguments", () => 
   assert.ok(labels("db.").includes("runCommand"));
 });
 
-test("every suggested createCollection option and runCommand command parses", () => {
+test("every suggested createCollection option, createUser option and runCommand command parses", () => {
   const render = (apply: string) => apply.replace(/\$\{([^{}]*)\}/g, (_, name: string) => name || "1");
   for (const option of METHOD_OPTION_KEYS.createCollection ?? []) {
     const command = `db.createCollection("x", { ${render(option.apply)} })`;
@@ -1199,6 +1610,10 @@ test("every suggested createCollection option and runCommand command parses", ()
     const command = `db.runCommand({ ${render(spec.apply)} })`;
     assert.ok(parseMongoCommand(command), `${command} must parse`);
   }
+  for (const option of METHOD_OPTION_KEYS.createUser ?? []) {
+    const command = `db.createUser({ ${option.label === "user" ? "" : 'user: "test", '}${render(option.apply)} })`;
+    assert.ok(parseMongoCommand(command), `${command} must parse`);
+  }
 });
 
 test("suggests the use and db.version commands", () => {
@@ -1206,6 +1621,62 @@ test("suggests the use and db.version commands", () => {
   // Database helpers stay reachable after `db.`, alongside the collection names.
   assert.ok(labels("db.vers", { collections }).includes("version"));
   assert.equal(labels("db.getColl", { collections }).includes("getCollection"), true);
+});
+
+test("suggests show dbs and show subcommands", () => {
+  // Typing sh or show at root offers show dbs snippet
+  const shItems = buildMongoCompletionItems("sh", 2);
+  const showSnippet = shItems.find((item) => item.label === "show dbs");
+  assert.ok(showSnippet, "typing sh offers show dbs");
+  assert.equal(showSnippet?.apply, "show dbs");
+  assert.ok(buildMongoCompletionItems("show", 4).some((item) => item.label === "show dbs"));
+  assert.ok(parseMongoCommand("show dbs"), "show dbs snippet must parse");
+
+  // show followed by space offers dbs and databases, and NOT db.* snippets
+  const showSpaceItems = labels("show ");
+  assert.deepEqual(showSpaceItems, ["dbs", "databases"]);
+  assert.equal(showSpaceItems.includes("db.collection.find"), false);
+  assert.equal(showSpaceItems.includes("db.version"), false);
+  assert.equal(showSpaceItems.includes("collections"), false, "show collections is not supported");
+
+  // Subcommand filtering
+  assert.deepEqual(labels("show d"), ["dbs", "databases"]);
+  assert.deepEqual(labels("show db"), ["dbs"]);
+  assert.deepEqual(labels("show dat"), ["databases"]);
+  assert.deepEqual(labels("show col"), []);
+
+  // Context and auto-trigger
+  assert.deepEqual(getMongoCompletionContext("show ", 5), { mode: "showSubcommand", prefix: "", from: 5 });
+  assert.deepEqual(getMongoCompletionContext("show db", 7), { mode: "showSubcommand", prefix: "db", from: 5 });
+  assert.equal(shouldAutoOpenMongoCompletion("show ", 5), true);
+
+  // Stays quiet when extra arguments follow rather than leaking root snippets
+  assert.deepEqual(labels("show dbs extra"), []);
+
+  // Subsequent lines in scripts without semicolons retain root and db completions
+  assert.ok(labels("show dbs\nfi").includes("find"));
+  assert.ok(labels("show dbs\ndb.", { collections }).includes("users"));
+  assert.ok(labels("show dbs\ndb.", { collections }).includes("version"));
+  assert.ok(labels("show dbs\nsh").includes("show dbs"));
+});
+
+test("suggests createUser database helper and its document options", () => {
+  // Offered on db. alongside other database helpers
+  const dbHelpers = labels("db.");
+  assert.ok(dbHelpers.includes("createUser"));
+  const snippet = buildMongoCompletionItems("db.createU", "db.createU".length).find((item) => item.label === "createUser");
+  assert.equal(snippet?.apply, 'createUser({ user: "${name}", pwd: "${password}", roles: [] })');
+
+  // Document argument options
+  const optionLabels = labels("db.createUser({ ");
+  assert.deepEqual(optionLabels, ["customData", "mechanisms", "pwd", "roles", "user"]);
+  assert.deepEqual(labels("db.createUser({ pw"), ["pwd"]);
+
+  // Stays quiet inside sub-arrays/values rather than leaking root snippets
+  assert.deepEqual(labels("db.createUser({ roles: [ "), []);
+
+  // Snippet parses via parseMongoCommand
+  assert.ok(parseMongoCommand('db.createUser({ user: "name", pwd: "password", roles: [] })'));
 });
 
 test("ranks everyday operators above the long tail", () => {
@@ -1225,6 +1696,7 @@ test("snippet templates use placeholder syntax CodeMirror actually honours", () 
     ...QUERY_OPERATORS,
     ...UPDATE_OPERATORS,
     ...PUSH_MODIFIERS,
+    ...PROJECTION_OPERATORS,
     ...PIPELINE_STAGES,
     ...ACCUMULATORS,
     ...WINDOW_OPERATORS,
@@ -1284,6 +1756,56 @@ test("infers dotted MongoDB fields from sampled documents", () => {
   assert.ok(inferred.find((field) => field.name === "profile.email" && field.type === "string"));
   assert.ok(inferred.find((field) => field.name === "profile.age" && field.type === "number"));
   assert.ok(inferred.find((field) => field.name === "tags.label" && field.type === "string"));
+});
+
+test("infers MongoDB fields from up to 10 array elements and ignores later elements", () => {
+  const documents = [
+    {
+      items: [{ e0: 0 }, { e1: 1 }, { e2: 2 }, { e3: 3 }, { e4: 4 }, { e5: 5 }, { e6: 6 }, { e7: 7 }, { e8: 8 }, { e9: 9 }, { e10: 10 }, { e11: 11 }],
+    },
+  ];
+
+  const inferred = inferMongoCompletionFields(documents);
+
+  // Array path itself
+  assert.ok(inferred.find((field) => field.name === "items" && field.type === "array"));
+  // Elements 0 through 9 (first 10 elements) must be sampled
+  assert.ok(inferred.find((field) => field.name === "items.e0" && field.type === "number"));
+  assert.ok(inferred.find((field) => field.name === "items.e2" && field.type === "number"));
+  assert.ok(inferred.find((field) => field.name === "items.e3" && field.type === "number"));
+  assert.ok(inferred.find((field) => field.name === "items.e9" && field.type === "number"));
+  // Elements 10 and 11 (beyond the 10-element limit) must NOT be sampled
+  assert.equal(
+    inferred.some((field) => field.name === "items.e10"),
+    false,
+  );
+  assert.equal(
+    inferred.some((field) => field.name === "items.e11"),
+    false,
+  );
+});
+
+test("caps inferred MongoDB distinct field paths at 512", () => {
+  const pathologicalDoc: Record<string, number> = {};
+  for (let i = 0; i < 600; i++) {
+    pathologicalDoc[`field_${i.toString().padStart(4, "0")}`] = i;
+  }
+
+  const inferred = inferMongoCompletionFields([pathologicalDoc]);
+  assert.equal(inferred.length, 512);
+
+  // A second document with existing and new fields: existing fields update types, new fields are ignored
+  const secondDoc: Record<string, unknown> = {
+    field_0000: "string_value",
+    brand_new_overflow_field: 42,
+  };
+  const inferredWithSecond = inferMongoCompletionFields([pathologicalDoc, secondDoc]);
+  assert.equal(inferredWithSecond.length, 512);
+  assert.equal(inferredWithSecond.find((field) => field.name === "field_0000")?.type, "number | string");
+  assert.equal(
+    inferredWithSecond.some((field) => field.name === "brand_new_overflow_field"),
+    false,
+  );
 });
 
 test("completes $setWindowFields stage options, sortBy key map, and output window operators", () => {

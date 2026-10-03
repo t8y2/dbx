@@ -2,6 +2,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { canTreeNodeShowExpander } from "@/lib/sidebar/sidebarTreeItemLayout";
 import { filterLocallySearchedTables } from "@/lib/sidebar/sidebarSearchTree";
+import { encodeSchemaTreeCache } from "@/lib/metadata/schemaTreeCache";
 import type { ConnectionConfig, ObjectInfo, TableInfo, TreeNode } from "@/types/database";
 
 function installLocalStorage() {
@@ -642,6 +643,116 @@ describe("connectionStore metadata loading", () => {
     ]);
   });
 
+  it.each(["simple", "grouped"] as const)("isolates discovered JDBC schemas, pages and cached objects in %s mode", async (mode) => {
+    const schemas = ["APP", "OTHER", "app", "A_B", "AXB", "_SYS_EPM"];
+    const rowsForSchema = (schema: string): TableInfo[] => [...Array.from({ length: 3 }, (_, index) => ({ name: `${schema}_table_${index}`, table_type: "TABLE", comment: null })), ...Array.from({ length: 3 }, (_, index) => ({ name: `${schema}_view_${index}`, table_type: "VIEW", comment: null }))];
+    // Empty schema models JDBC's unrestricted metadata request. Deliberately
+    // omit row-level schema fields: the requested scope must reach child nodes.
+    const listTables = vi.fn(async (_id: string, _database: string, schema: string, _filter?: string, limit?: number, offset = 0, types?: string[]) => {
+      const rows = (schema ? rowsForSchema(schema) : schemas.flatMap(rowsForSchema)).filter((row) => !types || types.includes(row.table_type));
+      return rows.slice(offset, offset + (limit ?? rows.length));
+    });
+    const listObjects = vi.fn(async (_id: string, _database: string, schema: string) => [{ ...procedure(`${schema}_procedure`), schema }]);
+    const listSchemaInfos = vi.fn().mockResolvedValue(schemas.map((name) => ({ name, comment: null })));
+    const saveSchemaCache = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listSchemaInfos,
+      listTables,
+      listObjects,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache,
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    useSettingsStore().editorSettings.sidebarObjectDisplay = mode;
+    useSettingsStore().desktopSettings.sidebar_table_page_size = 2;
+    const store = useConnectionStore();
+    const connection = { ...genericJdbcConnection(), connection_string: "jdbc:sap://localhost:443/?currentschema=APP", jdbc_driver_class: "com.sap.db.jdbc.Driver", show_system_schemas: true };
+    const database: TreeNode = { id: `${connection.id}:testdb`, label: "testdb", type: "database", connectionId: connection.id, database: "testdb", children: [] };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [{ id: connection.id, label: connection.name, type: "connection", connectionId: connection.id, children: [database] }];
+    await store.loadTreeNodeChildren(database);
+    expect(listSchemaInfos).toHaveBeenCalledOnce();
+    const schemaNodes = database.children!.filter((node) => node.type === "schema");
+    expect(new Set(schemaNodes.map((node) => node.schema))).toEqual(new Set(schemas));
+
+    for (const node of schemaNodes) {
+      await store.loadTreeNodeChildren(node);
+      const parents = mode === "simple" ? [node] : node.children!.filter((child) => child.type === "group-tables" || child.type === "group-views");
+      expect(parents).toHaveLength(mode === "simple" ? 1 : 2);
+      for (const parent of parents) {
+        expect(parent.schema).toBe(node.schema);
+        if (mode === "grouped") await store.loadTreeNodeChildren(parent);
+        expect(parent.children?.filter((child) => child.type === "table" || child.type === "view")).toHaveLength(2);
+        let more = parent.children?.find((child) => child.type === "load-more");
+        expect(more).toBeDefined();
+        while (more) {
+          await store.loadMoreObjectGroupChildren(more);
+          more = parent.children?.find((child) => child.type === "load-more");
+        }
+        const children = parent.children!.filter((child) => child.type === "table" || child.type === "view");
+        const expected = rowsForSchema(node.schema!).filter((row) => mode === "simple" || row.table_type === (parent.type === "group-tables" ? "TABLE" : "VIEW"));
+        expect(children.map((child) => [child.label, child.schema, child.type])).toEqual(expected.map((row) => [row.name, node.schema, row.table_type.toLowerCase()]));
+        const calls = listTables.mock.calls.length;
+        await store.loadTreeNodeChildren(parent);
+        expect(listTables).toHaveBeenCalledTimes(calls);
+      }
+      if (mode === "grouped") await store.loadTreeNodeChildren(node.children!.find((child) => child.type === "group-procedures")!);
+      await vi.waitFor(() => expect(node.children!.flatMap((child) => (mode === "simple" ? [child] : (child.children ?? []))).some((child) => child.label === `${node.schema}_procedure` && child.schema === node.schema)).toBe(true));
+    }
+    for (const schema of schemas) {
+      const calls = listTables.mock.calls.filter((call) => call[2] === schema);
+      expect(calls.map((call) => call[5])).toEqual(mode === "simple" ? [0, 2, 4] : [0, 2, 0, 2]);
+      expect(calls.every((call) => call[1] === "testdb" && call[4] === 3)).toBe(true);
+    }
+    expect(listTables).toHaveBeenCalledTimes(schemas.length * (mode === "simple" ? 3 : 4));
+    expect(listObjects.mock.calls.map((call) => call[2]).sort()).toEqual([...schemas].sort());
+    const objectWrites = saveSchemaCache.mock.calls.filter(([key]) => key.includes("objects-"));
+    expect(objectWrites.length).toBeGreaterThan(0);
+    expect(objectWrites.every(([key]) => key.includes("-jdbc-schema-v1"))).toBe(true);
+    expect(new Set(objectWrites.map(([key]) => key.split(":")[2]))).toEqual(new Set(schemas));
+  });
+
+  it.each(["simple", "grouped"] as const)("ignores persisted JDBC objects from before schema scoping in %s mode", async (mode) => {
+    const connection = genericJdbcConnection();
+    const stale: TreeNode = { id: "stale", label: "OTHER_table", type: "table", connectionId: connection.id, database: "testdb" };
+    const legacyKeys = new Set(["jdbc-1:testdb:APP:objects-simple-v9", "jdbc-1:testdb:APP:objects-grouped-v9", "jdbc-1:testdb:APP:group-tables:objects-v9"]);
+    const loadSchemaCache = vi.fn(async (key: string) => (legacyKeys.has(key) ? encodeSchemaTreeCache([stale]) : null));
+    const listTables = vi.fn().mockResolvedValue([{ name: "APP_table", table_type: "TABLE", comment: null }]);
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listTables,
+      loadSchemaCache,
+      listObjects: vi.fn().mockResolvedValue([]),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    useSettingsStore().editorSettings.sidebarObjectDisplay = mode;
+    const store = useConnectionStore();
+    const node: TreeNode = { id: "jdbc-1:testdb:APP", label: "APP", type: "schema", connectionId: connection.id, database: "testdb", schema: "APP", children: [] };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [node];
+    await store.loadTreeNodeChildren(node);
+    const parent = mode === "simple" ? node : node.children!.find((child) => child.type === "group-tables")!;
+    expect(parent).toBeDefined();
+    if (mode === "grouped") await store.loadTreeNodeChildren(parent);
+    expect(parent.children?.map((child) => [child.label, child.schema])).toEqual([["APP_table", "APP"]]);
+    expect(loadSchemaCache).toHaveBeenCalled();
+    expect(loadSchemaCache.mock.calls.every(([key]) => !legacyKeys.has(key) && key.includes("-jdbc-schema-v1"))).toBe(true);
+  });
+
   it("loads inferred Oracle JDBC schemas without requesting empty catalogs", async () => {
     const listDatabases = vi.fn().mockResolvedValue([]);
     const listSchemas = vi.fn().mockResolvedValue(["ANONYMOUS", "DBX_TEST", "SYS", "SYSTEM"]);
@@ -709,9 +820,15 @@ describe("connectionStore metadata loading", () => {
     expect(schemaNode?.children?.map((node) => [node.type, node.label, node.schema])).toEqual([["table", "sheet", "DBX_TEST"]]);
   });
 
-  it("keeps the flat object tree for unknown generic JDBC databases without schemas", async () => {
-    const listSchemaInfos = vi.fn().mockResolvedValue([]);
+  it.each([
+    { mode: "simple", names: [] },
+    { mode: "grouped", names: [] },
+    { mode: "simple", names: ["", " "] },
+    { mode: "grouped", names: ["", " "] },
+  ] as const)("keeps the flat JDBC catalog fallback in $mode mode for schema discovery $names", async ({ mode, names }) => {
+    const listSchemaInfos = vi.fn().mockResolvedValue(names.map((name) => ({ name, comment: null })));
     const listTables = vi.fn().mockResolvedValue([{ name: "t", table_type: "TABLE", comment: null }]);
+    const saveSchemaCache = vi.fn().mockResolvedValue(undefined);
 
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
     vi.doMock("@/lib/backend/api", () => ({
@@ -721,7 +838,7 @@ describe("connectionStore metadata loading", () => {
       listSchemaInfos,
       listTables,
       loadSchemaCache: vi.fn().mockResolvedValue(null),
-      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveSchemaCache,
       saveConnections: vi.fn().mockResolvedValue(undefined),
       saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
     }));
@@ -729,7 +846,7 @@ describe("connectionStore metadata loading", () => {
     const { useConnectionStore } = await import("@/stores/connectionStore");
     const { useSettingsStore } = await import("@/stores/settingsStore");
     const store = useConnectionStore();
-    useSettingsStore().editorSettings.sidebarObjectDisplay = "simple";
+    useSettingsStore().editorSettings.sidebarObjectDisplay = mode;
     const connection = genericJdbcConnection();
     const databaseNode: TreeNode = { id: "jdbc-1:testdb", label: "testdb", type: "database", connectionId: connection.id, database: "testdb", isExpanded: false, children: [] };
     store.connections = [connection];
@@ -739,11 +856,39 @@ describe("connectionStore metadata loading", () => {
     await store.loadTreeNodeChildren(databaseNode, { force: true });
 
     expect(listSchemaInfos).toHaveBeenCalledWith(connection.id, "testdb");
+    const parent = mode === "simple" ? databaseNode : databaseNode.children!.find((child) => child.type === "group-tables")!;
+    if (mode === "grouped") await store.loadTreeNodeChildren(parent);
     expect(listTables).toHaveBeenCalled();
-    expect(databaseNode.children?.map((node) => [node.type, node.label, node.schema])).toEqual([
-      ["table", "t", undefined],
-      ["saved-sql-root", "tree.queries", undefined],
-    ]);
+    expect(listTables.mock.calls[0].slice(0, 3)).toEqual([connection.id, "testdb", ""]);
+    expect(parent.children?.filter((node) => node.type !== "saved-sql-root").map((node) => [node.type, node.label, node.schema])).toEqual([["table", "t", undefined]]);
+    expect(saveSchemaCache.mock.calls.every(([key]) => !key.includes("-jdbc-schema-v1"))).toBe(true);
+  });
+
+  it("keeps failed JDBC schema discovery as an error without loading unrestricted tables", async () => {
+    const listSchemaInfos = vi.fn().mockRejectedValue(new Error("schema discovery denied"));
+    const listTables = vi.fn();
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      listSchemaInfos,
+      listTables,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = genericJdbcConnection();
+    const node: TreeNode = { id: "jdbc-1:testdb", label: "testdb", type: "database", connectionId: connection.id, database: "testdb", children: [] };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [node];
+    await expect(store.loadTreeNodeChildren(node)).rejects.toThrow("schema discovery denied");
+    expect(listTables).not.toHaveBeenCalled();
+    expect(node.children).toEqual([]);
+    expect(node.isLoading).toBe(false);
+    expect(store.isTreeNodeChildrenLoaded(node.id)).toBe(false);
   });
 
   it("keeps the flat object tree for GBase 8s databases that cannot qualify schemas in DML", async () => {

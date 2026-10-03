@@ -672,26 +672,64 @@ jobs:
             cargo build --release -p dbx-mcp --features os-keyring --target "${{ matrix.target }}"
           fi
 
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+          registry-url: https://registry.npmjs.org
+
+      - name: Sign macOS MCP binary
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: node .github/scripts/sign-mcp-macos.mjs sign "target/${{ matrix.target }}/release/${{ matrix.binary }}"
+
       - name: Stage platform package
         shell: bash
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           mkdir -p "packages/${{ matrix.package-dir }}/bin"
           cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
           if [[ "${{ runner.os }}" != "Windows" ]]; then
             chmod +x "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
           fi
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22.13.0
-          registry-url: https://registry.npmjs.org
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            cmp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
+            node .github/scripts/sign-mcp-macos.mjs verify "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}"
+          fi
 
       - name: Publish platform package
         shell: bash
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VERSION: ${{ needs.prepare.outputs.version }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
+          set -euo pipefail
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            work_dir="$(mktemp -d)"
+            trap 'rm -rf "$work_dir"' EXIT
+            package_ref="./packages/${{ matrix.package-dir }}"
+            exists=false
+            if npm view "${{ matrix.package-name }}@${VERSION}" version >/dev/null 2>&1; then
+              package_ref="${{ matrix.package-name }}@${VERSION}"
+              exists=true
+            fi
+            npm pack "$package_ref" --ignore-scripts --pack-destination "$work_dir" --json > "$work_dir/pack.json"
+            tarball="$work_dir/$(node -p 'require(process.argv[1])[0].filename' "$work_dir/pack.json")"
+            tar -xzf "$tarball" -C "$work_dir"
+            node .github/scripts/sign-mcp-macos.mjs verify "$work_dir/package/bin/${{ matrix.binary }}"
+            if [ "$exists" = true ]; then
+              echo "${{ matrix.package-name }}@${VERSION} already exists with a verified MCP identity; skipping."
+              exit 0
+            fi
+            cmp "packages/${{ matrix.package-dir }}/bin/${{ matrix.binary }}" "$work_dir/package/bin/${{ matrix.binary }}"
+            npm publish "$tarball" --access public --provenance --ignore-scripts
+            exit 0
+          fi
           if npm view "${{ matrix.package-name }}@${VERSION}" version >/dev/null 2>&1; then
             echo "${{ matrix.package-name }}@${VERSION} already exists on npm; skipping."
             exit 0
@@ -764,7 +802,7 @@ jobs:
 
   publish-mcp-github-release:
     name: Publish MCP GitHub Release assets
-    runs-on: ubuntu-latest
+    runs-on: macos-15
     needs: [prepare, publish-mcp-server]
     steps:
       - uses: actions/checkout@v5
@@ -780,6 +818,7 @@ jobs:
         shell: bash
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
           mkdir -p release-assets
@@ -794,7 +833,17 @@ jobs:
             mkdir -p "${work_dir}/archive"
             cp "${work_dir}/package/bin/dbx-mcp" "${work_dir}/archive/dbx-mcp"
             chmod +x "${work_dir}/archive/dbx-mcp"
+            if [[ "$package_name" == @dbx-app/mcp-darwin-* ]]; then
+              node .github/scripts/sign-mcp-macos.mjs verify "${work_dir}/archive/dbx-mcp"
+            fi
             tar -C "${work_dir}/archive" -czf "release-assets/${asset_name}.tar.gz" dbx-mcp
+            mkdir "${work_dir}/unpacked"
+            tar -xzf "release-assets/${asset_name}.tar.gz" -C "${work_dir}/unpacked"
+            cmp "${work_dir}/package/bin/dbx-mcp" "${work_dir}/unpacked/dbx-mcp"
+            if [[ "$package_name" == @dbx-app/mcp-darwin-* ]]; then
+              node .github/scripts/sign-mcp-macos.mjs verify "${work_dir}/unpacked/dbx-mcp"
+            fi
+            rm -rf "$work_dir"
           }
 
           pack_windows() {
@@ -816,7 +865,7 @@ jobs:
 
           (
             cd release-assets
-            sha256sum *.tar.gz *.zip > SHA256SUMS
+            shasum -a 256 *.tar.gz *.zip > SHA256SUMS
           )
 
       - name: Attest native release archives

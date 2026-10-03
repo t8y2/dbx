@@ -16,6 +16,7 @@
  *   QUERY_OPERATORS      → filter documents (`find`, `$match`, …)
  *   UPDATE_OPERATORS     → update documents (`updateOne`, `findOneAndUpdate`, …)
  *   PUSH_MODIFIERS       → the object value of `$push` / `$addToSet`
+ *   PROJECTION_OPERATORS → projection documents (`find`, `findOne`, `findOneAndUpdate`, …)
  *   PIPELINE_STAGES      → elements of an aggregation pipeline array
  *   ACCUMULATORS         → the output fields of `$group`
  *   EXPRESSION_OPERATORS → aggregation expression position (`$project`, `$expr`, …)
@@ -110,6 +111,13 @@ export const PUSH_MODIFIERS: MongoOperatorSpec[] = specs([
   ["$slice", "Limits the array length after the push", "$slice: ${}"],
   ["$sort", "Sorts the array elements after the push", "$sort: { ${field}: 1 }"],
   ["$position", "Insert position for $each", "$position: 0"],
+]);
+
+/** Projection operators, valid inside a projected field's object value in find-style projections. */
+export const PROJECTION_OPERATORS: MongoOperatorSpec[] = specs([
+  ["$slice", "Limits the number of elements projected from an array", "$slice: ${}"],
+  ["$elemMatch", "Projects the first array element matching a condition", "$elemMatch: { ${} }"],
+  ["$meta", "Projects metadata associated with the document", '$meta: "textScore"'],
 ]);
 
 export const PIPELINE_STAGES: MongoOperatorSpec[] = specs([
@@ -225,6 +233,12 @@ export const EXPRESSION_OPERATORS: MongoOperatorSpec[] = specs([
   ["$multiply", "Multiplies numbers", "$multiply: [${}, ${}]"],
   ["$divide", "Divides two numbers", "$divide: [${}, ${}]"],
   ["$mod", "Returns the remainder of a division", "$mod: [${}, ${}]"],
+  ["$sum", "Sums values", "$sum: [${}, ${}]"],
+  ["$avg", "Averages values", "$avg: [${}, ${}]"],
+  ["$min", "Returns the lowest value", "$min: [${}, ${}]"],
+  ["$max", "Returns the highest value", "$max: [${}, ${}]"],
+  ["$stdDevPop", "Population standard deviation", "$stdDevPop: [${}, ${}]"],
+  ["$stdDevSamp", "Sample standard deviation", "$stdDevSamp: [${}, ${}]"],
   ["$abs", "Absolute value", "$abs: ${}"],
   ["$ceil", "Rounds up to the next integer", "$ceil: ${}"],
   ["$floor", "Rounds down to the previous integer", "$floor: ${}"],
@@ -494,6 +508,10 @@ export const ENUM_VALUES: Record<string, MongoOperatorSpec[]> = {
     ["s", "Dot matches newlines", '"s"'],
     ["u", "Unicode character classes", '"u"'],
   ]),
+  $meta: specs([
+    ["textScore", "Access the text search score", '"textScore"'],
+    ["indexKey", "Access the index key for the document", '"indexKey"'],
+  ]),
   geometryType: specs([
     ["Point", "Single position", '"Point"'],
     ["LineString", "Sequence of positions", '"LineString"'],
@@ -568,6 +586,69 @@ export const ENUM_VALUES: Record<string, MongoOperatorSpec[]> = {
   fillMethod: specs([
     ["linear", "Linear interpolation between surrounding values", '"linear"'],
     ["locf", "Last observation carried forward", '"locf"'],
+  ]),
+  boolean: specs([
+    ["true", "Boolean true", "true"],
+    ["false", "Boolean false", "false"],
+  ]),
+  $regex: specs([["/pattern/", "Regular expression literal", "/${pattern}/"]]),
+  $language: specs([
+    ["none", "No language-specific rules", '"none"'],
+    ["da", "Danish", '"da"'],
+    ["de", "German", '"de"'],
+    ["en", "English", '"en"'],
+    ["es", "Spanish", '"es"'],
+    ["fi", "Finnish", '"fi"'],
+    ["fr", "French", '"fr"'],
+    ["hu", "Hungarian", '"hu"'],
+    ["it", "Italian", '"it"'],
+    ["nb", "Norwegian", '"nb"'],
+    ["nl", "Dutch", '"nl"'],
+    ["pt", "Portuguese", '"pt"'],
+    ["ro", "Romanian", '"ro"'],
+    ["ru", "Russian", '"ru"'],
+    ["sv", "Swedish", '"sv"'],
+    ["tr", "Turkish", '"tr"'],
+    ["danish", "Danish", '"danish"'],
+    ["dutch", "Dutch", '"dutch"'],
+    ["english", "English", '"english"'],
+    ["finnish", "Finnish", '"finnish"'],
+    ["french", "French", '"french"'],
+    ["german", "German", '"german"'],
+    ["hungarian", "Hungarian", '"hungarian"'],
+    ["italian", "Italian", '"italian"'],
+    ["norwegian", "Norwegian", '"norwegian"'],
+    ["portuguese", "Portuguese", '"portuguese"'],
+    ["romanian", "Romanian", '"romanian"'],
+    ["russian", "Russian", '"russian"'],
+    ["spanish", "Spanish", '"spanish"'],
+    ["swedish", "Swedish", '"swedish"'],
+    ["turkish", "Turkish", '"turkish"'],
+  ]),
+  locale: specs([
+    ["simple", "Simple binary comparison", '"simple"'],
+    ["en", "English", '"en"'],
+    ["fr", "French", '"fr"'],
+    ["de", "German", '"de"'],
+    ["es", "Spanish", '"es"'],
+    ["pt", "Portuguese", '"pt"'],
+    ["it", "Italian", '"it"'],
+    ["ru", "Russian", '"ru"'],
+    ["zh", "Chinese", '"zh"'],
+    ["ja", "Japanese", '"ja"'],
+    ["ko", "Korean", '"ko"'],
+    ["ar", "Arabic", '"ar"'],
+  ]),
+  whenMatched: specs([
+    ["replace", "Replace the existing document", '"replace"'],
+    ["keepExisting", "Keep the existing document", '"keepExisting"'],
+    ["merge", "Merge the matching documents", '"merge"'],
+    ["fail", "Fail the aggregation operation", '"fail"'],
+  ]),
+  whenNotMatched: specs([
+    ["insert", "Insert the document", '"insert"'],
+    ["discard", "Discard the document", '"discard"'],
+    ["fail", "Fail the aggregation operation", '"fail"'],
   ]),
 };
 
@@ -668,6 +749,13 @@ export const METHOD_OPTION_KEYS: Record<string, MongoOperatorSpec[]> = {
     ["viewOn", "Make this a view over another collection", 'viewOn: "${collection}"'],
     ["pipeline", "Aggregation pipeline the view applies", "pipeline: [${}]"],
     ["changeStreamPreAndPostImages", "Record document images for change streams", "changeStreamPreAndPostImages: { enabled: true }"],
+  ]),
+  createUser: specs([
+    ["user", "User name", 'user: "${name}"'],
+    ["pwd", "User password", 'pwd: "${password}"'],
+    ["roles", "Roles granted to the user", "roles: []"],
+    ["customData", "Arbitrary information stored with the user", "customData: {}"],
+    ["mechanisms", "Authentication mechanisms", "mechanisms: [${}]"],
   ]),
   // Command documents run as written, so this lists the commands worth typing by hand.
   runCommand: specs([

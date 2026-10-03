@@ -3213,6 +3213,9 @@ function preferredKeywordsForCompletion(
   databaseType: DatabaseType | undefined,
 ): string[] {
   const keywords: string[] = [];
+  if (databaseType !== "sqlserver" && databaseType !== "sqlite" && /^create\s+or$/i.test(maskSqlLiteralsAndComments(beforeToken, databaseType).trim())) {
+    keywords.push("REPLACE");
+  }
   if (selectListColumnContext && hasSelectListExpression(beforeCursor, databaseType)) keywords.push("FROM");
   if (isAfterJoinModifierContext(beforeCursor, databaseType)) keywords.push("JOIN");
   if (!exclusiveTableSuggestions && isAfterSelectBodyExpression(beforeToken, databaseType)) keywords.push("LIMIT");

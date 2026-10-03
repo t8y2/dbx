@@ -187,7 +187,7 @@ onBeforeUnmount(close);
     <ChevronDown v-if="showChevron" class="h-3 w-3 opacity-50" />
   </button>
   <Teleport to="body">
-    <div v-if="open" ref="menuRef" class="pointer-events-auto fixed z-50 min-w-32 overflow-x-hidden overflow-y-auto rounded-md p-1 cn-menu-translucent text-popover-foreground" :class="contentClass" :style="menuStyle" role="menu" @pointerdown.prevent>
+    <div v-if="open" ref="menuRef" class="pointer-events-auto fixed z-(--dbx-floating-layer-z-index) min-w-32 overflow-x-hidden overflow-y-auto rounded-md p-1 cn-menu-translucent text-popover-foreground" :class="contentClass" :style="menuStyle" role="menu" @pointerdown.prevent>
       <div v-if="label" :class="labelClass">{{ label }}</div>
       <div v-if="label" class="bg-border -mx-1 my-1 h-px" />
       <template v-for="item in items" :key="item.value">

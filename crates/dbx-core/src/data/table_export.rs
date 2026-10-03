@@ -690,7 +690,13 @@ async fn execute_table_export_count(
     cancel_token: CancellationToken,
 ) -> Result<QueryResult, String> {
     if table_export_cursor_kind(state, pool_key).await != Some(TableExportCursorKind::ExternalDriver) {
-        return execute_read_on_pool(state, pool_key, sql).await;
+        // execute_read_on_pool 不接受取消令牌；用 select! 让导出在取消时不必等待大表
+        // COUNT(*) 跑完（否则点“停止”在 COUNT 阶段毫无反应）。取消时返回 Err，调用方
+        // 会将其视作 total_rows=None 并继续，由后续 is_export_cancelled 收尾为已取消。
+        return tokio::select! {
+            result = execute_read_on_pool(state, pool_key, sql) => result,
+            _ = cancel_token.cancelled() => Err("table export count cancelled".to_string()),
+        };
     }
 
     let timeout_secs = table_export_query_timeout_secs(state, pool_key).await;

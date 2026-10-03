@@ -33,8 +33,8 @@ use crate::db::proxy_tunnel::ProxyTunnelManager;
 use crate::db::ssh_tunnel::TunnelManager;
 use crate::models::connection::{
     database_info_from_protocol_value, parse_jdbc_host_port, parse_mongo_first_host, rewrite_jdbc_url_host,
-    ConnectionConfig, ConnectionLivenessFailureKind, ConnectionLivenessMessage, ConnectionTestResult,
-    DatabaseConnectionInfo, DatabaseType, TransportLayerConfig,
+    validate_jdbc_transport_url, ConnectionConfig, ConnectionLivenessFailureKind, ConnectionLivenessMessage,
+    ConnectionTestResult, DatabaseConnectionInfo, DatabaseType, TransportLayerConfig,
 };
 use crate::mongo_oidc::MongoOidcBrowserOpener;
 use crate::nacos::config::{NACOS_CONSOLE_SESSION_PASSWORD, NACOS_PRIMARY_SESSION_PASSWORD};
@@ -3610,6 +3610,12 @@ impl AppState {
         if config.db_type == DatabaseType::Plugin && self.plugin_host.wants_proxy_route(config).await {
             if let Some(proxy) = self.socks5_route_for_transport_layers(connection_id, &transport_layers).await? {
                 return Ok(ConnectionEndpoint { host: config.host.clone(), port: config.port, proxy: Some(proxy) });
+            }
+        }
+
+        if config.db_type == DatabaseType::Jdbc {
+            if let Some(url) = config.connection_string.as_deref().filter(|url| !url.is_empty()) {
+                validate_jdbc_transport_url(url)?;
             }
         }
 

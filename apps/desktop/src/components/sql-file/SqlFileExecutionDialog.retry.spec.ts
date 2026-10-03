@@ -2,6 +2,7 @@
 
 import { createApp, defineComponent, h, nextTick, reactive } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { TreeNode } from "@/types/database";
 
 const mocks = vi.hoisted(() => ({
   desktop: true,
@@ -24,6 +25,8 @@ const mocks = vi.hoisted(() => ({
   progressHandler: undefined as undefined | ((progress: Record<string, unknown>) => void),
   changeDialogOpen: undefined as undefined | ((open: boolean) => void),
   connections: [{ id: "mysql-1", name: "MySQL", db_type: "mysql", driver_profile: "mysql", database: "" }] as Array<{ id: string; name: string; db_type: string; driver_profile: string; database: string }>,
+  treeNodes: [] as TreeNode[],
+  editorSettings: { sidebarConnectionSortMode: "manual" as "manual" | "asc" | "desc" },
   getConfig: vi.fn(),
   refreshDatabaseTreeNode: vi.fn(),
   refreshObjectListTreeNode: vi.fn(),
@@ -46,6 +49,14 @@ function passthrough(tag: string) {
       return () => h(tag, attrs, slots.default?.());
     },
   });
+}
+
+function connectionNode(id: string, label: string): TreeNode {
+  return { id, label, type: "connection", connectionId: id, children: [] };
+}
+
+function connectionGroupNode(id: string, label: string, children: TreeNode[]): TreeNode {
+  return { id, label, type: "connection-group", isExpanded: true, children };
 }
 
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
@@ -78,6 +89,9 @@ vi.mock("@/stores/connectionStore", () => ({
     get connections() {
       return mocks.connections;
     },
+    get treeNodes() {
+      return mocks.treeNodes;
+    },
     ensureConnected: mocks.ensureConnected,
     getConfig: mocks.getConfig,
     refreshDatabaseTreeNode: mocks.refreshDatabaseTreeNode,
@@ -85,6 +99,7 @@ vi.mock("@/stores/connectionStore", () => ({
   }),
 }));
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => mocks.queryStore }));
+vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: mocks.editorSettings }) }));
 vi.mock("@/lib/backend/api", () => ({
   beginManualTransaction: mocks.beginManualTransaction,
   commitManualTransaction: mocks.commitManualTransaction,
@@ -130,9 +145,21 @@ vi.mock("@/components/ui/input", () => ({
 }));
 vi.mock("@/components/ui/label", () => ({ Label: passthrough("label") }));
 vi.mock("@/components/ui/select", () => ({
-  Select: passthrough("div"),
+  Select: defineComponent({
+    inheritAttrs: false,
+    props: ["modelValue"],
+    setup(props, { attrs, slots }) {
+      return () => h("div", { ...attrs, "data-select-value": props.modelValue ?? "" }, slots.default?.());
+    },
+  }),
   SelectContent: passthrough("div"),
-  SelectItem: passthrough("div"),
+  SelectItem: defineComponent({
+    inheritAttrs: false,
+    props: ["value"],
+    setup(props, { attrs, slots }) {
+      return () => h("div", { ...attrs, "data-select-item": props.value }, slots.default?.());
+    },
+  }),
   SelectTrigger: passthrough("div"),
   SelectValue: passthrough("span"),
 }));
@@ -247,6 +274,8 @@ beforeEach(() => {
   ]);
   mocks.fetchSqlFileTargetOptions.mockResolvedValue([]);
   mocks.connections = [{ id: "mysql-1", name: "MySQL", db_type: "mysql", driver_profile: "mysql", database: "" }];
+  mocks.treeNodes = reactive<TreeNode[]>([]);
+  mocks.editorSettings = reactive({ sidebarConnectionSortMode: "manual" as "manual" | "asc" | "desc" });
   mocks.getConfig.mockImplementation((connectionId: string) => mocks.connections.find((connection) => connection.id === connectionId));
   mocks.openFileDialog.mockResolvedValue(["/tmp/first.sql", "/tmp/second.sql"]);
   mocks.previewSqlFile.mockImplementation(async (filePath: string) => ({
@@ -841,6 +870,44 @@ describe("SqlFileExecutionDialog retries", () => {
 
     await vi.waitFor(() => expect(root!.textContent).toContain("retry connection failed"));
     expect(root!.textContent).not.toContain("stale statement failure");
+  });
+});
+
+describe("SqlFileExecutionDialog connection order", () => {
+  function connectionOptionIds(): string[] {
+    return Array.from(root!.querySelectorAll<HTMLElement>("[data-select-item]"), (item) => item.dataset.selectItem!);
+  }
+
+  it("tracks nested sidebar order and sort mode while keeping missing SQL connections and the selection", async () => {
+    mocks.connections = [
+      { id: "alpha", name: "Alpha", db_type: "mysql", driver_profile: "mysql", database: "" },
+      { id: "message-queue", name: "Messages", db_type: "mq", driver_profile: "kafka", database: "" },
+      { id: "zebra", name: "Zebra", db_type: "postgres", driver_profile: "postgres", database: "" },
+      { id: "beta", name: "Beta", db_type: "mysql", driver_profile: "mysql", database: "" },
+      { id: "new", name: "New connection", db_type: "mysql", driver_profile: "mysql", database: "" },
+    ];
+    mocks.treeNodes = reactive<TreeNode[]>([connectionGroupNode("parent", "Parent", [connectionNode("zebra", "Zebra"), connectionGroupNode("nested", "Nested", [connectionNode("beta", "Beta")]), connectionNode("alpha", "Alpha")])]);
+
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(SqlFileExecutionDialog, { open: true, prefillConnectionId: "beta" });
+    app.mount(root);
+    await nextTick();
+
+    expect(connectionOptionIds()).toEqual(["zebra", "beta", "alpha", "new"]);
+    expect(root.querySelector('[data-select-value="beta"]')).not.toBeNull();
+
+    mocks.treeNodes.splice(0, 1, connectionGroupNode("parent", "Parent", [connectionNode("alpha", "Alpha"), connectionGroupNode("nested", "Nested", [connectionNode("beta", "Beta")]), connectionNode("zebra", "Zebra")]));
+    await nextTick();
+
+    expect(connectionOptionIds()).toEqual(["alpha", "beta", "zebra", "new"]);
+    expect(root.querySelector('[data-select-value="beta"]')).not.toBeNull();
+
+    mocks.editorSettings.sidebarConnectionSortMode = "desc";
+    await nextTick();
+
+    expect(connectionOptionIds()).toEqual(["zebra", "beta", "alpha", "new"]);
+    expect(root.querySelector('[data-select-value="beta"]')).not.toBeNull();
   });
 });
 

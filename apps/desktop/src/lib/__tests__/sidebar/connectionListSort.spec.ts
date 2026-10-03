@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sortConnectionListForDisplay } from "@/lib/sidebar/connectionListSort";
+import { orderConnectionsForSidebarDisplay, sortConnectionListForDisplay } from "@/lib/sidebar/connectionListSort";
 import type { TreeNode } from "@/types/database";
 
 function connection(id: string, label: string): TreeNode {
@@ -35,5 +35,19 @@ describe("connection list display sort", () => {
     expect(manualTree.map((node) => node.id)).toEqual(["zebra", "team", "alpha-root", "alpha-root-two"]);
     expect(manualTree[1]?.children?.map((node) => node.id)).toEqual(["beta", "alpha", "alpha-two"]);
     expect(sorted[1]).not.toBe(manualTree[1]);
+  });
+
+  it("flattens nested manual order, appends missing connections, and removes duplicates", () => {
+    const connections = [{ id: "alpha" }, { id: "beta" }, { id: "zebra" }, { id: "new" }];
+    const tree = [connection("zebra", "Zebra"), group("parent", "Parent", [connection("beta", "Beta"), group("nested", "Nested", [connection("alpha", "Alpha"), connection("zebra", "Zebra duplicate")])])];
+
+    expect(orderConnectionsForSidebarDisplay(connections, tree, "manual").map((connection) => connection.id)).toEqual(["zebra", "beta", "alpha", "new"]);
+  });
+
+  it("projects configs through the sidebar's alphabetical display mode", () => {
+    const connections = [{ id: "zebra" }, { id: "alpha" }, { id: "beta" }];
+    const tree = [group("parent", "Parent", [connection("zebra", "Zebra"), group("nested", "Nested", [connection("beta", "Beta")]), connection("alpha", "Alpha")])];
+
+    expect(orderConnectionsForSidebarDisplay(connections, tree, "asc").map((connection) => connection.id)).toEqual(["alpha", "beta", "zebra"]);
   });
 });

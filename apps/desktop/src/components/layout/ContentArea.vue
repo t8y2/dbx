@@ -1508,13 +1508,12 @@ async function selectResultRun(runId: string) {
 }
 
 /**
- * 点击结果标签：切换显示的同时固定该结果（issue #9975）。
- * 未固定的结果会被下一次普通查询复用/覆盖，点击后固定即可保留下来。
+ * Result selection can optionally pin the run so ordinary queries do not replace it.
  */
 async function selectResultRunFromTab(runId: string) {
   if (!(await selectResultRun(runId))) return;
   const run = resultRuns.value.find((item) => item.id === runId);
-  if (run && !run.pinned) toggleResultRunPinned(runId);
+  if (settingsStore.editorSettings.pinResultOnTabClick && run && !run.pinned) toggleResultRunPinned(runId);
 }
 
 async function focusResultRunByIndex(index: number) {

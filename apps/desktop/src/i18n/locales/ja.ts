@@ -7474,6 +7474,8 @@ export default withEnglishFallback({
     queryPageSize: "クエリ結果のデフォルト行数",
     queryPageSizeDescription: "クエリ結果の 1 ページあたりの行数です。最大 {max} 行まで指定できます。",
     defaultAutoKeepResults: "クエリ結果を既定で自動保持",
+    pinResultOnTabClick: "結果タブのクリックで結果を固定",
+    pinResultOnTabClickDescription: "無効にするとクリックでは結果の切り替えのみを行います。コンテキストメニューからは引き続き固定できます。",
     defaultAutoKeepResultsDescription: "適用すると開いているクエリタブを更新し、新しいタブの既定値にも設定します。タブごとに切り替えられます。",
     multiStatementDefaultView: "複数ステートメントの既定ビュー",
     multiStatementDefaultViewDescription: "複数の SQL ステートメントを含むバッチを、結果テーブルまたは実行サマリーのどちらで開くか選択します。",

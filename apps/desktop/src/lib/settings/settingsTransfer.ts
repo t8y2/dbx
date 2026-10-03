@@ -161,6 +161,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "dataGridTextFilterPanelHeight",
     "dataGridToolbarLayout",
     "defaultAutoKeepResults",
+    "pinResultOnTabClick",
     "multiStatementDefaultView",
     "dataGridAutoTransposeSingleRow",
     "dataGridCellDetailButtonVisible",

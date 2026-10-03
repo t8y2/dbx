@@ -223,6 +223,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "data-table-database-sort-direction", category: "data", titleKey: "settings.tableDatabaseSortDirection", targetId: "data" },
   { id: "data-table-local-sort-direction", category: "data", titleKey: "settings.tableLocalSortDirection", targetId: "data" },
   { id: "default-auto-keep-results", category: "data", titleKey: "settings.defaultAutoKeepResults", descriptionKey: "settings.defaultAutoKeepResultsDescription", targetId: "default-auto-keep-results" },
+  { id: "pin-result-on-tab-click", category: "data", titleKey: "settings.pinResultOnTabClick", descriptionKey: "settings.pinResultOnTabClickDescription", targetId: "pin-result-on-tab-click" },
   { id: "multi-statement-default-view", category: "data", titleKey: "settings.multiStatementDefaultView", descriptionKey: "settings.multiStatementDefaultViewDescription", targetId: "multi-statement-default-view" },
   { id: "query-result-max-rows", category: "data", titleKey: "settings.queryResultMaxRows", descriptionKey: "settings.queryResultMaxRowsDescription", targetId: "data" },
   { id: "data-grid-header-comments", category: "data", titleKey: "settings.showColumnCommentsInHeader", descriptionKey: "settings.showColumnCommentsInHeaderDescription", targetId: "data" },

@@ -8253,6 +8253,8 @@ export default withEnglishFallback({
     queryPageSize: "查询结果默认每页行数",
     queryPageSizeDescription: "每个查询结果分页加载的行数，最大支持 {max} 行。",
     defaultAutoKeepResults: "默认自动保留查询结果",
+    pinResultOnTabClick: "单击结果标签时固定结果",
+    pinResultOnTabClickDescription: "关闭后，单击只切换结果；仍可通过右键菜单固定结果。",
     defaultAutoKeepResultsDescription: "应用后同步更新已打开的查询标签，新建查询标签也使用此设置。仍可在标签内单独切换。",
     multiStatementDefaultView: "多语句执行默认视图",
     multiStatementDefaultViewDescription: "选择多条 SQL 语句批量执行后默认打开数据表或执行摘要。",

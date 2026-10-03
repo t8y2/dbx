@@ -7465,6 +7465,8 @@ export default withEnglishFallback({
     queryPageSize: "Sorğuda səhifə başına standart sətir sayı",
     queryPageSizeDescription: "Sorğu nəticəsinin hər səhifəsində yüklənən sətirlər. Dəstəklənən maksimum səhifə ölçüsü {max} təşkil edir.",
     defaultAutoKeepResults: "Sorğu nəticələrini standart olaraq avtomatik saxla",
+    pinResultOnTabClick: "Nəticə vərəqinə kliklədikdə nəticələri sabitlə",
+    pinResultOnTabClickDescription: "Söndürüldükdə klik yalnız nəticələr arasında keçid edir. Nəticələri kontekst menyusundan sabitləmək mümkündür.",
     defaultAutoKeepResultsDescription: "Tətbiq edildikdə açıq sorğu vərəqləri yenilənir və yeni vərəqlər üçün standart təyin olunur. Hər vərəqdə ayrıca dəyişə bilərsiniz.",
     multiStatementDefaultView: "Bir neçə əmr üçün standart görünüş",
     multiStatementDefaultViewDescription: "Bir neçə SQL əmrindən ibarət toplunun nəticə cədvəlində, yoxsa icra xülasəsində açılacağını seçin.",

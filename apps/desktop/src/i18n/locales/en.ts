@@ -8287,6 +8287,8 @@ export default {
     queryPageSize: "Default query rows per page",
     queryPageSizeDescription: "Rows loaded per query result page. The maximum supported page size is {max}.",
     defaultAutoKeepResults: "Auto-keep query results by default",
+    pinResultOnTabClick: "Pin results when clicking a result tab",
+    pinResultOnTabClickDescription: "When disabled, clicking only switches results. Results can still be pinned from the context menu.",
     defaultAutoKeepResultsDescription: "Applying this setting updates open query tabs and sets the default for new ones. You can still toggle it per tab.",
     multiStatementDefaultView: "Default view for multiple statements",
     multiStatementDefaultViewDescription: "Choose whether batches with multiple SQL statements open in the result table or execution summary.",

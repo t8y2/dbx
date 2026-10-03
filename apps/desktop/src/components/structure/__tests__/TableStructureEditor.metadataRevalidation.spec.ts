@@ -607,6 +607,25 @@ describe("TableStructureEditor column index actions", () => {
     expect(mocks.executeBatch).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["Doris", "doris", "doris"],
+    ["Doris MySQL profile", "mysql", "doris"],
+    ["StarRocks", "starrocks", "starrocks"],
+    ["StarRocks MySQL profile", "mysql", "starrocks"],
+    ["GoldenDB", "goldendb", "goldendb"],
+    ["SunDB", "sundb", "sundb"],
+    ["Databend", "databend", "databend"],
+  ] as const)("retains table-qualified automatic names on %s", async (_label, databaseType, driverProfile) => {
+    mocks.connection.db_type = databaseType;
+    mocks.connection.driver_profile = driverProfile;
+    loadMetadata();
+    const root = await mountStructureEditor();
+    await openSubmenu(fieldRow(root, "email"), "structureEditor.createColumnIndex");
+    menuButton("structureEditor.createNormalIndex").click();
+    await expectIndexName(root, "USERS_EMAIL_IDX");
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+
   it("preserves lowercase table-qualified naming for GaussDB M-mode", async () => {
     mocks.connection.db_type = "gaussdb";
     mocks.connection.driver_profile = "gaussdb-m";

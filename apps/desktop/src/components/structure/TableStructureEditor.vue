@@ -1309,6 +1309,10 @@ function onIndexColResize(e: MouseEvent, col: number) {
 
 const connection = computed(() => (props.connectionId ? store.getConfig(props.connectionId) : undefined));
 const databaseType = computed(() => tableStructureDatabaseTypeForConnection(connection.value));
+const usesNativeMysqlIndexNames = computed(() => {
+  const profile = connection.value?.driver_profile?.trim().toLowerCase();
+  return databaseType.value === "mysql" && connection.value?.db_type === "mysql" && (!profile || profile === "mysql");
+});
 const supportsCharacterLengthUnits = computed(() => databaseType.value === "dameng" || databaseType.value === "oracle");
 const usesMysql8SafeDefaults = computed(() => databaseType.value === "mysql" && connection.value?.db_type === "mysql" && connection.value.driver_profile === "mysql");
 const structureCapabilities = computed(() => getTableStructureCapabilities(databaseType.value, connection.value?.db_type, connection.value?.database_info?.productVersion));
@@ -4456,7 +4460,7 @@ function existingIndexNamesForDraft(index: EditableStructureIndex): string[] {
 function generatedIndexNameForDraft(index: EditableStructureIndex): string {
   const firstColumn = index.autoNameColumn ?? index.columns[0] ?? "";
   const existingNames = existingIndexNamesForDraft(index);
-  if (structureDialect.value === "mysql") return generateUniqueShortIndexName(firstColumn, existingNames, { ...index, maxLength: 64 });
+  if (usesNativeMysqlIndexNames.value) return generateUniqueShortIndexName(firstColumn, existingNames, { ...index, maxLength: 64 });
   // Index names can be schema-wide outside MySQL. Retain the original table-qualified rule.
   const name = generateUniqueIndexName(structureIndexTableName(), firstColumn ? [firstColumn] : [], existingNames);
   return connection.value?.driver_profile?.toLowerCase() === "gaussdb-m" ? name.toLowerCase() : name;

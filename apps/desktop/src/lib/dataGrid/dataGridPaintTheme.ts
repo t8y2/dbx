@@ -260,7 +260,9 @@ function paintToken(getVar: (name: string) => string, name: string, fallback: st
 
 export function resolveDataGridPaintTheme(options: { getVar: (name: string) => string; isDark: boolean }): DataGridPaintTheme {
   const { getVar, isDark } = options;
-  const background = cssVarColor(getVar, "--background", isDark ? "rgb(19, 20, 22)" : "rgb(255, 255, 255)");
+  const defaultBackground = isDark ? "rgb(19, 20, 22)" : "rgb(255, 255, 255)";
+  const solidBackground = cssVarColor(getVar, "--background-solid", cssVarColor(getVar, "--background", defaultBackground));
+  const background = paintToken(getVar, "--data-grid-background", solidBackground);
   const foreground = cssVarColor(getVar, "--foreground", isDark ? "rgb(215, 215, 219)" : "rgb(10, 10, 10)");
   const mutedForeground = cssVarColor(getVar, "--muted-foreground", isDark ? "rgb(151, 152, 157)" : "rgb(115, 115, 115)");
   const primary = cssVarColor(getVar, "--primary", isDark ? "rgb(208, 208, 214)" : "rgb(23, 23, 23)");

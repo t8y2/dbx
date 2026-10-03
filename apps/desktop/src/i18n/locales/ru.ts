@@ -1228,6 +1228,7 @@ export default withEnglishFallback({
     searchDatabasePlaceholder: "Поиск типов баз данных",
     searchResults: "Результаты поиска",
     databaseCategories: "Категории",
+    databaseCategoryAll: "Все",
     databaseCategorySql: "Реляционные",
     databaseCategoryAnalytics: "Аналитические",
     databaseCategoryDomestic: "Китайские БД",

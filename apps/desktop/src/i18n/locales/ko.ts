@@ -1153,6 +1153,7 @@ export default withEnglishFallback({
     searchDatabasePlaceholder: "데이터베이스 유형 검색",
     searchResults: "검색 결과",
     databaseCategories: "카테고리",
+    databaseCategoryAll: "전체",
     databaseCategorySql: "관계형",
     databaseCategoryAnalytics: "분석형",
     databaseCategoryDomestic: "중국 DB",

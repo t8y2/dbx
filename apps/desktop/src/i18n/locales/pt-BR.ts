@@ -1066,6 +1066,7 @@ export default withEnglishFallback({
     searchDatabasePlaceholder: "Pesquisar tipos de banco de dados",
     searchResults: "Resultados da busca",
     databaseCategories: "Categorias",
+    databaseCategoryAll: "Todos",
     databaseCategorySql: "Relacionais",
     databaseCategoryAnalytics: "Análises",
     databaseCategoryDomestic: "BD chineses",

@@ -748,6 +748,7 @@ export default withEnglishFallback({
     renameFile: "重新命名 SQL",
     renameFailed: "重新命名 SQL 失敗：{message}",
     nameConflict: "目前位置已存在同名 SQL：「{name}」",
+    nameAdjusted: "目前位置已存在同名 SQL，已自動儲存為「{name}」",
     deleteFile: "刪除 SQL",
     deleteFileConfirm: "確定刪除「{name}」嗎？",
     createFolderOption: "建立資料夾「{name}」",

@@ -704,6 +704,7 @@ export default withEnglishFallback({
     renameFile: "Переименовать SQL",
     renameFailed: "Не удалось переименовать SQL: {message}",
     nameConflict: "SQL с именем «{name}» уже существует в этом месте",
+    nameAdjusted: "SQL с таким именем уже был в этом месте, сохранено как «{name}»",
     deleteFile: "Удалить SQL",
     deleteFileConfirm: "Удалить «{name}»?",
     createFolderOption: "Создать папку «{name}»",

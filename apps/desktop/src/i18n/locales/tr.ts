@@ -525,6 +525,7 @@ export default withEnglishFallback({
     renameFile: "SQL'i Yeniden Adlandır",
     renameFailed: "SQL yeniden adlandırılamadı: {message}",
     nameConflict: 'Bu konumda "{name}" adlı bir SQL zaten var',
+    nameAdjusted: 'Bu konumda aynı ada sahip bir SQL vardı, "{name}" olarak kaydedildi',
     deleteFile: "SQL Sil",
     deleteFileConfirm: "“{name}” silinsin mi?",
     createFolderOption: "“{name}” klasörünü oluştur",

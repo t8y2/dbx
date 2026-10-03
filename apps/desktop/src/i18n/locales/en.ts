@@ -759,6 +759,7 @@ export default {
     renameFile: "Rename SQL",
     renameFailed: "Failed to rename SQL: {message}",
     nameConflict: 'An SQL named "{name}" already exists in this location',
+    nameAdjusted: 'The name was already taken here, so it was saved as "{name}"',
     deleteFile: "Delete SQL",
     deleteFileConfirm: "Delete “{name}”?",
     createFolderOption: "Create folder “{name}”",

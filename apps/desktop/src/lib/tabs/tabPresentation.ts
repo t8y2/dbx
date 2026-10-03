@@ -199,14 +199,24 @@ export function tabDisplayTitle(tab: QueryTab, t: Translate): string {
   }
   if (tab.mode === "data" && tab.tableMeta?.tableName) {
     if (compact) return tab.tableMeta.tableName;
-    const suffix = tab.tableMeta.schema && tab.tableMeta.schema !== tab.database ? `@${database}.${tab.tableMeta.schema}` : `@${database}`;
+    const schema = tab.tableMeta.schema || tab.schema;
+    const suffix = schema && schema !== tab.database ? `@${database}.${schema}` : `@${database}`;
     return `${tab.tableMeta.tableName}${suffix}`;
   }
   if (tab.mode === "query") {
     const title = queryTitle(tab);
     if (title) return title;
     if (compact) return connectionDisplayName(tab.connectionId);
-    return `${connectionDisplayName(tab.connectionId)}@${database}`;
+    const hasDatabase = Boolean(tab.database?.trim());
+    const schema = tab.schema?.trim();
+    let scope = database;
+    if (schema && schema !== tab.database) {
+      scope = hasDatabase ? `${database}.${schema}` : schema;
+    }
+    if (tab.catalog?.trim()) {
+      scope = `${tab.catalog.trim()}.${scope}`;
+    }
+    return `${connectionDisplayName(tab.connectionId)}@${scope}`;
   }
   if (tab.mode === "mongo" && tab.sql) {
     if (compact) return tab.sql;
@@ -307,6 +317,10 @@ export function tabTooltipLines(tab: QueryTab, t: Translate): { label: string; v
     ...(groupName ? [{ label: t("tabs.tooltipGroup"), value: groupName }] : []),
     ...(showDatabase ? [{ label: t("tabs.tooltipDatabase"), value: databaseDisplayNameForTab(tab.connectionId, database, t) }] : []),
   ];
+  const schema = tab.schema?.trim() || (tab.mode === "objects" ? tab.objectBrowser?.schema?.trim() : tab.tableMeta?.schema?.trim());
+  if (schema && (tab.mode === "objects" || schema !== database)) {
+    lines.push({ label: t("tabs.tooltipSchema"), value: schema });
+  }
   if (tab.mode === "query" && queryTitle(tab)) {
     lines.unshift({ label: t("tabs.tooltipTitle"), value: tab.title });
   }
@@ -335,9 +349,6 @@ export function tabTooltipLines(tab: QueryTab, t: Translate): { label: string; v
   }
   if (tab.mode === "hbase" && tab.sql) {
     lines.push({ label: t("tabs.tooltipTable"), value: tab.sql });
-  }
-  if (tab.mode === "objects" && tab.objectBrowser?.schema) {
-    lines.push({ label: t("tabs.tooltipSchema"), value: tab.objectBrowser.schema });
   }
   return lines;
 }

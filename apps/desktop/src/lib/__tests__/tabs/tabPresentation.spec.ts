@@ -33,6 +33,7 @@ const translations: Record<string, string> = {
   "tabs.tooltipConnection": "Connection:",
   "tabs.tooltipGroup": "Group:",
   "tabs.tooltipDatabase": "Database:",
+  "tabs.tooltipSchema": "Schema:",
   "tabs.tooltipTable": "Table:",
   "tabs.tooltipTableComment": "Table Comment:",
   "tree.events": "Events",
@@ -485,6 +486,36 @@ describe("tab group presentation", () => {
     settings.editorSettings.compactTabTitle = true;
     expect(tabDisplayTitle(queryTab({ mode: "database-search", database: "shop" }), translate)).toBe("Search Database");
     settings.editorSettings.compactTabTitle = false;
+  });
+
+  it("formats query tab titles with database, schema, and catalog scope", () => {
+    const store = useConnectionStore();
+    store.connections = [
+      { id: "conn-1", name: "PostgreSQL", db_type: "postgres", database: "app" } as ConnectionConfig,
+      { id: "conn-oracle", name: "Oracle", db_type: "oracle", database: "" } as ConnectionConfig,
+      { id: "conn-doris", name: "Doris", db_type: "doris", database: "analytics" } as ConnectionConfig,
+    ];
+
+    expect(tabDisplayTitle(queryTab({ connectionId: "conn-1", database: "app", schema: "public" }), translate)).toBe("PostgreSQL@app.public");
+    expect(tabDisplayTitle(queryTab({ connectionId: "conn-1", database: "app", schema: "tenant_a" }), translate)).toBe("PostgreSQL@app.tenant_a");
+    expect(tabDisplayTitle(queryTab({ connectionId: "conn-oracle", database: "", schema: "SCOTT" }), translate)).toBe("Oracle@SCOTT");
+    expect(tabDisplayTitle(queryTab({ connectionId: "conn-doris", database: "analytics", catalog: "internal", schema: "dim" }), translate)).toBe("Doris@internal.analytics.dim");
+    expect(tabDisplayTitle(queryTab({ connectionId: "conn-1", database: "app", schema: "app" }), translate)).toBe("PostgreSQL@app");
+  });
+
+  it("includes schema in tab tooltips when schema is present", () => {
+    const store = useConnectionStore();
+    store.connections = [{ id: "conn-1", name: "PostgreSQL", db_type: "postgres", database: "app" } as ConnectionConfig];
+    store.sidebarLayout = { groups: [], order: [{ type: "connection", id: "conn-1" }] };
+
+    const queryTabLines = tabTooltipLines(queryTab({ connectionId: "conn-1", database: "app", schema: "public" }), translate);
+    expect(queryTabLines).toContainEqual({ label: "Schema:", value: "public" });
+
+    const dataTabLines = tabTooltipLines(queryTab({ connectionId: "conn-1", mode: "data", database: "app", tableMeta: { schema: "analytics", tableName: "events", columns: [], primaryKeys: [] } }), translate);
+    expect(dataTabLines).toContainEqual({ label: "Schema:", value: "analytics" });
+
+    const sameSchemaLines = tabTooltipLines(queryTab({ connectionId: "conn-1", database: "app", schema: "app" }), translate);
+    expect(sameSchemaLines.some((line) => line.label === "Schema:")).toBe(false);
   });
 
   it("uses the live database and branch context for Dolt version control tabs", () => {

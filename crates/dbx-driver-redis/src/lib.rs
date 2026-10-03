@@ -2134,7 +2134,7 @@ pub fn classify_command(command: &str) -> RedisCommandSafety {
         | "ZREM" | "ZPOPMAX" | "ZPOPMIN" | "ZMPOP" | "BZMPOP" | "BZPOPMAX" | "BZPOPMIN" | "ZREMRANGEBYLEX"
         | "ZREMRANGEBYRANK" | "ZREMRANGEBYSCORE" | "XDEL" | "XTRIM" | "MOVE" | "SORT" | "SDIFFSTORE"
         | "SINTERSTORE" | "SUNIONSTORE" | "ZDIFFSTORE" | "ZINTERSTORE" | "ZRANGESTORE" | "ZUNIONSTORE" | "PFMERGE"
-        | "GEOSEARCHSTORE" | "FLUSHDB" => RedisCommandSafety::Confirm,
+        | "GEOSEARCHSTORE" => RedisCommandSafety::Confirm,
         "APPEND" | "BITFIELD" | "BITOP" | "COPY" | "DECR" | "DECRBY" | "GEOADD" | "GEORADIUS" | "GEORADIUSBYMEMBER"
         | "GETEX" | "GETSET" | "INCR" | "INCRBY" | "INCRBYFLOAT" | "SET" | "SETEX" | "PSETEX" | "SETNX"
         | "SETRANGE" | "MSET" | "MSETNX" | "PERSIST" | "HSET" | "HMSET" | "HINCRBY" | "HINCRBYFLOAT" | "HSETNX"
@@ -7686,7 +7686,7 @@ mod tests {
         assert_eq!(classify_command("GETEX"), RedisCommandSafety::Write);
         assert_eq!(classify_command("XREADGROUP"), RedisCommandSafety::Write);
         assert_eq!(classify_command("del"), RedisCommandSafety::Confirm);
-        assert_eq!(classify_command("flushdb"), RedisCommandSafety::Confirm);
+        assert_eq!(classify_command("flushdb"), RedisCommandSafety::Blocked);
         assert_eq!(classify_command("JSON.DEL"), RedisCommandSafety::Confirm);
         assert_eq!(classify_command("JSON.FORGET"), RedisCommandSafety::Confirm);
         assert_eq!(classify_command("JSON.CLEAR"), RedisCommandSafety::Confirm);

@@ -1227,6 +1227,19 @@ describe("useDataGridExport prepared row statements", () => {
     expect(vi.mocked(extractDataGridSelection).mock.calls.map(([request]) => request.options)).toEqual([extractorOptions, extractorOptions, extractorOptions]);
   });
 
+  it("sends unsaved INSERT policies to preview without changing the saved copy options", async () => {
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [0, 1], columns: ["id", "name"], rows: [[1, "Ada"]] };
+    const saved = structuredClone(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS);
+    const draft = { ...saved, sql: { ...saved.sql, quoteIdentifiers: false, temporalFormat: "string" as const } };
+    const state = createExportState(editableTable, ["id", "name"], matrix, [1, "Ada"], undefined, matrix.rows, [], saved);
+
+    await state.previewWithPreference("sql-inserts", draft);
+    expect(vi.mocked(extractDataGridSelection).mock.lastCall?.[0].options.sql).toEqual(draft.sql);
+    expect(copyToClipboard).not.toHaveBeenCalled();
+    await state.copyWithExtractor("sql-inserts");
+    expect(vi.mocked(extractDataGridSelection).mock.lastCall?.[0].options.sql).toEqual(saved.sql);
+  });
+
   it("does not report success when an extractor export save is cancelled", async () => {
     const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [1], columns: ["name"], rows: [["Ada"]] };
     vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: '[{"name":"Ada"}]', mimeType: "application/json", fileExtension: "json", rowCount: 1, columnCount: 1 });

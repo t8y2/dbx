@@ -536,6 +536,18 @@ pub fn build_data_grid_copy_update_statements(options: DataGridCopyUpdateStateme
 }
 
 pub fn build_data_grid_copy_insert_statement(options: DataGridCopyInsertStatementOptions) -> Option<String> {
+    build_data_grid_copy_insert_statement_with_formatters(
+        options,
+        |reference| reference,
+        format_grid_copy_insert_sql_literal,
+    )
+}
+
+pub(crate) fn build_data_grid_copy_insert_statement_with_formatters(
+    options: DataGridCopyInsertStatementOptions,
+    format_reference: impl Fn(String) -> String,
+    format_literal: impl Fn(&Value, Option<DatabaseType>, Option<&DataGridColumnInfo>, Option<&str>) -> String,
+) -> Option<String> {
     let save_columns = effective_copy_columns(options.source_columns.as_deref(), &options.columns);
     let column_info = options.table_meta.as_ref().and_then(|meta| meta.columns.as_deref()).unwrap_or(&[]);
     let primary_key_set: Vec<String> = options
@@ -640,10 +652,15 @@ pub fn build_data_grid_copy_insert_statement(options: DataGridCopyInsertStatemen
             )
         },
     );
+    let table = format_reference(table);
     let columns = insert_columns
         .iter()
         .map(|(_, index, _)| {
-            data_grid_identifier(options.database_type, &options.columns[*index], options.identifier_quote.as_deref())
+            format_reference(data_grid_identifier(
+                options.database_type,
+                &options.columns[*index],
+                options.identifier_quote.as_deref(),
+            ))
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -656,7 +673,7 @@ pub fn build_data_grid_copy_insert_statement(options: DataGridCopyInsertStatemen
                 insert_columns
                     .iter()
                     .map(|(_, index, info)| {
-                        format_grid_copy_insert_sql_literal(
+                        format_literal(
                             row.get(*index).unwrap_or(&Value::Null),
                             options.database_type,
                             info.as_ref(),
@@ -2392,7 +2409,7 @@ pub fn normalize_data_grid_save_error(database_type: Option<DatabaseType>, error
     error.to_string()
 }
 
-fn format_grid_copy_insert_sql_literal(
+pub(crate) fn format_grid_copy_insert_sql_literal(
     value: &Value,
     database_type: Option<DatabaseType>,
     column_info: Option<&DataGridColumnInfo>,

@@ -16,19 +16,21 @@ use std::fmt::Write as _;
 use std::fs::File;
 use std::future::Future;
 use std::io::BufReader;
+use std::net::IpAddr;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
-use tokio_postgres::config::SslMode;
+use tokio_postgres::config::{Host, LoadBalanceHosts, SslMode};
 use tokio_postgres::tls::{MakeTlsConnect, TlsConnect};
 use tokio_postgres::types::{FromSql, Kind, Type};
 use tokio_postgres::{AsyncMessage, NoTls, Row, SimpleQueryMessage, Socket};
 use tokio_util::sync::CancellationToken;
 
 use super::file_validator::validate_file_path;
+use super::postgres_connect_race::race_staggered;
 use crate::execution::{await_stream_with_progress_timeout, DbOperationBudget, StreamProgressClock};
 use crate::models::connection::DatabaseType;
 use crate::sql::starts_with_executable_sql_keyword;
@@ -2556,11 +2558,52 @@ fn postgres_client_keys() -> &'static Mutex<PostgresClientKeys> {
     KEYS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// The single TCP host worth racing, when a hostname may resolve to several
+/// addresses. Configs that pin addresses (`hostaddr`), list several hosts,
+/// use unix sockets, or opt into random load balancing keep the crate's
+/// built-in sequential connection behavior.
+fn raceable_postgres_host(pg_config: &tokio_postgres::Config) -> Option<(String, u16)> {
+    if pg_config.get_load_balance_hosts() == LoadBalanceHosts::Random {
+        return None;
+    }
+    if pg_config.get_hosts().len() != 1 || !pg_config.get_hostaddrs().is_empty() {
+        return None;
+    }
+    let Host::Tcp(hostname) = pg_config.get_hosts().first()? else {
+        return None;
+    };
+    let port = pg_config.get_ports().first().copied().unwrap_or(5432);
+    Some((hostname.clone(), port))
+}
+
+/// Resolves the raceable host and returns its distinct addresses in
+/// getaddrinfo order. `None` when resolution fails or yields fewer than two
+/// distinct addresses — in both cases the crate's sequential connect path is
+/// equivalent anyway.
+async fn raceable_postgres_addresses(hostname: &str, port: u16) -> Option<Vec<IpAddr>> {
+    let resolved = tokio::net::lookup_host((hostname, port)).await.ok()?;
+    let mut addresses: Vec<IpAddr> = Vec::new();
+    for addr in resolved {
+        let ip = addr.ip();
+        if !addresses.contains(&ip) {
+            addresses.push(ip);
+        }
+    }
+    (addresses.len() >= 2).then_some(addresses)
+}
+
 /// Establishes connections like deadpool's `ConfigConnectImpl`, but drives
 /// each connection with a task that captures `NoticeResponse` messages
 /// (`RAISE NOTICE`/`WARNING`, etc.) into a per-backend buffer instead of
 /// discarding them. Query execution drains the buffer so notices are
 /// attached to the `QueryResult` of the statement that raised them.
+///
+/// When the host resolves to several addresses, the attempts are raced with
+/// RFC 8305-style staggering instead of tried sequentially, so one unreachable
+/// address (for example an IPv6 route blackholed by NAT64) can no longer
+/// consume the whole connect timeout before a reachable address is tried
+/// (#10955). Each attempt pins one resolved address via `hostaddr` while
+/// keeping the hostname for TLS identity checks.
 struct NoticeCapturingConnect<T>
 where
     T: MakeTlsConnect<Socket> + Clone + Sync + Send + 'static,
@@ -2587,7 +2630,36 @@ where
         let tls = self.tls.clone();
         let pg_config = pg_config.clone();
         Box::pin(async move {
-            let (client, mut connection) = pg_config.connect(tls).await?;
+            let connected = match raceable_postgres_host(&pg_config) {
+                Some((hostname, port)) => match raceable_postgres_addresses(&hostname, port).await {
+                    Some(addresses) => {
+                        log::info!(
+                            "[postgres] {hostname} resolves to {} addresses; racing them (happy eyeballs)",
+                            addresses.len()
+                        );
+                        match race_staggered(addresses, |ip| {
+                            let mut attempt = pg_config.clone();
+                            attempt.hostaddr(ip);
+                            let tls = tls.clone();
+                            Box::pin(async move {
+                                let (client, connection) = attempt.connect(tls).await?;
+                                Ok((client, connection))
+                            })
+                        })
+                        .await
+                        {
+                            Ok((ip, connected)) => {
+                                log::info!("[postgres] connected to {hostname} via {ip}");
+                                connected
+                            }
+                            Err(err) => return Err(err),
+                        }
+                    }
+                    None => pg_config.connect(tls).await?,
+                },
+                None => pg_config.connect(tls).await?,
+            };
+            let (client, mut connection) = connected;
             // No query can complete before the connection is being driven, so
             // the notice buffer is handed to the driver task through a slot
             // that is filled once the backend PID is known.
@@ -12975,6 +13047,58 @@ mod tests {
             inject_postgres_keepalive_params(url),
             "postgres://localhost/app?sslmode=require&keepalives=1&keepalives_idle=30&keepalives_interval=10&keepalives_retries=3#read-only"
         );
+    }
+
+    #[test]
+    fn raceable_postgres_host_accepts_a_single_tcp_host() {
+        let mut config = tokio_postgres::Config::new();
+        config.host("db.example.internal");
+
+        assert_eq!(raceable_postgres_host(&config), Some(("db.example.internal".to_string(), 5432)));
+
+        let mut with_port = tokio_postgres::Config::new();
+        with_port.host("db.example.internal").port(5433);
+        assert_eq!(raceable_postgres_host(&with_port), Some(("db.example.internal".to_string(), 5433)));
+    }
+
+    #[test]
+    fn raceable_postgres_host_skips_multi_host_configs() {
+        let mut config = tokio_postgres::Config::new();
+        config.host("primary.example.internal").host("replica.example.internal");
+
+        assert_eq!(raceable_postgres_host(&config), None);
+    }
+
+    #[test]
+    fn raceable_postgres_host_skips_pinned_hostaddrs() {
+        let mut config = tokio_postgres::Config::new();
+        config.host("db.example.internal").hostaddr(std::net::IpAddr::from([10, 0, 0, 1]));
+
+        assert_eq!(raceable_postgres_host(&config), None);
+    }
+
+    #[test]
+    fn raceable_postgres_host_skips_random_load_balancing() {
+        let mut config = tokio_postgres::Config::new();
+        config.host("db.example.internal").load_balance_hosts(LoadBalanceHosts::Random);
+
+        assert_eq!(raceable_postgres_host(&config), None);
+    }
+
+    #[test]
+    fn raceable_postgres_host_skips_unix_socket_hosts() {
+        let mut config = tokio_postgres::Config::new();
+        config.host("/var/run/postgresql");
+
+        // A unix socket path is a Host::Unix entry on unix and an unparseable
+        // TCP host elsewhere; neither may reach the racing path.
+        let raceable = raceable_postgres_host(&config).map(|(host, _)| host);
+        #[cfg(unix)]
+        assert_eq!(raceable, None);
+        #[cfg(not(unix))]
+        {
+            let _ = raceable;
+        }
     }
 
     #[test]

@@ -1164,7 +1164,7 @@ onBeforeUnmount(() => {
                   type="button"
                   class="inline-flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-background hover:text-foreground"
                   :class="marketplaceViewMode === 'grid' ? 'bg-background text-foreground shadow-sm' : ''"
-                  :aria-label="t('structure.viewGrid')"
+                  :aria-label="t('marketplace.viewGrid')"
                   :aria-pressed="marketplaceViewMode === 'grid'"
                   @click="marketplaceViewMode = 'grid'"
                 >
@@ -1174,7 +1174,7 @@ onBeforeUnmount(() => {
                   type="button"
                   class="inline-flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-background hover:text-foreground"
                   :class="marketplaceViewMode === 'list' ? 'bg-background text-foreground shadow-sm' : ''"
-                  :aria-label="t('structure.viewList')"
+                  :aria-label="t('marketplace.viewList')"
                   :aria-pressed="marketplaceViewMode === 'list'"
                   @click="marketplaceViewMode = 'list'"
                 >

@@ -145,7 +145,7 @@ import { copyDisplayPathForTreeNode, copyNameForTreeNode, isDirectNavigationTree
 import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import { mongoCollectionTableTypeFromNode, mongoCreateDatabasePreview, mongoDropIndexFailureCount } from "@/lib/sidebar/mongoCollectionMutation";
 import { dataTabOpenModeFromTreeClick, type DataTabOpenMode } from "@/lib/sidebar/dataTabOpenPolicy";
-import { isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isModRShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
+import { isCopySidebarSelectionShortcut, isDisconnectSidebarConnectionShortcut, isEditSidebarConnectionShortcut, isModRShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
 import { handleSidebarTreeDeleteShortcut } from "@/lib/sidebar/sidebarTreeDeleteShortcut";
 import { dataTableDoubleClickAction } from "@/lib/tabs/dataTabActivation";
 import { attachedDatabaseNameFromPath, buildCreateDatabaseSql, buildDuckDbAttachDatabaseSql, buildSqliteAttachDatabaseSql, supportsCreateDatabaseCharset, supportsCreateDatabaseLocale, uniqueAttachedDatabaseName } from "@/lib/database/createDatabaseSql";
@@ -1266,6 +1266,12 @@ function onKeydown(event: KeyboardEvent) {
     event.stopPropagation();
     return;
   }
+  if (isDisconnectConnectionShortcut(event)) {
+    if (!requestDisconnectSelectedConnection()) return;
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
   if (isSidebarTreeArrowKey(event) && handleSidebarTreeArrowKey(event)) {
     event.preventDefault();
     event.stopPropagation();
@@ -1332,6 +1338,10 @@ function handleSidebarTreeArrowKey(event: KeyboardEvent): boolean {
 
 function isEditConnectionShortcut(event: KeyboardEvent): boolean {
   return isEditSidebarConnectionShortcut(event, settingsStore.editorSettings.shortcuts);
+}
+
+function isDisconnectConnectionShortcut(event: KeyboardEvent): boolean {
+  return isDisconnectSidebarConnectionShortcut(event, settingsStore.editorSettings.shortcuts);
 }
 
 function isCopyTreeSelectionShortcut(event: KeyboardEvent): boolean {
@@ -1527,6 +1537,18 @@ function requestEditSelectedConnection(): boolean {
   if (!editTarget) return false;
   connectionStore.startEditing(editTarget.connectionId);
   return true;
+}
+
+function requestDisconnectSelectedConnection(): boolean {
+  if (canDisconnectConnection()) {
+    void disconnectConnection();
+    return true;
+  }
+  if (canDisconnectConnectionGroup()) {
+    void disconnectConnectionGroup();
+    return true;
+  }
+  return false;
 }
 
 function requestDeleteSelectedNode(): boolean {
@@ -5484,6 +5506,8 @@ const shortcutOpenDataInNewTab = computed(() => settingsStore.editorSettings.sho
 
 const shortcutEditConnection = computed(() => settingsStore.editorSettings.shortcuts.editSidebarConnection);
 
+const shortcutDisconnectConnection = computed(() => settingsStore.editorSettings.shortcuts.disconnectSidebarConnection);
+
 const shortcutRename = "F2";
 
 const shortcutRefresh = "F5";
@@ -5624,7 +5648,7 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
     if (isConnecting.value) {
       items.push({ label: t("connection.cancelConnecting"), action: cancelConnectionAttempt, icon: X });
     } else if (canDisconnectConnection()) {
-      items.push({ label: connectionDisconnectMenuLabel(), action: disconnectConnection, icon: Unplug });
+      items.push({ label: connectionDisconnectMenuLabel(), action: disconnectConnection, icon: Unplug, shortcut: shortcutDisconnectConnection.value });
       // save_password=false 且本次运行期已输入密码：提供"断开并忘记本次密码"，
       // 清除会话凭据后下次连接需重新输入。
       if (canForgetSessionCredential()) {
@@ -5816,6 +5840,7 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
       action: disconnectConnectionGroup,
       icon: Unplug,
       disabled: !canDisconnectConnectionGroup(),
+      shortcut: shortcutDisconnectConnection.value,
     });
     items.push({ label: "", separator: true });
     items.push({

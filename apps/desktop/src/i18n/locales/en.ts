@@ -8871,6 +8871,7 @@ export default {
     shortcutCopySidebarSelection: "Copy sidebar selection",
     shortcutPasteSidebarSelection: "Paste into sidebar",
     shortcutEditSidebarConnection: "Edit sidebar connection",
+    shortcutDisconnectSidebarConnection: "Disconnect sidebar connection",
     shortcutOpenDataInNewTab: "Open data in new tab (mouse click)",
     shortcutViewTableDdl: "View table DDL",
     shortcutSendSelectionToAi: "Send selection to AI",

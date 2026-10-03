@@ -8,6 +8,7 @@ import {
   isCloseOtherTabsShortcut,
   isCloseTabShortcut,
   isCopySidebarSelectionShortcut,
+  isDisconnectSidebarConnectionShortcut,
   isExecuteSqlShortcut,
   isEditSidebarConnectionShortcut,
   isFocusSearchShortcut,
@@ -456,11 +457,14 @@ test("matches configurable sidebar shortcuts", () => {
   assert.equal(isCopySidebarSelectionShortcut({ key: "c", metaKey: true }), true);
   assert.equal(isPasteSidebarSelectionShortcut({ key: "v", ctrlKey: true }), true);
   assert.equal(isEditSidebarConnectionShortcut({ key: "e", metaKey: true }), true);
+  assert.equal(isDisconnectSidebarConnectionShortcut({ key: "e", metaKey: true, shiftKey: true }), true);
+  assert.equal(isDisconnectSidebarConnectionShortcut({ key: "e", ctrlKey: true, shiftKey: true }), true);
 
   const shortcuts = {
     copySidebarSelection: "Alt+C",
     pasteSidebarSelection: "Alt+V",
     editSidebarConnection: "Shift+Mod+E",
+    disconnectSidebarConnection: "Alt+D",
   } as any;
 
   assert.equal(isCopySidebarSelectionShortcut({ key: "c", metaKey: true }, shortcuts), false);
@@ -468,4 +472,6 @@ test("matches configurable sidebar shortcuts", () => {
   assert.equal(isPasteSidebarSelectionShortcut({ key: "v", altKey: true }, shortcuts), true);
   assert.equal(isEditSidebarConnectionShortcut({ key: "e", metaKey: true }, shortcuts), false);
   assert.equal(isEditSidebarConnectionShortcut({ key: "e", ctrlKey: true, shiftKey: true }, shortcuts), true);
+  assert.equal(isDisconnectSidebarConnectionShortcut({ key: "e", metaKey: true, shiftKey: true }, shortcuts), false);
+  assert.equal(isDisconnectSidebarConnectionShortcut({ key: "d", altKey: true }, shortcuts), true);
 });

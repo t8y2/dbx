@@ -7272,6 +7272,7 @@ export default withEnglishFallback({
     shortcutCopySidebarSelection: "複製側邊欄選取項",
     shortcutPasteSidebarSelection: "貼到側邊欄",
     shortcutEditSidebarConnection: "編輯側邊欄連線",
+    shortcutDisconnectSidebarConnection: "中斷側邊欄連線",
     shortcutOpenDataInNewTab: "在新資料分頁中開啟（滑鼠點擊）",
     shortcutViewTableDdl: "檢視資料表 DDL",
     shortcutSendSelectionToAi: "傳送選取程式碼至 AI",

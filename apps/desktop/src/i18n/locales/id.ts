@@ -8705,6 +8705,7 @@ export default withEnglishFallback({
     shortcutCopySidebarSelection: "Salin seleksi bilah sisi",
     shortcutPasteSidebarSelection: "Tempel ke bilah sisi",
     shortcutEditSidebarConnection: "Edit koneksi bilah sisi",
+    shortcutDisconnectSidebarConnection: "Putuskan koneksi bilah sisi",
     shortcutOpenDataInNewTab: "Buka data di tab baru (klik mouse)",
     shortcutViewTableDdl: "Lihat DDL tabel",
     shortcutSendSelectionToAi: "Kirim seleksi ke AI",

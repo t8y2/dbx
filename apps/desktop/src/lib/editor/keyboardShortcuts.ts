@@ -321,6 +321,10 @@ export function isEditSidebarConnectionShortcut(event: ShortcutLikeEvent, shortc
   return matchesShortcut(event, actionShortcut("editSidebarConnection", shortcuts));
 }
 
+export function isDisconnectSidebarConnectionShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("disconnectSidebarConnection", shortcuts));
+}
+
 export function isViewTableDdlShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("viewTableDdl", shortcuts));
 }

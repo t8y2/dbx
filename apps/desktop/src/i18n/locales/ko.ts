@@ -7757,6 +7757,7 @@ export default withEnglishFallback({
     shortcutCopySidebarSelection: "사이드바 선택 복사",
     shortcutPasteSidebarSelection: "사이드바에 붙여넣기",
     shortcutEditSidebarConnection: "사이드바 연결 편집",
+    shortcutDisconnectSidebarConnection: "사이드바 연결 끊기",
     shortcutOpenDataInNewTab: "새 탭에서 데이터 열기 (마우스 클릭)",
     shortcutViewTableDdl: "테이블 DDL 보기",
     shortcutSendSelectionToAi: "선택 영역을 AI로 보내기",

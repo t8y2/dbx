@@ -7890,6 +7890,7 @@ export default withEnglishFallback({
     shortcutCopySidebarSelection: "Kenar çubuğu seçimini kopyala",
     shortcutPasteSidebarSelection: "Kenar çubuğuna yapıştır",
     shortcutEditSidebarConnection: "Kenar çubuğu bağlantısını düzenle",
+    shortcutDisconnectSidebarConnection: "Kenar çubuğu bağlantısını kes",
     shortcutOpenDataInNewTab: "Verileri yeni sekmede aç (fare tıklaması)",
     shortcutViewTableDdl: "Tablo DDL'ini görüntüle",
     shortcutSendSelectionToAi: "Seçimi yapay zekâya gönder",

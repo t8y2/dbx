@@ -43,7 +43,7 @@ describe("shortcutRegistry editor actions", () => {
     "exPasteSqlInCondition",
     "toggleFold",
   ];
-  const sidebarShortcutActionIds: ShortcutActionId[] = ["copySidebarSelection", "pasteSidebarSelection", "editSidebarConnection", "viewTableDdl"];
+  const sidebarShortcutActionIds: ShortcutActionId[] = ["copySidebarSelection", "pasteSidebarSelection", "editSidebarConnection", "disconnectSidebarConnection", "viewTableDdl"];
 
   it("registers pagination navigation as unassigned grid shortcuts", () => {
     const paginationActions = [

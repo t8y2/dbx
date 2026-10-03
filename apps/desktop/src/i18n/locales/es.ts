@@ -8205,6 +8205,7 @@ export default withEnglishFallback({
     shortcutCopySidebarSelection: "Copiar selección de la barra lateral",
     shortcutPasteSidebarSelection: "Pegar en la barra lateral",
     shortcutEditSidebarConnection: "Editar conexión de la barra lateral",
+    shortcutDisconnectSidebarConnection: "Desconectar conexión de la barra lateral",
     shortcutOpenDataInNewTab: "Abrir datos en una pestaña nueva (clic del ratón)",
     shortcutViewTableDdl: "Ver DDL de la tabla",
     shortcutSendSelectionToAi: "Enviar selección a IA",

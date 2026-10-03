@@ -8837,6 +8837,7 @@ export default withEnglishFallback({
     shortcutCopySidebarSelection: "复制侧边栏选中项",
     shortcutPasteSidebarSelection: "粘贴到侧边栏",
     shortcutEditSidebarConnection: "编辑侧边栏连接",
+    shortcutDisconnectSidebarConnection: "断开侧边栏连接",
     shortcutOpenDataInNewTab: "在新数据标签页中打开（鼠标点击）",
     shortcutViewTableDdl: "查看表 DDL",
     shortcutSendSelectionToAi: "发送选中代码到 AI",

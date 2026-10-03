@@ -10,7 +10,7 @@ default = []
 test-support = []
 
 [dependencies]
-dbx-platform = { path = "../dbx-platform", features = ["host-prompts"] }
+dbx-platform = { path = "../dbx-platform", features = ["host-prompts", "downloads"] }
 dbx-types = { path = "../dbx-types", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }

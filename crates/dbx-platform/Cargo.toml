@@ -14,9 +14,12 @@ downloads = ["dep:reqwest", "dep:futures", "dep:serde"]
 [dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "socks"], optional = true }
 futures = { version = "0.3", optional = true }
-tokio = { version = "1", features = ["process"] }
+tokio = { version = "1", features = ["process", "time"] }
 serde = { version = "1.0", features = ["derive"], optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt"] }
 
 [target.'cfg(all(unix, not(target_os = "redox")))'.dependencies]
 nix = { version = "0.31.3", features = ["user"] }

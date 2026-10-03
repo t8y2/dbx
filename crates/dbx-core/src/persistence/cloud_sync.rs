@@ -3810,6 +3810,7 @@ mod tests {
                     ssh_agent_sock_path: String::new(),
                     auth_method: "password".to_string(),
                     allow_exec_channel_proxy: false,
+                    proxy_command: String::new(),
                 }),
                 TransportLayerConfig::HttpTunnel(crate::models::connection::HttpTunnelConfig {
                     profile_id: String::new(),
@@ -5418,6 +5419,7 @@ mod tests {
             ssh_agent_sock_path: String::new(),
             auth_method: "password".to_string(),
             allow_exec_channel_proxy: false,
+            proxy_command: String::new(),
             profile_id: String::new(),
         });
         storage.save_tunnel_profiles(std::slice::from_ref(&profile)).await.unwrap();

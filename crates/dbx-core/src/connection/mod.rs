@@ -3490,6 +3490,7 @@ impl AppState {
                             1,
                             false,
                             leaf.allow_exec_channel_proxy,
+                            &leaf.proxy_command,
                         )
                         .await
                         .map(|_| ())
@@ -8536,6 +8537,7 @@ mod tests {
             ssh_agent_sock_path: String::new(),
             auth_method: "password".to_string(),
             allow_exec_channel_proxy: false,
+            proxy_command: String::new(),
             profile_id: String::new(),
         });
         assert!(state.test_tunnel_profile(&ssh).await.is_err());
@@ -11216,6 +11218,7 @@ for line in sys.stdin:
             ssh_agent_sock_path: String::new(),
             auth_method: String::new(),
             allow_exec_channel_proxy: false,
+            proxy_command: String::new(),
             profile_id: profile_id.to_string(),
         }
     }

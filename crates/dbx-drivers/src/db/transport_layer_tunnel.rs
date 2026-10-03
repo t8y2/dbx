@@ -200,6 +200,7 @@ async fn start_transport_layers_internal(
                             &resolved.auth_method,
                             effective_ssh_connect_timeout_secs(resolved.connect_timeout_secs),
                             resolved.allow_exec_channel_proxy,
+                            &resolved.proxy_command,
                         )
                         .await
                         .map_err(|err| format!("SSH layer {} failed: {err}", index + 1))?
@@ -226,6 +227,7 @@ async fn start_transport_layers_internal(
                             is_last && resolved.expose_lan,
                             resolved.allow_exec_channel_proxy,
                             if is_last { final_ssh_local_port } else { None },
+                            &resolved.proxy_command,
                         )
                         .await
                         .map_err(|err| format!("SSH layer {} failed: {err}", index + 1))?
@@ -411,6 +413,7 @@ mod tests {
             ssh_agent_sock_path: String::new(),
             auth_method: "password".to_string(),
             allow_exec_channel_proxy: false,
+            proxy_command: String::new(),
         })
     }
 

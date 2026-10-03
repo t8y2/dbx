@@ -406,6 +406,73 @@ function mongoShellNumberLongToExtendedJson(value: string): unknown {
   return match ? { $numberLong: match[2] } : value;
 }
 
+/**
+ * `NumberLong("-7")`, `NumberInt(3)`, `NumberDouble("1.5")`, `NumberDecimal("-12.5")`
+ * — the shell-style display text the collection grid renders typed BSON scalars with.
+ */
+const MONGO_SHELL_NUMBER_LITERAL_PATTERN = /^(?:NumberLong|NumberInt|NumberDouble|NumberDecimal)\(\s*(?:"([^"]*)"|'([^']*)'|([^()]*))\s*\)$/;
+const MONGO_NUMERIC_WRAPPER_KEYS: ReadonlySet<string> = new Set<string>(MONGO_EXTENDED_JSON_NUMERIC_TYPES.keys());
+
+function mongoNumericText(text: string): number | undefined {
+  const trimmed = text.trim();
+  if (!trimmed) return undefined;
+  const numeric = Number(trimmed);
+  return Number.isFinite(numeric) ? numeric : undefined;
+}
+
+function mongoShellNumericText(text: string): number | undefined {
+  const literal = MONGO_SHELL_NUMBER_LITERAL_PATTERN.exec(text.trim());
+  if (!literal) return mongoNumericText(text);
+  return mongoNumericText(literal[1] ?? literal[2] ?? literal[3] ?? "");
+}
+
+function mongoJsonNumericValue(json: string): number | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed === "number") return Number.isFinite(parsed) ? parsed : undefined;
+  if (typeof parsed === "string") return mongoShellNumericText(parsed);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+  const entries = Object.entries(parsed as Record<string, unknown>);
+  if (entries.length !== 1) return undefined;
+  const [key, inner] = entries[0]!;
+  if (!MONGO_NUMERIC_WRAPPER_KEYS.has(key)) return undefined;
+  if (typeof inner === "number") return Number.isFinite(inner) ? inner : undefined;
+  return typeof inner === "string" ? mongoNumericText(inner) : undefined;
+}
+
+/**
+ * The number a collection-grid cell contributes to a selection total, or
+ * undefined when it is not a number.
+ *
+ * BSON keeps numeric types the JSON grid cannot express: `int32` / `int64` /
+ * `decimal128` values arrive as extended-JSON wrappers or shell literals
+ * (`NumberLong("-7")`), so plain `Number(...)` coercion rejects them. Without
+ * this, a column whose plain doubles are counted while its wrapped values are
+ * skipped reports a total built from only part of the column — the dropped part
+ * being whichever type the rest of the column happens not to use, commonly the
+ * negative entries.
+ *
+ * Shell literals are read exactly as the grid displays them, so a BSON string
+ * whose text happens to be `NumberLong("-7")` contributes -7; that string is
+ * indistinguishable from a typed Int64 once it reaches a cell.
+ */
+export function mongoDocumentGridNumericValue(value: unknown): number | undefined {
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  if (typeof value !== "string") return undefined;
+  if (value === MONGO_DOCUMENT_GRID_NULL) return undefined;
+  // Values in the reserved namespace are escaped BSON strings: only plain
+  // numeric text counts, never a shell literal that was stored as text.
+  const escaped = mongoDocumentGridEscapedString(value);
+  if (escaped !== undefined) return mongoNumericText(escaped);
+  const json = mongoDocumentGridJson(value);
+  if (json !== undefined) return mongoJsonNumericValue(json);
+  return mongoShellNumericText(value);
+}
+
 export function buildMongoUpdateDocument(changes: Map<number, MongoInputValue>, columns: string[], originalDocument?: unknown): Record<string, unknown> {
   const setFields: Record<string, unknown> = {};
   const unsetFields: Record<string, unknown> = {};

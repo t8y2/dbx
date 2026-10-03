@@ -159,6 +159,22 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.queryEditabilityReason).toBeUndefined();
   }, 10_000);
 
+  it("falls back to the original SQL for non-Oracle databases when editability metadata exceeds the preflight budget", async () => {
+    // 慢元数据：列/索引加载永不在预算内返回，触发对所有数据库统一施加的 1s preflight 预算超时。
+    // 泛化前仅 Oracle/Xugu 有此预算，MySQL 等会被慢元数据阻塞到结果显示。
+    getColumns.mockReturnValue(deferred<never[]>().promise);
+    listIndexes.mockReturnValue(deferred<never[]>().promise);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+
+    await store.executeTabSql(tabId, "SELECT name FROM users");
+
+    // 预算超时后先出结果：执行原始 SQL、未注入隐藏主键（可编辑能力随后台加载补齐）。
+    expect(executeMulti).toHaveBeenCalledWith("mysql-1", "app", "SELECT name FROM users", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+  }, 10_000);
+
   it("appends the hidden primary key for Dameng tables whose columns keep the created case", async () => {
     // #10233: Dameng keeps the case an unquoted identifier was created with, so the
     // server reports `name` while the Oracle-family dialect handling folds the SQL

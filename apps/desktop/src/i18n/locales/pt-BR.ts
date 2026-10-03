@@ -366,6 +366,9 @@ export default withEnglishFallback({
     passwordChanged: "Senha alterada com sucesso",
     changePasswordFailed: "Falha ao alterar a senha",
     changePasswordDescription: "Digite sua senha atual e escolha uma nova",
+    logout: "Sair",
+    logoutDescription: "Encerrar a sessão atual e retornar à página de login",
+    logoutConfirm: "Tem certeza de que deseja sair?",
   },
   toolbar: {
     commitOutcomeUnknown: "O resultado do commit é desconhecido e a sessão não existe mais. Verifique os dados antes de executar o SQL novamente.",

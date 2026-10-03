@@ -26,6 +26,7 @@ import {
   GripVertical,
   HardDrive,
   Loader2,
+  LogOut,
   Moon,
   PackageSearch,
   Palette,
@@ -502,6 +503,7 @@ const emit = defineEmits<{
   "open-mcp-settings": [];
   "open-update-center": [];
   "ai-config-deep-link-handled": [];
+  logout: [];
 }>();
 
 const hasAnyUpdate = computed(() => Boolean(props.appUpdateAvailable || (props.driverUpdateCount || 0) > 0 || props.jdbcUpdateAvailable || props.mcpUpdateAvailable || (props.pluginUpdateCount || 0) > 0));
@@ -11326,6 +11328,19 @@ LIMIT 100;</pre
                 <p v-if="passwordMessage" class="text-xs" :class="passwordError ? 'text-destructive' : 'text-green-500'">
                   {{ passwordMessage }}
                 </p>
+              </div>
+
+              <div class="border-t border-border/60 pt-5 space-y-3">
+                <Label class="text-base">{{ t("auth.logout") }}</Label>
+                <p class="text-sm text-muted-foreground">
+                  {{ t("auth.logoutDescription") }}
+                </p>
+                <div>
+                  <Button variant="outline" class="gap-2 text-destructive hover:text-destructive" @click="emit('logout')">
+                    <LogOut class="h-4 w-4" />
+                    {{ t("auth.logout") }}
+                  </Button>
+                </div>
               </div>
             </section>
 

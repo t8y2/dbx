@@ -19,3 +19,13 @@ export async function checkStartupAuthentication(signal?: AbortSignal): Promise<
     setup_required: "setup_required" in result && result.setup_required === true,
   };
 }
+
+export async function logoutWeb(): Promise<void> {
+  const response = await fetch(apiUrl("/api/auth/logout"), {
+    method: "POST",
+    credentials: "same-origin",
+  });
+  if (!response.ok) {
+    throw new Error("AUTH_LOGOUT_FAILED");
+  }
+}

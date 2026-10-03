@@ -317,6 +317,9 @@ export default withEnglishFallback({
     passwordChanged: "Kata sandi berhasil diubah",
     changePasswordFailed: "Gagal mengubah kata sandi",
     changePasswordDescription: "Masukkan kata sandi Anda saat ini dan pilih yang baru",
+    logout: "Keluar",
+    logoutDescription: "Akhiri sesi saat ini dan kembali ke halaman masuk",
+    logoutConfirm: "Apakah Anda yakin ingin keluar?",
   },
   toolbar: {
     commitOutcomeUnknown: "Hasil commit tidak diketahui dan sesi sudah tidak ada lagi. Verifikasi data sebelum menjalankan SQL ini lagi.",

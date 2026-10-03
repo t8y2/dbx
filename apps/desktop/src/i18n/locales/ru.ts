@@ -348,6 +348,9 @@ export default withEnglishFallback({
     passwordChanged: "Пароль успешно изменён",
     changePasswordFailed: "Не удалось сменить пароль",
     changePasswordDescription: "Введите текущий пароль и выберите новый",
+    logout: "Выйти",
+    logoutDescription: "Завершить текущий сеанс и вернуться на страницу входа",
+    logoutConfirm: "Вы действительно хотите выйти?",
   },
   toolbar: {
     commitOutcomeUnknown: "Результат фиксации неизвестен, а сессия больше не существует. Проверьте данные перед повторным выполнением этого SQL.",

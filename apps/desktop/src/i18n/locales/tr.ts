@@ -202,6 +202,9 @@ export default withEnglishFallback({
     passwordChanged: "Parola başarıyla değiştirildi",
     changePasswordFailed: "Parola değiştirilemedi",
     changePasswordDescription: "Mevcut parolanızı girin ve yeni bir parola seçin",
+    logout: "Çıkış Yap",
+    logoutDescription: "Mevcut oturumu sonlandırın ve giriş sayfasına dönün",
+    logoutConfirm: "Çıkış yapmak istediğinizden emin misiniz?",
   },
   toolbar: {
     commitOutcomeUnknown: "Onaylama sonucu bilinmiyor ve oturum artık mevcut değil. SQL'i yeniden çalıştırmadan önce verileri doğrulayın.",

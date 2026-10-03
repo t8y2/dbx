@@ -315,6 +315,9 @@ export default withEnglishFallback({
     passwordChanged: "密码修改成功",
     changePasswordFailed: "密码修改失败",
     changePasswordDescription: "输入当前密码并设置新密码",
+    logout: "退出登录",
+    logoutDescription: "退出当前会话并返回登录页面",
+    logoutConfirm: "确定要退出登录吗？",
   },
   toolbar: {
     commitOutcomeUnknown: "提交结果未知，事务会话已不存在。请核对数据后再决定是否重新执行 SQL。",

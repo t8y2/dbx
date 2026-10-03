@@ -374,6 +374,9 @@ export default withEnglishFallback({
     passwordChanged: "비밀번호가 변경되었습니다",
     changePasswordFailed: "비밀번호 변경에 실패했습니다",
     changePasswordDescription: "현재 비밀번호를 입력하고 새 비밀번호를 선택하세요",
+    logout: "로그아웃",
+    logoutDescription: "현재 세션을 종료하고 로그인 페이지로 돌아갑니다",
+    logoutConfirm: "로그아웃하시겠습니까?",
   },
   toolbar: {
     commitOutcomeUnknown: "커밋 결과를 알 수 없고 세션이 더 이상 존재하지 않습니다. SQL을 다시 실행하기 전에 데이터를 확인하세요。",

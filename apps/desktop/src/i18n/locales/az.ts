@@ -202,6 +202,9 @@ export default withEnglishFallback({
     passwordChanged: "Parol uğurla dəyişdirildi",
     changePasswordFailed: "Parolu dəyişmək mümkün olmadı",
     changePasswordDescription: "Cari parolunuzu daxil edin və yeni parol seçin",
+    logout: "Çıxış",
+    logoutDescription: "Cari sessiyanı sonlandırın və giriş səhifəsinə qayıdın",
+    logoutConfirm: "Çıxış etmək istədiyinizdən əminsiniz?",
   },
   toolbar: {
     commitOutcomeUnknown: "Təsdiqləmə nəticəsi məlum deyil və sessiya artıq mövcud deyil. SQL-i yenidən icra etməzdən əvvəl məlumatları yoxlayın.",

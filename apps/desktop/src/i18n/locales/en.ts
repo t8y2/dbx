@@ -378,6 +378,9 @@ export default {
     passwordChanged: "Password changed successfully",
     changePasswordFailed: "Failed to change password",
     changePasswordDescription: "Enter your current password and choose a new one",
+    logout: "Log out",
+    logoutDescription: "End the current session and return to the login page",
+    logoutConfirm: "Are you sure you want to log out?",
   },
   toolbar: {
     commitOutcomeUnknown: "Commit result is unknown and the session no longer exists. Verify the data before running this SQL again.",

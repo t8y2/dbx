@@ -2,7 +2,7 @@
 import { computed, ref, onMounted, onBeforeUnmount, h, nextTick, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronsRight, DatabaseZap, FilePlus2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, CloudDownload, Package, PlugZap, FileDown, FolderTree, Pin, PinOff, CalendarClock, Waypoints } from "@lucide/vue";
+import { ChevronsRight, DatabaseZap, FilePlus2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, LogOut, CloudDownload, Package, PlugZap, FileDown, FolderTree, Pin, PinOff, CalendarClock, Waypoints } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import LightDropdown, { type LightDropdownItem } from "@/components/ui/LightDropdown.vue";
@@ -53,6 +53,7 @@ const props = defineProps<{
   hasConnections: boolean;
   canNewQuery: boolean;
   hasSqlFileConnections: boolean;
+  showLogout?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -75,6 +76,7 @@ const emit = defineEmits<{
   "open-data-compare": [];
   "open-backups": [];
   "open-mcp-settings": [];
+  logout: [];
 }>();
 
 const { t } = useI18n();
@@ -780,6 +782,15 @@ const toolbarStyle = computed(() => {
         </Button>
       </TooltipTrigger>
       <TooltipContent>{{ hasMcpUpdateAvailable ? t("toolbar.mcpUpdateAvailable") : t("settings.title") }}</TooltipContent>
+    </Tooltip>
+
+    <Tooltip v-if="showLogout">
+      <TooltipTrigger as-child>
+        <Button variant="ghost" size="icon" class="toolbar-action-button h-8 w-8 shrink-0" :aria-label="t('auth.logout')" @click="emit('logout')">
+          <LogOut class="toolbar-action-icon h-4 w-4" />
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>{{ t("auth.logout") }}</TooltipContent>
     </Tooltip>
 
     <WindowControls v-if="showControls" :is-maximized="isMaximized" @minimize="minimize" @toggle-maximize="toggleMaximize" @close="close" />

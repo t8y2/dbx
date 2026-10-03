@@ -366,6 +366,9 @@ export default withEnglishFallback({
     passwordChanged: "パスワードが変更されました",
     changePasswordFailed: "パスワードの変更に失敗しました",
     changePasswordDescription: "現在のパスワードと新しいパスワードを入力してください",
+    logout: "ログアウト",
+    logoutDescription: "現在のセッションを終了してログイン画面に戻ります",
+    logoutConfirm: "ログアウトしてもよろしいですか？",
   },
   toolbar: {
     commitOutcomeUnknown: "コミット結果は不明で、セッションは既に存在しません。SQL を再実行する前にデータを確認してください。",

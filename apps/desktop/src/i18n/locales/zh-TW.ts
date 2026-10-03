@@ -371,6 +371,9 @@ export default withEnglishFallback({
     passwordChanged: "密碼修改成功",
     changePasswordFailed: "密碼修改失敗",
     changePasswordDescription: "輸入目前密碼並設定新密碼",
+    logout: "登出",
+    logoutDescription: "結束目前工作階段並返回登入頁面",
+    logoutConfirm: "確定要登出嗎？",
   },
   toolbar: {
     commitOutcomeUnknown: "提交結果未知，交易工作階段已不存在。請核對資料後再決定是否重新執行 SQL。",

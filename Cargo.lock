@@ -2538,6 +2538,7 @@ dependencies = [
  "rustls 0.23.43",
  "rustls-pemfile 2.2.0",
  "schemars 1.2.2",
+ "security-framework 3.7.0",
  "serde",
  "serde_json",
  "sqlparser",

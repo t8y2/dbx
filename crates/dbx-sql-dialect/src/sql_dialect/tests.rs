@@ -1051,7 +1051,9 @@ fn builds_db2_table_data_large_value_previews_with_bounded_substr() {
     // DB2 的 SUBSTR 第三参数越界会报 SQL0138N，故用 CASE WHEN LENGTH(..) 把预览长度
     // 夹在实际长度内：CLOB → 文本预览、BLOB → 二进制预览，都不对短值报错。
     assert!(
-        sql.contains("SUBSTR(\"doc\", 1, CASE WHEN LENGTH(\"doc\") >= 4097 THEN 4097 ELSE LENGTH(\"doc\") END) AS \"doc\""),
+        sql.contains(
+            "SUBSTR(\"doc\", 1, CASE WHEN LENGTH(\"doc\") >= 4097 THEN 4097 ELSE LENGTH(\"doc\") END) AS \"doc\""
+        ),
         "clob preview sql: {sql}"
     );
     assert!(sql.contains("'T:4096' AS "), "clob marker sql: {sql}");

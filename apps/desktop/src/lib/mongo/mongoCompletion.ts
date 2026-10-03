@@ -354,7 +354,7 @@ const STAGE_OPTION_VALUE_ENUMS: Record<string, Record<string, string>> = {
 export function getMongoCompletionContext(text: string, cursor: number): MongoCompletionContext {
   const safeCursor = Math.max(0, Math.min(cursor, text.length));
   const beforeCursor = text.slice(0, safeCursor);
-  const collection = extractActiveCollection(text, safeCursor);
+  const collection = extractActiveCollection(beforeCursor);
   const database = extractActiveDatabase(text, safeCursor);
   const { prefix, from } = readMongoPropertyPrefix(text, safeCursor);
   const replaceClosingQuote = closingQuoteAtCursor(prefix, text, safeCursor);
@@ -1908,22 +1908,22 @@ const COLLECTION_REF = String.raw`(?:[A-Za-z_][\w$-]*|getCollection\(["'][^"']+[
 
 /** `db.` or `db.getSiblingDB("other").` immediately before the cursor. */
 function endsAtDbRootDot(beforeCursor: string): boolean {
-  return new RegExp(String.raw`(?:^|[\s;(])${DB_ROOT}\s*\.$`).test(beforeCursor);
+  return !!lastCodeMatch(new RegExp(String.raw`(?:^|[\s;(])${DB_ROOT}\s*\.$`), beforeCursor);
 }
 
 function endsAtSiblingRootDot(beforeCursor: string): boolean {
-  return new RegExp(String.raw`(?:^|[\s;(])${SIBLING_ROOT_PATTERN}\s*\.$`).test(beforeCursor);
+  return !!lastCodeMatch(new RegExp(String.raw`(?:^|[\s;(])${SIBLING_ROOT_PATTERN}\s*\.$`), beforeCursor);
 }
 
 function matchDbCollectionPrefix(beforeCursor: string): { prefix: string; from: number } | null {
-  const match = new RegExp(String.raw`(?:^|[\s;(])${DB_ROOT}\.([A-Za-z_][\w$-]*(?:\.[\w$-]*)*)$`).exec(beforeCursor);
+  const match = lastCodeMatch(new RegExp(String.raw`(?:^|[\s;(])${DB_ROOT}\.([A-Za-z_][\w$-]*(?:\.[\w$-]*)*)$`), beforeCursor);
   if (!match) return null;
   const prefix = match[1] ?? "";
   return { prefix, from: beforeCursor.length - prefix.length };
 }
 
 function matchSiblingCollectionPrefix(beforeCursor: string): boolean {
-  return new RegExp(String.raw`(?:^|[\s;(])${SIBLING_ROOT_PATTERN}\s*\.([A-Za-z_][\w$-]*(?:\.[\w$-]*)*)$`).test(beforeCursor);
+  return !!lastCodeMatch(new RegExp(String.raw`(?:^|[\s;(])${SIBLING_ROOT_PATTERN}\s*\.([A-Za-z_][\w$-]*(?:\.[\w$-]*)*)$`), beforeCursor);
 }
 
 const MONGO_COMMAND_LINE_START_PATTERN = /(?:use\b|show\s+(?:dbs|databases|collections)\b|db(?:\s*\.|\b))/iy;
@@ -1935,7 +1935,7 @@ function isMongoCommandLineStart(text: string, index: number): boolean {
 
 /** Cursor inside the string argument of `db.getSiblingDB(`, with the opening quote as part of the prefix. */
 function matchGetSiblingDbPrefix(beforeCursor: string): { prefix: string; from: number } | null {
-  const match = /(?:^|[\s;(])db\s*\.\s*getSiblingDB\s*\(\s*(["'][^"'\\]*)$/.exec(beforeCursor);
+  const match = lastCodeMatch(/(?:^|[\s;(])db\s*\.\s*getSiblingDB\s*\(\s*(["'][^"'\\]*)$/, beforeCursor);
   if (!match) return null;
   const prefix = match[1] ?? "";
   return { prefix, from: beforeCursor.length - prefix.length };
@@ -1965,14 +1965,14 @@ function matchShowSubcommandPrefix(beforeCursor: string): { prefix: string; from
 }
 
 function matchGetCollectionPrefix(beforeCursor: string): { prefix: string; from: number } | null {
-  const match = new RegExp(String.raw`(?:^|[\s;(])${DB_ROOT}\.getCollection\(\s*(["'][^"'\\]*)$`).exec(beforeCursor);
+  const match = lastCodeMatch(new RegExp(String.raw`(?:^|[\s;(])${DB_ROOT}\.getCollection\(\s*(["'][^"'\\]*)$`), beforeCursor);
   if (!match) return null;
   const prefix = match[1] ?? "";
   return { prefix, from: beforeCursor.length - prefix.length };
 }
 
 function isAfterCollectionDot(beforeCursor: string): boolean {
-  return new RegExp(String.raw`(?:^|[\s;(])${DB_ROOT}\.${COLLECTION_REF}\.[\w$-]*$`).test(beforeCursor);
+  return !!lastCodeMatch(new RegExp(String.raw`(?:^|[\s;(])${DB_ROOT}\.${COLLECTION_REF}\.[\w$-]*$`), beforeCursor);
 }
 
 /**
@@ -1982,9 +1982,7 @@ function isAfterCollectionDot(beforeCursor: string): boolean {
  */
 function matchCursorMethodDot(beforeCursor: string): { find: boolean; countable: boolean; terminal?: boolean } | null {
   const collectionCall = new RegExp(String.raw`(?:^|[\s;(])${DB_ROOT}\.${COLLECTION_REF}\.(find|aggregate)\s*\(`, "g");
-  let lastMatch: RegExpExecArray | null = null;
-  let match: RegExpExecArray | null;
-  while ((match = collectionCall.exec(beforeCursor))) lastMatch = match;
+  const lastMatch = lastCodeMatch(collectionCall, beforeCursor);
   if (!lastMatch) return null;
 
   const openParen = beforeCursor.indexOf("(", lastMatch.index + lastMatch[0].length - 1);
@@ -2010,20 +2008,25 @@ function matchCursorMethodDot(beforeCursor: string): { find: boolean; countable:
   return { find: false, countable: false };
 }
 
+/**
+ * Index of the `)` closing the `(` at `openIndex`, or -1 when the call is still open.
+ * Walks with the shared literal rules so a parenthesis inside a string or a comment —
+ * `find({ /* (legacy) *\/ … })` — never counts towards the depth.
+ */
 function findMatchingParen(text: string, openIndex: number): number {
   if (openIndex < 0 || text[openIndex] !== "(") return -1;
   let depth = 0;
-  let quote: string | null = null;
-  for (let i = openIndex; i < text.length; i++) {
-    const char = text[i];
-    if (quote) {
-      if (char === "\\") i++;
-      else if (char === quote) quote = null;
+  let i = openIndex;
+  while (i < text.length) {
+    const skipped = skipMongoStringOrComment(text, i, text.length);
+    if (skipped > i) {
+      i = skipped;
       continue;
     }
-    if (char === '"' || char === "'") quote = char;
-    else if (char === "(") depth++;
+    const char = text[i];
+    if (char === "(") depth++;
     else if (char === ")" && --depth === 0) return i;
+    i++;
   }
   return -1;
 }
@@ -2058,6 +2061,69 @@ function skipMongoStringOrComment(text: string, i: number, end: number): number 
     return close < 0 || close + 2 > end ? end : close + 2;
   }
   return i;
+}
+
+/**
+ * `[start, end)` of every string and comment in `text`, in order.
+ *
+ * The matchers below run their patterns over the raw text rather than over `maskMongoLiterals`,
+ * because the root of a command legitimately quotes a name — `db.getSiblingDB("other")`,
+ * `db.getCollection("audit.logs")` — and masking blanks exactly that. They therefore have to ask
+ * about literals separately: a match that *starts* inside one is literal content, not the command
+ * at the cursor. Offsets are shared with the raw text, so the same match still supplies the name.
+ *
+ * Memoised on the last text, because every matcher asks about the same slice within one
+ * completion: recomputing it per matcher costs eight character-by-character passes over the whole
+ * document, which is several times the price of the native regex scans it is there to qualify.
+ */
+let cachedLiteralText = "";
+let cachedLiteralRanges: Array<[number, number]> = [];
+
+function mongoLiteralRanges(text: string): Array<[number, number]> {
+  if (text === cachedLiteralText) return cachedLiteralRanges;
+  const ranges: Array<[number, number]> = [];
+  let i = 0;
+  while (i < text.length) {
+    const skipped = skipMongoStringOrComment(text, i, text.length);
+    if (skipped > i) {
+      ranges.push([i, skipped]);
+      i = skipped;
+    } else {
+      i++;
+    }
+  }
+  cachedLiteralText = text;
+  cachedLiteralRanges = ranges;
+  return ranges;
+}
+
+/** Binary search: the ranges are pushed in order and never overlap. A linear scan here is
+ * quadratic over a document full of string values, because every pattern match asks. */
+function isInsideMongoLiteral(ranges: Array<[number, number]>, index: number): boolean {
+  let low = 0;
+  let high = ranges.length - 1;
+  while (low <= high) {
+    const middle = (low + high) >> 1;
+    const range = ranges[middle]!;
+    if (index < range[0]) high = middle - 1;
+    else if (index >= range[1]) low = middle + 1;
+    else return true;
+  }
+  return false;
+}
+
+/** The last match of `pattern` that does not start inside a string or a comment. */
+function lastCodeMatch(pattern: RegExp, text: string): RegExpExecArray | null {
+  const scan = new RegExp(pattern.source, pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`);
+  let match = scan.exec(text);
+  if (!match) return null; // no match at all: no literal scan needed
+  const literals = mongoLiteralRanges(text);
+  let result = isInsideMongoLiteral(literals, match.index) ? null : match;
+  while ((match = scan.exec(text))) {
+    if (!isInsideMongoLiteral(literals, match.index)) result = match;
+    if (match[0] === "") scan.lastIndex++;
+  }
+  return result;
 }
 
 /**
@@ -2151,10 +2217,13 @@ function isInsideMongoComment(text: string, cursor: number): boolean {
   return false;
 }
 
-function extractActiveCollection(text: string, cursor: number): string | undefined {
-  const before = text.slice(0, cursor);
-  const getCollectionMatches = [...before.matchAll(new RegExp(String.raw`${DB_ROOT}\.getCollection\(["']([^"']+)["']\)`, "g"))];
-  const directMatches = [...before.matchAll(new RegExp(String.raw`${DB_ROOT}\.([A-Za-z_][\w$-]*)\s*\.`, "g"))].filter((match) => match[1] !== "getCollection");
+function extractActiveCollection(before: string): string | undefined {
+  // A `db.other.` written inside a string value or a comment is literal content: it must not
+  // redirect the field metadata that the command at the cursor completes against.
+  const literals = mongoLiteralRanges(before);
+  const isCode = (match: RegExpMatchArray) => match.index === undefined || !isInsideMongoLiteral(literals, match.index);
+  const getCollectionMatches = [...before.matchAll(new RegExp(String.raw`${DB_ROOT}\.getCollection\(["']([^"']+)["']\)`, "g"))].filter(isCode);
+  const directMatches = [...before.matchAll(new RegExp(String.raw`${DB_ROOT}\.([A-Za-z_][\w$-]*)\s*\.`, "g"))].filter(isCode).filter((match) => match[1] !== "getCollection");
   const lastGetCollection = getCollectionMatches[getCollectionMatches.length - 1];
   const lastDirect = directMatches[directMatches.length - 1];
   const getCollectionIndex = lastGetCollection?.index ?? -1;

@@ -8576,6 +8576,7 @@ export default withEnglishFallback({
     shortcutSelectAll: "全选",
     shortcutAddNextSelectionOccurrence: "增加下一个选中词",
     shortcutSelectAllSelectionOccurrences: "选中所有选中词",
+    shortcutSelectLineEnds: "选中行尾",
     shortcutExtendSelection: "扩展选择",
     shortcutUppercaseSelection: "选中内容转为大写",
     shortcutLowercaseSelection: "选中内容转为小写",

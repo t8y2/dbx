@@ -109,6 +109,7 @@ import { clampEditorFontSize, createEditorWheelZoomGestureGuard, createEditorZoo
 import { buildSqlShortcutExecutionSql, enabledSqlShortcutActions, resolveSqlShortcutForDatabase, uniqueSqlShortcutBindings } from "@/lib/sql/sqlShortcutActions";
 import { resolveSqlShortcutTableToken } from "@/lib/sql/sqlShortcutTableTarget";
 import { normalizeShortcutSettings, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
+import { matchesShortcut } from "@/lib/editor/keyboardShortcuts";
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
 import { editorClipboardLineEndingsExtension } from "@/lib/editor/editorClipboardLineEndings";
 import { applyVimConfig, isVimMappingCommand, loadVimConfig } from "@/lib/editor/vimConfig";
@@ -128,6 +129,7 @@ import { computePasteCaretResyncTarget } from "@/lib/editor/queryEditorPasteCare
 
 import { extendQueryEditorSelection, runQueryEditorAltExtendSelection } from "@/lib/editor/queryEditorExtendSelection";
 import { addNextQueryEditorSelectionOccurrence, selectAllQueryEditorSelectionOccurrences } from "@/lib/editor/queryEditorOccurrenceSelection";
+import { selectLineEnds } from "@/lib/editor/selectLineEnds";
 import { createQueryEditorStringMouseSelection } from "@/lib/editor/queryEditorStringMouseSelection";
 import { createQueryEditorCompletionShortcutBindings } from "@/lib/editor/queryEditorCompletionShortcut";
 import { createQueryEditorSelectionCaseShortcutBindings } from "@/lib/editor/queryEditorSelectionCaseShortcut";
@@ -1384,6 +1386,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         ...binding(shortcuts.extendSelection, extendQueryEditorSelectionForView),
         ...binding(shortcuts.addNextSelectionOccurrence, addNextQueryEditorSelectionOccurrence),
         ...binding(shortcuts.selectAllSelectionOccurrences, selectAllQueryEditorSelectionOccurrences),
+        ...binding(shortcuts.selectLineEnds, selectLineEnds),
         ...createQueryEditorSelectionCaseShortcutBindings(shortcuts.uppercaseSelection, () => convertSelectedSqlCase("upper")),
         ...createQueryEditorSelectionCaseShortcutBindings(shortcuts.lowercaseSelection, () => convertSelectedSqlCase("lower")),
         ...createQueryEditorSelectionCaseShortcutBindings(shortcuts.convertNamingStyle, () => convertSelectedNamingStyle()),
@@ -2059,6 +2062,10 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
           EditorView.domEventHandlers({
             keydown(event, currentView) {
               const shortcuts = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
+              if (matchesShortcut(event, shortcuts.selectLineEnds)) {
+                event.preventDefault();
+                return selectLineEnds(currentView);
+              }
               return runQueryEditorAltExtendSelection(event, shortcuts.extendSelection, currentView, extendQueryEditorSelectionForView);
             },
           }),

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { Compartment } from "@codemirror/state";
+import { keymap as codeMirrorKeymap } from "@codemirror/view";
 import { applyDdlStoragePreference } from "@/lib/sql/ddlStorage";
 import DdlStorageToggle from "@/components/objects/DdlStorageToggle.vue";
 import { computed, nextTick, onUnmounted, ref, shallowRef, watch } from "vue";
@@ -6,6 +8,8 @@ import { useI18n } from "vue-i18n";
 import { Clipboard, ExternalLink, Loader2, Maximize2, Minimize2, RefreshCw } from "@lucide/vue";
 import { useToast } from "@/composables/useToast";
 import { useTheme } from "@/composables/useTheme";
+import { selectLineEndsDefaultShortcut, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
+import { selectLineEnds } from "@/lib/editor/selectLineEnds";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
 import { editorClipboardLineEndingsExtension } from "@/lib/editor/editorClipboardLineEndings";
@@ -61,6 +65,8 @@ const ddlError = ref("");
 const ddlEditorContainer = ref<HTMLDivElement>();
 const ddlSearchPanelRef = ref<InstanceType<typeof EditorSearchPanel>>();
 const ddlEditorView = shallowRef<EditorView | null>(null);
+const ddlEditorShortcut = new Compartment();
+const selectLineEndsShortcut = () => settingsStore.editorSettings?.shortcuts?.selectLineEnds ?? selectLineEndsDefaultShortcut();
 let ddlEditorResizeObserver: ResizeObserver | null = null;
 
 // Keep the dialog movable for the duration of one open cycle. This mirrors the
@@ -367,6 +373,10 @@ function onDdlDialogCloseAutoFocus(event: Event) {
  * - Prec.highest overrides Cmd+F to open EditorSearchPanel.
  * - Editor theme/font are loaded from user settings for consistent appearance.
  */
+watch(selectLineEndsShortcut, (shortcut) => {
+  ddlEditorView.value?.dispatch({ effects: ddlEditorShortcut.reconfigure(codeMirrorKeymap.of([{ key: shortcutToCodeMirrorKey(shortcut), preventDefault: true, run: selectLineEnds }])) });
+});
+
 async function initDdlEditor(content: string) {
   if (!ddlEditorContainer.value) return;
   destroyDdlEditor();
@@ -399,6 +409,7 @@ async function initDdlEditor(content: string) {
       fontExt,
       // Intercept Cmd+F at highest precedence so EditorSearchPanel opens
       // instead of the default search panel (which is hidden above).
+      ddlEditorShortcut.of(keymap.of([{ key: shortcutToCodeMirrorKey(selectLineEndsShortcut()), preventDefault: true, run: selectLineEnds }])),
       Prec.highest(keymap.of([{ key: "Mod-f", run: () => ddlSearchPanelRef.value?.openSearch() ?? false, preventDefault: true }])),
       // Remove CodeMirror's default 1px dotted focus outline,
       // which is visible below the content when the DDL is short.

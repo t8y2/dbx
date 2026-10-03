@@ -8463,6 +8463,7 @@ export default withEnglishFallback({
     supportInfoAiProviders: "Proveedores de IA",
     sidebarSearchOpenedDatabasesOnly: "Buscar solo en bases de datos abiertas",
     sidebarSearchOpenedDatabasesOnlyDescription: "La búsqueda de la barra lateral solo carga las bases de datos abiertas en la conexión actual (si no hay ninguna abierta, busca en todas). Al desactivarla, se buscará en todas las bases de datos de esa conexión.",
+    shortcutSelectLineEnds: "Seleccionar finales de línea",
   },
   driverStore: {
     jreDirRemoveFailed: "No se pudo eliminar el directorio JRE antiguo: {path} (error original: {error})",

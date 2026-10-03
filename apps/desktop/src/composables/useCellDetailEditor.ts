@@ -17,6 +17,7 @@ import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";
 import type { EditorTheme } from "@/stores/settingsStore";
 import type { AppThemeAppearance, AppThemePalette } from "@/lib/app/appTheme";
 import { selectAllCellDetailText } from "@/lib/dataGrid/cellDetailSelection";
+import { selectLineEnds } from "@/lib/editor/selectLineEnds";
 
 export interface UseCellDetailEditorOptions {
   onChange?: (value: string) => void;
@@ -79,6 +80,7 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
   const fontThemeComp = new Compartment();
   const lineWrappingComp = new Compartment();
   const readOnlyComp = new Compartment();
+  const shortcutComp = new Compartment();
 
   let destroyed = false;
   let currentIsJson = false;
@@ -186,6 +188,15 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
   );
 
   watch(
+    () => settingsStore.editorSettings.shortcuts.selectLineEnds,
+    (shortcut) => {
+      const editor = view.value;
+      if (!editor || destroyed) return;
+      editor.dispatch({ effects: shortcutComp.reconfigure(keymap.of([{ key: shortcutToCodeMirrorKey(shortcut), preventDefault: true, run: selectLineEnds }])) });
+    },
+  );
+
+  watch(
     () => isReadOnly(),
     (readOnly) => {
       const editor = view.value;
@@ -258,6 +269,7 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
         readOnlyComp.of(readOnlyExtensions(isReadOnly())),
         themeComp.of(theme),
         fontThemeComp.of(fontTheme),
+        shortcutComp.of(keymap.of([{ key: shortcutToCodeMirrorKey(shortcuts.selectLineEnds), preventDefault: true, run: selectLineEnds }])),
         keymap.of([
           {
             key: "Mod-a",

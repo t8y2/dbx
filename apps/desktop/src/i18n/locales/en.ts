@@ -8594,6 +8594,7 @@ export default {
     shortcutSelectAll: "Select all",
     shortcutAddNextSelectionOccurrence: "Add next occurrence",
     shortcutSelectAllSelectionOccurrences: "Select all occurrences",
+    shortcutSelectLineEnds: "Select line ends",
     shortcutExtendSelection: "Extend selection",
     shortcutEditTableStructure: "Edit table structure",
     shortcutCopyCurrentRow: "Copy current data row",

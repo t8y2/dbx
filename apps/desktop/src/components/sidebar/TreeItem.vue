@@ -51,6 +51,8 @@ import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import ConnectionErrorIndicator from "@/components/connection/ConnectionErrorIndicator.vue";
 import ReadOnlySessionControl from "@/components/connection/ReadOnlySessionControl.vue";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
+import EnvironmentBadge from "@/components/common/EnvironmentBadge.vue";
+import { connectionEnvironmentPreset } from "@/lib/connection/connectionEnvironment";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
@@ -581,6 +583,7 @@ const detailTooltip = computed(() => {
         : null;
     const rows: DetailTooltipRow[] = [
       { label: t("connection.name"), value: cleanTooltipValue(config.name) },
+      { label: t("connection.environment"), value: connectionEnvironmentPreset(config.environment) ? t(connectionEnvironmentPreset(config.environment)!.labelKey) : "" },
       { label: "URL", value: connectionTooltipUrl(config), multiline: true },
       ...(hostValues.length > 0 ? [{ label: hostLabel, value: hostValues[0], values: hostValues } as DetailTooltipRow] : [{ label: hostLabel, value: hostValue, multiline: isLocalFileConnection(config) } as DetailTooltipRow]),
       { label: "Port", value: Number(config.port) > 0 ? String(config.port) : "" },
@@ -1775,7 +1778,12 @@ function onKeydown(event: KeyboardEvent) {
             >{{ trailingComment }}</span
           >
         </div>
-        <span v-if="node.type === 'connection' && node.connectionId && connectionStore.connectedIds.has(node.connectionId)" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
+        <!-- Fixed slot before the status dot: the badge pops in after the config
+             loads without shifting the dot, and badges align down the column. -->
+        <span v-if="node.type === 'connection'" class="inline-flex w-10 shrink-0 items-center justify-end">
+          <EnvironmentBadge :environment="connectionStore.getConfig(node.connectionId ?? '')?.environment" />
+        </span>
+        <span v-if="node.type === 'connection' && node.connectionId" class="w-1.5 h-1.5 rounded-full shrink-0" :class="connectionStore.connectedIds.has(node.connectionId) ? 'bg-green-500' : ''" />
         <span v-if="databaseOpenVisual.showsIndicator" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
         <ReadOnlySessionControl v-if="isConnectionReadonly && activeNode.connectionId" :connection-id="activeNode.connectionId" show-label />
         <ConnectionErrorIndicator v-if="node.type === 'connection'" :connection-id="node.connectionId" trigger-class="h-4 w-4" />

@@ -110,6 +110,8 @@ export interface ConnectionConfig {
   attached_databases?: AttachedDatabaseConfig[];
   init_script?: string;
   color?: string;
+  /** Optional environment label (development/testing/staging/production). Display-only. */
+  environment?: string;
   /**
    * Where this connection's documentation notes are stored. Absent means the
    * per-connection default inside the app data directory; an explicit path

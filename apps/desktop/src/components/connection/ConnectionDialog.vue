@@ -13,6 +13,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { HelpTooltip, Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import EnvironmentBadge from "@/components/common/EnvironmentBadge.vue";
+import { CONNECTION_ENVIRONMENTS } from "@/lib/connection/connectionEnvironment";
 import { Switch } from "@/components/ui/switch";
 import type {
   ConnectionConfig,
@@ -412,6 +414,7 @@ const defaultForm = (): ConnectionForm => ({
   password: "",
   database: undefined,
   color: "",
+  environment: "none",
   transport_layers: [],
   connect_timeout_secs: settingsStore.editorSettings.globalConnectTimeoutSecs,
   connect_timeout_inherit: true,
@@ -3103,6 +3106,7 @@ watch(
         // (e.g. redis-cli flags in the field) are healed when the form is saved.
         database: config.db_type === "redis" ? normalizeRedisDatabaseValue(config.database) || "" : config.database,
         color: config.color || "",
+        environment: config.environment || "none",
         transport_layers: transportLayersForConfig(legacyConfig),
         connect_timeout_secs: config.connect_timeout_inherit === true ? settingsStore.editorSettings.globalConnectTimeoutSecs : config.connect_timeout_secs || 10,
         connect_timeout_inherit: config.connect_timeout_inherit === true,
@@ -4779,6 +4783,7 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.name = form.value.name.trim() || config.name;
     config.note = form.value.note;
     config.color = form.value.color;
+    config.environment = form.value.environment === "none" ? undefined : form.value.environment;
     config.transport_layers = form.value.transport_layers || [];
     config.connect_timeout_secs = form.value.connect_timeout_secs;
     // buildPluginConnectionConfig rebuilds the config from scratch and drops
@@ -7287,6 +7292,22 @@ function openExternalUrl(url: string) {
                 <div v-if="isCustomCompatibleProfile()" class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelClass">{{ t("connection.driverName") }}</Label>
                   <Input v-model="customDriverName" class="col-span-3" :placeholder="t('connection.driverNamePlaceholder')" />
+                </div>
+
+                <div class="grid grid-cols-4 items-center gap-4">
+                  <Label :class="connectionLabelClass">{{ t("connection.environment") }}</Label>
+                  <div class="col-span-3 flex min-w-0 items-center gap-2">
+                    <Select v-model="form.environment">
+                      <SelectTrigger class="h-8 w-48">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="none">{{ t("connection.environmentNone") }}</SelectItem>
+                        <SelectItem v-for="env in CONNECTION_ENVIRONMENTS" :key="env.id" :value="env.id">{{ t(env.labelKey) }}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <EnvironmentBadge :environment="form.environment" />
+                  </div>
                 </div>
 
                 <div class="grid grid-cols-4 items-center gap-4">

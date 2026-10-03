@@ -163,6 +163,10 @@ pub struct ConnectionConfig {
     pub init_script: Option<String>,
     #[serde(default)]
     pub color: Option<String>,
+    /// Optional environment label (development/testing/staging/production).
+    /// Display-only: does not change connection behavior by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
     /// Path to this connection's documentation notes file. Set by the
     /// desktop app; the CLI takes an explicit `--notes` path instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -636,6 +640,8 @@ struct ConnectionConfigData {
     #[serde(default)]
     pub color: Option<String>,
     #[serde(default)]
+    pub environment: Option<String>,
+    #[serde(default)]
     pub docs_notes_path: Option<String>,
     #[serde(default)]
     pub transport_layers: Vec<TransportLayerConfig>,
@@ -790,6 +796,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             read_only: data.read_only,
             is_production: data.is_production,
             production_databases: data.production_databases,
+            environment: data.environment,
             database_info: data.database_info,
         }
     }
@@ -2908,6 +2915,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            environment: None,
             database_info: None,
         }
     }

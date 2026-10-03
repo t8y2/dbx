@@ -5,13 +5,12 @@ on:
   #   types: [opened]
   pull_request_target:
     types: [opened, closed]
-  release:
-    types: [published]
+  # Release 不在此通知：桌面正式版由 publish-packages.yml 在转正后发飞书卡片；
+  # 组件包（agents-v*/packages-v*）发布不进群。
 
 jobs:
   notify:
     runs-on: ubuntu-latest
-    if: ${{ github.event_name != 'release' || (!github.event.release.draft && !github.event.release.prerelease) }}
     steps:
       - name: Build message
         id: msg
@@ -27,10 +26,6 @@ jobs:
           PR_USER: ${{ github.event.pull_request.user.login }}
           PR_MERGED: ${{ github.event.pull_request.merged }}
           PR_MERGED_BY: ${{ github.event.pull_request.merged_by.login }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-          RELEASE_NAME: ${{ github.event.release.name }}
-          RELEASE_URL: ${{ github.event.release.html_url }}
-          RELEASE_BODY: ${{ github.event.release.body }}
         run: |
           python3 - <<'PYEOF'
           import os
@@ -49,32 +44,8 @@ jobs:
           #         f"提交者: {user}",
           #         f"链接: {url}",
           #     ])
-          #
-          # elif event == "release":
-          if event == "release":
-              tag = os.environ["RELEASE_TAG"]
-              name = os.environ["RELEASE_NAME"]
-              url = os.environ["RELEASE_URL"]
-              body = os.environ.get("RELEASE_BODY", "")
 
-              import re
-              body = re.sub(r'#{1,6}\s*', '', body)
-              body = re.sub(r'\*\*(.+?)\*\*', r'\1', body)
-              body = re.sub(r'\*(.+?)\*', r'\1', body)
-              body = re.sub(r'`(.+?)`', r'\1', body)
-              body = re.sub(r'\[(.+?)\]\(.+?\)', r'\1', body)
-              body = re.sub(r'\n{3,}', '\n\n', body)
-              body = body.strip()
-
-              msg = "\n".join([
-                  f"🚀 新版本发布 {tag}",
-                  "",
-                  body,
-                  "",
-                  f"下载: {url}",
-              ])
-
-          elif event in ("pull_request", "pull_request_target"):
+          if event in ("pull_request", "pull_request_target"):
               title = os.environ["PR_TITLE"]
               url = os.environ["PR_URL"]
               # if action == "opened":
@@ -165,7 +136,7 @@ jobs:
       #     PYEOF
 
       - name: Send to Feishu
-        if: ${{ steps.msg.outputs.skip != 'true' && github.event_name != 'release' }}
+        if: ${{ steps.msg.outputs.skip != 'true' }}
         env:
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
           MSG_CONTENT: ${{ steps.msg.outputs.msg }}
@@ -173,35 +144,3 @@ jobs:
           curl -s -X POST "$FEISHU_WEBHOOK_URL" \
             -H 'Content-Type: application/json' \
             -d "$(jq -n --arg text "$MSG_CONTENT" '{msg_type: "text", content: {text: $text}}')"
-
-      - name: Send to QQ group
-        # PR 合并通知不再发 QQ 群，QQ 群仅保留 release 正式发布通知
-        # if: steps.msg.outputs.skip != 'true'
-        if: steps.msg.outputs.skip != 'true' && github.event_name != 'pull_request_target'
-        env:
-          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          HOST: ${{ secrets.DEPLOY_HOST }}
-          ASTRBOT_API_KEY: ${{ secrets.ASTRBOT_API_KEY }}
-          MSG_CONTENT: ${{ steps.msg.outputs.msg }}
-          # AI_ANALYSIS: ${{ steps.ai.outputs.analysis }}
-        run: |
-          mkdir -p ~/.ssh
-          echo "$SSH_KEY" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
-
-          # if [ -n "$AI_ANALYSIS" ]; then
-          #   MSG_CONTENT="${MSG_CONTENT}
-          #
-          # 🤖 AI 分析:
-          # ${AI_ANALYSIS}"
-          # fi
-
-          PAYLOAD=$(jq -nc --arg msg "$MSG_CONTENT" \
-            '{"umo": "default:GroupMessage:1087880322", "message": $msg}')
-          if ! printf '%s' "$PAYLOAD" | ssh "root@${HOST}" "curl -fsS -X POST http://localhost:6185/api/v1/im/message \
-            -H 'Authorization: Bearer ${ASTRBOT_API_KEY}' \
-            -H 'Content-Type: application/json' \
-            --data-binary @-"; then
-            echo "::warning::QQ group notification failed; the event notification was sent to Feishu."
-          fi

@@ -4,6 +4,7 @@
 // is shared by every PluginWorkbenchHost instance, so only the first boot of a
 // plugin version pays the read/decode/inline pipeline.
 import * as api from "@/lib/backend/api";
+import { COMPONENT_PLUGINS_UPDATED_EVENT } from "@/lib/updates/componentUpdateEvents";
 
 export interface PluginUiHtml {
   html: string;
@@ -136,4 +137,15 @@ export function getOrLoadPluginUiHtml(key: string, pluginId: string): Promise<Pl
     inFlight.set(key, load);
   }
   return load;
+}
+
+// The plugin set can change from entry points other than the plugin center (the update center
+// dispatches COMPONENT_PLUGINS_UPDATED_EVENT from App.vue while the center is closed; batch
+// uninstall dispatches only dbx:plugins-changed), and a same-version reinstall reuses the
+// id:version key. Invalidate on both events here, at the cache owner — the same contract the
+// icon resolver follows — so workbench tabs opened after an install/update/uninstall read the
+// new ui build instead of the stale inlined bytes.
+if (typeof window !== "undefined") {
+  window.addEventListener(COMPONENT_PLUGINS_UPDATED_EVENT, clearPluginUiHtmlCache);
+  window.addEventListener("dbx:plugins-changed", clearPluginUiHtmlCache);
 }

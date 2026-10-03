@@ -758,9 +758,12 @@ fn quote_export_sql_string_for_database(text: &str, database_type: Option<Databa
             quote_mysql_compatible_export_sql_string(text)
         }
         // Not MySQL-wire targets, but both engines interpret backslash escape
-        // sequences in string literals, so they must keep MySQL-style escaping
-        // for round-trip correctness.
-        Some(DatabaseType::ClickHouse | DatabaseType::Snowflake) => quote_mysql_compatible_export_sql_string(text),
+        // sequences in string literals, so they must keep backslash escaping for
+        // round-trip correctness. Neither has MySQL's `\Z`, though, so the SUB
+        // byte is spelled `\x1a` (see [`SubControlEscape`]).
+        Some(DatabaseType::ClickHouse | DatabaseType::Snowflake) => {
+            quote_backslash_escaped_export_sql_string(text, SubControlEscape::Hex)
+        }
         _ => quote_standard_export_sql_string(text),
     }
 }
@@ -782,23 +785,49 @@ fn quote_dameng_export_sql_string(text: &str) -> String {
     parts.join(" || ")
 }
 
+/// How a backslash-escaping dialect spells the 0x1A (SUB / Ctrl-Z) byte.
+///
+/// `\Z` is a MySQL-family escape. ClickHouse has no `\Z` in its escape table and
+/// reads the sequence as a literal backslash followed by `Z`; Snowflake has none
+/// either and drops the backslash, yielding `Z`. Both therefore corrupt a stored
+/// SUB byte. Both accept the `\xhh` hexadecimal escape, which spells the byte the
+/// value actually holds.
+#[derive(Clone, Copy)]
+enum SubControlEscape {
+    /// The MySQL-family `\Z`.
+    BackslashZ,
+    /// `\x1a`, for dialects whose escape table has no `\Z`.
+    Hex,
+}
+
 fn quote_mysql_compatible_export_sql_string(text: &str) -> String {
-    format!("'{}'", escape_mysql_compatible_export_sql_string(text))
+    quote_backslash_escaped_export_sql_string(text, SubControlEscape::BackslashZ)
+}
+
+fn quote_backslash_escaped_export_sql_string(text: &str, sub_control: SubControlEscape) -> String {
+    format!("'{}'", escape_backslash_escaped_export_sql_string(text, sub_control))
 }
 
 fn escape_mysql_compatible_export_sql_string(text: &str) -> String {
+    escape_backslash_escaped_export_sql_string(text, SubControlEscape::BackslashZ)
+}
+
+fn escape_backslash_escaped_export_sql_string(text: &str, sub_control: SubControlEscape) -> String {
     let mut escaped = String::with_capacity(text.len());
     for ch in text.chars() {
         match ch {
-            // MySQL-family dumps should keep control characters out of the
-            // physical script layout while relying on the dialect's escapes.
+            // Keep control characters out of the physical script layout while
+            // relying on the dialect's escapes.
             '\0' => escaped.push_str("\\0"),
             '\x08' => escaped.push_str("\\b"),
             '\n' => escaped.push_str("\\n"),
             '\r' => escaped.push_str("\\r"),
             '\t' => escaped.push_str("\\t"),
             '\x0c' => escaped.push_str("\\f"),
-            '\x1a' => escaped.push_str("\\Z"),
+            '\x1a' => escaped.push_str(match sub_control {
+                SubControlEscape::BackslashZ => "\\Z",
+                SubControlEscape::Hex => "\\x1a",
+            }),
             '\\' => escaped.push_str("\\\\"),
             '\'' => escaped.push_str("''"),
             _ => escaped.push(ch),
@@ -5743,6 +5772,64 @@ mod tests {
                 "backslash-escaping dialect {database_type:?} must double backslashes"
             );
         }
+    }
+
+    #[test]
+    fn clickhouse_and_snowflake_export_spell_the_sub_byte_as_a_hex_escape() {
+        // `\Z` is a MySQL-family escape. ClickHouse reads it as a literal
+        // backslash followed by `Z` (verified on the ClickHouse playground,
+        // 26.10.1.448: `hex('a\Zb')` is `615C5A62`), and Snowflake drops the
+        // backslash and yields `Z`. Both accept `\xhh`, which is the byte the
+        // value holds (`hex('a\x1ab')` is `611A62`). Exporting `\Z` to them
+        // would rewrite a stored SUB byte, so the escape has to be
+        // dialect-specific.
+        for database_type in [DatabaseType::ClickHouse, DatabaseType::Snowflake] {
+            let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+                database_type: Some(database_type),
+                identifier_quote: None,
+                schema: None,
+                table_name: Some("t".to_string()),
+                qualified_table_name: None,
+                columns: vec!["note".to_string()],
+                column_types: vec![Some("String".to_string())],
+                column_extras: Vec::new(),
+                spatial_columns: Vec::new(),
+                spatial_values: Vec::new(),
+                rows: vec![vec![json!("a\x1ab")]],
+                batch_size: Some(10),
+            })
+            .unwrap();
+
+            let expected = match database_type {
+                DatabaseType::ClickHouse => r"INSERT INTO `t` (`note`) VALUES ('a\x1ab');",
+                DatabaseType::Snowflake => r#"INSERT INTO "t" ("note") VALUES ('a\x1ab');"#,
+                _ => unreachable!(),
+            };
+            assert_eq!(statements, vec![expected], "dialect {database_type:?} must not emit the MySQL-only \\Z escape");
+        }
+    }
+
+    #[test]
+    fn mysql_export_still_uses_the_backslash_z_escape() {
+        // MySQL has no `\xhh` escape, so the SUB byte must keep `\Z` there.
+        // Guards against "fixing" the ClickHouse/Snowflake spelling everywhere.
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            schema: None,
+            table_name: Some("t".to_string()),
+            qualified_table_name: None,
+            columns: vec!["note".to_string()],
+            column_types: vec![Some("text".to_string())],
+            column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![vec![json!("a\x1ab")]],
+            batch_size: Some(10),
+        })
+        .unwrap();
+
+        assert_eq!(statements, vec![r"INSERT INTO `t` (`note`) VALUES ('a\Zb');"]);
     }
 
     #[test]

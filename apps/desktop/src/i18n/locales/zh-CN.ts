@@ -323,6 +323,7 @@ export default withEnglishFallback({
     changePasswordDescription: "输入当前密码并设置新密码",
   },
   toolbar: {
+    immediateSync: "立即同步",
     commitOutcomeUnknown: "提交结果未知，事务会话已不存在。请核对数据后再决定是否重新执行 SQL。",
     moreActions: "更多操作",
     newConnection: "新建连接",

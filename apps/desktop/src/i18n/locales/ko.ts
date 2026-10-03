@@ -405,6 +405,7 @@ export default withEnglishFallback({
     changePasswordDescription: "현재 비밀번호를 입력하고 새 비밀번호를 선택하세요",
   },
   toolbar: {
+    immediateSync: "지금 동기화",
     commitOutcomeUnknown: "커밋 결과를 알 수 없고 세션이 더 이상 존재하지 않습니다. SQL을 다시 실행하기 전에 데이터를 확인하세요。",
     moreActions: "더 많은 작업",
     newConnection: "새 연결",

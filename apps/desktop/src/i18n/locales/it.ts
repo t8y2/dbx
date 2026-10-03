@@ -396,6 +396,7 @@ export default withEnglishFallback({
     changePasswordDescription: "Inserisci la password attuale e scegline una nuova",
   },
   toolbar: {
+    immediateSync: "Sincronizza ora",
     commitOutcomeUnknown: "L'esito del commit è sconosciuto e la sessione non esiste più. Verificare i dati prima di eseguire nuovamente SQL.",
     moreActions: "Altre azioni",
     newConnection: "Nuova Connessione",

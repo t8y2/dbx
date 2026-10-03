@@ -356,6 +356,7 @@ export default withEnglishFallback({
     changePasswordDescription: "Введите текущий пароль и выберите новый",
   },
   toolbar: {
+    immediateSync: "Синхронизировать сейчас",
     commitOutcomeUnknown: "Результат фиксации неизвестен, а сессия больше не существует. Проверьте данные перед повторным выполнением этого SQL.",
     moreActions: "Дополнительные действия",
     newConnection: "Новое подключение",

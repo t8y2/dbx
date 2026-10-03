@@ -407,6 +407,7 @@ export default {
     changePasswordDescription: "Enter your current password and choose a new one",
   },
   toolbar: {
+    immediateSync: "Sync now",
     commitOutcomeUnknown: "Commit result is unknown and the session no longer exists. Verify the data before running this SQL again.",
     moreActions: "More actions",
     newConnection: "New Connection",

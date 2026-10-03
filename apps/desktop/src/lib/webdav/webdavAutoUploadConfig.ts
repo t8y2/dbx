@@ -2,10 +2,22 @@ import type { SyncSelection, WebDavConfig } from "@/lib/backend/api";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 
 export const WEB_DAV_BACKUP_SELECTION_STORAGE_KEY = "dbx-webdav-backup-selection";
+export const SYNC_METHOD_STORAGE_KEY = "dbx-sync-method";
 export const WEB_DAV_AUTO_UPLOAD_STORAGE_KEYS = ["dbx-webdav-endpoint", "dbx-webdav-username", "dbx-webdav-remote-path", "dbx-webdav-auto-upload-enabled", "dbx-webdav-auto-upload-interval-minutes", WEB_DAV_BACKUP_SELECTION_STORAGE_KEY] as const;
 
 export const DEFAULT_WEB_DAV_REMOTE_PATH = "DBX/sync/snapshot.json";
 export const DEFAULT_WEB_DAV_AUTO_UPLOAD_INTERVAL_MINUTES = 30;
+
+export type SyncMethod = "webdav" | "snippet" | "local";
+
+export function readSyncMethod(): SyncMethod {
+  const value = safeLocalStorageGet(SYNC_METHOD_STORAGE_KEY);
+  return value === "snippet" || value === "local" ? value : "webdav";
+}
+
+export function writeSyncMethod(value: SyncMethod) {
+  safeLocalStorageSet(SYNC_METHOD_STORAGE_KEY, value);
+}
 
 export interface WebDavAutoUploadConfig {
   enabled: boolean;

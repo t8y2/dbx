@@ -2,7 +2,7 @@
 import { computed, ref, onMounted, onBeforeUnmount, h, nextTick, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronsRight, DatabaseZap, FilePlus2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, CloudDownload, Package, PlugZap, FileDown, FolderTree, Pin, PinOff, CalendarClock, Waypoints } from "@lucide/vue";
+import { ChevronsRight, DatabaseZap, FilePlus2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, CloudDownload, Package, PlugZap, FileDown, FolderTree, Pin, PinOff, CalendarClock, Waypoints, RefreshCw } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import LightDropdown, { type LightDropdownItem } from "@/components/ui/LightDropdown.vue";
@@ -53,6 +53,7 @@ const props = defineProps<{
   hasConnections: boolean;
   canNewQuery: boolean;
   hasSqlFileConnections: boolean;
+  immediateSyncing: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -75,6 +76,7 @@ const emit = defineEmits<{
   "open-data-compare": [];
   "open-backups": [];
   "open-mcp-settings": [];
+  "immediate-sync": [];
 }>();
 
 const { t } = useI18n();
@@ -206,6 +208,15 @@ const collapsibleRightItemDefs = computed(() => {
     disabled: boolean;
   }
   const items: ItemDef[] = [];
+  if (toolbarItems.value.immediateSync) {
+    items.push({
+      key: "immediateSync",
+      label: t("toolbar.immediateSync"),
+      icon: RefreshCw,
+      action: () => emit("immediate-sync"),
+      disabled: props.immediateSyncing,
+    });
+  }
   if (showToolbarUpdateEntry.value) {
     items.push({
       key: "checkUpdates",
@@ -646,6 +657,15 @@ const toolbarStyle = computed(() => {
           <TooltipContent>{{ updateTooltip }}</TooltipContent>
         </Tooltip>
       </template>
+
+      <Tooltip v-if="toolbarItems.immediateSync">
+        <TooltipTrigger as-child>
+          <Button v-show="isRightItemVisible('immediateSync')" variant="ghost" size="icon" class="toolbar-action-button h-8 w-8 shrink-0" :aria-label="t('toolbar.immediateSync')" :aria-busy="immediateSyncing" :disabled="immediateSyncing" @click="emit('immediate-sync')">
+            <RefreshCw class="toolbar-action-icon h-4 w-4" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ t("toolbar.immediateSync") }}</TooltipContent>
+      </Tooltip>
 
       <Tooltip v-if="showAlwaysOnTopButton">
         <TooltipTrigger as-child>

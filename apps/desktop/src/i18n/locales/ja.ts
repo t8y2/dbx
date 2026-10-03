@@ -910,6 +910,8 @@ export default withEnglishFallback({
     redisTlsInsecure: "証明書の検証をスキップ",
     redisTlsInsecureHint: "自己署名証明書やプライベートCA用の、redis-cli --tls --insecure 相当の設定です。",
     mysqlTlsMode: "TLSモード",
+    firebirdCharset: "文字セット",
+    firebirdCharsetHint: "CHARACTER SET NONE の列に格納されたテキスト（例: GBK で保存された中国語の旧データ）をデコードします。文字化けする場合はデータの実際のエンコーディングを選択してください。",
     mysqlTlsModePreferred: "優先",
     mysqlTlsModeDisabled: "無効",
     mysqlTlsModeRequired: "必須",

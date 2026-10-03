@@ -3937,6 +3937,20 @@ const postgresClientKeyPath = computed({
     form.value.url_params = setUrlParam(form.value.url_params, "sslkey", value);
   },
 });
+// Firebird 的 Java 驱动（Jaybird）默认按 JVM 编码（UTF-8）解码 CHARACTER SET NONE
+// 字段，历史数据若以 GBK 等编码存放就会显示为乱码。这里把连接字符集映射到 JDBC URL 的
+// charSet 参数（复用通用 URL 参数通道），交给用户按数据实际编码选择。
+const FIREBIRD_CHARSET_OPTIONS = ["UTF8", "GBK", "GB18030", "BIG5", "ISO8859_1", "WIN1252"];
+const firebirdCharsetItems = computed(() => {
+  const current = getUrlParam(form.value.url_params, "charSet");
+  return current && !FIREBIRD_CHARSET_OPTIONS.includes(current) ? [current, ...FIREBIRD_CHARSET_OPTIONS] : FIREBIRD_CHARSET_OPTIONS;
+});
+const firebirdCharset = computed({
+  get: () => getUrlParam(form.value.url_params, "charSet") || "default",
+  set: (value: string) => {
+    form.value.url_params = setUrlParam(form.value.url_params, "charSet", value === "default" ? "" : value);
+  },
+});
 const redisTlsInsecure = computed({
   get: () => getUrlParam(form.value.url_params, "insecure").toLowerCase() === "true",
   set: (value: boolean) => {
@@ -9349,6 +9363,24 @@ function openExternalUrl(url: string) {
                       </label>
                     </div>
 
+                    <div v-if="form.db_type === 'firebird'" class="grid grid-cols-4 items-start gap-4">
+                      <Label :class="connectionLabelTopClass">{{ t("connection.firebirdCharset") }}</Label>
+                      <div class="col-span-3 space-y-1.5">
+                        <Select v-model="firebirdCharset">
+                          <SelectTrigger class="h-9">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="default">{{ t("common.default") }}</SelectItem>
+                            <SelectItem v-for="charset in firebirdCharsetItems" :key="charset" :value="charset">{{ charset }}</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <p class="text-xs leading-5 text-muted-foreground">
+                          {{ t("connection.firebirdCharsetHint") }}
+                        </p>
+                      </div>
+                    </div>
+
                     <div v-if="supportsGenericUrlParams" class="connection-url-params-row grid grid-cols-4 items-start gap-4" :class="{ 'connection-url-params-row--compact': !showGenericUrlParamsHint, 'connection-url-params-row--with-hint': showGenericUrlParamsHint }">
                       <Label :class="[connectionLabelClass, 'connection-url-params-label']">{{ t("connection.urlParams") }}</Label>
                       <div class="col-span-3 space-y-1.5">
@@ -9375,7 +9407,9 @@ function openExternalUrl(url: string) {
                                               ? 'localdatacenter=dc1'
                                               : form.db_type === 'transwarp'
                                                 ? 'fetchSize=500;auth=noSasl'
-                                                : 'sslmode=prefer'
+                                                : form.db_type === 'firebird'
+                                                  ? 'charSet=GBK'
+                                                  : 'sslmode=prefer'
                           "
                         />
                         <p v-if="showGenericUrlParamsHint" class="text-xs leading-5 text-muted-foreground">

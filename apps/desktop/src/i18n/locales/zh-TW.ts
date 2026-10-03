@@ -915,6 +915,8 @@ export default withEnglishFallback({
     redisTlsInsecure: "跳過憑證驗證",
     redisTlsInsecureHint: "等價於 redis-cli --tls --insecure，適用於自簽名憑證或私有 CA。",
     mysqlTlsMode: "TLS 模式",
+    firebirdCharset: "連線字元集",
+    firebirdCharsetHint: "用於解碼 CHARACTER SET NONE 欄位中的文字（例如舊資料庫以 GBK 儲存的中文）。文字出現亂碼時，請依資料的實際編碼選擇。",
     mysqlTlsModePreferred: "優先使用",
     mysqlTlsModeDisabled: "停用",
     mysqlTlsModeRequired: "必須使用",

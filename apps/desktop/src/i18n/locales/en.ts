@@ -1015,6 +1015,8 @@ export default {
     redisTlsInsecure: "Skip certificate verification",
     redisTlsInsecureHint: "Equivalent to redis-cli --tls --insecure, for self-signed certificates or private CAs.",
     mysqlTlsMode: "TLS Mode",
+    firebirdCharset: "Charset",
+    firebirdCharsetHint: "Decodes text stored in CHARACTER SET NONE columns (for example legacy Chinese data saved as GBK). Pick the actual data encoding when text appears garbled.",
     mysqlTlsModePreferred: "Preferred",
     mysqlTlsModeDisabled: "Disabled",
     mysqlTlsModeRequired: "Required",

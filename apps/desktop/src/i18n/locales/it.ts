@@ -910,6 +910,8 @@ export default withEnglishFallback({
     redisTlsInsecure: "Salta verifica certificato",
     redisTlsInsecureHint: "Equivalente a redis-cli --tls --insecure, per certificati auto-firmati o CA private.",
     mysqlTlsMode: "Modalità TLS",
+    firebirdCharset: "Set di caratteri",
+    firebirdCharsetHint: "Decodifica il testo memorizzato nelle colonne CHARACTER SET NONE (ad esempio dati cinesi legacy salvati come GBK). Scegli la codifica effettiva dei dati quando il testo appare illeggibile.",
     mysqlTlsModePreferred: "Preferita",
     mysqlTlsModeDisabled: "Disabilitata",
     mysqlTlsModeRequired: "Richiesta",

@@ -14,8 +14,18 @@
 //! `dbx_sql_data` cannot depend on `dbx_formats` (the workspace enforces a one-way
 //! boundary between those two leaf crates), so this shim lives one level up in
 //! `dbx-core`, which already depends on `dbx-formats` and re-exports
-//! `data_grid_extractors`. It calls the same `push_formula_guard` the file exporters
-//! use, so the clipboard and file paths share one predicate and cannot drift.
+//! `data_grid_extractors`. It shares the [`needs_formula_guard`] predicate with the
+//! file exporters, so "does this text need a guard" is answered in exactly one place.
+//!
+//! It deliberately does **not** reuse [`dbx_formats::csv_export::push_formula_guard`],
+//! whose extra branch doubles a literal leading apostrophe (`'+8613…` → `''+8613…`).
+//! That doubling exists so DBX's own CSV importer, which strips one apostrophe, can
+//! read the value back. The clipboard has no such reader: the spreadsheet is the
+//! consumer, and Excel keeps a leading apostrophe as literal data on both paste and
+//! CSV open (measured on Excel 16.0 — pasting `''+8613800000000` stores both
+//! apostrophes, pasting `'+8613800000000` stores one). Doubling here would therefore
+//! add a visible apostrophe rather than preserve the value. The two paths legitimately
+//! differ because only one of them has a matching un-guard step.
 //!
 //! Only the extractors whose output lands in a spreadsheet are guarded. SQL, JSON,
 //! XML, HTML, Markdown and the raw extractor must stay byte-exact: prefixing a SQL
@@ -148,6 +158,9 @@ mod tests {
             DataGridExtractorId::Xml,
             DataGridExtractorId::Html,
             DataGridExtractorId::Markdown,
+            // `Pretty` is a fixed-width ASCII table for terminal display; a leading
+            // apostrophe would shift its columns out of alignment.
+            DataGridExtractorId::Pretty,
             DataGridExtractorId::Raw,
         ] {
             let out = neutralize(extractor, vec![vec![json!("=1+1")]]);
@@ -157,11 +170,25 @@ mod tests {
 
     #[test]
     fn text_without_a_trigger_character_is_untouched() {
-        // A phone number written with a leading apostrophe is the common case the
-        // exporter already doubles; here only the trigger set is neutralized.
+        // Only the trigger set is neutralized; a value that merely contains an
+        // apostrophe (but does not start with one) is already plain text to Excel.
         for value in ["plain", "a=b", "1'2", "'plain", "x@y.com", "", "NULL", "  plain"] {
             let out = neutralize(DataGridExtractorId::Tsv, vec![vec![json!(value)]]);
             assert_eq!(out[0], json!(value), "{value:?} must not be guarded");
+        }
+    }
+
+    #[test]
+    fn clipboard_does_not_double_a_literal_leading_apostrophe() {
+        // The file exporters double a literal leading apostrophe (`'+8613…` becomes
+        // `''+8613…`) because DBX's own CSV importer strips one apostrophe back off.
+        // The clipboard has no importer, and Excel keeps a leading apostrophe as
+        // literal data on both paste and CSV open (Excel 16.0: pasting `''+8613…`
+        // stores both, pasting `'+8613…` stores one). Doubling here would add a
+        // visible apostrophe, so these values must come out exactly as stored.
+        for value in ["'+8613800000000", "''-edge", "'=SUM(A1)", "'@x"] {
+            let out = neutralize(DataGridExtractorId::Tsv, vec![vec![json!(value)]]);
+            assert_eq!(out[0], json!(value), "{value:?} must reach the sheet unchanged, not doubled");
         }
     }
 

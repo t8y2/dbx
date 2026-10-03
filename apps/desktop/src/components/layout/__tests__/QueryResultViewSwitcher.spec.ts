@@ -14,7 +14,7 @@ afterEach(() => {
   }
 });
 
-async function mountSwitcher(canShowRedisConsole: boolean) {
+async function mountSwitcher(canShowRedisConsole: boolean, canShowGraph = false) {
   const state = reactive<{ view: TabOutputView; mode?: RedisResultViewMode }>({ view: "result" });
   const host = document.createElement("div");
   document.body.appendChild(host);
@@ -28,6 +28,7 @@ async function mountSwitcher(canShowRedisConsole: boolean) {
           canShowChart: false,
           canShowMessages: false,
           canShowRedisConsole,
+          canShowGraph,
           resultMode: state.mode,
           onSelectView: (view: TabOutputView) => {
             state.view = view;
@@ -42,7 +43,7 @@ async function mountSwitcher(canShowRedisConsole: boolean) {
     createI18n({
       legacy: false,
       locale: "en",
-      messages: { en: { tabs: { tableData: "Table Data", executionSummary: "Summary", messages: "Messages" }, chart: { title: "Chart" }, redis: { commandLine: "Command line" } } },
+      messages: { en: { tabs: { tableData: "Table Data", executionSummary: "Summary", messages: "Messages" }, chart: { title: "Chart" }, graph: { title: "Graph" }, redis: { commandLine: "Command line" } } },
     }),
   );
   app.mount(host);
@@ -77,5 +78,18 @@ describe("QueryResultViewSwitcher Redis mode", () => {
   it("does not expose the Redis-only mode on generic result toolbars", async () => {
     const { host } = await mountSwitcher(false);
     expect(host.querySelector('button[aria-label="Command line"]')).toBeNull();
+  });
+
+  it("shows the graph view only for graph results and switches back to the table", async () => {
+    const { host, state } = await mountSwitcher(false, true);
+    const graph = host.querySelector<HTMLButtonElement>('button[aria-label="Graph"]');
+    expect(graph).not.toBeNull();
+    graph?.click();
+    await nextTick();
+    expect(state.view).toBe("graph");
+    expect(graph?.getAttribute("aria-pressed")).toBe("true");
+    host.querySelector<HTMLButtonElement>("button")?.click();
+    await nextTick();
+    expect(state.view).toBe("result");
   });
 });

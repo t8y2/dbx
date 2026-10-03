@@ -6,7 +6,19 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { QueryResult, QueryTab } from "@/types/database";
 
 vi.mock("@/components/editor/QueryEditor.vue", () => ({ default: { render: () => null } }));
-vi.mock("@/components/grid/DataGrid.vue", () => ({ default: { render: () => h("div", { "data-test": "data-grid" }) } }));
+vi.mock("@/components/grid/DataGrid.vue", async () => {
+  const { defineComponent, h } = await import("vue");
+  return {
+    __esModule: true,
+    default: defineComponent({
+      emits: ["sort"],
+      setup:
+        (_props, { emit }) =>
+        () =>
+          h("button", { "data-test": "data-grid", onClick: () => emit("sort", "Message", 0, "asc", "", "database", "score DESC, Message ASC") }, "Sort"),
+    }),
+  };
+});
 
 import ContentArea from "../ContentArea.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -27,6 +39,7 @@ async function mountResults(results: QueryResult[], activeIndex: number) {
   const tab: QueryTab = { id: "query", title: "Query", connectionId: connection.id, database: "app", mode: "query", sql: "EXEC demo", isExecuting: false, results, result: results[activeIndex], activeResultIndex: activeIndex };
   useQueryStore().tabs.push(tab);
   const state = reactive({ view: "result" as "result" | "messages" });
+  const sortEvents: unknown[][] = [];
   const host = document.createElement("div");
   document.body.appendChild(host);
   const app = createApp(
@@ -43,6 +56,7 @@ async function mountResults(results: QueryResult[], activeIndex: number) {
           cursorPos: 0,
           resultOnly: true,
           blockDangerousRedisCommands: false,
+          onSort: (...args: unknown[]) => sortEvents.push(args),
           "onUpdate:activeOutputView": (_tabId: string, view: string) => {
             state.view = view as typeof state.view;
           },
@@ -55,12 +69,19 @@ async function mountResults(results: QueryResult[], activeIndex: number) {
   cleanups.push(() => app.unmount());
   await nextTick();
   await nextTick();
-  return { host, state };
+  return { host, state, sortEvents };
 }
 
 describe("SQL Server messages in the result surface", () => {
   const message: QueryResult = { columns: ["Message"], rows: [["before notice"]], affected_rows: 0, execution_time_ms: 1, server_message: true };
   const data: QueryResult = { columns: ["Message"], rows: [["real data"]], affected_rows: 0, execution_time_ms: 1 };
+
+  it("forwards effective multi-column ordering for a non-Neo4j grid", async () => {
+    const { host, sortEvents } = await mountResults([data], 0);
+    await vi.waitFor(() => expect(host.querySelector('[data-test="data-grid"]')).not.toBeNull());
+    host.querySelector<HTMLButtonElement>('[data-test="data-grid"]')!.click();
+    expect(sortEvents).toEqual([["query", "Message", 0, "asc", "", "database", "score DESC, Message ASC"]]);
+  });
 
   it("shows only three result tabs and preserves both message blocks in Messages", async () => {
     const { host, state } = await mountResults([message, data, { ...message, rows: [["after notice"]] }, { ...data, rows: [] }, data], 1);

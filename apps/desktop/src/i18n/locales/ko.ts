@@ -61,6 +61,30 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  graph: {
+    title: "그래프",
+    search: "그래프 검색",
+    nodes: "노드",
+    edges: "간선",
+    records: "레코드",
+    properties: "속성",
+    expand: "확장",
+    hide: "숨기기",
+    pin: "고정 또는 해제",
+    restoreHidden: "숨긴 요소 표시",
+    zoomIn: "확대",
+    zoomOut: "축소",
+    fit: "그래프 맞춤",
+    layout: "다시 배치",
+    exportPng: "PNG 내보내기",
+    clearSelection: "선택 해제",
+    save: "저장",
+    cancel: "취소",
+    conflict: "데이터베이스의 속성이 변경되었습니다. 결과를 새로고침한 뒤 다시 시도하세요.",
+    unavailable: "이 연결에서는 그래프를 편집할 수 없습니다.",
+    resultChanged: "결과 또는 연결이 변경되었습니다. 새로고침한 뒤 다시 시도하세요.",
+    updateFailed: "속성을 업데이트하지 못했습니다.",
+  },
   mongoDump,
   cellTransform: {
     title: "변환 미리보기",

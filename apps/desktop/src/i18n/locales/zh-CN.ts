@@ -7,6 +7,30 @@ import { meilisearchManagementZhCN } from "./meilisearchManagement";
 import { mongodbDatabaseDumpZhCN as mongoDump } from "./mongodbDatabaseDump";
 
 export default withEnglishFallback({
+  graph: {
+    title: "图谱",
+    search: "搜索图谱",
+    nodes: "节点",
+    edges: "关系",
+    records: "记录",
+    properties: "属性",
+    expand: "展开",
+    hide: "隐藏",
+    pin: "固定或取消固定",
+    restoreHidden: "显示隐藏的对象",
+    zoomIn: "放大",
+    zoomOut: "缩小",
+    fit: "适应画布",
+    layout: "重新布局",
+    exportPng: "导出 PNG",
+    clearSelection: "取消选择",
+    save: "保存",
+    cancel: "取消",
+    conflict: "数据库中的属性已变化，请刷新结果后重试。",
+    unavailable: "当前连接不能编辑图谱。",
+    resultChanged: "结果或连接已变化，请刷新后重试。",
+    updateFailed: "属性更新失败。",
+  },
   cellTransform: {
     title: "转换预览",
     description: "将当前内容转换后查看或复制，不改变原值和编辑草稿。",

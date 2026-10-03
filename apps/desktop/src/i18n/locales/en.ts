@@ -61,6 +61,30 @@ const consul = {
 };
 
 export default {
+  graph: {
+    title: "Graph",
+    search: "Search graph",
+    nodes: "nodes",
+    edges: "edges",
+    records: "Records",
+    properties: "Properties",
+    expand: "Expand",
+    hide: "Hide",
+    pin: "Pin or unpin",
+    restoreHidden: "Show hidden elements",
+    zoomIn: "Zoom in",
+    zoomOut: "Zoom out",
+    fit: "Fit graph",
+    layout: "Run layout",
+    exportPng: "Export PNG",
+    clearSelection: "Clear selection",
+    save: "Save",
+    cancel: "Cancel",
+    conflict: "The property changed in the database. Refresh the result and retry.",
+    unavailable: "Graph editing is unavailable for this connection.",
+    resultChanged: "The result or connection changed. Refresh and retry.",
+    updateFailed: "The property could not be updated.",
+  },
   cellTransform: {
     title: "Convert preview",
     description: "Convert the current value for viewing or copying. The source value and editor draft stay unchanged.",

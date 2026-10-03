@@ -63,6 +63,30 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  graph: {
+    title: "圖譜",
+    search: "搜尋圖譜",
+    nodes: "節點",
+    edges: "關係",
+    records: "記錄",
+    properties: "屬性",
+    expand: "展開",
+    hide: "隱藏",
+    pin: "固定或取消固定",
+    restoreHidden: "顯示隱藏的物件",
+    zoomIn: "放大",
+    zoomOut: "縮小",
+    fit: "符合畫布",
+    layout: "重新佈局",
+    exportPng: "匯出 PNG",
+    clearSelection: "取消選取",
+    save: "儲存",
+    cancel: "取消",
+    conflict: "資料庫中的屬性已變更，請重新整理結果後再試。",
+    unavailable: "目前連線無法編輯圖譜。",
+    resultChanged: "結果或連線已變更，請重新整理後再試。",
+    updateFailed: "屬性更新失敗。",
+  },
   mongoDump,
   cellTransform: {
     title: "轉換預覽",

@@ -63,6 +63,30 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  graph: {
+    title: "Grafo",
+    search: "Buscar en el grafo",
+    nodes: "nodos",
+    edges: "aristas",
+    records: "Registros",
+    properties: "Propiedades",
+    expand: "Expandir",
+    hide: "Ocultar",
+    pin: "Fijar o liberar",
+    restoreHidden: "Mostrar elementos ocultos",
+    zoomIn: "Acercar",
+    zoomOut: "Alejar",
+    fit: "Ajustar grafo",
+    layout: "Reorganizar",
+    exportPng: "Exportar PNG",
+    clearSelection: "Deseleccionar",
+    save: "Guardar",
+    cancel: "Cancelar",
+    conflict: "La propiedad cambió en la base de datos. Actualiza el resultado y vuelve a intentarlo.",
+    unavailable: "Esta conexión no permite editar el grafo.",
+    resultChanged: "El resultado o la conexión cambió. Actualiza y vuelve a intentarlo.",
+    updateFailed: "No se pudo actualizar la propiedad.",
+  },
   mongoDump,
   cellTransform: {
     title: "Vista previa de conversión",

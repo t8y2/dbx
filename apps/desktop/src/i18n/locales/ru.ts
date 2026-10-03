@@ -5,6 +5,30 @@ import { meilisearchManagementRu } from "./meilisearchManagement";
 
 // Russian locale. Entries omitted here fall back to English at runtime.
 export default withEnglishFallback({
+  graph: {
+    title: "Граф",
+    search: "Поиск по графу",
+    nodes: "узлы",
+    edges: "связи",
+    records: "Записи",
+    properties: "Свойства",
+    expand: "Развернуть",
+    hide: "Скрыть",
+    pin: "Закрепить или открепить",
+    restoreHidden: "Показать скрытые элементы",
+    zoomIn: "Увеличить",
+    zoomOut: "Уменьшить",
+    fit: "Уместить граф",
+    layout: "Перестроить",
+    exportPng: "Экспорт PNG",
+    clearSelection: "Снять выделение",
+    save: "Сохранить",
+    cancel: "Отмена",
+    conflict: "Свойство изменилось в базе данных. Обновите результат и повторите попытку.",
+    unavailable: "Для этого подключения редактирование графа недоступно.",
+    resultChanged: "Результат или подключение изменились. Обновите и повторите попытку.",
+    updateFailed: "Не удалось обновить свойство.",
+  },
   docs,
   dataDictionary,
   cellTransform: {

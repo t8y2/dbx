@@ -62,6 +62,30 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  graph: {
+    title: "グラフ",
+    search: "グラフを検索",
+    nodes: "ノード",
+    edges: "エッジ",
+    records: "レコード",
+    properties: "プロパティ",
+    expand: "展開",
+    hide: "非表示",
+    pin: "固定または解除",
+    restoreHidden: "非表示の要素を表示",
+    zoomIn: "拡大",
+    zoomOut: "縮小",
+    fit: "全体表示",
+    layout: "再配置",
+    exportPng: "PNG をエクスポート",
+    clearSelection: "選択解除",
+    save: "保存",
+    cancel: "キャンセル",
+    conflict: "データベース内のプロパティが変更されました。結果を更新して再試行してください。",
+    unavailable: "この接続ではグラフを編集できません。",
+    resultChanged: "結果または接続が変更されました。更新して再試行してください。",
+    updateFailed: "プロパティを更新できませんでした。",
+  },
   mongoDump,
   cellTransform: {
     title: "変換プレビュー",

@@ -1704,6 +1704,36 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
   const autoUpdateJdbc = typeof settings.autoUpdateJdbc === "boolean" ? settings.autoUpdateJdbc : legacyUpdateOptOut ? false : DEFAULT_EDITOR_SETTINGS.autoUpdateJdbc;
   const autoUpdateMcp = typeof settings.autoUpdateMcp === "boolean" ? settings.autoUpdateMcp : legacyUpdateOptOut ? false : DEFAULT_EDITOR_SETTINGS.autoUpdateMcp;
   const autoUpdatePlugins = typeof settings.autoUpdatePlugins === "boolean" ? settings.autoUpdatePlugins : legacyUpdateOptOut ? false : DEFAULT_EDITOR_SETTINGS.autoUpdatePlugins;
+  const customThemes = (() => {
+    if (Array.isArray(settings.customThemes) && settings.customThemes.length > 0) {
+      return settings.customThemes.map((theme) => {
+        const renamed = theme.name === "默认" ? { ...theme, name: "Custom" } : { ...theme };
+        return {
+          ...renamed,
+          colors: { ...DEFAULT_CUSTOM_THEME_COLORS, ...renamed.colors },
+          ddlColors: {
+            ...DEFAULT_CUSTOM_THEME_DDL_COLORS,
+            ...(renamed as any).ddlColors,
+          },
+        };
+      });
+    }
+    if (settings.customThemeColors && Object.keys(settings.customThemeColors).length > 0) {
+      return [
+        {
+          id: "migrated",
+          name: "Migrated",
+          colors: {
+            ...DEFAULT_CUSTOM_THEME_COLORS,
+            ...settings.customThemeColors,
+          },
+          ddlColors: { ...DEFAULT_CUSTOM_THEME_DDL_COLORS },
+        },
+      ];
+    }
+    return [...DEFAULT_CUSTOM_THEMES];
+  })();
+  const activeCustomThemeId = settings.activeCustomThemeId && customThemes.some((t) => t.id === settings.activeCustomThemeId) ? settings.activeCustomThemeId : (customThemes[0]?.id ?? "default");
   return {
     fontFamily: normalizeFontFamily(settings.fontFamily, DEFAULT_EDITOR_SETTINGS.fontFamily),
     fontSize: settings.fontSize ?? DEFAULT_EDITOR_SETTINGS.fontSize,
@@ -1716,35 +1746,8 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
       ...DEFAULT_CUSTOM_THEME_COLORS,
       ...settings.customThemeColors,
     },
-    customThemes: (() => {
-      if (Array.isArray(settings.customThemes) && settings.customThemes.length > 0) {
-        return settings.customThemes.map((theme) => {
-          const renamed = theme.name === "默认" ? { ...theme, name: "Custom" } : { ...theme };
-          return {
-            ...renamed,
-            colors: { ...DEFAULT_CUSTOM_THEME_COLORS, ...renamed.colors },
-            ddlColors: {
-              ...DEFAULT_CUSTOM_THEME_DDL_COLORS,
-              ...(renamed as any).ddlColors,
-            },
-          };
-        });
-      }
-      return settings.customThemeColors
-        ? [
-            {
-              id: "migrated",
-              name: "Migrated",
-              colors: {
-                ...DEFAULT_CUSTOM_THEME_COLORS,
-                ...settings.customThemeColors,
-              },
-              ddlColors: { ...DEFAULT_CUSTOM_THEME_DDL_COLORS },
-            },
-          ]
-        : [];
-    })(),
-    activeCustomThemeId: settings.activeCustomThemeId ?? "default",
+    customThemes,
+    activeCustomThemeId,
     executeMode: hasCurrentExecuteModeDefault && (settings.executeMode === "all" || settings.executeMode === "current") ? settings.executeMode : DEFAULT_EDITOR_SETTINGS.executeMode,
     executeModeDefaultVersion,
     executeAllOnBlankLine: settings.executeAllOnBlankLine === true,
@@ -2578,7 +2581,7 @@ export const useSettingsStore = defineStore("settings", () => {
       };
     }
     if (partial.customThemes !== undefined) {
-      editorSettings.value.customThemes = Array.isArray(partial.customThemes) ? partial.customThemes : editorSettings.value.customThemes;
+      editorSettings.value.customThemes = Array.isArray(partial.customThemes) && partial.customThemes.length > 0 ? partial.customThemes : [...DEFAULT_CUSTOM_THEMES];
     }
     if (partial.activeCustomThemeId !== undefined) {
       editorSettings.value.activeCustomThemeId = partial.activeCustomThemeId;
@@ -2589,6 +2592,7 @@ export const useSettingsStore = defineStore("settings", () => {
       const activeTheme = themes.find((t) => t.id === activeId) || themes[0];
       if (activeTheme) {
         editorSettings.value.customThemeColors = { ...activeTheme.colors };
+        editorSettings.value.activeCustomThemeId = activeTheme.id;
       }
     }
     if (partial.executeMode !== undefined) editorSettings.value.executeMode = partial.executeMode;

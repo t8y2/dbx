@@ -4,6 +4,7 @@ import { isProxy } from "vue";
 import {
   AI_PROVIDER_PARTNER_PRESETS,
   AI_PROVIDER_PRESETS,
+  DEFAULT_CUSTOM_THEMES,
   DEFAULT_EDITOR_SETTINGS,
   EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
   SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
@@ -128,6 +129,37 @@ describe("normalizeEditorSettings", () => {
     ).toEqual({
       "connection:local": { name: "Local services", color: "#e11d48" },
     });
+  });
+
+  it("normalizes customThemes when empty or absent by seeding DEFAULT_CUSTOM_THEMES", () => {
+    // When customThemes is an empty array
+    const normalizedEmpty = normalizeEditorSettings({ customThemes: [] });
+    expect(normalizedEmpty.customThemes).toEqual(DEFAULT_CUSTOM_THEMES);
+    expect(normalizedEmpty.activeCustomThemeId).toBe("default");
+
+    // When customThemes is absent
+    const normalizedAbsent = normalizeEditorSettings({});
+    expect(normalizedAbsent.customThemes).toEqual(DEFAULT_CUSTOM_THEMES);
+    expect(normalizedAbsent.activeCustomThemeId).toBe("default");
+
+    // When customThemes has invalid activeCustomThemeId, fall back to first theme id
+    const customList = [{ id: "my-theme", name: "My Theme", colors: DEFAULT_CUSTOM_THEMES[0].colors, ddlColors: DEFAULT_CUSTOM_THEMES[0].ddlColors }];
+    const normalizedInvalidActive = normalizeEditorSettings({
+      customThemes: customList,
+      activeCustomThemeId: "nonexistent",
+    });
+    expect(normalizedInvalidActive.customThemes).toHaveLength(1);
+    expect(normalizedInvalidActive.activeCustomThemeId).toBe("my-theme");
+
+    // When legacy customThemeColors is provided and customThemes is empty
+    const legacyColors = { ...DEFAULT_CUSTOM_THEMES[0].colors, keyword: "#ff0000" };
+    const normalizedLegacy = normalizeEditorSettings({
+      customThemes: [],
+      customThemeColors: legacyColors,
+    });
+    expect(normalizedLegacy.customThemes).toHaveLength(1);
+    expect(normalizedLegacy.customThemes[0].id).toBe("migrated");
+    expect(normalizedLegacy.customThemes[0].colors.keyword).toBe("#ff0000");
   });
 
   it("defaults and bounds the persisted text filter panel height", () => {
@@ -1184,6 +1216,15 @@ describe("settingsStore persisted settings initialization", () => {
       appLayout: "separated",
     });
     expect(saveEditorSettings).toHaveBeenCalledWith(expect.objectContaining({ fontSize: 17, theme: "xcode-dark", appLayout: "separated" }));
+  });
+
+  it("seeds DEFAULT_CUSTOM_THEMES when updateEditorSettings receives empty customThemes", async () => {
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+
+    store.updateEditorSettings({ customThemes: [] });
+    expect(store.editorSettings.customThemes).toEqual(DEFAULT_CUSTOM_THEMES);
+    expect(store.editorSettings.activeCustomThemeId).toBe("default");
   });
 
   it("migrates the legacy filter-editor preference in incremental settings updates", async () => {

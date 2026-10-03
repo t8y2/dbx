@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
 import type { CustomTheme, CustomThemeColors } from "@/stores/settingsStore";
-import { DEFAULT_CUSTOM_THEME_COLORS, DEFAULT_CUSTOM_THEME_DDL_COLORS } from "@/stores/settingsStore";
+import { DEFAULT_CUSTOM_THEMES, DEFAULT_CUSTOM_THEME_COLORS, DEFAULT_CUSTOM_THEME_DDL_COLORS } from "@/stores/settingsStore";
 import { Plus, Trash2, Copy, Pencil, ChevronDown, Palette } from "@lucide/vue";
 import { useToast } from "@/composables/useToast";
 import { useI18n } from "vue-i18n";
@@ -32,12 +32,22 @@ const jsonText = ref("");
 const renamingId = ref<string | null>(null);
 const renamingName = ref("");
 
+function cloneCustomThemes(themes: CustomTheme[]): CustomTheme[] {
+  return themes.map((theme) => ({
+    id: theme.id,
+    name: theme.name,
+    colors: { ...theme.colors },
+    ddlColors: { ...theme.ddlColors },
+  }));
+}
+
 watch(
   () => props.open,
   (isOpen) => {
     if (isOpen) {
-      localThemes.value = JSON.parse(JSON.stringify(props.themes));
-      activeEditId.value = props.activeThemeId;
+      localThemes.value = props.themes && props.themes.length > 0 ? cloneCustomThemes(props.themes) : cloneCustomThemes(DEFAULT_CUSTOM_THEMES);
+      const hasActive = localThemes.value.some((t) => t.id === props.activeThemeId);
+      activeEditId.value = hasActive ? props.activeThemeId : (localThemes.value[0]?.id ?? "default");
       syncJson();
     }
   },
@@ -352,11 +362,9 @@ function handleJsonChange() {
 }
 
 function handleSave() {
-  emit(
-    "save",
-    localThemes.value.map((t) => ({ ...t })),
-    activeEditId.value,
-  );
+  const themesToSave = localThemes.value.length > 0 ? localThemes.value : cloneCustomThemes(DEFAULT_CUSTOM_THEMES);
+  const activeId = themesToSave.some((t) => t.id === activeEditId.value) ? activeEditId.value : (themesToSave[0]?.id ?? "default");
+  emit("save", cloneCustomThemes(themesToSave), activeId);
   emit("update:open", false);
 }
 

@@ -1015,6 +1015,12 @@ const specialPageTabs = computed(() => ({
 }));
 provide(GROUP_TAB_BAR_PORTAL, createGroupTabBarPortal(computed(() => !isDetachedWindowContext && (driverStoreActive.value || pluginCenterActive.value || settingsStore.settingsPageActive))));
 provide(EDITOR_TOOLBAR_ACTIONS, {
+  canNewQuery: canCreateNewQuery,
+  newQuery: (groupId: string) => {
+    queryStore.focusGroup(groupId);
+    newQueryContextSource.value = "tab";
+    void newQuery();
+  },
   explainMode,
   blockDangerousRedisCommands,
   databaseRequiredSignalFor: (tabId: string) => (databaseRequiredTabId.value === tabId ? databaseRequiredSignal.value : 0),

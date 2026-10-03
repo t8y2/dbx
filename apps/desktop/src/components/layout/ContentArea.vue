@@ -36,6 +36,7 @@ import {
   X,
   Pin,
   Pencil,
+  PencilRuler,
   Rows3,
   Hash,
   SquareDashed,
@@ -220,6 +221,8 @@ type DataGridHandle = DataGridColumnLayoutHandle & {
   openExtractorConfiguration: () => void;
   showDdl: boolean;
   toggleDdl: (tab?: TableInfoTab) => void;
+  canOpenTableStructureEditor: boolean;
+  openTableStructureEditor: (tab: TableInfoTab) => void;
   multiRowTranspose: boolean;
   setMultiRowTranspose: (value: boolean) => void;
   exportCsv: () => Promise<void>;
@@ -2691,6 +2694,12 @@ defineExpose({
           </button>
           <span v-if="showDataColumnsChip && activeDataTabTableMeta" class="inline-flex shrink-0 items-center rounded border border-border bg-muted/30 px-2 py-0.5 font-medium text-muted-foreground tabular-nums"> {{ activeDataTabTableMeta.columns.length }} {{ t("tree.columns") }} </span>
           <span class="ml-auto" />
+          <LightTooltip v-if="dataGridRef?.canOpenTableStructureEditor" :text="t('contextMenu.editStructure')" side="bottom" nowrap>
+            <Button data-edit-table-structure variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :aria-label="t('contextMenu.editStructure')" @click="dataGridRef?.openTableStructureEditor('columns')">
+              <PencilRuler class="h-3.5 w-3.5" />
+              <span v-if="!dataToolbarCompact">{{ t("contextMenu.editStructure") }}</span>
+            </Button>
+          </LightTooltip>
           <DataGridColumnLayoutPopover v-if="activeTab.result?.columns.length" :grid="dataGridRef" trigger-class="px-1.5" />
           <Button v-if="activeTab.result && activeDataTabTableMeta && activeTab.connectionId" variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :class="{ 'bg-accent': dataGridRef?.showDdl }" :title="dataToolbarCompact ? t('grid.tableInfo') : undefined" @click="dataGridRef?.toggleDdl()"
             ><TableProperties class="h-3.5 w-3.5" /><span v-if="!dataToolbarCompact">{{ t("grid.tableInfo") }}</span></Button

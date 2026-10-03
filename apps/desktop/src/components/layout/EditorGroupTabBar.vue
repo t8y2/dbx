@@ -27,7 +27,7 @@ const TAB_DRAG_HORIZONTAL_THRESHOLD = 24;
 </script>
 
 <script setup lang="ts">
-import { computed, nextTick, onUnmounted, ref, watch } from "vue";
+import { computed, inject, nextTick, onUnmounted, ref, watch } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
 import {
@@ -54,6 +54,7 @@ import {
   Pencil,
   Pin,
   PlugZap,
+  Plus,
   RotateCcw,
   RotateCw,
   Search,
@@ -75,6 +76,7 @@ import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import TabExecutionStatus from "@/components/layout/TabExecutionStatus.vue";
 import TabModeIcon from "@/components/layout/TabModeIcon.vue";
 import ReadOnlySessionControl from "@/components/connection/ReadOnlySessionControl.vue";
+import { EDITOR_TOOLBAR_ACTIONS } from "./editorToolbarActions";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -127,6 +129,8 @@ const { t } = useI18n();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const connectionStore = useConnectionStore();
+const toolbar = inject(EDITOR_TOOLBAR_ACTIONS, null);
+const canNewQuery = computed(() => toolbar?.canNewQuery.value ?? false);
 const { toast } = useToast();
 const tabsContainerRef = ref<HTMLElement | null>(null);
 const { hasTabOverflow, scrollThumbLeftPercent, scrollThumbWidthPercent, isScrollbarDragging, updateScrollButtons, onTabsWheel, startScrollbarDrag } = useTabScroll(tabsContainerRef);
@@ -1617,6 +1621,14 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
   >
     <!-- Compact vertical toolbar: search, tab organization, collapse. -->
     <div v-if="isVerticalLayout" class="flex h-9 shrink-0 items-center gap-0.5 border-b p-1" :class="isTabBarCollapsed ? 'justify-center' : ''">
+      <Tooltip v-if="canNewQuery">
+        <TooltipTrigger as-child>
+          <button type="button" data-new-query-tab :class="verticalTabToolbarButtonClass" :aria-label="t('toolbar.newQuery')" @click="toolbar?.newQuery(groupId)">
+            <Plus class="h-4 w-4" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent>{{ t("toolbar.newQuery") }}</TooltipContent>
+      </Tooltip>
       <div v-if="!isTabBarCollapsed" class="relative min-w-0 flex-1">
         <Search class="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
         <Input v-model="tabSearchQuery" type="search" :placeholder="t('tabs.searchOpenTabs')" class="h-7 w-full pl-7 text-sm" />
@@ -1918,7 +1930,21 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
           </template>
         </div>
       </div>
-      <div v-if="showOverflowControl" class="tab-overflow-control absolute right-0 top-0 z-30 flex h-full items-center">
+      <Tooltip v-if="!isVerticalLayout && canNewQuery">
+        <TooltipTrigger as-child>
+          <button
+            type="button"
+            data-new-query-tab
+            class="mx-0.5 inline-flex h-7 w-7 shrink-0 self-center items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            :aria-label="t('toolbar.newQuery')"
+            @click="toolbar?.newQuery(groupId)"
+          >
+            <Plus class="h-4 w-4" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent>{{ t("toolbar.newQuery") }}</TooltipContent>
+      </Tooltip>
+      <div v-if="showOverflowControl" class="tab-overflow-control absolute top-0 z-30 flex h-full items-center" :class="canNewQuery ? 'right-8' : 'right-0'">
         <Popover v-model:open="tabOverflowOpen">
           <PopoverTrigger as-child>
             <button type="button" class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border/60 bg-background text-foreground/70 hover:border-border hover:text-foreground" :aria-label="t('tabs.openTabs')" :title="t('tabs.openTabs')">

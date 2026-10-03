@@ -3,7 +3,7 @@ import { hasTableStructureRefreshWork, unloadedTableStructureRefreshScope, visib
 
 describe("table structure metadata loading", () => {
   it.each([
-    ["columns", { columns: true, indexes: false, foreignKeys: false, constraints: false, triggers: false, partitions: false, tableComment: true }],
+    ["columns", { columns: true, indexes: true, foreignKeys: false, constraints: false, triggers: false, partitions: false, tableComment: true }],
     ["indexes", { columns: true, indexes: true, foreignKeys: false, constraints: false, triggers: false, partitions: false, tableComment: true }],
     ["foreignKeys", { columns: true, indexes: false, foreignKeys: true, constraints: false, triggers: false, partitions: false, tableComment: true }],
     ["constraints", { columns: false, indexes: false, foreignKeys: false, constraints: true, triggers: false, partitions: false, tableComment: true }],

@@ -16,6 +16,11 @@ import {
   draftColumnNameForSql,
   getDataTypeLengthUnitOptions,
   getDefaultLengthForType,
+  generateIndexName,
+  generateUniqueIndexName,
+  generateShortIndexName,
+  generateUniqueShortIndexName,
+  specialIndexColumnIssue,
   hasExistingColumnTypeChange,
   isDataTypeLengthDisabled,
   isDamengIdentityCompatibleDataType,
@@ -36,6 +41,74 @@ import {
 } from "@/lib/table/tableStructureEditorState";
 
 describe("tableStructureEditorState", () => {
+  describe("index naming", () => {
+    it("uses a lowercase type prefix and the initial field name", () => {
+      expect(generateShortIndexName("Prop_Code")).toBe("idx_prop_code");
+      expect(generateShortIndexName("email", { isUnique: true })).toBe("uk_email");
+      expect(generateShortIndexName("title", { indexType: "FULLTEXT" })).toBe("ft_title");
+      expect(generateShortIndexName("location", { indexType: "SPATIAL" })).toBe("sp_location");
+      expect(generateShortIndexName("id", { isPrimary: true })).toBe("PRIMARY");
+      expect(generateShortIndexName("")).toBe("");
+    });
+
+    it("keeps long names deterministic and distinguishes truncated column names", () => {
+      const name = generateShortIndexName("a".repeat(90));
+      expect(name).toHaveLength(63);
+      expect(name).toMatch(/^idx_.*_[0-9a-f]{8}$/);
+      expect(generateShortIndexName("a".repeat(90))).toBe(name);
+      expect(generateShortIndexName("a".repeat(89) + "b")).not.toBe(name);
+      expect(generateShortIndexName("a".repeat(90), { maxLength: 64 })).toHaveLength(64);
+    });
+
+    it("resolves case-insensitive collisions while retaining type prefixes and limits", () => {
+      expect(generateUniqueShortIndexName("email", ["IDX_EMAIL", "idx_email_2"])).toBe("idx_email_3");
+      expect(generateUniqueShortIndexName("email", ["UK_EMAIL"], { isUnique: true })).toBe("uk_email_2");
+      const base = generateShortIndexName("a".repeat(90));
+      const next = generateUniqueShortIndexName("a".repeat(90), [base]);
+      expect(next).toHaveLength(63);
+      expect(next).toMatch(/^idx_.*_[0-9a-f]{8}_2$/);
+    });
+
+    it("preserves legacy callers and table-qualified names for shared namespaces", () => {
+      expect(generateIndexName("users", ["email"])).toBe("USERS_EMAIL_IDX");
+      expect(generateIndexName("orders", ["email"])).toBe("ORDERS_EMAIL_IDX");
+      expect(generateIndexName("users", ["email", "region"])).toBe("USERS_EMAIL_REGION_IDX");
+      expect(generateUniqueIndexName("users", ["email"], ["USERS_EMAIL_IDX"])).toBe("USERS_EMAIL_IDX_2");
+    });
+
+    it("preserves Chinese field names and provides deterministic names for symbols", () => {
+      const field = "\u5c5e\u6027";
+      expect(generateShortIndexName(field)).toBe(`idx_${field}`);
+      expect(generateUniqueShortIndexName(field, [`uk_${field}`], { isUnique: true })).toBe(`uk_${field}_2`);
+      const longName = generateShortIndexName(field.repeat(40), { maxLength: 64 });
+      expect(longName).toHaveLength(64);
+      expect(longName).toMatch(/_[0-9a-f]{8}$/);
+      expect(generateShortIndexName("---")).toMatch(/^idx_column_[0-9a-f]{8}$/);
+      expect(generateShortIndexName("---")).not.toBe(generateShortIndexName("+++"));
+      expect(generateShortIndexName("\u{10400}")).toMatch(/^idx_column_[0-9a-f]{8}$/);
+    });
+  });
+
+  describe("special index columns", () => {
+    const field = (dataType: string, isNullable = false) => ({ dataType, isNullable });
+
+    it("allows composite text searches but rejects JSON, numbers, and unique fulltext", () => {
+      expect(specialIndexColumnIssue("mysql", "FULLTEXT", [field("varchar(255)"), field("longtext")])).toBeNull();
+      for (const type of ["json", "int", "blob"]) expect(specialIndexColumnIssue("mysql", "FULLTEXT", [field(type)])).toBe("fulltextIndexColumns");
+      expect(specialIndexColumnIssue("mysql", "FULLTEXT", [field("text")], true)).toBe("specialIndexUnique");
+    });
+
+    it("requires one non-null geometry for MySQL spatial indexes", () => {
+      expect(specialIndexColumnIssue("mysql", "SPATIAL", [field("point")])).toBeNull();
+      expect(specialIndexColumnIssue("mysql", "SPATIAL", [field("polygon", true)])).toBe("spatialIndexNullable");
+      expect(specialIndexColumnIssue("mysql", "SPATIAL", [field("point"), field("geometry")])).toBe("spatialIndexColumn");
+      expect(specialIndexColumnIssue("mysql", "SPATIAL", [field("varchar(64)")])).toBe("spatialIndexColumn");
+      expect(specialIndexColumnIssue("mysql", "SPATIAL", [field("geography")])).toBe("spatialIndexColumn");
+      expect(specialIndexColumnIssue("sqlserver", "SPATIAL", [field("geography", true)])).toBeNull();
+      expect(specialIndexColumnIssue("postgres", "GIST", [field("geometry", true)])).toBeNull();
+    });
+  });
+
   describe("DuckDB type parameters", () => {
     it.each([
       "TINYINT",

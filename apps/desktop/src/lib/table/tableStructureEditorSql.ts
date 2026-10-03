@@ -38,6 +38,8 @@ export interface EditableStructureIndex {
   name: string;
   columns: string[];
   nameEdited?: boolean;
+  /** First selected field, retained when a composite index's members change. */
+  autoNameColumn?: string;
   isUnique: boolean;
   isPrimary: boolean;
   filter: string;

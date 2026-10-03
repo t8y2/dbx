@@ -383,3 +383,9 @@ export function isBrowserReloadShortcut(event: ShortcutLikeEvent): boolean {
   if (key === "F5") return true;
   return key === "r" && (!!event.metaKey || !!event.ctrlKey);
 }
+
+export function isBrowserTaskManagerShortcut(event: ShortcutLikeEvent): boolean {
+  if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey) return false;
+  if (!event.shiftKey) return false;
+  return event.key === "Escape" || event.key === "Esc" || event.code === "Escape";
+}

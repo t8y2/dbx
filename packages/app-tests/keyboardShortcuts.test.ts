@@ -4,6 +4,7 @@ import {
   eventToShortcut,
   handleTabHistoryNavigationShortcut,
   isBrowserReloadShortcut,
+  isBrowserTaskManagerShortcut,
   isCancelSearchShortcut,
   isCloseOtherTabsShortcut,
   isCloseTabShortcut,
@@ -366,6 +367,19 @@ test("detects browser reload shortcuts for desktop suppression", () => {
   assert.equal(isBrowserReloadShortcut({ key: "F5" }), true);
   assert.equal(isBrowserReloadShortcut({ key: "r", altKey: true, ctrlKey: true }), false);
   assert.equal(isBrowserReloadShortcut({ key: "r", ctrlKey: true, isComposing: true }), false);
+});
+
+test("detects browser task manager shortcut (Shift+Escape) for suppression", () => {
+  assert.equal(isBrowserTaskManagerShortcut({ key: "Escape", shiftKey: true }), true);
+  assert.equal(isBrowserTaskManagerShortcut({ key: "Esc", shiftKey: true }), true);
+  assert.equal(isBrowserTaskManagerShortcut({ code: "Escape", shiftKey: true, key: "Unidentified" }), true);
+  assert.equal(isBrowserTaskManagerShortcut({ key: "Escape" }), false);
+  assert.equal(isBrowserTaskManagerShortcut({ key: "Escape", shiftKey: false }), false);
+  assert.equal(isBrowserTaskManagerShortcut({ key: "Escape", shiftKey: true, ctrlKey: true }), false);
+  assert.equal(isBrowserTaskManagerShortcut({ key: "Escape", shiftKey: true, metaKey: true }), false);
+  assert.equal(isBrowserTaskManagerShortcut({ key: "Escape", shiftKey: true, altKey: true }), false);
+  assert.equal(isBrowserTaskManagerShortcut({ key: "Escape", shiftKey: true, isComposing: true }), false);
+  assert.equal(isBrowserTaskManagerShortcut({ key: "Tab", shiftKey: true }), false);
 });
 
 test("matches Mod-R without shift or alt for scoped refresh and replace", () => {

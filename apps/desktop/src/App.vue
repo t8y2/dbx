@@ -106,6 +106,7 @@ import { activeDesktopAiRuns, blockingDesktopAiRunsForQuit } from "@/lib/ai/desk
 
 import {
   isBrowserReloadShortcut,
+  isBrowserTaskManagerShortcut,
   isCloseOtherTabsShortcut,
   isCloseTabShortcut,
   isExecuteSqlInNewResultTabShortcut,
@@ -3707,6 +3708,11 @@ const tabSwitcherKeyboard = createTabSwitcherKeyboardController({
 });
 
 function handleNativeSelectAll(e: KeyboardEvent) {
+  if (isBrowserTaskManagerShortcut(e)) {
+    e.preventDefault();
+    e.stopPropagation();
+    return;
+  }
   if (shouldBlockAppNativeSelectAll(e)) e.preventDefault();
 }
 
@@ -4000,6 +4006,11 @@ async function handleKeydown(e: KeyboardEvent) {
       return;
     }
   }
+  if (isBrowserTaskManagerShortcut(e)) {
+    e.preventDefault();
+    e.stopPropagation();
+    return;
+  }
   if (isDesktop && isBrowserReloadShortcut(e)) {
     e.preventDefault();
     e.stopPropagation();
@@ -4174,6 +4185,7 @@ watch(appReady, (ready) => void syncConnectionLivenessSubscription(ready), { imm
 onMounted(async () => {
   clearStartupPreloadRetry();
   markStartupPhase("app-mounted");
+  window.addEventListener("keydown", handleNativeSelectAll, true);
   console.log("[STARTUP] onMounted begin");
   const mountStart = performance.now();
   if (isDetachedWindowContext) {
@@ -4195,7 +4207,6 @@ onMounted(async () => {
   });
   applyTheme();
   void applyUiScale(settingsStore.editorSettings.uiScale);
-  window.addEventListener("keydown", handleNativeSelectAll, true);
   window.addEventListener("keydown", handleGlobalSearchKeydownCapture, true);
   window.addEventListener("keydown", handleTabSwitcherKeydownCapture, true);
   window.addEventListener("keydown", handleAuxiliarySearchKeydownCapture, true);

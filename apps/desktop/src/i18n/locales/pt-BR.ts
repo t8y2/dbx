@@ -7246,6 +7246,8 @@ export default withEnglishFallback({
     sidebarObjectDisplaySimpleDescription: "Listar tabelas e views diretamente sob cada banco de dados ou schema para reduzir os níveis intermediários.",
     autoSelectActiveSidebarNode: "Sempre selecionar o item aberto",
     autoSelectActiveSidebarNodeDescription: "Ao alternar abas, selecionar a tabela, coleção ou arquivo SQL correspondente visível na barra lateral.",
+    sidebarPinDefaultDatabase: "Fixar banco de dados padrão no topo",
+    sidebarPinDefaultDatabaseDescription: "Quando ativado, o banco de dados padrão aparece no topo da lista de bancos de dados. Quando desativado, é ordenado em ordem alfabética.",
     sidebarBrowseObjectsOnDatabaseActivation: "Explorar objetos ao ativar um banco de dados",
     sidebarBrowseObjectsOnDatabaseActivationDescription: 'Quando ativado, ativar um nó de banco de dados ou esquema com o modo selecionado de clique simples ou duplo também abre a aba "Explorar Objetos".',
     openTabsRestoreMode: "Restaurar abas ao iniciar",

@@ -842,6 +842,7 @@ const editRoutineSourceOpenMode = ref(settingsStore.editorSettings.routineSource
 const editSidebarTableSearchEnabled = ref(settingsStore.editorSettings.sidebarTableSearchEnabled);
 const editSidebarSearchOpenedDatabasesOnly = ref(settingsStore.editorSettings.sidebarSearchOpenedDatabasesOnly);
 const editAutoSelectActiveSidebarNode = ref(settingsStore.editorSettings.autoSelectActiveSidebarNode);
+const editSidebarPinDefaultDatabase = ref(settingsStore.editorSettings.sidebarPinDefaultDatabase);
 const editSidebarBrowseObjectsOnDatabaseActivation = ref(settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation);
 const editOpenTabsRestoreMode = ref<OpenTabsRestoreMode>(settingsStore.editorSettings.openTabsRestoreMode);
 const editAutoReloadRestoredDataTabsOnOpen = ref(settingsStore.editorSettings.autoReloadRestoredDataTabsOnOpen);
@@ -1126,6 +1127,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     sidebarTableSearchEnabled: editSidebarTableSearchEnabled.value,
     sidebarSearchOpenedDatabasesOnly: editSidebarSearchOpenedDatabasesOnly.value,
     autoSelectActiveSidebarNode: editAutoSelectActiveSidebarNode.value,
+    sidebarPinDefaultDatabase: editSidebarPinDefaultDatabase.value,
     sidebarBrowseObjectsOnDatabaseActivation: editSidebarBrowseObjectsOnDatabaseActivation.value,
     openTabsRestoreMode: editOpenTabsRestoreMode.value,
     autoReloadRestoredDataTabsOnOpen: editAutoReloadRestoredDataTabsOnOpen.value,
@@ -1796,6 +1798,7 @@ function syncEditorSettingsDraftFromStore() {
   editSidebarTableSearchEnabled.value = settingsStore.editorSettings.sidebarTableSearchEnabled;
   editSidebarSearchOpenedDatabasesOnly.value = settingsStore.editorSettings.sidebarSearchOpenedDatabasesOnly;
   editAutoSelectActiveSidebarNode.value = settingsStore.editorSettings.autoSelectActiveSidebarNode;
+  editSidebarPinDefaultDatabase.value = settingsStore.editorSettings.sidebarPinDefaultDatabase;
   editSidebarBrowseObjectsOnDatabaseActivation.value = settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation;
   editOpenTabsRestoreMode.value = settingsStore.editorSettings.openTabsRestoreMode;
   editAutoReloadRestoredDataTabsOnOpen.value = settingsStore.editorSettings.autoReloadRestoredDataTabsOnOpen;
@@ -1938,6 +1941,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   sidebarTableSearchEnabled: editSidebarTableSearchEnabled,
   sidebarSearchOpenedDatabasesOnly: editSidebarSearchOpenedDatabasesOnly,
   autoSelectActiveSidebarNode: editAutoSelectActiveSidebarNode,
+  sidebarPinDefaultDatabase: editSidebarPinDefaultDatabase,
   sidebarBrowseObjectsOnDatabaseActivation: editSidebarBrowseObjectsOnDatabaseActivation,
   openTabsRestoreMode: editOpenTabsRestoreMode,
   autoReloadRestoredDataTabsOnOpen: editAutoReloadRestoredDataTabsOnOpen,
@@ -2446,6 +2450,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
     editSidebarSearchOpenedDatabasesOnly.value = DEFAULT_EDITOR_SETTINGS.sidebarSearchOpenedDatabasesOnly;
     editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
+    editSidebarPinDefaultDatabase.value = DEFAULT_EDITOR_SETTINGS.sidebarPinDefaultDatabase;
     editSidebarBrowseObjectsOnDatabaseActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarBrowseObjectsOnDatabaseActivation;
     editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
     editAutoReloadRestoredDataTabsOnOpen.value = DEFAULT_EDITOR_SETTINGS.autoReloadRestoredDataTabsOnOpen;
@@ -2629,6 +2634,7 @@ function resetAllDefaults() {
   editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
   editSidebarSearchOpenedDatabasesOnly.value = DEFAULT_EDITOR_SETTINGS.sidebarSearchOpenedDatabasesOnly;
   editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
+  editSidebarPinDefaultDatabase.value = DEFAULT_EDITOR_SETTINGS.sidebarPinDefaultDatabase;
   editSidebarBrowseObjectsOnDatabaseActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarBrowseObjectsOnDatabaseActivation;
   editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
   editAutoReloadRestoredDataTabsOnOpen.value = DEFAULT_EDITOR_SETTINGS.autoReloadRestoredDataTabsOnOpen;
@@ -7861,6 +7867,15 @@ onUnmounted(() => {
                   </HelpTooltip>
                 </div>
                 <Switch id="auto-select-active-sidebar-node" v-model="editAutoSelectActiveSidebarNode" />
+              </div>
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="flex items-center gap-2">
+                  <Label for="sidebar-pin-default-database">{{ t("settings.sidebarPinDefaultDatabase") }}</Label>
+                  <HelpTooltip :label="t('settings.sidebarPinDefaultDatabase')">
+                    {{ t("settings.sidebarPinDefaultDatabaseDescription") }}
+                  </HelpTooltip>
+                </div>
+                <Switch id="sidebar-pin-default-database" v-model="editSidebarPinDefaultDatabase" />
               </div>
               <div class="settings-item space-y-2 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">

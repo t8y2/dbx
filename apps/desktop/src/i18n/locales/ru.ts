@@ -8455,6 +8455,8 @@ export default withEnglishFallback({
     routineSourceOpenModeDialogDescription: "Открывать исходный код во всплывающем диалоге для быстрого просмотра и редактирования.",
     autoSelectActiveSidebarNode: "Всегда выделять открытый элемент",
     autoSelectActiveSidebarNodeDescription: "При переключении вкладок выделять соответствующую видимую таблицу, коллекцию или SQL-файл в боковой панели.",
+    sidebarPinDefaultDatabase: "Закреплять базу данных по умолчанию вверху",
+    sidebarPinDefaultDatabaseDescription: "Если включено, база данных по умолчанию отображается в начале списка. Если отключено, она сортируется по алфавиту.",
     sidebarBrowseObjectsOnDatabaseActivation: "Просматривать объекты при активации базы данных",
     sidebarBrowseObjectsOnDatabaseActivationDescription: "Если включено, активация узла базы данных или схемы выбранным режимом (один или двойной клик) также открывает вкладку «Просмотр объектов».",
     openTabsRestoreMode: "Восстанавливать вкладки при запуске",

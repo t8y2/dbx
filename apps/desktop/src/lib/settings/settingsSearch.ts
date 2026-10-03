@@ -204,6 +204,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "navigation-table-search", category: "navigation", titleKey: "settings.sidebarTableSearchEnabled", descriptionKey: "settings.sidebarTableSearchEnabledDescription", targetId: "navigation" },
   { id: "navigation-search-opened-databases-only", category: "navigation", titleKey: "settings.sidebarSearchOpenedDatabasesOnly", descriptionKey: "settings.sidebarSearchOpenedDatabasesOnlyDescription", targetId: "navigation" },
   { id: "navigation-active-node", category: "navigation", titleKey: "settings.autoSelectActiveSidebarNode", descriptionKey: "settings.autoSelectActiveSidebarNodeDescription", targetId: "navigation" },
+  { id: "navigation-sidebar-pin-default-database", category: "navigation", titleKey: "settings.sidebarPinDefaultDatabase", descriptionKey: "settings.sidebarPinDefaultDatabaseDescription", targetId: "navigation" },
   { id: "navigation-browse-objects-on-database-activation", category: "navigation", titleKey: "settings.sidebarBrowseObjectsOnDatabaseActivation", descriptionKey: "settings.sidebarBrowseObjectsOnDatabaseActivationDescription", targetId: "navigation" },
   { id: "navigation-tabs-restore", category: "navigation", titleKey: "settings.openTabsRestoreMode", descriptionKey: "settings.openTabsRestoreModeDescription", targetId: "navigation" },
   { id: "navigation-sidebar-scroll", category: "navigation", titleKey: "settings.sidebarAllowHorizontalScroll", descriptionKey: "settings.sidebarAllowHorizontalScrollDescription", targetId: "navigation" },

@@ -1200,7 +1200,7 @@ function pinnedSortKey(): string {
 }
 
 function canDragPinnedOrder(): boolean {
-  return isPinned.value && !isNodeDefaultDatabase.value && !props.reorderDisabled;
+  return isPinned.value && !(isNodeDefaultDatabase.value && settingsStore.editorSettings.sidebarPinDefaultDatabase) && !props.reorderDisabled;
 }
 
 const {

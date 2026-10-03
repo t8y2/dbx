@@ -6594,6 +6594,8 @@ export default withEnglishFallback({
     sidebarObjectDisplaySimpleDescription: "直接在每個資料庫或 schema 下列出資料表與檢視，減少中間層級。",
     autoSelectActiveSidebarNode: "一律選取已開啟項目",
     autoSelectActiveSidebarNodeDescription: "切換分頁時，在側邊欄選取相符的可見資料表、集合或 SQL 檔案。",
+    sidebarPinDefaultDatabase: "預設資料庫置頂",
+    sidebarPinDefaultDatabaseDescription: "開啟後，預設資料庫在資料庫清單中置頂顯示；關閉後依字母正常排序。",
     sidebarBrowseObjectsOnDatabaseActivation: "啟用資料庫節點時瀏覽物件",
     sidebarBrowseObjectsOnDatabaseActivationDescription: "開啟後，依照所選的單擊或雙擊啟用方式操作資料庫或結構描述節點時，會同時展開側邊欄並開啟「瀏覽物件」分頁。",
     openTabsRestoreMode: "啟動時還原分頁",

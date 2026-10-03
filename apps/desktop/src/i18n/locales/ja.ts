@@ -7261,6 +7261,8 @@ export default withEnglishFallback({
     sidebarObjectDisplaySimpleDescription: "中間レベルを減らすために、各データベースまたはスキーマの直下にテーブルとビューを一覧表示します。",
     autoSelectActiveSidebarNode: "開いた項目を常に選択",
     autoSelectActiveSidebarNodeDescription: "タブ切替時に、サイドバーで一致する表示中のテーブル、コレクション、またはSQLファイルを選択します。",
+    sidebarPinDefaultDatabase: "デフォルトデータベースを先頭に固定",
+    sidebarPinDefaultDatabaseDescription: "有効にすると、デフォルトデータベースがデータベース一覧の先頭に固定されます。無効にすると、アルファベット順に並べ替えられます。",
     sidebarBrowseObjectsOnDatabaseActivation: "データベースノードのアクティブ化時にオブジェクトを参照",
     sidebarBrowseObjectsOnDatabaseActivationDescription: "有効にすると、選択したシングルクリックまたはダブルクリック方式でデータベースまたはスキーマノードをアクティブ化した際に、サイドバーを展開すると同時に「オブジェクトを参照」タブを開きます。",
     openTabsRestoreMode: "起動時にタブを復元",

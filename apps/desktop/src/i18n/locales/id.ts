@@ -7947,6 +7947,8 @@ export default withEnglishFallback({
     routineSourceOpenModeDialogDescription: "Buka sumber pada dialog pop-up untuk melihat dan mengedit dengan cepat.",
     autoSelectActiveSidebarNode: "Selalu pilih item yang dibuka",
     autoSelectActiveSidebarNodeDescription: "Saat beralih tab, pilih tabel, koleksi, atau file SQL yang terlihat sesuai di bilah sisi.",
+    sidebarPinDefaultDatabase: "Sematkan database default ke atas",
+    sidebarPinDefaultDatabaseDescription: "Saat diaktifkan, database default akan muncul di bagian atas daftar database. Saat dinonaktifkan, akan diurutkan berdasarkan abjad.",
     sidebarBrowseObjectsOnDatabaseActivation: "Jelajahi objek saat mengaktifkan database",
     sidebarBrowseObjectsOnDatabaseActivationDescription: 'Jika diaktifkan, mengaktifkan node database atau skema menggunakan mode klik tunggal atau ganda yang dipilih juga membuka tab "Jelajahi Objek".',
     openTabsRestoreMode: "Pulihkan tab saat peluncuran",

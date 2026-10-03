@@ -988,6 +988,7 @@ export interface EditorSettings {
   sidebarGlobalSearchLocal: boolean;
   sidebarSearchOpenedDatabasesOnly: boolean;
   autoSelectActiveSidebarNode: boolean;
+  sidebarPinDefaultDatabase: boolean;
   sidebarBrowseObjectsOnDatabaseActivation: boolean;
   sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: number;
   openTabsRestoreMode: OpenTabsRestoreMode;
@@ -1283,6 +1284,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sidebarGlobalSearchLocal: false,
   sidebarSearchOpenedDatabasesOnly: true,
   autoSelectActiveSidebarNode: false,
+  sidebarPinDefaultDatabase: true,
   sidebarBrowseObjectsOnDatabaseActivation: false,
   sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
   openTabsRestoreMode: "all",
@@ -1867,6 +1869,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     sidebarGlobalSearchLocal: typeof settings.sidebarGlobalSearchLocal === "boolean" ? settings.sidebarGlobalSearchLocal : DEFAULT_EDITOR_SETTINGS.sidebarGlobalSearchLocal,
     sidebarSearchOpenedDatabasesOnly: typeof settings.sidebarSearchOpenedDatabasesOnly === "boolean" ? settings.sidebarSearchOpenedDatabasesOnly : DEFAULT_EDITOR_SETTINGS.sidebarSearchOpenedDatabasesOnly,
     autoSelectActiveSidebarNode: settings.autoSelectActiveSidebarNode ?? DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode,
+    sidebarPinDefaultDatabase: typeof settings.sidebarPinDefaultDatabase === "boolean" ? settings.sidebarPinDefaultDatabase : DEFAULT_EDITOR_SETTINGS.sidebarPinDefaultDatabase,
     sidebarBrowseObjectsOnDatabaseActivation:
       typeof settings.sidebarBrowseObjectsOnDatabaseActivation === "boolean"
         ? settings.sidebarBrowseObjectsOnDatabaseActivation
@@ -2720,6 +2723,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sidebarGlobalSearchLocal !== undefined) editorSettings.value.sidebarGlobalSearchLocal = partial.sidebarGlobalSearchLocal;
     if (partial.sidebarSearchOpenedDatabasesOnly !== undefined) editorSettings.value.sidebarSearchOpenedDatabasesOnly = partial.sidebarSearchOpenedDatabasesOnly;
     if (partial.autoSelectActiveSidebarNode !== undefined) editorSettings.value.autoSelectActiveSidebarNode = partial.autoSelectActiveSidebarNode;
+    if (partial.sidebarPinDefaultDatabase !== undefined) editorSettings.value.sidebarPinDefaultDatabase = partial.sidebarPinDefaultDatabase === true;
     if (partial.sidebarBrowseObjectsOnDatabaseActivation !== undefined) editorSettings.value.sidebarBrowseObjectsOnDatabaseActivation = partial.sidebarBrowseObjectsOnDatabaseActivation === true;
     if (partial.openTabsRestoreMode !== undefined) editorSettings.value.openTabsRestoreMode = normalizeOpenTabsRestoreMode(partial.openTabsRestoreMode);
     if (partial.autoReloadRestoredDataTabsOnOpen !== undefined) editorSettings.value.autoReloadRestoredDataTabsOnOpen = partial.autoReloadRestoredDataTabsOnOpen === true;

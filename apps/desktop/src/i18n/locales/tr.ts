@@ -7161,6 +7161,8 @@ export default withEnglishFallback({
     routineSourceOpenModeDialogDescription: "Hızlı görüntüleme ve düzenleme için kaynağı açılır bir iletişim kutusunda aç.",
     autoSelectActiveSidebarNode: "Açılan öğeyi her zaman seç",
     autoSelectActiveSidebarNodeDescription: "Sekmeler arasında geçiş yaparken kenar çubuğunda eşleşen görünür tabloyu, koleksiyonu veya SQL dosyasını seç.",
+    sidebarPinDefaultDatabase: "Varsayılan veritabanını en üste sabitle",
+    sidebarPinDefaultDatabaseDescription: "Etkinleştirildiğinde, varsayılan veritabanı veritabanı listesinin en üstünde görüntülenir. Devre dışı bırakıldığında alfabetik olarak sıralanır.",
     sidebarBrowseObjectsOnDatabaseActivation: "Veritabanı etkinleştirilirken nesnelere gözat",
     sidebarBrowseObjectsOnDatabaseActivationDescription: 'Etkinleştirildiğinde, seçili tek veya çift tıklama moduyla bir veritabanı ya da şema düğümünü etkinleştirmek "Nesnelere Gözat" sekmesini de açar.',
     openTabsRestoreMode: "Açılışta sekmeleri geri yükle",

@@ -889,6 +889,24 @@ describe("normalizeEditorSettings - tabLayout", () => {
   });
 });
 
+describe("normalizeEditorSettings - sidebarPinDefaultDatabase", () => {
+  it("defaults sidebarPinDefaultDatabase to true", () => {
+    expect(normalizeEditorSettings({}).sidebarPinDefaultDatabase).toBe(true);
+  });
+
+  it("preserves explicit boolean values", () => {
+    expect(normalizeEditorSettings({ sidebarPinDefaultDatabase: false }).sidebarPinDefaultDatabase).toBe(false);
+    expect(normalizeEditorSettings({ sidebarPinDefaultDatabase: true }).sidebarPinDefaultDatabase).toBe(true);
+  });
+
+  it("falls back to default for non-boolean values", () => {
+    expect(normalizeEditorSettings({ sidebarPinDefaultDatabase: "false" } as any).sidebarPinDefaultDatabase).toBe(true);
+    expect(normalizeEditorSettings({ sidebarPinDefaultDatabase: undefined } as any).sidebarPinDefaultDatabase).toBe(true);
+    expect(normalizeEditorSettings({ sidebarPinDefaultDatabase: null } as any).sidebarPinDefaultDatabase).toBe(true);
+    expect(normalizeEditorSettings({ sidebarPinDefaultDatabase: 0 } as any).sidebarPinDefaultDatabase).toBe(true);
+  });
+});
+
 // --- Helpers for Pinia store tests ---
 
 function makeTestConfig(overrides: Partial<AiConfigItem> & { id: string }): AiConfigItem {

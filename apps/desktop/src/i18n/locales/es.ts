@@ -7466,6 +7466,8 @@ export default withEnglishFallback({
     sidebarObjectDisplaySimpleDescription: "Muestra tablas y vistas directamente bajo cada base de datos o esquema para reducir niveles intermedios.",
     autoSelectActiveSidebarNode: "Seleccionar siempre el elemento abierto",
     autoSelectActiveSidebarNodeDescription: "Al cambiar de pestaña, selecciona la tabla, colección o archivo SQL visible correspondiente en la barra lateral.",
+    sidebarPinDefaultDatabase: "Fijar base de datos predeterminada arriba",
+    sidebarPinDefaultDatabaseDescription: "Cuando está habilitado, la base de datos predeterminada se muestra en la parte superior de la lista. Cuando está deshabilitado, se ordena alfabéticamente.",
     sidebarBrowseObjectsOnDatabaseActivation: "Explorar objetos al activar una base de datos",
     sidebarBrowseObjectsOnDatabaseActivationDescription: 'Si está activado, al activar un nodo de base de datos o esquema con el modo seleccionado de uno o dos clics también se abre la pestaña "Explorar objetos".',
     openTabsRestoreMode: "Restaurar pestañas al iniciar",

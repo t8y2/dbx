@@ -8123,6 +8123,8 @@ export default withEnglishFallback({
     routineSourceOpenModeDialogDescription: "在弹出对话框中打开源码，方便快速查看和编辑。",
     autoSelectActiveSidebarNode: "始终选中已打开项目",
     autoSelectActiveSidebarNodeDescription: "切换标签页时，在侧边栏选中匹配的可见表、集合或 SQL 文件。",
+    sidebarPinDefaultDatabase: "默认数据库置顶",
+    sidebarPinDefaultDatabaseDescription: "开启后，默认数据库在数据库列表中置顶显示；关闭后按字母正常排序。",
     sidebarBrowseObjectsOnDatabaseActivation: "激活数据库节点时浏览对象",
     sidebarBrowseObjectsOnDatabaseActivationDescription: "开启后，按照所选的单击或双击激活方式操作数据库或模式节点时，会同时展开侧边栏并打开“浏览对象”标签页。",
     openTabsRestoreMode: "启动时恢复标签页",

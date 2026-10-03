@@ -7244,6 +7244,8 @@ export default withEnglishFallback({
     sidebarObjectDisplaySimpleDescription: "Elenca tabelle e viste direttamente sotto ogni database o schema per ridurre i livelli intermedi.",
     autoSelectActiveSidebarNode: "Seleziona sempre l'elemento aperto",
     autoSelectActiveSidebarNodeDescription: "Quando passi da una scheda all'altra, seleziona la tabella, la collezione o il file SQL visibile corrispondente nella barra laterale.",
+    sidebarPinDefaultDatabase: "Fissa database predefinito in alto",
+    sidebarPinDefaultDatabaseDescription: "Se abilitato, il database predefinito viene mostrato in cima all'elenco dei database. Se disabilitato, viene ordinato alfabeticamente.",
     sidebarBrowseObjectsOnDatabaseActivation: "Esplora oggetti all'attivazione di un database",
     sidebarBrowseObjectsOnDatabaseActivationDescription: "Se abilitato, l'attivazione di un nodo database o schema con la modalità a clic singolo o doppio selezionata apre anche la scheda «Esplora oggetti».",
     openTabsRestoreMode: "Ripristina schede all'avvio",

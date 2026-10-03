@@ -94,6 +94,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "sidebarTableSearchEnabled",
   "sidebarSearchOpenedDatabasesOnly",
   "autoSelectActiveSidebarNode",
+  "sidebarPinDefaultDatabase",
   "sidebarBrowseObjectsOnDatabaseActivation",
   "openTabsRestoreMode",
   "autoReloadRestoredDataTabsOnOpen",

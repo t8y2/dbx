@@ -1810,6 +1810,7 @@ export const useConnectionStore = defineStore("connection", () => {
       return !!node.connectionId && !!node.schema && isDefaultSchema(node.connectionId, node.schema);
     }
     if (node.type !== "database" && node.type !== "redis-db" && node.type !== "mongo-db") return false;
+    if (!settingsStore.editorSettings.sidebarPinDefaultDatabase) return false;
     return !!node.connectionId && typeof node.database === "string" && isDefaultDatabase(node.connectionId, node.database);
   }
 
@@ -1820,6 +1821,14 @@ export const useConnectionStore = defineStore("connection", () => {
   function syncPinnedTreeState(nodes: TreeNode[]) {
     syncPinnedTreeNodeStateInPlace(nodes, pinnedTreeNodeIds.value, pinnedTreeNodeOrder.value, isFixedPriorityTreeNode);
   }
+
+  watch(
+    () => settingsStore.editorSettings.sidebarPinDefaultDatabase,
+    () => {
+      syncPinnedTreeState(treeNodes.value);
+    },
+    { flush: "post" },
+  );
 
   function isConnectionUtilityNode(node: TreeNode): boolean {
     // dameng-users / dameng-roles must be here too: they are synthesized admin
@@ -10251,6 +10260,7 @@ export const useConnectionStore = defineStore("connection", () => {
     databaseCompatibilityModes,
     isTreeNodePinned,
     orderByPinnedTreeNodes,
+    syncPinnedTreeState,
     toggleTreeNodePin,
     beginPinnedTreeNodeReorder,
     endPinnedTreeNodeReorder,

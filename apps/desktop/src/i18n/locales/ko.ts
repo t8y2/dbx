@@ -7046,6 +7046,8 @@ export default withEnglishFallback({
     sidebarObjectDisplaySimpleDescription: "중간 수준을 줄이기 위해 각 데이터베이스나 스키마 아래에 테이블과 뷰를 직접 나열합니다.",
     autoSelectActiveSidebarNode: "열린 항목 항상 선택",
     autoSelectActiveSidebarNodeDescription: "탭을 전환할 때 사이드바에서 일치하는 표시된 테이블, 컬렉션 또는 SQL 파일을 선택합니다.",
+    sidebarPinDefaultDatabase: "기본 데이터베이스 상단 고정",
+    sidebarPinDefaultDatabaseDescription: "활성화하면 기본 데이터베이스가 데이터베이스 목록 상단에 고정 표시됩니다. 비활성화하면 알파벳순으로 정렬됩니다.",
     sidebarBrowseObjectsOnDatabaseActivation: "데이터베이스 노드 활성화 시 객체 탐색",
     sidebarBrowseObjectsOnDatabaseActivationDescription: '활성화하면 선택한 한 번 클릭 또는 두 번 클릭 방식으로 데이터베이스나 스키마 노드를 활성화할 때 사이드바를 펼치면서 "객체 탐색" 탭을 엽니다.',
     openTabsRestoreMode: "실행 시 탭 복원",

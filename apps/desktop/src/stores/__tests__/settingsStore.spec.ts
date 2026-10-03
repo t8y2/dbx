@@ -557,6 +557,20 @@ describe("normalizeEditorSettings", () => {
     }
   });
 
+  it("defaults data grid zebra striping on and normalizes boolean and custom color", () => {
+    expect(normalizeEditorSettings({}).dataGridZebraStriping).toBe(true);
+    expect(normalizeEditorSettings({ dataGridZebraStriping: true }).dataGridZebraStriping).toBe(true);
+    expect(normalizeEditorSettings({ dataGridZebraStriping: false }).dataGridZebraStriping).toBe(false);
+
+    for (const invalidValue of [0, 1, "false", null]) {
+      expect(normalizeEditorSettings({ dataGridZebraStriping: invalidValue as never }).dataGridZebraStriping).toBe(true);
+    }
+
+    expect(normalizeEditorSettings({}).dataGridZebraRowBg).toBe("");
+    expect(normalizeEditorSettings({ dataGridZebraRowBg: " #334455 \n" }).dataGridZebraRowBg).toBe("#334455");
+    expect(normalizeEditorSettings({ dataGridZebraRowBg: null as never }).dataGridZebraRowBg).toBe("");
+  });
+
   it("defaults the data grid font and preserves a custom font family", () => {
     const defaultFontFamily = `"Geist Variable Tabular", "Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif`;
     expect(normalizeEditorSettings({}).tableFontFamily).toBe(defaultFontFamily);

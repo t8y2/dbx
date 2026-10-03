@@ -427,4 +427,20 @@ describe("settingsTransfer", () => {
     expect(transferCategoryForKey("csvNullMode")).toBe("data");
     expect(collectTransferCategories(["csvNullMode", "csvQuoteMode"])).toEqual(["data"]);
   });
+
+  it("round-trips zebra striping settings in data category", () => {
+    expect(transferCategoryForKey("dataGridZebraStriping")).toBe("data");
+    expect(transferCategoryForKey("dataGridZebraRowBg")).toBe("data");
+
+    const text = serializeSettingsTransfer({
+      ...DEFAULT_EDITOR_SETTINGS,
+      dataGridZebraStriping: false,
+      dataGridZebraRowBg: "#232323",
+    });
+    const result = parseSettingsTransferFile(text);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.editorSettings.dataGridZebraStriping).toBe(false);
+    expect(result.value.editorSettings.dataGridZebraRowBg).toBe("#232323");
+  });
 });

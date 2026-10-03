@@ -103,6 +103,8 @@ export interface DrawCanvasDataGridOptions {
   booleanDisplayMode?: "checkbox" | "dropdown";
   flatteningMultiLineEnabled: boolean;
   showWhitespace?: boolean;
+  zebraStriping?: boolean;
+  zebraRowBg?: string;
   /** 行号栏取值：`view` = 当前视图序号（默认，与筛选前一致），`source` = 筛选前的原始行号 */
   rowNumberMode?: "view" | "source";
 }
@@ -430,7 +432,9 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions): boolean 
     const rowIsActive = isRowActive(item.displayIndex);
     const rowSelectionVisual = rowCellsUseSelectionVisual(item.id);
 
-    const rowBase = item.isDeleted ? theme.rowDeleted : item.isNew && !rowIsActive ? theme.rowNew : item.isDraft && !rowIsActive ? theme.rowMuted : item.displayIndex % 2 === 1 && !rowIsActive ? theme.rowMuted : theme.background;
+    const zebraActive = options.zebraStriping !== false;
+    const stripedRowBg = options.zebraRowBg?.trim() || theme.rowMuted;
+    const rowBase = item.isDeleted ? theme.rowDeleted : item.isNew && !rowIsActive ? theme.rowNew : item.isDraft && !rowIsActive ? theme.rowMuted : zebraActive && item.displayIndex % 2 === 1 && !rowIsActive ? stripedRowBg : theme.background;
     const rowFill = resolveCanvasDataGridRowFill(theme, rowBase, {
       isActive: rowIsActive,
       isDeleted: item.isDeleted,

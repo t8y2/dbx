@@ -9062,6 +9062,97 @@ pub async fn list_event_triggers_core(
     .await
 }
 
+pub async fn list_foreign_data_wrappers_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+) -> Result<Vec<db::ForeignDataWrapperInfo>, String> {
+    retry_metadata_connection(state, connection_id, Some(database), || async {
+        let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
+        let db_config = connection_config(state, connection_id).await;
+        if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Kingbase) {
+            let pool_handle = state.pool_handle(&pool_key).await;
+            if let Some(client) = extract_pool!(pool_handle.as_ref(), Agent) {
+                return kingbase::list_foreign_data_wrappers(
+                    client,
+                    database,
+                    agent_metadata_timeout(db_config.as_ref()),
+                )
+                .await;
+            }
+        }
+        if let Some(config) = agent_postgres_extension_fallback_config(db_config.as_ref()) {
+            if let Some(pool) = native_postgres_metadata_pool(state, connection_id, database, config).await? {
+                return db::postgres::list_foreign_data_wrappers(&pool).await;
+            }
+        }
+        let pool = clone_metadata_pool(state, &pool_key).await.ok_or("Pool not found")?;
+        match &pool {
+            PoolKind::Postgres(p) => db::postgres::list_foreign_data_wrappers(p).await,
+            _ => Ok(vec![]),
+        }
+    })
+    .await
+}
+
+pub async fn list_foreign_servers_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+) -> Result<Vec<db::ForeignServerInfo>, String> {
+    retry_metadata_connection(state, connection_id, Some(database), || async {
+        let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
+        let db_config = connection_config(state, connection_id).await;
+        if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Kingbase) {
+            let pool_handle = state.pool_handle(&pool_key).await;
+            if let Some(client) = extract_pool!(pool_handle.as_ref(), Agent) {
+                return kingbase::list_foreign_servers(client, database, agent_metadata_timeout(db_config.as_ref()))
+                    .await;
+            }
+        }
+        if let Some(config) = agent_postgres_extension_fallback_config(db_config.as_ref()) {
+            if let Some(pool) = native_postgres_metadata_pool(state, connection_id, database, config).await? {
+                return db::postgres::list_foreign_servers(&pool).await;
+            }
+        }
+        let pool = clone_metadata_pool(state, &pool_key).await.ok_or("Pool not found")?;
+        match &pool {
+            PoolKind::Postgres(p) => db::postgres::list_foreign_servers(p).await,
+            _ => Ok(vec![]),
+        }
+    })
+    .await
+}
+
+pub async fn list_user_mappings_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+) -> Result<Vec<db::UserMappingInfo>, String> {
+    retry_metadata_connection(state, connection_id, Some(database), || async {
+        let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
+        let db_config = connection_config(state, connection_id).await;
+        if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Kingbase) {
+            let pool_handle = state.pool_handle(&pool_key).await;
+            if let Some(client) = extract_pool!(pool_handle.as_ref(), Agent) {
+                return kingbase::list_user_mappings(client, database, agent_metadata_timeout(db_config.as_ref()))
+                    .await;
+            }
+        }
+        if let Some(config) = agent_postgres_extension_fallback_config(db_config.as_ref()) {
+            if let Some(pool) = native_postgres_metadata_pool(state, connection_id, database, config).await? {
+                return db::postgres::list_user_mappings(&pool).await;
+            }
+        }
+        let pool = clone_metadata_pool(state, &pool_key).await.ok_or("Pool not found")?;
+        match &pool {
+            PoolKind::Postgres(p) => db::postgres::list_user_mappings(p).await,
+            _ => Ok(vec![]),
+        }
+    })
+    .await
+}
+
 pub async fn list_available_extensions_core(
     state: &AppState,
     connection_id: &str,

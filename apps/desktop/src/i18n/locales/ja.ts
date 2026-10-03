@@ -4024,6 +4024,9 @@ export default withEnglishFallback({
     materializedViews: "マテリアライズドビュー",
     extensions: "拡張機能",
     eventTriggers: "イベントトリガー",
+    foreignDataWrappers: "Foreign Data Wrappers",
+    foreignServers: "Foreign Servers",
+    userMappings: "User Mappings",
     types: "タイプ",
     gridfs: "GridFS",
     doltSystemTables: "Dolt システムテーブル",
@@ -9022,6 +9025,38 @@ export default withEnglishFallback({
     enabled: "有効",
     tags: "タグ",
     definition: "定義",
+  },
+
+  foreignDataWrapper: {
+    detailsTitle: "Foreign Data Wrapper Details",
+    viewDetails: "View details",
+    name: "Name",
+    owner: "Owner",
+    handler: "Handler",
+    validator: "Validator",
+    options: "Options",
+    definition: "DDL",
+  },
+
+  foreignServer: {
+    detailsTitle: "Foreign Server Details",
+    viewDetails: "View details",
+    name: "Name",
+    owner: "Owner",
+    foreignDataWrapper: "Foreign Data Wrapper",
+    type: "Type",
+    version: "Version",
+    options: "Options",
+    definition: "DDL",
+  },
+
+  userMapping: {
+    detailsTitle: "User Mapping Details",
+    viewDetails: "View details",
+    userName: "User",
+    serverName: "Server",
+    options: "Options",
+    definition: "DDL",
   },
 
   extension: {

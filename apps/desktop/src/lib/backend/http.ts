@@ -54,6 +54,9 @@ import type {
   SubpartitionInfo,
   ExtensionInfo,
   EventTriggerInfo,
+  ForeignDataWrapperInfo,
+  ForeignServerInfo,
+  UserMappingInfo,
   FunctionInfo,
   SequenceInfo,
   RuleInfo,
@@ -1371,6 +1374,18 @@ export async function listAvailableExtensions(connectionId: string, database: st
 
 export async function listEventTriggers(connectionId: string, database: string): Promise<EventTriggerInfo[]> {
   return get(`/api/schema/event-triggers?${qs({ connection_id: connectionId, database })}`);
+}
+
+export async function listForeignDataWrappers(connectionId: string, database: string): Promise<ForeignDataWrapperInfo[]> {
+  return get(`/api/schema/foreign-data-wrappers?${qs({ connection_id: connectionId, database })}`);
+}
+
+export async function listForeignServers(connectionId: string, database: string): Promise<ForeignServerInfo[]> {
+  return get(`/api/schema/foreign-servers?${qs({ connection_id: connectionId, database })}`);
+}
+
+export async function listUserMappings(connectionId: string, database: string): Promise<UserMappingInfo[]> {
+  return get(`/api/schema/user-mappings?${qs({ connection_id: connectionId, database })}`);
 }
 
 export async function listDialectDataTypes(dialectName: string): Promise<string[]> {

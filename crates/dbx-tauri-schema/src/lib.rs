@@ -59,6 +59,9 @@ define_registry![
     list_extensions,
     list_available_extensions,
     list_event_triggers,
+    list_foreign_data_wrappers,
+    list_foreign_servers,
+    list_user_mappings,
 ];
 
 pub fn handles(command: &str) -> bool {
@@ -84,9 +87,12 @@ mod tests {
 
     #[test]
     fn handles_only_schema_commands() {
-        assert_eq!(COMMANDS.len(), 48);
+        assert_eq!(COMMANDS.len(), 51);
         assert!(handles("list_databases"));
         assert!(handles("list_event_triggers"));
+        assert!(handles("list_foreign_data_wrappers"));
+        assert!(handles("list_foreign_servers"));
+        assert!(handles("list_user_mappings"));
         assert!(!handles("prepare_schema_diff"));
         assert!(!handles("load_connections"));
     }

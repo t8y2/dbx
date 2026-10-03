@@ -95,6 +95,9 @@ import type {
   OwnerInfo,
   ExtensionInfo,
   EventTriggerInfo,
+  ForeignDataWrapperInfo,
+  ForeignServerInfo,
+  UserMappingInfo,
   QueryResult,
   SqlReferenceAnalysis,
   DatabaseType,
@@ -2588,6 +2591,18 @@ export async function listAvailableExtensions(connectionId: string, database: st
 
 export async function listEventTriggers(connectionId: string, database: string): Promise<EventTriggerInfo[]> {
   return invoke("list_event_triggers", { connectionId, database });
+}
+
+export async function listForeignDataWrappers(connectionId: string, database: string): Promise<ForeignDataWrapperInfo[]> {
+  return invoke("list_foreign_data_wrappers", { connectionId, database });
+}
+
+export async function listForeignServers(connectionId: string, database: string): Promise<ForeignServerInfo[]> {
+  return invoke("list_foreign_servers", { connectionId, database });
+}
+
+export async function listUserMappings(connectionId: string, database: string): Promise<UserMappingInfo[]> {
+  return invoke("list_user_mappings", { connectionId, database });
 }
 
 // --- Docs ---

@@ -168,7 +168,7 @@ fn event_triggers_sql(catalog: ExtensionCatalog) -> String {
          COALESCE(r.rolname, '') AS owner, \
          COALESCE(format('%I.%I(%s)', pn.nspname, p.proname, pg_get_function_arguments(p.oid)), '') AS function, \
          e.evtenabled::text AS enabled, \
-         NULL::text AS tags, \
+         COALESCE(array_to_string(e.evttags, ','), '') AS tags, \
          obj_description(e.oid, 'pg_event_trigger') AS comment, \
          NULL::text AS source \
          FROM {cat}.pg_event_trigger e \
@@ -177,6 +177,18 @@ fn event_triggers_sql(catalog: ExtensionCatalog) -> String {
          LEFT JOIN {cat}.pg_namespace pn ON pn.oid = p.pronamespace \
          ORDER BY e.evtname"
     )
+}
+
+fn query_result_cell_string_list(row: &[serde_json::Value], index: usize) -> Option<Vec<String>> {
+    let cell = row.get(index)?;
+    match cell {
+        serde_json::Value::Array(arr) => Some(arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()),
+        serde_json::Value::String(s) if s.is_empty() => None,
+        serde_json::Value::String(s) => {
+            Some(s.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect())
+        }
+        _ => None,
+    }
 }
 
 fn event_trigger_infos_from_query_result(result: db::QueryResult) -> Vec<db::EventTriggerInfo> {
@@ -191,9 +203,179 @@ fn event_trigger_infos_from_query_result(result: db::QueryResult) -> Vec<db::Eve
                 owner: query_result_cell_string(&row, 2).filter(|s| !s.is_empty()),
                 function: query_result_cell_string(&row, 3).filter(|s| !s.is_empty()),
                 enabled: query_result_cell_string(&row, 4).filter(|s| !s.is_empty()),
-                tags: None,
+                tags: query_result_cell_string_list(&row, 5).filter(|v| !v.is_empty()),
                 comment: query_result_cell_string(&row, 6).filter(|s| !s.is_empty()),
                 source: None,
+            })
+        })
+        .collect()
+}
+
+/// Lists Foreign Data Wrappers over a Kingbase agent connection.
+/// Reuses the sys/pg catalog fallback pattern from `list_extensions`.
+pub(super) async fn list_foreign_data_wrappers(
+    client: Arc<db::agent_driver::PooledAgentClient>,
+    database: &str,
+    timeout_duration: Option<Duration>,
+) -> Result<Vec<db::ForeignDataWrapperInfo>, String> {
+    let result = query_result_with_catalog_fallback(
+        client,
+        database,
+        fdw_options_sql(ExtensionCatalog::Sys),
+        fdw_options_sql(ExtensionCatalog::Pg),
+        10_000,
+        timeout_duration,
+    )
+    .await?;
+    Ok(fdw_infos_from_query_result(result))
+}
+
+pub(super) async fn list_foreign_servers(
+    client: Arc<db::agent_driver::PooledAgentClient>,
+    database: &str,
+    timeout_duration: Option<Duration>,
+) -> Result<Vec<db::ForeignServerInfo>, String> {
+    let result = query_result_with_catalog_fallback(
+        client,
+        database,
+        foreign_servers_sql(ExtensionCatalog::Sys),
+        foreign_servers_sql(ExtensionCatalog::Pg),
+        10_000,
+        timeout_duration,
+    )
+    .await?;
+    Ok(server_infos_from_query_result(result))
+}
+
+pub(super) async fn list_user_mappings(
+    client: Arc<db::agent_driver::PooledAgentClient>,
+    database: &str,
+    timeout_duration: Option<Duration>,
+) -> Result<Vec<db::UserMappingInfo>, String> {
+    let result = query_result_with_catalog_fallback(
+        client,
+        database,
+        user_mappings_sql(ExtensionCatalog::Sys),
+        user_mappings_sql(ExtensionCatalog::Pg),
+        10_000,
+        timeout_duration,
+    )
+    .await?;
+    Ok(mapping_infos_from_query_result(result))
+}
+
+fn fdw_options_sql(catalog: ExtensionCatalog) -> String {
+    let cat = catalog.catalog_name();
+    format!(
+        "SELECT fdw.fdwname, \
+         COALESCE(r.rolname, '') AS owner, \
+         COALESCE(format('%I.%I', hn.nspname, h.proname), '') AS handler, \
+         COALESCE(format('%I.%I', vn.nspname, v.proname), '') AS validator, \
+         fdw.fdwoptions AS options, \
+         obj_description(fdw.oid, 'pg_foreign_data_wrapper') AS comment \
+         FROM {cat}.pg_foreign_data_wrapper fdw \
+         LEFT JOIN {cat}.pg_roles r ON r.oid = fdw.fdwowner \
+         LEFT JOIN {cat}.pg_proc h ON h.oid = fdw.fdwhandler \
+         LEFT JOIN {cat}.pg_namespace hn ON hn.oid = h.pronamespace \
+         LEFT JOIN {cat}.pg_proc v ON v.oid = fdw.fdwvalidator \
+         LEFT JOIN {cat}.pg_namespace vn ON vn.oid = v.pronamespace \
+         ORDER BY fdw.fdwname"
+    )
+}
+
+fn foreign_servers_sql(catalog: ExtensionCatalog) -> String {
+    let cat = catalog.catalog_name();
+    format!(
+        "SELECT srv.srvname, \
+         COALESCE(r.rolname, '') AS owner, \
+         fdw.fdwname AS foreign_data_wrapper, \
+         srv.srvtype AS server_type, \
+         srv.srvversion AS server_version, \
+         srv.srvoptions AS options, \
+         obj_description(srv.oid, 'pg_foreign_server') AS comment \
+         FROM {cat}.pg_foreign_server srv \
+         LEFT JOIN {cat}.pg_roles r ON r.oid = srv.srvowner \
+         LEFT JOIN {cat}.pg_foreign_data_wrapper fdw ON fdw.oid = srv.srvfdw \
+         ORDER BY srv.srvname"
+    )
+}
+
+fn user_mappings_sql(catalog: ExtensionCatalog) -> String {
+    // pg_user_mappings is a public view; even on Kingbase it exists.
+    // Use the same view name; the catalog prefix only affects tables.
+    let _cat = catalog.catalog_name();
+    "SELECT um.umid::text AS oid, \
+       COALESCE(um.usename, '') AS user_name, \
+       um.srvname AS server_name, \
+       um.umoptions AS options \
+     FROM pg_catalog.pg_user_mappings um \
+     ORDER BY um.srvname, um.usename"
+        .to_string()
+}
+
+fn query_result_cell_option_pairs(row: &[serde_json::Value], index: usize) -> Vec<(String, String)> {
+    let cell = match row.get(index) {
+        Some(v) => v,
+        None => return vec![],
+    };
+    let strings: Vec<String> = match cell {
+        serde_json::Value::Array(arr) => arr.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
+        _ => return vec![],
+    };
+    strings
+        .into_iter()
+        .filter_map(|option| option.split_once('=').map(|(key, value)| (key.to_string(), value.to_string())))
+        .collect()
+}
+
+fn fdw_infos_from_query_result(result: db::QueryResult) -> Vec<db::ForeignDataWrapperInfo> {
+    result
+        .rows
+        .into_iter()
+        .filter_map(|row| {
+            let name = query_result_cell_string(&row, 0)?;
+            Some(db::ForeignDataWrapperInfo {
+                name,
+                owner: query_result_cell_string(&row, 1).filter(|s| !s.is_empty()),
+                handler: query_result_cell_string(&row, 2).filter(|s| !s.is_empty()),
+                validator: query_result_cell_string(&row, 3).filter(|s| !s.is_empty()),
+                options: query_result_cell_option_pairs(&row, 4),
+                comment: query_result_cell_string(&row, 5).filter(|s| !s.is_empty()),
+            })
+        })
+        .collect()
+}
+
+fn server_infos_from_query_result(result: db::QueryResult) -> Vec<db::ForeignServerInfo> {
+    result
+        .rows
+        .into_iter()
+        .filter_map(|row| {
+            let name = query_result_cell_string(&row, 0)?;
+            Some(db::ForeignServerInfo {
+                name,
+                owner: query_result_cell_string(&row, 1).filter(|s| !s.is_empty()),
+                foreign_data_wrapper: query_result_cell_string(&row, 2).unwrap_or_default(),
+                server_type: query_result_cell_string(&row, 3).filter(|s| !s.is_empty()),
+                server_version: query_result_cell_string(&row, 4).filter(|s| !s.is_empty()),
+                options: query_result_cell_option_pairs(&row, 5),
+                comment: query_result_cell_string(&row, 6).filter(|s| !s.is_empty()),
+            })
+        })
+        .collect()
+}
+
+fn mapping_infos_from_query_result(result: db::QueryResult) -> Vec<db::UserMappingInfo> {
+    result
+        .rows
+        .into_iter()
+        .filter_map(|row| {
+            let oid = query_result_cell_string(&row, 0)?;
+            Some(db::UserMappingInfo {
+                oid,
+                user_name: query_result_cell_string(&row, 1).unwrap_or_default(),
+                server_name: query_result_cell_string(&row, 2).unwrap_or_default(),
+                options: query_result_cell_option_pairs(&row, 3),
             })
         })
         .collect()

@@ -7,9 +7,9 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
-import type { ColumnInfo, ObjectSourceKind, QueryTab, TableInfo, TableNameFilter, TreeNode, TreeNodeType } from "@/types/database";
+import type { ColumnInfo, ObjectSourceKind, QueryTab, TableInfo, TableNameFilter, TreeNode, TreeNodeType, UserMappingInfo } from "@/types/database";
 import type { ElasticsearchIndexMetadataKind } from "@/lib/backend/tauri";
-import { listEventTriggers } from "@/lib/backend/api";
+import { listForeignDataWrappers, listForeignServers, listUserMappings, listEventTriggers } from "@/lib/backend/api";
 import {
   filterLocallySearchedTables,
   createSidebarSearchSubtreePreserver,
@@ -71,6 +71,9 @@ import SidebarTableVGroupDialog from "./SidebarTableVGroupDialog.vue";
 import InstallExtensionDialog from "@/components/objects/InstallExtensionDialog.vue";
 import ExtensionDetailsDialog from "@/components/objects/ExtensionDetailsDialog.vue";
 import EventTriggerDetailsDialog from "@/components/objects/EventTriggerDetailsDialog.vue";
+import ForeignDataWrapperDetailsDialog from "@/components/objects/ForeignDataWrapperDetailsDialog.vue";
+import ForeignServerDetailsDialog from "@/components/objects/ForeignServerDetailsDialog.vue";
+import UserMappingDetailsDialog from "@/components/objects/UserMappingDetailsDialog.vue";
 import { RecycleScroller } from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
@@ -137,7 +140,13 @@ const sidebarInstallExtensionDialogRef = ref<InstanceType<typeof InstallExtensio
 const sidebarExtensionDetailsTarget = ref<TreeNode | null>(null);
 const sidebarExtensionDetailsDialogRef = ref<InstanceType<typeof ExtensionDetailsDialog> | null>(null);
 const sidebarEventTriggerDetailsTarget = ref<TreeNode | null>(null);
+const sidebarFdwDetailsTarget = ref<TreeNode | null>(null);
+const sidebarFsDetailsTarget = ref<TreeNode | null>(null);
+const sidebarUmDetailsTarget = ref<TreeNode | null>(null);
 const sidebarEventTriggerDetailsDialogRef = ref<InstanceType<typeof EventTriggerDetailsDialog> | null>(null);
+const sidebarFdwDetailsDialogRef = ref<InstanceType<typeof ForeignDataWrapperDetailsDialog> | null>(null);
+const sidebarFsDetailsDialogRef = ref<InstanceType<typeof ForeignServerDetailsDialog> | null>(null);
+const sidebarUmDetailsDialogRef = ref<InstanceType<typeof UserMappingDetailsDialog> | null>(null);
 const sidebarTreeRuntimeHostRef = ref<SidebarTreeRuntimeHostInstance | null>(null);
 const sidebarTreeRuntime = createSidebarTreeRuntime();
 const sidebarTreeRuntimeInitialNode: TreeNode = { id: "__sidebar-runtime__", label: "", type: "connection-group" };
@@ -2083,6 +2092,51 @@ async function openSidebarEventTriggerDetails(node: TreeNode) {
   }
 }
 
+async function openSidebarForeignDataWrapperDetails(node: TreeNode) {
+  sidebarFdwDetailsTarget.value = createSidebarActionTarget(node);
+  await nextTick();
+  sidebarFdwDetailsDialogRef.value?.show();
+  if (!node.connectionId || !node.database) return;
+  try {
+    const wrappers = await listForeignDataWrappers(node.connectionId, node.database);
+    const fresh = wrappers.find((f) => f.name === node.label);
+    if (fresh) {
+      node.meta = fresh;
+      sidebarFdwDetailsTarget.value = createSidebarActionTarget({ ...node, meta: fresh });
+    }
+  } catch {}
+}
+
+async function openSidebarForeignServerDetails(node: TreeNode) {
+  sidebarFsDetailsTarget.value = createSidebarActionTarget(node);
+  await nextTick();
+  sidebarFsDetailsDialogRef.value?.show();
+  if (!node.connectionId || !node.database) return;
+  try {
+    const servers = await listForeignServers(node.connectionId, node.database);
+    const fresh = servers.find((s) => s.name === node.label);
+    if (fresh) {
+      node.meta = fresh;
+      sidebarFsDetailsTarget.value = createSidebarActionTarget({ ...node, meta: fresh });
+    }
+  } catch {}
+}
+
+async function openSidebarUserMappingDetails(node: TreeNode) {
+  sidebarUmDetailsTarget.value = createSidebarActionTarget(node);
+  await nextTick();
+  sidebarUmDetailsDialogRef.value?.show();
+  if (!node.connectionId || !node.database) return;
+  try {
+    const mappings = await listUserMappings(node.connectionId, node.database);
+    const fresh = mappings.find((m) => m.oid === (node.meta as UserMappingInfo)?.oid);
+    if (fresh) {
+      node.meta = fresh;
+      sidebarUmDetailsTarget.value = createSidebarActionTarget({ ...node, meta: fresh });
+    }
+  } catch {}
+}
+
 function beginSidebarAction(): number {
   sidebarActionGeneration += 1;
   sidebarDdlOpen.value = false;
@@ -2634,6 +2688,9 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
       @open-install-extension="openSidebarInstallExtension"
       @open-extension-details="openSidebarExtensionDetails"
       @open-event-trigger-details="openSidebarEventTriggerDetails"
+      @open-foreign-data-wrapper-details="openSidebarForeignDataWrapperDetails"
+      @open-foreign-server-details="openSidebarForeignServerDetails"
+      @open-user-mapping-details="openSidebarUserMappingDetails"
     />
     <div class="connection-tree-search sticky top-0 z-10 bg-background px-2 py-1">
       <div class="relative flex items-center gap-1">
@@ -2971,6 +3028,9 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
     <InstallExtensionDialog v-if="sidebarInstallExtensionTarget" ref="sidebarInstallExtensionDialogRef" :node="sidebarInstallExtensionTarget" @close="refreshSidebarActionTarget" @changed="refreshSidebarActionTarget" />
     <ExtensionDetailsDialog v-if="sidebarExtensionDetailsTarget" ref="sidebarExtensionDetailsDialogRef" :node="sidebarExtensionDetailsTarget" />
     <EventTriggerDetailsDialog v-if="sidebarEventTriggerDetailsTarget" ref="sidebarEventTriggerDetailsDialogRef" :node="sidebarEventTriggerDetailsTarget" />
+    <ForeignDataWrapperDetailsDialog v-if="sidebarFdwDetailsTarget" ref="sidebarFdwDetailsDialogRef" :node="sidebarFdwDetailsTarget" />
+    <ForeignServerDetailsDialog v-if="sidebarFsDetailsTarget" ref="sidebarFsDetailsDialogRef" :node="sidebarFsDetailsTarget" />
+    <UserMappingDetailsDialog v-if="sidebarUmDetailsTarget" ref="sidebarUmDetailsDialogRef" :node="sidebarUmDetailsTarget" />
     <div v-if="store.treeNodes.length === 0" class="px-3 py-8 text-center text-muted-foreground text-xs">
       {{ t("sidebar.noConnections") }}
     </div>

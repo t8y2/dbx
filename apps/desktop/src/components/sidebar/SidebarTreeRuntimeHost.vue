@@ -508,6 +508,9 @@ const emit = defineEmits<{
   "open-install-extension": [node: TreeNode];
   "open-extension-details": [node: TreeNode];
   "open-event-trigger-details": [node: TreeNode];
+  "open-foreign-data-wrapper-details": [node: TreeNode];
+  "open-foreign-server-details": [node: TreeNode];
+  "open-user-mapping-details": [node: TreeNode];
 }>();
 
 const {
@@ -779,6 +782,9 @@ const groupTypes: Set<TreeNodeType> = new Set([
   "group-partitions",
   "group-extensions",
   "group-event-triggers",
+  "group-foreign-data-wrappers",
+  "group-foreign-servers",
+  "group-user-mappings",
   "group-tablespaces",
   "group-datafiles",
 ]);
@@ -1134,6 +1140,12 @@ async function toggle(requestId = beginNavigationRequest()) {
       await connectionStore.refreshTreeNode(node);
     } else if (node.type === "group-event-triggers" && node.connectionId && hasTreeNodeDatabaseContext(node)) {
       await connectionStore.refreshTreeNode(node);
+    } else if (node.type === "group-foreign-data-wrappers" && node.connectionId && hasTreeNodeDatabaseContext(node)) {
+      await connectionStore.refreshTreeNode(node);
+    } else if (node.type === "group-foreign-servers" && node.connectionId && hasTreeNodeDatabaseContext(node)) {
+      await connectionStore.refreshTreeNode(node);
+    } else if (node.type === "group-user-mappings" && node.connectionId && hasTreeNodeDatabaseContext(node)) {
+      await connectionStore.refreshTreeNode(node);
     }
     emitNodeToggled(node, wasExpanded);
   } catch (e: any) {
@@ -1197,6 +1209,12 @@ function runRowClickAction(clickDetail: number) {
     emit("open-extension-details", node);
   } else if (action === "open-event-trigger-details") {
     emit("open-event-trigger-details", node);
+  } else if (action === "open-foreign-data-wrapper-details") {
+    emit("open-foreign-data-wrapper-details", node);
+  } else if (action === "open-foreign-server-details") {
+    emit("open-foreign-server-details", node);
+  } else if (action === "open-user-mapping-details") {
+    emit("open-user-mapping-details", node);
   } else if (action === "open-saved-sql") {
     void openSavedSqlFile();
   } else if (isDocumentBrowserTreeNode(node.type)) {
@@ -1633,6 +1651,12 @@ function onDoubleClick(event: MouseEvent) {
     emit("open-extension-details", activeNode.value);
   } else if (action === "open-event-trigger-details") {
     emit("open-event-trigger-details", activeNode.value);
+  } else if (action === "open-foreign-data-wrapper-details") {
+    emit("open-foreign-data-wrapper-details", activeNode.value);
+  } else if (action === "open-foreign-server-details") {
+    emit("open-foreign-server-details", activeNode.value);
+  } else if (action === "open-user-mapping-details") {
+    emit("open-user-mapping-details", activeNode.value);
   } else if (action === "open-saved-sql") {
     openSavedSqlFile();
   } else if (action === "toggle" && (activeNode.value.type === "mongo-gridfs" || isDocumentBrowserTreeNode(activeNode.value.type))) {
@@ -6278,6 +6302,24 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   }
   if (node.type === "event-trigger") {
     items.push({ label: t("eventTrigger.viewDetails"), action: () => emit("open-event-trigger-details", node), icon: Info });
+    items.push({ label: "", separator: true });
+    items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    return true;
+  }
+  if (node.type === "foreign-data-wrapper") {
+    items.push({ label: t("foreignDataWrapper.viewDetails"), action: () => emit("open-foreign-data-wrapper-details", node), icon: Info });
+    items.push({ label: "", separator: true });
+    items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    return true;
+  }
+  if (node.type === "foreign-server") {
+    items.push({ label: t("foreignServer.viewDetails"), action: () => emit("open-foreign-server-details", node), icon: Info });
+    items.push({ label: "", separator: true });
+    items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    return true;
+  }
+  if (node.type === "user-mapping") {
+    items.push({ label: t("userMapping.viewDetails"), action: () => emit("open-user-mapping-details", node), icon: Info });
     items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     return true;

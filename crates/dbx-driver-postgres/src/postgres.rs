@@ -39,9 +39,9 @@ use crate::types::{
     CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest,
     CompletionAssistantResponse, ConstraintInfo, CustomTypeDdl, CustomTypeDetails, CustomTypeDomainConstraint,
     CustomTypeKind, CustomTypeMember, CustomTypeProperties, DatabaseInfo, DatabaseStorageInfo, EventTriggerInfo,
-    ExtensionInfo, ForeignKeyInfo, FunctionInfo, IndexInfo, ObjectInfo, ObjectStatistics, OwnerInfo, PgPartitionBound,
-    PgPartitionKind, PgPartitionNode, PgTablePartitioning, QueryMessage, QueryResult, RuleInfo, SchemaInfo,
-    SequenceInfo, SpatialColumnBuilder, TableInfo, TriggerInfo,
+    ExtensionInfo, ForeignDataWrapperInfo, ForeignKeyInfo, ForeignServerInfo, FunctionInfo, IndexInfo, ObjectInfo,
+    ObjectStatistics, OwnerInfo, PgPartitionBound, PgPartitionKind, PgPartitionNode, PgTablePartitioning, QueryMessage,
+    QueryResult, RuleInfo, SchemaInfo, SequenceInfo, SpatialColumnBuilder, TableInfo, TriggerInfo, UserMappingInfo,
 };
 
 pub const GAUSSDB_COMPATIBILITY_SQL: &str =
@@ -10108,6 +10108,104 @@ pub async fn list_event_triggers(pool: &Pool) -> Result<Vec<EventTriggerInfo>, S
             tags: row.try_get::<_, Option<Vec<String>>>(5).ok().flatten(),
             comment: row.try_get::<_, Option<String>>(6).ok().flatten().filter(|s| !s.is_empty()),
             source: row.try_get::<_, Option<String>>(7).ok().flatten().filter(|s| !s.is_empty()),
+        })
+        .collect())
+}
+
+// ── Foreign Data Wrapper / Foreign Server / User Mapping ──────────────
+
+fn postgres_fdw_options_sql() -> &'static str {
+    "SELECT fdw.fdwname, \
+       COALESCE(r.rolname, '') AS owner, \
+       COALESCE(format('%I.%I', hn.nspname, h.proname), '') AS handler, \
+       COALESCE(format('%I.%I', vn.nspname, v.proname), '') AS validator, \
+       fdw.fdwoptions AS options, \
+       obj_description(fdw.oid, 'pg_foreign_data_wrapper') AS comment \
+     FROM pg_catalog.pg_foreign_data_wrapper fdw \
+     LEFT JOIN pg_catalog.pg_roles r ON r.oid = fdw.fdwowner \
+     LEFT JOIN pg_catalog.pg_proc h ON h.oid = fdw.fdwhandler \
+     LEFT JOIN pg_catalog.pg_namespace hn ON hn.oid = h.pronamespace \
+     LEFT JOIN pg_catalog.pg_proc v ON v.oid = fdw.fdwvalidator \
+     LEFT JOIN pg_catalog.pg_namespace vn ON vn.oid = v.pronamespace \
+     ORDER BY fdw.fdwname"
+}
+
+fn postgres_foreign_servers_sql() -> &'static str {
+    "SELECT srv.srvname, \
+       COALESCE(r.rolname, '') AS owner, \
+       fdw.fdwname AS foreign_data_wrapper, \
+       srv.srvtype AS server_type, \
+       srv.srvversion AS server_version, \
+       srv.srvoptions AS options, \
+       obj_description(srv.oid, 'pg_foreign_server') AS comment \
+     FROM pg_catalog.pg_foreign_server srv \
+     LEFT JOIN pg_catalog.pg_roles r ON r.oid = srv.srvowner \
+     LEFT JOIN pg_catalog.pg_foreign_data_wrapper fdw ON fdw.oid = srv.srvfdw \
+     ORDER BY srv.srvname"
+}
+
+fn postgres_user_mappings_sql() -> &'static str {
+    "SELECT um.umid::text AS oid, \
+       COALESCE(um.usename, '') AS user_name, \
+       um.srvname AS server_name, \
+       um.umoptions AS options \
+     FROM pg_catalog.pg_user_mappings um \
+     ORDER BY um.srvname, um.usename"
+}
+
+fn parse_pg_options(row: &Row, idx: usize) -> Vec<(String, String)> {
+    row.try_get::<_, Option<Vec<String>>>(idx)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|option| option.split_once('=').map(|(key, value)| (key.to_string(), value.to_string())))
+        .collect()
+}
+
+pub async fn list_foreign_data_wrappers(pool: &Pool) -> Result<Vec<ForeignDataWrapperInfo>, String> {
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let rows = postgres_query_cached(&client, postgres_fdw_options_sql(), &[]).await.map_err(|e| e.to_string())?;
+    Ok(rows
+        .iter()
+        .map(|row| ForeignDataWrapperInfo {
+            name: pg_row_try_string(row, 0),
+            owner: row.try_get::<_, Option<String>>(1).ok().flatten().filter(|s| !s.is_empty()),
+            handler: row.try_get::<_, Option<String>>(2).ok().flatten().filter(|s| !s.is_empty()),
+            validator: row.try_get::<_, Option<String>>(3).ok().flatten().filter(|s| !s.is_empty()),
+            options: parse_pg_options(row, 4),
+            comment: row.try_get::<_, Option<String>>(5).ok().flatten().filter(|s| !s.is_empty()),
+        })
+        .collect())
+}
+
+pub async fn list_foreign_servers(pool: &Pool) -> Result<Vec<ForeignServerInfo>, String> {
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let rows = postgres_query_cached(&client, postgres_foreign_servers_sql(), &[]).await.map_err(|e| e.to_string())?;
+    Ok(rows
+        .iter()
+        .map(|row| ForeignServerInfo {
+            name: pg_row_try_string(row, 0),
+            owner: row.try_get::<_, Option<String>>(1).ok().flatten().filter(|s| !s.is_empty()),
+            foreign_data_wrapper: pg_row_try_string(row, 2),
+            server_type: row.try_get::<_, Option<String>>(3).ok().flatten().filter(|s| !s.is_empty()),
+            server_version: row.try_get::<_, Option<String>>(4).ok().flatten().filter(|s| !s.is_empty()),
+            options: parse_pg_options(row, 5),
+            comment: row.try_get::<_, Option<String>>(6).ok().flatten().filter(|s| !s.is_empty()),
+        })
+        .collect())
+}
+
+pub async fn list_user_mappings(pool: &Pool) -> Result<Vec<UserMappingInfo>, String> {
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let rows = postgres_query_cached(&client, postgres_user_mappings_sql(), &[]).await.map_err(|e| e.to_string())?;
+    Ok(rows
+        .iter()
+        .map(|row| UserMappingInfo {
+            oid: pg_row_try_string(row, 0),
+            user_name: pg_row_try_string(row, 1),
+            server_name: pg_row_try_string(row, 2),
+            options: parse_pg_options(row, 3),
         })
         .collect())
 }

@@ -683,3 +683,30 @@ pub async fn list_event_triggers(
 ) -> Result<Vec<db::EventTriggerInfo>, String> {
     dbx_core::schema::list_event_triggers_core(&state, &connection_id, &database).await
 }
+
+#[tauri::command]
+pub async fn list_foreign_data_wrappers(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+) -> Result<Vec<db::ForeignDataWrapperInfo>, String> {
+    dbx_core::schema::list_foreign_data_wrappers_core(&state, &connection_id, &database).await
+}
+
+#[tauri::command]
+pub async fn list_foreign_servers(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+) -> Result<Vec<db::ForeignServerInfo>, String> {
+    dbx_core::schema::list_foreign_servers_core(&state, &connection_id, &database).await
+}
+
+#[tauri::command]
+pub async fn list_user_mappings(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+) -> Result<Vec<db::UserMappingInfo>, String> {
+    dbx_core::schema::list_user_mappings_core(&state, &connection_id, &database).await
+}

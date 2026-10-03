@@ -1251,6 +1251,35 @@ export interface EventTriggerInfo {
   source?: string | null;
 }
 
+/** PostgreSQL Foreign Data Wrapper (`pg_foreign_data_wrapper`). Database-level DDL object. */
+export interface ForeignDataWrapperInfo {
+  name: string;
+  owner?: string | null;
+  handler?: string | null;
+  validator?: string | null;
+  options: [string, string][];
+  comment?: string | null;
+}
+
+/** PostgreSQL Foreign Server (`pg_foreign_server`). Database-level object referencing a FDW. */
+export interface ForeignServerInfo {
+  name: string;
+  owner?: string | null;
+  foreignDataWrapper: string;
+  serverType?: string | null;
+  serverVersion?: string | null;
+  options: [string, string][];
+  comment?: string | null;
+}
+
+/** PostgreSQL User Mapping (`pg_user_mappings` view). Maps a local user to credentials on a Foreign Server. */
+export interface UserMappingInfo {
+  oid: string;
+  userName: string;
+  serverName: string;
+  options: [string, string][];
+}
+
 export interface OwnerInfo {
   object_name: string;
   object_type: string;
@@ -1603,10 +1632,16 @@ export type TreeNodeType =
   | "group-partitions"
   | "group-extensions"
   | "group-event-triggers"
+  | "group-foreign-data-wrappers"
+  | "group-foreign-servers"
+  | "group-user-mappings"
   | "group-tablespaces"
   | "group-datafiles"
   | "extension"
   | "event-trigger"
+  | "foreign-data-wrapper"
+  | "foreign-server"
+  | "user-mapping"
   | "object-browser"
   | "user-admin"
   | "xugu-user-admin"
@@ -1734,7 +1769,7 @@ export interface TreeNode {
   vgroupId?: string;
   /** 投影时盖章的分组类别（tables/views/…），供拖拽落点 O(1) 类别判定。 */
   vgroupKind?: string;
-  meta?: ColumnInfo | IndexInfo | ForeignKeyInfo | TriggerInfo | ConstraintInfo | PartitionInfo | SubpartitionInfo | ExtensionInfo | EventTriggerInfo | VectorCollectionMeta | MongoCollectionMeta | CustomTypeTreeMemberMeta;
+  meta?: ColumnInfo | IndexInfo | ForeignKeyInfo | TriggerInfo | ConstraintInfo | PartitionInfo | SubpartitionInfo | ExtensionInfo | EventTriggerInfo | ForeignDataWrapperInfo | ForeignServerInfo | UserMappingInfo | VectorCollectionMeta | MongoCollectionMeta | CustomTypeTreeMemberMeta;
   loadMore?: {
     parentId: string;
     offset: number;

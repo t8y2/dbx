@@ -2323,6 +2323,42 @@ export const useConnectionStore = defineStore("connection", () => {
     };
   }
 
+  function buildForeignDataWrappersNode(connectionId: string, database: string): TreeNode {
+    return {
+      id: `${connectionId}:${database}:__foreign_data_wrappers`,
+      label: "tree.foreignDataWrappers",
+      type: "group-foreign-data-wrappers",
+      connectionId,
+      database,
+      isExpanded: false,
+      children: [],
+    };
+  }
+
+  function buildForeignServersNode(connectionId: string, database: string): TreeNode {
+    return {
+      id: `${connectionId}:${database}:__foreign_servers`,
+      label: "tree.foreignServers",
+      type: "group-foreign-servers",
+      connectionId,
+      database,
+      isExpanded: false,
+      children: [],
+    };
+  }
+
+  function buildUserMappingsNode(connectionId: string, database: string): TreeNode {
+    return {
+      id: `${connectionId}:${database}:__user_mappings`,
+      label: "tree.userMappings",
+      type: "group-user-mappings",
+      connectionId,
+      database,
+      isExpanded: false,
+      children: [],
+    };
+  }
+
   async function loadEventTriggers(connectionId: string, database: string) {
     const node = findNode(treeNodes.value, `${connectionId}:${database}:__event_triggers`);
     if (!node) return;
@@ -2340,6 +2376,101 @@ export const useConnectionStore = defineStore("connection", () => {
         database,
         comment: et.comment ?? null,
         meta: et,
+        isExpanded: false,
+      }));
+      const targetNode = treeNodeLoadTarget(load);
+      if (!targetNode) return;
+      setChildren(targetNode, children);
+      targetNode.objectCount = children.length;
+      targetNode.isExpanded = true;
+    } catch (e) {
+      recordMetadataLoadError(connectionId, e, load);
+      throw e;
+    } finally {
+      finishTreeNodeLoad(load);
+    }
+  }
+
+  async function loadForeignDataWrappers(connectionId: string, database: string) {
+    const node = findNode(treeNodes.value, `${connectionId}:${database}:__foreign_data_wrappers`);
+    if (!node) return;
+    let load = beginTreeNodeLoad(node);
+    try {
+      await ensureConnected(connectionId);
+      load = reclaimTreeNodeLoad(load, node);
+      if (useCachedChildren(node, undefined, load)) return;
+      const wrappers = await withMetadataLoadTimeout(connectionId, api.listForeignDataWrappers(connectionId, database), "foreign-data-wrappers");
+      const children: TreeNode[] = wrappers.map((fdw) => ({
+        id: `${node.id}:${fdw.name}`,
+        label: fdw.name,
+        type: "foreign-data-wrapper" as const,
+        connectionId,
+        database,
+        comment: fdw.comment ?? null,
+        meta: fdw,
+        isExpanded: false,
+      }));
+      const targetNode = treeNodeLoadTarget(load);
+      if (!targetNode) return;
+      setChildren(targetNode, children);
+      targetNode.objectCount = children.length;
+      targetNode.isExpanded = true;
+    } catch (e) {
+      recordMetadataLoadError(connectionId, e, load);
+      throw e;
+    } finally {
+      finishTreeNodeLoad(load);
+    }
+  }
+
+  async function loadForeignServers(connectionId: string, database: string) {
+    const node = findNode(treeNodes.value, `${connectionId}:${database}:__foreign_servers`);
+    if (!node) return;
+    let load = beginTreeNodeLoad(node);
+    try {
+      await ensureConnected(connectionId);
+      load = reclaimTreeNodeLoad(load, node);
+      if (useCachedChildren(node, undefined, load)) return;
+      const servers = await withMetadataLoadTimeout(connectionId, api.listForeignServers(connectionId, database), "foreign-servers");
+      const children: TreeNode[] = servers.map((srv) => ({
+        id: `${node.id}:${srv.name}`,
+        label: srv.name,
+        type: "foreign-server" as const,
+        connectionId,
+        database,
+        comment: srv.comment ?? null,
+        meta: srv,
+        isExpanded: false,
+      }));
+      const targetNode = treeNodeLoadTarget(load);
+      if (!targetNode) return;
+      setChildren(targetNode, children);
+      targetNode.objectCount = children.length;
+      targetNode.isExpanded = true;
+    } catch (e) {
+      recordMetadataLoadError(connectionId, e, load);
+      throw e;
+    } finally {
+      finishTreeNodeLoad(load);
+    }
+  }
+
+  async function loadUserMappings(connectionId: string, database: string) {
+    const node = findNode(treeNodes.value, `${connectionId}:${database}:__user_mappings`);
+    if (!node) return;
+    let load = beginTreeNodeLoad(node);
+    try {
+      await ensureConnected(connectionId);
+      load = reclaimTreeNodeLoad(load, node);
+      if (useCachedChildren(node, undefined, load)) return;
+      const mappings = await withMetadataLoadTimeout(connectionId, api.listUserMappings(connectionId, database), "user-mappings");
+      const children: TreeNode[] = mappings.map((um) => ({
+        id: `${node.id}:${um.oid}`,
+        label: `${um.userName} (${um.serverName})`,
+        type: "user-mapping" as const,
+        connectionId,
+        database,
+        meta: um,
         isExpanded: false,
       }));
       const targetNode = treeNodeLoadTarget(load);
@@ -6114,6 +6245,9 @@ export const useConnectionStore = defineStore("connection", () => {
           if (isPostgresLikeForExtensions(getConfig(connectionId)?.db_type)) {
             children.push(buildExtensionManagementNode(connectionId, database));
             children.push(buildEventTriggersNode(connectionId, database));
+            children.push(buildForeignDataWrappersNode(connectionId, database));
+            children.push(buildForeignServersNode(connectionId, database));
+            children.push(buildUserMappingsNode(connectionId, database));
           }
           if (isSidebarSearchQueryChanged(options)) return;
           const targetNode = treeNodeLoadTarget(load);
@@ -6550,6 +6684,9 @@ export const useConnectionStore = defineStore("connection", () => {
             if (!schema && isPostgresLikeForExtensions(config?.db_type)) {
               children.push(buildExtensionManagementNode(connectionId, database));
               children.push(buildEventTriggersNode(connectionId, database));
+              children.push(buildForeignDataWrappersNode(connectionId, database));
+              children.push(buildForeignServersNode(connectionId, database));
+              children.push(buildUserMappingsNode(connectionId, database));
             }
           }
           if (isTreeLoadSearchChanged(searchFilter, options)) return;
@@ -7741,6 +7878,12 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadExtensions(node.connectionId, node.database || "");
     } else if (node.type === "group-event-triggers" && node.connectionId && hasTreeNodeDatabaseContext(node)) {
       await loadEventTriggers(node.connectionId, node.database || "");
+    } else if (node.type === "group-foreign-data-wrappers" && node.connectionId && hasTreeNodeDatabaseContext(node)) {
+      await loadForeignDataWrappers(node.connectionId, node.database || "");
+    } else if (node.type === "group-foreign-servers" && node.connectionId && hasTreeNodeDatabaseContext(node)) {
+      await loadForeignServers(node.connectionId, node.database || "");
+    } else if (node.type === "group-user-mappings" && node.connectionId && hasTreeNodeDatabaseContext(node)) {
+      await loadUserMappings(node.connectionId, node.database || "");
     }
   }
 

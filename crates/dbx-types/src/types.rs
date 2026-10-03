@@ -172,6 +172,69 @@ pub struct EventTriggerInfo {
     pub source: Option<String>,
 }
 
+/// PostgreSQL Foreign Data Wrapper (`pg_foreign_data_wrapper`).
+/// Database-level object that defines a handler (and optional validator)
+/// for accessing external data sources.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForeignDataWrapperInfo {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// Schema-qualified handler function, e.g. `public.postgres_fdw_handler`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handler: Option<String>,
+    /// Schema-qualified validator function.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validator: Option<String>,
+    /// FDW-level options (key=value pairs from `fdwoptions`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
+/// PostgreSQL Foreign Server (`pg_foreign_server`).
+/// Database-level object that references a Foreign Data Wrapper and defines
+/// connection options for a specific external data source.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForeignServerInfo {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// Name of the Foreign Data Wrapper this server uses.
+    pub foreign_data_wrapper: String,
+    /// Server type hint (e.g. `postgres`, `mysql`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_type: Option<String>,
+    /// Server version hint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_version: Option<String>,
+    /// Server-level connection options (key=value pairs from `srvoptions`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
+/// PostgreSQL User Mapping (`pg_user_mappings` view).
+/// Maps a local database user to credentials on a Foreign Server.
+/// Non-superusers only see their own mappings via the public view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserMappingInfo {
+    /// `umid::text` from `pg_user_mappings` — unique per mapping.
+    pub oid: String,
+    /// Local database user name.
+    pub user_name: String,
+    /// Foreign server name.
+    pub server_name: String,
+    /// Mapping-level connection options (key=value pairs from `umoptions`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<(String, String)>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ObjectStatistics {
     pub name: String,

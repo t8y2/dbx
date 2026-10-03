@@ -4167,6 +4167,9 @@ export default withEnglishFallback({
     loadMore: "加载更多...",
     extensions: "扩展",
     eventTriggers: "事件触发器",
+    foreignDataWrappers: "外部数据包装器",
+    foreignServers: "外部服务器",
+    userMappings: "用户映射",
   },
   eventTrigger: {
     detailsTitle: "事件触发器详情",
@@ -4178,6 +4181,38 @@ export default withEnglishFallback({
     enabled: "启用状态",
     tags: "标签",
     definition: "定义",
+  },
+
+  foreignDataWrapper: {
+    detailsTitle: "外部数据包装器详情",
+    viewDetails: "查看详情",
+    name: "名称",
+    owner: "所有者",
+    handler: "处理器",
+    validator: "验证器",
+    options: "选项",
+    definition: "DDL",
+  },
+
+  foreignServer: {
+    detailsTitle: "外部服务器详情",
+    viewDetails: "查看详情",
+    name: "名称",
+    owner: "所有者",
+    foreignDataWrapper: "外部数据包装器",
+    type: "类型",
+    version: "版本",
+    options: "选项",
+    definition: "DDL",
+  },
+
+  userMapping: {
+    detailsTitle: "用户映射详情",
+    viewDetails: "查看详情",
+    userName: "用户",
+    serverName: "服务器",
+    options: "选项",
+    definition: "DDL",
   },
 
   extension: {

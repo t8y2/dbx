@@ -48,7 +48,10 @@ fn is_spreadsheet_extractor(extractor: DataGridExtractorId) -> bool {
 ///
 /// This is a no-op for every non-spreadsheet extractor, and for numbers, booleans and
 /// NULL (which never start with a trigger character and must keep their JSON types so
-/// the extractors' numeric formatting is unchanged).
+/// the extractors' numeric formatting is unchanged). Negative decimal text cells
+/// (drivers deliver DECIMAL/NUMERIC/BIGINT as strings) are also left alone: the shared
+/// [`needs_formula_guard`] predicate exempts whole-string numeric literals, so a
+/// copied `-1` stays `-1` while `-2+1+cmd|…` stays neutralized.
 pub fn neutralize_spreadsheet_formulas(mut request: DataGridExtractRequest) -> DataGridExtractRequest {
     if !is_spreadsheet_extractor(request.extractor) {
         return request;
@@ -175,6 +178,38 @@ mod tests {
         assert_eq!(out[2], json!(true));
         assert_eq!(out[3], Value::Null);
         assert_eq!(out[4], json!([1, -2]));
+    }
+
+    #[test]
+    fn negative_decimal_text_cells_are_copied_verbatim() {
+        // 回归：驱动把 DECIMAL/NUMERIC/BIGINT 以字符串下发（PG numeric、MySQL
+        // DECIMAL 都是 Value::String），负值曾因 `-` 触发符被复制成 `'-1`。
+        // 整串数字字面量豁免；超 Excel 15 位精度、`+` 号形态与注入载荷仍守卫。
+        for extractor in [DataGridExtractorId::Tsv, DataGridExtractorId::Csv, DataGridExtractorId::PipeSeparated] {
+            let out = neutralize(
+                extractor,
+                vec![vec![
+                    json!("-1"),
+                    json!("-123.45"),
+                    json!("-9223372036854775808"),
+                    json!("+8613800000000"),
+                    json!("-2+1+cmd|'x'"),
+                ]],
+            );
+            assert_eq!(out[0], json!("-1"), "extractor {extractor:?}");
+            assert_eq!(out[1], json!("-123.45"), "extractor {extractor:?}");
+            assert_eq!(out[2], json!("'-9223372036854775808"), "extractor {extractor:?}");
+            assert_eq!(out[3], json!("'+8613800000000"), "extractor {extractor:?}");
+            assert_eq!(out[4], json!("'-2+1+cmd|'x'"), "extractor {extractor:?}");
+        }
+    }
+
+    #[test]
+    fn grid_tsv_copy_of_a_negative_decimal_stays_a_plain_number() {
+        // 端到端：多格复制（默认 smart → TSV）里负 decimal 文本不再带 `'`。
+        let guarded = neutralize_spreadsheet_formulas(request(DataGridExtractorId::Tsv, vec![vec![json!("-1.23")]]));
+        let result = dbx_sql::data_grid_extractors::extract_data_grid_selection(guarded).expect("TSV extraction");
+        assert_eq!(result.text, "-1.23");
     }
 
     #[test]

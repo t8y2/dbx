@@ -215,6 +215,8 @@ const groupExecutableSql = computed(() => {
         @explain="activeTab && toolbar.explain(activeTab.id)"
         @format-sql="activeTab && toolbar.formatSql(activeTab.id)"
         @compress-sql="activeTab && toolbar.compressSql(activeTab.id)"
+        @fold-all="activeSurfaceRef?.foldAll?.()"
+        @unfold-all="activeSurfaceRef?.unfoldAll?.()"
         @toggle-sql-keyword-case="toolbar.toggleSqlKeywordCase()"
         @save-sql="(tabId: string) => toolbar.saveSql(tabId)"
         @open-sql="toolbar.openSqlFile()"

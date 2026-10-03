@@ -102,6 +102,7 @@ import { buildQueryEditorLineNumbersExtension, createQueryEditorLineNumberAlignm
 import { keepGuttersAttachedDuringSync } from "@/lib/editor/codemirrorGutterSync";
 import { searchKeymapWithoutModD } from "@/lib/editor/codemirrorSearchKeymap";
 import { defaultKeymapForGlobalShortcuts } from "@/lib/editor/codemirrorDefaultKeymap";
+import { createQueryEditorFoldShortcutBindings, foldKeymapWithoutAllBindings } from "@/lib/editor/queryEditorFoldKeymap";
 import { createShowWhitespaceExtension } from "@/lib/editor/codemirrorShowWhitespace";
 
 import { clampEditorFontSize, createEditorWheelZoomGestureGuard, createEditorZoomCommitScheduler, fontSizeFromGestureScale, fontSizeFromWheelDelta } from "@/lib/editor/editorZoom";
@@ -1216,6 +1217,15 @@ const contextMenuActions: QueryEditorContextMenuActions = {
   sendSelectionToAi: () => {
     if (selectedSql.value.trim()) emit("sendSelectionToAi", selectedSql.value);
   },
+  toggleFoldFromContextMenu: () => {
+    toggleFold();
+  },
+  foldAllFromContextMenu: () => {
+    foldAll();
+  },
+  unfoldAllFromContextMenu: () => {
+    unfoldAll();
+  },
 };
 
 function getContextMenuState(): QueryEditorContextMenuState {
@@ -1383,6 +1393,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
           return codeMirrorRuntime.codeMirrorToggleBlockComment?.(view) ?? false;
         }),
         ...binding(shortcuts.toggleFold, (view) => codeMirrorRuntime.codeMirrorToggleFold?.(view) ?? false),
+        ...createQueryEditorFoldShortcutBindings(shortcuts, foldAllForView, (view) => codeMirrorRuntime.codeMirrorUnfoldAll?.(view) ?? false),
         ...binding(shortcuts.exPasteSqlInCondition, () => {
           if (!supportsSqlInListPaste(props.databaseType)) return false;
           void pasteClipboardAsSqlInCondition();
@@ -1978,7 +1989,7 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
         // Vim must be mounted before DBX/default keymaps so normal-mode keys are handled first.
         initializedRuntime.vimModeComp.of(vimModeExtension(initialSettings.vimModeEnabled)),
         initializedRuntime.defaultKeymapComp.of(defaultKeymapExtension()),
-        keymap.of([...searchKeymapWithoutModD(searchKeymap), ...historyKeymap, ...foldKeymap, ...completionKeymap]),
+        keymap.of([...searchKeymapWithoutModD(searchKeymap), ...historyKeymap, ...foldKeymapWithoutAllBindings(foldKeymap, initializedRuntime.codeMirrorFoldAll, initializedRuntime.codeMirrorUnfoldAll), ...completionKeymap]),
         Prec.highest(keymap.of([{ key: "Space", run: acceptSqlServerCompletionOnSpace }])),
         initializedRuntime.sqlLanguageComp.of(sqlExtensions.buildSqlLanguageExtension()),
         initializedRuntime.sqlSemanticHighlightComp.of(sqlExtensions.buildSqlSemanticHighlightExtension()),
@@ -2738,6 +2749,33 @@ function cancelGutterExecutionViewport(requestId: number) {
   return executionViewportOwnership.cancelPendingRequest(requestId);
 }
 
+function toggleFold(): boolean {
+  if (!view.value) return false;
+  return codeMirrorRuntime.codeMirrorToggleFold?.(view.value) ?? false;
+}
+
+function foldAllForView(currentView: EditorViewType): boolean {
+  const command = codeMirrorRuntime.codeMirrorFoldAll;
+  if (!command) return false;
+  if (!shouldUseQueryEditorLargeDocumentModeForSize(currentView.state.doc.length, currentView.state.doc.lines)) return command(currentView);
+  const expectedDoc = currentView.state.doc;
+  void statementBoundaries.ensureStatementCache(currentView.state).then((result) => {
+    if (!result || view.value !== currentView || currentView.state.doc !== expectedDoc) return;
+    command(currentView);
+  });
+  return true;
+}
+
+function foldAll(): boolean {
+  if (!view.value) return false;
+  return foldAllForView(view.value);
+}
+
+function unfoldAll(): boolean {
+  if (!view.value) return false;
+  return codeMirrorRuntime.codeMirrorUnfoldAll?.(view.value) ?? false;
+}
+
 function shouldBlockExecutionShortcut(event?: KeyboardEvent, currentView: EditorViewType | null = view.value): boolean {
   return (currentView ? isEditorComposing(currentView) : false) || (event ? postCompositionKeyGuard.blocks(event) : false);
 }
@@ -2759,6 +2797,9 @@ defineExpose({
   focusErrorPosition,
   previewStatementRange,
   refreshCompletionCache,
+  toggleFold,
+  foldAll,
+  unfoldAll,
 });
 </script>
 

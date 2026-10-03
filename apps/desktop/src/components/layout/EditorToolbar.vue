@@ -21,6 +21,8 @@ import {
   AlertTriangle,
   ClipboardPaste,
   Minimize2,
+  FoldVertical,
+  UnfoldVertical,
   SpellCheck2,
   Layers,
   MoreHorizontal,
@@ -99,6 +101,8 @@ const emit = defineEmits<{
   "update:explainMode": [mode: "explain" | "autotrace"];
   formatSql: [];
   compressSql: [];
+  foldAll: [];
+  unfoldAll: [];
   toggleSqlKeywordCase: [];
   saveSql: [tabId: string];
   openSql: [];
@@ -459,6 +463,15 @@ const canFormatSql = computed(() => canFormatSqlForDatabaseType(props.activeConn
 const showFormatButton = computed(() => canFormatSql.value && toolbarTier.value < 2);
 const showExplainAnalyzeToggle = computed(() => toolbarTier.value < 3);
 const showCompressButton = computed(() => toolbarTier.value < 1);
+const showFoldButtons = computed(() => toolbarTier.value < 1);
+const foldAllTooltip = computed(() => {
+  const shortcut = formatShortcutDisplay(settingsStore.editorSettings.shortcuts.foldAll);
+  return shortcut ? `${t("toolbar.foldAll")} (${shortcut})` : t("toolbar.foldAll");
+});
+const unfoldAllTooltip = computed(() => {
+  const shortcut = formatShortcutDisplay(settingsStore.editorSettings.shortcuts.unfoldAll);
+  return shortcut ? `${t("toolbar.unfoldAll")} (${shortcut})` : t("toolbar.unfoldAll");
+});
 const showKeywordCaseButton = computed(() => toolbarTier.value < 1);
 const showWordWrapButton = computed(() => toolbarTier.value < 1);
 const showSemanticDiagnosticsButton = computed(() => supportsSqlSemanticDiagnosticsToggle.value && toolbarTier.value < 1);
@@ -616,6 +629,22 @@ async function changeCatalog(selectedCatalog: string) {
         </TooltipTrigger>
         <TooltipContent>{{ t("toolbar.compressSql") }}</TooltipContent>
       </Tooltip>
+      <Tooltip v-if="showFoldButtons">
+        <TooltipTrigger as-child>
+          <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground hover:bg-muted hover:text-foreground" :disabled="activeTab.isExecuting || activeTab.isExplaining || !activeTab.sql.trim()" :aria-label="t('toolbar.foldAll')" @click="emit('foldAll')">
+            <FoldVertical class="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ foldAllTooltip }}</TooltipContent>
+      </Tooltip>
+      <Tooltip v-if="showFoldButtons">
+        <TooltipTrigger as-child>
+          <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground hover:bg-muted hover:text-foreground" :disabled="activeTab.isExecuting || activeTab.isExplaining || !activeTab.sql.trim()" :aria-label="t('toolbar.unfoldAll')" @click="emit('unfoldAll')">
+            <UnfoldVertical class="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ unfoldAllTooltip }}</TooltipContent>
+      </Tooltip>
       <Tooltip v-if="showKeywordCaseButton">
         <TooltipTrigger as-child>
           <Button
@@ -761,6 +790,14 @@ async function changeCatalog(selectedCatalog: string) {
           <DropdownMenuItem :disabled="activeTab.isExecuting || activeTab.isExplaining || !activeTab.sql.trim()" @select="emit('compressSql')">
             <Minimize2 class="h-3.5 w-3.5" />
             {{ t("toolbar.compressSql") }}
+          </DropdownMenuItem>
+          <DropdownMenuItem :disabled="activeTab.isExecuting || activeTab.isExplaining || !activeTab.sql.trim()" @select="emit('foldAll')">
+            <FoldVertical class="h-3.5 w-3.5" />
+            {{ t("toolbar.foldAll") }}
+          </DropdownMenuItem>
+          <DropdownMenuItem :disabled="activeTab.isExecuting || activeTab.isExplaining || !activeTab.sql.trim()" @select="emit('unfoldAll')">
+            <UnfoldVertical class="h-3.5 w-3.5" />
+            {{ t("toolbar.unfoldAll") }}
           </DropdownMenuItem>
           <DropdownMenuItem @select="emit('toggleSqlKeywordCase')">
             <span class="inline-flex h-4 w-4 shrink-0 items-center justify-center font-mono text-xs font-semibold" aria-hidden="true">

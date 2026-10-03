@@ -1650,6 +1650,14 @@ function cancelQueryEditorExecutionViewport(requestId: number) {
   return queryEditorRef.value?.cancelGutterExecutionViewport(requestId) ?? false;
 }
 
+function foldAll(): boolean {
+  return queryEditorRef.value?.foldAll?.() ?? false;
+}
+
+function unfoldAll(): boolean {
+  return queryEditorRef.value?.unfoldAll?.() ?? false;
+}
+
 async function handleExportQuery(payload: { sql: string; format: "csv" | "xlsx" | "txt"; columnComments?: (string | null)[] }) {
   const tab = props.activeTab;
   if (!tab || tab.mode !== "query") return;
@@ -1795,6 +1803,8 @@ defineExpose({
   focusStatementRange,
   focusErrorPosition,
   locateActiveResultError,
+  foldAll,
+  unfoldAll,
 });
 </script>
 

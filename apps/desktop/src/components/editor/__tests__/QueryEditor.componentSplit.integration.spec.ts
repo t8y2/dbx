@@ -6,6 +6,7 @@ import { createI18n } from "vue-i18n";
 import { EditorSelection } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { toggleLineComment, undo } from "@codemirror/commands";
+import { foldedRanges } from "@codemirror/language";
 import { closeCompletion, completionStatus, currentCompletions, selectedCompletionIndex, startCompletion } from "@codemirror/autocomplete";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import QueryEditor from "../QueryEditor.vue";
@@ -76,6 +77,12 @@ function keydown(target: HTMLElement, key: string) {
   const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
   target.dispatchEvent(event);
   return event;
+}
+
+function foldedRangeCount(view: EditorView): number {
+  let count = 0;
+  foldedRanges(view.state).between(0, view.state.doc.length, () => count++);
+  return count;
 }
 
 describe("QueryEditor component split integration", () => {
@@ -303,6 +310,17 @@ describe("QueryEditor component split integration", () => {
     editor.previewStatementRange(null);
     expect(host.querySelector(".cm-db-result-source-highlight")).toBeNull();
     expect(view.state.doc.toString()).toBe("SELECT 1;\nSELECT 2;");
+  });
+
+  it("folds and unfolds all available ranges through the exposed handles", async () => {
+    const source = "BEGIN\nSELECT 1;\nEND;\n\nBEGIN\nSELECT 2;\nEND;";
+    const { editor, view } = await mountEditor({ modelValue: source });
+    expect(typeof editor.foldAll).toBe("function");
+    expect(typeof editor.unfoldAll).toBe("function");
+    expect(editor.foldAll()).toBe(true);
+    expect(foldedRangeCount(view)).toBe(2);
+    expect(editor.unfoldAll()).toBe(true);
+    expect(foldedRangeCount(view)).toBe(0);
   });
 
   it("isolates extension reconfiguration and disposal between editor instances", async () => {

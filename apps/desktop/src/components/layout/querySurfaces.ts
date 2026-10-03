@@ -42,6 +42,8 @@ export interface QueryEditorSurfaceHandle {
   previewStatementRange(range: StatementRange | null): boolean;
   focusStatementRange(range: StatementRange | null): boolean;
   focusErrorPosition(offset: number): boolean;
+  foldAll?(): boolean;
+  unfoldAll?(): boolean;
 }
 
 export interface QueryResultSurfaceHandle {

@@ -5,6 +5,7 @@ import {
   DEFAULT_SHORTCUT_SETTINGS,
   findCrossScopeShortcutConflicts,
   findShortcutConflict,
+  foldAllDefaultShortcut,
   formatShortcut,
   gotoLineDefaultShortcut,
   isReservedShortcut,
@@ -42,6 +43,8 @@ describe("shortcutRegistry editor actions", () => {
     "lowercaseSelection",
     "exPasteSqlInCondition",
     "toggleFold",
+    "foldAll",
+    "unfoldAll",
   ];
   const sidebarShortcutActionIds: ShortcutActionId[] = ["copySidebarSelection", "pasteSidebarSelection", "editSidebarConnection", "disconnectSidebarConnection", "viewTableDdl"];
 
@@ -291,6 +294,18 @@ describe("shortcutRegistry editor actions", () => {
     expect(shortcuts.lowercaseSelection).toBe("Shift+Alt+L");
     expect(shortcuts.exPasteSqlInCondition).toBe("");
     expect(shortcuts.toggleFold).toBe("Mod+.");
+    expect(shortcuts.foldAll).toBe(foldAllDefaultShortcut("foldAll"));
+    expect(shortcuts.unfoldAll).toBe(foldAllDefaultShortcut("unfoldAll"));
+  });
+
+  it("uses platform-safe fold-all defaults and migrates the colliding defaults", () => {
+    expect(foldAllDefaultShortcut("foldAll", "MacIntel")).toBe("Ctrl+Alt+[");
+    expect(foldAllDefaultShortcut("unfoldAll", "MacIntel")).toBe("Ctrl+Alt+]");
+    expect(foldAllDefaultShortcut("foldAll", "Win32")).toBe("Shift+Alt+[");
+    expect(foldAllDefaultShortcut("unfoldAll", "Linux x86_64")).toBe("Shift+Alt+]");
+    expect(normalizeShortcutSettings({ foldAll: "Mod+Alt+[", unfoldAll: "Mod+Alt+]" }, "MacIntel")).toMatchObject({ foldAll: "Ctrl+Alt+[", unfoldAll: "Ctrl+Alt+]" });
+    expect(normalizeShortcutSettings({ foldAll: "Ctrl+Alt+[", unfoldAll: "Ctrl+Alt+]" }, "Win32")).toMatchObject({ foldAll: "Shift+Alt+[", unfoldAll: "Shift+Alt+]" });
+    expect(normalizeShortcutSettings({ foldAll: "", unfoldAll: "" }, "Win32")).toMatchObject({ foldAll: "", unfoldAll: "" });
   });
 
   it("registers IntelliJ-style extend selection as a configurable editor shortcut", () => {
@@ -549,6 +564,8 @@ describe("shortcutRegistry editor actions", () => {
       ["selectAllSelectionOccurrences", "Ctrl+Alt+Shift+J"],
       ["toggleAiPanel", "Ctrl+Alt+I"],
       ["gotoLine", "Mod+G"],
+      ["foldAll", "Shift+Alt+["],
+      ["unfoldAll", "Shift+Alt+]"],
     ];
 
     it("flags combinations that are another platform's default for the same action", () => {

@@ -956,6 +956,8 @@ export default withEnglishFallback({
     redisTlsInsecure: "跳过证书验证",
     redisTlsInsecureHint: "等价于 redis-cli --tls --insecure，适用于自签名证书或私有 CA。",
     mysqlTlsMode: "TLS 模式",
+    firebirdCharset: "连接字符集",
+    firebirdCharsetHint: "用于解码 CHARACTER SET NONE 字段中的文本（例如旧库以 GBK 存放的中文）。文本出现乱码时，请按数据的实际编码选择。",
     mysqlTlsModePreferred: "优先使用",
     mysqlTlsModeDisabled: "禁用",
     mysqlTlsModeRequired: "必须使用",

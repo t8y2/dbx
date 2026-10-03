@@ -950,6 +950,8 @@ export default withEnglishFallback({
     redisTlsInsecure: "인증서 검증 건너뛰기",
     redisTlsInsecureHint: "redis-cli --tls --insecure과 동일하며, 자체 서명 인증서나 사설 CA용입니다.",
     mysqlTlsMode: "TLS 모드",
+    firebirdCharset: "문자 집합",
+    firebirdCharsetHint: "CHARACTER SET NONE 열에 저장된 텍스트(예: GBK로 저장된 예전 중국어 데이터)를 디코딩합니다. 텍스트가 깨져 보이면 데이터의 실제 인코딩을 선택하세요.",
     mysqlTlsModePreferred: "선호",
     mysqlTlsModeDisabled: "비활성화",
     mysqlTlsModeRequired: "필수",

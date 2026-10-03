@@ -733,6 +733,8 @@ export default withEnglishFallback({
     redisTlsInsecure: "Sertifikat yoxlamasını ötür",
     redisTlsInsecureHint: "Öz imzalı sertifikatlar və ya özəl CA-lar üçün redis-cli --tls --insecure əmrinə bərabərdir.",
     mysqlTlsMode: "TLS rejimi",
+    firebirdCharset: "Simvol dəsti",
+    firebirdCharsetHint: "CHARACTER SET NONE sütunlarında saxlanan mətni (məsələn, GBK ilə saxlanmış köhnə Çin məlumatları) deşifrə edir. Mətn pozulmuş görünürsə, məlumatın faktiki kodlaşdırmasını seçin.",
     mysqlTlsModePreferred: "Üstün tutulan",
     mysqlTlsModeDisabled: "Deaktiv",
     mysqlTlsModeRequired: "Tələb olunur",

@@ -733,6 +733,8 @@ export default withEnglishFallback({
     redisTlsInsecure: "Sertifika doğrulamasını atla",
     redisTlsInsecureHint: "redis-cli --tls --insecure ile eşdeğerdir; kendinden imzalı sertifikalar veya özel CA'lar içindir.",
     mysqlTlsMode: "TLS Modu",
+    firebirdCharset: "Karakter kümesi",
+    firebirdCharsetHint: "CHARACTER SET NONE sütunlarında saklanan metni çözer (örneğin GBK olarak kaydedilmiş eski Çince veriler). Metin bozuk göründüğünde verinin gerçek kodlamasını seçin.",
     mysqlTlsModePreferred: "Tercih edilen",
     mysqlTlsModeDisabled: "Devre dışı",
     mysqlTlsModeRequired: "Zorunlu",

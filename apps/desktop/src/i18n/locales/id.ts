@@ -958,6 +958,8 @@ export default withEnglishFallback({
     redisTlsInsecure: "Lewati verifikasi sertifikat",
     redisTlsInsecureHint: "Setara dengan redis-cli --tls --insecure, untuk sertifikat self-signed atau CA privat.",
     mysqlTlsMode: "Mode TLS",
+    firebirdCharset: "Charset",
+    firebirdCharsetHint: "Mendekode teks yang disimpan di kolom CHARACTER SET NONE (misalnya data bahasa Mandarin lama yang disimpan sebagai GBK). Pilih pengodean data yang sebenarnya saat teks tampak rusak.",
     mysqlTlsModePreferred: "Preferred",
     mysqlTlsModeDisabled: "Dinonaktifkan",
     mysqlTlsModeRequired: "Wajib",

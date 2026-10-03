@@ -372,6 +372,13 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ restoreOpenTabsOnLaunch: true } as any).openTabsRestoreMode).toBe("all");
   });
 
+  it("keeps auto-reload of restored data tabs off unless explicitly enabled", () => {
+    expect(normalizeEditorSettings({}).autoReloadRestoredDataTabsOnOpen).toBe(false);
+    expect(normalizeEditorSettings({ autoReloadRestoredDataTabsOnOpen: true }).autoReloadRestoredDataTabsOnOpen).toBe(true);
+    expect(normalizeEditorSettings({ autoReloadRestoredDataTabsOnOpen: "true" as any }).autoReloadRestoredDataTabsOnOpen).toBe(false);
+    expect(normalizeEditorSettings({ autoReloadRestoredDataTabsOnOpen: undefined }).autoReloadRestoredDataTabsOnOpen).toBe(false);
+  });
+
   it("defaults the delete-time tab handling to closing tabs and preserves explicit modes", () => {
     expect(normalizeEditorSettings({}).deleteConnectionTabHandlingMode).toBe("close-tabs");
     expect(normalizeEditorSettings({ deleteConnectionTabHandlingMode: "keep-sql-tabs" }).deleteConnectionTabHandlingMode).toBe("keep-sql-tabs");

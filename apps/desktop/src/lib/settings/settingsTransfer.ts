@@ -127,6 +127,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "autoSelectActiveSidebarNode",
     "sidebarBrowseObjectsOnDatabaseActivation",
     "openTabsRestoreMode",
+    "autoReloadRestoredDataTabsOnOpen",
     "disconnectTabHandlingMode",
     "deleteConnectionTabHandlingMode",
     "rememberConnectionDatabaseOnDelete",

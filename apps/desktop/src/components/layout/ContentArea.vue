@@ -64,6 +64,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { Switch } from "@/components/ui/switch";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
+import HelpTooltip from "@/components/ui/tooltip/HelpTooltip.vue";
 import ColumnInfoPanel from "@/components/editor/ColumnInfoPanel.vue";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import QueryErrorActions from "@/components/common/QueryErrorActions.vue";
@@ -1308,6 +1309,15 @@ function reloadUnavailableDataTab() {
   const { whereInput, orderBy } = restoredDataTabReloadFilters(props.activeTab);
   emit("reload", props.activeTab.id, undefined, undefined, whereInput, orderBy);
 }
+
+watch(
+  () => props.activeTab.id,
+  () => {
+    if (!settingsStore.editorSettings.autoReloadRestoredDataTabsOnOpen) return;
+    if (canReloadUnavailableDataTab(props.activeTab)) reloadUnavailableDataTab();
+  },
+  { immediate: true },
+);
 
 function refreshData(): boolean {
   // Reuse ObjectBrowser's reload path so schema reloads and stale object-response guards stay intact.
@@ -3019,6 +3029,9 @@ defineExpose({
             <span>{{ t("grid.dataUnavailableHintPrefix") }}</span>
             <kbd v-for="key in modRKeys" :key="key" class="min-w-5 rounded border border-border/60 bg-muted/50 px-1.5 py-0.5 text-center font-mono text-[12px] leading-none text-muted-foreground shadow-xs">{{ key }}</kbd>
             <span>{{ t("grid.dataUnavailableHintSuffix") }}</span>
+            <HelpTooltip :label="t('settings.autoReloadRestoredDataTabsOnOpen')">
+              {{ t("grid.dataUnavailableAutoReloadHint", { setting: t("settings.autoReloadRestoredDataTabsOnOpen"), section: t("settings.navigationTab") }) }}
+            </HelpTooltip>
           </div>
           <Button variant="outline" size="sm" class="h-7 gap-1.5" @click="reloadUnavailableDataTab()">
             <RefreshCcw class="h-3.5 w-3.5" />

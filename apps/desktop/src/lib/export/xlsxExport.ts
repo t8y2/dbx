@@ -117,9 +117,23 @@ function normalizeUniqueSheetNames(sheets: readonly { sheetName?: string }[]): s
 function estimateColumnWidths(columns: readonly string[], rows: readonly (readonly XlsxCellValue[])[], rowStart: number, rowEnd: number, columnComments?: readonly (string | null)[]): number[] {
   return columns.map((column, colIndex) => {
     const headerText = columnComments?.[colIndex] || column;
+    const isSqlCol = column.toUpperCase() === "SQL";
+    const maxClamp = isSqlCol ? 100 : 60;
     const values = Array.from({ length: Math.min(100, rowEnd - rowStart) }, (_, index) => rows[rowStart + index]?.[colIndex]);
-    const maxLen = [headerText, ...values.map((value) => (value == null ? "" : String(value)))].map((value) => Math.min(value.length, 60)).reduce((max, length) => Math.max(max, length), 8);
-    return Math.max(10, Math.min(60, maxLen + 2));
+    const maxLen = [
+      headerText,
+      ...values.map((value) => {
+        if (value == null) return "";
+        const str = String(value);
+        if (isSqlCol || str.includes("\n")) {
+          return str.split("\n").reduce((max, line) => Math.max(max, line.length), 0);
+        }
+        return str.length;
+      }),
+    ]
+      .map((value) => Math.min(typeof value === "number" ? value : value.length, maxClamp))
+      .reduce((max, length) => Math.max(max, length), 8);
+    return Math.max(isSqlCol ? 40 : 10, Math.min(maxClamp, maxLen + 2));
   });
 }
 
@@ -133,15 +147,20 @@ function safeExcelNumber(value: string): string | undefined {
 
 const NUMERIC_RIGHT_ALIGN_STYLE_INDEX = 2;
 const NUMERIC_LEFT_ALIGN_STYLE_INDEX = 3;
+const XLSX_WRAP_TEXT_STYLE_INDEX = 4;
 
 function numericColumnStyle(columnType?: string, enabled = true): number | undefined {
   if (!isNumericColumnType(columnType)) return undefined;
   return enabled ? NUMERIC_RIGHT_ALIGN_STYLE_INDEX : NUMERIC_LEFT_ALIGN_STYLE_INDEX;
 }
 
-function cellXml(value: XlsxCellValue, rowIndex: number, colIndex: number, style?: number, columnType?: string): string {
+function cellXml(value: XlsxCellValue, rowIndex: number, colIndex: number, style?: number, columnType?: string, columnName?: string): string {
   const ref = cellRef(rowIndex, colIndex);
-  const styleAttr = style == null ? "" : ` s="${style}"`;
+  const isSqlCol = columnName?.toLowerCase() === "sql";
+  const strVal = typeof value === "string" ? value : undefined;
+  const isMultiline = strVal !== undefined && (strVal.includes("\n") || strVal.includes("\r"));
+  const effectiveStyle = isSqlCol || isMultiline ? XLSX_WRAP_TEXT_STYLE_INDEX : style;
+  const styleAttr = effectiveStyle == null ? "" : ` s="${effectiveStyle}"`;
   if (value == null) return `<c r="${ref}"${styleAttr}/>`;
   if (typeof value === "number" && Number.isFinite(value)) {
     return `<c r="${ref}"${styleAttr}><v>${value}</v></c>`;
@@ -155,7 +174,8 @@ function cellXml(value: XlsxCellValue, rowIndex: number, colIndex: number, style
     const number = safeExcelNumber(value);
     if (number !== undefined) return `<c r="${ref}"${styleAttr}><v>${number}</v></c>`;
   }
-  return `<c r="${ref}" t="inlineStr"${styleAttr}><is><t>${escapeXml(String(value))}</t></is></c>`;
+  const spaceAttr = typeof value === "string" && /^\s|\s$|[\r\n\t]/.test(value) ? ' xml:space="preserve"' : "";
+  return `<c r="${ref}" t="inlineStr"${styleAttr}><is><t${spaceAttr}>${escapeXml(String(value))}</t></is></c>`;
 }
 
 function worksheetXml(segment: XlsxWorksheetSegment): string {
@@ -171,7 +191,7 @@ function worksheetXml(segment: XlsxWorksheetSegment): string {
   const bodyXml = Array.from({ length: segment.rowEnd - segment.rowStart }, (_, rowIndex) => {
     const row = rows[segment.rowStart + rowIndex]!;
     const excelRowIndex = rowIndex + 2;
-    const cells = columns.map((_, colIndex) => cellXml(row[colIndex], excelRowIndex - 1, colIndex, numericColumnStyle(data.columnTypes?.[colIndex], rightAlignEnabled), data.columnTypes?.[colIndex])).join("");
+    const cells = columns.map((colName, colIndex) => cellXml(row[colIndex], excelRowIndex - 1, colIndex, numericColumnStyle(data.columnTypes?.[colIndex], rightAlignEnabled), data.columnTypes?.[colIndex], colName)).join("");
     return `<row r="${excelRowIndex}">${cells}</row>`;
   }).join("");
 
@@ -254,7 +274,7 @@ function stylesXml(): string {
   <fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>
   <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
   <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-  <cellXfs count="4"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment horizontal="right"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment horizontal="left"/></xf></cellXfs>
+  <cellXfs count="5"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment horizontal="right"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment horizontal="left"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf></cellXfs>
   <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
 </styleSheet>`;
 }

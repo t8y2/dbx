@@ -1396,3 +1396,61 @@ test("target source reservation retains each legacy duplicate owner until its mo
   await store.updateFileExecutionTarget(duplicate.id, targetReservationTarget("final"));
   await store.saveFile({ ...original, id: undefined });
 });
+
+function scopeSeedFile(id: string, name: string, overrides: Partial<SavedSqlFile> = {}): SavedSqlFile {
+  return {
+    id,
+    connectionId: "conn-1",
+    database: "db-1",
+    name,
+    sql: "SELECT 1;",
+    sqlLoaded: true,
+    createdAt: "2026-07-19T00:00:00.000Z",
+    updatedAt: "2026-07-19T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+test("a name conflict suggests the next free name in the same scope", async () => {
+  apiMock.loadSavedSqlLibrary.mockResolvedValue({
+    folders: [],
+    files: [
+      scopeSeedFile("sql-1", "query_3.sql"),
+      // Same name in another database and in another folder must not shift the
+      // suggestion for the root of db-1.
+      scopeSeedFile("sql-2", "query_4.sql", { database: "db-2" }),
+      scopeSeedFile("sql-3", "query_4.sql", { folderId: "folder-a" }),
+    ],
+  });
+
+  const store = useSavedSqlStore();
+  await store.initFromStorage();
+
+  // A third tab is titled `query_3`, which the library already holds, so saving
+  // it has to fall through to the next free name instead of dead-ending.
+  const conflict = await store.saveFile({ connectionId: "conn-1", database: "db-1", name: "query_3.sql", sql: "SELECT 1;" }).catch((error) => error);
+  assert.ok(conflict instanceof SavedSqlNameConflictError);
+  assert.equal(conflict.fileName, "query_3.sql");
+  assert.equal(conflict.suggestedName, "query_4.sql");
+
+  const saved = await store.saveFile({ connectionId: "conn-1", database: "db-1", name: conflict.suggestedName!, sql: "SELECT 1;" });
+  assert.equal(saved.name, "query_4.sql");
+});
+
+test("a conflict suggestion also skips names reserved by in-flight saves", async () => {
+  const pending = deferredSavedSqlFile();
+  apiMock.saveSavedSqlFile.mockImplementation((file) => (file.name === "query_4.sql" ? pending.promise : Promise.resolve(file)));
+  apiMock.loadSavedSqlLibrary.mockResolvedValue({ folders: [], files: [scopeSeedFile("sql-1", "query_3.sql")] });
+
+  const store = useSavedSqlStore();
+  await store.initFromStorage();
+
+  const inFlight = store.saveFile({ connectionId: "conn-1", database: "db-1", name: "query_4.sql", sql: "SELECT 1;" });
+  const conflict = await store.saveFile({ connectionId: "conn-1", database: "db-1", name: "query_3.sql", sql: "SELECT 2;" }).catch((error) => error);
+
+  assert.ok(conflict instanceof SavedSqlNameConflictError);
+  assert.equal(conflict.suggestedName, "query_5.sql");
+
+  pending.resolve({ id: "sql-pending", connectionId: "conn-1", database: "db-1", name: "query_4.sql", sql: "SELECT 1;", sqlLoaded: true, createdAt: "2026-07-19T00:00:00.000Z", updatedAt: "2026-07-19T00:00:00.000Z" });
+  await inFlight;
+});

@@ -341,7 +341,7 @@ function confirmSelection() {
       <div v-if="catalog" class="min-h-0 flex-1 space-y-2 overflow-y-auto px-5 py-4">
         <details open class="border-b pb-2">
           <summary class="flex cursor-pointer list-none items-center gap-2 py-2 text-sm font-medium">
-            <input :checked="allSelected('connections', catalog.connections)" type="checkbox" class="size-4 accent-primary" @click.stop.prevent="toggleAll('connections', catalog.connections)" />
+            <input :checked="allSelected('connections', catalog.connections)" :disabled="!catalog.connections.length" type="checkbox" class="size-4 accent-primary" @click.stop @change="toggleAll('connections', catalog.connections)" />
             <span>{{ t("settings.syncSelectionConnections") }}</span>
             <span class="ml-auto text-xs text-muted-foreground">{{ selection.connections?.length ?? 0 }}/{{ catalog.connections.length }}</span>
           </summary>
@@ -362,7 +362,7 @@ function confirmSelection() {
 
         <details open class="border-b pb-2">
           <summary class="flex cursor-pointer list-none items-center gap-2 py-2 text-sm font-medium">
-            <input :checked="allSelected('tunnelProfiles', catalog.tunnelProfiles)" type="checkbox" class="size-4 accent-primary" @click.stop.prevent="toggleAll('tunnelProfiles', catalog.tunnelProfiles)" />
+            <input :checked="allSelected('tunnelProfiles', catalog.tunnelProfiles)" :disabled="!catalog.tunnelProfiles.length" type="checkbox" class="size-4 accent-primary" @click.stop @change="toggleAll('tunnelProfiles', catalog.tunnelProfiles)" />
             <span>{{ t("settings.syncSelectionTunnels") }}</span>
             <span class="ml-auto text-xs text-muted-foreground">{{ selection.tunnelProfiles?.length ?? 0 }}/{{ catalog.tunnelProfiles.length }}</span>
           </summary>

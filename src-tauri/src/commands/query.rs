@@ -833,14 +833,19 @@ pub async fn extract_data_grid_selection(
     request: dbx_core::data_grid_extractors::DataGridExtractRequest,
 ) -> Result<dbx_core::data_grid_extractors::DataGridExtractResult, dbx_core::data_grid_extractors::DataGridExtractError>
 {
-    tauri::async_runtime::spawn_blocking(move || dbx_core::data_grid_extractors::extract_data_grid_selection(request))
-        .await
-        .map_err(|error| {
-            dbx_core::data_grid_extractors::DataGridExtractError::new(
-                dbx_core::data_grid_extractors::DataGridExtractErrorCode::ExecutionFailed,
-                format!("Data grid extractor worker failed: {error}"),
-            )
-        })?
+    tauri::async_runtime::spawn_blocking(move || {
+        // Cells pasted from the grid land in a spreadsheet, so formula-triggering text
+        // is neutralized before the extractor renders it (see dbx_core::data::grid_clipboard_guard).
+        let request = dbx_core::data::grid_clipboard_guard::neutralize_spreadsheet_formulas(request);
+        dbx_core::data_grid_extractors::extract_data_grid_selection(request)
+    })
+    .await
+    .map_err(|error| {
+        dbx_core::data_grid_extractors::DataGridExtractError::new(
+            dbx_core::data_grid_extractors::DataGridExtractErrorCode::ExecutionFailed,
+            format!("Data grid extractor worker failed: {error}"),
+        )
+    })?
 }
 
 #[tauri::command]

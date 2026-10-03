@@ -1898,6 +1898,35 @@ export interface TabUiState {
   page?: Record<string, TabPageUiState>;
 }
 
+export interface DatabaseSearchResultItem {
+  id: string;
+  schema?: string;
+  tableName: string;
+  tableType?: string;
+  matchedColumns: string[];
+  preview: string;
+  whereInput: string;
+}
+
+export interface DatabaseSearchTableTask {
+  schema?: string;
+  table: TableInfo;
+}
+
+export interface DatabaseSearchTabState {
+  keyword: string;
+  perTableLimit: number;
+  progressDone: number;
+  progressTotal: number;
+  results: DatabaseSearchResultItem[];
+  tableErrors: Array<{ tableName: string; message: string }>;
+  generalError: string;
+  tableTasks: DatabaseSearchTableTask[];
+  nextTableIndex: number;
+  activeKeyword: string;
+  activePerTableLimit: number;
+}
+
 export interface QueryTab {
   id: string;
   /** Stable creation time used when tabs are displayed in creation order. */
@@ -2068,7 +2097,8 @@ export interface QueryTab {
     | "solr-admin"
     | "dolt-version-control"
     | "plugin-workbench"
-    | "plugin-filesystem";
+    | "plugin-filesystem"
+    | "database-search";
   pluginWorkbench?: {
     /** Host command that created this tab; distinct commands can share a workbench. */
     commandId?: string;
@@ -2101,6 +2131,7 @@ export interface QueryTab {
   structureInitialTabRequestId?: number;
   structureInitialTarget?: TableStructureEditorTarget;
   structureDraft?: TableStructureEditorDraft;
+  databaseSearchState?: DatabaseSearchTabState;
   objectBrowser?: {
     catalog?: string;
     schema?: string;

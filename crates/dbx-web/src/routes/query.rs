@@ -1189,17 +1189,22 @@ pub async fn extract_data_grid_selection(
     Json<dbx_core::data_grid_extractors::DataGridExtractResult>,
     (axum::http::StatusCode, Json<dbx_core::data_grid_extractors::DataGridExtractError>),
 > {
-    tokio::task::spawn_blocking(move || dbx_core::data_grid_extractors::extract_data_grid_selection(req.request))
-        .await
-        .map_err(|error| {
-            let error = dbx_core::data_grid_extractors::DataGridExtractError::new(
-                dbx_core::data_grid_extractors::DataGridExtractErrorCode::ExecutionFailed,
-                format!("Data grid extractor worker failed: {error}"),
-            );
-            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(error))
-        })?
-        .map(Json)
-        .map_err(|error| (axum::http::StatusCode::BAD_REQUEST, Json(error)))
+    tokio::task::spawn_blocking(move || {
+        // Cells pasted from the grid land in a spreadsheet, so formula-triggering text
+        // is neutralized before the extractor renders it (see dbx_core::data::grid_clipboard_guard).
+        let request = dbx_core::data::grid_clipboard_guard::neutralize_spreadsheet_formulas(req.request);
+        dbx_core::data_grid_extractors::extract_data_grid_selection(request)
+    })
+    .await
+    .map_err(|error| {
+        let error = dbx_core::data_grid_extractors::DataGridExtractError::new(
+            dbx_core::data_grid_extractors::DataGridExtractErrorCode::ExecutionFailed,
+            format!("Data grid extractor worker failed: {error}"),
+        );
+        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(error))
+    })?
+    .map(Json)
+    .map_err(|error| (axum::http::StatusCode::BAD_REQUEST, Json(error)))
 }
 
 pub async fn build_data_grid_copy_update_statements(

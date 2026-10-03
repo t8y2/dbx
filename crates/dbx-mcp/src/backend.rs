@@ -214,6 +214,68 @@ pub struct DocsSnapshotOptions {
     pub project_name: Option<String>,
 }
 
+/// Stand-in backend for a store that could not be opened, most often because the
+/// data encryption key is not reachable from this process.
+///
+/// Exiting at startup closes stdout before the transport is running, so an MCP
+/// client sees only EOF and the remedy stays on stderr where the host does not
+/// show it. Keeping the server answerable turns that into an ordinary protocol
+/// error: every request fails closed, carrying the reason the operator needs.
+pub struct UnavailableBackend {
+    reason: String,
+}
+
+impl UnavailableBackend {
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self { reason: reason.into() }
+    }
+}
+
+#[async_trait]
+impl DbxBackend for UnavailableBackend {
+    async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String> {
+        Err(self.reason.clone())
+    }
+
+    async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
+        Err(self.reason.clone())
+    }
+
+    async fn execute_agent_tool(
+        &self,
+        _connection: &ConnectionConfig,
+        _database: &str,
+        tool_name: &str,
+        _arguments: Value,
+        _permissions: AgentSqlPermissions,
+    ) -> ToolResult {
+        ToolResult {
+            tool_call_id: String::new(),
+            tool_name: tool_name.to_string(),
+            content: self.reason.clone(),
+            is_error: true,
+            explain_data: None,
+        }
+    }
+
+    async fn add_connection_for_mcp(&self, _config: ConnectionConfig) -> Result<ConnectionConfig, String> {
+        Err(self.reason.clone())
+    }
+
+    async fn duplicate_connection_for_mcp(
+        &self,
+        _source_id: &str,
+        _copy_id: &str,
+        _copy_name: &str,
+    ) -> Result<ConnectionConfig, String> {
+        Err(self.reason.clone())
+    }
+
+    async fn remove_connection_for_mcp(&self, _connection_id: &str) -> Result<bool, String> {
+        Err(self.reason.clone())
+    }
+}
+
 #[async_trait]
 pub trait DbxBackend: Send + Sync {
     async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String>;
@@ -2807,6 +2869,64 @@ pub fn new_connection_config(
         NewConnectionConfig { id, name, db_type, host, port, username, password, database, ssl, driver_profile };
     serde_json::from_value(serde_json::to_value(minimal).map_err(|error| error.to_string())?)
         .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod unavailable_backend_tests {
+    use super::*;
+
+    const REASON: &str = "SECRET_KEY_UNAVAILABLE: this process cannot read the DBX data encryption key";
+
+    fn sample_connection() -> ConnectionConfig {
+        new_connection_config(
+            "source".into(),
+            "Source".into(),
+            DatabaseType::Postgres,
+            "127.0.0.1".into(),
+            5432,
+            "postgres".into(),
+            "test-password".into(),
+            None,
+            false,
+            None,
+        )
+        .unwrap()
+    }
+
+    // The server used to exit before the transport started, so the client saw
+    // EOF and this text never left stderr. Serving it means every entry point
+    // has to carry it rather than failing blank.
+    #[tokio::test]
+    async fn every_required_entry_point_reports_the_reason() {
+        let backend = UnavailableBackend::new(REASON);
+
+        assert_eq!(backend.load_mcp_global_policy().await.unwrap_err(), REASON);
+        assert_eq!(backend.load_connections().await.unwrap_err(), REASON);
+        assert_eq!(backend.remove_connection_for_mcp("any").await.unwrap_err(), REASON);
+        assert_eq!(backend.duplicate_connection_for_mcp("source", "copy", "Copy").await.unwrap_err(), REASON);
+        assert_eq!(backend.add_connection_for_mcp(sample_connection()).await.unwrap_err(), REASON);
+    }
+
+    // A tool call answers in band: is_error set, reason in the content, and the
+    // tool name preserved so the client can tell which call failed.
+    #[tokio::test]
+    async fn an_agent_tool_call_fails_closed_with_the_reason() {
+        let backend = UnavailableBackend::new(REASON);
+
+        let result = backend
+            .execute_agent_tool(
+                &sample_connection(),
+                "db",
+                "execute_query",
+                Value::Null,
+                AgentSqlPermissions { allow_writes: false, allow_dangerous: false, confirmed_write_sql: None },
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert_eq!(result.content, REASON);
+        assert_eq!(result.tool_name, "execute_query");
+    }
 }
 
 #[cfg(test)]

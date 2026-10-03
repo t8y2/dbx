@@ -89,6 +89,8 @@ export interface DataGridExtractorOptions {
     insertMode: DataGridCopyInsertMode;
     excludePrimaryKeysFromInsert: boolean;
     includeDatabaseName: boolean;
+    quoteIdentifiers: boolean;
+    temporalFormat: "native" | "string";
   };
   json: {
     pretty: boolean;
@@ -150,6 +152,8 @@ export const DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS: DataGridExtractorOptions = {
     insertMode: "merged",
     excludePrimaryKeysFromInsert: false,
     includeDatabaseName: true,
+    quoteIdentifiers: true,
+    temporalFormat: "native",
   },
   json: { pretty: true, camelCaseFieldNames: false },
 };
@@ -181,6 +185,8 @@ export function normalizeDataGridExtractorOptions(value: unknown): DataGridExtra
       insertMode: sql.insertMode === "row-by-row" ? "row-by-row" : "merged",
       excludePrimaryKeysFromInsert: sql.excludePrimaryKeysFromInsert === true,
       includeDatabaseName: sql.includeDatabaseName !== false,
+      quoteIdentifiers: sql.quoteIdentifiers !== false,
+      temporalFormat: sql.temporalFormat === "string" ? "string" : "native",
     },
     json: {
       pretty: json.pretty !== false,

@@ -64,6 +64,15 @@ export const SQL_SEMANTIC_DIALECTS: Record<string, SqlSemanticDialectAdapter> = 
     quoteIdentifier: (identifier) => quoteWith(identifier, '"'),
     qualifierRole: roleForGenericQualifier,
   },
+  snowflake: {
+    id: "snowflake",
+    identifierQuotes: [{ open: '"', close: '"' }],
+    supportsAsForTableAlias: true,
+    projectionAliasVisibility: defaultProjectionAliasVisibility,
+    normalizeIdentifier: upperUnquoted,
+    quoteIdentifier: (identifier) => quoteWith(identifier, '"'),
+    qualifierRole: roleForGenericQualifier,
+  },
   postgres: {
     id: "postgres",
     identifierQuotes: [{ open: '"', close: '"' }],
@@ -190,6 +199,7 @@ export function sqlReferenceAnalysisDialectFor(options: { databaseType?: Databas
 }
 
 export function sqlSemanticDialectFor(options: { databaseType?: DatabaseType; dialect?: "mysql" | "postgres" | "sqlserver" | "clickhouse" | "doris" | "soql" }): SqlSemanticDialectAdapter {
+  if (options.databaseType === "snowflake") return SQL_SEMANTIC_DIALECTS.snowflake;
   if (options.databaseType === "salesforce") return SQL_SEMANTIC_DIALECTS.soql;
   if (options.databaseType === "clickhouse") return SQL_SEMANTIC_DIALECTS.clickhouse;
   // Doris/StarRocks connections ride the editor's MySQL fallback dialect (codeMirrorSqlDialect maps

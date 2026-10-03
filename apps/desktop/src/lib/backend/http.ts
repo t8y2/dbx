@@ -3513,7 +3513,7 @@ export async function exportQueryResultsXlsx(
   _dateTimeFormat?: string,
 ): Promise<void> {
   const { buildXlsxWorkbookMulti } = await import("@/lib/export/xlsxExport");
-  const workbook = buildXlsxWorkbookMulti(autoFilter === undefined ? worksheets : worksheets.map((worksheet) => ({ ...worksheet, autoFilter })));
+  const workbook = buildXlsxWorkbookMulti(autoFilter === undefined ? worksheets : worksheets.map((worksheet) => ({ ...worksheet, autoFilter: worksheet.autoFilter ?? autoFilter })));
   const fileName = filePath.split(/[\\/]/).pop() || "export.xlsx";
   const blob = new Blob([new Uint8Array(workbook)], {
     type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

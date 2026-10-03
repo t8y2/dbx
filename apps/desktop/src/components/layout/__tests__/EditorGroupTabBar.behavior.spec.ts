@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { createApp, nextTick } from "vue";
+import { createApp, nextTick, ref } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { createI18n } from "vue-i18n";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -42,6 +42,7 @@ vi.mock("@/components/icons/DatabaseIcon.vue", () => ({
 }));
 
 import EditorGroupTabBar from "../EditorGroupTabBar.vue";
+import { createNoopEditorToolbarActions, EDITOR_TOOLBAR_ACTIONS, type EditorToolbarActions } from "../editorToolbarActions";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import type { ConnectionConfig } from "@/types/database";
@@ -64,6 +65,7 @@ function mountBar(
   activePinia: ReturnType<typeof createPinia>,
   onActivateTab?: (tabId: string) => void,
   specialPageTabs?: { settingsOpen: boolean; settingsActive: boolean; driverStoreOpen: boolean; driverStoreActive: boolean; pluginCenterOpen: boolean; pluginCenterActive: boolean; driverUpdateCount: number },
+  toolbarActions?: EditorToolbarActions,
 ): Mounted {
   const store = useQueryStore();
   const host = createHost();
@@ -78,6 +80,7 @@ function mountBar(
   // instance the test drives — otherwise drag validation runs against an
   // empty store and silently early-returns.
   app.use(activePinia);
+  if (toolbarActions) app.provide(EDITOR_TOOLBAR_ACTIONS, toolbarActions);
   app.use(
     createI18n({
       legacy: false,
@@ -165,6 +168,25 @@ describe("EditorGroupTabBar behavior", () => {
     vi.restoreAllMocks();
     pinia = createPinia();
     setActivePinia(pinia);
+  });
+
+  it("opens a new query through the app action for this editor group", async () => {
+    const store = useQueryStore();
+    const id = store.createTab("pg-1", "app", "users", "data", "public");
+    const actions = createNoopEditorToolbarActions();
+    actions.canNewQuery = ref(true);
+    actions.newQuery = vi.fn();
+    const { app, host } = mountBar(store.groups[0].id, [id], id, pinia, undefined, undefined, actions);
+    await settle();
+    const buttons = host.querySelectorAll<HTMLButtonElement>("[data-new-query-tab]");
+    expect(buttons).toHaveLength(1);
+    buttons[0].click();
+    expect(actions.newQuery).toHaveBeenCalledExactlyOnceWith(store.groups[0].id);
+    actions.canNewQuery.value = false;
+    await settle();
+    expect(host.querySelector("[data-new-query-tab]")).toBeNull();
+    app.unmount();
+    host.remove();
   });
 
   it("offers duplicate without rename on a data tab", async () => {

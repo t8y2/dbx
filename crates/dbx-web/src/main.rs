@@ -39,6 +39,51 @@ use web_mcp::WebMcpRuntime;
 
 const XLSX_CONTENT_TYPE: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 const DATA_GRID_EXTRACTOR_BODY_LIMIT_BYTES: usize = 96 * 1024 * 1024;
+const NON_WINDOWS_HELP_TEXT: &str = r#"Usage: dbx-web [OPTION]
+
+Start the DBX Web browser service.
+
+Options:
+  -h, --help, /help  Show this help message and exit.
+
+Environment variables:
+  DBX_PORT              Listen port (default: 4224)
+  DBX_DATA_DIR          Data directory (default: ~/.dbx-web)
+  DBX_PUBLIC_BASE_PATH  URL path prefix (default: /)
+  DBX_PASSWORD          Set the Web login password
+  DBX_DISABLE_PASSWORD  Set to 1 to disable login protection
+  DBX_STATIC_DIR        Serve frontend assets from this directory
+  RUST_LOG              Configure backend log filtering
+  RUST_BACKTRACE        Set to 1 to include Rust backtraces
+
+Examples:
+  DBX_PORT=8080 dbx-web
+  RUST_LOG=dbx_web=debug,tower_http=info dbx-web
+  RUST_BACKTRACE=1 RUST_LOG=dbx_web=debug dbx-web
+"#;
+const WINDOWS_HELP_TEXT: &str = r#"Usage: dbx-web [OPTION]
+
+Start the DBX Web browser service.
+
+Options:
+  -h, --help, /help  Show this help message and exit.
+
+Environment variables:
+  DBX_PORT              Listen port (default: 4224)
+  DBX_DATA_DIR          Data directory (default: %HOME%\.dbx-web; .\.dbx-web if HOME is unset)
+  DBX_PUBLIC_BASE_PATH  URL path prefix (default: /)
+  DBX_PASSWORD          Set the Web login password
+  DBX_DISABLE_PASSWORD  Set to 1 to disable login protection
+  DBX_STATIC_DIR        Serve frontend assets from this directory
+  RUST_LOG              Configure backend log filtering
+  RUST_BACKTRACE        Set to 1 to include Rust backtraces
+
+Examples:
+  set "DBX_PORT=8080" && dbx-web.exe
+  set "RUST_LOG=dbx_web=debug,tower_http=info" && dbx-web.exe
+  set "RUST_BACKTRACE=1" && set "RUST_LOG=dbx_web=debug" && dbx-web.exe
+"#;
+const HELP_TEXT: &str = if cfg!(windows) { WINDOWS_HELP_TEXT } else { NON_WINDOWS_HELP_TEXT };
 
 #[derive(OpenApi)]
 #[openapi(
@@ -55,6 +100,29 @@ async fn openapi_json() -> axum::Json<utoipa::openapi::OpenApi> {
 #[cfg(test)]
 mod data_grid_extractor_openapi_tests {
     use super::*;
+
+    #[test]
+    fn help_flags_are_detected_without_starting_the_server() {
+        for flag in ["-h", "--help", "/help"] {
+            assert!(help_requested(&[flag.to_string()]));
+        }
+        assert!(help_requested(&["extra".to_string(), "--help".to_string()]));
+        assert!(!help_requested(&["--helpful".to_string()]));
+    }
+
+    #[test]
+    fn native_help_matches_the_target_shell() {
+        assert!(WINDOWS_HELP_TEXT.contains(r".\.dbx-web if HOME is unset"));
+        assert!(WINDOWS_HELP_TEXT.contains(r#"set "DBX_PORT=8080" && dbx-web.exe"#));
+        assert!(!WINDOWS_HELP_TEXT.contains("DBX_PORT=8080 dbx-web\n"));
+        if cfg!(windows) {
+            assert!(HELP_TEXT.contains(r#"set "DBX_PORT=8080" && dbx-web.exe"#));
+            assert!(!HELP_TEXT.contains("DBX_PORT=8080 dbx-web\n"));
+        } else {
+            assert!(HELP_TEXT.contains("DBX_PORT=8080 dbx-web\n"));
+            assert!(!HELP_TEXT.contains("dbx-web.exe"));
+        }
+    }
 
     #[test]
     fn extractor_openapi_contains_the_versioned_request_and_error_responses() {
@@ -173,6 +241,10 @@ where
             }
         }),
     )
+}
+
+fn help_requested(args: &[String]) -> bool {
+    args.iter().any(|arg| matches!(arg.as_str(), "-h" | "--help" | "/help"))
 }
 
 /// Frontend build output compiled into the binary by the `embed-static` feature.
@@ -385,6 +457,12 @@ fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
 }
 
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if help_requested(&args) {
+        print!("{HELP_TEXT}");
+        return;
+    }
+
     let runtime = dbx_core::scheduled_backup::worker_runtime().expect("Failed to build tokio runtime");
     runtime.block_on(serve());
 }
@@ -1437,22 +1515,80 @@ async fn serve() {
 
     let listener = tokio::net::TcpListener::bind(addr).await.expect("Failed to bind address");
     let shutdown_state = web_state.app.clone();
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            #[cfg(unix)]
-            {
-                let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                    .expect("Failed to listen for SIGTERM");
-                tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
+    let server_shutdown = tokio_util::sync::CancellationToken::new();
+    let server_shutdown_trigger = server_shutdown.clone();
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            let mut terminate: Option<tokio::signal::unix::Signal> =
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        tracing::error!("Failed to install SIGTERM handler: {e}; continuing with Ctrl+C only");
+                        None
+                    }
+                };
+            tokio::select! {
+                res = tokio::signal::ctrl_c() => {
+                    if let Err(e) = res {
+                        tracing::error!("Failed to listen for Ctrl+C: {e}");
+                    } else {
+                        tracing::info!("Shutdown signal received (Ctrl+C)");
+                    }
+                }
+                _ = async {
+                    match terminate.as_mut() {
+                        Some(signal) => {
+                            signal.recv().await;
+                        }
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    tracing::info!("Shutdown signal received (SIGTERM)");
+                }
             }
-            #[cfg(not(unix))]
-            let _ = tokio::signal::ctrl_c().await;
-            backup_stop.cancel();
-        })
-        .await
-        .expect("Server error");
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(60), backup_worker).await;
+        }
+        #[cfg(not(unix))]
+        {
+            if let Err(e) = tokio::signal::ctrl_c().await {
+                tracing::error!("Failed to listen for Ctrl+C: {e}");
+            } else {
+                tracing::info!("Shutdown signal received (Ctrl+C)");
+            }
+        }
+        backup_stop.cancel();
+        server_shutdown_trigger.cancel();
+    });
+
+    let shutdown_wait = server_shutdown.clone();
+    let serve_future = axum::serve(listener, app).with_graceful_shutdown(async move {
+        shutdown_wait.cancelled().await;
+    });
+
+    // If graceful shutdown of HTTP connections takes longer than 5 seconds, abort to ensure prompt termination on Ctrl+C.
+    // Non-zero exit codes keep systemd's Restart=on-failure meaningful: a serve error or an
+    // undrained backup worker must not look like a clean stop.
+    let mut exit_code = 0i32;
+    tokio::select! {
+        res = serve_future => {
+            if let Err(e) = res {
+                tracing::error!("Server error: {e}");
+                exit_code = 1;
+            }
+        }
+        _ = async {
+            server_shutdown.cancelled().await;
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        } => {
+            tracing::warn!("Graceful HTTP shutdown timed out after 5s; proceeding with teardown");
+        }
+    }
+    if tokio::time::timeout(std::time::Duration::from_secs(5), backup_worker).await.is_err() {
+        tracing::warn!("Scheduled backup worker did not drain within 5s; exiting with failure status");
+        exit_code = 1;
+    }
     shutdown_state.shutdown(std::time::Duration::from_secs(3)).await;
+    std::process::exit(exit_code);
 }
 
 #[cfg(test)]

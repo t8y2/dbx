@@ -294,7 +294,8 @@ public final class JsonRpcServer {
                 new ExecuteQueryOptions(
                     intOrDefault(params, "maxRows", JdbcExecutor.DEFAULT_MAX_ROWS),
                     intOrNull(params, "fetchSize"),
-                    intOrDefault(params, "timeoutSecs", 0)
+                    intOrDefault(params, "timeoutSecs", 0),
+                    booleanOrDefault(params, "deferLobs", false)
                 )
             );
         }
@@ -306,7 +307,8 @@ public final class JsonRpcServer {
                     intOrDefault(params, "pageSize", 100),
                     intOrNull(params, "fetchSize"),
                     intOrDefault(params, "maxRows", JdbcExecutor.DEFAULT_MAX_ROWS),
-                    intOrDefault(params, "timeoutSecs", 0)
+                    intOrDefault(params, "timeoutSecs", 0),
+                    booleanOrDefault(params, "deferLobs", false)
                 )
             );
         }
@@ -327,7 +329,8 @@ public final class JsonRpcServer {
                     intOrDefault(params, "pageSize", 100),
                     intOrNull(params, "fetchSize"),
                     intOrDefault(params, "maxRows", JdbcExecutor.DEFAULT_MAX_ROWS),
-                    intOrDefault(params, "timeoutSecs", 0)
+                    intOrDefault(params, "timeoutSecs", 0),
+                    booleanOrDefault(params, "deferLobs", false)
                 )
             );
         }
@@ -554,6 +557,11 @@ public final class JsonRpcServer {
             return null;
         }
         return element.getAsInt();
+    }
+
+    private static boolean booleanOrDefault(JsonObject object, String key, boolean defaultValue) {
+        JsonElement element = object.get(key);
+        return element == null || element instanceof JsonNull ? defaultValue : element.getAsBoolean();
     }
 
     private MetadataListConstraints metadataListConstraints(JsonObject params) {

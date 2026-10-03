@@ -14,9 +14,13 @@ import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.MetadataSqlSupport;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
+import com.dbx.agent.QueryPageOptions;
+import com.dbx.agent.QueryPageResult;
 import com.dbx.agent.QueryResult;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.TriggerInfo;
+import java.sql.Blob;
+import java.sql.Clob;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Types;
@@ -25,13 +29,18 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Properties;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 public final class Db2Agent extends AbstractJdbcAgent {
+    private static final String LARGE_VALUE_BYTES_COLUMN_PREFIX = "__DBX_LARGE_VALUE_BYTES_";
+    private static final String DEFERRED_LOB_MARKER = "D:1";
     private static final Set<String> NUMERIC_PRECISION_TYPES = Set.of(
         "DECIMAL", "NUMERIC", "INTEGER", "SMALLINT", "BIGINT", "REAL", "DOUBLE", "FLOAT"
     );
     private static final Set<String> NUMERIC_SCALE_TYPES = Set.of("DECIMAL", "NUMERIC");
     private static final Set<String> CHARACTER_LENGTH_TYPES = Set.of("VARCHAR", "CHAR", "CLOB", "GRAPHIC", "VARGRAPHIC");
+    private final Set<String> deferredQuerySessions = ConcurrentHashMap.newKeySet();
+    private final Set<String> deferredTableReadSessions = ConcurrentHashMap.newKeySet();
 
     @Override
     protected String driverClass() {
@@ -53,6 +62,12 @@ public final class Db2Agent extends AbstractJdbcAgent {
         Properties properties = super.buildConnectionProperties(params);
         properties.setProperty("db2.jcc.charsetDecoderEncoder", "3");
         return properties;
+    }
+
+    @Override
+    protected void afterDisconnect() {
+        deferredQuerySessions.clear();
+        deferredTableReadSessions.clear();
     }
 
     @Override
@@ -383,7 +398,11 @@ public final class Db2Agent extends AbstractJdbcAgent {
 
     @Override
     public QueryResult executeQuery(String sql, String schema, ExecuteQueryOptions options) {
-        return JdbcExecutor.current().execute(
+        boolean deferLobs = shouldDeferLobs(sql, options.getDeferLobs());
+        JdbcExecutor.ResultValueReader valueReader = deferLobs
+            ? (JdbcExecutor.ColumnAwareResultValueReader) this::deferredResultValue
+            : this::resultValue;
+        QueryResult result = JdbcExecutor.current().execute(
             requireConnected(),
             sql,
             schema,
@@ -391,8 +410,72 @@ public final class Db2Agent extends AbstractJdbcAgent {
             options.getMaxRows(),
             options.getFetchSize(),
             options.getTimeoutSecs(),
-            this::resultValue
+            valueReader
         );
+        return deferLobs ? addDeferredLobMarkers(result) : result;
+    }
+
+    @Override
+    public QueryPageResult executeQueryPage(String sql, String schema, QueryPageOptions options) {
+        boolean deferLobs = shouldDeferLobs(sql, options.getDeferLobs());
+        JdbcExecutor.ResultValueReader valueReader = deferLobs
+            ? (JdbcExecutor.ColumnAwareResultValueReader) this::deferredResultValue
+            : this::resultValue;
+        QueryPageResult result = JdbcExecutor.current().executePage(
+            requireConnected(),
+            sql,
+            schema,
+            this::setSchemaSQL,
+            this::resetSchemaSQL,
+            options,
+            valueReader,
+            advancePastUpdateCounts()
+        );
+        rememberDeferredSession(deferredQuerySessions, result, deferLobs);
+        return deferLobs ? addDeferredLobMarkers(result) : result;
+    }
+
+    @Override
+    public QueryPageResult fetchQueryPage(String sessionId, int pageSize) {
+        QueryPageResult result = JdbcExecutor.current().fetchPage(sessionId, pageSize);
+        return finishDeferredPage(deferredQuerySessions, sessionId, result);
+    }
+
+    @Override
+    public boolean closeQuerySession(String sessionId) {
+        deferredQuerySessions.remove(sessionId);
+        return super.closeQuerySession(sessionId);
+    }
+
+    @Override
+    public QueryPageResult startTableRead(String sql, String schema, QueryPageOptions options) {
+        boolean deferLobs = shouldDeferLobs(sql, options.getDeferLobs());
+        JdbcExecutor.ResultValueReader valueReader = deferLobs
+            ? (JdbcExecutor.ColumnAwareResultValueReader) this::deferredResultValue
+            : this::resultValue;
+        QueryPageResult result = JdbcExecutor.current().startTableRead(
+            requireConnected(),
+            sql,
+            schema,
+            this::setSchemaSQL,
+            this::resetSchemaSQL,
+            options,
+            valueReader
+        );
+        rememberDeferredSession(deferredTableReadSessions, result, deferLobs);
+        return deferLobs ? addDeferredLobMarkers(result) : result;
+    }
+
+    @Override
+    public QueryPageResult fetchTableReadPage(String sessionId, int pageSize) {
+        QueryPageResult result = JdbcExecutor.current().fetchTableReadPage(sessionId, pageSize);
+        return finishDeferredPage(deferredTableReadSessions, sessionId, result);
+    }
+
+    @Override
+    public boolean closeTableReadSession(String sessionId) {
+        deferredTableReadSessions.remove(sessionId);
+        return super.closeTableReadSession(sessionId);
     }
 
     @Override
@@ -410,6 +493,138 @@ public final class Db2Agent extends AbstractJdbcAgent {
             return rs.wasNull() ? null : value == null ? null : value.toString();
         });
     }
+
+    Object deferredResultValue(ResultSet rs, int index, int sqlType, String typeName) {
+        String lobType = deferredLobType(sqlType, typeName);
+        if (lobType == null) {
+            return resultValue(rs, index, sqlType);
+        }
+        return unchecked(() -> {
+            if ("BLOB".equals(lobType)) {
+                Blob value = rs.getBlob(index);
+                return value == null || rs.wasNull() ? null : "<BLOB>";
+            }
+            Clob value = rs.getClob(index);
+            return value == null || rs.wasNull() ? null : "<" + lobType + ">";
+        });
+    }
+
+    static QueryResult addDeferredLobMarkers(QueryResult result) {
+        DeferredLobResult deferred = deferredLobResult(result.getColumns(), result.getColumn_types(), result.getRows());
+        if (deferred == null) {
+            return result;
+        }
+        result.setColumns(deferred.columns());
+        result.setColumn_types(deferred.columnTypes());
+        result.setRows(deferred.rows());
+        return result;
+    }
+
+    static QueryPageResult addDeferredLobMarkers(QueryPageResult result) {
+        DeferredLobResult deferred = deferredLobResult(result.getColumns(), result.getColumn_types(), result.getRows());
+        if (deferred == null) {
+            return result;
+        }
+        result.setColumns(deferred.columns());
+        result.setColumn_types(deferred.columnTypes());
+        result.setRows(deferred.rows());
+        return result;
+    }
+
+    private static DeferredLobResult deferredLobResult(
+        List<String> columns,
+        List<String> columnTypes,
+        List<List<Object>> rows
+    ) {
+        if (columns.size() != columnTypes.size()
+            || columns.stream().anyMatch(column -> column.toUpperCase(Locale.ROOT).startsWith(LARGE_VALUE_BYTES_COLUMN_PREFIX))) {
+            return null;
+        }
+        List<String> deferredTypes = new ArrayList<>(columnTypes.size());
+        boolean hasDeferredLob = false;
+        for (String columnType : columnTypes) {
+            String lobType = deferredLobType(Types.OTHER, columnType);
+            deferredTypes.add(lobType);
+            hasDeferredLob |= lobType != null;
+        }
+        if (!hasDeferredLob) {
+            return null;
+        }
+
+        List<String> expandedColumns = new ArrayList<>(columns.size() + deferredTypes.size());
+        List<String> expandedColumnTypes = new ArrayList<>(columnTypes.size() + deferredTypes.size());
+        for (int index = 0; index < columns.size(); index++) {
+            expandedColumns.add(columns.get(index));
+            expandedColumnTypes.add(columnTypes.get(index));
+            String lobType = deferredTypes.get(index);
+            if (lobType != null) {
+                expandedColumns.add(LARGE_VALUE_BYTES_COLUMN_PREFIX + markerAliasKind(lobType) + "_" + index);
+                expandedColumnTypes.add("VARCHAR");
+            }
+        }
+
+        List<List<Object>> expandedRows = new ArrayList<>(rows.size());
+        for (List<Object> row : rows) {
+            List<Object> expandedRow = new ArrayList<>(expandedColumns.size());
+            for (int index = 0; index < columns.size(); index++) {
+                Object value = index < row.size() ? row.get(index) : null;
+                expandedRow.add(value);
+                if (deferredTypes.get(index) != null) {
+                    expandedRow.add(value == null ? null : DEFERRED_LOB_MARKER);
+                }
+            }
+            expandedRows.add(expandedRow);
+        }
+        return new DeferredLobResult(expandedColumns, expandedColumnTypes, expandedRows);
+    }
+
+    private static String deferredLobType(int sqlType, String typeName) {
+        String normalized = typeName == null ? "" : typeName.trim().toUpperCase(Locale.ROOT);
+        int parameterStart = normalized.indexOf('(');
+        if (parameterStart >= 0) {
+            normalized = normalized.substring(0, parameterStart).trim();
+        }
+        if (sqlType == Types.BLOB || "BLOB".equals(normalized)) {
+            return "BLOB";
+        }
+        if ("DBCLOB".equals(normalized)) {
+            return "DBCLOB";
+        }
+        if (sqlType == Types.CLOB || sqlType == Types.NCLOB || "CLOB".equals(normalized) || "NCLOB".equals(normalized)) {
+            return "CLOB";
+        }
+        return null;
+    }
+
+    private static String markerAliasKind(String lobType) {
+        return "BLOB".equals(lobType) ? "L" : "C";
+    }
+
+    private static boolean shouldDeferLobs(String sql, boolean requested) {
+        return requested && !sql.toUpperCase(Locale.ROOT).contains(LARGE_VALUE_BYTES_COLUMN_PREFIX);
+    }
+
+    private static void rememberDeferredSession(Set<String> sessions, QueryPageResult result, boolean deferLobs) {
+        if (deferLobs && result.getHas_more() && result.getSession_id() != null) {
+            sessions.add(result.getSession_id());
+        }
+    }
+
+    private static QueryPageResult finishDeferredPage(Set<String> sessions, String sessionId, QueryPageResult result) {
+        if (!sessions.contains(sessionId)) {
+            return result;
+        }
+        if (!result.getHas_more()) {
+            sessions.remove(sessionId);
+        }
+        return addDeferredLobMarkers(result);
+    }
+
+    private record DeferredLobResult(
+        List<String> columns,
+        List<String> columnTypes,
+        List<List<Object>> rows
+    ) {}
 
     static String buildUrl(ConnectParams params) {
         if (!params.getConnection_string().trim().isEmpty()) {

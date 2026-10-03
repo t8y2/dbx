@@ -464,7 +464,9 @@ LIMIT 100;`);
 
     const formatted = await formatSqlForEditing(sql, sqlFormatDialectForDbType("dameng"));
 
-    expect(formatted).toContain('JS1.REC_CREATOR AS "recCreator"');
+    const aliasLines = formatted.split("\n").filter((line) => line.includes(' AS "recCreator'));
+    expect(aliasLines).toHaveLength(2);
+    expect(aliasLines[0]!.indexOf(" AS ")).toBe(aliasLines[1]!.indexOf(" AS "));
     // Known and unknown functions alike are written without a space before the
     // parenthesis.
     expect(formatted).toContain("DECODE(");

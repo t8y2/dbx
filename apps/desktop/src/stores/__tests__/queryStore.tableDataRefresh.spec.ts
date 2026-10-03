@@ -714,6 +714,59 @@ describe("queryStore table data refresh", () => {
     );
   });
 
+  it("enables bounded DB2 BLOB previews for table refreshes", async () => {
+    mocks.getConnectionConfig.mockReturnValue({
+      id: "db2-1",
+      name: "DB2",
+      db_type: "db2",
+      database: "MAXIMO",
+      query_timeout_secs: 60,
+    });
+    mocks.buildTableSelectSql.mockResolvedValue('SELECT "MAFAPPDATAID", SUBSTR("APP", 1, 8193) AS "APP" FROM "MAXIMO"."MAFAPPDATA";');
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("db2-1", "MAXIMO", "MAFAPPDATA", "data", "MAXIMO");
+    store.setTableMeta(tabId, {
+      database: "MAXIMO",
+      schema: "MAXIMO",
+      tableName: "MAFAPPDATA",
+      tableType: "TABLE",
+      columns: [
+        { name: "MAFAPPDATAID", data_type: "BIGINT", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+        { name: "APP", data_type: "BLOB", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+      ],
+      primaryKeys: ["MAFAPPDATAID"],
+    });
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    tab.resultPageLimit = 100;
+    tab.resultPageOffset = 0;
+
+    await expect(store.refreshDataTab(tabId)).resolves.toBe(true);
+
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(
+      expect.objectContaining({
+        databaseType: "db2",
+        columnTypes: ["BIGINT", "BLOB"],
+        largeValuePreviewSize: 8 * 1024,
+      }),
+    );
+    expect(mocks.executeMulti).toHaveBeenCalledWith(
+      "db2-1",
+      "MAXIMO",
+      expect.any(String),
+      undefined,
+      expect.any(String),
+      expect.objectContaining({
+        maxRows: 100,
+        fetchSize: 100,
+        maxResultBytes: 32 * 1024 * 1024,
+        resultKeyColumns: ["MAFAPPDATAID"],
+        tableDataPreview: true,
+        timeoutSecs: 60,
+      }),
+    );
+  });
+
   it("keeps a MySQL table refresh unqualified in the selected database context", async () => {
     mocks.getConnectionConfig.mockReturnValue({
       id: "mysql-1",

@@ -14,7 +14,7 @@ export type DatabaseBackupExportStatus = "Running" | "Done" | "Error" | "Cancell
 export type DatabaseBackupRunStatus = "running" | "success" | "failed" | "cancelled";
 export type DatabaseBackupRunTrigger = "manual" | "scheduled";
 export type DatabaseBackupRunSource = "scheduled" | "one-shot";
-export type DatabaseBackupTableFilterMode = "all" | "include" | "exclude";
+export type DatabaseBackupTableFilterMode = "all" | "include" | "exclude" | "selected";
 export type DatabaseBackupOutputCompression = "none" | "gzip";
 
 const CONSISTENT_BACKUP_DATABASE_TYPES = new Set(["mysql", "postgres"]);
@@ -98,6 +98,7 @@ export function databaseBackupTableNamesAreCaseSensitive(databaseType: DatabaseT
 export function resolveScheduledDatabaseBackupTableScope(mode: DatabaseBackupTableFilterMode, patterns: readonly string[], availableTables: readonly string[], database = "", schema = "", caseSensitive = true): DatabaseBackupTableScope {
   const available = [...new Set(availableTables.map((table) => table.trim()).filter(Boolean))];
   if (mode === "all") return { includedTables: available };
+  if (mode === "selected") throw new Error("Exact table selection requires database and schema identities");
 
   const normalizedPatterns = normalizeDatabaseBackupTablePatterns(patterns);
   const matching = available.filter((table) => databaseBackupTableMatchesPattern(table, normalizedPatterns, database, schema, caseSensitive));
@@ -110,11 +111,50 @@ export function resolveScheduledDatabaseBackupTableScope(mode: DatabaseBackupTab
   };
 }
 
+export interface DatabaseBackupTableTarget {
+  database: string;
+  schema: string;
+  table: string;
+}
+
+export interface DatabaseBackupTableSelectionState {
+  scopeKey: string;
+  ready: boolean;
+}
+
+export function databaseBackupTableTargetKey(target: DatabaseBackupTableTarget): string {
+  return JSON.stringify([target.database, target.schema, target.table]);
+}
+
+export function databaseBackupTableSelectionScopeKey(connectionId: string, databaseType: string | undefined, databases: readonly string[]): string {
+  return JSON.stringify([connectionId, databaseType ?? "", [...new Set(databases)].sort()]);
+}
+
+export function normalizeDatabaseBackupTableTargets(value: unknown): DatabaseBackupTableTarget[] {
+  if (value == null) return [];
+  if (!Array.isArray(value)) throw new Error("Invalid selected backup tables");
+  const result: DatabaseBackupTableTarget[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") throw new Error("Invalid selected backup table");
+    const { database, schema, table } = entry as Record<string, unknown>;
+    if (typeof database !== "string" || typeof schema !== "string" || typeof table !== "string" || !database.trim() || !schema.trim() || !table.trim()) throw new Error("Invalid selected backup table identity");
+    const target = { database, schema, table };
+    const key = databaseBackupTableTargetKey(target);
+    if (!seen.has(key)) {
+      seen.add(key);
+      result.push(target);
+    }
+  }
+  return result;
+}
+
 export interface DatabaseBackupExecutionConfig {
   connectionId: string;
   databases: string[];
   tableFilterMode: DatabaseBackupTableFilterMode;
   tablePatterns: string[];
+  selectedTables?: DatabaseBackupTableTarget[];
   destinationDirectory: string;
   includeStructure: boolean;
   includeData: boolean;
@@ -150,6 +190,7 @@ export function toDatabaseBackupExecutionConfig(schedule: DatabaseBackupSchedule
     databases: [...schedule.databases],
     tableFilterMode: schedule.tableFilterMode,
     tablePatterns: [...schedule.tablePatterns],
+    ...(schedule.tableFilterMode === "selected" ? { selectedTables: normalizeDatabaseBackupTableTargets(schedule.selectedTables) } : {}),
     destinationDirectory: schedule.destinationDirectory,
     includeStructure: schedule.includeStructure,
     includeData: schedule.includeData,
@@ -238,6 +279,14 @@ export function normalizeDatabaseBackupSchedule(value: unknown, now = new Date()
   const destinationDirectory = stringValue(input.destinationDirectory).trim();
   if (!id || !connectionId || !destinationDirectory) return null;
 
+  let selectedTables: DatabaseBackupTableTarget[] | undefined;
+  if (input.tableFilterMode === "selected") {
+    try {
+      selectedTables = normalizeDatabaseBackupTableTargets(input.selectedTables);
+    } catch {
+      return null;
+    }
+  }
   const nowIso = now.toISOString();
   const frequency: DatabaseBackupFrequency = input.frequency === "daily" || input.frequency === "weekly" ? input.frequency : "hourly";
   const schedule: DatabaseBackupSchedule = {
@@ -246,8 +295,9 @@ export function normalizeDatabaseBackupSchedule(value: unknown, now = new Date()
     enabled: booleanValue(input.enabled, true),
     connectionId,
     databases: Array.isArray(input.databases) ? [...new Set(input.databases.map((database) => stringValue(database).trim()).filter(Boolean))] : [],
-    tableFilterMode: input.tableFilterMode === "include" || input.tableFilterMode === "exclude" ? input.tableFilterMode : "all",
+    tableFilterMode: input.tableFilterMode === "include" || input.tableFilterMode === "exclude" || input.tableFilterMode === "selected" ? input.tableFilterMode : "all",
     tablePatterns: normalizeDatabaseBackupTablePatterns(input.tablePatterns),
+    ...(selectedTables ? { selectedTables } : {}),
     destinationDirectory,
     frequency,
     intervalHours: boundedInteger(input.intervalHours, 6, 1, 168),

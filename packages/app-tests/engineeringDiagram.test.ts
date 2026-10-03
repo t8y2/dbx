@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { buildEngineeringDiagram } from "../../apps/desktop/src/lib/diagram/engineeringDiagram.ts";
+import { buildEngineeringDiagram, buildEngineeringDiagramConnections, sliceEngineeringDiagramForViewport } from "../../apps/desktop/src/lib/diagram/engineeringDiagram.ts";
 import type { DiagramRelationship, DiagramTable } from "../../apps/desktop/src/lib/diagram/erDiagram.ts";
 
 const tables: DiagramTable[] = [
@@ -101,4 +101,66 @@ test("keeps adjacent entity centers reasonably close", () => {
   const orderCenter = orders.x + orders.width / 2;
 
   assert.ok(Math.abs(orderCenter - userCenter) <= 560);
+});
+
+test("precomputes engineering connection lines and slices them by viewport", () => {
+  const diagram = buildEngineeringDiagram(tables, relationships, {
+    users: { x: 40, y: 40 },
+    orders: { x: 360, y: 40 },
+  });
+  const connections = buildEngineeringDiagramConnections(diagram);
+  const users = diagram.entities.find((entity) => entity.name === "users")!;
+  const viewport = {
+    left: users.x - 20,
+    top: users.y - 20,
+    right: users.x + users.width + 20,
+    bottom: users.y + users.height + 20,
+  };
+  const slice = sliceEngineeringDiagramForViewport(diagram, connections, viewport);
+
+  assert.equal(connections.attributeLines.length, diagram.attributes.length);
+  assert.equal(connections.relationshipLines.length, diagram.relationships.length * 2);
+  assert.ok(slice.entities.some((entity) => entity.name === "users"));
+  assert.ok(slice.entities.length < diagram.entities.length);
+  assert.ok(slice.attributeLines.length > 0);
+});
+
+test("builds a 1268-table engineering diagram without overflowing the call stack", () => {
+  const largeTables: DiagramTable[] = Array.from({ length: 1268 }, (_, tableIndex) => ({
+    name: `table_${tableIndex}`,
+    columns: Array.from({ length: 100 }, (_, columnIndex) => ({
+      name: `column_${columnIndex}`,
+      data_type: "varchar",
+      is_nullable: true,
+      column_default: null,
+      is_primary_key: columnIndex === 0,
+      extra: null,
+    })),
+    foreignKeys: [],
+  }));
+  const positions = Object.fromEntries(
+    largeTables.map((table, index) => [
+      table.name,
+      {
+        x: (index % 4) * 440,
+        y: Math.floor(index / 4) * 600,
+      },
+    ]),
+  );
+
+  const diagram = buildEngineeringDiagram(largeTables, [], positions);
+  const connections = buildEngineeringDiagramConnections(diagram);
+  const slice = sliceEngineeringDiagramForViewport(diagram, connections, {
+    left: 0,
+    top: 0,
+    right: 1920,
+    bottom: 1080,
+  });
+
+  assert.equal(diagram.entities.length, 1268);
+  assert.equal(diagram.attributes.length, 126_800);
+  assert.ok(Number.isFinite(diagram.canvas.width));
+  assert.ok(Number.isFinite(diagram.canvas.height));
+  assert.ok(slice.entities.length < diagram.entities.length);
+  assert.ok(slice.attributes.length < diagram.attributes.length);
 });

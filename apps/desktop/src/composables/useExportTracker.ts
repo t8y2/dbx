@@ -690,7 +690,8 @@ export function useExportTracker() {
     task.tableName = progress.tableName || task.tableName;
     task.rowsExported = progress.rowsExported;
     task.totalRows = progress.totalRows;
-    task.status = normalizeExportStatus(progress.status);
+    const nextStatus = normalizeExportStatus(progress.status);
+    task.status = task.status === "Cancelling" && (nextStatus === "Running" || nextStatus === "Writing") ? "Cancelling" : nextStatus;
     task.errorMessage = progress.errorMessage || null;
     if (task.status === "Done" || task.status === "Error" || task.status === "Cancelled") finishExportTask(task);
   }
@@ -718,6 +719,12 @@ export function useExportTracker() {
     if (!task || task.kind !== "database-export" || task.status === "Done" || task.status === "Error" || task.status === "Cancelled") return;
     task.status = "Cancelling";
     task.preparing = false;
+  }
+
+  function markTableExportTaskCancelling(exportId: string) {
+    const task = taskMap.get(exportId);
+    if (!task || task.kind !== "table-export" || task.status === "Done" || task.status === "Error" || task.status === "Cancelled") return;
+    task.status = "Cancelling";
   }
 
   function restoreDatabaseExportTaskRunning(exportId: string) {
@@ -852,6 +859,7 @@ export function useExportTracker() {
       } else if (task?.kind === "data-transfer") {
         await api.cancelTransfer(exportId);
       } else {
+        markTableExportTaskCancelling(exportId);
         await api.cancelTableExport(exportId);
       }
     } catch {

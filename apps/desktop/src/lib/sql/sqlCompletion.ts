@@ -1471,7 +1471,7 @@ type SqlCompletionApplyDialect = "mysql" | "postgres" | "sqlserver" | "oracle" |
 const MYSQL_LIKE_IDENTIFIER_DATABASES = new Set<DatabaseType>(["mysql", "clickhouse", "hive", "argo", "transwarp", "kyuubi", "impala", "spark", "databend", "tdengine", "access", "doris", "starrocks"]);
 const POSTGRES_LIKE_IDENTIFIER_DATABASES = new Set<DatabaseType>(["postgres", "redshift", "gaussdb", "kingbase", "highgo", "uxdb", "vastbase", "kwdb", "opengauss"]);
 export const ORACLE_COMPAT_IDENTIFIER_DATABASES = new Set<DatabaseType>(["oracle", "oceanbase-oracle", "yashandb", "oscar", "xugu"]);
-const UPPER_FOLDING_IDENTIFIER_DATABASES = new Set<DatabaseType>(["dameng", "db2"]);
+const UPPER_FOLDING_IDENTIFIER_DATABASES = new Set<DatabaseType>(["dameng", "db2", "snowflake"]);
 
 function sqlCompletionApplyDialect(databaseType: DatabaseType | undefined, fallback: "mysql" | "postgres" | "sqlserver" | undefined): SqlCompletionApplyDialect | undefined {
   if (!databaseType) return fallback;
@@ -2850,7 +2850,7 @@ function parseTrailingIdentifierContext(input: string, databaseType?: DatabaseTy
       index -= 1;
       continue;
     }
-    parts.unshift(unquoteIdentifier(parsed.raw));
+    parts.unshift(parsed.raw);
     index = parsed.start;
     if (index <= 0 || tail[index - 1] !== ".") break;
     index -= 1;
@@ -2860,8 +2860,8 @@ function parseTrailingIdentifierContext(input: string, databaseType?: DatabaseTy
   const start = index;
 
   if (parts.length >= 2 || endsWithDot) {
-    const qualifierParts = endsWithDot ? parts : parts.slice(0, -1);
-    const prefixPart = endsWithDot ? "" : (parts[parts.length - 1] ?? "");
+    const qualifierParts = (endsWithDot ? parts : parts.slice(0, -1)).map((part) => completionLookupIdentifier(part, databaseType));
+    const prefixPart = endsWithDot ? "" : unquoteIdentifier(parts[parts.length - 1] ?? "");
     const qualifierValue = qualifierParts.join(".");
     return {
       start,
@@ -2873,7 +2873,7 @@ function parseTrailingIdentifierContext(input: string, databaseType?: DatabaseTy
 
   return {
     start,
-    prefix: parts[0] ?? "",
+    prefix: unquoteIdentifier(parts[0] ?? ""),
   };
 }
 
@@ -3213,6 +3213,9 @@ function preferredKeywordsForCompletion(
   databaseType: DatabaseType | undefined,
 ): string[] {
   const keywords: string[] = [];
+  if (databaseType !== "sqlserver" && databaseType !== "sqlite" && /^create\s+or$/i.test(maskSqlLiteralsAndComments(beforeToken, databaseType).trim())) {
+    keywords.push("REPLACE");
+  }
   if (selectListColumnContext && hasSelectListExpression(beforeCursor, databaseType)) keywords.push("FROM");
   if (isAfterJoinModifierContext(beforeCursor, databaseType)) keywords.push("JOIN");
   if (!exclusiveTableSuggestions && isAfterSelectBodyExpression(beforeToken, databaseType)) keywords.push("LIMIT");
@@ -3622,8 +3625,8 @@ function extractReferencedTables(sql: string, databaseType?: DatabaseType): SqlC
     }
     const rawParts = splitQualifiedNameRawParts(rawName);
     const omittedSqlServerSchema = databaseType === "sqlserver" && rawParts.length >= 3 && rawParts[rawParts.length - 2] === "";
-    const unquotedRawParts = rawParts.map((part) => unquoteIdentifier(part));
-    const parts = rawParts.map((part) => unquoteIdentifier(part)).filter(Boolean);
+    const unquotedRawParts = rawParts.map((part) => completionLookupIdentifier(part, databaseType));
+    const parts = unquotedRawParts.filter(Boolean);
     const name = unquotedRawParts[unquotedRawParts.length - 1];
     if (!name) continue;
     const table: SqlCompletionReferencedTable = {
@@ -3989,6 +3992,12 @@ function unquoteIdentifier(value: string): string {
     return value.slice(1, -1);
   }
   return value;
+}
+
+function completionLookupIdentifier(value: string, databaseType?: DatabaseType): string {
+  const name = unquoteIdentifier(value);
+  if (databaseType !== "snowflake") return name;
+  return value.startsWith('"') ? name.replaceAll('""', '"') : name.toUpperCase();
 }
 
 export function quoteSqlIdentifier(identifier: string, dialect?: SqlCompletionApplyDialect): string {

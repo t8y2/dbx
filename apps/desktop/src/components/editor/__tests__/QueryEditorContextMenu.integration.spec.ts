@@ -38,6 +38,9 @@ function mountMenu() {
     emitContextObjectAction: vi.fn(),
     openCodeSnapshot: vi.fn(),
     sendSelectionToAi: vi.fn(),
+    toggleFoldFromContextMenu: vi.fn(),
+    foldAllFromContextMenu: vi.fn(),
+    unfoldAllFromContextMenu: vi.fn(),
   } satisfies QueryEditorContextMenuActions;
   const onClose = vi.fn();
   let synchronize = () => {};
@@ -198,5 +201,26 @@ describe("QueryEditor extracted context menu", () => {
       state.contextObjectTarget = null;
     });
     expect(button("contextMenu.viewData").disabled).toBe(true);
+  });
+
+  it("routes folding actions from the folding submenu", async () => {
+    const { actions, open } = mountMenu();
+    await open();
+    button("editor.contextMenu.folding").dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    await nextTick();
+    button("editor.contextMenu.toggleFold").click();
+    expect(actions.toggleFoldFromContextMenu).toHaveBeenCalledTimes(1);
+
+    await open();
+    button("editor.contextMenu.folding").dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    await nextTick();
+    button("editor.contextMenu.foldAll").click();
+    expect(actions.foldAllFromContextMenu).toHaveBeenCalledTimes(1);
+
+    await open();
+    button("editor.contextMenu.folding").dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    await nextTick();
+    button("editor.contextMenu.unfoldAll").click();
+    expect(actions.unfoldAllFromContextMenu).toHaveBeenCalledTimes(1);
   });
 });

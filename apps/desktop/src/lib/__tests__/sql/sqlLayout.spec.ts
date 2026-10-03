@@ -188,9 +188,28 @@ describe("sql layout", () => {
 
   it("keeps nested and simple CASE expressions compact", async () => {
     const sql = "SELECT SUM(CASE WHEN a = 1 AND b = 2 THEN 1 ELSE 0 END) AS total, CASE a WHEN 1 THEN CASE b WHEN 2 THEN 'x  y' END ELSE 'other' END AS label FROM t;";
-    const expected = lines("SELECT SUM(CASE WHEN a = 1 AND b = 2 THEN 1 ELSE 0 END) AS total,", "       CASE a WHEN 1 THEN CASE b WHEN 2 THEN 'x  y' END ELSE 'other' END AS label", "FROM t;");
+    const expected = lines("SELECT SUM(CASE WHEN a = 1 AND b = 2 THEN 1 ELSE 0 END)                  AS total,", "       CASE a WHEN 1 THEN CASE b WHEN 2 THEN 'x  y' END ELSE 'other' END AS label", "FROM t;");
     expect(await format(sql)).toBe(expected);
     expect(await format(expected)).toBe(expected);
+  });
+
+  it("falls back to unaligned fields when an aligned alias would overflow the line width", async () => {
+    // Alignment pads every alias to one column past the widest expression, so
+    // the short expression's long alias lands exactly at the 120-column width;
+    // one more character and the whole list keeps the plain one-space layout.
+    const fitting = `SELECT ${"a".repeat(60)} AS total, ${"b".repeat(30)} AS ${"y".repeat(49)} FROM t;`;
+    expect(await format(fitting)).toBe(lines(`SELECT ${"a".repeat(60)} AS total,`, `       ${"b".repeat(30)}${" ".repeat(31)}AS ${"y".repeat(49)}`, "FROM t;"));
+
+    const overflowing = `SELECT ${"a".repeat(60)} AS total, ${"b".repeat(30)} AS ${"y".repeat(50)} FROM t;`;
+    expect(await format(overflowing)).toBe(lines(`SELECT ${"a".repeat(60)} AS total,`, `       ${"b".repeat(30)} AS ${"y".repeat(50)}`, "FROM t;"));
+  });
+
+  it("keeps an unaliased field plain while the aliased ones align", async () => {
+    expect(await format("SELECT a, b AS x, c AS yyy FROM t;")).toBe(lines("SELECT a,", "       b AS x,", "       c AS yyy", "FROM t;"));
+
+    // The alignment column comes from the aliased expressions only, so the
+    // bare field stays untouched beside the padded aliases.
+    expect(await format("SELECT a, bb AS x, c AS yyy FROM t;")).toBe(lines("SELECT a,", "       bb AS x,", "       c  AS yyy", "FROM t;"));
   });
 
   it("preserves comments and width wrapping inside CASE expressions", async () => {

@@ -2172,6 +2172,40 @@ fn unwrap_extended_json_csv_scalar(value: &serde_json::Value) -> Option<String> 
     }
 }
 
+fn is_extended_json_wrapper(value: &serde_json::Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    match object.len() {
+        1 => {
+            let Some(key) = object.keys().next() else {
+                return false;
+            };
+            matches!(
+                key.as_str(),
+                "$binary"
+                    | "$uuid"
+                    | "$timestamp"
+                    | "$regularExpression"
+                    | "$minKey"
+                    | "$maxKey"
+                    | "$symbol"
+                    | "$code"
+                    | "$dbPointer"
+                    | "$undefined"
+                    | "$oid"
+                    | "$date"
+                    | "$numberInt"
+                    | "$numberLong"
+                    | "$numberDouble"
+                    | "$numberDecimal"
+            )
+        }
+        2 => object.contains_key("$code") && object.contains_key("$scope"),
+        _ => false,
+    }
+}
+
 /// Resolves an export header back to its value, understanding the same grammar the import
 /// side parses, so `tags[0]` and `address.city` both round-trip.
 fn json_at_field_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
@@ -2246,7 +2280,7 @@ fn collect_csv_fields_at(
     fields: &mut Vec<String>,
     seen: &mut HashSet<String>,
 ) -> Result<(), String> {
-    if unwrap_extended_json_csv_scalar(value).is_none() {
+    if !is_extended_json_wrapper(value) {
         match value {
             serde_json::Value::Object(object) if !object.is_empty() => {
                 for (key, child) in object {
@@ -3961,6 +3995,139 @@ mod tests {
         assert_eq!(imported[0]["scenario"], "clone-all-bson-types");
         assert_eq!(imported[0]["nested"]["ok"], true);
         assert_eq!(imported[0]["count"]["$numberInt"], "42");
+    }
+
+    #[test]
+    fn csv_fields_from_extended_documents_treats_all_wrappers_as_leaf_columns() {
+        let document = serde_json::json!({
+            "_id": {"$oid": "507f1f77bcf86cd799439011"},
+            "bin": {"$binary": {"base64": "AQID", "subType": "00"}},
+            "uuid": {"$uuid": "c45330e7-60e5-4e78-831e-450fdf5bbcfb"},
+            "ts": {"$timestamp": {"t": 1234567890, "i": 1}},
+            "re": {"$regularExpression": {"pattern": "^test$", "options": "i"}},
+            "lo": {"$minKey": 1},
+            "hi": {"$maxKey": 1},
+            "sym": {"$symbol": "symbol_val"},
+            "code": {"$code": "function() {}"},
+            "code_scoped": {"$code": "function() {}", "$scope": {"a": 1}},
+            "db_ptr": {"$dbPointer": {"$ref": "db.coll", "$id": {"$oid": "507f1f77bcf86cd799439011"}}},
+            "undef": {"$undefined": true},
+            "dt": {"$date": "2021-01-01T00:00:00Z"},
+            "num_int": {"$numberInt": "10"},
+            "num_long": {"$numberLong": "9223372036854775807"},
+            "num_double": {"$numberDouble": "3.14"},
+            "num_decimal": {"$numberDecimal": "123.45"},
+        });
+        let fields = csv_fields_from_extended_documents(std::slice::from_ref(&document)).unwrap();
+        assert_eq!(fields[0], "_id");
+        for expected in &[
+            "bin",
+            "uuid",
+            "ts",
+            "re",
+            "lo",
+            "hi",
+            "sym",
+            "code",
+            "code_scoped",
+            "db_ptr",
+            "undef",
+            "dt",
+            "num_int",
+            "num_long",
+            "num_double",
+            "num_decimal",
+        ] {
+            assert!(fields.iter().any(|f| f == expected), "expected field {expected} in {fields:?}");
+        }
+        for field in &fields {
+            assert!(!field.contains('$'), "field {field} should not contain extended JSON wrapper keys");
+        }
+    }
+
+    #[test]
+    fn csv_plain_nested_user_document_expands_to_dotted_paths() {
+        let document = serde_json::json!({
+            "address": { "city": "x" }
+        });
+        let fields = csv_fields_from_extended_documents(std::slice::from_ref(&document)).unwrap();
+        assert_eq!(fields, vec!["address.city"]);
+
+        // A user object whose key happens to start with $ is not a canonical wrapper and still expands
+        let doc_with_dollar = serde_json::json!({
+            "custom": { "$userKey": "val" }
+        });
+        let fields = csv_fields_from_extended_documents(std::slice::from_ref(&doc_with_dollar)).unwrap();
+        assert_eq!(fields, vec!["custom.$userKey"]);
+    }
+
+    #[test]
+    fn csv_export_import_round_trip_preserves_extended_json_wrapper_types() {
+        use mongodb::bson::oid::ObjectId;
+        use mongodb::bson::spec::BinarySubtype;
+        use mongodb::bson::{Binary, DateTime, Regex, Timestamp};
+
+        let original = doc! {
+            "_id": ObjectId::parse_str("507f1f77bcf86cd799439011").unwrap(),
+            "bin": Bson::Binary(Binary { subtype: BinarySubtype::Generic, bytes: vec![1, 2, 3] }),
+            "uuid": Bson::Binary(Binary {
+                subtype: BinarySubtype::Uuid,
+                bytes: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            }),
+            "ts": Bson::Timestamp(Timestamp { time: 1234567890, increment: 1 }),
+            "re": Bson::RegularExpression(Regex { pattern: "^test$".to_string(), options: "i".to_string() }),
+            "lo": Bson::MinKey,
+            "hi": Bson::MaxKey,
+            "dt": DateTime::from_millis(1609459200000),
+            "num": 9223372036854775807i64,
+        };
+
+        let extended = document_to_canonical_extended_json(&original);
+        let fields = csv_fields_from_extended_documents(std::slice::from_ref(&extended)).unwrap();
+        assert_eq!(fields, vec!["_id", "bin", "uuid", "ts", "re", "lo", "hi", "dt", "num"]);
+        let mut csv = fields.join(",");
+        csv.push('\n');
+        csv.push_str(&format_csv_document_line(&fields, &extended));
+
+        // Test with both Auto and ExtendedJson type modes
+        for mode in [MongoImportTypeMode::Auto, MongoImportTypeMode::ExtendedJson] {
+            let parse_options = MongoImportParseOptions {
+                type_mode: Some(mode),
+                recognize_object_id_hex: Some(true),
+                ..MongoImportParseOptions::default()
+            };
+
+            let dir = std::env::temp_dir().join(format!("dbx-mongo-test-round-trip-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("data.csv");
+            std::fs::write(&path, csv.as_bytes()).unwrap();
+
+            let mut reimported = Vec::new();
+            for_each_mongodb_import_document(
+                path.to_str().unwrap(),
+                MongoImportFormat::Csv,
+                &parse_options,
+                |parsed| {
+                    reimported.push(parsed?.document);
+                    Ok(())
+                },
+            )
+            .unwrap();
+            let _ = std::fs::remove_dir_all(dir);
+
+            assert_eq!(reimported.len(), 1);
+            let doc = &reimported[0];
+            assert_eq!(doc.get("_id"), original.get("_id"));
+            assert_eq!(doc.get("bin"), original.get("bin"));
+            assert_eq!(doc.get("uuid"), original.get("uuid"));
+            assert_eq!(doc.get("ts"), original.get("ts"));
+            assert_eq!(doc.get("re"), original.get("re"));
+            assert_eq!(doc.get("lo"), original.get("lo"));
+            assert_eq!(doc.get("hi"), original.get("hi"));
+            assert_eq!(doc.get("dt"), original.get("dt"));
+            assert_eq!(doc.get("num"), original.get("num"));
+            assert_eq!(doc, &original);
+        }
     }
 
     #[test]

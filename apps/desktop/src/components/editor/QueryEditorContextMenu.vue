@@ -1,7 +1,37 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useI18n } from "vue-i18n";
-import { AlignLeft, Camera, CaseLower, CaseSensitive, CaseUpper, ClipboardPaste, Code2, Columns3, Download, Eye, FileCode, Highlighter, MessageSquareText, Minimize2, Pencil, PencilRuler, Play, Copy, List, Scissors, Search, Sparkles, Table2, TextSelect, Trash2, WandSparkles } from "@lucide/vue";
+import {
+  AlignLeft,
+  Camera,
+  CaseLower,
+  CaseSensitive,
+  CaseUpper,
+  ChevronsUpDown,
+  ClipboardPaste,
+  Code2,
+  Columns3,
+  Download,
+  Eye,
+  FileCode,
+  FoldVertical,
+  Highlighter,
+  MessageSquareText,
+  Minimize2,
+  Pencil,
+  PencilRuler,
+  Play,
+  Copy,
+  List,
+  Scissors,
+  Search,
+  Sparkles,
+  Table2,
+  TextSelect,
+  Trash2,
+  UnfoldVertical,
+  WandSparkles,
+} from "@lucide/vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { canFormatSqlForDatabaseType } from "@/lib/sql/sqlFormatter";
 import { supportsQueryEditorBlockComments } from "@/lib/database/databaseFeatureSupport";
@@ -47,6 +77,9 @@ export interface QueryEditorContextMenuActions {
   emitContextObjectAction: (action: QueryContextObjectAction) => void;
   openCodeSnapshot: () => void;
   sendSelectionToAi: () => void;
+  toggleFoldFromContextMenu?: () => void;
+  foldAllFromContextMenu?: () => void;
+  unfoldAllFromContextMenu?: () => void;
 }
 
 const props = defineProps<{ getState: () => QueryEditorContextMenuState; actions: QueryEditorContextMenuActions }>();
@@ -182,6 +215,30 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
       action: actions.compressCurrentSql,
       disabled: state.readOnly || !canCopySelectedSql,
       icon: Minimize2,
+    },
+    {
+      label: t("editor.contextMenu.folding"),
+      icon: ChevronsUpDown,
+      children: [
+        {
+          label: t("editor.contextMenu.toggleFold"),
+          action: () => actions.toggleFoldFromContextMenu?.(),
+          icon: ChevronsUpDown,
+          shortcut: shortcuts.toggleFold,
+        },
+        {
+          label: t("editor.contextMenu.foldAll"),
+          action: () => actions.foldAllFromContextMenu?.(),
+          icon: FoldVertical,
+          shortcut: shortcuts.foldAll,
+        },
+        {
+          label: t("editor.contextMenu.unfoldAll"),
+          action: () => actions.unfoldAllFromContextMenu?.(),
+          icon: UnfoldVertical,
+          shortcut: shortcuts.unfoldAll,
+        },
+      ],
     },
     {
       label: t("editor.contextMenu.copySelection"),

@@ -43,6 +43,8 @@ Homebrew 安装后，客户端配置使用 `echo "$(brew --prefix)/bin/dbx-mcp"`
 
 npm/npx 通道保持兼容。DBX 桌面端现在默认安装独立原生服务，并为已有 npm 用户显示推荐的原生迁移入口。迁移会保留 npm 包作为兜底，也不会自动改写外部客户端文件：请将启动命令替换为页面生成的原生绝对路径，删除 Node/npx 参数并保留 `env`。仍可选择执行 `npm rm -g @dbx-app/mcp-server` 清理旧包。桌面端可以更新和卸载当前的独立原生或 Homebrew 安装；卸载独立原生版本后，保留的 npm 安装会重新成为兜底。
 
+macOS 上，Shell 安装器还会在替换二进制前验证官方 Developer ID 签名及稳定的 `com.dbx.app.mcp` designated requirement。未签名、临时签名、签名身份不符或绑定单次构建哈希的安装包会被拒绝，已安装的程序和版本标记保持不变。此校验针对 Shell 安装器，Homebrew 和 npm 保持各自的安装流程。
+
 ## npm 快速开始
 
 <Steps>
@@ -392,6 +394,18 @@ DBX 在 **设置 → MCP** 中保存一份权威策略，并在每次请求时�
 | `DBX_MCP_DEBUG_SQL` | 临时诊断时输出 SQL |
 
 ## 常见问题
+
+### 升级后的凭据访问
+
+独立 macOS MCP 在后台运行时不弹出钥匙串对话框。已有加密密钥被锁定或拒绝访问时，启动会保留 `KEYRING_ACCESS_FAILED`（可能包含在 `SECRET_KEY_UNAVAILABLE` 中），而不是反复要求输入密码。先解锁登录钥匙串；对于旧版绑定构建哈希的授权，在终端对 **MCP 客户端实际使用的同一个官方程序**执行一次：
+
+```bash
+"$HOME/.dbx/bin/dbx-mcp" --authorize-keychain
+```
+
+Homebrew 或 npm 安装需要替换为对应的二进制路径。该命令先验证运行程序的官方签名和稳定 designated requirement，再读取已有 DBX 钥匙串条目；不会打开数据库、启动 MCP 传输、创建或替换密钥、导出密钥，也不会自行改写 ACL。macOS 首次迁移时可能要求确认一次，对已验证的 DBX 程序选择 **始终允许**，然后重启 MCP 客户端。已获授权的程序应直接成功。稳定签名使普通正式升级继续沿用授权，但不能绕过签名团队变更或用户撤销权限。
+
+不要将 `--authorize-keychain` 添加到 MCP 客户端的启动参数，它是执行后立即退出的一次性恢复命令。缺失的密钥仍需通过 Desktop 数据安全设置处理，该命令不能恢复丢失的密钥。Windows 和 Linux 不使用此 macOS 命令；应恢复同一系统用户的凭据库访问（或配置的无界面密钥文件），再重启 MCP。凭据库拒绝访问或密钥损坏时，不应自动生成替代加密密钥。
 
 <Accordions>
   <Accordion title="npm 没有安装当前平台包">不要使用 `--no-optional`，重新安装 `@dbx-app/mcp-server`，并用 `node -p 'process.platform + "-" + process.arch'` 检查平台。Alpine Linux 默认使用 musl，目前不在 Linux 发布包支持范围内。</Accordion>

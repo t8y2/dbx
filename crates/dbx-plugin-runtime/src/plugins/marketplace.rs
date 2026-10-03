@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use fs2::FileExt;
-use futures::StreamExt;
 use reqwest::redirect::Policy;
 use reqwest::{Client, Url};
 use semver::Version;
@@ -364,7 +363,7 @@ impl PluginMarketplace {
         validate_repository(repository)?;
         let primary_url = repository_catalog_url(repository)?;
         let (raw, catalog_url) = match self
-            .download_limited(primary_url.clone(), MAX_PLUGIN_CATALOG_BYTES, "Plugin catalog")
+            .download_limited(primary_url.clone(), MAX_PLUGIN_CATALOG_BYTES, "Plugin catalog", |_, _| {})
             .await
         {
             Ok(raw) => (raw, primary_url),
@@ -372,7 +371,7 @@ impl PluginMarketplace {
                 let fallback_url =
                     Url::parse(OFFICIAL_CATALOG_FALLBACK_URL).expect("built-in catalog fallback URL is valid");
                 let raw = self
-                    .download_limited(fallback_url.clone(), MAX_PLUGIN_CATALOG_BYTES, "Plugin catalog")
+                    .download_limited(fallback_url.clone(), MAX_PLUGIN_CATALOG_BYTES, "Plugin catalog", |_, _| {})
                     .await
                     .map_err(|fallback_error| {
                         format!(
@@ -430,7 +429,8 @@ impl PluginMarketplace {
         }
         let artifact_url =
             Url::parse(&artifact.url).map_err(|error| format!("Invalid plugin artifact URL: {error}"))?;
-        let package = self.download_limited(artifact_url, MAX_PLUGIN_PACKAGE_BYTES, "Plugin package").await?;
+        let package =
+            self.download_limited(artifact_url, MAX_PLUGIN_PACKAGE_BYTES, "Plugin package", |_, _| {}).await?;
         verify_artifact_bytes(artifact, &package)?;
         let trust_store = marketplace_trust_store(&self.root_dir, repository.kind)?;
         let expectation = PluginPackageExpectation {
@@ -464,56 +464,32 @@ impl PluginMarketplace {
         F: FnMut(u64, Option<u64>),
     {
         let url = parse_http_url(url.trim(), "Plugin package URL")?;
-        let response = self
-            .client
-            .get(url.clone())
-            .send()
-            .await
-            .map_err(|error| format!("Failed to download Plugin package from {url}: {error}"))?;
-        if !response.status().is_success() {
-            return Err(format!("Failed to download Plugin package from {url}: HTTP {}", response.status()));
-        }
-        if response.content_length().is_some_and(|length| length > MAX_PLUGIN_PACKAGE_BYTES as u64) {
-            return Err(format!("Plugin package exceeds {MAX_PLUGIN_PACKAGE_BYTES} bytes"));
-        }
-        let total = response.content_length();
-        let mut bytes = Vec::new();
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|error| format!("Failed to read Plugin package from {url}: {error}"))?;
-            if bytes.len().saturating_add(chunk.len()) > MAX_PLUGIN_PACKAGE_BYTES {
-                return Err(format!("Plugin package exceeds {MAX_PLUGIN_PACKAGE_BYTES} bytes"));
-            }
-            bytes.extend_from_slice(&chunk);
-            on_progress(bytes.len() as u64, total);
-        }
+        let package = self.download_limited(url, MAX_PLUGIN_PACKAGE_BYTES, "Plugin package", &mut on_progress).await?;
         self.guard_installer(PluginPackageInstaller::new(self.root_dir.clone(), self.app_version.clone())?)
-            .install_bytes_with_expectation(&bytes, policy, None, super::installer::PluginInstallSource::Url, false)
+            .install_bytes_with_expectation(&package, policy, None, super::installer::PluginInstallSource::Url, false)
     }
 
-    async fn download_limited(&self, url: Url, max_bytes: usize, label: &str) -> Result<Vec<u8>, String> {
-        let response = self
-            .client
-            .get(url.clone())
-            .send()
-            .await
-            .map_err(|error| format!("Failed to download {label} from {url}: {error}"))?;
-        if !response.status().is_success() {
-            return Err(format!("Failed to download {label} from {url}: HTTP {}", response.status()));
-        }
-        if response.content_length().is_some_and(|length| length > max_bytes as u64) {
-            return Err(format!("{label} exceeds {max_bytes} bytes"));
-        }
-        let mut bytes = Vec::new();
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|error| format!("Failed to read {label} from {url}: {error}"))?;
-            if bytes.len().saturating_add(chunk.len()) > max_bytes {
-                return Err(format!("{label} exceeds {max_bytes} bytes"));
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        Ok(bytes)
+    /// Thin wrapper over the shared resilient download layer: retries transient
+    /// mid-body connection drops (the historical flaky "error decoding response
+    /// body" install failures) and resumes from partial bytes via Range requests.
+    /// Integrity remains caller-side (size + SHA-256 + signature), so a bad
+    /// resume can never be installed.
+    async fn download_limited(
+        &self,
+        url: Url,
+        max_bytes: usize,
+        label: &str,
+        on_progress: impl FnMut(u64, Option<u64>),
+    ) -> Result<Vec<u8>, String> {
+        dbx_platform::download::resilient_download_bytes(
+            &self.client,
+            url,
+            label,
+            max_bytes,
+            dbx_platform::download::RESILIENT_DOWNLOAD_ATTEMPTS,
+            on_progress,
+        )
+        .await
     }
 }
 

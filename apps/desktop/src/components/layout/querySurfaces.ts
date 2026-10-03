@@ -1,4 +1,5 @@
 import type { ConnectionConfig, ObjectBrowserFilter, ObjectBrowserViewport, QueryTab, TabOutputView } from "@/types/database";
+import type { NavigationTarget } from "@/composables/useNavigationTargets";
 import type { DataGridReloadIntent } from "@/lib/dataGrid/dataGridToolbar";
 import type { DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
@@ -41,6 +42,8 @@ export interface QueryEditorSurfaceHandle {
   previewStatementRange(range: StatementRange | null): boolean;
   focusStatementRange(range: StatementRange | null): boolean;
   focusErrorPosition(offset: number): boolean;
+  foldAll?(): boolean;
+  unfoldAll?(): boolean;
 }
 
 export interface QueryResultSurfaceHandle {
@@ -75,6 +78,7 @@ export interface ContentAreaSurfaceProps {
  */
 export interface ContentAreaSurfaceEmits {
   closeTab: [tabId: string];
+  "locate-tab": [tab: QueryTab];
   "update:activeOutputView": [tabId: string, value: TabOutputView];
   fixWithAi: [tabId: string, errorMessage: string];
   sendSelectionToAi: [tabId: string, sql: string];
@@ -101,6 +105,7 @@ export interface ContentAreaSurfaceEmits {
   editTableStructure: [tabId: string, target: SqlObjectNavigationTarget];
   openObjectSource: [tabId: string, target: SqlObjectNavigationTarget, initialEditing: boolean];
   openObjectTable: [tabId: string, target: { tableName: string; schema?: string; tableType?: string; catalog?: string; comment?: string | null }];
+  openDatabaseSearchTarget: [tabId: string, target: NavigationTarget];
   objectSchemaChange: [tabId: string, schema: string | undefined];
   objectBrowserViewportChange: [tabId: string, viewport: ObjectBrowserViewport];
   objectBrowserSearchChange: [tabId: string, query: string];

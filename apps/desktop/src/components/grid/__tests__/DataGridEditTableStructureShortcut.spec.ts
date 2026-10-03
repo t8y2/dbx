@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { createApp, defineComponent, h, markRaw, nextTick, type App, type PropType } from "vue";
+import { createApp, defineComponent, h, markRaw, nextTick, ref, type App, type PropType } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
@@ -95,6 +95,7 @@ function mountGrid(
   };
 
   const host = document.createElement("div");
+  const grid = ref<{ canOpenTableStructureEditor: boolean; openTableStructureEditor: (tab: TableInfoTab) => void }>();
   document.body.append(host);
   const Root = defineComponent({
     setup() {
@@ -105,6 +106,7 @@ function mountGrid(
           {
             default: () =>
               h(DataGrid, {
+                ref: grid,
                 result,
                 databaseType: options.databaseType ?? "mysql",
                 context: options.context ?? "table-data",
@@ -123,7 +125,7 @@ function mountGrid(
   app.component("RecycleScroller", RecycleScroller);
   app.mount(host);
   mountedApps.push({ app, host });
-  return { host, openTableStructure };
+  return { host, openTableStructure, grid };
 }
 
 async function settle() {
@@ -153,6 +155,15 @@ afterEach(() => {
 });
 
 describe("DataGrid edit-table-structure shortcut", () => {
+  it("exposes columns navigation to the table header even when the information drawer is closed", async () => {
+    const { host, openTableStructure, grid } = mountGrid({ tableInfoTab: "indexes" });
+    await settle();
+    expect(host.querySelector("[data-edit-table-structure]")).toBeNull();
+    expect(grid.value?.canOpenTableStructureEditor).toBe(true);
+    grid.value!.openTableStructureEditor("columns");
+    expect(openTableStructure).toHaveBeenCalledExactlyOnceWith("connection-1", "app", "public", "users", "columns", undefined, "warehouse", "table");
+  });
+
   it("opens the existing structure editor route for an eligible table-data grid", async () => {
     const { host, openTableStructure } = mountGrid();
     await settle();
@@ -219,6 +230,7 @@ describe("DataGrid edit-table-structure shortcut", () => {
     expect(event.defaultPrevented).toBe(false);
     expect(bubbled).toHaveBeenCalledOnce();
     expect(openTableStructure).not.toHaveBeenCalled();
+    expect(host.querySelector("[data-edit-table-structure]")).toBeNull();
   });
 
   it("leaves editable text targets untouched", async () => {
@@ -268,7 +280,7 @@ describe("DataGrid edit-table-structure shortcut", () => {
     const { host, openTableStructure } = mountGrid({ tableInfoTab: "triggers", autoShowTableInfo: true });
     await settle();
 
-    const editButton = host.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.global.t("contextMenu.editStructure")}"]`);
+    const editButton = host.querySelector<HTMLButtonElement>(`.table-info-action-button[aria-label="${i18n.global.t("contextMenu.editStructure")}"]`);
     expect(editButton).not.toBeNull();
     editButton!.click();
     await settle();

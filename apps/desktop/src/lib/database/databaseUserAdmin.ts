@@ -66,7 +66,8 @@ export interface DatabaseUserAdminProvider {
   parseGrants?(result: QueryResult): string[];
   createUserSql?(input: CreatePrincipalInput): string;
   renameUserSql?(user: DatabaseUserIdentity, newHost: string): string;
-  alterPasswordSql?(user: DatabaseUserIdentity, password: string): string;
+  supportsOldPassword?: boolean;
+  alterPasswordSql?(user: DatabaseUserIdentity, password: string, oldPassword?: string): string;
   alterLoginSql?(user: DatabaseUserIdentity, enabled: boolean): string;
   dropUserSql?(user: DatabaseUserIdentity): string;
   grantPrivilegesSql?(input: PrivilegeChangeInput): string;
@@ -657,6 +658,10 @@ export function postgresAlterRolePasswordSql(user: DatabaseUserIdentity, passwor
   return `ALTER ROLE ${quotePostgresIdentifier(user.user)} PASSWORD ${quoteSqlString(password)};`;
 }
 
+export function vastbaseAlterRolePasswordSql(user: DatabaseUserIdentity, password: string, oldPassword?: string): string {
+  return `ALTER ROLE ${quotePostgresIdentifier(user.user)} IDENTIFIED BY ${quoteSqlString(password)}${oldPassword ? ` REPLACE ${quoteSqlString(oldPassword)}` : ""};`;
+}
+
 export function postgresAlterRoleLoginSql(user: DatabaseUserIdentity, enabled: boolean): string {
   return `ALTER ROLE ${quotePostgresIdentifier(user.user)} ${enabled ? "LOGIN" : "NOLOGIN"};`;
 }
@@ -967,7 +972,7 @@ const DATABASE_USER_ADMIN_PROVIDER_BY_TYPE = new Map<DatabaseType, DatabaseUserA
   ["kwdb", postgresCompatibleUserAdminProvider],
   ["opengauss", postgresCompatibleUserAdminProvider],
   ["questdb", postgresCompatibleUserAdminProvider],
-  ["vastbase", postgresCompatibleUserAdminProvider],
+  ["vastbase", { ...postgresCompatibleUserAdminProvider, supportsOldPassword: true, alterPasswordSql: vastbaseAlterRolePasswordSql }],
   ["starrocks", starrocksUserAdminProvider],
 ]);
 

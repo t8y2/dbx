@@ -271,6 +271,7 @@ fn write_xlsx(path: &Path, row_count: usize, column_count: usize, text_bytes: us
         column_comments: Vec::new(),
         rows: (0..row_count).map(|row_index| row(row_index, column_count, text_bytes)).collect(),
         numeric_column_right_align: false,
+        auto_filter: None,
     })?;
     fs::write(path, workbook).map_err(|error| error.to_string())
 }

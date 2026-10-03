@@ -2103,7 +2103,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.6.29"
+version = "0.6.32"
 dependencies = [
  "anyhow",
  "axum",
@@ -2186,7 +2186,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-cli"
-version = "0.4.102"
+version = "0.4.105"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -2522,7 +2522,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-mcp"
-version = "0.4.102"
+version = "0.4.105"
 dependencies = [
  "async-trait",
  "axum",
@@ -2538,6 +2538,7 @@ dependencies = [
  "rustls 0.23.43",
  "rustls-pemfile 2.2.0",
  "schemars 1.2.2",
+ "security-framework 3.7.0",
  "serde",
  "serde_json",
  "sqlparser",
@@ -2703,7 +2704,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-web"
-version = "0.6.29"
+version = "0.6.32"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",

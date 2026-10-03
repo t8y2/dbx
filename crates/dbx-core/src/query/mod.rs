@@ -8995,7 +8995,13 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
-    async fn gaussdb_on_error_stop_overrides_continue_on_error() {
+    async fn postgres_family_on_error_stop_overrides_continue_on_error() {
+        for db_type in [DatabaseType::Postgres, DatabaseType::OpenGauss, DatabaseType::Gaussdb] {
+            assert_psql_on_error_stop_overrides_continue_on_error(db_type).await;
+        }
+    }
+
+    async fn assert_psql_on_error_stop_overrides_continue_on_error(db_type: DatabaseType) {
         let dir = std::env::temp_dir().join(format!("dbx-query-gaussdb-on-error-stop-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
@@ -9007,7 +9013,7 @@ for line in sys.stdin:
                 connections.insert(connection_id.to_string(), PoolKind::Sqlite(sqlite));
             })
             .await;
-        state.configs.write().await.insert(connection_id.to_string(), test_connection_config(DatabaseType::Gaussdb));
+        state.configs.write().await.insert(connection_id.to_string(), test_connection_config(db_type));
 
         let results = execute_multi_core_with_options(
             &state,

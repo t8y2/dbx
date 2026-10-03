@@ -669,13 +669,22 @@ mod tests {
 
     #[test]
     fn denied_or_corrupt_platform_key_never_creates_a_fallback() {
-        for provider_error in ["KEYRING_ACCESS_FAILED: permission denied", "SECRET_KEY_INVALID"] {
-            let directory = tempfile::tempdir().unwrap();
-            let path = directory.path().join("secret.key");
-            let expected = provider_error.to_string();
-            let result = SecretCodec::resolve_platform_default(Some(path.clone()), true, move |_| Err(expected));
-            assert!(matches!(result, Err(error) if error == provider_error));
-            assert!(!path.exists());
+        for allow_create in [false, true] {
+            for provider_error in [
+                "KEYRING_ACCESS_FAILED: permission denied",
+                "KEYRING_ACCESS_FAILED: locked credential store",
+                "SECRET_KEY_INVALID",
+            ] {
+                let directory = tempfile::tempdir().unwrap();
+                let path = directory.path().join("secret.key");
+                let expected = provider_error.to_string();
+                let result = SecretCodec::resolve_platform_default(Some(path.clone()), allow_create, move |create| {
+                    assert_eq!(create, allow_create);
+                    Err(expected)
+                });
+                assert!(matches!(result, Err(error) if error == provider_error));
+                assert!(!path.exists());
+            }
         }
     }
 

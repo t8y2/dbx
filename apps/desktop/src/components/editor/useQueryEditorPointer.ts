@@ -1,6 +1,6 @@
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { startsQueryEditorSelectionDrag } from "@/lib/editor/queryEditorPointerSelection";
-import { keepNativeSelectionParkedDuringDrag, type EditorNativeSelectionPark } from "@/lib/editor/queryEditorNativeSelection";
+import { keepNativeSelectionParkedDuringDrag, keepNativeSelectionParkedWhileScrolling, type EditorNativeSelectionPark } from "@/lib/editor/queryEditorNativeSelection";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { isMacOS } from "@/lib/backend/platform";
 import type { QueryEditorProps } from "./queryEditorTypes";
@@ -26,6 +26,8 @@ export function useQueryEditorPointer(options: QueryEditorPointerOptions) {
   let editorScrollbarPointerCleanup: (() => void) | null = null;
 
   let editorNativeSelectionParkCleanup: (() => void) | null = null;
+
+  let editorNativeSelectionScrollParkCleanup: (() => void) | null = null;
 
   let editorSelectionDragCleanup: (() => void) | null = null;
 
@@ -147,6 +149,23 @@ export function useQueryEditorPointer(options: QueryEditorPointerOptions) {
       stop();
       editorNativeSelectionParkCleanup = null;
     };
+  }
+
+  /**
+   * Parks the browser selection for the length of a scroll burst.
+   *
+   * Scrolling a long selection asks the macOS 26/27 web view for the same
+   * per-run text-services operation a drag or an open context menu does, once
+   * per scroll event, so a select-all document stalls and drops frames the
+   * whole way down. The editor keeps its own selection (CodeMirror draws it),
+   * so nothing about what is highlighted, copied or selected changes; see
+   * queryEditorNativeSelection.ts.
+   */
+  function registerEditorNativeSelectionScrollGuard(currentView: EditorViewType, guardOptions: QueryEditorNativeSelectionDragGuardOptions = {}) {
+    editorNativeSelectionScrollParkCleanup?.();
+    editorNativeSelectionScrollParkCleanup = keepNativeSelectionParkedWhileScrolling(currentView, {
+      finalizeClipboardText: guardOptions.finalizeClipboardText,
+    });
   }
 
   function selectedRangeAtPointer(currentView: EditorViewType, event: MouseEvent) {
@@ -335,8 +354,9 @@ export function useQueryEditorPointer(options: QueryEditorPointerOptions) {
   function dispose() {
     editorScrollbarPointerCleanup?.();
     editorNativeSelectionParkCleanup?.();
+    editorNativeSelectionScrollParkCleanup?.();
     editorSelectionDragCleanup?.();
   }
 
-  return { registerEditorScrollbarPointerGuard, registerEditorNativeSelectionDragGuard, startEditorSelectionDrag, dispose };
+  return { registerEditorScrollbarPointerGuard, registerEditorNativeSelectionDragGuard, registerEditorNativeSelectionScrollGuard, startEditorSelectionDrag, dispose };
 }

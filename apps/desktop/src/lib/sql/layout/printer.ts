@@ -63,6 +63,12 @@ function printClause(writer: Writer, clause: ClauseNode, baseColumn: number, ctx
   const sourceOnOwnLine = clause.nameKw.text.toUpperCase() === "FROM" && !ctx.options.fromClauseSourceOnSameLine;
   const childCtx = clauseChildContext(ctx, clause);
 
+  // Align explicit SELECT aliases to the same column, matching the tabular
+  // layout used by DBX for CREATE TABLE definitions. Only use this path when
+  // every aliased item can be rendered as a single line; otherwise the normal
+  // element printer preserves the formatter's existing wrapping behavior.
+  const alignedAliases = projection && items.length > 1 ? alignedProjectionItems(items, childCtx, ctx.options.lineWidth - itemColumn) : null;
+
   if (!sourceOnOwnLine && !(projection && items.length > 1) && items.length <= ctx.options.keepElementsOnOneLine) {
     const flat = renderInline(childCtx, clause.children, ctx.options.lineWidth - writer.column - keyword.length - 1);
     if (flat) {
@@ -79,9 +85,46 @@ function printClause(writer: Writer, clause: ClauseNode, baseColumn: number, ctx
     } else {
       writer.newline(itemColumn);
     }
-    printElement(writer, item, baseColumn, childCtx);
+    if (alignedAliases) {
+      const aligned = alignedAliases[index];
+      if (aligned) {
+        writer.write(aligned.expression);
+        writer.write(" ".repeat(aligned.aliasColumn - aligned.expression.length));
+        writer.write(`${aligned.asKeyword} ${aligned.alias}`);
+      } else {
+        printElement(writer, item, baseColumn, childCtx);
+      }
+    } else {
+      printElement(writer, item, baseColumn, childCtx);
+    }
     if (index < items.length - 1) writer.write(",");
   });
+}
+
+interface AlignedProjectionItem {
+  expression: string;
+  alias: string;
+  asKeyword: string;
+  aliasColumn: number;
+}
+
+function alignedProjectionItems(items: AstNode[][], ctx: SqlLayoutContext, lineWidth: number): Array<AlignedProjectionItem | null> | null {
+  const parsed = items.map((item) => {
+    const asIndex = item.findIndex((node) => node.type === "keyword" && node.text.toUpperCase() === "AS");
+    if (asIndex <= 0 || asIndex >= item.length - 1) return null;
+    const asNode = item[asIndex];
+    if (asNode?.type !== "keyword") return null;
+    const expression = renderInline(ctx, item.slice(0, asIndex), lineWidth);
+    const alias = renderInline(ctx, item.slice(asIndex + 1), lineWidth);
+    if (!expression || !alias) return null;
+    return { expression, alias, asKeyword: keywordText(asNode.text, ctx), aliasColumn: 0 };
+  });
+
+  if (!parsed.some(Boolean)) return null;
+  const expressionWidth = Math.max(...parsed.filter((item): item is AlignedProjectionItem => item !== null).map((item) => item.expression.length));
+  const aliasColumn = expressionWidth + 1;
+  if (parsed.some((item) => item && item.expression.length + (aliasColumn - item.expression.length) + item.asKeyword.length + 1 + item.alias.length > lineWidth)) return null;
+  return parsed.map((item) => (item ? { ...item, aliasColumn } : null));
 }
 
 /** Emits a `LIMIT` clause, which sql-formatter renders as keyword + expressions. */

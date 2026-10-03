@@ -47,6 +47,7 @@ pub async fn export_query_result_xlsx(request: QueryResultXlsxExportRequest) -> 
             column_comments: request.column_comments,
             rows: request.rows,
             numeric_column_right_align: request.numeric_column_right_align,
+            auto_filter: request.auto_filter,
         };
         // Ensure consistency: if the feature is disabled, clear the flag.
         if !data.numeric_column_right_align {

@@ -100,7 +100,13 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     @Override
     public QueryPageResult executeQueryPage(String sql, String schema, QueryPageOptions options) {
         try (QueryTiming timing = QueryTiming.begin()) {
-            QueryPageResult result = super.executeQueryPage(sql, schema, options);
+            long prepareStarted = System.nanoTime();
+            Connection connection = requireConnected();
+            uncheckedVoid(() -> beforeQueryExecution(connection, options.getTimeoutSecs()));
+            QueryTiming.record("session_prepare", prepareStarted);
+            QueryPageResult result = JdbcExecutor.current().executeBoundedPage(
+                connection, sql, schema, this::setSchemaSQL, this::resetSchemaSQL, options, resultValueReader()
+            );
             result.setQuery_timings_ms(timing.finish());
             return result;
         }
@@ -307,8 +313,9 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                     WHEN 'PROCEDURE' THEN 2
                     WHEN 'FUNCTION' THEN 3
                     WHEN 'PACKAGE' THEN 4
-                    WHEN 'SEQUENCE' THEN 5
-                    ELSE 6
+                    WHEN 'PACKAGE BODY' THEN 5
+                    WHEN 'SEQUENCE' THEN 6
+                    ELSE 7
                 END, OBJECT_NAME
                 """.stripIndent().trim(),
                 owner,
@@ -317,11 +324,17 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             );
 
             List<ObjectInfo> result = new ArrayList<>();
-            try (var stmt = requireConnection().prepareStatement(query.sql)) {
+            String sql = query.sql;
+            if (constraints.hasLimit() || constraints.hasOffset()) {
+                sql += "\nORDER BY DBX_RN";
+            }
+            try (var stmt = requireConnection().prepareStatement(sql)) {
                 bind(stmt, query.args);
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
-                        result.add(new ObjectInfo(rs.getString(1), rs.getString(2), owner, null));
+                        String objectType = rs.getString(2);
+                        result.add(new ObjectInfo(rs.getString(1),
+                            "PACKAGE BODY".equals(objectType) ? "PACKAGE_BODY" : objectType, owner, null));
                     }
                 }
             }
@@ -703,7 +716,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     }
 
     private static List<String> oceanBaseObjectTypes(MetadataListConstraints constraints) {
-        List<String> supported = List.of("TABLE", "VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "SEQUENCE", "SYNONYM");
+        List<String> supported = List.of("TABLE", "VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE BODY", "SEQUENCE", "SYNONYM");
         if (!constraints.hasObjectTypes()) {
             return supported;
         }

@@ -71,6 +71,11 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("savedSqlOpenTargetMode");
   });
 
+  it("includes the privacy-safe welcome page mode", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("welcomePageMode");
+    expect(editorSettingsDraftFromSettings(makeSettings({ welcomePageMode: "workspace" })).welcomePageMode).toBe("workspace");
+  });
+
   it("includes the regular expression match limit", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("regexMaxMatchCount");
   });

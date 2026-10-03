@@ -14,6 +14,8 @@ skipTcpProbe: true
 defaultPort: 443
 traits:
   schemaAware: true
+  databaseSchemaQualified: true
+  treeSchema: true
 supportLevel: operate
 capabilities:
   queryExecution: true

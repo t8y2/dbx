@@ -30,12 +30,12 @@ import { needsSidebarObjectGroupDiscovery } from "@/lib/sidebar/sidebarSearchDis
 import { isSidebarSearchPrunedDatabaseNode, resolveSidebarSearchDatabaseScope } from "@/lib/sidebar/sidebarSearchDatabaseScope";
 import { createSidebarSearchExpansionState } from "@/lib/sidebar/sidebarSearchExpansionState";
 import { createSidebarSearchLoadingTracker } from "@/lib/sidebar/sidebarSearchLoadingTracker";
-import { isCancelSearchShortcut, isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut, isViewTableDdlShortcut } from "@/lib/editor/keyboardShortcuts";
+import { isCancelSearchShortcut, isCopySidebarSelectionShortcut, isDisconnectSidebarConnectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut, isViewTableDdlShortcut } from "@/lib/editor/keyboardShortcuts";
 import { sidebarNodeSupportsDdlView } from "@/lib/sidebar/sidebarTreeDdlShortcut";
 import { objectSourceTargetForTreeNode } from "@/lib/sidebar/treeNodeClick";
 import { supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import { copyToClipboard } from "@/lib/common/clipboard";
-import { connectionPasteTargetGroupId, copySelectedConnectionsToClipboards, selectedConnectionEditTarget } from "@/lib/sidebar/sidebarConnectionSelection";
+import { connectionPasteTargetGroupId, copySelectedConnectionsToClipboards, selectedConnectionDisconnectTargets, selectedConnectionEditTarget } from "@/lib/sidebar/sidebarConnectionSelection";
 import { formatSidebarTableCopyText } from "@/lib/sidebar/sidebarTableNameCopy";
 import { pruneTreeSelectionToVisibleNodeIds } from "@/lib/sidebar/sidebarTreeSelection";
 import { isEditableSidebarTypeSearchTarget, sidebarTypeSearchNextQuery } from "@/lib/sidebar/sidebarTypeSearch";
@@ -2407,6 +2407,13 @@ function onWindowKeydown(event: KeyboardEvent) {
       }
       return;
     }
+    if (sidebarShortcutTargetAllowsAppShortcut(event.target) && isDisconnectConnectionShortcut(event)) {
+      if (requestSelectedConnectionDisconnect()) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      return;
+    }
     if (sidebarShortcutTargetAllowsAppShortcut(event.target) && isCopySidebarSelectionShortcut(event, settingsStore.editorSettings.shortcuts)) {
       if (copySelectedSidebarNames()) {
         event.preventDefault();
@@ -2467,6 +2474,10 @@ function isEditConnectionShortcut(event: KeyboardEvent): boolean {
   return isEditSidebarConnectionShortcut(event, settingsStore.editorSettings.shortcuts);
 }
 
+function isDisconnectConnectionShortcut(event: KeyboardEvent): boolean {
+  return isDisconnectSidebarConnectionShortcut(event, settingsStore.editorSettings.shortcuts);
+}
+
 function requestSelectedConnectionEdit(): boolean {
   const selectedNodeId = store.selectedTreeNodeId;
   const currentNode = selectedNodeId ? flatTreeIndex.value.nodeById.get(selectedNodeId) : null;
@@ -2475,6 +2486,26 @@ function requestSelectedConnectionEdit(): boolean {
   if (!editTarget) return false;
   store.startEditing(editTarget.connectionId);
   return true;
+}
+
+function requestSelectedConnectionDisconnect(): boolean {
+  const selectedNodeId = store.selectedTreeNodeId;
+  const currentNode = selectedNodeId ? flatTreeIndex.value.nodeById.get(selectedNodeId) : null;
+  if (!currentNode) return false;
+  const targets = selectedConnectionDisconnectTargets(currentNode, selectedSidebarNodesInVisibleOrder());
+  const connectedTargets = targets.filter((target) => store.connectedIds.has(target.connectionId));
+  if (connectedTargets.length > 0) {
+    const connectionIds = connectedTargets.map((target) => target.connectionId);
+    void disconnectSidebarConnections(connectionIds, (connectionId) => store.disconnect(connectionId)).then((result) => {
+      if (result.succeeded > 0 && result.failed === 0) {
+        toast(connectionIds.length > 1 ? t("connection.disconnectedSelected", { count: connectionIds.length }) : t("connection.disconnected"), 2000);
+      } else if (result.failed > 0) {
+        toast(t("connection.disconnectSelectedPartial", { succeeded: result.succeeded, failed: result.failed }), 5000);
+      }
+    });
+    return true;
+  }
+  return false;
 }
 
 function copySelectedSidebarNames(): boolean {

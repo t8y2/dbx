@@ -136,7 +136,10 @@ export function normalizeImportColumnName(name: string): string {
   return name.trim().toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
 }
 
-export function autoMapImportColumns(sourceColumns: string[], targetColumns: string[]): Record<string, string> {
+export function autoMapImportColumns(sourceColumns: string[], targetColumns: string[], mode: "name" | "position" = "name"): Record<string, string> {
+  if (mode === "position") {
+    return Object.fromEntries(sourceColumns.map((source, index) => [source, targetColumns[index] ?? IMPORT_SKIP_TARGET]));
+  }
   const exactTargets = new Map(targetColumns.map((column) => [column, column]));
   const normalizedTargets = new Map(targetColumns.map((column) => [normalizeImportColumnName(column), column]));
 

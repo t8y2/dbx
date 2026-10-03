@@ -47,6 +47,24 @@ json_quote() {
     }
   } END { printf "\"" }'
 }
+verify_macos_signature() {
+  command -v codesign >/dev/null 2>&1 || fail 'macOS signature verification failed: codesign is unavailable; existing installation unchanged.'
+  requirement='identifier "com.dbx.app.mcp" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "TVDM965TDL"'
+  codesign --verify --strict --all-architectures -R "=$requirement" "$1" >/dev/null 2>&1 ||
+    fail 'macOS signature verification failed: expected the official DBX Developer ID signature; existing installation unchanged.'
+  signature=$(codesign --display --verbose=4 --requirements - "$1" 2>&1) ||
+    fail 'macOS signature verification failed: cannot inspect signing identity; existing installation unchanged.'
+  printf '%s\n' "$signature" | grep -Fxq 'Identifier=com.dbx.app.mcp' &&
+    printf '%s\n' "$signature" | grep -Fxq 'TeamIdentifier=TVDM965TDL' &&
+    printf '%s\n' "$signature" | grep -Eq '^Timestamp=.+$' &&
+    ! printf '%s\n' "$signature" | grep -Eq '^Timestamp=none$|^Signature=adhoc$' ||
+    fail 'macOS signature verification failed: missing release signing identity or timestamp; existing installation unchanged.'
+  # A valid signature with a hash-bound requirement would lose Keychain consent on the next upgrade.
+  designated=$(printf '%s\n' "$signature" | sed -n 's/^designated => //p' | sed 's|/\* *exists *\*/|exists|g' | tr -d '[:space:]"')
+  stable=$(printf '%s\n' "$requirement" | tr -d '[:space:]"')
+  [ "$designated" = "$stable" ] ||
+    fail 'macOS signature verification failed: unstable designated requirement; existing installation unchanged.'
+}
 print_configs() {
   quoted_binary=$(printf '%s' "$binary" | json_quote)
   printf '\nClaude Code (.mcp.json), Cursor (.cursor/mcp.json), ZCode config, generic JSON:\n'
@@ -73,7 +91,7 @@ configure_path() {
   fi
 }
 
-for dependency in curl tar openssl awk sed grep sort; do
+for dependency in curl tar openssl awk sed grep sort tr; do
   command -v "$dependency" >/dev/null 2>&1 || fail "Required command not found: $dependency"
 done
 operating_system=$(uname -s)
@@ -144,6 +162,7 @@ if [ "$downloaded" = false ]; then
 fi
 [ -s "$work_dir/dbx-mcp" ] || fail 'Downloaded binary is empty.'
 chmod 755 "$work_dir/dbx-mcp"
+if [ "$operating_system" = Darwin ]; then verify_macos_signature "$work_dir/dbx-mcp"; fi
 printf '%s\n' "$version" > "$work_dir/version"
 mv -f "$work_dir/dbx-mcp" "$binary"
 mv -f "$work_dir/version" "$marker"

@@ -250,6 +250,7 @@ fn query_sql_worksheets(request: &QueryResultExportRequest) -> Vec<XlsxWorksheet
         column_comments: Vec::new(),
         rows: split_excel_cell_text(&request.sql).into_iter().map(|sql| vec![Value::String(sql)]).collect(),
         numeric_column_right_align: false,
+        auto_filter: Some(false),
     }]
 }
 
@@ -998,6 +999,9 @@ async fn export_query_result_core_inner(
                     use_agent_cursor: request.use_agent_cursor,
                     first_page_uses_actual_sql: true,
                 });
+                if let Some(error) = plan.pagination_error {
+                    return Err(error);
+                }
                 let Some(plan_limit) = plan.page_limit else {
                     return Err("Failed to build query pagination plan for export".to_string());
                 };
@@ -2595,6 +2599,24 @@ mod tests {
         req.query_base_sql = req.sql.clone();
 
         assert_eq!(streaming_pagination_preflight_error(&req, 100, false, false), None);
+    }
+
+    #[test]
+    fn oceanbase_duplicate_projection_export_requires_cursor_and_follows_its_end() {
+        let mut req = request("csv", None, None);
+        req.database_type = DatabaseType::OceanbaseOracle;
+        req.sql = "SELECT a.name, a.* FROM people a ORDER BY a.id".into();
+        req.query_base_sql = req.sql.clone();
+        req.use_agent_cursor = true;
+        assert!(!supports_streaming_offset_pagination(&req, 100));
+        assert_eq!(streaming_pagination_preflight_error(&req, 100, false, false), None);
+        assert!(should_fetch_next_page(true, true, 100, 100, 100));
+        assert!(!should_fetch_next_page(true, false, 100, 100, 100));
+        req.use_agent_cursor = false;
+        assert_eq!(
+            streaming_pagination_preflight_error(&req, 100, false, false),
+            Some(STREAMING_PAGINATION_UNSUPPORTED_ERROR)
+        );
     }
 
     #[test]

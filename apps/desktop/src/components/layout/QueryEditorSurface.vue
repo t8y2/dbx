@@ -45,6 +45,8 @@ defineExpose<QueryEditorSurfaceHandle>({
   previewStatementRange: (range: StatementRange | null) => contentAreaRef.value?.previewStatementRange(range) ?? false,
   focusStatementRange: (range: StatementRange | null) => contentAreaRef.value?.focusStatementRange(range) ?? false,
   focusErrorPosition: (offset: number) => contentAreaRef.value?.focusErrorPosition(offset) ?? false,
+  foldAll: () => contentAreaRef.value?.foldAll() ?? false,
+  unfoldAll: () => contentAreaRef.value?.unfoldAll() ?? false,
 });
 </script>
 

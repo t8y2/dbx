@@ -339,6 +339,19 @@ public final class JdbcExecutor {
         return executePage(conn, sql, schema, setSchemaSql, () -> "", options, valueReader, StatementMessageReader.NONE, tableReadSessions);
     }
 
+    public QueryPageResult executeBoundedPage(
+        Connection conn,
+        String sql,
+        String schema,
+        Function<String, String> setSchemaSql,
+        Supplier<String> resetSchemaSql,
+        QueryPageOptions options,
+        ResultValueReader valueReader
+    ) {
+        return executePage(conn, sql, schema, setSchemaSql, resetSchemaSql, options, valueReader,
+            StatementMessageReader.NONE, sessions, false, true);
+    }
+
     public QueryPageResult startTableRead(
         Connection conn,
         String sql,
@@ -388,6 +401,23 @@ public final class JdbcExecutor {
         ConcurrentHashMap<String, QuerySession> targetSessions,
         boolean advancePastUpdateCounts
     ) {
+        return executePage(conn, sql, schema, setSchemaSql, resetSchemaSql, options, valueReader,
+            statementMessageReader, targetSessions, advancePastUpdateCounts, false);
+    }
+
+    private QueryPageResult executePage(
+        Connection conn,
+        String sql,
+        String schema,
+        Function<String, String> setSchemaSql,
+        Supplier<String> resetSchemaSql,
+        QueryPageOptions options,
+        ResultValueReader valueReader,
+        StatementMessageReader statementMessageReader,
+        ConcurrentHashMap<String, QuerySession> targetSessions,
+        boolean advancePastUpdateCounts,
+        boolean boundStatementRows
+    ) {
         return unchecked(() -> {
             expireIdleSessions(targetSessions, System.currentTimeMillis(), QUERY_SESSION_IDLE_TIMEOUT_MILLIS);
             String trimmedSql = trimSql(sql);
@@ -402,9 +432,14 @@ public final class JdbcExecutor {
             QuerySession createdSession = null;
             activeStatements.add(stmt);
             try {
+                if (boundStatementRows) {
+                    stmt.setMaxRows(statementMaxRows(options.getMaxRows()));
+                }
                 applyQueryTimeout(stmt, options.getTimeoutSecs());
                 if (options.getFetchSize() != null && options.getFetchSize() > 0) {
                     stmt.setFetchSize(options.getFetchSize());
+                } else if (boundStatementRows) {
+                    stmt.setFetchSize(Math.max(1, Math.min(options.getPageSize(), Math.max(options.getMaxRows(), 1))));
                 }
                 // Keep script transaction-control statements in the SQL stream.
                 // JDBC transaction APIs are reserved for executeTransaction.

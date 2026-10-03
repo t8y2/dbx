@@ -205,6 +205,19 @@ pub struct SqlServerColumnMetadata {
     pub computed_clause: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SqlServerTemporalTableMetadata {
+    pub temporal_type: i32,
+    pub start_column: Option<String>,
+    pub end_column: Option<String>,
+    pub history_schema: Option<String>,
+    pub history_table: Option<String>,
+    pub parent_schema: Option<String>,
+    pub parent_table: Option<String>,
+    pub retention_period: Option<i32>,
+    pub retention_unit: Option<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct SqlServerCompletionContext {
     pub default_schema: String,
@@ -2926,6 +2939,75 @@ pub async fn get_column_metadata(
     let stream = client.query(&*sql, &[]).await.map_err(|e| e.to_string())?;
     let rows = stream.into_first_result().await.map_err(|e| e.to_string())?;
     Ok(rows.iter().map(sqlserver_column_metadata_from_row).collect())
+}
+
+pub async fn get_temporal_table_metadata(
+    client: &mut SqlServerClient,
+    schema: &str,
+    table: &str,
+) -> Result<Option<SqlServerTemporalTableMetadata>, String> {
+    // Dynamic SQL keeps pre-2016 servers from binding the newer catalog columns.
+    // Retention metadata was added later, so it has its own feature check.
+    let sql = r#"IF OBJECT_ID(N'sys.periods') IS NOT NULL
+BEGIN
+    DECLARE @retention nvarchar(max) = N'CAST(NULL AS int), CAST(NULL AS nvarchar(30))';
+    IF COL_LENGTH(N'sys.tables', N'history_retention_period') IS NOT NULL
+        SET @retention = N'CAST(t.history_retention_period AS int), t.history_retention_period_unit_desc';
+    DECLARE @sql nvarchar(max) = N'
+        SELECT CAST(t.temporal_type AS int), cs.name, ce.name,
+               hs.name, h.name, ps.name, parent.name, ' + @retention + N'
+        FROM sys.tables t
+        JOIN sys.schemas s ON s.schema_id = t.schema_id
+        LEFT JOIN sys.periods p ON p.object_id = t.object_id
+        LEFT JOIN sys.columns cs ON cs.object_id = p.object_id AND cs.column_id = p.start_column_id
+        LEFT JOIN sys.columns ce ON ce.object_id = p.object_id AND ce.column_id = p.end_column_id
+        LEFT JOIN sys.tables h ON h.object_id = t.history_table_id
+        LEFT JOIN sys.schemas hs ON hs.schema_id = h.schema_id
+        LEFT JOIN sys.tables parent ON parent.history_table_id = t.object_id
+        LEFT JOIN sys.schemas ps ON ps.schema_id = parent.schema_id
+        WHERE s.name = COALESCE(NULLIF(@schema, N''''), SCHEMA_NAME()) AND t.name = @table';
+    EXEC sys.sp_executesql @sql, N'@schema nvarchar(128), @table nvarchar(128)', @schema=@P1, @table=@P2;
+END"#;
+    let rows = client
+        .query(sql, &[&schema, &table])
+        .await
+        .map_err(|error| error.to_string())?
+        .into_first_result()
+        .await
+        .map_err(|error| error.to_string())?;
+    let Some(row) = rows.first() else { return Ok(None) };
+    let metadata = SqlServerTemporalTableMetadata {
+        temporal_type: row.get::<i32, _>(0).unwrap_or(0),
+        start_column: row.get::<&str, _>(1).map(str::to_string),
+        end_column: row.get::<&str, _>(2).map(str::to_string),
+        history_schema: row.get::<&str, _>(3).map(str::to_string),
+        history_table: row.get::<&str, _>(4).map(str::to_string),
+        parent_schema: row.get::<&str, _>(5).map(str::to_string),
+        parent_table: row.get::<&str, _>(6).map(str::to_string),
+        retention_period: row.get::<i32, _>(7),
+        retention_unit: row.get::<&str, _>(8).map(str::to_string),
+    };
+    if metadata.temporal_type == 0 && metadata.start_column.is_none() && metadata.end_column.is_none() {
+        return Ok(None);
+    }
+    if metadata.temporal_type == 2
+        && (metadata.start_column.is_none()
+            || metadata.end_column.is_none()
+            || metadata.history_schema.is_none()
+            || metadata.history_table.is_none())
+    {
+        return Err("SQL Server temporal table metadata is incomplete".to_string());
+    }
+    if metadata.temporal_type == 1 && (metadata.parent_schema.is_none() || metadata.parent_table.is_none()) {
+        return Err("SQL Server history table relationship metadata is incomplete".to_string());
+    }
+    if metadata.temporal_type == 2
+        && metadata.retention_period.is_some_and(|period| period >= 0)
+        && !metadata.retention_unit.as_deref().is_some_and(|unit| matches!(unit, "DAY" | "WEEK" | "MONTH" | "YEAR"))
+    {
+        return Err("SQL Server temporal history retention metadata is unavailable or unsupported".to_string());
+    }
+    Ok(Some(metadata))
 }
 
 fn sqlserver_column_metadata_from_row(row: &Row) -> SqlServerColumnMetadata {

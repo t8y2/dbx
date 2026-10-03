@@ -70,6 +70,7 @@ import {
 } from "@lucide/vue";
 import type { ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
+import { getTableMutationHistoryStoreOrNull, recordTableMutationHistory } from "@/lib/history/tableMutationHistory";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
@@ -145,7 +146,7 @@ import { copyDisplayPathForTreeNode, copyNameForTreeNode, isDirectNavigationTree
 import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import { mongoCollectionTableTypeFromNode, mongoCreateDatabasePreview, mongoDropIndexFailureCount } from "@/lib/sidebar/mongoCollectionMutation";
 import { dataTabOpenModeFromTreeClick, type DataTabOpenMode } from "@/lib/sidebar/dataTabOpenPolicy";
-import { isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isModRShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
+import { isCopySidebarSelectionShortcut, isDisconnectSidebarConnectionShortcut, isEditSidebarConnectionShortcut, isModRShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
 import { handleSidebarTreeDeleteShortcut } from "@/lib/sidebar/sidebarTreeDeleteShortcut";
 import { dataTableDoubleClickAction } from "@/lib/tabs/dataTabActivation";
 import { attachedDatabaseNameFromPath, buildCreateDatabaseSql, buildDuckDbAttachDatabaseSql, buildSqliteAttachDatabaseSql, supportsCreateDatabaseCharset, supportsCreateDatabaseLocale, uniqueAttachedDatabaseName } from "@/lib/database/createDatabaseSql";
@@ -682,6 +683,9 @@ const {
   executeWithProductionGuard: executeTreeNodeSqlWithProductionGuard,
   closeDroppedTableObjectTabsForNode,
   refreshMutatedTableDataTabsForNode,
+  historyStore: {
+    add: (entry) => getTableMutationHistoryStoreOrNull()?.add(entry) ?? Promise.resolve(),
+  },
 });
 
 const batchDropProgress = ref({ completed: 0, total: 0 });
@@ -1266,6 +1270,12 @@ function onKeydown(event: KeyboardEvent) {
     event.stopPropagation();
     return;
   }
+  if (isDisconnectConnectionShortcut(event)) {
+    if (!requestDisconnectSelectedConnection()) return;
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
   if (isSidebarTreeArrowKey(event) && handleSidebarTreeArrowKey(event)) {
     event.preventDefault();
     event.stopPropagation();
@@ -1332,6 +1342,10 @@ function handleSidebarTreeArrowKey(event: KeyboardEvent): boolean {
 
 function isEditConnectionShortcut(event: KeyboardEvent): boolean {
   return isEditSidebarConnectionShortcut(event, settingsStore.editorSettings.shortcuts);
+}
+
+function isDisconnectConnectionShortcut(event: KeyboardEvent): boolean {
+  return isDisconnectSidebarConnectionShortcut(event, settingsStore.editorSettings.shortcuts);
 }
 
 function isCopyTreeSelectionShortcut(event: KeyboardEvent): boolean {
@@ -1529,6 +1543,18 @@ function requestEditSelectedConnection(): boolean {
   return true;
 }
 
+function requestDisconnectSelectedConnection(): boolean {
+  if (canDisconnectConnection()) {
+    void disconnectConnection();
+    return true;
+  }
+  if (canDisconnectConnectionGroup()) {
+    void disconnectConnectionGroup();
+    return true;
+  }
+  return false;
+}
+
 function requestDeleteSelectedNode(): boolean {
   claimTreeItemDialogOwnership();
   ensureDangerDialogRouting();
@@ -1600,7 +1626,7 @@ function onDoubleClick(event: MouseEvent) {
     void openObjectBrowser(false, false, true);
   } else if (action === "open-object-browser-and-expand") {
     void openObjectBrowser(false, false, true);
-    if (!activeNode.value.isExpanded) void toggle(requestId);
+    void toggle(requestId);
   } else if (action === "open-data") {
     openDataImmediately(activeNode.value);
   } else if (action === "activate-data") {
@@ -2369,7 +2395,7 @@ async function copyDisplayPath() {
 function copyNameMenuItem(): ContextMenuItem {
   const node = activeNode.value;
   const connectionName = node.connectionId ? connectionStore.getConfig(node.connectionId)?.name || "" : "";
-  if (currentDatabaseType() === "mysql" && copyDisplayPathForTreeNode(node, connectionName)) {
+  if (copyDisplayPathForTreeNode(node, connectionName)) {
     return {
       label: t("contextMenu.copyName"),
       icon: Copy,
@@ -3508,6 +3534,7 @@ async function confirmBatchDrop() {
         }),
       );
       const batchSql = plan.map(({ sql }) => sql).join(";\n");
+      const startTime = Date.now();
       const result = await executeWithProductionSqlGuard({
         connection: connectionStore.getConfig(first.connectionId!),
         database: first.database!,
@@ -3526,6 +3553,17 @@ async function confirmBatchDrop() {
       });
       if (!result) return;
 
+      await recordTableMutationHistory(getTableMutationHistoryStoreOrNull(), {
+        connectionId: first.connectionId!,
+        connectionName: connectionStore.getConfig(first.connectionId!)?.name,
+        database: first.database!,
+        sql: batchSql,
+        elapsedMs: Date.now() - startTime,
+        success: !result.failed,
+        error: result.failed ? String(result.failed.message || result.failed) : undefined,
+        target: targets.map((t) => t.label).join(", "),
+      }).catch((err) => console.warn("[DBX] failed to record batch drop history", err));
+
       for (const target of result.succeeded) {
         closeDroppedTableObjectTabsForNode(target);
         connectionStore.removeTreeNode(target.id);
@@ -3542,7 +3580,22 @@ async function confirmBatchDrop() {
       await connectionStore.ensureConnected(target.connectionId);
       const sql = await dropSqlForTreeNode(target, { cascade: useCascade });
       if (!sql) continue;
-      await executeTreeNodeSqlWithProductionGuard(target, sql, { database: target.database, schema: target.schema });
+      const startTime = Date.now();
+      const guardResult = await executeTreeNodeSqlWithProductionGuard(target, sql, { database: target.database, schema: target.schema });
+      if (guardResult === undefined) {
+        // The production guard declined the SQL: it was never sent, so keep the
+        // node, skip the history record, and move on to the next target.
+        continue;
+      }
+      await recordTableMutationHistory(getTableMutationHistoryStoreOrNull(), {
+        connectionId: target.connectionId,
+        connectionName: connectionStore.getConfig(target.connectionId)?.name,
+        database: target.database,
+        sql,
+        elapsedMs: Date.now() - startTime,
+        success: true,
+        target: target.label,
+      }).catch((err) => console.warn("[DBX] failed to record drop history", err));
       closeDroppedTableObjectTabsForNode(target);
       // Remove immediately so a later failure cannot leave dropped objects in the tree.
       connectionStore.removeTreeNode(target.id);
@@ -3573,8 +3626,19 @@ async function confirmBatchTruncate() {
         await connectionStore.ensureConnected(target.connectionId);
         const sql = await truncateSqlForTreeNode(target, { cascade: useCascade });
         if (!sql) return false;
+        const startTime = Date.now();
         const result = await executeTreeNodeSqlWithProductionGuard(target, sql, { database: target.database, schema: target.schema });
-        return result === undefined ? false : undefined;
+        if (result === undefined) return false;
+        await recordTableMutationHistory(getTableMutationHistoryStoreOrNull(), {
+          connectionId: target.connectionId,
+          connectionName: connectionStore.getConfig(target.connectionId)?.name,
+          database: target.database,
+          sql,
+          elapsedMs: Date.now() - startTime,
+          success: true,
+          target: target.label,
+        }).catch((err) => console.warn("[DBX] failed to record batch truncate history", err));
+        return undefined;
       },
       refreshMutatedTableDataTabsForNodes,
     );
@@ -3594,7 +3658,22 @@ async function confirmBatchEmpty() {
     await connectionStore.ensureConnected(target.connectionId);
     const sql = await emptySqlForTreeNode(target);
     if (!sql) throw new Error("Empty table SQL is unavailable");
-    await executeTreeNodeSqlWithProductionGuard(target, sql, { database: target.database, schema: target.schema });
+    const startTime = Date.now();
+    const guardResult = await executeTreeNodeSqlWithProductionGuard(target, sql, { database: target.database, schema: target.schema });
+    if (guardResult === undefined) {
+      // The production guard declined the SQL: it was never sent, so this must
+      // not be recorded as a success nor counted as an emptied table.
+      throw new Error("Production safety confirmation declined");
+    }
+    await recordTableMutationHistory(getTableMutationHistoryStoreOrNull(), {
+      connectionId: target.connectionId,
+      connectionName: connectionStore.getConfig(target.connectionId)?.name,
+      database: target.database,
+      sql,
+      elapsedMs: Date.now() - startTime,
+      success: true,
+      target: target.label,
+    }).catch((err) => console.warn("[DBX] failed to record batch empty history", err));
   });
   for (const failure of result.failed) {
     console.error(`Failed to empty table "${failure.target.label}":`, failure.error);
@@ -5484,6 +5563,8 @@ const shortcutOpenDataInNewTab = computed(() => settingsStore.editorSettings.sho
 
 const shortcutEditConnection = computed(() => settingsStore.editorSettings.shortcuts.editSidebarConnection);
 
+const shortcutDisconnectConnection = computed(() => settingsStore.editorSettings.shortcuts.disconnectSidebarConnection);
+
 const shortcutRename = "F2";
 
 const shortcutRefresh = "F5";
@@ -5624,7 +5705,7 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
     if (isConnecting.value) {
       items.push({ label: t("connection.cancelConnecting"), action: cancelConnectionAttempt, icon: X });
     } else if (canDisconnectConnection()) {
-      items.push({ label: connectionDisconnectMenuLabel(), action: disconnectConnection, icon: Unplug });
+      items.push({ label: connectionDisconnectMenuLabel(), action: disconnectConnection, icon: Unplug, shortcut: shortcutDisconnectConnection.value });
       // save_password=false 且本次运行期已输入密码：提供"断开并忘记本次密码"，
       // 清除会话凭据后下次连接需重新输入。
       if (canForgetSessionCredential()) {
@@ -5816,6 +5897,7 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
       action: disconnectConnectionGroup,
       icon: Unplug,
       disabled: !canDisconnectConnectionGroup(),
+      shortcut: shortcutDisconnectConnection.value,
     });
     items.push({ label: "", separator: true });
     items.push({
@@ -6521,9 +6603,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     if (!isPackageMember && canViewDatabaseObjectDependencies(currentDatabaseType(), node)) {
       items.push({ label: t("contextMenu.viewDependencies"), action: openDatabaseObjectDependencies, icon: Network });
     }
-    if (currentDatabaseType() === "mysql") {
-      items.push(copyNameMenuItem());
-    }
+    items.push(copyNameMenuItem());
     if (!isPackageMember && canRenameObject.value) {
       items.push({
         label: t("contextMenu.renameObject"),
@@ -6569,7 +6649,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     if (currentDatabaseType() === "oceanbase-oracle") {
       items.push({ label: t("contextMenu.editObject"), action: () => openObjectSourceDialog(true), icon: Pencil });
     }
-    items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    items.push(copyNameMenuItem());
     items.push({ label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });
     return true;
   }
@@ -6605,7 +6685,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
         icon: Code2,
       });
     }
-    items.push(node.type === "trigger" ? copyNameMenuItem() : { label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    items.push(copyNameMenuItem());
     items.push({ label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });
     return true;
   }
@@ -6615,7 +6695,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   if (node.type === "type" || node.type === "type-body") {
     if (supportsTypeObjectSource(currentDatabaseType())) {
       items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
-      items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+      items.push(copyNameMenuItem());
       items.push({ label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });
       return true;
     }
@@ -6623,7 +6703,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       items.push({ label: t("contextMenu.copyDdl"), action: copyCustomTypeDdl, icon: Copy });
       items.push({ label: "", separator: true });
     }
-    items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    items.push(copyNameMenuItem());
     return true;
   }
   return false;

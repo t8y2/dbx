@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Activity, AlertTriangle, Braces, CalendarClock, Clock, Code2, Database, Eye, FileCode, Gauge, KeyRound, Link2, ListTree, Network, Package, PencilRuler, ScrollText, ShieldCheck, Table, TableProperties, UsersRound, Zap } from "@lucide/vue";
+import { Activity, AlertTriangle, Braces, CalendarClock, Clock, Code2, Database, Eye, FileCode, Gauge, KeyRound, Link2, ListTree, Network, Package, PencilRuler, ScrollText, Search, ShieldCheck, Table, TableProperties, UsersRound, Zap } from "@lucide/vue";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import { isEventObjectBrowserTab, tabDatabaseIconType } from "@/lib/tabs/tabPresentation";
@@ -26,6 +26,7 @@ defineProps<{ tab: QueryTab }>();
   <TableProperties v-else-if="tab.mode === 'objects'" />
   <UsersRound v-else-if="tab.mode === 'users'" />
   <PencilRuler v-else-if="tab.mode === 'structure'" />
+  <Search v-else-if="tab.mode === 'database-search'" />
   <ScrollText v-else-if="tab.objectSource?.objectType === 'PROCEDURE'" />
   <Braces v-else-if="tab.objectSource?.objectType === 'FUNCTION'" />
   <Zap v-else-if="tab.objectSource?.objectType === 'TRIGGER'" />

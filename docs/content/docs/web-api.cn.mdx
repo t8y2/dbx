@@ -92,6 +92,18 @@ Cookie: dbx_session=...
 | `DBX_MAX_UPLOAD_MB` | 调整通用请求及上传文件大小上限，默认 1024 MB；multipart 路由会额外预留固定的协议开销（如需上传 4 GiB 文件，请设为至少 `4096`） |
 | `DBX_AGENT_DIR` | 覆盖 Web 端 Agent/驱动目录，默认位于数据目录下的 `agents` |
 | `DBX_STATIC_DIR` | 覆盖 Web 静态文件目录 |
+| `RUST_LOG` | 配置 Rust 后端日志过滤；默认值为 `dbx_web=info,tower_http=info` |
+| `RUST_BACKTRACE=1` | 错误包含 Rust 回溯时输出 backtrace |
+
+## 日志与问题排查
+
+DBX Web 启动时读取标准 `RUST_LOG` 过滤器。排查问题时，可以只提高 Web 和 HTTP 中间件的日志级别，避免打开所有依赖的日志：
+
+```bash
+RUST_LOG=dbx_web=debug,tower_http=info ./dbx
+```
+
+如果错误需要 Rust 回溯，同时设置 `RUST_BACKTRACE=1`。如果问题位于其他 DBX crate，可以在同一个过滤器中加入 `dbx_core`、`dbx_drivers`、`dbx_sql`、`dbx_plugin_runtime`、`dbx_ai_provider` 或 `dbx_platform`。`RUST_LOG=debug` 会启用范围更广、噪声更大的过滤器。日志写入进程输出，需要保存诊断文件时可自行重定向输出。
 
 ## 请求约定
 

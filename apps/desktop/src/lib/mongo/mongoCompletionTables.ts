@@ -16,6 +16,7 @@
  *   QUERY_OPERATORS      → filter documents (`find`, `$match`, …)
  *   UPDATE_OPERATORS     → update documents (`updateOne`, `findOneAndUpdate`, …)
  *   PUSH_MODIFIERS       → the object value of `$push` / `$addToSet`
+ *   PROJECTION_OPERATORS → projection documents (`find`, `findOne`, `findOneAndUpdate`, …)
  *   PIPELINE_STAGES      → elements of an aggregation pipeline array
  *   ACCUMULATORS         → the output fields of `$group`
  *   EXPRESSION_OPERATORS → aggregation expression position (`$project`, `$expr`, …)
@@ -112,6 +113,13 @@ export const PUSH_MODIFIERS: MongoOperatorSpec[] = specs([
   ["$position", "Insert position for $each", "$position: 0"],
 ]);
 
+/** Projection operators, valid inside a projected field's object value in find-style projections. */
+export const PROJECTION_OPERATORS: MongoOperatorSpec[] = specs([
+  ["$slice", "Limits the number of elements projected from an array", "$slice: ${}"],
+  ["$elemMatch", "Projects the first array element matching a condition", "$elemMatch: { ${} }"],
+  ["$meta", "Projects metadata associated with the document", '$meta: "textScore"'],
+]);
+
 export const PIPELINE_STAGES: MongoOperatorSpec[] = specs([
   ["$match", "Filters documents", "$match: { ${} }"],
   ["$project", "Reshapes documents", "$project: { ${} }"],
@@ -136,7 +144,7 @@ export const PIPELINE_STAGES: MongoOperatorSpec[] = specs([
   ["$graphLookup", "Performs a recursive search on a collection", '$graphLookup: { from: "${collection}", startWith: "$${field}", connectFromField: "${field}", connectToField: "_id", as: "${as}" }'],
   ["$geoNear", "Orders documents by proximity to a point", '$geoNear: { near: { type: "Point", coordinates: [0, 0] }, distanceField: "${distance}" }'],
   ["$setWindowFields", "Adds fields computed over a window of documents", '$setWindowFields: { partitionBy: "$${field}", sortBy: { ${field}: 1 }, output: {} }'],
-  ["$densify", "Fills gaps in a sequence of field values", '$densify: { field: "${field}", range: { step: 1, unit: "${unit}" } }'],
+  ["$densify", "Fills gaps in a sequence of field values", '$densify: { field: "${field}", range: { step: 1, bounds: "${full}" } }'],
   ["$fill", "Fills null or missing field values", "$fill: { output: { ${field}: { value: ${} } } }"],
   ["$documents", "Returns literal documents", "$documents: [${}]"],
   ["$redact", "Restricts document content based on a condition", "$redact: { ${} }"],
@@ -172,6 +180,37 @@ export const ACCUMULATORS: MongoOperatorSpec[] = specs([
   ["$percentile", "Approximates the requested percentiles", '$percentile: { input: "$${field}", p: [0.95], method: "approximate" }'],
 ]);
 
+export const WINDOW_OPERATORS: MongoOperatorSpec[] = specs([
+  ["$rank", "Returns the document's rank relative to other documents", "$rank: {}"],
+  ["$denseRank", "Returns the document's dense rank relative to other documents", "$denseRank: {}"],
+  ["$documentNumber", "Returns the document's position within the window", "$documentNumber: {}"],
+  ["$shift", "Returns a value from a document at a given offset", '$shift: { output: "$${field}", by: 1, default: null }'],
+  ["$expMovingAvg", "Exponential moving average", '$expMovingAvg: { input: "$${field}", N: 3 }'],
+  ["$derivative", "Average rate of change over an interval", '$derivative: { input: "$${field}", unit: "${unit}" }'],
+  ["$integral", "Approximation of the area under the curve", '$integral: { input: "$${field}", unit: "${unit}" }'],
+  ["$covariancePop", "Population covariance between two numeric expressions", '$covariancePop: ["$${field1}", "$${field2}"]'],
+  ["$covarianceSamp", "Sample covariance between two numeric expressions", '$covarianceSamp: ["$${field1}", "$${field2}"]'],
+  ["$locf", "Last observation carried forward", '$locf: "$${field}"'],
+  ["$linearFill", "Fills null and missing values by linear interpolation", '$linearFill: "$${field}"'],
+]);
+
+const WINDOW_SPEC: Spec = ["window", "Window boundary specification", 'window: { documents: ["unbounded", "current"] }'];
+
+function dedupeSpecsByLabel(...lists: readonly MongoOperatorSpec[][]): MongoOperatorSpec[] {
+  const seen = new Set<string>();
+  const deduped: MongoOperatorSpec[] = [];
+  for (const list of lists) {
+    for (const spec of list) {
+      if (seen.has(spec.label)) continue;
+      seen.add(spec.label);
+      deduped.push(spec);
+    }
+  }
+  return deduped;
+}
+
+export const WINDOW_FUNCTION_OPERATORS: MongoOperatorSpec[] = [...dedupeSpecsByLabel(WINDOW_OPERATORS, ACCUMULATORS), ...specs([WINDOW_SPEC])];
+
 export const EXPRESSION_OPERATORS: MongoOperatorSpec[] = specs([
   // Conditional
   ["$cond", "Returns one of two values from a condition", "$cond: { if: ${}, then: ${}, else: ${} }"],
@@ -194,6 +233,12 @@ export const EXPRESSION_OPERATORS: MongoOperatorSpec[] = specs([
   ["$multiply", "Multiplies numbers", "$multiply: [${}, ${}]"],
   ["$divide", "Divides two numbers", "$divide: [${}, ${}]"],
   ["$mod", "Returns the remainder of a division", "$mod: [${}, ${}]"],
+  ["$sum", "Sums values", "$sum: [${}, ${}]"],
+  ["$avg", "Averages values", "$avg: [${}, ${}]"],
+  ["$min", "Returns the lowest value", "$min: [${}, ${}]"],
+  ["$max", "Returns the highest value", "$max: [${}, ${}]"],
+  ["$stdDevPop", "Population standard deviation", "$stdDevPop: [${}, ${}]"],
+  ["$stdDevSamp", "Sample standard deviation", "$stdDevSamp: [${}, ${}]"],
   ["$abs", "Absolute value", "$abs: ${}"],
   ["$ceil", "Rounds up to the next integer", "$ceil: ${}"],
   ["$floor", "Rounds down to the previous integer", "$floor: ${}"],
@@ -416,6 +461,15 @@ export const OPERATOR_SUB_KEYS: Record<string, MongoOperatorSpec[]> = {
     ["backwards", "Compare secondary differences from the end", "backwards: false"],
     ["normalization", "Normalize text to Unicode NFD first", "normalization: false"],
   ]),
+  range: specs([
+    ["step", "Step size to densify by", "step: 1"],
+    ["unit", "Time unit for date densification", 'unit: "${unit}"'],
+    ["bounds", "Boundary condition for the range", 'bounds: "${full}"'],
+  ]),
+  fillOutput: specs([
+    ["value", "Value or expression to fill with", "value: ${}"],
+    ["method", "Fill method", 'method: "${linear}"'],
+  ]),
 };
 
 const BSON_TYPE_ALIASES: Spec[] = [
@@ -453,6 +507,10 @@ export const ENUM_VALUES: Record<string, MongoOperatorSpec[]> = {
     ["x", "Ignore whitespace and # comments in the pattern", '"x"'],
     ["s", "Dot matches newlines", '"s"'],
     ["u", "Unicode character classes", '"u"'],
+  ]),
+  $meta: specs([
+    ["textScore", "Access the text search score", '"textScore"'],
+    ["indexKey", "Access the index key for the document", '"indexKey"'],
   ]),
   geometryType: specs([
     ["Point", "Single position", '"Point"'],
@@ -509,6 +567,88 @@ export const ENUM_VALUES: Record<string, MongoOperatorSpec[]> = {
     ["3", "Base letters, accents and case", "3"],
     ["4", "Also punctuation, with alternate: shifted", "4"],
     ["5", "Identical, including code points", "5"],
+  ]),
+  unit: specs([
+    ["millisecond", "Densify by milliseconds", '"millisecond"'],
+    ["second", "Densify by seconds", '"second"'],
+    ["minute", "Densify by minutes", '"minute"'],
+    ["hour", "Densify by hours", '"hour"'],
+    ["day", "Densify by days", '"day"'],
+    ["week", "Densify by weeks", '"week"'],
+    ["month", "Densify by months", '"month"'],
+    ["quarter", "Densify by quarters", '"quarter"'],
+    ["year", "Densify by years", '"year"'],
+  ]),
+  bounds: specs([
+    ["full", "Densify across entire range", '"full"'],
+    ["partition", "Densify within each partition", '"partition"'],
+  ]),
+  fillMethod: specs([
+    ["linear", "Linear interpolation between surrounding values", '"linear"'],
+    ["locf", "Last observation carried forward", '"locf"'],
+  ]),
+  boolean: specs([
+    ["true", "Boolean true", "true"],
+    ["false", "Boolean false", "false"],
+  ]),
+  $regex: specs([["/pattern/", "Regular expression literal", "/${pattern}/"]]),
+  $language: specs([
+    ["none", "No language-specific rules", '"none"'],
+    ["da", "Danish", '"da"'],
+    ["de", "German", '"de"'],
+    ["en", "English", '"en"'],
+    ["es", "Spanish", '"es"'],
+    ["fi", "Finnish", '"fi"'],
+    ["fr", "French", '"fr"'],
+    ["hu", "Hungarian", '"hu"'],
+    ["it", "Italian", '"it"'],
+    ["nb", "Norwegian", '"nb"'],
+    ["nl", "Dutch", '"nl"'],
+    ["pt", "Portuguese", '"pt"'],
+    ["ro", "Romanian", '"ro"'],
+    ["ru", "Russian", '"ru"'],
+    ["sv", "Swedish", '"sv"'],
+    ["tr", "Turkish", '"tr"'],
+    ["danish", "Danish", '"danish"'],
+    ["dutch", "Dutch", '"dutch"'],
+    ["english", "English", '"english"'],
+    ["finnish", "Finnish", '"finnish"'],
+    ["french", "French", '"french"'],
+    ["german", "German", '"german"'],
+    ["hungarian", "Hungarian", '"hungarian"'],
+    ["italian", "Italian", '"italian"'],
+    ["norwegian", "Norwegian", '"norwegian"'],
+    ["portuguese", "Portuguese", '"portuguese"'],
+    ["romanian", "Romanian", '"romanian"'],
+    ["russian", "Russian", '"russian"'],
+    ["spanish", "Spanish", '"spanish"'],
+    ["swedish", "Swedish", '"swedish"'],
+    ["turkish", "Turkish", '"turkish"'],
+  ]),
+  locale: specs([
+    ["simple", "Simple binary comparison", '"simple"'],
+    ["en", "English", '"en"'],
+    ["fr", "French", '"fr"'],
+    ["de", "German", '"de"'],
+    ["es", "Spanish", '"es"'],
+    ["pt", "Portuguese", '"pt"'],
+    ["it", "Italian", '"it"'],
+    ["ru", "Russian", '"ru"'],
+    ["zh", "Chinese", '"zh"'],
+    ["ja", "Japanese", '"ja"'],
+    ["ko", "Korean", '"ko"'],
+    ["ar", "Arabic", '"ar"'],
+  ]),
+  whenMatched: specs([
+    ["replace", "Replace the existing document", '"replace"'],
+    ["keepExisting", "Keep the existing document", '"keepExisting"'],
+    ["merge", "Merge the matching documents", '"merge"'],
+    ["fail", "Fail the aggregation operation", '"fail"'],
+  ]),
+  whenNotMatched: specs([
+    ["insert", "Insert the document", '"insert"'],
+    ["discard", "Discard the document", '"discard"'],
+    ["fail", "Fail the aggregation operation", '"fail"'],
   ]),
 };
 
@@ -610,6 +750,13 @@ export const METHOD_OPTION_KEYS: Record<string, MongoOperatorSpec[]> = {
     ["pipeline", "Aggregation pipeline the view applies", "pipeline: [${}]"],
     ["changeStreamPreAndPostImages", "Record document images for change streams", "changeStreamPreAndPostImages: { enabled: true }"],
   ]),
+  createUser: specs([
+    ["user", "User name", 'user: "${name}"'],
+    ["pwd", "User password", 'pwd: "${password}"'],
+    ["roles", "Roles granted to the user", "roles: []"],
+    ["customData", "Arbitrary information stored with the user", "customData: {}"],
+    ["mechanisms", "Authentication mechanisms", "mechanisms: [${}]"],
+  ]),
   // Command documents run as written, so this lists the commands worth typing by hand.
   runCommand: specs([
     ["ping", "Check that the server responds", "ping: 1"],
@@ -710,6 +857,17 @@ export const STAGE_OPTION_KEYS: Record<string, MongoOperatorSpec[]> = {
     ["includeLocs", "Field holding the matched location", 'includeLocs: "${location}"'],
   ]),
   $replaceRoot: specs([["newRoot", "Expression producing the new root document", 'newRoot: "$${field}"']]),
+  $densify: specs([
+    ["field", "Field whose values will be densified", 'field: "${field}"'],
+    ["partitionByFields", "Fields that partition the documents", 'partitionByFields: ["${field}"]'],
+    ["range", "Range specification to densify", 'range: { step: 1, bounds: "${full}" }'],
+  ]),
+  $fill: specs([
+    ["partitionBy", "Expression to partition by", 'partitionBy: "$${field}"'],
+    ["partitionByFields", "Fields that partition the documents", 'partitionByFields: ["${field}"]'],
+    ["sortBy", "Sort order for evaluating values", "sortBy: { ${field}: 1 }"],
+    ["output", "Fields to fill", "output: { ${field}: { value: ${} } }"],
+  ]),
 };
 
 /** Literal values that are worth completing in value position. */

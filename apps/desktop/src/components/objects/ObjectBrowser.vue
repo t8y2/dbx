@@ -124,6 +124,7 @@ import { useExportTracker, type ExportTask } from "@/composables/useExportTracke
 import { useSettingsStore } from "@/stores/settingsStore";
 import { formatSidebarTableNamesForCopy, type SidebarTableCopyTarget } from "@/lib/sidebar/sidebarTableNameCopy";
 import { useQueryStore } from "@/stores/queryStore";
+import { getTableMutationHistoryStoreOrNull, recordTableMutationHistory } from "@/lib/history/tableMutationHistory";
 import QueryEditor from "@/components/editor/QueryEditor.vue";
 import MySqlEventEditor from "@/components/objects/MySqlEventEditor.vue";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
@@ -175,6 +176,7 @@ import { invalidateObjectMetadataCache } from "@/lib/metadata/objectMetadataCach
 import { invalidateObjectDdl } from "@/lib/metadata/objectDdlCache";
 import { invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
 import { eventEditorInstanceKey, resolveInitialEventEditorRequest } from "@/lib/table/eventEditorRequest";
+import { createLocateTabMenuItem } from "@/lib/tabs/tabMenu";
 
 type ObjectFilter = ObjectBrowserFilter;
 type ObjectBrowserColumnKey = "select" | "name" | "type" | "estimatedRows" | "totalBytes" | "created_at" | "updated_at" | "comment";
@@ -197,6 +199,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   openTable: [target: { tableName: string; schema?: string; tableType?: string; catalog?: string; comment?: string | null }];
+  locateTable: [target: { tableName: string; schema?: string; tableType?: string; catalog?: string }];
   schemaChange: [schema: string | undefined];
   viewportChange: [viewport: ObjectBrowserViewport];
   searchChange: [query: string];
@@ -1843,10 +1846,24 @@ async function confirmRename() {
 async function confirmDrop() {
   if (!dropTarget.value) return;
   const row = dropTarget.value;
+  let executedSql = "";
+  const start = Date.now();
+  let successRecorded = false;
   try {
     const sql = dropPreviewSql.value || (await buildDropSqlForRow(row, { cascade: canDropTargetCascade.value && dropTableCascade.value }));
+    executedSql = sql;
     const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql));
     if (!executed) return;
+    await recordTableMutationHistory(getTableMutationHistoryStoreOrNull(), {
+      connectionId: props.connection.id,
+      connectionName: props.connection.name,
+      database: props.database,
+      sql,
+      elapsedMs: Date.now() - start,
+      success: true,
+      target: row.name,
+    }).catch((err) => console.warn("[DBX] failed to record drop history", err));
+    successRecorded = true;
     const successKey = row.type === "VIEW" ? "contextMenu.dropViewSuccess" : row.type === "PROCEDURE" ? "contextMenu.dropProcedureSuccess" : row.type === "FUNCTION" ? "contextMenu.dropFunctionSuccess" : row.type === "EVENT" ? "contextMenu.dropEventSuccess" : "contextMenu.dropTableSuccess";
     toast(t(successKey, { name: row.name }));
     const cacheSchema = row.schema || selectedSchema.value || props.database;
@@ -1857,6 +1874,18 @@ async function confirmDrop() {
     await reload();
     await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, row.schema || selectedSchema.value);
   } catch (e: any) {
+    if (executedSql && !successRecorded) {
+      await recordTableMutationHistory(getTableMutationHistoryStoreOrNull(), {
+        connectionId: props.connection.id,
+        connectionName: props.connection.name,
+        database: props.database,
+        sql: executedSql,
+        elapsedMs: Date.now() - start,
+        success: false,
+        error: e?.message || String(e),
+        target: row.name,
+      }).catch((err) => console.warn("[DBX] failed to record drop history", err));
+    }
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   }
   dropTarget.value = null;
@@ -2103,8 +2132,12 @@ function requestBatchDropTables() {
 async function confirmBatchDropTables() {
   if (batchDropExecuting.value) return;
   batchDropExecuting.value = true;
+  let batchSql = "";
+  let batchDropRecorded = false;
+  let targets: ObjectBrowserRow[] = [];
+  const start = Date.now();
   try {
-    const targets = await fetchSortedTableRowsForDrop();
+    targets = await fetchSortedTableRowsForDrop();
     if (targets.length === 0) return;
     batchDropProgress.value = { completed: 0, total: targets.length };
     const useCascade = canBatchDropCascade.value && batchDropCascade.value;
@@ -2114,7 +2147,7 @@ async function confirmBatchDropTables() {
         sql: await buildDropTableSql(tableAdminSqlOptions(target, { cascade: useCascade })),
       })),
     );
-    const batchSql = plan.map(({ sql }) => sql).join(";\n");
+    batchSql = plan.map(({ sql }) => sql).join(";\n");
     const result = await executeObjectBrowserSqlWithProductionGuard(batchSql, () =>
       runBatchTableDrop({
         databaseType: effectiveDatabaseType.value,
@@ -2128,6 +2161,18 @@ async function confirmBatchDropTables() {
     );
     if (!result) return;
 
+    batchDropRecorded = true;
+    await recordTableMutationHistory(getTableMutationHistoryStoreOrNull(), {
+      connectionId: props.connection.id,
+      connectionName: props.connection.name,
+      database: props.database,
+      sql: batchSql,
+      elapsedMs: Date.now() - start,
+      success: !result.failed,
+      error: result.failed ? String(result.failed.message || result.failed) : undefined,
+      target: targets.map((t) => t.name).join(", "),
+    }).catch((err) => console.warn("[DBX] failed to record batch drop history", err));
+
     for (const row of result.succeeded) closeDroppedTableObjectTabsForRow(row);
     if (result.succeeded.length > 0) {
       removePinnedObjectBrowserRows(result.succeeded);
@@ -2138,6 +2183,18 @@ async function confirmBatchDropTables() {
     if (result.failed) throw result.failed;
     toast(t("objects.batchDropSuccess", { count: result.succeeded.length }));
   } catch (e: any) {
+    if (!batchDropRecorded && batchSql) {
+      await recordTableMutationHistory(getTableMutationHistoryStoreOrNull(), {
+        connectionId: props.connection.id,
+        connectionName: props.connection.name,
+        database: props.database,
+        sql: batchSql,
+        elapsedMs: Date.now() - start,
+        success: false,
+        error: e?.message || String(e),
+        target: targets.map((t) => t.name).join(", "),
+      }).catch((err) => console.warn("[DBX] failed to record batch drop history", err));
+    }
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   } finally {
     batchDropExecuting.value = false;
@@ -2189,6 +2246,9 @@ async function refreshMutatedTableDataTabsForRows(rows: readonly ObjectBrowserRo
 async function confirmBatchTruncateTables() {
   const targets = [...selectedTableRows.value];
   if (targets.length === 0) return;
+  let batchSql = "";
+  const start = Date.now();
+  let successRecorded = false;
   try {
     const useCascade = canBatchTruncateCascade.value && batchTruncateCascade.value;
     const statements = await Promise.all(
@@ -2197,7 +2257,8 @@ async function confirmBatchTruncateTables() {
         sql: await buildTruncateTableSql(tableAdminSqlOptions(row, { cascade: useCascade })),
       })),
     );
-    const executed = await executeObjectBrowserSqlWithProductionGuard(statements.map(({ sql }) => sql).join(";\n"), async () => {
+    batchSql = statements.map(({ sql }) => sql).join(";\n");
+    const executed = await executeObjectBrowserSqlWithProductionGuard(batchSql, async () => {
       await runBatchTableTruncate(
         statements,
         async ({ sql }) => {
@@ -2208,12 +2269,34 @@ async function confirmBatchTruncateTables() {
       return true;
     });
     if (!executed) return;
+    await recordTableMutationHistory(getTableMutationHistoryStoreOrNull(), {
+      connectionId: props.connection.id,
+      connectionName: props.connection.name,
+      database: props.database,
+      sql: batchSql,
+      elapsedMs: Date.now() - start,
+      success: true,
+      target: targets.map((t) => t.name).join(", "),
+    }).catch((err) => console.warn("[DBX] failed to record batch truncate history", err));
+    successRecorded = true;
     toast(t("objects.batchTruncateSuccess", { count: targets.length }));
     clearTableSelection();
     showBatchTruncateConfirm.value = false;
     await reload();
     await connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, selectedSchema.value);
   } catch (e: any) {
+    if (batchSql && !successRecorded) {
+      await recordTableMutationHistory(getTableMutationHistoryStoreOrNull(), {
+        connectionId: props.connection.id,
+        connectionName: props.connection.name,
+        database: props.database,
+        sql: batchSql,
+        elapsedMs: Date.now() - start,
+        success: false,
+        error: e?.message || String(e),
+        target: targets.map((t) => t.name).join(", "),
+      }).catch((err) => console.warn("[DBX] failed to record batch truncate history", err));
+    }
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   }
 }
@@ -2243,6 +2326,7 @@ function requestBatchEmptyTables() {
 async function confirmBatchEmptyTables() {
   const plan = batchEmptyPlan.value.slice();
   if (plan.length === 0) return;
+  const start = Date.now();
   const asynchronousMutation = effectiveDatabaseType.value === "clickhouse";
   const reviewSql = plan.map(({ sql }) => sql).join(";\n");
   const result = await executeObjectBrowserSqlWithProductionGuard(reviewSql, () => {
@@ -2251,6 +2335,16 @@ async function confirmBatchEmptyTables() {
     });
   });
   if (!result) return;
+  await recordTableMutationHistory(getTableMutationHistoryStoreOrNull(), {
+    connectionId: props.connection.id,
+    connectionName: props.connection.name,
+    database: props.database,
+    sql: reviewSql,
+    elapsedMs: Date.now() - start,
+    success: result.failed.length === 0,
+    error: result.failed.length > 0 ? result.failed.map((f) => `${f.target.target.name}: ${f.error}`).join("; ") : undefined,
+    target: plan.map((p) => p.target.name).join(", "),
+  }).catch((err) => console.warn("[DBX] failed to record batch empty history", err));
   for (const failure of result.failed) {
     console.error(`Failed to empty table "${failure.target.target.name}":`, failure.error);
   }
@@ -2844,13 +2938,39 @@ function requestTruncateTable(row: ObjectBrowserRow) {
 async function confirmTruncateTable() {
   const row = truncateTarget.value;
   if (!row) return;
+  let executedSql = "";
+  const start = Date.now();
+  let successRecorded = false;
   try {
     const sql = truncatePreviewSql.value || (await buildTruncateTableSql(tableAdminSqlOptions(row, { cascade: canTruncateTargetCascade.value && truncateTableCascade.value })));
+    executedSql = sql;
     const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql));
     if (!executed) return;
+    await recordTableMutationHistory(getTableMutationHistoryStoreOrNull(), {
+      connectionId: props.connection.id,
+      connectionName: props.connection.name,
+      database: props.database,
+      sql,
+      elapsedMs: Date.now() - start,
+      success: true,
+      target: row.name,
+    }).catch((err) => console.warn("[DBX] failed to record truncate history", err));
+    successRecorded = true;
     toast(t("contextMenu.truncateTableSuccess", { name: row.name }));
     await refreshMutatedTableDataTabsForRows([row]);
   } catch (e: any) {
+    if (executedSql && !successRecorded) {
+      await recordTableMutationHistory(getTableMutationHistoryStoreOrNull(), {
+        connectionId: props.connection.id,
+        connectionName: props.connection.name,
+        database: props.database,
+        sql: executedSql,
+        elapsedMs: Date.now() - start,
+        success: false,
+        error: e?.message || String(e),
+        target: row.name,
+      }).catch((err) => console.warn("[DBX] failed to record truncate history", err));
+    }
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   }
   truncateTarget.value = null;
@@ -2919,13 +3039,39 @@ function requestEmptyTable(row: ObjectBrowserRow) {
 async function confirmEmptyTable() {
   const row = emptyTarget.value;
   if (!row) return;
+  let executedSql = "";
+  const start = Date.now();
+  let successRecorded = false;
   try {
     const sql = emptyPreviewSql.value || (await buildEmptyTableSql(tableAdminSqlOptions(row)));
+    executedSql = sql;
     const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql));
     if (!executed) return;
+    await recordTableMutationHistory(getTableMutationHistoryStoreOrNull(), {
+      connectionId: props.connection.id,
+      connectionName: props.connection.name,
+      database: props.database,
+      sql,
+      elapsedMs: Date.now() - start,
+      success: true,
+      target: row.name,
+    }).catch((err) => console.warn("[DBX] failed to record empty history", err));
+    successRecorded = true;
     toast(t("contextMenu.emptyTableSuccess", { name: row.name }));
     await refreshMutatedTableDataTabsForRows([row]);
   } catch (e: any) {
+    if (executedSql && !successRecorded) {
+      await recordTableMutationHistory(getTableMutationHistoryStoreOrNull(), {
+        connectionId: props.connection.id,
+        connectionName: props.connection.name,
+        database: props.database,
+        sql: executedSql,
+        elapsedMs: Date.now() - start,
+        success: false,
+        error: e?.message || String(e),
+        target: row.name,
+      }).catch((err) => console.warn("[DBX] failed to record empty history", err));
+    }
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   }
   emptyTarget.value = null;
@@ -3640,7 +3786,7 @@ function getTypeMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   return items;
 }
 
-function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
+function getObjectBrowserActionMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   if (isMongodb.value) {
     return [
       { label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
@@ -3654,6 +3800,21 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   if (item.type === "TYPE" || item.type === "TYPE_BODY") return getTypeMenuItems(item);
   if (isSourceOnlyObjectBrowserRow(item)) return getPackageMenuItems(item);
   return getProcFuncMenuItems(item);
+}
+
+function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
+  const items = getObjectBrowserActionMenuItems(item);
+  if (item.type === "TABLE" || item.type === "VIEW" || item.type === "MATERIALIZED_VIEW") {
+    items.push(
+      { label: "", separator: true },
+      createLocateTabMenuItem({
+        t,
+        visible: true,
+        onLocate: () => emit("locateTable", { tableName: item.name, schema: item.schema, tableType: objectBrowserOpenTableType(item), catalog: props.catalog }),
+      }),
+    );
+  }
+  return items;
 }
 </script>
 

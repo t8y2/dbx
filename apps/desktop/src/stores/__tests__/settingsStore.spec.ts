@@ -4,7 +4,10 @@ import { isProxy } from "vue";
 import {
   AI_PROVIDER_PARTNER_PRESETS,
   AI_PROVIDER_PRESETS,
+  DEFAULT_CUSTOM_THEMES,
+  DEFAULT_CUSTOM_THEME_COLORS,
   DEFAULT_EDITOR_SETTINGS,
+  type CustomThemeColors,
   EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
   SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
   enforceRightSidebarPanelExclusivity,
@@ -130,6 +133,70 @@ describe("normalizeEditorSettings", () => {
     });
   });
 
+  it("preserves optional UI colors in customThemes and customThemeColors", () => {
+    const customColors: CustomThemeColors = {
+      ...DEFAULT_CUSTOM_THEME_COLORS,
+      background: "#101010",
+      foreground: "#f0f0f0",
+      activeLine: "#202020",
+      selection: "#303030",
+      cursor: "#ff00ff",
+      gutterBackground: "#151515",
+      lineNumber: "#666666",
+      matchingBracket: "#444444",
+    };
+    const normalized = normalizeEditorSettings({
+      customThemeColors: customColors,
+      customThemes: [
+        {
+          id: "custom-1",
+          name: "My Custom",
+          colors: customColors,
+          ddlColors: DEFAULT_CUSTOM_THEMES[0].ddlColors,
+        },
+      ],
+    });
+    expect(normalized.customThemeColors.activeLine).toBe("#202020");
+    expect(normalized.customThemeColors.selection).toBe("#303030");
+    expect(normalized.customThemeColors.cursor).toBe("#ff00ff");
+    expect(normalized.customThemeColors.gutterBackground).toBe("#151515");
+    expect(normalized.customThemeColors.lineNumber).toBe("#666666");
+    expect(normalized.customThemeColors.matchingBracket).toBe("#444444");
+    expect(normalized.customThemes[0].colors.activeLine).toBe("#202020");
+    expect(normalized.customThemes[0].colors.gutterBackground).toBe("#151515");
+  });
+
+  it("normalizes customThemes when empty or absent by seeding DEFAULT_CUSTOM_THEMES", () => {
+    // When customThemes is an empty array
+    const normalizedEmpty = normalizeEditorSettings({ customThemes: [] });
+    expect(normalizedEmpty.customThemes).toEqual(DEFAULT_CUSTOM_THEMES);
+    expect(normalizedEmpty.activeCustomThemeId).toBe("default");
+
+    // When customThemes is absent
+    const normalizedAbsent = normalizeEditorSettings({});
+    expect(normalizedAbsent.customThemes).toEqual(DEFAULT_CUSTOM_THEMES);
+    expect(normalizedAbsent.activeCustomThemeId).toBe("default");
+
+    // When customThemes has invalid activeCustomThemeId, fall back to first theme id
+    const customList = [{ id: "my-theme", name: "My Theme", colors: DEFAULT_CUSTOM_THEMES[0].colors, ddlColors: DEFAULT_CUSTOM_THEMES[0].ddlColors }];
+    const normalizedInvalidActive = normalizeEditorSettings({
+      customThemes: customList,
+      activeCustomThemeId: "nonexistent",
+    });
+    expect(normalizedInvalidActive.customThemes).toHaveLength(1);
+    expect(normalizedInvalidActive.activeCustomThemeId).toBe("my-theme");
+
+    // When legacy customThemeColors is provided and customThemes is empty
+    const legacyColors = { ...DEFAULT_CUSTOM_THEMES[0].colors, keyword: "#ff0000" };
+    const normalizedLegacy = normalizeEditorSettings({
+      customThemes: [],
+      customThemeColors: legacyColors,
+    });
+    expect(normalizedLegacy.customThemes).toHaveLength(1);
+    expect(normalizedLegacy.customThemes[0].id).toBe("migrated");
+    expect(normalizedLegacy.customThemes[0].colors.keyword).toBe("#ff0000");
+  });
+
   it("defaults and bounds the persisted text filter panel height", () => {
     expect(normalizeEditorSettings({}).dataGridTextFilterPanelHeight).toBe(168);
     expect(normalizeEditorSettings({ dataGridTextFilterPanelHeight: 236.4 }).dataGridTextFilterPanelHeight).toBe(236);
@@ -173,6 +240,15 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ generateSqlQuoteIdentifiers: true }).generateSqlQuoteIdentifiers).toBe(true);
     expect(normalizeEditorSettings({ generateSqlQuoteIdentifiers: false }).generateSqlQuoteIdentifiers).toBe(false);
     expect(normalizeEditorSettings({ generateSqlQuoteIdentifiers: "false" } as any).generateSqlQuoteIdentifiers).toBe(true);
+  });
+
+  it("enables data grid striped rows by default and permits opting out", () => {
+    expect(DEFAULT_EDITOR_SETTINGS.dataGridStripedRows).toBe(true);
+    expect(normalizeEditorSettings({}).dataGridStripedRows).toBe(true);
+    expect(normalizeEditorSettings({ dataGridStripedRows: true }).dataGridStripedRows).toBe(true);
+    expect(normalizeEditorSettings({ dataGridStripedRows: false }).dataGridStripedRows).toBe(false);
+    expect(normalizeEditorSettings({ dataGridStripedRows: "false" } as any).dataGridStripedRows).toBe(true);
+    expect(normalizeEditorSettings({ dataGridStripedRows: null } as any).dataGridStripedRows).toBe(true);
   });
 
   it("keeps SQL-file save formatting disabled unless explicitly enabled", () => {
@@ -370,6 +446,13 @@ describe("normalizeEditorSettings", () => {
   it("migrates legacy open tab restore booleans", () => {
     expect(normalizeEditorSettings({ restoreOpenTabsOnLaunch: false } as any).openTabsRestoreMode).toBe("none");
     expect(normalizeEditorSettings({ restoreOpenTabsOnLaunch: true } as any).openTabsRestoreMode).toBe("all");
+  });
+
+  it("keeps auto-reload of restored data tabs off unless explicitly enabled", () => {
+    expect(normalizeEditorSettings({}).autoReloadRestoredDataTabsOnOpen).toBe(false);
+    expect(normalizeEditorSettings({ autoReloadRestoredDataTabsOnOpen: true }).autoReloadRestoredDataTabsOnOpen).toBe(true);
+    expect(normalizeEditorSettings({ autoReloadRestoredDataTabsOnOpen: "true" as any }).autoReloadRestoredDataTabsOnOpen).toBe(false);
+    expect(normalizeEditorSettings({ autoReloadRestoredDataTabsOnOpen: undefined }).autoReloadRestoredDataTabsOnOpen).toBe(false);
   });
 
   it("defaults the delete-time tab handling to closing tabs and preserves explicit modes", () => {
@@ -882,6 +965,24 @@ describe("normalizeEditorSettings - tabLayout", () => {
   });
 });
 
+describe("normalizeEditorSettings - sidebarPinDefaultDatabase", () => {
+  it("defaults sidebarPinDefaultDatabase to true", () => {
+    expect(normalizeEditorSettings({}).sidebarPinDefaultDatabase).toBe(true);
+  });
+
+  it("preserves explicit boolean values", () => {
+    expect(normalizeEditorSettings({ sidebarPinDefaultDatabase: false }).sidebarPinDefaultDatabase).toBe(false);
+    expect(normalizeEditorSettings({ sidebarPinDefaultDatabase: true }).sidebarPinDefaultDatabase).toBe(true);
+  });
+
+  it("falls back to default for non-boolean values", () => {
+    expect(normalizeEditorSettings({ sidebarPinDefaultDatabase: "false" } as any).sidebarPinDefaultDatabase).toBe(true);
+    expect(normalizeEditorSettings({ sidebarPinDefaultDatabase: undefined } as any).sidebarPinDefaultDatabase).toBe(true);
+    expect(normalizeEditorSettings({ sidebarPinDefaultDatabase: null } as any).sidebarPinDefaultDatabase).toBe(true);
+    expect(normalizeEditorSettings({ sidebarPinDefaultDatabase: 0 } as any).sidebarPinDefaultDatabase).toBe(true);
+  });
+});
+
 // --- Helpers for Pinia store tests ---
 
 function makeTestConfig(overrides: Partial<AiConfigItem> & { id: string }): AiConfigItem {
@@ -1161,6 +1262,15 @@ describe("settingsStore persisted settings initialization", () => {
     expect(saveEditorSettings).toHaveBeenCalledWith(expect.objectContaining({ fontSize: 17, theme: "xcode-dark", appLayout: "separated" }));
   });
 
+  it("seeds DEFAULT_CUSTOM_THEMES when updateEditorSettings receives empty customThemes", async () => {
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+
+    store.updateEditorSettings({ customThemes: [] });
+    expect(store.editorSettings.customThemes).toEqual(DEFAULT_CUSTOM_THEMES);
+    expect(store.editorSettings.activeCustomThemeId).toBe("default");
+  });
+
   it("migrates the legacy filter-editor preference in incremental settings updates", async () => {
     const loadEditorSettings = vi.fn().mockResolvedValue({});
     const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
@@ -1364,6 +1474,29 @@ describe("settingsStore persisted settings initialization", () => {
     const restartedStore = useSettingsStore();
     await restartedStore.initEditorSettings();
     expect(restartedStore.editorSettings.dataGridCrosshairHighlight).toBe(true);
+  });
+
+  it("loads, persists, and reloads data grid striped rows preference", async () => {
+    let persistedSettings: Record<string, unknown> = {};
+    const loadEditorSettings = vi.fn(async () => JSON.parse(JSON.stringify(persistedSettings)));
+    const saveEditorSettings = vi.fn(async (settings: Record<string, unknown>) => {
+      persistedSettings = JSON.parse(JSON.stringify(settings));
+    });
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+
+    expect(store.editorSettings.dataGridStripedRows).toBe(true);
+
+    await store.updateEditorSettingsAndPersist({ dataGridStripedRows: false });
+    expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ dataGridStripedRows: false }));
+
+    setActivePinia(createPinia());
+    const restartedStore = useSettingsStore();
+    await restartedStore.initEditorSettings();
+    expect(restartedStore.editorSettings.dataGridStripedRows).toBe(false);
   });
 
   it("loads, persists, and reloads hidden query editor line numbers", async () => {

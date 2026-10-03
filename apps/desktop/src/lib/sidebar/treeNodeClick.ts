@@ -72,7 +72,7 @@ const databaseChildGroupNodeTypes = new Set<TreeNodeType>([
   "group-packages",
   "group-types",
 ]);
-const displayPathObjectNodeTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "procedure", "function", "trigger", "event"]);
+const displayPathObjectNodeTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "procedure", "function", "trigger", "event", "sequence", "synonym", "package", "package-body", "type", "type-body"]);
 
 export function objectSourceKindForTreeNode(type: TreeNodeType): ObjectSourceKind | null {
   if (type === "view") return "VIEW";
@@ -198,9 +198,28 @@ export function copyNameForTreeNode(node: TreeNode): string {
 export function copyDisplayPathForTreeNode(node: TreeNode, connectionName: string): string | null {
   const connection = connectionName.trim();
   const database = node.database?.trim();
-  if (!connection || !database) return null;
-  if (node.type === "database") return `${connection}.${database}`;
+  const schema = (node.schema || (node.type === "schema" ? node.label : undefined))?.trim();
+  if (!connection) return null;
+  if (!database && !schema) return null;
+
+  if (node.type === "database") {
+    return database ? `${connection}.${database}` : null;
+  }
+
+  if (node.type === "schema") {
+    const parts = [connection];
+    if (database) parts.push(database);
+    if (schema && schema !== database) parts.push(schema);
+    return parts.length > 1 ? parts.join(".") : null;
+  }
+
   if (!displayPathObjectNodeTypes.has(node.type)) return null;
   const objectName = (node.objectName || (node.type === "table" ? node.tableName : undefined) || node.label).trim();
-  return objectName ? `${connection}.${database}.${objectName}` : null;
+  if (!objectName) return null;
+
+  const parts = [connection];
+  if (database) parts.push(database);
+  if (schema && schema !== database) parts.push(schema);
+  parts.push(objectName);
+  return parts.join(".");
 }

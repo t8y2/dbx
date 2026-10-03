@@ -127,6 +127,9 @@ export type DesktopIconTheme = "default" | "black";
 
 export type InterfaceLayout = "separated" | "classic";
 
+/** Content shown when no query tab is open. The intro mode keeps personal workspace data off the landing page. */
+export type WelcomePageMode = "intro" | "workspace";
+
 export type UpdateDownloadSource = "official" | "cnb";
 export type SqlSemanticDiagnosticsMode = "auto" | "enabled" | "disabled";
 export type OpenTabsRestoreMode = "all" | "pinned" | "none";
@@ -706,7 +709,7 @@ const TAB_LAYOUT_MODES = ["scroll", "wrap"] as const;
 export type TabLayoutMode = (typeof TAB_LAYOUT_MODES)[number];
 const TAB_PLACEMENTS = ["top", "bottom", "left", "right"] as const;
 export type TabPlacement = (typeof TAB_PLACEMENTS)[number];
-const TAB_GROUP_MODES = ["none", "database-type", "database", "connection"] as const;
+const TAB_GROUP_MODES = ["none", "database-type", "database", "connection", "sidebar"] as const;
 export type TabGroupMode = (typeof TAB_GROUP_MODES)[number];
 export interface TabGroupCustomization {
   name?: string;
@@ -766,7 +769,24 @@ export interface CustomThemeColors {
   builtin: string;
   background?: string;
   foreground?: string;
+  activeLine?: string;
+  selection?: string;
+  cursor?: string;
+  gutterBackground?: string;
+  lineNumber?: string;
+  matchingBracket?: string;
 }
+
+export const DEFAULT_CUSTOM_THEME_OPTIONAL_COLORS: Partial<Record<keyof CustomThemeColors, string>> = {
+  background: "#1e1e2e",
+  foreground: "#cdd6f4",
+  activeLine: "#313244",
+  selection: "#313244",
+  cursor: "#f5e0dc",
+  gutterBackground: "#181825",
+  lineNumber: "#6c7086",
+  matchingBracket: "#45475a",
+};
 
 export const DEFAULT_CUSTOM_THEME_COLORS: CustomThemeColors = {
   keyword: "#cba6f7",
@@ -882,6 +902,7 @@ export interface EditorSettings {
   confirmUnsavedSqlClose: boolean;
   appCloseUnsavedTabsMode: AppCloseUnsavedTabsMode;
   savedSqlOpenTargetMode: SavedSqlOpenTargetMode;
+  welcomePageMode: WelcomePageMode;
   compactTabTitle: boolean;
   tabLayout: TabLayoutMode;
   tabPlacement: TabPlacement;
@@ -963,6 +984,7 @@ export interface EditorSettings {
   dataGridAutoTransposeSingleRow: boolean;
   dataGridCellDetailButtonVisible: boolean;
   dataGridCrosshairHighlight: boolean;
+  dataGridStripedRows: boolean;
   dataGridMultiRowTranspose: boolean;
   dataGridHideNullColumns: boolean;
   dataGridBooleanDisplayMode: "dropdown" | "checkbox";
@@ -988,9 +1010,11 @@ export interface EditorSettings {
   sidebarGlobalSearchLocal: boolean;
   sidebarSearchOpenedDatabasesOnly: boolean;
   autoSelectActiveSidebarNode: boolean;
+  sidebarPinDefaultDatabase: boolean;
   sidebarBrowseObjectsOnDatabaseActivation: boolean;
   sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: number;
   openTabsRestoreMode: OpenTabsRestoreMode;
+  autoReloadRestoredDataTabsOnOpen: boolean;
   disconnectTabHandlingMode: DisconnectTabHandlingMode;
   deleteConnectionTabHandlingMode: DeleteConnectionTabHandlingMode;
   /** 删除连接时记住「连接名 → 数据库名」，新建同名同类型连接时自动回填并重绑保留的 SQL 页签。 */
@@ -1199,6 +1223,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   confirmUnsavedSqlClose: true,
   appCloseUnsavedTabsMode: "keep-drafts",
   savedSqlOpenTargetMode: "saved",
+  welcomePageMode: "intro",
   compactTabTitle: false,
   tabLayout: "scroll",
   tabPlacement: "top",
@@ -1257,6 +1282,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   dataGridAutoTransposeSingleRow: false,
   dataGridCellDetailButtonVisible: true,
   dataGridCrosshairHighlight: false,
+  dataGridStripedRows: true,
   dataGridMultiRowTranspose: false,
   dataGridHideNullColumns: false,
   dataGridBooleanDisplayMode: "dropdown",
@@ -1282,9 +1308,11 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sidebarGlobalSearchLocal: false,
   sidebarSearchOpenedDatabasesOnly: true,
   autoSelectActiveSidebarNode: false,
+  sidebarPinDefaultDatabase: true,
   sidebarBrowseObjectsOnDatabaseActivation: false,
   sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
   openTabsRestoreMode: "all",
+  autoReloadRestoredDataTabsOnOpen: false,
   disconnectTabHandlingMode: "close-tabs",
   deleteConnectionTabHandlingMode: "close-tabs",
   rememberConnectionDatabaseOnDelete: true,
@@ -1700,6 +1728,36 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
   const autoUpdateJdbc = typeof settings.autoUpdateJdbc === "boolean" ? settings.autoUpdateJdbc : legacyUpdateOptOut ? false : DEFAULT_EDITOR_SETTINGS.autoUpdateJdbc;
   const autoUpdateMcp = typeof settings.autoUpdateMcp === "boolean" ? settings.autoUpdateMcp : legacyUpdateOptOut ? false : DEFAULT_EDITOR_SETTINGS.autoUpdateMcp;
   const autoUpdatePlugins = typeof settings.autoUpdatePlugins === "boolean" ? settings.autoUpdatePlugins : legacyUpdateOptOut ? false : DEFAULT_EDITOR_SETTINGS.autoUpdatePlugins;
+  const customThemes = (() => {
+    if (Array.isArray(settings.customThemes) && settings.customThemes.length > 0) {
+      return settings.customThemes.map((theme) => {
+        const renamed = theme.name === "默认" ? { ...theme, name: "Custom" } : { ...theme };
+        return {
+          ...renamed,
+          colors: { ...DEFAULT_CUSTOM_THEME_COLORS, ...renamed.colors },
+          ddlColors: {
+            ...DEFAULT_CUSTOM_THEME_DDL_COLORS,
+            ...(renamed as any).ddlColors,
+          },
+        };
+      });
+    }
+    if (settings.customThemeColors && Object.keys(settings.customThemeColors).length > 0) {
+      return [
+        {
+          id: "migrated",
+          name: "Migrated",
+          colors: {
+            ...DEFAULT_CUSTOM_THEME_COLORS,
+            ...settings.customThemeColors,
+          },
+          ddlColors: { ...DEFAULT_CUSTOM_THEME_DDL_COLORS },
+        },
+      ];
+    }
+    return [...DEFAULT_CUSTOM_THEMES];
+  })();
+  const activeCustomThemeId = settings.activeCustomThemeId && customThemes.some((t) => t.id === settings.activeCustomThemeId) ? settings.activeCustomThemeId : (customThemes[0]?.id ?? "default");
   return {
     fontFamily: normalizeFontFamily(settings.fontFamily, DEFAULT_EDITOR_SETTINGS.fontFamily),
     fontSize: settings.fontSize ?? DEFAULT_EDITOR_SETTINGS.fontSize,
@@ -1712,35 +1770,8 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
       ...DEFAULT_CUSTOM_THEME_COLORS,
       ...settings.customThemeColors,
     },
-    customThemes: (() => {
-      if (Array.isArray(settings.customThemes) && settings.customThemes.length > 0) {
-        return settings.customThemes.map((theme) => {
-          const renamed = theme.name === "默认" ? { ...theme, name: "Custom" } : { ...theme };
-          return {
-            ...renamed,
-            colors: { ...DEFAULT_CUSTOM_THEME_COLORS, ...renamed.colors },
-            ddlColors: {
-              ...DEFAULT_CUSTOM_THEME_DDL_COLORS,
-              ...(renamed as any).ddlColors,
-            },
-          };
-        });
-      }
-      return settings.customThemeColors
-        ? [
-            {
-              id: "migrated",
-              name: "Migrated",
-              colors: {
-                ...DEFAULT_CUSTOM_THEME_COLORS,
-                ...settings.customThemeColors,
-              },
-              ddlColors: { ...DEFAULT_CUSTOM_THEME_DDL_COLORS },
-            },
-          ]
-        : [];
-    })(),
-    activeCustomThemeId: settings.activeCustomThemeId ?? "default",
+    customThemes,
+    activeCustomThemeId,
     executeMode: hasCurrentExecuteModeDefault && (settings.executeMode === "all" || settings.executeMode === "current") ? settings.executeMode : DEFAULT_EDITOR_SETTINGS.executeMode,
     executeModeDefaultVersion,
     executeAllOnBlankLine: settings.executeAllOnBlankLine === true,
@@ -1782,6 +1813,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     confirmUnsavedSqlClose: settings.confirmUnsavedSqlClose ?? DEFAULT_EDITOR_SETTINGS.confirmUnsavedSqlClose,
     appCloseUnsavedTabsMode: normalizeAppCloseUnsavedTabsMode(settings.appCloseUnsavedTabsMode),
     savedSqlOpenTargetMode: settings.savedSqlOpenTargetMode === "current" ? "current" : DEFAULT_EDITOR_SETTINGS.savedSqlOpenTargetMode,
+    welcomePageMode: settings.welcomePageMode === "workspace" ? "workspace" : DEFAULT_EDITOR_SETTINGS.welcomePageMode,
     compactTabTitle: settings.compactTabTitle ?? DEFAULT_EDITOR_SETTINGS.compactTabTitle,
     tabLayout: normalizeTabLayout(settings.tabLayout),
     tabPlacement: normalizeTabPlacement(settings.tabPlacement),
@@ -1840,6 +1872,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     dataGridAutoTransposeSingleRow: settings.dataGridAutoTransposeSingleRow === true,
     dataGridCellDetailButtonVisible: typeof settings.dataGridCellDetailButtonVisible === "boolean" ? settings.dataGridCellDetailButtonVisible : DEFAULT_EDITOR_SETTINGS.dataGridCellDetailButtonVisible,
     dataGridCrosshairHighlight: typeof settings.dataGridCrosshairHighlight === "boolean" ? settings.dataGridCrosshairHighlight : DEFAULT_EDITOR_SETTINGS.dataGridCrosshairHighlight,
+    dataGridStripedRows: typeof settings.dataGridStripedRows === "boolean" ? settings.dataGridStripedRows : DEFAULT_EDITOR_SETTINGS.dataGridStripedRows,
     dataGridMultiRowTranspose: settings.dataGridMultiRowTranspose === true,
     dataGridHideNullColumns: settings.dataGridHideNullColumns === true,
     dataGridBooleanDisplayMode: settings.dataGridBooleanDisplayMode === "checkbox" ? "checkbox" : "dropdown",
@@ -1865,6 +1898,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     sidebarGlobalSearchLocal: typeof settings.sidebarGlobalSearchLocal === "boolean" ? settings.sidebarGlobalSearchLocal : DEFAULT_EDITOR_SETTINGS.sidebarGlobalSearchLocal,
     sidebarSearchOpenedDatabasesOnly: typeof settings.sidebarSearchOpenedDatabasesOnly === "boolean" ? settings.sidebarSearchOpenedDatabasesOnly : DEFAULT_EDITOR_SETTINGS.sidebarSearchOpenedDatabasesOnly,
     autoSelectActiveSidebarNode: settings.autoSelectActiveSidebarNode ?? DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode,
+    sidebarPinDefaultDatabase: typeof settings.sidebarPinDefaultDatabase === "boolean" ? settings.sidebarPinDefaultDatabase : DEFAULT_EDITOR_SETTINGS.sidebarPinDefaultDatabase,
     sidebarBrowseObjectsOnDatabaseActivation:
       typeof settings.sidebarBrowseObjectsOnDatabaseActivation === "boolean"
         ? settings.sidebarBrowseObjectsOnDatabaseActivation
@@ -1884,6 +1918,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
         }
       ).restoreOpenTabsOnLaunch,
     ),
+    autoReloadRestoredDataTabsOnOpen: settings.autoReloadRestoredDataTabsOnOpen === true,
     disconnectTabHandlingMode: normalizeDisconnectTabHandlingMode(
       (settings as Partial<EditorSettings>).disconnectTabHandlingMode,
       (
@@ -2572,7 +2607,7 @@ export const useSettingsStore = defineStore("settings", () => {
       };
     }
     if (partial.customThemes !== undefined) {
-      editorSettings.value.customThemes = Array.isArray(partial.customThemes) ? partial.customThemes : editorSettings.value.customThemes;
+      editorSettings.value.customThemes = Array.isArray(partial.customThemes) && partial.customThemes.length > 0 ? partial.customThemes : [...DEFAULT_CUSTOM_THEMES];
     }
     if (partial.activeCustomThemeId !== undefined) {
       editorSettings.value.activeCustomThemeId = partial.activeCustomThemeId;
@@ -2583,6 +2618,7 @@ export const useSettingsStore = defineStore("settings", () => {
       const activeTheme = themes.find((t) => t.id === activeId) || themes[0];
       if (activeTheme) {
         editorSettings.value.customThemeColors = { ...activeTheme.colors };
+        editorSettings.value.activeCustomThemeId = activeTheme.id;
       }
     }
     if (partial.executeMode !== undefined) editorSettings.value.executeMode = partial.executeMode;
@@ -2627,6 +2663,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.confirmUnsavedSqlClose !== undefined) editorSettings.value.confirmUnsavedSqlClose = partial.confirmUnsavedSqlClose;
     if (partial.appCloseUnsavedTabsMode !== undefined) editorSettings.value.appCloseUnsavedTabsMode = normalizeAppCloseUnsavedTabsMode(partial.appCloseUnsavedTabsMode);
     if (partial.savedSqlOpenTargetMode !== undefined) editorSettings.value.savedSqlOpenTargetMode = partial.savedSqlOpenTargetMode === "current" ? "current" : "saved";
+    if (partial.welcomePageMode !== undefined) editorSettings.value.welcomePageMode = partial.welcomePageMode === "workspace" ? "workspace" : DEFAULT_EDITOR_SETTINGS.welcomePageMode;
     if (partial.compactTabTitle !== undefined) editorSettings.value.compactTabTitle = partial.compactTabTitle;
     if (partial.tabLayout !== undefined) editorSettings.value.tabLayout = normalizeTabLayout(partial.tabLayout);
     if (partial.tabPlacement !== undefined) editorSettings.value.tabPlacement = normalizeTabPlacement(partial.tabPlacement);
@@ -2692,6 +2729,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.dataGridAutoTransposeSingleRow !== undefined) editorSettings.value.dataGridAutoTransposeSingleRow = partial.dataGridAutoTransposeSingleRow === true;
     if (partial.dataGridCellDetailButtonVisible !== undefined) editorSettings.value.dataGridCellDetailButtonVisible = typeof partial.dataGridCellDetailButtonVisible === "boolean" ? partial.dataGridCellDetailButtonVisible : DEFAULT_EDITOR_SETTINGS.dataGridCellDetailButtonVisible;
     if (partial.dataGridCrosshairHighlight !== undefined) editorSettings.value.dataGridCrosshairHighlight = typeof partial.dataGridCrosshairHighlight === "boolean" ? partial.dataGridCrosshairHighlight : DEFAULT_EDITOR_SETTINGS.dataGridCrosshairHighlight;
+    if (partial.dataGridStripedRows !== undefined) editorSettings.value.dataGridStripedRows = typeof partial.dataGridStripedRows === "boolean" ? partial.dataGridStripedRows : DEFAULT_EDITOR_SETTINGS.dataGridStripedRows;
     if (partial.dataGridMultiRowTranspose !== undefined) editorSettings.value.dataGridMultiRowTranspose = partial.dataGridMultiRowTranspose === true;
     if (partial.dataGridHideNullColumns !== undefined) editorSettings.value.dataGridHideNullColumns = partial.dataGridHideNullColumns === true;
     if (partial.dataGridBooleanDisplayMode !== undefined) editorSettings.value.dataGridBooleanDisplayMode = partial.dataGridBooleanDisplayMode === "dropdown" ? "dropdown" : "checkbox";
@@ -2717,8 +2755,10 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sidebarGlobalSearchLocal !== undefined) editorSettings.value.sidebarGlobalSearchLocal = partial.sidebarGlobalSearchLocal;
     if (partial.sidebarSearchOpenedDatabasesOnly !== undefined) editorSettings.value.sidebarSearchOpenedDatabasesOnly = partial.sidebarSearchOpenedDatabasesOnly;
     if (partial.autoSelectActiveSidebarNode !== undefined) editorSettings.value.autoSelectActiveSidebarNode = partial.autoSelectActiveSidebarNode;
+    if (partial.sidebarPinDefaultDatabase !== undefined) editorSettings.value.sidebarPinDefaultDatabase = partial.sidebarPinDefaultDatabase === true;
     if (partial.sidebarBrowseObjectsOnDatabaseActivation !== undefined) editorSettings.value.sidebarBrowseObjectsOnDatabaseActivation = partial.sidebarBrowseObjectsOnDatabaseActivation === true;
     if (partial.openTabsRestoreMode !== undefined) editorSettings.value.openTabsRestoreMode = normalizeOpenTabsRestoreMode(partial.openTabsRestoreMode);
+    if (partial.autoReloadRestoredDataTabsOnOpen !== undefined) editorSettings.value.autoReloadRestoredDataTabsOnOpen = partial.autoReloadRestoredDataTabsOnOpen === true;
     if (partial.disconnectTabHandlingMode !== undefined) editorSettings.value.disconnectTabHandlingMode = normalizeDisconnectTabHandlingMode(partial.disconnectTabHandlingMode);
     if (partial.deleteConnectionTabHandlingMode !== undefined) editorSettings.value.deleteConnectionTabHandlingMode = normalizeDeleteConnectionTabHandlingMode(partial.deleteConnectionTabHandlingMode);
     if (partial.rememberConnectionDatabaseOnDelete !== undefined) editorSettings.value.rememberConnectionDatabaseOnDelete = partial.rememberConnectionDatabaseOnDelete === true;

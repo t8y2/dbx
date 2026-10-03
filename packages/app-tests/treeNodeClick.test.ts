@@ -262,6 +262,119 @@ test("copying a MySQL display path uses connection, database, and object names",
   );
 });
 
+test("copying display paths for schema-enabled databases (PostgreSQL, Oracle, SQL Server, SQLite)", () => {
+  // PostgreSQL schema node
+  assert.equal(
+    copyDisplayPathForTreeNode(
+      {
+        id: "conn:mydb:public",
+        label: "public",
+        type: "schema",
+        connectionId: "conn",
+        database: "mydb",
+        schema: "public",
+      },
+      "prod-pg",
+    ),
+    "prod-pg.mydb.public",
+  );
+  // PostgreSQL table under schema
+  assert.equal(
+    copyDisplayPathForTreeNode(
+      {
+        id: "conn:mydb:public:users",
+        label: "users",
+        type: "table",
+        connectionId: "conn",
+        database: "mydb",
+        schema: "public",
+        tableName: "users",
+      },
+      "prod-pg",
+    ),
+    "prod-pg.mydb.public.users",
+  );
+  // PostgreSQL routine under schema
+  assert.equal(
+    copyDisplayPathForTreeNode(
+      {
+        id: "conn:mydb:public:calculate_total",
+        label: "calculate_total",
+        type: "function",
+        connectionId: "conn",
+        database: "mydb",
+        schema: "public",
+        objectName: "calculate_total",
+      },
+      "prod-pg",
+    ),
+    "prod-pg.mydb.public.calculate_total",
+  );
+  // Oracle table (database equals schema or database omitted)
+  assert.equal(
+    copyDisplayPathForTreeNode(
+      {
+        id: "conn:HR:EMPLOYEES",
+        label: "EMPLOYEES",
+        type: "table",
+        connectionId: "conn",
+        database: "HR",
+        schema: "HR",
+        tableName: "EMPLOYEES",
+      },
+      "dev-oracle",
+    ),
+    "dev-oracle.HR.EMPLOYEES",
+  );
+  // SQL Server procedure with distinct database and schema
+  assert.equal(
+    copyDisplayPathForTreeNode(
+      {
+        id: "conn:master:dbo:sp_audit",
+        label: "sp_audit",
+        type: "procedure",
+        connectionId: "conn",
+        database: "master",
+        schema: "dbo",
+        objectName: "sp_audit",
+      },
+      "dev-mssql",
+    ),
+    "dev-mssql.master.dbo.sp_audit",
+  );
+  // SQLite table (main database)
+  assert.equal(
+    copyDisplayPathForTreeNode(
+      {
+        id: "conn:main:items",
+        label: "items",
+        type: "table",
+        connectionId: "conn",
+        database: "main",
+        tableName: "items",
+      },
+      "local-sqlite",
+    ),
+    "local-sqlite.main.items",
+  );
+  // Additional object types: sequence, package
+  assert.equal(
+    copyDisplayPathForTreeNode(
+      {
+        id: "conn:mydb:public:user_id_seq",
+        label: "user_id_seq",
+        type: "sequence",
+        connectionId: "conn",
+        database: "mydb",
+        schema: "public",
+        objectName: "user_id_seq",
+      },
+      "prod-pg",
+    ),
+    "prod-pg.mydb.public.user_id_seq",
+  );
+});
+
 test("copying a display path rejects incomplete and synthetic nodes", () => {
   assert.equal(
     copyDisplayPathForTreeNode(

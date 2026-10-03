@@ -315,7 +315,6 @@ mod tests {
     use reqwest::header::{HeaderMap, HeaderValue, CONTENT_RANGE, ETAG};
     use std::io::{Read, Write};
     use std::net::{Shutdown, TcpListener};
-    use std::str::FromStr;
     use std::thread;
     use std::time::Duration;
 

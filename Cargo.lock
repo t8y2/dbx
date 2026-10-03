@@ -2198,6 +2198,7 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -2233,12 +2234,14 @@ dependencies = [
  "futures",
  "jsonwebtoken",
  "keyring",
+ "libc",
  "log",
  "minijinja",
  "mongodb",
  "mysql_async",
  "nix 0.31.3",
  "notify",
+ "pbkdf2 0.12.2",
  "percent-encoding",
  "portpicker",
  "prometheus-parse",
@@ -2268,6 +2271,7 @@ dependencies = [
  "uuid",
  "webpki-roots 0.26.11",
  "windows-sys 0.61.2",
+ "zeroize",
  "zip",
  "zstd",
 ]
@@ -2526,20 +2530,25 @@ version = "0.4.105"
 dependencies = [
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "chrono",
  "dbx-core",
  "dirs",
  "env_logger",
  "futures",
+ "jsonwebtoken",
  "log",
  "mysql_async",
+ "rand 0.8.7",
  "reqwest 0.12.28",
  "rmcp",
+ "rsa 0.9.10",
  "rustls 0.23.43",
  "rustls-pemfile 2.2.0",
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sqlparser",
  "tempfile",
  "tokio",
@@ -2832,6 +2841,7 @@ dependencies = [
  "const-oid 0.9.6",
  "der_derive",
  "flagset",
+ "pem-rfc7468 0.7.0",
  "zeroize",
 ]
 
@@ -4933,7 +4943,7 @@ dependencies = [
  "p384",
  "p521",
  "rand_core 0.10.1",
- "rsa",
+ "rsa 0.10.0-rc.16",
  "sec1",
  "sha1 0.11.0",
  "sha2 0.11.0",
@@ -6092,6 +6102,7 @@ dependencies = [
  "rand 0.8.7",
  "serde",
  "smallvec",
+ "zeroize",
 ]
 
 [[package]]
@@ -6146,6 +6157,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+ "libm",
 ]
 
 [[package]]
@@ -6922,6 +6934,17 @@ dependencies = [
  "atomic-waker",
  "fastrand",
  "futures-io",
+]
+
+[[package]]
+name = "pkcs1"
+version = "0.7.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8ffb9f10fa047879315e6625af03c164b16962a5368d724ed16323b68ace47f"
+dependencies = [
+ "der 0.7.10",
+ "pkcs8 0.10.2",
+ "spki 0.7.3",
 ]
 
 [[package]]
@@ -7919,6 +7942,26 @@ dependencies = [
 
 [[package]]
 name = "rsa"
+version = "0.9.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8573f03f5883dcaebdfcf4725caa1ecb9c15b2ef50c43a07b816e06799bb12d"
+dependencies = [
+ "const-oid 0.9.6",
+ "digest 0.10.7",
+ "num-bigint-dig",
+ "num-integer",
+ "num-traits",
+ "pkcs1 0.7.5",
+ "pkcs8 0.10.2",
+ "rand_core 0.6.4",
+ "signature 2.2.0",
+ "spki 0.7.3",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "rsa"
 version = "0.10.0-rc.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6fb9fd8c1edd9e6a2693623baf0fe77ff05ce022a5d7746900ffc38a15c233de"
@@ -7927,7 +7970,7 @@ dependencies = [
  "crypto-bigint",
  "crypto-primes",
  "digest 0.11.3",
- "pkcs1",
+ "pkcs1 0.8.0-rc.4",
  "pkcs8 0.11.0-rc.11",
  "rand_core 0.10.1",
  "sha2 0.11.0",
@@ -8023,13 +8066,13 @@ dependencies = [
  "pageant",
  "pbkdf2 0.12.2",
  "pbkdf2 0.13.0",
- "pkcs1",
+ "pkcs1 0.8.0-rc.4",
  "pkcs5",
  "pkcs8 0.11.0-rc.11",
  "polyval 0.7.3",
  "rand 0.10.2",
  "rand_core 0.10.1",
- "rsa",
+ "rsa 0.10.0-rc.16",
  "russh-cryptovec",
  "russh-util",
  "salsa20",
@@ -8969,6 +9012,7 @@ version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
 dependencies = [
+ "digest 0.10.7",
  "rand_core 0.6.4",
 ]
 
@@ -9916,7 +9960,7 @@ dependencies = [
  "serde_with",
  "swift-rs",
  "thiserror 2.0.19",
- "toml 1.1.4+spec-1.1.0",
+ "toml 0.9.12+spec-1.1.0",
  "url",
  "urlpattern",
  "uuid",

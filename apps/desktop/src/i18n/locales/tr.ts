@@ -1030,6 +1030,7 @@ export default withEnglishFallback({
     searchDatabasePlaceholder: "Veritabanı türlerinde ara",
     searchResults: "Arama sonuçları",
     databaseCategories: "Kategoriler",
+    databaseCategoryAll: "Tümü",
     databaseCategorySql: "İlişkisel",
     databaseCategoryAnalytics: "Analitik",
     databaseCategoryDomestic: "Çin VT'leri",

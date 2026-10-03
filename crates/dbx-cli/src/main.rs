@@ -1,4 +1,5 @@
 mod agent_skill;
+mod connections;
 
 use std::{env, path::PathBuf, process::ExitCode, sync::Arc};
 
@@ -100,6 +101,8 @@ struct Flags {
     max_rows: Option<usize>,
     timeout_ms: Option<u64>,
     file: Option<PathBuf>,
+    passphrase_file: Option<PathBuf>,
+    initialize: bool,
     out: Option<PathBuf>,
     notes: Option<PathBuf>,
     lang: Option<String>,
@@ -107,6 +110,7 @@ struct Flags {
     allow_writes: bool,
     allow_dangerous: bool,
     force: bool,
+    yes: bool,
     help: bool,
     version: bool,
 }
@@ -220,7 +224,7 @@ async fn run(argv: Vec<String>) -> Result<String, (CliError, bool)> {
         let db_path = dbx_mcp::paths::storage_db_path()
             .map_err(|message| (CliError::new("CONNECTION_STORE_ERROR", message), json_output))?;
         Arc::new(
-            LocalBackend::open(&db_path)
+            LocalBackend::open_for_connection_import(&db_path, flags.initialize)
                 .await
                 .map_err(|message| (CliError::new("CONNECTION_STORE_ERROR", message), json_output))?,
         )
@@ -232,9 +236,8 @@ async fn run(argv: Vec<String>) -> Result<String, (CliError, bool)> {
 
 async fn run_with_backend(backend: &dyn DbxBackend, flags: Flags) -> Result<String, CliError> {
     let args = &flags.args;
-    if args.first().is_some_and(|arg| arg == "connections") && args.get(1).is_some_and(|arg| arg == "list") {
-        ensure_arg_count(args, 2, "dbx connections list")?;
-        return format_connections(&backend.load_connections().await.map_err(store_error)?, flags.format);
+    if args.first().is_some_and(|arg| arg == "connections") {
+        return connections::run(backend, &flags).await;
     }
     if args.first().is_some_and(|arg| arg == "schema") && args.get(1).is_some_and(|arg| arg == "list") {
         ensure_arg_count(args, 3, "dbx schema list")?;
@@ -600,6 +603,8 @@ fn parse_flags(argv: &[String]) -> Result<Flags, CliError> {
         max_rows: None,
         timeout_ms: None,
         file: None,
+        passphrase_file: None,
+        initialize: false,
         out: None,
         notes: None,
         lang: None,
@@ -607,6 +612,7 @@ fn parse_flags(argv: &[String]) -> Result<Flags, CliError> {
         allow_writes: false,
         allow_dangerous: false,
         force: false,
+        yes: false,
         help: false,
         version: false,
     };
@@ -648,6 +654,10 @@ fn parse_flags(argv: &[String]) -> Result<Flags, CliError> {
             "--timeout" => {
                 flags.timeout_ms = Some(duration_ms(&option_value(argv, &mut index, "--timeout")?, "--timeout")?)
             }
+            "--initialize" => flags.initialize = true,
+            "--passphrase-file" => {
+                flags.passphrase_file = Some(PathBuf::from(option_value(argv, &mut index, "--passphrase-file")?))
+            }
             "--file" => flags.file = Some(PathBuf::from(option_value(argv, &mut index, "--file")?)),
             "--out" => flags.out = Some(PathBuf::from(option_value(argv, &mut index, "--out")?)),
             "--notes" => flags.notes = Some(PathBuf::from(option_value(argv, &mut index, "--notes")?)),
@@ -656,8 +666,12 @@ fn parse_flags(argv: &[String]) -> Result<Flags, CliError> {
             "--allow-writes" => flags.allow_writes = true,
             "--allow-dangerous-sql" => flags.allow_dangerous = true,
             "--force" => flags.force = true,
+            "--yes" => flags.yes = true,
             value if value.starts_with('-') => {
-                return Err(CliError::new("UNKNOWN_OPTION", format!("Unknown option: {value}")))
+                return Err(CliError::new(
+                    "UNKNOWN_OPTION",
+                    "Unknown option. Run dbx --help; credentials must not be passed as command-line arguments.",
+                ))
             }
             _ => flags.args.push(arg.clone()),
         }
@@ -669,7 +683,9 @@ fn parse_flags(argv: &[String]) -> Result<Flags, CliError> {
 fn option_value(argv: &[String], index: &mut usize, option: &'static str) -> Result<String, CliError> {
     *index += 1;
     argv.get(*index)
-        .filter(|value| !value.starts_with('-'))
+        .filter(|value| {
+            !value.starts_with('-') || (matches!(option, "--file" | "--passphrase-file") && value.as_str() == "-")
+        })
         .cloned()
         .ok_or_else(|| CliError::new("INVALID_OPTION", format!("{option} requires a value.")))
 }
@@ -703,6 +719,18 @@ fn duration_ms(value: &str, option: &'static str) -> Result<u64, CliError> {
 }
 
 fn validate_agent_only_flags(flags: &Flags) -> Result<(), CliError> {
+    if (flags.passphrase_file.is_some() || flags.initialize)
+        && !(flags.args.first().is_some_and(|arg| arg == "connections")
+            && flags.args.get(1).is_some_and(|arg| arg == "import"))
+    {
+        return Err(CliError::new(
+            "INVALID_OPTION",
+            "--passphrase-file and --initialize are only supported by connections import.",
+        ));
+    }
+    if flags.yes && !flags.args.first().is_some_and(|arg| arg == "connections") {
+        return Err(CliError::new("INVALID_OPTION", "--yes is only supported by dbx connections remove/import."));
+    }
     if flags.args.first().is_some_and(|arg| arg == "agent") {
         return Ok(());
     }
@@ -753,23 +781,38 @@ fn format_connections(connections: &[ConnectionConfig], format: OutputFormat) ->
         .iter()
         .map(|connection| {
             optional_object([
-                ("name", Some(json!(connection.name))),
+                ("id", Some(json!(dbx_core::persistence::connection_management::safe_connection_text(&connection.id)))),
+                ("read_only", Some(json!(connection.read_only))),
+                (
+                    "name",
+                    Some(json!(dbx_core::persistence::connection_management::safe_connection_text(&connection.name))),
+                ),
                 ("type", Some(json!(db_type_name(connection.db_type)))),
-                ("host", Some(json!(connection.host))),
+                (
+                    "host",
+                    Some(json!(dbx_core::persistence::connection_management::safe_connection_text(&connection.host))),
+                ),
                 ("port", Some(json!(connection.port))),
-                ("database", connection.database.clone().filter(|value| !value.is_empty()).map(|value| json!(value))),
+                (
+                    "database",
+                    connection
+                        .database
+                        .as_deref()
+                        .filter(|value| !value.is_empty())
+                        .map(|value| json!(dbx_core::persistence::connection_management::safe_connection_text(value))),
+                ),
             ])
         })
         .collect();
     match format {
         OutputFormat::Json => json_string(&json!({ "connections": rows })),
-        OutputFormat::Csv => Ok(csv_table(&["name", "type", "host", "port", "database"], &rows)),
+        OutputFormat::Csv => Ok(csv_table(&["id", "name", "type", "host", "port", "database", "read_only"], &rows)),
         OutputFormat::Table => Ok(format!(
             "{}\n",
             markdown_table(
-                &["Name", "Type", "Host", "Port", "Database"],
+                &["ID", "Name", "Type", "Host", "Port", "Database", "Read only"],
                 &rows,
-                &["name", "type", "host", "port", "database"]
+                &["id", "name", "type", "host", "port", "database", "read_only"]
             )
         )),
     }
@@ -1028,7 +1071,7 @@ fn csv_cell(value: &str) -> String {
 }
 
 fn usage() -> &'static str {
-    "Usage:\n  dbx doctor [--json]\n  dbx capabilities [--json]\n  dbx agent setup [--skills-dir path] [--force] [--json]\n  dbx agent status [--skills-dir path] [--json]\n  dbx connections list [--json]\n  dbx schema list <connection> [--schema name] [--json]\n  dbx schema describe <connection> <table> [--schema name] [--json]\n  dbx query <connection> <sql> [--file path] [--limit n] [--timeout 10s] [--allow-writes] [--allow-dangerous-sql] [--json]\n  dbx context <connection> [--schema name] [--tables a,b] [--max-tables n] [--json]\n  dbx dbml <connection> [--out path] [--notes path] [--schema name] [--database name] [--tables a,b]\n  dbx docs <connection> [--out path] [--notes path] [--lang code] [--schema name] [--database name] [--tables a,b]\n  dbx open <connection> <table> [--schema name] [--database name] [--json]"
+    "Usage:\n  dbx doctor [--json]\n  dbx capabilities [--json]\n  dbx agent setup [--skills-dir path] [--force] [--json]\n  dbx agent status [--skills-dir path] [--json]\n  dbx connections list [--json]\n  dbx connections get <id-or-name> [--json]\n  dbx connections import --file <path|-> [--passphrase-file <path|->] [--initialize] [--yes] [--json]\n  dbx connections add --file <path|-> [--json]\n  dbx connections update <id-or-name> --file <path|-> [--json]\n  dbx connections remove <id-or-name> --yes [--json]\n  dbx schema list <connection> [--schema name] [--json]\n  dbx schema describe <connection> <table> [--schema name] [--json]\n  dbx query <connection> <sql> [--file path] [--limit n] [--timeout 10s] [--allow-writes] [--allow-dangerous-sql] [--json]\n  dbx context <connection> [--schema name] [--tables a,b] [--max-tables n] [--json]\n  dbx dbml <connection> [--out path] [--notes path] [--schema name] [--database name] [--tables a,b]\n  dbx docs <connection> [--out path] [--notes path] [--lang code] [--schema name] [--database name] [--tables a,b]\n  dbx open <connection> <table> [--schema name] [--database name] [--json]"
 }
 
 #[cfg(test)]

@@ -191,6 +191,13 @@ pub struct McpAddConnectionRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct McpUpdateConnectionRequest {
+    pub connection_id: String,
+    pub changes: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct McpDuplicateConnectionRequest {
     pub source_id: String,
     pub copy_id: String,
@@ -807,6 +814,23 @@ pub async fn mcp_add_connection(
     let saved = state.app.storage.add_connection_for_mcp(body.config).await.map_err(AppError::from)?;
     state.app.session_credentials.clear_connection(&saved.id);
     state.app.remove_connection_pools_detached(&saved.id).await;
+    state.app.configs.write().await.insert(saved.id.clone(), saved.clone());
+    Ok(Json(saved))
+}
+
+pub async fn mcp_update_connection(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<McpUpdateConnectionRequest>,
+) -> Result<Json<ConnectionConfig>, AppError> {
+    let saved =
+        state.app.storage.update_connection_for_mcp(&body.connection_id, body.changes).await.map_err(AppError::from)?;
+    state.app.session_credentials.clear_connection(&saved.id);
+    state.app.remove_connection_pools_detached(&saved.id).await;
+    state.app.reset_connection_transport(&saved.id).await;
+    state.app.write_unlock_windows.lock(&saved.id).await;
+    state.app.nacos_registry.drop_connection(&saved.id).await;
+    #[cfg(feature = "mq-admin")]
+    state.app.mq_registry.drop_connection(&saved.id).await;
     state.app.configs.write().await.insert(saved.id.clone(), saved.clone());
     Ok(Json(saved))
 }
@@ -1583,7 +1607,8 @@ mod tests {
         // Simulate a Web UI edit after the MCP client last observed the list.
         existing.host = dir.join("after.db").to_string_lossy().into_owned();
         state.app.storage.save_connections(std::slice::from_ref(&existing)).await.unwrap();
-        let added = sqlite_config("added", &dir.join("added.db").to_string_lossy());
+        let mut added = sqlite_config("added", &dir.join("added.db").to_string_lossy());
+        added.name = "Added".to_string();
         let result =
             mcp_add_connection(State(state.clone()), Json(McpAddConnectionRequest { config: added.clone() })).await;
         assert!(result.is_ok());
@@ -1632,6 +1657,72 @@ mod tests {
         assert_eq!(layout["order"][0]["children"][1]["id"], copied.id);
         assert_eq!(layout["order"][1]["id"], added.id);
 
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn mcp_connection_update_preserves_secrets_and_rechecks_scope() {
+        let (state, dir) = test_web_state().await;
+        let mut config = sqlite_config("patch-target", ":memory:");
+        config.password = "web-fixture-secret".to_string();
+        state.app.storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+        state
+            .app
+            .storage
+            .save_mcp_global_policy(&McpGlobalPolicy { read_only: false, ..Default::default() })
+            .await
+            .unwrap();
+        let changed = super::mcp_update_connection(
+            State(state.clone()),
+            Json(super::McpUpdateConnectionRequest {
+                connection_id: config.id.clone(),
+                changes: serde_json::json!({"read_only": true, "name":"Changed"}),
+            }),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{}", error.message))
+        .0;
+        assert!(changed.read_only);
+        assert_eq!(changed.password, "web-fixture-secret");
+        assert_eq!(state.app.configs.read().await.get(&config.id), Some(&changed));
+        state
+            .app
+            .storage
+            .save_mcp_global_policy(&McpGlobalPolicy { read_only: true, ..Default::default() })
+            .await
+            .unwrap();
+        let blocked = super::mcp_update_connection(
+            State(state.clone()),
+            Json(super::McpUpdateConnectionRequest {
+                connection_id: config.id.clone(),
+                changes: serde_json::json!({"read_only": false}),
+            }),
+        )
+        .await
+        .err()
+        .expect("global policy must block update");
+        assert!(blocked.message.contains("MCP_READ_ONLY"));
+        state
+            .app
+            .storage
+            .save_mcp_global_policy(&McpGlobalPolicy {
+                read_only: false,
+                allowed_connection_ids: Some(vec![]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let blocked = super::mcp_update_connection(
+            State(state.clone()),
+            Json(super::McpUpdateConnectionRequest {
+                connection_id: config.id,
+                changes: serde_json::json!({"read_only": false}),
+            }),
+        )
+        .await
+        .err()
+        .expect("connection scope must block update");
+        assert!(blocked.message.contains("CONNECTION_OUT_OF_SCOPE"));
         let _ = std::fs::remove_dir_all(dir);
     }
 

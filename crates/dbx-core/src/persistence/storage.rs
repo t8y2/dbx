@@ -5904,6 +5904,32 @@ fn ensure_mcp_connection_change_allowed_in_tx(
     Ok(())
 }
 
+fn ensure_unique_connection_name_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    name: &str,
+    except_id: Option<&str>,
+) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err("INVALID_CONNECTION: connection name must not be empty".to_string());
+    }
+    let mut statement = tx.prepare("SELECT id, config_json FROM connections").map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .map_err(|error| error.to_string())?;
+    for row in rows {
+        let (id, json) = row.map_err(|error| error.to_string())?;
+        if except_id == Some(id.as_str()) {
+            continue;
+        }
+        let existing: ConnectionConfig =
+            serde_json::from_str(&json).map_err(|_| "CONNECTION_LOAD_ERROR: invalid saved connection".to_string())?;
+        if existing.name.trim().to_lowercase() == name.trim().to_lowercase() {
+            return Err("CONNECTION_ALREADY_EXISTS: connection name already exists".to_string());
+        }
+    }
+    Ok(())
+}
+
 fn sanitized_connection_config(config: &ConnectionConfig) -> ConnectionConfig {
     let mut sanitized = config.clone().canonicalized();
     sanitized.password = String::new();
@@ -6375,17 +6401,222 @@ impl Storage {
         .await
     }
 
+    /// Atomically add a validated export, without replacing any existing configuration.
+    /// Preview does not write connection rows, layout, profiles, or secret-key material.
+    pub async fn import_connections_for_mcp(
+        &self,
+        input: serde_json::Value,
+        dry_run: bool,
+    ) -> Result<super::connection_import::ConnectionImportReport, String> {
+        use super::connection_import::{parse_bundle, plan_import};
+        let bundle = parse_bundle(input)?;
+        let check_policy = move |policy: &McpGlobalPolicy| -> Result<(), String> {
+            if policy
+                .allowed_tool_names
+                .as_ref()
+                .is_some_and(|names| !names.iter().any(|name| name == "dbx_import_connections"))
+            {
+                return Err("TOOL_OUT_OF_SCOPE: Import is not allowed by MCP policy.".into());
+            }
+            if policy.allowed_connection_ids.is_some() || !policy.allowed_group_ids.is_empty() {
+                return Err("CONNECTION_OUT_OF_SCOPE: Import is disabled in scoped sessions.".into());
+            }
+            if !dry_run && policy.read_only {
+                return Err("MCP_READ_ONLY: Global MCP read-only mode blocks connection imports.".into());
+            }
+            Ok(())
+        };
+        check_policy(&self.load_mcp_global_policy().await?.policy())?;
+        let needs_key = bundle.connections.iter().any(connection_config_has_inline_secrets)
+            || bundle.profiles.iter().any(|profile| {
+                let mut clean = profile.clone();
+                clean.scrub_secrets();
+                clean != *profile
+            });
+        let codec = if dry_run { None } else { Some(self.secret_codec_for_write(needs_key).await?) };
+        self.with_conn(move |conn| {
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|_| "CONNECTION_STORE_ERROR".to_string())?;
+            check_policy(&load_mcp_global_policy_in_tx(&tx)?)?;
+            let existing = {
+                let mut stmt = tx
+                    .prepare("SELECT config_json FROM connections ORDER BY rowid")
+                    .map_err(|_| "CONNECTION_STORE_ERROR".to_string())?;
+                let rows = stmt
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .map_err(|_| "CONNECTION_STORE_ERROR".to_string())?;
+                let mut configs = Vec::new();
+                for row in rows {
+                    configs.push(
+                        serde_json::from_str::<ConnectionConfig>(
+                            &row.map_err(|_| "CONNECTION_STORE_ERROR".to_string())?,
+                        )
+                        .map_err(|_| "CONNECTION_STORE_ERROR: Invalid existing configuration.".to_string())?,
+                    );
+                }
+                configs
+            };
+            let current: Option<String> = tx
+                .query_row("SELECT layout_json FROM sidebar_layout WHERE id=1", [], |row| row.get(0))
+                .optional()
+                .map_err(|_| "CONNECTION_STORE_ERROR".to_string())?;
+            let layout = current
+                .map(|value| serde_json::from_str(&value).map_err(|_| "CONNECTION_STORE_ERROR".to_string()))
+                .transpose()?;
+            let plan = plan_import(bundle, &existing, layout, dry_run)?;
+            if !dry_run && !plan.connections.is_empty() {
+                let codec = codec.as_ref().expect("apply codec");
+                for config in &plan.connections {
+                    persist_connection_in_tx(&tx, codec, config)?;
+                }
+                // New profile IDs are always remapped, so existing profiles and their secrets remain untouched.
+                for profile in &plan.profiles {
+                    let mut clean = profile.clone();
+                    clean.scrub_secrets();
+                    let json = serde_json::to_string(&clean).map_err(|_| "CONNECTION_STORE_ERROR".to_string())?;
+                    tx.execute(
+                        "INSERT INTO tunnel_profiles (id, config_json) VALUES (?1, ?2)",
+                        params![profile.id(), json],
+                    )
+                    .map_err(|_| "CONNECTION_STORE_ERROR".to_string())?;
+                    if clean != *profile {
+                        persist_secret_in_tx(
+                            &tx,
+                            codec,
+                            &format!("{TUNNEL_SECRET_NAMESPACE_PREFIX}{}", profile.id()),
+                            CONFIG_SECRET_BLOB_KEY,
+                            &serde_json::to_string(profile).map_err(|_| "CONNECTION_STORE_ERROR".to_string())?,
+                        )?;
+                    }
+                }
+                let json = serde_json::to_string(&plan.layout).map_err(|_| "CONNECTION_STORE_ERROR".to_string())?;
+                tx.execute("INSERT OR REPLACE INTO sidebar_layout (id,layout_json) VALUES (1,?1)", [json])
+                    .map_err(|_| "CONNECTION_STORE_ERROR".to_string())?;
+                if !plan.timeout_inheritance.is_empty() {
+                    let previous: Option<String> = tx
+                        .query_row(
+                            "SELECT value_json FROM app_state WHERE key=?1",
+                            [APP_STATE_EDITOR_SETTINGS_KEY],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .map_err(|_| "CONNECTION_STORE_ERROR".to_string())?;
+                    let mut settings: serde_json::Value = previous
+                        .map(|json| serde_json::from_str(&json).map_err(|_| "CONNECTION_STORE_ERROR".to_string()))
+                        .transpose()?
+                        .unwrap_or_else(|| serde_json::json!({}));
+                    if !settings.is_object() {
+                        return Err("CONNECTION_STORE_ERROR: Invalid editor settings.".into());
+                    }
+                    for (field, is_connect) in
+                        [("connectTimeoutInheritConnectionIds", true), ("queryTimeoutInheritConnectionIds", false)]
+                    {
+                        if settings.get(field).is_none() {
+                            settings[field] = serde_json::json!([]);
+                        }
+                        let ids = settings[field]
+                            .as_array_mut()
+                            .ok_or_else(|| "CONNECTION_STORE_ERROR: Invalid timeout settings.".to_string())?;
+                        for (id, connect, query) in &plan.timeout_inheritance {
+                            if (if is_connect { *connect } else { *query })
+                                && !ids.iter().any(|value| value.as_str() == Some(id))
+                            {
+                                ids.push(serde_json::json!(id));
+                            }
+                        }
+                    }
+                    // No existing profile's migration state is advanced implicitly.
+                    if existing.is_empty() {
+                        settings["timeoutInheritanceMigrationVersion"] = serde_json::json!(2);
+                    }
+                    tx.execute(
+                        "INSERT OR REPLACE INTO app_state (key,value_json) VALUES (?1,?2)",
+                        params![APP_STATE_EDITOR_SETTINGS_KEY, settings.to_string()],
+                    )
+                    .map_err(|_| "CONNECTION_STORE_ERROR".to_string())?;
+                }
+                tx.commit().map_err(|_| "CONNECTION_STORE_ERROR".to_string())?;
+            }
+            Ok(plan.report)
+        })
+        .await
+    }
+
     pub async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
         let config = config.canonicalized();
+        super::connection_management::validate_connection_patch(
+            &serde_json::json!({"name": config.name, "host": config.host}),
+        )?;
         let codec = self.secret_codec_for_write(connection_config_has_inline_secrets(&config)).await?;
         self.with_conn(move |conn| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
             ensure_mcp_connection_change_allowed_in_tx(&tx, None)?;
+            ensure_unique_connection_name_in_tx(&tx, &config.name, None)?;
             persist_connection_in_tx(&tx, &codec, &config)?;
             tx.commit().map_err(|e| e.to_string())?;
             Ok(config)
         })
         .await
+    }
+
+    /// Atomically patch one saved connection without re-saving a stale hydrated config.
+    /// Unspecified secrets remain encrypted and untouched, including tunnel/plugin credentials.
+    pub async fn update_connection_for_mcp(
+        &self,
+        connection_id: &str,
+        patch: serde_json::Value,
+    ) -> Result<ConnectionConfig, String> {
+        super::connection_management::validate_connection_patch(&patch)?;
+        let needs_key =
+            patch.get("password").and_then(serde_json::Value::as_str).is_some_and(|value| !value.is_empty())
+                && patch.get("save_password").and_then(serde_json::Value::as_bool) != Some(false);
+        let codec = self.secret_codec_for_write(needs_key).await?;
+        let id = connection_id.to_string();
+        let updated_id = id.clone();
+        self.with_conn(move |conn| {
+            let tx =
+                conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
+            ensure_mcp_connection_change_allowed_in_tx(&tx, Some(&id))?;
+            let json = tx
+                .query_row("SELECT config_json FROM connections WHERE id = ?1", [&id], |row| row.get::<_, String>(0))
+                .optional()
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "CONNECTION_NOT_FOUND: connection was not found".to_string())?;
+            let mut value: serde_json::Value = serde_json::from_str(&json)
+                .map_err(|_| "CONNECTION_LOAD_ERROR: invalid saved connection".to_string())?;
+            let object =
+                value.as_object_mut().ok_or_else(|| "CONNECTION_LOAD_ERROR: invalid saved connection".to_string())?;
+            for (key, replacement) in patch.as_object().expect("validated object") {
+                if key != "password" {
+                    object.insert(key.clone(), replacement.clone());
+                }
+            }
+            let config: ConnectionConfig = serde_json::from_value(value)
+                .map_err(|_| "INVALID_CONNECTION: invalid connection settings".to_string())?;
+            if config.id != id {
+                return Err("CONNECTION_LOAD_ERROR: saved connection ID does not match its row".to_string());
+            }
+            if patch.get("name").is_some() {
+                ensure_unique_connection_name_in_tx(&tx, &config.name, Some(&id))?;
+            }
+            // Only update the requested password key. Never rewrite/delete other secret rows.
+            if !config.save_password {
+                persist_secret_in_tx(&tx, &codec, &id, "password", "")?;
+            } else if let Some(password) = patch.get("password").and_then(serde_json::Value::as_str) {
+                persist_secret_in_tx(&tx, &codec, &id, "password", password)?;
+            }
+            let json = serde_json::to_string(&config).map_err(|error| error.to_string())?;
+            tx.execute("UPDATE connections SET config_json = ?1 WHERE id = ?2", params![json, id])
+                .map_err(|error| error.to_string())?;
+            tx.commit().map_err(|error| error.to_string())
+        })
+        .await?;
+        self.load_connections()
+            .await?
+            .into_iter()
+            .find(|connection| connection.id == updated_id)
+            .ok_or_else(|| "CONNECTION_NOT_FOUND: updated connection could not be reloaded".to_string())
     }
 
     pub async fn duplicate_connection_for_mcp(
@@ -6403,18 +6634,7 @@ impl Storage {
             let tx =
                 conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
             ensure_mcp_connection_change_allowed_in_tx(&tx, Some(&source_id))?;
-            let copy_name_lower = copy_name.to_lowercase();
-            let mut names = tx.prepare("SELECT config_json FROM connections").map_err(|error| error.to_string())?;
-            let duplicate_name = names
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(|error| error.to_string())?
-                .filter_map(Result::ok)
-                .filter_map(|json| serde_json::from_str::<ConnectionConfig>(&json).ok())
-                .any(|connection| connection.name.to_lowercase() == copy_name_lower);
-            drop(names);
-            if duplicate_name {
-                return Err(format!("CONNECTION_ALREADY_EXISTS: connection '{copy_name}' already exists"));
-            }
+            ensure_unique_connection_name_in_tx(&tx, &copy_name, None)?;
             let source_json = tx
                 .query_row("SELECT config_json FROM connections WHERE id = ?1", [&source_id], |row| {
                     row.get::<_, String>(0)
@@ -11971,7 +12191,8 @@ mod tests {
         let mut concurrently_updated = removed.clone();
         concurrently_updated.host = "updated-by-web-ui".to_string();
         storage.save_connections(&[kept.clone(), concurrently_updated.clone()]).await.unwrap();
-        let added = mq_connection("added", "added-token");
+        let mut added = mq_connection("added", "added-token");
+        added.name = "Added".to_string();
         storage.add_connection_for_mcp(added.clone()).await.unwrap();
         let after_add = storage.load_connections().await.unwrap();
         assert_eq!(after_add.len(), 3);

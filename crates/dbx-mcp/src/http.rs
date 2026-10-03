@@ -18,6 +18,49 @@ use crate::{
     DbxBackend, DbxMcpServer, McpScope,
 };
 
+/// HTTP-only wrapper: all protocol requests retain their admission permit
+/// until the operation finishes and are canceled at the authenticated deadline.
+/// Stdio behavior and the core DBX permission gates remain unchanged.
+struct BoundedHttpService(DbxMcpServer);
+
+impl rmcp::Service<rmcp::RoleServer> for BoundedHttpService {
+    async fn handle_request(
+        &self,
+        request: rmcp::model::ClientRequest,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ServerResult, rmcp::ErrorData> {
+        let lease = context
+            .extensions
+            .get::<axum::http::request::Parts>()
+            .and_then(|parts| parts.extensions.get::<crate::http_auth::HttpRequestDeadline>())
+            .cloned()
+            .ok_or_else(|| rmcp::ErrorData::internal_error("Missing authenticated HTTP request context", None))?;
+        let cancellation = context.ct.clone();
+        if lease.deadline <= tokio::time::Instant::now() || lease.session_cancellation.is_cancelled() {
+            return Err(rmcp::ErrorData::internal_error("Authenticated HTTP session expired", None));
+        }
+        tokio::select! {
+            biased;
+            _ = lease.session_cancellation.cancelled() => Err(rmcp::ErrorData::internal_error("Authenticated HTTP session closed", None)),
+            _ = cancellation.cancelled() => Err(rmcp::ErrorData::internal_error("MCP request cancelled", None)),
+            _ = tokio::time::sleep_until(lease.deadline) => Err(rmcp::ErrorData::internal_error("Authenticated HTTP request deadline expired", None)),
+            result = rmcp::Service::handle_request(&self.0, request, context) => result,
+        }
+    }
+
+    async fn handle_notification(
+        &self,
+        notification: rmcp::model::ClientNotification,
+        context: rmcp::service::NotificationContext<rmcp::RoleServer>,
+    ) -> Result<(), rmcp::ErrorData> {
+        rmcp::Service::handle_notification(&self.0, notification, context).await
+    }
+
+    fn get_info(&self) -> rmcp::model::ServerInfo {
+        rmcp::Service::get_info(&self.0)
+    }
+}
+
 /// Builds a protected Streamable HTTP MCP router for embedding in an existing
 /// HTTP server. The embedded host remains responsible for choosing the public
 /// listener and lifecycle; this router only owns the `/mcp` protocol route.
@@ -28,7 +71,16 @@ pub fn streamable_http_router(
     allowed_hosts: Vec<String>,
     web_mode: bool,
 ) -> Result<Router, String> {
-    build_streamable_http_router(backend, path, auth, allowed_hosts, web_mode, None, Default::default())
+    build_streamable_http_router(backend, path, auth, allowed_hosts, web_mode, None, Arc::new(http_session_manager()))
+}
+
+fn http_session_manager() -> LocalSessionManager {
+    let mut manager = LocalSessionManager::default();
+    // Avoid an unbounded aggregate of recently completed large query results.
+    // Late POST-response replay is deliberately unsupported; live SSE remains.
+    manager.session_config.completed_cache_ttl = std::time::Duration::ZERO;
+    manager.session_config.init_timeout = Some(std::time::Duration::from_secs(5));
+    manager
 }
 
 fn build_streamable_http_router(
@@ -46,15 +98,33 @@ fn build_streamable_http_router(
     let mut rmcp_config = if web_mode {
         StreamableHttpServerConfig::default().disable_allowed_hosts().disable_allowed_origins()
     } else {
-        StreamableHttpServerConfig::default().with_allowed_hosts(allowed_hosts)
+        StreamableHttpServerConfig::default().with_allowed_hosts(allowed_hosts).disable_allowed_origins()
     };
     if let Some(cancellation) = cancellation {
         rmcp_config = rmcp_config.with_cancellation_token(cancellation);
     }
+    // Tie bookkeeping expiry/rotation to physical SDK cleanup, including
+    // transaction rollback and pending handler cancellation. A weak reference
+    // ensures the maintenance task ends when the router is dropped.
+    auth.attach_manager(&session_manager);
+    let cleanup_manager = Arc::downgrade(&session_manager);
+    let cleanup_auth = auth.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        loop {
+            interval.tick().await;
+            let Some(manager) = cleanup_manager.upgrade() else {
+                break;
+            };
+            cleanup_auth.reap_sessions(&manager).await;
+        }
+    });
     let server_backend = backend.clone();
     let scope = McpScope::from_env();
-    let service: StreamableHttpService<DbxMcpServer, LocalSessionManager> = StreamableHttpService::new(
-        move || Ok(DbxMcpServer::with_runtime_options(server_backend.clone(), scope.clone(), web_mode)),
+    let service: StreamableHttpService<BoundedHttpService, LocalSessionManager> = StreamableHttpService::new(
+        move || {
+            Ok(BoundedHttpService(DbxMcpServer::with_runtime_options(server_backend.clone(), scope.clone(), web_mode)))
+        },
         session_manager,
         rmcp_config,
     );
@@ -64,15 +134,28 @@ fn build_streamable_http_router(
     // browser origins without requiring users to enumerate every development
     // port, while remote mode still requires exact configured origins.
     let cors_auth = auth.clone();
+    let oauth = auth.oauth();
     let router =
         Router::new().nest_service(path, service).layer(middleware::from_fn_with_state(auth, authorize_request));
+    let router = if let Some(oauth) = oauth {
+        let metadata = oauth.metadata();
+        // Discovery is public; it contains only operator-provided URLs/scopes.
+        router.route(oauth.metadata_path(), get(move || async move { axum::Json(metadata) }))
+    } else {
+        router
+    };
     Ok(router.layer(
         CorsLayer::new()
             .allow_origin(AllowOrigin::predicate(move |origin, _| {
                 origin.to_str().is_ok_and(|origin| cors_auth.origin_is_allowed(origin))
             }))
             .allow_methods([Method::GET, Method::POST, Method::DELETE])
-            .allow_headers(Any),
+            .allow_headers(Any)
+            .expose_headers([
+                axum::http::HeaderName::from_static("mcp-session-id"),
+                axum::http::HeaderName::from_static("mcp-protocol-version"),
+                axum::http::header::WWW_AUTHENTICATE,
+            ]),
     ))
 }
 
@@ -109,7 +192,7 @@ pub async fn serve_streamable_http_on_listener(
     cancellation: CancellationToken,
     listener: tokio::net::TcpListener,
 ) -> io::Result<()> {
-    let session_manager = Arc::new(LocalSessionManager::default());
+    let session_manager = Arc::new(http_session_manager());
     let mcp_router = build_streamable_http_router(
         backend,
         &config.path,
@@ -224,6 +307,9 @@ mod tests {
     }
 
     struct HttpTestBackend {
+        read_only: bool,
+        slow_load: Arc<std::sync::atomic::AtomicBool>,
+        running_load: Arc<AtomicUsize>,
         connection: ConnectionConfig,
         sql: Arc<std::sync::Mutex<Vec<String>>>,
         disconnects: Arc<AtomicUsize>,
@@ -232,6 +318,9 @@ mod tests {
     impl HttpTestBackend {
         fn new() -> Self {
             Self {
+                read_only: false,
+                slow_load: Default::default(),
+                running_load: Default::default(),
                 connection: serde_json::from_value(json!({
                     "id": "mysql",
                     "name": "mysql",
@@ -253,10 +342,21 @@ mod tests {
     #[async_trait]
     impl DbxBackend for HttpTestBackend {
         async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String> {
-            Ok(McpGlobalPolicy { read_only: false, allow_dangerous_sql: true, ..Default::default() })
+            Ok(McpGlobalPolicy { read_only: self.read_only, allow_dangerous_sql: true, ..Default::default() })
         }
 
         async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
+            if self.slow_load.load(Ordering::SeqCst) {
+                struct Running(Arc<AtomicUsize>);
+                impl Drop for Running {
+                    fn drop(&mut self) {
+                        self.0.fetch_sub(1, Ordering::SeqCst);
+                    }
+                }
+                self.running_load.fetch_add(1, Ordering::SeqCst);
+                let _running = Running(self.running_load.clone());
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            }
             Ok(vec![self.connection.clone()])
         }
 
@@ -318,7 +418,8 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let mut session_config = SessionConfig::default();
         session_config.keep_alive = Some(keep_alive);
-        let mut local_manager = LocalSessionManager::default();
+        session_config.completed_cache_ttl = std::time::Duration::ZERO;
+        let mut local_manager = http_session_manager();
         local_manager.session_config = session_config;
         let manager = Arc::new(local_manager);
         let cancellation = CancellationToken::new();
@@ -524,5 +625,306 @@ mod tests {
         server_task.await.unwrap();
         wait_for_disposal(&backend).await;
         drop(client);
+    }
+    #[tokio::test]
+    async fn idle_sse_streams_do_not_starve_tools_or_session_cleanup() {
+        let backend = Arc::new(HttpTestBackend::new());
+        let (url, manager, cancellation, server_task) =
+            start_http_test_server(backend.clone(), std::time::Duration::from_secs(30)).await;
+        let (client, inner_session_id) = open_active_transaction(&url).await;
+        let id = manager.sessions.read().await.keys().next().unwrap().to_string();
+        let http = reqwest::Client::new();
+        let mut streams = Vec::new();
+        // Keep all GET bodies open, including rmcp's shadow streams. These
+        // carry notifications, not executing SQL, and must not consume the
+        // operation budget or force an existing transaction to be discarded.
+        let mut rejected = None;
+        for _ in 0..33 {
+            let stream = http
+                .get(&url)
+                .bearer_auth("http-test-token")
+                .header("mcp-session-id", &id)
+                .header("accept", "text/event-stream")
+                .send()
+                .await
+                .unwrap();
+            if stream.status() == 429 {
+                rejected = Some(stream);
+                break;
+            }
+            assert_eq!(stream.status(), 200);
+            streams.push(stream);
+        }
+        // The SDK client owns one common GET; the raw client fills the rest.
+        assert!((31..=32).contains(&streams.len()));
+        let excess = rejected.expect("SSE connections must remain bounded");
+        for _ in 0..80 {
+            let listed = client.call_tool(CallToolRequestParams::new("dbx_list_connections")).await.unwrap();
+            assert_ne!(listed.is_error, Some(true));
+        }
+        let query = client
+            .call_tool(
+                CallToolRequestParams::new("dbx_execute_query").with_arguments(
+                    serde_json::from_value(json!({
+                        "connection_id": "mysql",
+                        "database": "app",
+                        "session_id": inner_session_id,
+                        "sql": "SELECT 1"
+                    }))
+                    .unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_ne!(query.is_error, Some(true));
+        assert_eq!(query.structured_content.as_ref().unwrap()["transaction_state"], "active");
+        assert_eq!(excess.text().await.unwrap(), "MCP SSE stream limit reached");
+        assert_eq!(backend.disconnects.load(Ordering::SeqCst), 0);
+        assert!(!backend.sql.lock().unwrap().iter().any(|sql| sql == "ROLLBACK"));
+        assert_eq!(manager.sessions.read().await.len(), 1);
+        let response =
+            http.delete(&url).bearer_auth("http-test-token").header("mcp-session-id", &id).send().await.unwrap();
+        assert_eq!(response.status(), 202);
+        wait_for_disposal(&backend).await;
+        for stream in streams {
+            tokio::time::timeout(std::time::Duration::from_secs(2), stream.bytes()).await.unwrap().unwrap();
+        }
+        drop(client);
+        cancellation.cancel();
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn oauth_http_discovery_authorization_isolation_limits_and_read_only() {
+        use crate::oauth::test_issuer::issuer;
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let issuer = issuer();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut backend = HttpTestBackend::new();
+        backend.read_only = true;
+        let backend = Arc::new(backend);
+        let manager = Arc::new(http_session_manager());
+        let cancellation = CancellationToken::new();
+        let auth = HttpAuth::new_oauth(issuer.verifier(), vec![address.to_string()], vec![]).unwrap();
+        let router = build_streamable_http_router(
+            backend.clone(),
+            "/mcp",
+            auth.clone(),
+            vec![address.to_string()],
+            false,
+            Some(cancellation.child_token()),
+            manager.clone(),
+        )
+        .unwrap();
+        let stop = cancellation.clone();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router).with_graceful_shutdown(async move { stop.cancelled().await }).await.unwrap();
+        });
+        let base = format!("http://{address}");
+        let url = format!("{base}/mcp");
+        let http = reqwest::Client::new();
+        let discovery = http.get(format!("{base}/.well-known/oauth-protected-resource/mcp")).send().await.unwrap();
+        assert_eq!(discovery.status(), 200);
+        assert_eq!(discovery.json::<Value>().await.unwrap()["resource"], "https://dbx.example.test/mcp");
+        for token in [None, Some("wrong".to_owned())] {
+            let mut request = http.post(&url);
+            if let Some(token) = token {
+                request = request.bearer_auth(token);
+            }
+            let response = request.body("{}").send().await.unwrap();
+            assert_eq!(response.status(), 401);
+            assert!(response.headers()["www-authenticate"].to_str().unwrap().contains("resource_metadata="));
+        }
+        for field in ["iss", "aud", "exp"] {
+            let mut claims = issuer.claims("owner");
+            claims[field] = if field == "exp" { json!(1) } else { json!("https://wrong.example.test") };
+            assert_eq!(
+                http.post(&url).bearer_auth(issuer.sign(&claims)).body("{}").send().await.unwrap().status(),
+                401
+            );
+        }
+        assert_eq!(
+            http.post(&url).bearer_auth(issuer.token("uninvited")).body("{}").send().await.unwrap().status(),
+            403
+        );
+        let mut no_scope = issuer.claims("owner");
+        no_scope["scope"] = json!("openid");
+        let denied = http.post(&url).bearer_auth(issuer.sign(&no_scope)).body("{}").send().await.unwrap();
+        assert_eq!(denied.status(), 403);
+        assert!(denied.headers()["www-authenticate"].to_str().unwrap().contains("insufficient_scope"));
+        let token = issuer.token("owner");
+        let client = ()
+            .serve(StreamableHttpClientTransport::from_config(
+                StreamableHttpClientTransportConfig::with_uri(url.clone()).auth_header(token.clone()),
+            ))
+            .await
+            .unwrap();
+        assert!(!client.list_all_tools().await.unwrap().is_empty());
+        let listed = client.call_tool(CallToolRequestParams::new("dbx_list_connections")).await.unwrap();
+        assert_ne!(listed.is_error, Some(true));
+        let blocked = client
+            .call_tool(
+                CallToolRequestParams::new("dbx_execute_query").with_arguments(
+                    serde_json::from_value(
+                        json!({"connection_id":"mysql", "database":"app", "sql":"DELETE FROM important"}),
+                    )
+                    .unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(blocked.is_error, Some(true));
+        assert!(backend.sql.lock().unwrap().is_empty());
+        let id = manager.sessions.read().await.keys().next().unwrap().to_string();
+        let list = json!({"jsonrpc":"2.0","id":42,"method":"tools/list","params":{}});
+        let response = http
+            .post(&url)
+            .bearer_auth(issuer.token("second-owner"))
+            .header("mcp-session-id", &id)
+            .header("accept", "application/json, text/event-stream")
+            .json(&list)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 403);
+        assert_eq!(
+            http.delete(&url)
+                .bearer_auth(issuer.token("second-owner"))
+                .header("mcp-session-id", &id)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            403
+        );
+        assert_eq!(
+            http.post(&url)
+                .bearer_auth(&token)
+                .header("origin", "https://evil.example.test")
+                .json(&list)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            403
+        );
+        assert_eq!(
+            http.post(&url)
+                .bearer_auth(&token)
+                .header("host", "evil.example.test")
+                .json(&list)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            403
+        );
+        assert_eq!(
+            http.post(&url).bearer_auth(&token).body("x".repeat(1024 * 1024 + 1)).send().await.unwrap().status(),
+            413
+        );
+        // A short-lived SSE token must expire without killing concurrent
+        // work authenticated with a fresh token for the same owner/session.
+        let mut short_claims = issuer.claims("owner");
+        short_claims["exp"] = json!(jsonwebtoken::get_current_timestamp() + 2);
+        let short_token = issuer.sign(&short_claims);
+        let short_stream = http
+            .get(&url)
+            .bearer_auth(&short_token)
+            .header("mcp-session-id", &id)
+            .header("accept", "text/event-stream")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(short_stream.status(), 200);
+        tokio::time::timeout(std::time::Duration::from_secs(3), short_stream.bytes()).await.unwrap().unwrap();
+        assert!(!client.list_all_tools().await.unwrap().is_empty());
+
+        // The operation itself is dropped at expiry, not merely its HTTP body.
+        backend.slow_load.store(true, Ordering::SeqCst);
+        let mut short_claims = issuer.claims("owner");
+        short_claims["exp"] = json!(jsonwebtoken::get_current_timestamp() + 2);
+        let short_token = issuer.sign(&short_claims);
+        let slow_call = http
+            .post(&url)
+            .bearer_auth(&short_token)
+            .header("mcp-session-id", &id)
+            .header("accept", "application/json, text/event-stream")
+            .json(&json!({"jsonrpc":"2.0","id":81,"method":"tools/call","params":{"name":"dbx_list_connections"}}))
+            .send()
+            .await
+            .unwrap();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), slow_call.bytes()).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while backend.running_load.load(Ordering::SeqCst) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("expired tool operation must drop its backend future");
+        backend.slow_load.store(false, Ordering::SeqCst);
+        assert!(!client.list_all_tools().await.unwrap().is_empty());
+
+        // SDK orphan/TTL cleanup removes physical sessions as well as bindings.
+        let (orphan, _transport) = manager.create_session().await.unwrap();
+        auth.reap_sessions(&manager).await;
+        assert!(!manager.has_session(&orphan).await.unwrap());
+        backend.slow_load.store(true, Ordering::SeqCst);
+        let abandoned = http
+            .post(&url)
+            .bearer_auth(&token)
+            .header("mcp-session-id", &id)
+            .header("accept", "application/json, text/event-stream")
+            .json(&json!({"jsonrpc":"2.0","id":82,"method":"tools/call","params":{"name":"dbx_list_connections"}}))
+            .send()
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while backend.running_load.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(abandoned);
+        assert_eq!(
+            http.delete(&url).bearer_auth(&token).header("mcp-session-id", &id).send().await.unwrap().status(),
+            202
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while backend.running_load.load(Ordering::SeqCst) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("DELETE must cancel a disconnected in-flight operation");
+        backend.slow_load.store(false, Ordering::SeqCst);
+
+        assert_eq!(
+            http.post(&url)
+                .bearer_auth(&token)
+                .header("mcp-session-id", &id)
+                .json(&list)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            404
+        );
+        let replacement = ()
+            .serve(StreamableHttpClientTransport::from_config(
+                StreamableHttpClientTransportConfig::with_uri(url.clone()).auth_header(token.clone()),
+            ))
+            .await
+            .unwrap();
+        let replacement_id = manager.sessions.read().await.keys().next().unwrap().to_string();
+        auth.expire_session_for_test(&replacement_id);
+        auth.reap_sessions(&manager).await;
+        assert!(manager.sessions.read().await.is_empty());
+        drop(replacement);
+        drop(client);
+        cancellation.cancel();
+        task.await.unwrap();
     }
 }

@@ -214,6 +214,7 @@ import {
 
 type DbOption = Omit<ConnectionPickerOption, "category"> & { category?: DbCategoryKey; plugin?: boolean; pluginId?: string; pluginIcon?: string };
 type DbCategoryKey = ConnectionProfileCategory | "plugins";
+type DbPickerCategoryKey = DbCategoryKey | "all";
 type DbCategory = { key: DbCategoryKey; title: string; options: DbOption[] };
 type DialogStep = "select" | "config";
 export type ConfigTab = "connection" | "advanced" | "tls" | "transport";
@@ -837,7 +838,7 @@ const damengJvmOptions = ref("");
 const dialogStep = ref<DialogStep>("select");
 const dbPickerView = ref<DbPickerView>(loadConnectionPickerView());
 const dbSearchQuery = ref("");
-const selectedDbCategory = ref<DbCategoryKey>("sql");
+const selectedDbCategory = ref<DbPickerCategoryKey>("all");
 const configTab = ref<ConfigTab>("connection");
 
 // 对话框拖动功能
@@ -3401,8 +3402,6 @@ function onDbTypeChange(val: string) {
   if (!editingId.value) {
     resetForm({ preservePickerState: true });
   }
-  const category = dbCategoryForOption(val);
-  if (category) selectedDbCategory.value = category;
   // Keep in sync with PLUGIN_CONNECTION_PROVIDER_OPTION_PREFIX in lib/plugins/frontendPlugin.
   if (val.startsWith("plugin-provider:")) {
     onPluginProviderOptionChange(val);
@@ -3426,8 +3425,6 @@ function onPluginProviderOptionChange(val: string) {
 
 function selectIgniteConnectionProfile(profile: IgniteConnectionProfile) {
   if (form.value.db_type === profile) return;
-  const category = dbCategoryForOption(profile);
-  if (category) selectedDbCategory.value = category;
   customDriverName.value = "";
   applyProfile(profile, true);
   resetTestState();
@@ -3708,8 +3705,20 @@ const dbCategories = computed<DbCategory[]>(() => {
   if (pluginOptions.length) {
     categories.push({ key: "plugins", title: t("connection.databaseCategoryPlugins"), options: pluginOptions });
   }
-  return categories;
+  // Preserve category/provider order and show each option only once, including
+  // plugin providers. All and search share this catalog rather than copying it.
+  const seen = new Set<string>();
+  return categories.map((category) => ({
+    ...category,
+    options: category.options.filter((option) => {
+      if (seen.has(option.value)) return false;
+      seen.add(option.value);
+      return true;
+    }),
+  }));
 });
+
+const dbCategoryNavigation = computed<Array<{ key: DbPickerCategoryKey; title: string }>>(() => [{ key: "all", title: t("connection.databaseCategoryAll") }, ...dbCategories.value.map(({ key, title }) => ({ key, title }))]);
 
 function matchesDbOption(option: DbOption, keyword: string, categoryTitle = "") {
   const profile = driverProfiles[option.value];
@@ -3735,7 +3744,7 @@ const filteredDbCategories = computed<DbCategory[]>(() => {
 });
 
 const visibleDbCategories = computed<DbCategory[]>(() => {
-  if (isDbSearchActive.value) return filteredDbCategories.value;
+  if (isDbSearchActive.value || selectedDbCategory.value === "all") return filteredDbCategories.value;
   return filteredDbCategories.value.filter((category) => category.key === selectedDbCategory.value);
 });
 const hasDbPickerResults = computed(() => visibleDbCategories.value.some((category) => category.options.length > 0));
@@ -3745,12 +3754,13 @@ function isPickerOptionSelected(optionValue: string): boolean {
 
 const selectedDbOptionIsVisible = computed(() => visibleDbCategories.value.some((category) => category.options.some((option) => isPickerOptionSelected(option.value))));
 
-function selectDbCategory(category: DbCategoryKey) {
+function selectDbCategory(category: DbPickerCategoryKey) {
   selectedDbCategory.value = category;
   dbSearchQuery.value = "";
-  const categoryOptions = dbCategories.value.find((definition) => definition.key === category)?.options.map((option) => option.value) ?? [];
-  const nextSelection = databaseSelectionForCategory(selectedType.value, categoryOptions);
-  if (nextSelection && nextSelection !== selectedType.value) onDbTypeChange(nextSelection);
+  const categoryOptions = (category === "all" ? dbCategories.value.flatMap((definition) => definition.options) : (dbCategories.value.find((definition) => definition.key === category)?.options ?? [])).map((option) => option.value);
+  const pickerValue = MERGED_PICKER_OPTION_FOR_TYPE[selectedType.value] ?? selectedType.value;
+  const nextSelection = databaseSelectionForCategory(pickerValue, categoryOptions);
+  if (nextSelection && nextSelection !== pickerValue) onDbTypeChange(nextSelection);
 }
 
 function selectDbPickerView(view: DbPickerView) {
@@ -4407,12 +4417,16 @@ function goToConnectionStep(value = selectedType.value) {
   }
   dialogStep.value = "config";
   configTab.value = "connection";
-  dbSearchQuery.value = "";
 }
 
 function backToDatabasePicker() {
-  const category = dbCategoryForOption(selectedType.value);
-  if (category) selectedDbCategory.value = category;
+  // Normal Next/Back preserves the browsing context. A shortcut or deep link
+  // may open an option outside it; reveal that selection when returning.
+  if (!selectedDbOptionIsVisible.value) {
+    dbSearchQuery.value = "";
+    const category = dbCategoryForOption(selectedType.value);
+    if (category && selectedDbCategory.value !== "all") selectedDbCategory.value = category;
+  }
   dialogStep.value = "select";
   resetTestState();
 }
@@ -6157,7 +6171,7 @@ function resetForm(options: { preservePickerState?: boolean } = {}) {
   if (!options.preservePickerState) {
     dialogStep.value = "select";
     dbSearchQuery.value = "";
-    selectedDbCategory.value = "sql";
+    selectedDbCategory.value = "all";
     configTab.value = "connection";
   }
   resetVisibleDatabaseDraftState();
@@ -7122,7 +7136,7 @@ function openExternalUrl(url: string) {
           <div class="connection-db-picker-body min-h-0 flex flex-1 flex-col gap-3 overflow-hidden sm:flex-row sm:gap-4">
             <nav data-connection-category-nav class="flex shrink-0 gap-1 overflow-x-auto border-b px-0.5 pt-0.5 pb-2.5 sm:w-40 sm:flex-col sm:overflow-y-auto sm:border-b-0 sm:border-r sm:py-0.5 sm:pr-3.5" :aria-label="t('connection.databaseCategories')">
               <button
-                v-for="category in dbCategories"
+                v-for="category in dbCategoryNavigation"
                 :key="category.key"
                 type="button"
                 class="connection-db-category-option shrink-0 whitespace-nowrap rounded-[4px] px-3 py-2 text-left text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:w-full"
@@ -7138,7 +7152,7 @@ function openExternalUrl(url: string) {
               <div v-if="isDbSearchActive" class="text-sm font-medium">{{ t("connection.searchResults") }}</div>
 
               <section v-for="category in visibleDbCategories" :key="category.key" class="space-y-2">
-                <h3 v-if="isDbSearchActive" class="text-sm font-medium">{{ category.title }}</h3>
+                <h3 v-if="isDbSearchActive || selectedDbCategory === 'all'" class="text-sm font-medium">{{ category.title }}</h3>
 
                 <div v-if="dbPickerView === 'icon'" class="connection-db-picker-grid grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-5">
                   <button
@@ -7176,7 +7190,7 @@ function openExternalUrl(url: string) {
                     <PluginIcon v-if="opt.plugin" :plugin-id="opt.pluginId || ''" :icon="opt.pluginIcon" class="h-5 w-5 shrink-0" />
                     <DatabaseIcon v-else :db-type="iconTypeMap[opt.value] || opt.value" class="h-5 w-5 shrink-0" />
                     <span class="min-w-0 flex-1 truncate text-sm font-medium">{{ opt.label }}</span>
-                    <span v-if="isDbSearchActive" class="text-xs text-muted-foreground">{{ category.title }}</span>
+                    <span v-if="isDbSearchActive || selectedDbCategory === 'all'" class="text-xs text-muted-foreground">{{ category.title }}</span>
                   </button>
                 </div>
               </section>

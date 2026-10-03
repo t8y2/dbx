@@ -72,6 +72,40 @@ dbx context local --tables users,orders
 dbx open local users
 ```
 
+## 导入 DBX 连接包
+
+将明文或加密 DBX 导出文件导入本地加密连接存储；此操作不会连接业务数据库：
+
+```bash
+chmod 600 connections.json
+dbx connections import --file connections.json --json
+# 检查预览后，再明确执行导入：
+dbx connections import --file connections.json --yes --json
+```
+
+未传 `--yes` 时只预览。JSON 结果包含 `dry_run`、`input_count`、`imported_count`（预览时表示将新增的数量）、`skipped_count`、隧道配置数量和警告，不输出凭据。CLI 也支持通过非交互安全管道使用 `--file -`。
+
+- 支持含 `connections`、可选 `layout` 和 `tunnelProfiles` 的明文 DBX 连接包，以及旧版连接数组和 `dbx-config` 版本 1 导出
+- 保留支持的完整连接设置和凭据，导入被引用的隧道配置，为连接、隧道配置和侧边栏分组重新分配 ID，并追加分组及排序；不覆盖已有配置和密码
+- 规范化名称、主机、端口、用户名、数据库类型和数据库均相同的连接会跳过；同名但端点、用户名、类型或数据库不同的连接会分别保留（请用 ID 选择）；重复来源 ID 或无效配置会使整批导入失败
+- 通常需要已初始化的本地 DBX 存储及现有加密密钥；不支持 `DBX_WEB_URL` 或限定范围的会话，预览和导入均受 MCP 工具/连接范围限制
+- 全局只读模式允许预览；实际导入需要可写 MCP 策略，并在存储事务中重新检查。`--yes` 和 SQL 写入标志不能绕过该策略
+- 输入上限为 16 MiB，Unix 文件须为仅所有者可访问的普通文件；Windows 请限制文件 ACL。加密的 `dbx-encrypted` 版本 1 导出需要单独受保护的口令文件
+
+加密导出通过仅所有者可访问的 UTF-8 口令文件解密，预览和执行使用相同参数：
+
+```bash
+chmod 600 connections.json passphrase.txt
+dbx connections import --file connections.json --passphrase-file passphrase.txt --json
+dbx connections import --file connections.json --passphrase-file passphrase.txt --yes --json
+```
+
+口令文件末尾的一个 LF 或 CRLF 会被去除。也可让凭据管理器将口令通过非交互管道传给 `--passphrase-file -`，此时连接包必须来自文件，两者不能同时使用标准输入。不能将口令字面值作为命令参数。口令错误或密文损坏时，在写入任何连接前失败。
+
+仅当本地配置完全为空时，可明确添加 `--initialize`。预览仍不创建加密密钥或连接；使用 `--initialize --yes` 执行时，可以先创建配置的加密密钥再保存加密凭据。已有连接、旧版文件、已存凭据，或未完成/失败的安全迁移会阻止初始化。该选项不替换已有密钥，也不放宽 MCP 策略；后续导入请省略它。
+
+明文导出文件可能包含密码，不要将内容粘贴到聊天、命令参数、日志或版本库中，迁移结束后清理临时导出文件。导入不会测试连通性、复制 SQLite/DuckDB 文件、安装驱动，也不会转换本机路径或内网地址；使用前请检查警告。
+
 ## 诊断
 
 使用 `dbx doctor` 查看本地 DBX 路径、连接存储健康状态，以及桌面端 bridge 是否可用：
@@ -258,7 +292,7 @@ open 'dbx://connection/new?type=r-nacos&url=http%3A%2F%2F127.0.0.1%3A8848%2Fnaco
 open 'dbx://connection/new?id=saved-connection-id&user=fresh-sso-token&password=fresh-sso-token'
 ```
 
-将 `saved-connection-id` 替换为 MCP 工具 `dbx_list_connections` 返回的连接 ID。更新按 ID 精确匹配，不按显示名称查找。CLI 命令 `dbx connections list --json` 目前只列出名称和端点等信息，不返回连接 ID。
+将 `saved-connection-id` 替换为 MCP 工具 `dbx_list_connections` 返回的连接 ID。更新按 ID 精确匹配，不按显示名称查找。CLI 命令 `dbx connections list --json` 也会返回连接 ID、名称、端点和 `read_only`。
 
 收到更新链接后，DBX 只打开预填好的编辑窗口。检查修改内容并点击**保存**后，才会以原连接 ID 和原侧栏分组持久化修改。链接不会自动保存、测试或连接数据库；取消编辑不会修改已保存配置。ID 为空或不存在、目标是一次性连接、已有其他连接窗口打开时，更新会被拒绝，不会退回新建连接。
 
@@ -292,3 +326,41 @@ Codex 可以直接通过 shell 调用 CLI：
 dbx schema describe local users --json
 dbx context local --tables users,orders | codex exec "Write a retention query"
 ```
+
+## 管理已保存的连接
+
+这些命令只修改 DBX 连接配置，不连接或修改业务数据库。本地存储模式需要已初始化的 DBX 加密存储及可访问的原有密钥；命令不会自动创建密钥或绕过数据安全升级。CLI 与桌面端共用加密存储；配置 `DBX_WEB_URL` 时也可使用支持更新端点的 Web 服务。命令遵守 MCP 连接/工具范围；全局只读模式及限定范围的 AI 会话会阻止新增、修改和删除。请在 **DBX 设置 → MCP** 配置权限，连接管理不能用 `--allow-writes` 绕过全局只读。
+
+```bash
+dbx connections list --json
+dbx connections get <连接ID或名称> --json
+dbx connections add --file connection.json --json
+dbx connections update <连接ID或名称> --file changes.json --json
+dbx connections remove <连接ID或名称> --yes --json
+```
+
+名称重名时请使用连接 ID。列表包含 ID 和 `read_only`；详情不会输出密码、令牌、DSN、URL 参数、初始化脚本、隧道或插件密钥，因此不能作为完整凭据备份。
+
+用安全编辑器创建仅本人可读写的 JSON 文件（Unix 执行 `chmod 600 connection.json`；Windows 限制文件 ACL），或通过凭据管理器向 `--file -` 管道输入 JSON。交互终端 stdin 会被拒绝，避免回显凭据。不要把密码写入命令参数、shell 历史、内联 JSON 或版本库。CLI 不提供密码参数。JSON 输入上限为 1 MiB，非法输入报错不会回显原始值。
+
+不含凭据的最小 `connection.json`：
+
+```json
+{"name":"scratch","db_type":"sqlite","host":"/absolute/path/scratch.db","port":0,"read_only":true}
+```
+
+新增支持 `name`、`db_type`、`host`，以及可选的 `port`、`username`、`password`、`database`、`ssl`、`driver_profile`、`read_only`、`save_password`。端口优先使用数据库类型的默认值；文件型数据库请明确填写 `0`。
+
+`changes.json` 示例：
+
+```json
+{"name":"scratch-renamed","read_only":false,"query_timeout_secs":60}
+```
+
+局部修改支持 `name`、`note`、`host`、`port`、`username`、`password`、`database`、`driver_profile`、`ssl`、`read_only`、`save_password`、`is_production`、`connect_timeout_secs`、`query_timeout_secs`、`idle_timeout_secs`、`keepalive_interval_secs`。未提供的配置、密码、隧道/插件凭据和数据库专用设置保持不变。连接 ID 与数据库类型不可修改，不支持的字段会报错。
+
+- `{"password":""}` 明确清空已保存密码；不传 `password` 保留原密码
+- `{"database":null}` 或 `{"driver_profile":null}` 清除对应可选项；其他字段不接受 null
+- `{"save_password":false}` 删除已保存数据库密码；恢复为 true 不会找回旧密码
+- 修改后缓存连接和固定事务会失效，需要重新连接
+- 删除必须传 `--yes`，会删除连接配置及其凭据，CLI 无撤销操作；请先查看目标，必要时保留授权的 DBX 备份。数据库文件和业务数据不受影响

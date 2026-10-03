@@ -1,0 +1,7 @@
+{
+  "issuer": "https://identity.example.com/realms/personal",
+  "resource": "https://dbx.example.com/mcp",
+  "jwks_file": "public-jwks.json",
+  "allowed_subjects": ["REPLACE_WITH_YOUR_PROVIDER_SUBJECT_ID"],
+  "required_scope": "dbx:mcp"
+}

@@ -35,6 +35,7 @@ pub struct ConnectionSummary {
     pub port: u16,
     pub database: String,
     pub group_path: Vec<String>,
+    pub read_only: bool,
 }
 
 impl From<&ConnectionConfig> for ConnectionSummary {
@@ -44,13 +45,18 @@ impl From<&ConnectionConfig> for ConnectionSummary {
             .and_then(|value| value.as_str().map(ToOwned::to_owned))
             .unwrap_or_else(|| format!("{:?}", config.db_type).to_ascii_lowercase());
         Self {
-            id: config.id.clone(),
-            name: config.name.clone(),
+            id: dbx_core::persistence::connection_management::safe_connection_text(&config.id),
+            name: dbx_core::persistence::connection_management::safe_connection_text(&config.name),
             db_type,
-            host: config.host.clone(),
+            host: dbx_core::persistence::connection_management::safe_connection_text(&config.host),
             port: config.port,
-            database: config.database.clone().unwrap_or_default(),
+            database: config
+                .database
+                .as_deref()
+                .map(dbx_core::persistence::connection_management::safe_connection_text)
+                .unwrap_or_default(),
             group_path: Vec::new(),
+            read_only: config.read_only,
         }
     }
 }
@@ -321,7 +327,17 @@ pub trait DbxBackend: Send + Sync {
         let _ = database;
         dbx_core::sql::sql_execution_plan_for_database(sql, connection.db_type)
     }
+    async fn import_connections_for_mcp(
+        &self,
+        _bundle: Value,
+        _dry_run: bool,
+    ) -> Result<dbx_core::persistence::connection_import::ConnectionImportReport, String> {
+        Err("CONNECTION_IMPORT_UNSUPPORTED: Bundle import is supported only by the local backend.".into())
+    }
     async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String>;
+    async fn update_connection_for_mcp(&self, _connection_id: &str, _patch: Value) -> Result<ConnectionConfig, String> {
+        Err("CONNECTION_UPDATE_UNSUPPORTED: backend does not support connection updates".to_string())
+    }
     async fn duplicate_connection_for_mcp(
         &self,
         source_id: &str,
@@ -737,6 +753,35 @@ impl LocalBackend {
             transaction_owners: Arc::new(TransactionOwnerRegistry::default()),
             transaction_owner_config: TransactionOwnerConfig::from_env(),
         }
+    }
+
+    /// Explicit CLI initialization is permitted only for an empty, unmigrated profile.
+    /// Existing key material, policies, and legacy credentials are never replaced or migrated.
+    pub async fn open_for_connection_import(path: &Path, initialize: bool) -> Result<Self, String> {
+        if !initialize {
+            return Self::open(path).await;
+        }
+        let storage = Storage::open_unmigrated(path).await?;
+        let preflight = storage.inspect_data_migration().await?;
+        if preflight.connection_count != 0
+            || preflight.database_plaintext_count != 0
+            || preflight.plugin_secret_count != 0
+            || preflight.ai_secret_count != 0
+            || preflight.tunnel_secret_count != 0
+            || preflight.sync_credential_count != 0
+            || preflight.legacy_json_files.iter().any(|file| file.exists)
+            || !preflight.is_ready()
+        {
+            return Err("CONNECTION_IMPORT_INITIALIZATION_BLOCKED: --initialize requires an empty profile with no legacy data. Use the normal DBX data-security setup for an existing profile.".into());
+        }
+        let data_dir = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+        let state = Arc::new(AppState::new_with_plugin_and_agent_dir_and_app_version(
+            storage,
+            data_dir.join("plugins"),
+            data_dir.join("agents"),
+            "",
+        ));
+        Ok(Self::from_app_state(state, data_dir))
     }
 
     pub async fn open(path: &Path) -> Result<Self, String> {
@@ -1249,8 +1294,42 @@ impl DbxBackend for LocalBackend {
         dbx_core::query::query_execution_plan(sql, Some(connection.db_type), is_sqlserver_agent)
     }
 
+    async fn import_connections_for_mcp(
+        &self,
+        bundle: Value,
+        dry_run: bool,
+    ) -> Result<dbx_core::persistence::connection_import::ConnectionImportReport, String> {
+        if !dry_run && self.load_mcp_global_policy().await?.read_only {
+            return Err("MCP_READ_ONLY: Global MCP read-only mode blocks connection imports.".into());
+        }
+        let report = self.state.storage.import_connections_for_mcp(bundle, dry_run).await?;
+        if !dry_run && report.imported_count > 0 {
+            for config in self.state.storage.load_connections().await? {
+                self.state.configs.write().await.insert(config.id.clone(), config);
+            }
+            self.notify_connections_changed().await;
+        }
+        Ok(report)
+    }
+
     async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
         let config = self.state.storage.add_connection_for_mcp(config).await?;
+        self.state.configs.write().await.insert(config.id.clone(), config.clone());
+        self.notify_connections_changed().await;
+        Ok(config)
+    }
+
+    async fn update_connection_for_mcp(&self, connection_id: &str, patch: Value) -> Result<ConnectionConfig, String> {
+        let config = self.state.storage.update_connection_for_mcp(connection_id, patch).await?;
+        // A read-only/credential change must not leave a pinned session using old permissions.
+        self.transaction_owners.invalidate_connection(connection_id);
+        self.state.session_credentials.clear_connection(connection_id);
+        self.state.remove_connection_pools_detached(connection_id).await;
+        self.state.reset_connection_transport(connection_id).await;
+        self.state.write_unlock_windows.lock(connection_id).await;
+        self.state.nacos_registry.drop_connection(connection_id).await;
+        #[cfg(feature = "mq-admin")]
+        self.state.mq_registry.drop_connection(connection_id).await;
         self.state.configs.write().await.insert(config.id.clone(), config.clone());
         self.notify_connections_changed().await;
         Ok(config)
@@ -1746,6 +1825,21 @@ impl DbxBackend for WebBackend {
             .json()
             .await
             .map_err(|error| format!("Invalid MCP connection response: {error}"))
+    }
+
+    async fn update_connection_for_mcp(&self, connection_id: &str, patch: Value) -> Result<ConnectionConfig, String> {
+        let config = self
+            .request(
+                reqwest::Method::POST,
+                "/api/connection/mcp/update",
+                Some(json!({ "connectionId": connection_id, "changes": patch })),
+            )
+            .await?
+            .json()
+            .await
+            .map_err(|_| "Invalid MCP connection response".to_string())?;
+        self.connected.lock().await.remove(connection_id);
+        Ok(config)
     }
 
     async fn duplicate_connection_for_mcp(
@@ -2823,12 +2917,17 @@ mod tests {
     };
 
     async fn connection_mutation_backend(data_dir: &Path) -> LocalBackend {
-        let storage = Storage::open(&data_dir.join("dbx.db"))
-            .await
-            .unwrap()
-            .with_secret_key_policy(dbx_core::persistence::secret_codec::SecretKeyPolicy::ManagedDataDir);
+        let storage = dbx_core::persistence::test_storage::open(&data_dir.join("dbx.db")).await.unwrap();
         storage.save_mcp_global_policy(&McpGlobalPolicy { read_only: false, ..Default::default() }).await.unwrap();
-        LocalBackend::from_app_state(Arc::new(AppState::new(storage)), data_dir.to_path_buf())
+        LocalBackend::from_app_state(
+            Arc::new(AppState::new_with_plugin_and_agent_dir_and_app_version(
+                storage,
+                data_dir.join("plugins"),
+                data_dir.join("agents"),
+                "",
+            )),
+            data_dir.to_path_buf(),
+        )
     }
 
     fn mutation_test_connection() -> ConnectionConfig {
@@ -2874,6 +2973,16 @@ mod tests {
 
         backend.add_connection_for_mcp(mutation_test_connection()).await.unwrap();
         assert_eq!(received.try_recv().unwrap(), vec!["source"]);
+        backend.state.session_credentials.set("fixture-owner", "source", "session-fixture").unwrap();
+        backend.state.write_unlock_windows.unlock("source", 60).await.unwrap();
+        let changed = backend.update_connection_for_mcp("source", json!({"read_only": true})).await.unwrap();
+        assert!(!backend.state.session_credentials.has("fixture-owner", "source"));
+        assert_eq!(backend.state.write_unlock_windows.remaining_ms("source").await, 0);
+        assert!(changed.read_only);
+        assert_eq!(changed.password, "test-password");
+        assert_eq!(backend.state.configs.read().await.get("source"), Some(&changed));
+        assert_eq!(received.try_recv().unwrap(), vec!["source"]);
+
         backend.duplicate_connection_for_mcp("source", "copy", "Copy").await.unwrap();
         let mut ids = received.try_recv().unwrap();
         ids.sort();
@@ -2891,6 +3000,7 @@ mod tests {
             .unwrap();
         assert!(backend.add_connection_for_mcp(mutation_test_connection()).await.is_err());
         assert!(backend.remove_connection_for_mcp("source").await.is_err());
+        assert!(backend.update_connection_for_mcp("source", json!({"read_only": false})).await.is_err());
         assert!(received.try_recv().is_err());
         server.abort();
     }

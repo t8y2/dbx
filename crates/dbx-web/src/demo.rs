@@ -48,6 +48,7 @@ const BLOCKED_EXACT: &[&str] = &[
     // 演示连接清单只读：整表覆盖会互删，新增等于 SSRF
     "connection/save",
     "connection/mcp/add",
+    "connection/mcp/update",
     "connection/mcp/duplicate",
     "connection/mcp/remove",
     "tunnel-profiles/save",
@@ -199,6 +200,7 @@ mod tests {
             (Method::POST, "connection/test-ssh-tunnel"),
             (Method::POST, "connection/save"),
             (Method::POST, "connection/mcp/add"),
+            (Method::POST, "connection/mcp/update"),
             (Method::POST, "mq/test-connection"),
             (Method::POST, "nacos/test-connection"),
             (Method::POST, "tunnel-profiles/test"),

@@ -23,7 +23,7 @@ description: Export database connections with AES-256-GCM encrypted passwords. M
 <Step>
     ### Choose Export Protection
 
-    Enter a passphrase to encrypt your passwords. For a one-time migration in a trusted environment, you may instead choose **Export without encryption** and confirm the warning. The plaintext file may contain database passwords, SSH Tunnel credentials, and other sensitive information.
+    Enter a passphrase to encrypt your passwords. For a one-time migration in a trusted environment, you may instead choose **Export without encryption** and confirm the warning. Plaintext export excludes credentials by default. To retain them, explicitly check **Include passwords and other credentials (plaintext)** before confirming.
   </Step>
 <Step>
     ### Save File
@@ -57,13 +57,19 @@ description: Export database connections with AES-256-GCM encrypted passwords. M
   </Step>
 </Steps>
 
+## CLI and MCP imports
+
+For a local DBX export, use `dbx connections import --file connections.json --json` to preview, then add `--yes` after reviewing the counts and warnings. MCP provides `dbx_import_connections` with `file_path`; omit `confirmed` for preview, and set `confirmed: true` only after approval. Credentials remain in the protected local file, never in the tool arguments or result.
+
+These interfaces perform an add-only atomic import, including supported connection settings, referenced tunnel profiles, and sidebar groups/order with remapped IDs. They skip existing connections only when normalized name, host, port, username, database type, and database all match; connections with equal names but different endpoints/usernames/types/databases remain separate, and existing settings or credentials are never overwritten. Input files are limited to 16 MiB and must be owner-only on Unix. Import is local-only, normally requires the existing initialized encrypted store, and respects MCP policy. CLI additionally offers explicit `--initialize` for a completely empty profile; it refuses existing connections or legacy credentials and creates no key during preview. For encrypted exports, add CLI `--passphrase-file passphrase.txt` or MCP `passphrase_file`, pointing to a separate owner-only UTF-8 file. Never supply a literal passphrase in command arguments or tool calls. See [CLI import](/en/docs/cli#import-a-dbx-connection-bundle).
+
 ## Security
 
 - Passwords are encrypted using **AES-256-GCM** with **PBKDF2** key derivation
 - Without the passphrase, an encrypted file cannot be decrypted
-- Plaintext export is not encrypted and may expose database passwords, SSH Tunnel credentials, and other secrets; use it only for temporary migration in a trusted environment
+- Plaintext export excludes passwords and other credentials by default. The optional **Include passwords and other credentials (plaintext)** setting writes them in readable form; use it only for temporary migration in a trusted environment, protect the file, and delete it when finished
 - The export file is standard JSON, transferable via USB drive, cloud storage, etc.
-- DBX stores ordinary connection fields separately from secrets such as database passwords, SSH passwords, SSH key passphrases, and full connection strings. Encrypted export protects the combined data; plaintext export writes those secrets as readable JSON.
+- DBX stores ordinary connection fields separately from secrets such as database passwords, SSH passwords, SSH key passphrases, and full connection strings. Encrypted export protects the combined data; plaintext export writes those secrets as readable JSON only when explicitly selected for that export. The choice resets when cancelling or leaving the plaintext confirmation, and after a completed export.
 - Treat the passphrase like a secret. Anyone with both the export file and passphrase can restore the saved connections.
 
 ## Backward Compatibility
@@ -76,7 +82,7 @@ Import automatically detects encrypted or plain configuration files. It also sup
 | ---------------------------------------------------------------------- | --------------------------------------------------------------------- |
 | Connection name, type, host, port, database, color                     | Yes                                                                   |
 | URL parameters, SSL, SSH, proxy, visible database settings             | Yes                                                                   |
-| Database password, SSH password, SSH key passphrase, connection string | Yes; encrypted in encrypted exports and readable in plaintext exports |
+| Database password, SSH password, SSH key passphrase, connection string | Encrypted exports: yes. Plaintext exports: only with explicit credential opt-in |
 | Vendor JDBC driver JAR files                                           | No; reinstall or re-import drivers on the target machine              |
 | Sidebar groups and ordering for selected connections                   | Yes; choose whether to apply them after import                        |
 | Saved SQL and UI/editor settings                                       | No; use [Cloud Sync](/en/docs/cloud-sync) to migrate them             |

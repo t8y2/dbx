@@ -112,7 +112,53 @@ describe("useDialogSources", () => {
 
     dialogs.onRequestUnencryptedExport();
     await dialogs.onConfigUnencryptedExportConfirm();
-    expect(mocks.store.exportConnectionsToFile).toHaveBeenCalledWith({ mode: "plaintext" }, ["selected"]);
+    expect(mocks.store.exportConnectionsToFile).toHaveBeenCalledWith({ mode: "plaintext", includeCredentials: false }, ["selected"]);
+  });
+
+  it("includes credentials only for the opted-in export and resets after saving", async () => {
+    mocks.store.connections = [conn("selected")];
+    const dialogs = await mountDialogs();
+    dialogs.onExportClick();
+    dialogs.onConfigConnectionSelectConfirm(["selected"]);
+    dialogs.onRequestUnencryptedExport();
+    expect(dialogs.configExportIncludeCredentials.value).toBe(false);
+    dialogs.configExportIncludeCredentials.value = true;
+    await dialogs.onConfigUnencryptedExportConfirm();
+    expect(mocks.store.exportConnectionsToFile).toHaveBeenCalledWith({ mode: "plaintext", includeCredentials: true }, ["selected"]);
+    expect(dialogs.configExportIncludeCredentials.value).toBe(false);
+  });
+
+  it.each(["cancel", "dismiss", "encrypted", "restart"])("resets credential opt-in on %s", async (action) => {
+    mocks.store.connections = [conn("selected")];
+    const dialogs = await mountDialogs();
+    dialogs.onExportClick();
+    dialogs.onConfigConnectionSelectConfirm(["selected"]);
+    dialogs.onRequestUnencryptedExport();
+    dialogs.configExportIncludeCredentials.value = true;
+    if (action === "cancel") dialogs.onConfigUnencryptedExportCancel();
+    if (action === "dismiss") dialogs.onConfigUnencryptedExportOpenChange(false);
+    if (action === "encrypted") await dialogs.onExportConfirm("synthetic-passphrase");
+    if (action === "restart") dialogs.onExportClick();
+    expect(dialogs.configExportIncludeCredentials.value).toBe(false);
+    dialogs.onRequestUnencryptedExport();
+    expect(dialogs.configExportIncludeCredentials.value).toBe(false);
+  });
+
+  it("preserves the current opt-in after cancelling the save picker but clears it after a write error", async () => {
+    mocks.store.connections = [conn("selected")];
+    const dialogs = await mountDialogs();
+    dialogs.onExportClick();
+    dialogs.onConfigConnectionSelectConfirm(["selected"]);
+    dialogs.onRequestUnencryptedExport();
+    dialogs.configExportIncludeCredentials.value = true;
+    mocks.store.exportConnectionsToFile.mockResolvedValueOnce("cancelled");
+    await dialogs.onConfigUnencryptedExportConfirm();
+    expect(dialogs.configExportIncludeCredentials.value).toBe(true);
+    expect(dialogs.showConfigUnencryptedExportConfirm.value).toBe(true);
+    mocks.store.exportConnectionsToFile.mockRejectedValueOnce(new Error("synthetic write error"));
+    await dialogs.onConfigUnencryptedExportConfirm();
+    expect(dialogs.configExportIncludeCredentials.value).toBe(false);
+    expect(dialogs.showConfigPassphraseDialog.value).toBe(true);
   });
 
   it("keeps encrypted export state when the native save dialog is cancelled", async () => {
@@ -151,8 +197,8 @@ describe("useDialogSources", () => {
 
     await dialogs.onConfigUnencryptedExportConfirm();
     expect(mocks.store.exportConnectionsToFile.mock.calls).toEqual([
-      [{ mode: "plaintext" }, ["selected"]],
-      [{ mode: "plaintext" }, ["selected"]],
+      [{ mode: "plaintext", includeCredentials: false }, ["selected"]],
+      [{ mode: "plaintext", includeCredentials: false }, ["selected"]],
     ]);
     expect(dialogs.showConfigUnencryptedExportConfirm.value).toBe(false);
     expect(mocks.toast).toHaveBeenCalledOnce();

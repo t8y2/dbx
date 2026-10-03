@@ -538,6 +538,38 @@ describe("connectionStore timeout recovery", () => {
     expect(click).toHaveBeenCalledOnce();
   });
 
+  it.each([undefined, false, true])("writes credentials to the chosen file only when includeCredentials is %s", async (includeCredentials) => {
+    const save = vi.fn().mockResolvedValue("/tmp/synthetic-export.json");
+    const writeTextFile = vi.fn().mockResolvedValue(undefined);
+    const selected = postgresConnection({ id: "selected", password: "synthetic-db-secret", transport_layers: [{ type: "ssh", id: "layer", host: "localhost", port: 22, user: "test", profile_id: "selected-profile" }] });
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
+    vi.doMock("@tauri-apps/plugin-dialog", () => ({ save }));
+    vi.doMock("@tauri-apps/plugin-fs", () => ({ writeTextFile }));
+    vi.doMock("@/lib/backend/api", () => ({
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      loadEditorSettings: vi.fn().mockResolvedValue(null),
+      loadConnections: vi.fn().mockResolvedValue([selected, postgresConnection({ id: "unselected", password: "unselected-secret" })]),
+      loadPinnedTreeNodeIds: vi.fn().mockResolvedValue([]),
+      loadSidebarLayout: vi.fn().mockResolvedValue(null),
+      loadTableVGroups: vi.fn().mockResolvedValue({}),
+      loadTunnelProfiles: vi.fn().mockResolvedValue([{ type: "ssh", id: "selected-profile", name: "Test", host: "localhost", port: 22, user: "test", password: "synthetic-profile-secret" }]),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveEditorSettings: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    await store.initFromDisk();
+    await expect(store.exportConnectionsToFile({ mode: "plaintext", includeCredentials }, ["selected"])).resolves.toBe("saved");
+    expect(writeTextFile).toHaveBeenCalledOnce();
+    expect(writeTextFile.mock.calls[0][0]).toBe("/tmp/synthetic-export.json");
+    const exported = JSON.parse(writeTextFile.mock.calls[0][1]);
+    expect(exported.connections).toHaveLength(1);
+    expect(exported.connections[0].password).toBe(includeCredentials ? "synthetic-db-secret" : "");
+    expect(exported.tunnelProfiles[0].password).toBe(includeCredentials ? "synthetic-profile-secret" : "");
+    expect(store.connections[0].password).toBe("synthetic-db-secret");
+  });
+
   it("reports cancellation when the native export save dialog is dismissed", async () => {
     const save = vi.fn().mockResolvedValue(null);
     const writeTextFile = vi.fn().mockResolvedValue(undefined);

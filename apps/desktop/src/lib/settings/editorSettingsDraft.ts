@@ -44,6 +44,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "confirmUnsavedSqlClose",
   "appCloseUnsavedTabsMode",
   "savedSqlOpenTargetMode",
+  "welcomePageMode",
   "appLayout",
   "tabLayout",
   "tabPlacement",

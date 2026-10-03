@@ -23,6 +23,16 @@ describe("settingsTransfer", () => {
     expect(parseSettingsTransferFile(fileWith({ resultTabPreferComments: "false" })).ok).toBe(false);
   });
 
+  it("round-trips the welcome page mode and rejects invalid values", () => {
+    const result = parseSettingsTransferFile(fileWith({ welcomePageMode: "workspace" }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.editorSettings.welcomePageMode).toBe("workspace");
+
+    const invalid = parseSettingsTransferFile(fileWith({ welcomePageMode: "connections" }));
+    expect(invalid.ok).toBe(false);
+    if (!invalid.ok) expect(invalid.error.detail).toContain("welcomePageMode");
+  });
+
   it("builds a dated transfer filename", () => {
     expect(buildSettingsTransferFilename(new Date(2026, 8, 6))).toBe("dbx-settings-2026-09-06.json");
   });

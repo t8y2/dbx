@@ -48,6 +48,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "savedSqlOpenTargetMode",
   "welcomePageMode",
   "appLayout",
+  "webLogoPosition",
   "tabLayout",
   "tabPlacement",
   "colorizeConnectionTabs",
@@ -186,6 +187,7 @@ function normalizedDraftValue(key: EditorSettingsDraftKey, value: unknown): unkn
   if (key === "csvNullMode") return normalizeCsvNullMode(value);
   if (key === "backgroundImage") return normalizeBackgroundImageSettings(value);
   if (key === "snippetTriggerKey") return value === "space" || value === "both" ? value : "tab";
+  if (key === "webLogoPosition") return value === "right" || value === "hidden" ? value : "left";
   return value;
 }
 

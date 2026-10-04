@@ -855,6 +855,8 @@ export interface RememberedConnectionDatabase {
 
 export type SnippetTriggerKey = "tab" | "space" | "both";
 
+export type WebLogoPosition = "left" | "right" | "hidden";
+
 export interface EditorSettings {
   snippetTriggerKey: SnippetTriggerKey;
   fontFamily: string;
@@ -920,6 +922,7 @@ export interface EditorSettings {
   /** 水平标签页最大显示宽度（像素，0 表示不限制）。 */
   tabMaxWidth: number;
   appLayout: "separated" | "classic";
+  webLogoPosition: WebLogoPosition;
   pageSize: number;
   tableOpenPageSize: number;
   tableOpenSortMode: "none" | "database" | "local";
@@ -1255,6 +1258,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   tabSortMode: "manual",
   tabMaxWidth: 0,
   appLayout: "classic",
+  webLogoPosition: "left",
   pageSize: 100,
   tableOpenPageSize: 100,
   tableOpenSortMode: "none",
@@ -1447,6 +1451,10 @@ function normalizeDataGridColumnWidthMode(value: unknown): DataGridColumnWidthMo
 
 function normalizeTabLayout(value: unknown): TabLayoutMode {
   return TAB_LAYOUT_MODES.includes(value as TabLayoutMode) ? (value as TabLayoutMode) : DEFAULT_EDITOR_SETTINGS.tabLayout;
+}
+
+export function normalizeWebLogoPosition(value: unknown): WebLogoPosition {
+  return value === "right" || value === "hidden" ? value : "left";
 }
 
 function normalizeTabPlacement(value: unknown): TabPlacement {
@@ -1872,6 +1880,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     tabSortMode: normalizeTabSortMode(settings.tabSortMode),
     tabMaxWidth: normalizeTabMaxWidth(settings.tabMaxWidth),
     appLayout: settings.appLayout ?? DEFAULT_EDITOR_SETTINGS.appLayout,
+    webLogoPosition: normalizeWebLogoPosition(settings.webLogoPosition),
     pageSize: normalizeResultPageSize(settings.pageSize),
     tableOpenPageSize: normalizeResultPageSize(settings.tableOpenPageSize, DEFAULT_EDITOR_SETTINGS.tableOpenPageSize),
     tableOpenSortMode: settings.tableOpenSortMode === "database" || settings.tableOpenSortMode === "local" ? settings.tableOpenSortMode : "none",
@@ -2731,6 +2740,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.tabSortMode !== undefined) editorSettings.value.tabSortMode = normalizeTabSortMode(partial.tabSortMode);
     if (partial.tabMaxWidth !== undefined) editorSettings.value.tabMaxWidth = normalizeTabMaxWidth(partial.tabMaxWidth);
     if (partial.appLayout !== undefined) editorSettings.value.appLayout = partial.appLayout;
+    if (partial.webLogoPosition !== undefined) editorSettings.value.webLogoPosition = normalizeWebLogoPosition(partial.webLogoPosition);
     if (partial.pageSize !== undefined) editorSettings.value.pageSize = normalizeResultPageSize(partial.pageSize);
     if (partial.tableOpenPageSize !== undefined) editorSettings.value.tableOpenPageSize = normalizeResultPageSize(partial.tableOpenPageSize, DEFAULT_EDITOR_SETTINGS.tableOpenPageSize);
     if (partial.tableOpenSortMode !== undefined) editorSettings.value.tableOpenSortMode = partial.tableOpenSortMode === "database" || partial.tableOpenSortMode === "local" ? partial.tableOpenSortMode : "none";

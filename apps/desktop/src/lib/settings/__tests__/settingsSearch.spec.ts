@@ -307,6 +307,7 @@ describe("settings search", () => {
       { titleKey: "transfer.dataTransfer", category: "appearance", targetId: "appearance" },
       { titleKey: "toolbar.driverManager", category: "appearance", targetId: "appearance" },
       { titleKey: "toolbar.theme", category: "appearance", targetId: "appearance" },
+      { titleKey: "settings.webLogoPosition", category: "appearance", targetId: "appearance-web-logo-position" },
       { titleKey: "settings.sidebarObjectInfoMode", category: "navigation", targetId: "navigation" },
       { titleKey: "settings.insertSpaceAfterCompletion", category: "editor", targetId: "editor" },
       { titleKey: "settings.functionCompletionIncludeParams", category: "editor", targetId: "editor" },

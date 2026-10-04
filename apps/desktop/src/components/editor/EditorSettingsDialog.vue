@@ -115,6 +115,7 @@ import {
   normalizeMcpGlobalPolicy,
   type ClickTableNavigationTarget,
   type EditorSettings,
+  type WebLogoPosition,
   type SnippetTriggerKey,
   type SqlCompletionTriggerMode,
   type SqlTableCompletionSchemaQualification,
@@ -718,6 +719,7 @@ const editAppCloseUnsavedTabsMode = ref<AppCloseUnsavedTabsMode>(settingsStore.e
 const editSavedSqlOpenTargetMode = ref<SavedSqlOpenTargetMode>(settingsStore.editorSettings.savedSqlOpenTargetMode);
 const editWelcomePageMode = ref<WelcomePageMode>(settingsStore.editorSettings.welcomePageMode);
 const editAppLayout = ref(settingsStore.editorSettings.appLayout);
+const editWebLogoPosition = ref<WebLogoPosition>(settingsStore.editorSettings.webLogoPosition);
 const editTabLayout = ref(settingsStore.editorSettings.tabLayout);
 const editTabPlacement = ref<TabPlacement>(settingsStore.editorSettings.tabPlacement);
 const editColorizeConnectionTabs = ref(settingsStore.editorSettings.colorizeConnectionTabs);
@@ -1097,6 +1099,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     savedSqlOpenTargetMode: editSavedSqlOpenTargetMode.value,
     welcomePageMode: editWelcomePageMode.value,
     appLayout: editAppLayout.value,
+    webLogoPosition: editWebLogoPosition.value,
     tabLayout: editTabLayout.value,
     tabPlacement: editTabPlacement.value,
     colorizeConnectionTabs: editColorizeConnectionTabs.value,
@@ -1777,6 +1780,7 @@ function syncEditorSettingsDraftFromStore() {
   editSavedSqlOpenTargetMode.value = settingsStore.editorSettings.savedSqlOpenTargetMode;
   editWelcomePageMode.value = settingsStore.editorSettings.welcomePageMode;
   editAppLayout.value = settingsStore.editorSettings.appLayout;
+  editWebLogoPosition.value = settingsStore.editorSettings.webLogoPosition;
   editTabLayout.value = settingsStore.editorSettings.tabLayout;
   editTabPlacement.value = settingsStore.editorSettings.tabPlacement;
   editColorizeConnectionTabs.value = settingsStore.editorSettings.colorizeConnectionTabs;
@@ -1932,6 +1936,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   savedSqlOpenTargetMode: editSavedSqlOpenTargetMode,
   welcomePageMode: editWelcomePageMode,
   appLayout: editAppLayout,
+  webLogoPosition: editWebLogoPosition,
   tabLayout: editTabLayout,
   tabPlacement: editTabPlacement,
   colorizeConnectionTabs: editColorizeConnectionTabs,
@@ -2484,6 +2489,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editActiveCustomThemeId.value = DEFAULT_EDITOR_SETTINGS.activeCustomThemeId;
     editWelcomePageMode.value = DEFAULT_EDITOR_SETTINGS.welcomePageMode;
     editAppLayout.value = DEFAULT_EDITOR_SETTINGS.appLayout;
+    editWebLogoPosition.value = DEFAULT_EDITOR_SETTINGS.webLogoPosition;
     editTabLayout.value = DEFAULT_EDITOR_SETTINGS.tabLayout;
     editTabPlacement.value = DEFAULT_EDITOR_SETTINGS.tabPlacement;
     editColorizeConnectionTabs.value = DEFAULT_EDITOR_SETTINGS.colorizeConnectionTabs;
@@ -2646,6 +2652,7 @@ function resetAllDefaults() {
   editSqlVariableSyntaxOverrides.value = normalizeSqlVariableSyntaxOverrides(DEFAULT_EDITOR_SETTINGS.sqlVariableSyntaxOverrides);
   editWelcomePageMode.value = DEFAULT_EDITOR_SETTINGS.welcomePageMode;
   editAppLayout.value = DEFAULT_EDITOR_SETTINGS.appLayout;
+  editWebLogoPosition.value = DEFAULT_EDITOR_SETTINGS.webLogoPosition;
   editShowTrayIcon.value = DEFAULT_DESKTOP_SETTINGS.show_tray_icon;
   editQuitOnClose.value = DEFAULT_DESKTOP_SETTINGS.quit_on_close;
   desktopCloseBehaviorResetPending.value = true;
@@ -7806,6 +7813,24 @@ onUnmounted(() => {
                   <HelpTooltip :label="t('settings.toolbarTitle')" content-class="max-w-64">
                     <p>{{ t("settings.toolbarHiddenHint") }}</p>
                   </HelpTooltip>
+                </div>
+                <div v-if="isWeb" data-settings-search-id="appearance-web-logo-position" :class="['settings-item flex items-center justify-between gap-4 rounded-md border border-border/60 p-3', settingsSearchTargetClass('appearance-web-logo-position')]">
+                  <div class="space-y-1">
+                    <Label for="web-logo-position">{{ t("settings.webLogoPosition") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.webLogoPositionDescription") }}
+                    </p>
+                  </div>
+                  <Select :model-value="editWebLogoPosition" @update:model-value="editWebLogoPosition = $event as WebLogoPosition">
+                    <SelectTrigger id="web-logo-position" class="h-8 w-44 shrink-0">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="left">{{ t("settings.webLogoPositionLeft") }}</SelectItem>
+                      <SelectItem value="right">{{ t("settings.webLogoPositionRight") }}</SelectItem>
+                      <SelectItem value="hidden">{{ t("settings.webLogoPositionHidden") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div class="settings-item flex items-center justify-between gap-4 rounded-md border border-border/60 p-3">
                   <div class="space-y-1">

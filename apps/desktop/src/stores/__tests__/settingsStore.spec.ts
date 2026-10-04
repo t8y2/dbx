@@ -32,6 +32,15 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ resultTabPreferComments: "false" } as any).resultTabPreferComments).toBe(true);
   });
 
+  it("defaults webLogoPosition to left and validates positions (#11053)", () => {
+    expect(DEFAULT_EDITOR_SETTINGS.webLogoPosition).toBe("left");
+    expect(normalizeEditorSettings({}).webLogoPosition).toBe("left");
+    expect(normalizeEditorSettings({ webLogoPosition: "right" }).webLogoPosition).toBe("right");
+    expect(normalizeEditorSettings({ webLogoPosition: "hidden" }).webLogoPosition).toBe("hidden");
+    expect(normalizeEditorSettings({ webLogoPosition: "invalid" as any }).webLogoPosition).toBe("left");
+    expect(normalizeEditorSettings({ webLogoPosition: undefined }).webLogoPosition).toBe("left");
+  });
+
   it("defaults the welcome page to the workspace overview and honors an explicitly saved intro mode", () => {
     expect(DEFAULT_EDITOR_SETTINGS.welcomePageMode).toBe("workspace");
     expect(normalizeEditorSettings({}).welcomePageMode).toBe("workspace");

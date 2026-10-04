@@ -53,6 +53,7 @@ vi.mock("@/components/layout/ToolbarUpdateIcon.vue", () => ({
   default: { name: "ToolbarUpdateIconStub", template: `<span />` },
 }));
 
+import { useSettingsStore } from "@/stores/settingsStore";
 import AppToolbar from "../AppToolbar.vue";
 
 const defaultToolbarProps = {
@@ -80,6 +81,7 @@ const defaultToolbarProps = {
   hasConnections: false,
   canNewQuery: false,
   hasSqlFileConnections: false,
+  immediateSyncing: false,
 };
 
 let pinia: ReturnType<typeof createPinia>;
@@ -118,7 +120,7 @@ function mount(props: Record<string, unknown> = {}) {
   };
 }
 
-describe("AppToolbar web branding (#8703)", () => {
+describe("AppToolbar web branding (#8703, #11053)", () => {
   beforeEach(() => {
     document.body.innerHTML = "";
     mockIsTauriRuntime = false;
@@ -130,7 +132,7 @@ describe("AppToolbar web branding (#8703)", () => {
     document.body.innerHTML = "";
   });
 
-  it("renders the DBX brand logo and title on web mode", async () => {
+  it("renders the DBX brand logo and title on web mode on the left by default", async () => {
     mockIsTauriRuntime = false;
     const { host, unmount } = mount();
     await nextTick();
@@ -146,11 +148,58 @@ describe("AppToolbar web branding (#8703)", () => {
     expect(logoImg).not.toBeNull();
     expect(logoImg?.getAttribute("alt")).toBe("DBX");
 
+    // Located at the very start of toolbar (left position)
+    const toolbar = host.querySelector(".app-toolbar");
+    expect(toolbar?.firstElementChild).toBe(brandEl);
+
     unmount();
   });
 
-  it("does not render the web DBX brand logo in desktop mode", async () => {
+  it("renders the DBX brand logo on the right when configured (#11053)", async () => {
+    mockIsTauriRuntime = false;
+    const settingsStore = useSettingsStore();
+    settingsStore.updateEditorSettings({ webLogoPosition: "right" });
+
+    const { host, unmount } = mount();
+    await nextTick();
+
+    const brandEl = host.querySelector('[data-testid="web-brand-logo"]');
+    expect(brandEl).not.toBeNull();
+    expect(brandEl?.textContent).toContain("DBX");
+
+    const toolbar = host.querySelector(".app-toolbar");
+    const children = Array.from(toolbar?.children ?? []);
+    const brandIndex = children.indexOf(brandEl as Element);
+
+    // Should not be the first child (it was moved from left to right)
+    expect(brandIndex).toBeGreaterThan(0);
+
+    // Toolbar settings button should be after the brand logo
+    const settingsBtn = host.querySelector('button[class*="toolbar-action-button"]');
+    expect(settingsBtn).not.toBeNull();
+
+    unmount();
+  });
+
+  it("does not render the brand logo when webLogoPosition is hidden (#11053)", async () => {
+    mockIsTauriRuntime = false;
+    const settingsStore = useSettingsStore();
+    settingsStore.updateEditorSettings({ webLogoPosition: "hidden" });
+
+    const { host, unmount } = mount();
+    await nextTick();
+
+    const brandEl = host.querySelector('[data-testid="web-brand-logo"]');
+    expect(brandEl).toBeNull();
+
+    unmount();
+  });
+
+  it("does not render the web DBX brand logo in desktop mode regardless of setting", async () => {
     mockIsTauriRuntime = true;
+    const settingsStore = useSettingsStore();
+    settingsStore.updateEditorSettings({ webLogoPosition: "right" });
+
     const { host, unmount } = mount();
     await nextTick();
 

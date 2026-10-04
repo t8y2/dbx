@@ -195,6 +195,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "appearance-tab-max-width", category: "appearance", titleKey: "settings.tabMaxWidth", descriptionKey: "settings.tabMaxWidthDescription", targetId: "appearance" },
   { id: "appearance-connection-tab-colors", category: "appearance", titleKey: "settings.colorizeConnectionTabs", descriptionKey: "settings.colorizeConnectionTabsDescription", targetId: "appearance" },
   { id: "appearance-icons", category: "appearance", titleKey: "settings.iconTheme", targetId: "appearance", visible: desktopOnly },
+  { id: "appearance-web-logo-position", category: "appearance", titleKey: "settings.webLogoPosition", descriptionKey: "settings.webLogoPositionDescription", targetId: "appearance-web-logo-position", visible: webOnly },
   { id: "appearance-tray", category: "appearance", titleKey: "settings.showTrayIcon", descriptionKey: "settings.showTrayIconDescription", targetId: "appearance", visible: desktopOnly },
   { id: "appearance-quit", category: "appearance", titleKey: "settings.quitOnClose", descriptionKey: "settings.quitOnCloseDescription", targetId: "appearance", visible: desktopOnly },
   { id: "about-debug-logs", category: "about", titleKey: "settings.debugLoggingEnabled", descriptionKey: "settings.debugLoggingEnabledDescription", targetId: "about", visible: desktopOnly },

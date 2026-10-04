@@ -51,8 +51,6 @@ const i18n = {
     customIncludeJre: `Include JRE 21`,
     customIncludeJreForced: "Included automatically — Java agents require the JRE",
     customSource: "Fetch source",
-    customSourceCnb: "CNB (direct)",
-    customSourceGithub: "GitHub (via this site)",
     customDownload: "Download bundle",
     customEstimate: "Estimated download",
     customSelected: "selected",
@@ -61,7 +59,6 @@ const i18n = {
     customWorkersNote: "The SQLite SSH Worker Linux packages are always included — remote SSH hosts execute them.",
     customNoDrivers: "No drivers match this platform or search.",
     customPhaseDownload: "Downloading",
-    customPhaseUnpack: "Unpacking",
     customPhaseAssemble: "Assembling ZIP",
     customPhaseDone: "Custom bundle downloaded ({size}). Import it in DBX from Settings > Driver Manager > offline import.",
     customErrorTitle: "Bundle build failed",
@@ -111,8 +108,6 @@ const i18n = {
     customIncludeJre: "包含 JRE 21",
     customIncludeJreForced: "已自动包含——Java 驱动必须搭配 JRE",
     customSource: "下载源",
-    customSourceCnb: "CNB（直连）",
-    customSourceGithub: "GitHub（经本站代理）",
     customDownload: "下载离线包",
     customEstimate: "预计下载量",
     customSelected: "已选",
@@ -121,7 +116,6 @@ const i18n = {
     customWorkersNote: "SQLite SSH Worker 的 Linux 包会自动包含——它们在远端 SSH 主机上执行。",
     customNoDrivers: "没有匹配该平台或搜索词的驱动。",
     customPhaseDownload: "正在下载",
-    customPhaseUnpack: "正在解包",
     customPhaseAssemble: "正在打包",
     customPhaseDone: "自定义离线包已下载（{size}）。在 DBX 的“设置 > 驱动管理”中离线导入即可。",
     customErrorTitle: "打包失败",
@@ -301,17 +295,16 @@ export function DriversClient({ initialCatalog, initialRegistry }: { initialCata
   };
 
   const fetchBundlePackage = async (url: string, onProgress: (received: number) => void, signal: AbortSignal): Promise<Uint8Array> => {
-    const proxy = proxyUrl(window.location.origin, url);
-    const mirror = cnbMirrorUrl(url);
+    // The selected source is tried first; the other is a silent fallback.
     const attempts: Array<{ label: string; url: string }> =
       bundleSource === "cnb"
         ? [
-            { label: t.customSourceCnb, url: mirror },
-            { label: t.customSourceGithub, url: proxy },
+            { label: "CNB", url: cnbMirrorUrl(url) },
+            { label: "GitHub", url: proxyUrl(window.location.origin, url) },
           ]
         : [
-            { label: t.customSourceGithub, url: proxy },
-            { label: t.customSourceCnb, url: mirror },
+            { label: "GitHub", url: proxyUrl(window.location.origin, url) },
+            { label: "CNB", url: cnbMirrorUrl(url) },
           ];
     const errors: string[] = [];
     for (const attempt of attempts) {
@@ -388,12 +381,10 @@ export function DriversClient({ initialCatalog, initialRegistry }: { initialCata
   const bundleProgressText = useMemo(() => {
     if (!bundleProgress) return "";
     if (bundleProgress.phase === "download") {
-      const expected = bundleProgress.expectedBytes > 0 ? ` / ${formatSize(bundleProgress.expectedBytes)}` : "";
-      return `${t.customPhaseDownload} ${bundleProgress.label} (${bundleProgress.index}/${bundleProgress.total}) · ${formatSize(bundleProgress.received)}${expected}`;
+      const expected = bundleProgress.totalBytes > 0 ? ` / ${formatSize(bundleProgress.totalBytes)}` : "";
+      return `${t.customPhaseDownload} ${bundleProgress.completed}/${bundleProgress.total} · ${formatSize(bundleProgress.receivedBytes)}${expected}`;
     }
-    if (bundleProgress.phase === "unpack") return `${t.customPhaseUnpack} ${bundleProgress.label}`;
-    if (bundleProgress.phase === "assemble") return t.customPhaseAssemble;
-    return "";
+    return t.customPhaseAssemble;
   }, [bundleProgress, t]);
 
   const activeCount = activeTab === "bundles" ? filteredBundles.length : activeTab === "custom" ? filteredBundleOptions.length : activeTab === "drivers" ? filteredDrivers.length : activeTab === "native" ? filteredNativeGroups.length : activeTab === "jre" ? filteredJres.length : filteredJdbcPlugin.length;
@@ -580,8 +571,8 @@ export function DriversClient({ initialCatalog, initialRegistry }: { initialCata
                       <LandingSelect<BundleSource>
                         value={bundleSource}
                         options={[
-                          { value: "cnb", label: t.customSourceCnb },
-                          { value: "github", label: t.customSourceGithub },
+                          { value: "cnb", label: "CNB" },
+                          { value: "github", label: "GitHub" },
                         ]}
                         onChange={setBundleSource}
                         disabled={bundleBusy}

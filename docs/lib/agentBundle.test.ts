@@ -285,8 +285,9 @@ test("assemble builds a driver-manager compatible offline ZIP end to end", async
   const assembled = await assembleCustomBundle(plan, fetchPackage, (event) => progress.push(event), signal);
 
   assert.equal(assembled.filename, "dbx-agents-offline-custom-windows-x64.zip");
-  assert.ok(progress.some((event) => event.phase === "download" && event.label === "H2"));
-  assert.ok(progress.some((event) => event.phase === "unpack"));
+  const downloads = progress.filter((event): event is Extract<BundleProgress, { phase: "download" }> => event.phase === "download");
+  assert.ok(downloads.some((event) => event.completed === 4), "all four jobs must report completion");
+  assert.equal(downloads.at(-1)?.receivedBytes, h2Package.length + workerX64Package.length + workerArmPackage.length + JRE_BYTES.length);
   assert.ok(progress.some((event) => event.phase === "assemble"));
   assert.ok(progress.some((event) => event.phase === "done"));
 
@@ -315,6 +316,25 @@ test("assemble builds a driver-manager compatible offline ZIP end to end", async
   assert.equal(registry.drivers.h2!.label, "H2");
   assert.deepEqual(Object.keys(registry.drivers["sqlite-worker"]!.native!), ["linux-x64", "linux-aarch64"]);
   assert.equal(fetched.length, 4);
+});
+
+test("bundle downloads run in parallel under the concurrency limit", async () => {
+  const plan = computeBundlePlan(testRegistry, "windows-x64", new Set(["h2"]), false);
+  assert.equal(plan.drivers.length + plan.workers.length + (plan.jre ? 1 : 0), 4);
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const fetchPackage: BundleFetch = async (url) => {
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    inFlight -= 1;
+    if (url.endsWith("dbx-agent-h2-1.0.0.tar.zst")) return h2Package;
+    if (url.endsWith("linux-x64.tar.zst")) return workerX64Package;
+    if (url.endsWith("linux-aarch64.tar.zst")) return workerArmPackage;
+    return JRE_BYTES;
+  };
+  await assembleCustomBundle(plan, fetchPackage, () => {}, new AbortController().signal);
+  assert.equal(maxInFlight, 4);
 });
 
 test("assembly rejects packages whose checksum does not match the registry", async () => {

@@ -404,8 +404,7 @@ export function buildStoredZipParts(entries: StoredZipEntry[], date = new Date()
 export type BundleFetch = (url: string, onProgress: (received: number) => void, signal: AbortSignal) => Promise<Uint8Array>;
 
 export type BundleProgress =
-  | { phase: "download"; label: string; index: number; total: number; received: number; expectedBytes: number }
-  | { phase: "unpack"; label: string }
+  | { phase: "download"; completed: number; total: number; receivedBytes: number; totalBytes: number }
   | { phase: "assemble" }
   | { phase: "done"; filename: string; size: number };
 
@@ -417,6 +416,33 @@ export interface AssembleResult {
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", bytes as unknown as ArrayBuffer);
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+/** Parallel package downloads; 4 keeps the peak heap bounded by a few packages. */
+export const BUNDLE_DOWNLOAD_CONCURRENCY = 4;
+
+async function runPool(tasks: Array<() => Promise<void>>, limit: number): Promise<void> {
+  let cursor = 0;
+  const failure: { current: { error: unknown } | null } = { current: null };
+  const worker = async () => {
+    for (;;) {
+      if (failure.current) return;
+      const index = cursor++;
+      if (index >= tasks.length) return;
+      try {
+        await tasks[index]!();
+      } catch (error) {
+        failure.current ??= { error };
+        return;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, tasks.length)) }, worker));
+  if (failure.current) throw failure.current.error;
+}
+
+function describe(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function mergeDriverEntry(target: Record<string, PackageDriverEntry>, extracted: ExtractedDriverPackage): void {
@@ -435,9 +461,10 @@ function mergeDriverEntry(target: Record<string, PackageDriverEntry>, extracted:
 }
 
 /**
- * Downloads every planned package, unpacks the raw artifacts, verifies the
- * package-provided SHA-256 digests, and assembles the final driver-manager
- * compatible ZIP. `fetchPackage` is injected so tests can stub the network.
+ * Downloads the planned packages in parallel (CNB first with a silent fallback
+ * handled by the injected `fetchPackage`), unpacks and verifies each raw
+ * artifact, then assembles the driver-manager compatible ZIP. The first
+ * failing package stops the pool; in-flight downloads still settle.
  */
 export async function assembleCustomBundle(
   plan: BundlePlan,
@@ -449,59 +476,97 @@ export async function assembleCustomBundle(
   if (plan.drivers.length === 0) throw new Error("Select at least one driver");
   const hash = deps.sha256 ?? sha256Hex;
   const items = [...plan.drivers, ...plan.workers];
-  const drivers: Record<string, PackageDriverEntry> = {};
-  const zipEntries: StoredZipEntry[] = [];
-  let rawBytes = 0;
+  const jre = plan.jre;
+  const total = items.length + (jre ? 1 : 0);
+  const totalBytes = items.reduce((sum, item) => sum + item.packageSize, 0) + (jre?.size ?? 0);
+  const extractedByUrl = new Map<string, ExtractedDriverPackage>();
+  const receivedByUrl = new Map<string, number>();
+  const jreResult: { bytes: Uint8Array | null } = { bytes: null };
+  let completed = 0;
 
-  for (let index = 0; index < items.length; index += 1) {
-    const item = items[index];
+  const reportDownload = () => {
+    let receivedBytes = 0;
+    for (const value of receivedByUrl.values()) receivedBytes += value;
+    onProgress({ phase: "download", completed, total, receivedBytes, totalBytes });
+  };
+
+  const downloadOne = async (url: string, expectedBytes: number): Promise<Uint8Array> => {
+    const bytes = await fetchPackage(
+      url,
+      (received) => {
+        receivedByUrl.set(url, received);
+        reportDownload();
+      },
+      signal,
+    );
+    receivedByUrl.set(url, bytes.length);
+    return bytes;
+  };
+
+  const tasks: Array<() => Promise<void>> = items.map((item) => async () => {
     signal.throwIfAborted();
-    onProgress({ phase: "download", label: item.label, index: index + 1, total: items.length + (plan.jre ? 1 : 0), received: 0, expectedBytes: item.packageSize });
     let packageBytes: Uint8Array;
     try {
-      packageBytes = await fetchPackage(item.packageUrl, (received) => {
-        onProgress({ phase: "download", label: item.label, index: index + 1, total: items.length + (plan.jre ? 1 : 0), received, expectedBytes: item.packageSize });
-      }, signal);
+      packageBytes = await downloadOne(item.packageUrl, item.packageSize);
     } catch (error) {
       if (signal.aborted) throw error;
-      throw new Error(`${item.label} — ${error instanceof Error ? error.message : String(error)}`);
+      throw new Error(`${item.label} — ${describe(error)}`);
     }
     if (item.packageSha256) {
       const actual = await hash(packageBytes);
-      if (actual !== item.packageSha256.toLowerCase()) throw new Error(`Package checksum mismatch for ${item.label}`);
+      if (actual !== item.packageSha256.toLowerCase()) throw new Error(`${item.label} — package checksum mismatch`);
     }
-    onProgress({ phase: "unpack", label: item.label });
-    const extracted = extractDriverPackage(packageBytes, item.key);
-    if (extracted.artifactKind !== item.kind) throw new Error(`Package kind mismatch for ${item.label}: expected ${item.kind}`);
+    let extracted: ExtractedDriverPackage;
+    try {
+      extracted = extractDriverPackage(packageBytes, item.key);
+    } catch (error) {
+      throw new Error(`${item.label} — ${describe(error)}`);
+    }
+    if (extracted.artifactKind !== item.kind) throw new Error(`${item.label} — package kind mismatch: expected ${item.kind}`);
     if (extracted.sha256) {
       const actual = await hash(extracted.bytes);
-      if (actual !== extracted.sha256.toLowerCase()) throw new Error(`Artifact checksum mismatch for ${item.label}`);
+      if (actual !== extracted.sha256.toLowerCase()) throw new Error(`${item.label} — artifact checksum mismatch`);
     }
+    extractedByUrl.set(item.packageUrl, extracted);
+    completed += 1;
+    reportDownload();
+  });
+  if (jre) {
+    tasks.push(async () => {
+      signal.throwIfAborted();
+      let bytes: Uint8Array;
+      try {
+        bytes = await downloadOne(jre.url, jre.size);
+      } catch (error) {
+        if (signal.aborted) throw error;
+        throw new Error(`JRE ${jre.key} — ${describe(error)}`);
+      }
+      if (jre.sha256) {
+        const actual = await hash(bytes);
+        if (actual !== jre.sha256.toLowerCase()) throw new Error(`JRE ${jre.key} — checksum mismatch`);
+      }
+      jreResult.bytes = bytes;
+      completed += 1;
+      reportDownload();
+    });
+  }
+
+  await runPool(tasks, BUNDLE_DOWNLOAD_CONCURRENCY);
+
+  const drivers: Record<string, PackageDriverEntry> = {};
+  const zipEntries: StoredZipEntry[] = [];
+  let rawBytes = 0;
+  for (const item of items) {
+    const extracted = extractedByUrl.get(item.packageUrl);
+    if (!extracted) throw new Error(`${item.label} — package was not downloaded`);
     mergeDriverEntry(drivers, extracted);
     zipEntries.push({ name: `drivers/${extracted.filename}`, data: extracted.bytes });
     rawBytes += extracted.bytes.length;
   }
 
   let jres: Record<string, { version: string; platforms: Record<string, { url: string; sha256?: string; size: number; format: "tar_zstd" }> }> = {};
-  if (plan.jre) {
-    signal.throwIfAborted();
-    const jre = plan.jre;
-    const index = items.length + 1;
-    const total = index;
-    onProgress({ phase: "download", label: `JRE ${jre.key}`, index, total, received: 0, expectedBytes: jre.size });
-    let jreBytes: Uint8Array;
-    try {
-      jreBytes = await fetchPackage(jre.url, (received) => {
-        onProgress({ phase: "download", label: `JRE ${jre.key}`, index, total, received, expectedBytes: jre.size });
-      }, signal);
-    } catch (error) {
-      if (signal.aborted) throw error;
-      throw new Error(`JRE ${jre.key} — ${error instanceof Error ? error.message : String(error)}`);
-    }
-    if (jre.sha256) {
-      const actual = await hash(jreBytes);
-      if (actual !== jre.sha256.toLowerCase()) throw new Error("JRE package checksum mismatch");
-    }
+  const jreBytes = jreResult.bytes;
+  if (jre && jreBytes) {
     jres = {
       [jre.key]: {
         version: jre.version,

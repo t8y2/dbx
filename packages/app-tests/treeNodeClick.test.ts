@@ -99,8 +99,13 @@ test("double-click follow-up clicks do not repeat side-effecting row actions", (
 });
 
 test("plain metadata leaf rows do nothing on row clicks", () => {
-  assert.equal(treeNodeRowAction("column", false), "none");
   assert.equal(treeNodeRowAction("index", false), "none");
+});
+
+test("column rows locate column in data grid", () => {
+  assert.equal(treeNodeRowAction("column", false, "single"), "locate-column");
+  assert.equal(treeNodeRowAction("column", false, "double"), "none");
+  assert.equal(treeNodeRowDoubleClickAction("column", false, "double"), "locate-column");
 });
 
 test("maps source-capable sidebar nodes to object source kinds", () => {

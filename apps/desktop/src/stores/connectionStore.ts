@@ -7401,6 +7401,7 @@ export const useConnectionStore = defineStore("connection", () => {
           connectionId,
           database,
           schema,
+          catalog: catalog || targetNode.catalog,
           tableName: table,
           meta: col,
         })),

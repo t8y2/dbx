@@ -62,6 +62,28 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  modelGeneration: {
+    title: "モデルを生成",
+    editTemplate: "テンプレートを編集",
+    addTemplate: "テンプレートを追加",
+    deleteTemplate: "テンプレートを削除",
+    templateName: "テンプレート名",
+    extension: "ファイル拡張子",
+    templateBody: "テンプレートソース",
+    search: "言語を検索",
+    targets: "モデル出力先",
+    languages: "言語",
+    customTemplates: "カスタムテンプレート",
+    noMatches: "一致する言語またはテンプレートがありません",
+    outputFormat: "出力形式",
+    showHeaderComments: "ヘッダーコメントを表示",
+    preview: "生成コードのプレビュー",
+    copy: "コードをコピー",
+    save: "コードを保存",
+    unknownTypes: "認識できないデータベース型があります。生成された型を確認してから使用してください。",
+    templateHelp:
+      "変数: table.name、table.schema、table.comment、class.name。columns セクション内では column.name、column.type、column.originalType、column.comment、column.defaultValue、column.nullable、column.primaryKey を使用できます。変数は二重中括弧で囲み、#columns と /columns はループ、#column.nullable と /column.nullable は条件ブロックを表します。",
+  },
   mongoDump,
   cellTransform: {
     title: "変換プレビュー",

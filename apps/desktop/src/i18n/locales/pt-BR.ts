@@ -62,6 +62,28 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  modelGeneration: {
+    title: "Gerar modelo",
+    editTemplate: "Editar modelo",
+    addTemplate: "Adicionar modelo",
+    deleteTemplate: "Excluir modelo",
+    templateName: "Nome do modelo",
+    extension: "Extensão do arquivo",
+    templateBody: "Código do modelo",
+    search: "Pesquisar linguagens",
+    targets: "Destinos do modelo",
+    languages: "Linguagens",
+    customTemplates: "Modelos personalizados",
+    noMatches: "Nenhuma linguagem ou modelo correspondente",
+    outputFormat: "Formato de saída",
+    showHeaderComments: "Mostrar comentários do cabeçalho",
+    preview: "Prévia do código gerado",
+    copy: "Copiar código",
+    save: "Salvar código",
+    unknownTypes: "Alguns tipos de banco de dados não foram reconhecidos. Revise os tipos gerados antes de usá-los.",
+    templateHelp:
+      "Variáveis: table.name, table.schema, table.comment, class.name; dentro de uma seção columns: column.name, column.type, column.originalType, column.comment, column.defaultValue, column.nullable, column.primaryKey. Use chaves duplas para variáveis, #columns e /columns para loops, e #column.nullable e /column.nullable para blocos condicionais.",
+  },
   mongoDump,
   cellTransform: {
     title: "Prévia da conversão",

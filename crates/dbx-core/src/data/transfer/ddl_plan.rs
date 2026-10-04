@@ -1,8 +1,10 @@
 //! Prepare target CREATE TABLE and deferred foreign keys without executing DDL.
 //!
-//! The transfer pass and the ownership preview share this planning helper so both always
-//! agree on the DDL that will run and the names it will use. Nothing here executes DDL:
-//! execution stays with `execute_transfer_create_table_ddl_on_pool` and the caller.
+//! The transfer pass and the structure-only SQL preview share this planning helper, so both
+//! always agree on the DDL that will run and the names it will use. Nothing here executes
+//! DDL: execution stays with `execute_transfer_create_table_ddl_on_pool` and the caller. The
+//! preview is still a plan, not a frozen script — the transfer pass re-reads source and
+//! target metadata (and re-runs its fail-closed checks) when it starts.
 
 use super::*;
 

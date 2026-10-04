@@ -222,7 +222,7 @@ type DataGridHandle = DataGridColumnLayoutHandle & {
   showDdl: boolean;
   toggleDdl: (tab?: TableInfoTab) => void;
   canOpenTableStructureEditor: boolean;
-  openTableStructureEditor: (tab: TableInfoTab) => void;
+  openTableStructureEditor: (tab?: TableInfoTab) => boolean;
   multiRowTranspose: boolean;
   setMultiRowTranspose: (value: boolean) => void;
   exportCsv: () => Promise<void>;
@@ -1302,6 +1302,11 @@ function openGoToColumn(): boolean {
   return dataGridRef.value?.openGoToColumn() ?? false;
 }
 
+function openTableStructureEditor(initialTab: TableInfoTab = "columns"): boolean {
+  if (props.activeTab.mode !== "data") return false;
+  return dataGridRef.value?.openTableStructureEditor?.(initialTab) ?? false;
+}
+
 function refreshQueryEditorCompletionCache(): boolean {
   if (props.activeTab.mode !== "query" || !queryEditorRef.value) return false;
   queryEditorRef.value.refreshCompletionCache();
@@ -1786,6 +1791,7 @@ defineExpose({
   focusSearch,
   focusWhere,
   openGoToColumn,
+  openTableStructureEditor,
   refreshData,
   toggleResultsPane,
   refreshQueryEditorCompletionCache,

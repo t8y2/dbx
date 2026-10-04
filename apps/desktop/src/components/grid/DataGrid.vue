@@ -9786,10 +9786,9 @@ async function onGridKeydown(event: KeyboardEvent) {
   }
 
   const targetAllowsNativeClipboard = eventTargetAllowsNativeClipboard(event);
-  if (!targetAllowsNativeClipboard && props.context === "table-data" && canOpenTableStructureEditor.value && isEditTableStructureShortcut(event, settingsStore.editorSettings.shortcuts)) {
+  if (!targetAllowsNativeClipboard && props.context === "table-data" && isEditTableStructureShortcut(event, settingsStore.editorSettings.shortcuts) && openTableStructureEditor("columns")) {
     event.preventDefault();
     event.stopPropagation();
-    openTableStructureEditor("columns");
     return;
   }
   if (!targetAllowsNativeClipboard && isGoToColumnShortcut(event, settingsStore.editorSettings.shortcuts) && openGoToColumn()) {
@@ -11898,9 +11897,10 @@ function copyDdl() {
   copyText(ddlContent.value);
 }
 
-function openTableStructureEditor(initialTab: TableInfoTab) {
-  if (!props.connectionId || !props.database || !props.tableMeta?.tableName || !canOpenTableStructureEditor.value) return;
+function openTableStructureEditor(initialTab: TableInfoTab = "columns"): boolean {
+  if (!props.connectionId || !props.database || !props.tableMeta?.tableName || !canOpenTableStructureEditor.value) return false;
   queryStore.openTableStructure(props.connectionId, props.database, props.tableMeta.schema, props.tableMeta.tableName, initialTab, undefined, props.tableMeta.catalog, (props.tableMeta.tableType || "").toUpperCase() === "VIEW" ? "view" : "table");
+  return true;
 }
 
 function toggleDdlWrap() {

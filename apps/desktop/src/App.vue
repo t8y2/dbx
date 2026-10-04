@@ -109,6 +109,7 @@ import {
   isBrowserTaskManagerShortcut,
   isCloseOtherTabsShortcut,
   isCloseTabShortcut,
+  isEditTableStructureShortcut,
   isExecuteSqlInNewResultTabShortcut,
   isExecuteSqlShortcut,
   isFocusSearchShortcut,
@@ -152,7 +153,7 @@ import { countAvailableAgentDriverUpdates } from "@/lib/connection/agentDriverUp
 import type { DriverStoreFocus, DriverStoreTab } from "@/lib/connection/agentDriverInstallHint";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { webPath } from "@/lib/common/webPath";
-import { shouldBlockAppNativeSelectAll } from "@/lib/common/clipboard";
+import { eventTargetAllowsNativeClipboard, shouldBlockAppNativeSelectAll } from "@/lib/common/clipboard";
 import { APP_FONT_SANS_CSS_VAR, DATA_GRID_FONT_FAMILY_CSS_VAR, DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_MONO_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY, FONT_MONO_CSS_VAR } from "@/lib/app/appFonts";
 import { DATA_GRID_TYPE_COLOR_KEYS, dataGridTypeColorCssVar, resolveActiveDataGridTypeColors } from "@/lib/dataGrid/dataGridTypeColorScheme";
 import { rankSavedSqlHistory } from "@/lib/savedSql/savedSqlHistory";
@@ -3828,6 +3829,14 @@ async function handleKeydown(e: KeyboardEvent) {
   if (isFocusWhereShortcut(e, shortcuts) && !showSettingsPage.value && !showPluginCenter.value && !showDriverStore.value) {
     const target = e.target instanceof Element ? e.target : null;
     if (!target?.closest('[role="dialog"], [role="alertdialog"]') && contentAreaRef.value?.focusWhere()) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+  }
+  if (isEditTableStructureShortcut(e, shortcuts) && !showSettingsPage.value && !showPluginCenter.value && !showDriverStore.value) {
+    const target = e.target instanceof Element ? e.target : null;
+    if (!target?.closest('[role="dialog"], [role="alertdialog"]') && !eventTargetAllowsNativeClipboard(e) && contentAreaRef.value?.openTableStructureEditor?.()) {
       e.preventDefault();
       e.stopPropagation();
       return;

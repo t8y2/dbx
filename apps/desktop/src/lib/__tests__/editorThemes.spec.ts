@@ -194,6 +194,18 @@ describe("Cursor editor theme selection", () => {
     expect(wcagContrastRatio(dark.foreground, dark.selection), `cursor-dark text on selection`).toBeGreaterThanOrEqual(3.0);
     expect(wcagContrastRatio(light.foreground, light.selection), `cursor-light text on selection`).toBeGreaterThanOrEqual(3.0);
   });
+
+  it("does not paint an opaque background on .cm-scroller so background images can show through", async () => {
+    const ideThemes = ["idea-dark", "idea-light", "jetbrains-dark", "jetbrains-light", "cursor-dark", "cursor-light", "claude-dark", "claude-light"] as const;
+
+    for (const theme of ideThemes) {
+      const extension = (await loadEditorTheme(theme, "dark")) as any;
+      const themeFacet = extension[0]?.find((ext: any) => ext?.value?.rules);
+      expect(themeFacet).toBeDefined();
+      const scrollerRule = themeFacet.value.rules.find((r: string) => r.includes(".cm-scroller {") && r.includes("background"));
+      expect(scrollerRule, `${theme} should not set an opaque background on .cm-scroller`).toBeUndefined();
+    }
+  });
 });
 
 describe("SQL completion theme", () => {

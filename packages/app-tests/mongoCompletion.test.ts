@@ -2070,3 +2070,100 @@ test("keeps the find chain completable when a comment holds an unbalanced parent
   assert.deepEqual(labels(lineComment, { fields }), ["limit"]);
   assert.deepEqual(labels('db.users.find({ note: "(x" }).li', { fields }), ["limit"]);
 });
+
+test("suppresses completion after a dot following findOne", () => {
+  const text = "db.users.findOne({}).";
+  const context = getMongoCompletionContext(text, text.length);
+  assert.equal(context.mode, "none");
+  assert.deepEqual(labels(text, { collections, fields }), []);
+  assert.equal(shouldAutoOpenMongoCompletion(text, text.length), false);
+});
+
+test("suppresses completion after a dot following countDocuments", () => {
+  const text = "db.users.countDocuments({}).";
+  const context = getMongoCompletionContext(text, text.length);
+  assert.equal(context.mode, "none");
+  assert.deepEqual(labels(text, { collections, fields }), []);
+  assert.equal(shouldAutoOpenMongoCompletion(text, text.length), false);
+});
+
+test("suppresses completion after a dot following explain", () => {
+  const text = "db.users.explain().";
+  const context = getMongoCompletionContext(text, text.length);
+  assert.equal(context.mode, "none");
+  assert.deepEqual(labels(text, { collections, fields }), []);
+  assert.equal(shouldAutoOpenMongoCompletion(text, text.length), false);
+});
+
+test("suppresses completion after a dot and typed prefix following findOne", () => {
+  const text = "db.users.findOne({}).na";
+  const context = getMongoCompletionContext(text, text.length);
+  assert.equal(context.mode, "none");
+  assert.deepEqual(labels(text, { collections, fields }), []);
+});
+
+test("suppresses completion after a dot following a non-cursor call with masked parens in literals", () => {
+  for (const text of ['db.users.findOne({ note: "(x)" }).', "db.users.findOne({ /* ) */ }).", "db.users.findOne({}) ."]) {
+    const context = getMongoCompletionContext(text, text.length);
+    assert.equal(context.mode, "none", text);
+    assert.deepEqual(labels(text, { collections, fields }), [], text);
+    assert.equal(shouldAutoOpenMongoCompletion(text, text.length), false, text);
+  }
+  const typed = "db.users.findOne({}) .na";
+  assert.equal(getMongoCompletionContext(typed, typed.length).mode, "none");
+  assert.deepEqual(labels(typed, { collections, fields }), []);
+});
+
+test("preserves completion behavior for cursor chains, root triggers, and multiline statements", () => {
+  // cursor methods
+  assert.equal(getMongoCompletionContext("db.users.find({}).", "db.users.find({}).".length).mode, "cursorMethod");
+  assert.ok(labels("db.users.find({}).", { fields }).includes("sort"));
+
+  assert.equal(getMongoCompletionContext("db.users.find({}).sort({ name: 1 }).", "db.users.find({}).sort({ name: 1 }).".length).mode, "cursorMethod");
+  assert.ok(labels("db.users.find({}).sort({ name: 1 }).", { fields }).includes("limit"));
+
+  // aggregate cursor methods
+  assert.equal(getMongoCompletionContext("db.users.aggregate([]).", "db.users.aggregate([]).".length).mode, "cursorMethod");
+  assert.deepEqual(labels("db.users.aggregate([]).").sort(), ["pretty", "toArray"]);
+
+  // terminal cursor method count()
+  assert.equal(getMongoCompletionContext("db.users.find({}).count().", "db.users.find({}).count().".length).mode, "none");
+  assert.deepEqual(labels("db.users.find({}).count()."), []);
+
+  // db root dot / collection prefix / use / show / sh / empty doc
+  assert.equal(getMongoCompletionContext("db.", "db.".length).mode, "collection");
+  assert.ok(labels("db.", { collections }).includes("users"));
+
+  assert.equal(getMongoCompletionContext("db.us", "db.us".length).mode, "collection");
+  assert.ok(labels("db.us", { collections }).includes("users"));
+  assert.ok(labels("db.us", { collections }).includes("user_events"));
+
+  assert.equal(getMongoCompletionContext("use ", "use ".length).mode, "database");
+  assert.equal(getMongoCompletionContext("show ", "show ".length).mode, "showSubcommand");
+  assert.equal(getMongoCompletionContext("sh", "sh".length).mode, "root");
+  assert.equal(getMongoCompletionContext("", 0).mode, "root");
+
+  assert.equal(getMongoCompletionContext("db.users.find({ name: 'x' });\ndb.", "db.users.find({ name: 'x' });\ndb.".length).mode, "collection");
+  assert.ok(labels("db.users.find({ name: 'x' });\ndb.", { collections }).includes("users"));
+
+  // statement on a new line after a finished statement
+  assert.equal(getMongoCompletionContext("db.users.findOne({})\ndb.", "db.users.findOne({})\ndb.".length).mode, "collection");
+  assert.ok(labels("db.users.findOne({})\ndb.", { collections }).includes("users"));
+
+  assert.equal(getMongoCompletionContext("db.users.findOne({})\nfi", "db.users.findOne({})\nfi".length).mode, "root");
+  assert.ok(labels("db.users.findOne({})\nfi").includes("find"));
+});
+
+test("preserves auto-trigger and completion for getCollection and getSiblingDB dot chains", () => {
+  const getCollectionDot = 'db.getCollection("users").';
+  assert.equal(getMongoCompletionContext(getCollectionDot, getCollectionDot.length).mode, "method");
+  assert.equal(shouldAutoOpenMongoCompletion(getCollectionDot, getCollectionDot.length), true);
+
+  const siblingDbDot = 'db.getSiblingDB("shop").';
+  assert.equal(getMongoCompletionContext(siblingDbDot, siblingDbDot.length).mode, "collection");
+  assert.equal(shouldAutoOpenMongoCompletion(siblingDbDot, siblingDbDot.length), true);
+
+  const siblingGetCollectionDot = 'db.getSiblingDB("shop").getCollection("a").';
+  assert.equal(getMongoCompletionContext(siblingGetCollectionDot, siblingGetCollectionDot.length).mode, "method");
+  assert.equal(shouldAutoOpenMongoCompletion(siblingGetCollectionDot, siblingGetCollectionDot.length), true);
+});

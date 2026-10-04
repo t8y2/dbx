@@ -122,6 +122,30 @@ function sortFilesByOrder(items: SavedSqlFile[]) {
   });
 }
 
+export type SavedSqlFileSortMode = "name-asc" | "name-desc" | "updated-desc" | "updated-asc";
+export type SavedSqlFolderSortMode = "name-asc" | "name-desc";
+
+function sortFilesByCriteria(items: SavedSqlFile[], mode: SavedSqlFileSortMode): SavedSqlFile[] {
+  return [...items].sort((a, b) => {
+    switch (mode) {
+      case "name-asc":
+        return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+      case "name-desc":
+        return b.name.localeCompare(a.name, undefined, { numeric: true, sensitivity: "base" });
+      case "updated-desc": {
+        const timeDiff = b.updatedAt.localeCompare(a.updatedAt);
+        if (timeDiff !== 0) return timeDiff;
+        return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+      }
+      case "updated-asc": {
+        const timeDiff = a.updatedAt.localeCompare(b.updatedAt);
+        if (timeDiff !== 0) return timeDiff;
+        return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+      }
+    }
+  });
+}
+
 function reindexFolders(items: SavedSqlFolder[]) {
   return items.map((folder, index) => ({ ...folder, orderIndex: index }));
 }
@@ -968,6 +992,52 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     return allFiles.value.filter((f) => !f.folderId);
   }
 
+  async function sortFolderFiles(folderId: string | undefined, mode: SavedSqlFileSortMode) {
+    const targetFolderId = folderId || undefined;
+    const groupFiles = files.value.filter((file) => (file.folderId || undefined) === targetFolderId);
+    if (groupFiles.length <= 1) return;
+
+    const sortedGroup = sortFilesByCriteria(groupFiles, mode);
+    const reindexed = reindexFiles(sortedGroup, targetFolderId);
+    const untouched = files.value.filter((file) => (file.folderId || undefined) !== targetFolderId);
+    await persistFiles([...untouched, ...reindexed]);
+  }
+
+  async function sortFolderChildren(parentFolderId: string | undefined, mode: SavedSqlFolderSortMode) {
+    const targetParentId = parentFolderId || undefined;
+    const groupFolders = folders.value.filter((folder) => (folder.parentFolderId || undefined) === targetParentId);
+    if (groupFolders.length <= 1) return;
+
+    const sortedGroup = [...groupFolders].sort((a, b) => {
+      if (mode === "name-asc") {
+        return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+      }
+      return b.name.localeCompare(a.name, undefined, { numeric: true, sensitivity: "base" });
+    });
+
+    const reindexed = reindexFolders(sortedGroup).map((folder) => ({
+      ...folder,
+      parentFolderId: targetParentId,
+    }));
+    const untouched = folders.value.filter((folder) => (folder.parentFolderId || undefined) !== targetParentId);
+    await persistFolders([...untouched, ...reindexed]);
+  }
+
+  async function sortAllFolderFiles(mode: SavedSqlFileSortMode) {
+    const folderIds = new Set<string | undefined>([undefined, ...folders.value.map((f) => f.id)]);
+    const nextFiles: SavedSqlFile[] = [];
+    for (const fId of folderIds) {
+      const groupFiles = files.value.filter((file) => (file.folderId || undefined) === fId);
+      if (groupFiles.length <= 1) {
+        nextFiles.push(...groupFiles);
+      } else {
+        const sorted = sortFilesByCriteria(groupFiles, mode);
+        nextFiles.push(...reindexFiles(sorted, fId));
+      }
+    }
+    await persistFiles(nextFiles);
+  }
+
   return {
     folders,
     files,
@@ -997,6 +1067,9 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     reorderFiles,
     moveFileToFolder,
     moveFilesToFolder,
+    sortFolderFiles,
+    sortFolderChildren,
+    sortAllFolderFiles,
     syncToLocalDirectory,
     allFolders,
     allFoldersTreeOrder,

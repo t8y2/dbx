@@ -1454,3 +1454,106 @@ test("a conflict suggestion also skips names reserved by in-flight saves", async
   pending.resolve({ id: "sql-pending", connectionId: "conn-1", database: "db-1", name: "query_4.sql", sql: "SELECT 1;", sqlLoaded: true, createdAt: "2026-07-19T00:00:00.000Z", updatedAt: "2026-07-19T00:00:00.000Z" });
   await inFlight;
 });
+
+test("sortFolderFiles sorts files in a folder by name and updatedAt", async () => {
+  apiMock.saveSavedSqlFile.mockImplementation((file) => Promise.resolve(file));
+  apiMock.loadSavedSqlLibrary.mockResolvedValue({
+    folders: [{ id: "folder-1", name: "My Folder", createdAt: "2026-07-19T00:00:00.000Z", updatedAt: "2026-07-19T00:00:00.000Z" }],
+    files: [
+      scopeSeedFile("sql-1", "cherry.sql", { folderId: "folder-1", orderIndex: 0, updatedAt: "2026-07-19T01:00:00.000Z" }),
+      scopeSeedFile("sql-2", "apple.sql", { folderId: "folder-1", orderIndex: 1, updatedAt: "2026-07-19T03:00:00.000Z" }),
+      scopeSeedFile("sql-3", "banana.sql", { folderId: "folder-1", orderIndex: 2, updatedAt: "2026-07-19T02:00:00.000Z" }),
+      scopeSeedFile("sql-4", "other.sql", { folderId: "folder-2", orderIndex: 0 }),
+    ],
+  });
+
+  const store = useSavedSqlStore();
+  await store.initFromStorage();
+
+  // Sort by name-asc
+  await store.sortFolderFiles("folder-1", "name-asc");
+  assert.deepEqual(
+    store.filesInFolder("folder-1").map((f) => f.name),
+    ["apple.sql", "banana.sql", "cherry.sql"],
+  );
+  // Other folder unaffected
+  assert.equal(store.filesInFolder("folder-2")[0]?.name, "other.sql");
+
+  // Sort by name-desc
+  await store.sortFolderFiles("folder-1", "name-desc");
+  assert.deepEqual(
+    store.filesInFolder("folder-1").map((f) => f.name),
+    ["cherry.sql", "banana.sql", "apple.sql"],
+  );
+
+  // Sort by updated-desc (newest first)
+  await store.sortFolderFiles("folder-1", "updated-desc");
+  assert.deepEqual(
+    store.filesInFolder("folder-1").map((f) => f.name),
+    ["apple.sql", "banana.sql", "cherry.sql"],
+  );
+
+  // Sort by updated-asc (oldest first)
+  await store.sortFolderFiles("folder-1", "updated-asc");
+  assert.deepEqual(
+    store.filesInFolder("folder-1").map((f) => f.name),
+    ["cherry.sql", "banana.sql", "apple.sql"],
+  );
+});
+
+test("sortFolderChildren sorts subfolders by name", async () => {
+  apiMock.saveSavedSqlFolder.mockImplementation((folder) => Promise.resolve(folder));
+  apiMock.loadSavedSqlLibrary.mockResolvedValue({
+    folders: [
+      { id: "parent", name: "Parent", createdAt: "2026-07-19T00:00:00.000Z", updatedAt: "2026-07-19T00:00:00.000Z" },
+      { id: "c1", name: "Zebra", parentFolderId: "parent", orderIndex: 0, createdAt: "2026-07-19T00:00:00.000Z", updatedAt: "2026-07-19T00:00:00.000Z" },
+      { id: "c2", name: "Alpha", parentFolderId: "parent", orderIndex: 1, createdAt: "2026-07-19T00:00:00.000Z", updatedAt: "2026-07-19T00:00:00.000Z" },
+      { id: "c3", name: "Beta", parentFolderId: "parent", orderIndex: 2, createdAt: "2026-07-19T00:00:00.000Z", updatedAt: "2026-07-19T00:00:00.000Z" },
+    ],
+    files: [],
+  });
+
+  const store = useSavedSqlStore();
+  await store.initFromStorage();
+
+  await store.sortFolderChildren("parent", "name-asc");
+  assert.deepEqual(
+    store.allFolders.filter((f) => f.parentFolderId === "parent").map((f) => f.name),
+    ["Alpha", "Beta", "Zebra"],
+  );
+
+  await store.sortFolderChildren("parent", "name-desc");
+  assert.deepEqual(
+    store.allFolders.filter((f) => f.parentFolderId === "parent").map((f) => f.name),
+    ["Zebra", "Beta", "Alpha"],
+  );
+});
+
+test("sortAllFolderFiles sorts files across all folders", async () => {
+  apiMock.saveSavedSqlFile.mockImplementation((file) => Promise.resolve(file));
+  apiMock.loadSavedSqlLibrary.mockResolvedValue({
+    folders: [
+      { id: "f1", name: "F1", createdAt: "2026-07-19T00:00:00.000Z", updatedAt: "2026-07-19T00:00:00.000Z" },
+      { id: "f2", name: "F2", createdAt: "2026-07-19T00:00:00.000Z", updatedAt: "2026-07-19T00:00:00.000Z" },
+    ],
+    files: [
+      scopeSeedFile("sql-1", "z.sql", { folderId: "f1", orderIndex: 0 }),
+      scopeSeedFile("sql-2", "a.sql", { folderId: "f1", orderIndex: 1 }),
+      scopeSeedFile("sql-3", "y.sql", { folderId: "f2", orderIndex: 0 }),
+      scopeSeedFile("sql-4", "b.sql", { folderId: "f2", orderIndex: 1 }),
+    ],
+  });
+
+  const store = useSavedSqlStore();
+  await store.initFromStorage();
+
+  await store.sortAllFolderFiles("name-asc");
+  assert.deepEqual(
+    store.filesInFolder("f1").map((f) => f.name),
+    ["a.sql", "z.sql"],
+  );
+  assert.deepEqual(
+    store.filesInFolder("f2").map((f) => f.name),
+    ["b.sql", "y.sql"],
+  );
+});

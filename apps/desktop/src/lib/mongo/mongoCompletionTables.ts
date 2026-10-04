@@ -78,6 +78,7 @@ export const TOP_LEVEL_QUERY_OPERATORS: MongoOperatorSpec[] = specs([
   ["$and", "Joins clauses with a logical AND", "$and: [${}]"],
   ["$or", "Joins clauses with a logical OR", "$or: [${}]"],
   ["$nor", "Joins clauses with a logical NOR", "$nor: [${}]"],
+  ["$comment", "Attaches a comment to the query, visible in logs and profiler", '$comment: "${comment}"'],
   ["$expr", "Uses aggregation expressions in a query", "$expr: { ${} }"],
   ["$text", "Performs a text search", '$text: { $search: "${text}" }'],
   ["$where", "Matches with a JavaScript predicate", '$where: "${expression}"'],

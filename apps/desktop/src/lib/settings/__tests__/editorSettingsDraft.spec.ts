@@ -563,3 +563,38 @@ describe("editorSettingsDraftPatchFromSettings", () => {
     expect(patch.pageSize).toBe(normalizeTableOpenPageSizeDraft(999999));
   });
 });
+
+describe("editorSettingsDraft - tabMaxWidth", () => {
+  it("includes tabMaxWidth in EDITOR_SETTINGS_DRAFT_KEYS", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("tabMaxWidth");
+  });
+
+  it("maps tabMaxWidth from settings", () => {
+    expect(editorSettingsDraftFromSettings(makeSettings({ tabMaxWidth: 240 })).tabMaxWidth).toBe(240);
+    expect(editorSettingsDraftFromSettings(makeSettings({ tabMaxWidth: 0 })).tabMaxWidth).toBe(0);
+  });
+
+  it("detects change in tabMaxWidth", () => {
+    const settings = makeSettings({ tabMaxWidth: 0 });
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+    draft.tabMaxWidth = 240;
+    expect(editorSettingsDraftChanged(draft, base)).toBe(true);
+  });
+
+  it("detects no change when tabMaxWidth matches", () => {
+    const settings = makeSettings({ tabMaxWidth: 240 });
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+    expect(editorSettingsDraftChanged(draft, base)).toBe(false);
+  });
+
+  it("includes tabMaxWidth in patch when changed", () => {
+    const settings = makeSettings({ tabMaxWidth: 0 });
+    const draft = editorSettingsDraftFromSettings(settings);
+    const base = editorSettingsDraftFromSettings(settings);
+    draft.tabMaxWidth = 240;
+    const patch = editorSettingsPatchFromDraft(draft, base);
+    expect(patch.tabMaxWidth).toBe(240);
+  });
+});

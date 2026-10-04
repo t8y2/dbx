@@ -119,6 +119,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "tabGroupMode",
     "colorizeConnectionTabs",
     "tabSortMode",
+    "tabMaxWidth",
     "sidebarActivation",
     "sidebarObjectDisplay",
     "routineSourceOpenMode",

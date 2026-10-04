@@ -118,6 +118,7 @@ import {
   type SqlCompletionTriggerMode,
   type SqlTableCompletionSchemaQualification,
   type TableHoverLookupMode,
+  normalizeTabMaxWidth,
   SIDEBAR_INDENT_MIN,
   SIDEBAR_INDENT_MAX,
   SIDEBAR_FONT_SIZE_MIN,
@@ -720,6 +721,7 @@ const editTabPlacement = ref<TabPlacement>(settingsStore.editorSettings.tabPlace
 const editColorizeConnectionTabs = ref(settingsStore.editorSettings.colorizeConnectionTabs);
 const editTabGroupMode = ref<TabGroupMode>(settingsStore.editorSettings.tabGroupMode);
 const editTabSortMode = ref<TabSortMode>(settingsStore.editorSettings.tabSortMode);
+const editTabMaxWidth = ref<number>(settingsStore.editorSettings.tabMaxWidth);
 const editShowTrayIcon = ref(settingsStore.desktopSettings.show_tray_icon);
 const editQuitOnClose = ref(settingsStore.desktopSettings.quit_on_close);
 const desktopCloseBehaviorResetPending = ref(false);
@@ -1094,6 +1096,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     colorizeConnectionTabs: editColorizeConnectionTabs.value,
     tabGroupMode: editTabGroupMode.value,
     tabSortMode: editTabSortMode.value,
+    tabMaxWidth: editTabMaxWidth.value,
     showColumnCommentsInHeader: editShowColumnCommentsInHeader.value,
     showColumnTypesInHeader: editShowColumnTypesInHeader.value,
     showColumnHeaderTooltips: editShowColumnHeaderTooltips.value,
@@ -1769,6 +1772,7 @@ function syncEditorSettingsDraftFromStore() {
   editColorizeConnectionTabs.value = settingsStore.editorSettings.colorizeConnectionTabs;
   editTabGroupMode.value = settingsStore.editorSettings.tabGroupMode;
   editTabSortMode.value = settingsStore.editorSettings.tabSortMode;
+  editTabMaxWidth.value = settingsStore.editorSettings.tabMaxWidth;
   editShowColumnCommentsInHeader.value = settingsStore.editorSettings.showColumnCommentsInHeader;
   editShowColumnTypesInHeader.value = settingsStore.editorSettings.showColumnTypesInHeader;
   editShowColumnHeaderTooltips.value = settingsStore.editorSettings.showColumnHeaderTooltips;
@@ -1919,6 +1923,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   colorizeConnectionTabs: editColorizeConnectionTabs,
   tabGroupMode: editTabGroupMode,
   tabSortMode: editTabSortMode,
+  tabMaxWidth: editTabMaxWidth,
   showColumnCommentsInHeader: editShowColumnCommentsInHeader,
   showColumnTypesInHeader: editShowColumnTypesInHeader,
   showColumnHeaderTooltips: editShowColumnHeaderTooltips,
@@ -2465,6 +2470,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editColorizeConnectionTabs.value = DEFAULT_EDITOR_SETTINGS.colorizeConnectionTabs;
     editTabGroupMode.value = DEFAULT_EDITOR_SETTINGS.tabGroupMode;
     editTabSortMode.value = DEFAULT_EDITOR_SETTINGS.tabSortMode;
+    editTabMaxWidth.value = DEFAULT_EDITOR_SETTINGS.tabMaxWidth;
     editShowTrayIcon.value = DEFAULT_DESKTOP_SETTINGS.show_tray_icon;
     editQuitOnClose.value = DEFAULT_DESKTOP_SETTINGS.quit_on_close;
     desktopCloseBehaviorResetPending.value = true;
@@ -3158,6 +3164,10 @@ function setTabGroupMode(value: TabGroupMode) {
 
 function setTabSortMode(value: TabSortMode) {
   editTabSortMode.value = value;
+}
+
+function setTabMaxWidth(value: number) {
+  editTabMaxWidth.value = normalizeTabMaxWidth(value);
 }
 
 function setSidebarActivation(value: "single" | "double") {
@@ -7579,7 +7589,7 @@ onUnmounted(() => {
               </div>
 
               <div class="settings-appearance-group">
-                <div class="grid grid-cols-1 gap-4 md:grid-cols-3">
+                <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
                   <div class="space-y-2">
                     <Label>{{ t("settings.tabPlacement") }}</Label>
                     <Select :model-value="editTabPlacement" @update:model-value="setTabPlacement($event as TabPlacement)">
@@ -7616,10 +7626,24 @@ onUnmounted(() => {
                       </SelectContent>
                     </Select>
                   </div>
+                  <div class="space-y-2">
+                    <Label>{{ t("settings.tabMaxWidth") }}</Label>
+                    <Select :model-value="String(editTabMaxWidth)" @update:model-value="setTabMaxWidth(Number($event))">
+                      <SelectTrigger class="w-full"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="0">{{ t("settings.tabMaxWidthUnlimited") }}</SelectItem>
+                        <SelectItem value="160">{{ t("settings.tabMaxWidthCompact") }}</SelectItem>
+                        <SelectItem value="200">{{ t("settings.tabMaxWidthMedium") }}</SelectItem>
+                        <SelectItem value="240">{{ t("settings.tabMaxWidthStandard") }}</SelectItem>
+                        <SelectItem value="320">{{ t("settings.tabMaxWidthWide") }}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
                 </div>
                 <div class="space-y-1 text-xs text-muted-foreground">
                   <p>{{ t("settings.tabPlacementDescription") }}</p>
                   <p>{{ t("settings.tabOrganizationDescription") }}</p>
+                  <p>{{ t("settings.tabMaxWidthDescription") }}</p>
                 </div>
               </div>
 

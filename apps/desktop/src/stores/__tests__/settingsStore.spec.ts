@@ -1012,6 +1012,26 @@ describe("normalizeEditorSettings - tabLayout", () => {
   });
 });
 
+describe("normalizeEditorSettings - tabMaxWidth", () => {
+  it("defaults tabMaxWidth to 0", () => {
+    expect(normalizeEditorSettings({}).tabMaxWidth).toBe(0);
+  });
+
+  it("preserves valid width values", () => {
+    expect(normalizeEditorSettings({ tabMaxWidth: 160 }).tabMaxWidth).toBe(160);
+    expect(normalizeEditorSettings({ tabMaxWidth: 240 }).tabMaxWidth).toBe(240);
+    expect(normalizeEditorSettings({ tabMaxWidth: 320 }).tabMaxWidth).toBe(320);
+  });
+
+  it("falls back to 0 for invalid values", () => {
+    expect(normalizeEditorSettings({ tabMaxWidth: -10 } as any).tabMaxWidth).toBe(0);
+    expect(normalizeEditorSettings({ tabMaxWidth: 9999 } as any).tabMaxWidth).toBe(0);
+    expect(normalizeEditorSettings({ tabMaxWidth: "240" } as any).tabMaxWidth).toBe(0);
+    expect(normalizeEditorSettings({ tabMaxWidth: null } as any).tabMaxWidth).toBe(0);
+    expect(normalizeEditorSettings({ tabMaxWidth: undefined } as any).tabMaxWidth).toBe(0);
+  });
+});
+
 describe("normalizeEditorSettings - sidebarPinDefaultDatabase", () => {
   it("defaults sidebarPinDefaultDatabase to true", () => {
     expect(normalizeEditorSettings({}).sidebarPinDefaultDatabase).toBe(true);

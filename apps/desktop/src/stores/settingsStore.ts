@@ -914,6 +914,8 @@ export interface EditorSettings {
   tabGroupMode: TabGroupMode;
   tabGroupCustomizations: Record<string, TabGroupCustomization>;
   tabSortMode: TabSortMode;
+  /** 水平标签页最大显示宽度（像素，0 表示不限制）。 */
+  tabMaxWidth: number;
   appLayout: "separated" | "classic";
   pageSize: number;
   tableOpenPageSize: number;
@@ -1242,6 +1244,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   tabGroupMode: "none",
   tabGroupCustomizations: {},
   tabSortMode: "manual",
+  tabMaxWidth: 0,
   appLayout: "classic",
   pageSize: 100,
   tableOpenPageSize: 100,
@@ -1458,6 +1461,13 @@ export function normalizeTabGroupCustomizations(value: unknown): Record<string, 
 
 function normalizeTabSortMode(value: unknown): TabSortMode {
   return TAB_SORT_MODES.includes(value as TabSortMode) ? (value as TabSortMode) : DEFAULT_EDITOR_SETTINGS.tabSortMode;
+}
+
+export function normalizeTabMaxWidth(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1200) {
+    return Math.round(value);
+  }
+  return DEFAULT_EDITOR_SETTINGS.tabMaxWidth;
 }
 
 function normalizeCellDetailPanelLayout(value: unknown): CellDetailPanelLayout {
@@ -1842,6 +1852,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     tabGroupMode: normalizeTabGroupMode(settings.tabGroupMode),
     tabGroupCustomizations: normalizeTabGroupCustomizations(settings.tabGroupCustomizations),
     tabSortMode: normalizeTabSortMode(settings.tabSortMode),
+    tabMaxWidth: normalizeTabMaxWidth(settings.tabMaxWidth),
     appLayout: settings.appLayout ?? DEFAULT_EDITOR_SETTINGS.appLayout,
     pageSize: normalizeResultPageSize(settings.pageSize),
     tableOpenPageSize: normalizeResultPageSize(settings.tableOpenPageSize, DEFAULT_EDITOR_SETTINGS.tableOpenPageSize),
@@ -2696,6 +2707,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.tabGroupMode !== undefined) editorSettings.value.tabGroupMode = normalizeTabGroupMode(partial.tabGroupMode);
     if (partial.tabGroupCustomizations !== undefined) editorSettings.value.tabGroupCustomizations = normalizeTabGroupCustomizations(partial.tabGroupCustomizations);
     if (partial.tabSortMode !== undefined) editorSettings.value.tabSortMode = normalizeTabSortMode(partial.tabSortMode);
+    if (partial.tabMaxWidth !== undefined) editorSettings.value.tabMaxWidth = normalizeTabMaxWidth(partial.tabMaxWidth);
     if (partial.appLayout !== undefined) editorSettings.value.appLayout = partial.appLayout;
     if (partial.pageSize !== undefined) editorSettings.value.pageSize = normalizeResultPageSize(partial.pageSize);
     if (partial.tableOpenPageSize !== undefined) editorSettings.value.tableOpenPageSize = normalizeResultPageSize(partial.tableOpenPageSize, DEFAULT_EDITOR_SETTINGS.tableOpenPageSize);

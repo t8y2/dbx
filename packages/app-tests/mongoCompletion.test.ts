@@ -437,14 +437,42 @@ test("offers whole-filter operators at the top level and field operators under a
   assert.ok(bare.includes("$or"));
 });
 
-test("treats $and / $or sub-filters, $elemMatch bodies and $match as filters", () => {
-  for (const text of ["db.users.find({ $or: [{ $", "db.users.find({ items: { $elemMatch: { $", "db.users.aggregate([{ $match: { $"]) {
+test("treats $and / $or sub-filters and $match as filters", () => {
+  for (const text of ["db.users.find({ $or: [{ $", "db.users.aggregate([{ $match: { $"]) {
     const items = labels(text, { fields });
     assert.ok(items.includes("$or"), text);
     assert.equal(items.includes("$gte"), false, text);
   }
   assert.ok(labels("db.users.find({ $or: [{ ", { fields }).includes("name"));
   assert.ok(labels("db.users.find({ $or: [{ age: { $", { fields }).includes("$gte"));
+});
+
+test("completes $elemMatch body with field names, field query operators and logical operators", () => {
+  const findItems = labels("db.users.find({ tags: { $elemMatch: { $", { fields });
+  for (const op of ["$gte", "$lt", "$in", "$regex", "$exists", "$and", "$or", "$nor"]) {
+    assert.ok(findItems.includes(op), `find $elemMatch must include ${op}`);
+  }
+  for (const op of ["$expr", "$text", "$where", "$jsonSchema"]) {
+    assert.equal(findItems.includes(op), false, `find $elemMatch must exclude ${op}`);
+  }
+
+  const bare = labels("db.users.find({ tags: { $elemMatch: { ", { fields });
+  assert.ok(
+    bare.slice(0, fields.length).every((label) => !label.startsWith("$")),
+    `fields first: ${bare.join(", ")}`,
+  );
+  assert.deepEqual(bare.slice(0, fields.length), ["_id", "createdAt", "name", "profile.email"]);
+
+  assert.ok(labels("db.users.find({ tags: { $elemMatch: { qty: { $", { fields }).includes("$gte"));
+  assert.ok(labels("db.users.find({ tags: { $elemMatch: { $or: [{ ", { fields }).includes("name"));
+
+  const aggItems = labels("db.users.aggregate([{ $match: { tags: { $elemMatch: { $", { fields });
+  for (const op of ["$gte", "$lt", "$in", "$regex", "$exists", "$and", "$or", "$nor"]) {
+    assert.ok(aggItems.includes(op), `aggregate $elemMatch must include ${op}`);
+  }
+  for (const op of ["$expr", "$text", "$where", "$jsonSchema"]) {
+    assert.equal(aggItems.includes(op), false, `aggregate $elemMatch must exclude ${op}`);
+  }
 });
 
 test("does not offer filter operators in update or insert documents", () => {
@@ -1016,6 +1044,10 @@ test("suggests projection operators in find projections", () => {
   assert.deepEqual(labels("db.users.find({}, { tags: { $elemMatch: { ", { fields }).slice(0, 3), ["_id", "createdAt", "name"]);
   assert.ok(labels("db.users.find({}, { tags: { $elemMatch: { score: { ", { fields }).includes("$gt"));
   assert.ok(labels("db.users.find({}, { tags: { $elemMatch: { score: { $gt: ", { fields }).includes("NumberInt"));
+  const projElemMatch = labels("db.users.find({}, { tags: { $elemMatch: { $", { fields });
+  assert.ok(projElemMatch.includes("$gte"));
+  assert.ok(projElemMatch.includes("$or"));
+  assert.equal(projElemMatch.includes("$expr"), false);
 });
 
 test("every suggested projection operator parses", () => {

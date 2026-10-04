@@ -61,6 +61,28 @@ const consul = {
 };
 
 export default {
+  modelGeneration: {
+    title: "Generate model",
+    editTemplate: "Edit template",
+    addTemplate: "Add template",
+    deleteTemplate: "Delete template",
+    templateName: "Template name",
+    extension: "File extension",
+    templateBody: "Template source",
+    search: "Search languages",
+    targets: "Model targets",
+    languages: "Languages",
+    customTemplates: "Custom templates",
+    noMatches: "No matching languages or templates",
+    outputFormat: "Output format",
+    showHeaderComments: "Show header comments",
+    preview: "Generated code",
+    copy: "Copy code",
+    save: "Save code",
+    unknownTypes: "Some database types are unknown. Review their generated types before use.",
+    templateHelp:
+      "Variables: table.name, table.schema, table.comment, class.name; inside a columns section: column.name, column.type, column.originalType, column.comment, column.defaultValue, column.nullable, column.primaryKey. Use double braces for variables, #columns and /columns for loops, #column.nullable and /column.nullable for conditional sections.",
+  },
   cellTransform: {
     title: "Convert preview",
     description: "Convert the current value for viewing or copying. The source value and editor draft stay unchanged.",

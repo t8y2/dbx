@@ -1,3 +1,4 @@
+import { normalizeModelTemplates, type ModelTemplate } from "@/lib/model/modelTemplates";
 import { normalizePluginShortcutSettings, type PluginShortcutSettings } from "@/lib/plugins/pluginShortcuts";
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
@@ -1060,6 +1061,7 @@ export interface EditorSettings {
   globalDateTimeImportFormat: string;
   snippets: SqlSnippet[];
   sqlShortcuts: SqlShortcutAction[];
+  modelGenerationTemplates: ModelTemplate[];
   tableColumnTemplateFields: string[];
   exportBatchSize: number;
   preferredExportPath: string;
@@ -1365,6 +1367,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   globalDateTimeImportFormat: "",
   snippets: DEFAULT_SQL_SNIPPETS,
   sqlShortcuts: DEFAULT_SQL_SHORTCUTS,
+  modelGenerationTemplates: [],
   tableColumnTemplateFields: [...DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS],
   exportBatchSize: 2000,
   preferredExportPath: "",
@@ -2022,6 +2025,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     globalDateTimeImportFormat: normalizeGlobalDateTimePattern(settings.globalDateTimeImportFormat),
     snippets: normalizeSqlSnippets(settings.snippets, existing?.snippets),
     sqlShortcuts: normalizeSqlShortcuts(settings.sqlShortcuts, existing?.sqlShortcuts),
+    modelGenerationTemplates: normalizeModelTemplates(settings.modelGenerationTemplates),
     tableColumnTemplateFields: normalizeTableColumnTemplateFields(settings.tableColumnTemplateFields),
     exportBatchSize: typeof settings.exportBatchSize === "number" && settings.exportBatchSize >= 100 && settings.exportBatchSize <= 100000 ? Math.round(settings.exportBatchSize) : DEFAULT_EDITOR_SETTINGS.exportBatchSize,
     preferredExportPath: typeof settings.preferredExportPath === "string" ? settings.preferredExportPath.trim() : DEFAULT_EDITOR_SETTINGS.preferredExportPath,
@@ -2849,6 +2853,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.globalDateTimeImportFormat !== undefined) editorSettings.value.globalDateTimeImportFormat = normalizeGlobalDateTimePattern(partial.globalDateTimeImportFormat);
     if (partial.snippets !== undefined) editorSettings.value.snippets = normalizeSqlSnippets(partial.snippets);
     if (partial.sqlShortcuts !== undefined) editorSettings.value.sqlShortcuts = normalizeSqlShortcuts(partial.sqlShortcuts);
+    if (partial.modelGenerationTemplates !== undefined) editorSettings.value.modelGenerationTemplates = normalizeModelTemplates(partial.modelGenerationTemplates);
     if (partial.tableColumnTemplateFields !== undefined) editorSettings.value.tableColumnTemplateFields = normalizeTableColumnTemplateFields(partial.tableColumnTemplateFields);
     if (partial.exportBatchSize !== undefined) editorSettings.value.exportBatchSize = Math.min(100000, Math.max(100, Math.round(partial.exportBatchSize)));
     if (partial.preferredExportPath !== undefined) editorSettings.value.preferredExportPath = typeof partial.preferredExportPath === "string" ? partial.preferredExportPath.trim() : "";

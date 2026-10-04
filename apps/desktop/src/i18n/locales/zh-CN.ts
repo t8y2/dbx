@@ -7,6 +7,28 @@ import { meilisearchManagementZhCN } from "./meilisearchManagement";
 import { mongodbDatabaseDumpZhCN as mongoDump } from "./mongodbDatabaseDump";
 
 export default withEnglishFallback({
+  modelGeneration: {
+    title: "生成模型",
+    editTemplate: "编辑模板",
+    addTemplate: "添加模板",
+    deleteTemplate: "删除模板",
+    templateName: "模板名称",
+    extension: "文件扩展名",
+    templateBody: "模板内容",
+    search: "搜索语言",
+    targets: "模型目标",
+    languages: "语言",
+    customTemplates: "自定义模板",
+    noMatches: "没有匹配的语言或模板",
+    outputFormat: "输出格式",
+    showHeaderComments: "显示顶部注释",
+    preview: "生成代码预览",
+    copy: "复制代码",
+    save: "保存代码",
+    unknownTypes: "部分数据库类型未识别，请检查生成的字段类型。",
+    templateHelp:
+      "变量：table.name、table.schema、table.comment、class.name；字段循环内可用 column.name、column.type、column.originalType、column.comment、column.defaultValue、column.nullable、column.primaryKey。变量用双花括号包围，#columns 与 /columns 表示循环，#column.nullable 与 /column.nullable 表示条件块。",
+  },
   cellTransform: {
     title: "转换预览",
     description: "将当前内容转换后查看或复制，不改变原值和编辑草稿。",

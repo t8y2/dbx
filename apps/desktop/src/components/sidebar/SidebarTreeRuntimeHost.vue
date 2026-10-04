@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, watch, onBeforeUnmount, onScopeDispose, inject, reactive, ref, shallowRef } from "vue";
+import { computed, defineAsyncComponent, nextTick, watch, onBeforeUnmount, onScopeDispose, inject, reactive, ref, shallowRef } from "vue";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import PluginWorkbenchHost from "@/components/plugins/PluginWorkbenchHost.vue";
 import type { PluginWorkbenchContext } from "@/lib/plugins/pluginHostBridge";
@@ -425,6 +425,11 @@ const props = defineProps<{
   highlighted?: boolean;
 }>();
 
+const ModelGenerateDialog = defineAsyncComponent(() => import("@/components/generate/ModelGenerateDialog.vue"));
+const modelGenerationTarget = shallowRef<TreeNode | null>(null);
+function openModelGeneration() {
+  modelGenerationTarget.value = { ...activeNode.value };
+}
 const activeNode = shallowRef<TreeNode>(props.node);
 let acceptedSelectionIds: readonly string[] | null = null;
 let latestNavigationRequestId = 0;
@@ -6505,6 +6510,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
         variant: "destructive" as const,
       });
     }
+    if (node.type === "table") items.push({ label: t("modelGeneration.title"), action: openModelGeneration, icon: Code2 });
     items.push({
       label: t("contextMenu.generateSql"),
       icon: FilePlus,
@@ -7278,6 +7284,7 @@ defineExpose({
 </script>
 
 <template>
+  <ModelGenerateDialog v-if="modelGenerationTarget" :key="modelGenerationTarget.id" :target="modelGenerationTarget" @close="modelGenerationTarget = null" />
   <Dialog
     :open="!!pluginDialog"
     @update:open="

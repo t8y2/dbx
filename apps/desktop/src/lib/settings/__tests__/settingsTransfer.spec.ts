@@ -50,6 +50,34 @@ describe("settingsTransfer", () => {
     expect(result.value.categories).toContain("shortcuts");
   });
 
+  it("round-trips custom model generation templates", () => {
+    const settings: EditorSettings = {
+      ...DEFAULT_EDITOR_SETTINGS,
+      modelGenerationTemplates: [{ id: "model-1", name: "GraphQL", extension: "graphql", body: "type {{class.name}} {}" }],
+    };
+    const result = parseSettingsTransferFile(serializeSettingsTransfer(settings));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.editorSettings.modelGenerationTemplates).toEqual(settings.modelGenerationTemplates);
+    expect(result.value.categories).toContain("editor");
+  });
+
+  it("rejects malformed model generation templates instead of dropping them", () => {
+    const missingBody = parseSettingsTransferFile(fileWith({ modelGenerationTemplates: [{ id: "broken", name: "Broken", extension: "ts" }] }));
+    expect(missingBody.ok).toBe(false);
+    if (!missingBody.ok) expect(missingBody.error.detail).toContain("modelGenerationTemplates");
+
+    const duplicateIds = parseSettingsTransferFile(
+      fileWith({
+        modelGenerationTemplates: [
+          { id: "same", name: "One", extension: "ts", body: "one" },
+          { id: "same", name: "Two", extension: "ts", body: "two" },
+        ],
+      }),
+    );
+    expect(duplicateIds.ok).toBe(false);
+  });
+
   it("keeps connection timeout ownership out of the payload", () => {
     const text = serializeSettingsTransfer(DEFAULT_EDITOR_SETTINGS);
     expect(text).not.toContain("connectTimeoutInheritConnectionIds");

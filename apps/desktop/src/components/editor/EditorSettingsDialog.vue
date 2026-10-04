@@ -774,6 +774,7 @@ const editRegexMaxMatchCount = ref(settingsStore.editorSettings.regexMaxMatchCou
 const editAutoCalculateTotalRows = ref(settingsStore.editorSettings.autoCalculateTotalRows);
 const editFlatteningMultiLineText = ref(settingsStore.editorSettings.flatteningMultiLineText);
 const editDataGridShowWhitespace = ref(settingsStore.editorSettings.dataGridShowWhitespace);
+const editModelGenerationTemplates = ref(settingsStore.editorSettings.modelGenerationTemplates.map((template) => ({ ...template })));
 const editTableColumnTemplateRows = ref<TableColumnTemplateGridRow[]>(tableColumnTemplateRowsFromSettings(settingsStore.editorSettings.tableColumnTemplateFields));
 const editTableColumnTemplateDatabaseType = ref<DatabaseType>(TABLE_COLUMN_TEMPLATE_DATABASE_TYPES[0] ?? "mysql");
 const editSqlVariableSubstitutionEnabled = ref(settingsStore.editorSettings.sqlVariableSubstitutionEnabled);
@@ -1125,6 +1126,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     dataGridZebraRowBg: editDataGridZebraRowBg.value,
     flatteningMultiLineText: editFlatteningMultiLineText.value,
     dataGridShowWhitespace: editDataGridShowWhitespace.value,
+    modelGenerationTemplates: editModelGenerationTemplates.value,
     pageSize: editPageSize.value,
     tableOpenPageSize: editTableOpenPageSize.value,
     tableOpenSortMode: editTableOpenSortMode.value,
@@ -1802,6 +1804,7 @@ function syncEditorSettingsDraftFromStore() {
   editDataGridZebraRowBg.value = settingsStore.editorSettings.dataGridZebraRowBg;
   editFlatteningMultiLineText.value = settingsStore.editorSettings.flatteningMultiLineText;
   editDataGridShowWhitespace.value = settingsStore.editorSettings.dataGridShowWhitespace;
+  editModelGenerationTemplates.value = settingsStore.editorSettings.modelGenerationTemplates.map((template) => ({ ...template }));
   editPageSize.value = settingsStore.editorSettings.pageSize;
   editTableOpenPageSize.value = settingsStore.editorSettings.tableOpenPageSize;
   editTableOpenSortMode.value = settingsStore.editorSettings.tableOpenSortMode;
@@ -2028,6 +2031,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   defaultTransactionMode: editDefaultTransactionMode,
   keepExplicitTransactionInAutoCommit: editKeepExplicitTransactionInAutoCommit,
   tableColumnTemplateFields: editTableColumnTemplateRows,
+  modelGenerationTemplates: editModelGenerationTemplates,
 };
 
 function applyEditorSettingsKeysToRefs(draft: EditorSettingsDraft, keys: readonly EditorSettingsDraftKey[]) {
@@ -2035,6 +2039,7 @@ function applyEditorSettingsKeysToRefs(draft: EditorSettingsDraft, keys: readonl
     customThemes: (value) => [...(value as CustomTheme[])],
     dataGridTypeColorSchemes: (value) => cloneDataGridTypeColorSchemes(value as DataGridTypeColorScheme[]),
     tableColumnTemplateFields: (value) => tableColumnTemplateRowsFromSettings(value as string[]),
+    modelGenerationTemplates: (value) => (value as EditorSettings["modelGenerationTemplates"]).map((template) => ({ ...template })),
     shortcuts: (value) => normalizeShortcutSettings(value as Parameters<typeof normalizeShortcutSettings>[0]),
     sqlFormatter: (value) => normalizeSqlFormatterSettings(value as SqlFormatterSettings),
     sidebarHiddenTablePrefixes: (value) => (value as string[]).join("\n"),
@@ -2543,6 +2548,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editDataGridZebraRowBg.value = DEFAULT_EDITOR_SETTINGS.dataGridZebraRowBg;
     editFlatteningMultiLineText.value = DEFAULT_EDITOR_SETTINGS.flatteningMultiLineText;
     editDataGridShowWhitespace.value = DEFAULT_EDITOR_SETTINGS.dataGridShowWhitespace;
+    editModelGenerationTemplates.value = DEFAULT_EDITOR_SETTINGS.modelGenerationTemplates.map((template) => ({ ...template }));
     editPageSize.value = DEFAULT_EDITOR_SETTINGS.pageSize;
     editTableOpenPageSize.value = DEFAULT_EDITOR_SETTINGS.tableOpenPageSize;
     editTableOpenSortMode.value = DEFAULT_EDITOR_SETTINGS.tableOpenSortMode;
@@ -2662,6 +2668,7 @@ function resetAllDefaults() {
   editDataGridZebraRowBg.value = DEFAULT_EDITOR_SETTINGS.dataGridZebraRowBg;
   editFlatteningMultiLineText.value = DEFAULT_EDITOR_SETTINGS.flatteningMultiLineText;
   editDataGridShowWhitespace.value = DEFAULT_EDITOR_SETTINGS.dataGridShowWhitespace;
+  editModelGenerationTemplates.value = DEFAULT_EDITOR_SETTINGS.modelGenerationTemplates.map((template) => ({ ...template }));
   editPageSize.value = DEFAULT_EDITOR_SETTINGS.pageSize;
   editTableOpenPageSize.value = DEFAULT_EDITOR_SETTINGS.tableOpenPageSize;
   editTableOpenSortMode.value = DEFAULT_EDITOR_SETTINGS.tableOpenSortMode;

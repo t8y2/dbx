@@ -184,6 +184,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "infiniteScroll",
     "regexMaxMatchCount",
     "autoCalculateTotalRows",
+    "modelGenerationTemplates",
     "tableColumnTemplateFields",
     "redisKeyTemplates",
     "redisDatabaseDisplayLimit",
@@ -392,6 +393,16 @@ function isSqlSnippetItem(value: unknown): boolean {
   return value.enabled === undefined || typeof value.enabled === "boolean";
 }
 
+function isModelGenerationTemplatesShape(value: unknown): boolean {
+  if (!Array.isArray(value)) return false;
+  const ids = new Set<string>();
+  return value.every((item) => {
+    if (!isPlainObject(item) || typeof item.id !== "string" || !item.id || ids.has(item.id) || !isNonEmptyTrimmedString(item.name) || typeof item.extension !== "string" || !/^[a-zA-Z0-9]+$/.test(item.extension) || typeof item.body !== "string") return false;
+    ids.add(item.id);
+    return true;
+  });
+}
+
 function isSqlShortcutActionItem(value: unknown): boolean {
   if (!isPlainObject(value)) return false;
   if (!isNonEmptyTrimmedString(value.id) || !isNonEmptyTrimmedString(value.label) || typeof value.shortcut !== "string" || typeof value.sql !== "string") return false;
@@ -455,6 +466,7 @@ const NESTED_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (value: un
   sidebarHiddenTablePrefixes: isNonEmptyStringArray,
   redisKeyTemplates: isNonEmptyStringArray,
   snippets: (value) => isArrayOfShape(value, isSqlSnippetItem),
+  modelGenerationTemplates: isModelGenerationTemplatesShape,
   sqlShortcuts: (value) => isArrayOfShape(value, isSqlShortcutActionItem),
   sqlVariableSyntaxOverrides: (value) => isSqlVariableSyntaxOverridesShape(value, (toggle) => toggle === false),
 };
@@ -479,6 +491,7 @@ const RAW_STRUCTURED_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (v
   sidebarHiddenTablePrefixes: isStringArray,
   redisKeyTemplates: isStringArray,
   snippets: (value) => isArrayOfShape(value, isSqlSnippetItem),
+  modelGenerationTemplates: isModelGenerationTemplatesShape,
   sqlShortcuts: (value) => isArrayOfShape(value, isSqlShortcutActionItem),
   sqlVariableSyntaxOverrides: (value) => isSqlVariableSyntaxOverridesShape(value, (toggle) => typeof toggle === "boolean"),
 };

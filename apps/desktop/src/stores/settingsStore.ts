@@ -906,6 +906,7 @@ export interface EditorSettings {
   appCloseUnsavedTabsMode: AppCloseUnsavedTabsMode;
   savedSqlOpenTargetMode: SavedSqlOpenTargetMode;
   welcomePageMode: WelcomePageMode;
+  welcomePageModeDefaultVersion: number;
   compactTabTitle: boolean;
   tabLayout: TabLayoutMode;
   tabPlacement: TabPlacement;
@@ -913,6 +914,8 @@ export interface EditorSettings {
   tabGroupMode: TabGroupMode;
   tabGroupCustomizations: Record<string, TabGroupCustomization>;
   tabSortMode: TabSortMode;
+  /** 水平标签页最大显示宽度（像素，0 表示不限制）。 */
+  tabMaxWidth: number;
   appLayout: "separated" | "classic";
   pageSize: number;
   tableOpenPageSize: number;
@@ -1091,6 +1094,7 @@ export interface EditorSettings {
 }
 
 export interface ToolbarItems {
+  immediateSync: boolean;
   dataTransfer: boolean;
   driverManager: boolean;
   pluginCenter: boolean;
@@ -1112,6 +1116,7 @@ export interface ToolbarItems {
 }
 
 export const DEFAULT_TOOLBAR_ITEMS: ToolbarItems = {
+  immediateSync: false,
   dataTransfer: true,
   driverManager: true,
   pluginCenter: true,
@@ -1179,6 +1184,9 @@ const EDITOR_THEME_VALUES = new Set<EditorTheme>(EDITOR_THEMES.map((theme) => th
 
 export const EXECUTE_MODE_CURRENT_DEFAULT_VERSION = 1;
 export const SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION = 1;
+// v1: the welcome page default moved from "intro" back to "workspace"; persisted
+// blobs from the intro-default builds lack this marker and are migrated.
+export const WELCOME_PAGE_DEFAULT_VERSION = 1;
 
 export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   fontFamily: DEFAULT_MONO_FONT_FAMILY,
@@ -1229,7 +1237,8 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   confirmUnsavedSqlClose: true,
   appCloseUnsavedTabsMode: "keep-drafts",
   savedSqlOpenTargetMode: "saved",
-  welcomePageMode: "intro",
+  welcomePageMode: "workspace",
+  welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION,
   compactTabTitle: false,
   tabLayout: "scroll",
   tabPlacement: "top",
@@ -1237,6 +1246,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   tabGroupMode: "none",
   tabGroupCustomizations: {},
   tabSortMode: "manual",
+  tabMaxWidth: 0,
   appLayout: "classic",
   pageSize: 100,
   tableOpenPageSize: 100,
@@ -1453,6 +1463,13 @@ export function normalizeTabGroupCustomizations(value: unknown): Record<string, 
 
 function normalizeTabSortMode(value: unknown): TabSortMode {
   return TAB_SORT_MODES.includes(value as TabSortMode) ? (value as TabSortMode) : DEFAULT_EDITOR_SETTINGS.tabSortMode;
+}
+
+export function normalizeTabMaxWidth(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1200) {
+    return Math.round(value);
+  }
+  return DEFAULT_EDITOR_SETTINGS.tabMaxWidth;
 }
 
 function normalizeCellDetailPanelLayout(value: unknown): CellDetailPanelLayout {
@@ -1685,6 +1702,7 @@ function normalizeToolbarItems(items: Partial<ToolbarItems> | undefined): Toolba
   const defaults = DEFAULT_TOOLBAR_ITEMS;
   if (!items || typeof items !== "object") return { ...defaults };
   return {
+    immediateSync: items.immediateSync ?? defaults.immediateSync,
     dataTransfer: items.dataTransfer ?? defaults.dataTransfer,
     driverManager: items.driverManager ?? defaults.driverManager,
     pluginCenter: items.pluginCenter ?? defaults.pluginCenter,
@@ -1722,6 +1740,9 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
   const savedExecuteModeDefaultVersion = settings.executeModeDefaultVersion;
   const executeModeDefaultVersion = typeof savedExecuteModeDefaultVersion === "number" && savedExecuteModeDefaultVersion >= EXECUTE_MODE_CURRENT_DEFAULT_VERSION ? savedExecuteModeDefaultVersion : EXECUTE_MODE_CURRENT_DEFAULT_VERSION;
   const hasCurrentExecuteModeDefault = executeModeDefaultVersion === savedExecuteModeDefaultVersion;
+  const savedWelcomePageDefaultVersion = settings.welcomePageModeDefaultVersion;
+  const welcomePageModeDefaultVersion = typeof savedWelcomePageDefaultVersion === "number" && savedWelcomePageDefaultVersion >= WELCOME_PAGE_DEFAULT_VERSION ? savedWelcomePageDefaultVersion : WELCOME_PAGE_DEFAULT_VERSION;
+  const hasCurrentWelcomePageDefault = welcomePageModeDefaultVersion === savedWelcomePageDefaultVersion;
   // The active id can only be validated once the scheme list it points into is known.
   const dataGridTypeColorSchemes = normalizeDataGridTypeColorSchemes(settings.dataGridTypeColorSchemes);
   const savedExtractorMigrationVersion = settings.dataGridExtractorOptionsMigrationVersion;
@@ -1825,7 +1846,8 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     confirmUnsavedSqlClose: settings.confirmUnsavedSqlClose ?? DEFAULT_EDITOR_SETTINGS.confirmUnsavedSqlClose,
     appCloseUnsavedTabsMode: normalizeAppCloseUnsavedTabsMode(settings.appCloseUnsavedTabsMode),
     savedSqlOpenTargetMode: settings.savedSqlOpenTargetMode === "current" ? "current" : DEFAULT_EDITOR_SETTINGS.savedSqlOpenTargetMode,
-    welcomePageMode: settings.welcomePageMode === "workspace" ? "workspace" : DEFAULT_EDITOR_SETTINGS.welcomePageMode,
+    welcomePageMode: hasCurrentWelcomePageDefault && (settings.welcomePageMode === "intro" || settings.welcomePageMode === "workspace") ? settings.welcomePageMode : DEFAULT_EDITOR_SETTINGS.welcomePageMode,
+    welcomePageModeDefaultVersion,
     compactTabTitle: settings.compactTabTitle ?? DEFAULT_EDITOR_SETTINGS.compactTabTitle,
     tabLayout: normalizeTabLayout(settings.tabLayout),
     tabPlacement: normalizeTabPlacement(settings.tabPlacement),
@@ -1833,6 +1855,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     tabGroupMode: normalizeTabGroupMode(settings.tabGroupMode),
     tabGroupCustomizations: normalizeTabGroupCustomizations(settings.tabGroupCustomizations),
     tabSortMode: normalizeTabSortMode(settings.tabSortMode),
+    tabMaxWidth: normalizeTabMaxWidth(settings.tabMaxWidth),
     appLayout: settings.appLayout ?? DEFAULT_EDITOR_SETTINGS.appLayout,
     pageSize: normalizeResultPageSize(settings.pageSize),
     tableOpenPageSize: normalizeResultPageSize(settings.tableOpenPageSize, DEFAULT_EDITOR_SETTINGS.tableOpenPageSize),
@@ -2231,11 +2254,12 @@ export const useSettingsStore = defineStore("settings", () => {
             query: typeof savedSettings.globalQueryTimeoutSecs === "number" || typeof (savedSettings as { queryTimeoutSecs?: unknown }).queryTimeoutSecs === "number",
           };
           const needsExecuteModeDefaultMigration = typeof savedSettings.executeModeDefaultVersion !== "number" || savedSettings.executeModeDefaultVersion < EXECUTE_MODE_CURRENT_DEFAULT_VERSION;
+          const needsWelcomePageDefaultMigration = typeof savedSettings.welcomePageModeDefaultVersion !== "number" || savedSettings.welcomePageModeDefaultVersion < WELCOME_PAGE_DEFAULT_VERSION;
           const needsTabNavigationShortcutMigration = needsTabNavigationHistoryShortcutMigration(savedSettings.shortcuts);
           const savedNullText = (savedSettings.dataGridExtractorOptions as Partial<DataGridExtractorOptions> | undefined)?.dsv?.nullText;
           const needsDataGridExtractorOptionsMigration = (typeof savedSettings.dataGridExtractorOptionsMigrationVersion !== "number" || savedSettings.dataGridExtractorOptionsMigrationVersion < DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION) && savedNullText === "NULL";
           const savedUpdateDownloadSource = (saved as { updateDownloadSource?: unknown }).updateDownloadSource;
-          if (savedUpdateDownloadSource === "atomgit" || needsExecuteModeDefaultMigration || needsTabNavigationShortcutMigration || needsSidebarBrowseObjectsMigration || needsDataGridExtractorOptionsMigration) {
+          if (savedUpdateDownloadSource === "atomgit" || needsExecuteModeDefaultMigration || needsWelcomePageDefaultMigration || needsTabNavigationShortcutMigration || needsSidebarBrowseObjectsMigration || needsDataGridExtractorOptionsMigration) {
             // Persist one-time migrations so removed or unsafe defaults cannot reappear.
             await enqueueEditorSettingsSave().catch(() => {});
           }
@@ -2678,7 +2702,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.confirmUnsavedSqlClose !== undefined) editorSettings.value.confirmUnsavedSqlClose = partial.confirmUnsavedSqlClose;
     if (partial.appCloseUnsavedTabsMode !== undefined) editorSettings.value.appCloseUnsavedTabsMode = normalizeAppCloseUnsavedTabsMode(partial.appCloseUnsavedTabsMode);
     if (partial.savedSqlOpenTargetMode !== undefined) editorSettings.value.savedSqlOpenTargetMode = partial.savedSqlOpenTargetMode === "current" ? "current" : "saved";
-    if (partial.welcomePageMode !== undefined) editorSettings.value.welcomePageMode = partial.welcomePageMode === "workspace" ? "workspace" : DEFAULT_EDITOR_SETTINGS.welcomePageMode;
+    if (partial.welcomePageMode !== undefined) editorSettings.value.welcomePageMode = partial.welcomePageMode === "intro" || partial.welcomePageMode === "workspace" ? partial.welcomePageMode : DEFAULT_EDITOR_SETTINGS.welcomePageMode;
     if (partial.compactTabTitle !== undefined) editorSettings.value.compactTabTitle = partial.compactTabTitle;
     if (partial.tabLayout !== undefined) editorSettings.value.tabLayout = normalizeTabLayout(partial.tabLayout);
     if (partial.tabPlacement !== undefined) editorSettings.value.tabPlacement = normalizeTabPlacement(partial.tabPlacement);
@@ -2686,6 +2710,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.tabGroupMode !== undefined) editorSettings.value.tabGroupMode = normalizeTabGroupMode(partial.tabGroupMode);
     if (partial.tabGroupCustomizations !== undefined) editorSettings.value.tabGroupCustomizations = normalizeTabGroupCustomizations(partial.tabGroupCustomizations);
     if (partial.tabSortMode !== undefined) editorSettings.value.tabSortMode = normalizeTabSortMode(partial.tabSortMode);
+    if (partial.tabMaxWidth !== undefined) editorSettings.value.tabMaxWidth = normalizeTabMaxWidth(partial.tabMaxWidth);
     if (partial.appLayout !== undefined) editorSettings.value.appLayout = partial.appLayout;
     if (partial.pageSize !== undefined) editorSettings.value.pageSize = normalizeResultPageSize(partial.pageSize);
     if (partial.tableOpenPageSize !== undefined) editorSettings.value.tableOpenPageSize = normalizeResultPageSize(partial.tableOpenPageSize, DEFAULT_EDITOR_SETTINGS.tableOpenPageSize);

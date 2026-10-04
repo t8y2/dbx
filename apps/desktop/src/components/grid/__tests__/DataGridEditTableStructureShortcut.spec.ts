@@ -95,7 +95,7 @@ function mountGrid(
   };
 
   const host = document.createElement("div");
-  const grid = ref<{ canOpenTableStructureEditor: boolean; openTableStructureEditor: (tab: TableInfoTab) => void }>();
+  const grid = ref<{ canOpenTableStructureEditor: boolean; openTableStructureEditor: (tab?: TableInfoTab) => boolean }>();
   document.body.append(host);
   const Root = defineComponent({
     setup() {
@@ -160,8 +160,16 @@ describe("DataGrid edit-table-structure shortcut", () => {
     await settle();
     expect(host.querySelector("[data-edit-table-structure]")).toBeNull();
     expect(grid.value?.canOpenTableStructureEditor).toBe(true);
-    grid.value!.openTableStructureEditor("columns");
+    expect(grid.value!.openTableStructureEditor()).toBe(true);
     expect(openTableStructure).toHaveBeenCalledExactlyOnceWith("connection-1", "app", "public", "users", "columns", undefined, "warehouse", "table");
+  });
+
+  it("returns false from openTableStructureEditor when table structure editing is not available", async () => {
+    const { grid, openTableStructure } = mountGrid({ databaseType: "redis" });
+    await settle();
+    expect(grid.value?.canOpenTableStructureEditor).toBe(false);
+    expect(grid.value!.openTableStructureEditor()).toBe(false);
+    expect(openTableStructure).not.toHaveBeenCalled();
   });
 
   it("opens the existing structure editor route for an eligible table-data grid", async () => {

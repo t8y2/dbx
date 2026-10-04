@@ -6,6 +6,7 @@ import {
   ENUM_VALUES,
   EXTENDED_JSON_VALUES,
   FIELD_QUERY_OPERATORS,
+  ELEM_MATCH_QUERY_OPERATORS,
   PIPELINE_STAGES,
   PUSH_MODIFIERS,
   BULK_WRITE_OPERATION_FIELDS,
@@ -45,6 +46,7 @@ export type MongoCompletionMode =
   | "field"
   | "filterField"
   | "pullCondition"
+  | "elemMatchKey"
   | "fieldPath"
   | "fieldRef"
   | "indexName"
@@ -430,10 +432,10 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
   // Top-level snippets belong at the start of a command. Inside an argument list — of a method
   // this engine does not model (`limit(`, `drop(`, `renameCollection(`, `runCommand({`, …) or after a
   // `use` — they are noise: `db.collection.find` is not something you can type there.
-  if (!call) return isInsideCallArguments(beforeCursor) || isAfterUseKeyword(beforeCursor) || isAfterShowKeyword(beforeCursor) ? at("none") : at("root");
+  if (!call) return isInsideCallArguments(beforeCursor) || isAfterUseKeyword(beforeCursor) || isAfterShowKeyword(beforeCursor) || isAfterCallResultDot(beforeCursor) ? at("none") : at("root");
 
   const scan = scanMongoCallArguments(text, call.openParenIndex + 1, safeCursor);
-  if (!scan) return isInsideCallArguments(beforeCursor) || isAfterUseKeyword(beforeCursor) || isAfterShowKeyword(beforeCursor) ? at("none") : at("root");
+  if (!scan) return isInsideCallArguments(beforeCursor) || isAfterUseKeyword(beforeCursor) || isAfterShowKeyword(beforeCursor) || isAfterCallResultDot(beforeCursor) ? at("none") : at("root");
 
   const classified = classifyCursorInCall(call.method, scan);
   const variables = classified.mode === "fieldRef" || classified.mode === "expression" ? collectScopeVariables(scan) : undefined;
@@ -495,6 +497,10 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
     case "pullCondition":
       // Fields lead; query operators follow once `$` is typed.
       items = [...fieldItems(prefix, fields), ...specItems(FIELD_QUERY_OPERATORS, prefix, "query operator", 80)];
+      break;
+    case "elemMatchKey":
+      // Fields lead; field query operators and $and / $or / $nor follow once `$` is typed.
+      items = [...fieldItems(prefix, fields), ...specItems(ELEM_MATCH_QUERY_OPERATORS, prefix, "query operator", 80)];
       break;
     case "fieldPath":
       items = fieldPathItems(prefix, fields);
@@ -569,7 +575,7 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
 
 /** Modes whose items are built from the target collection's sampled fields. */
 export function mongoCompletionNeedsFields(mode: MongoCompletionMode): boolean {
-  return mode === "field" || mode === "filterField" || mode === "pullCondition" || mode === "fieldPath" || mode === "fieldRef" || mode === "expression";
+  return mode === "field" || mode === "filterField" || mode === "pullCondition" || mode === "elemMatchKey" || mode === "fieldPath" || mode === "fieldRef" || mode === "expression";
 }
 
 /** Modes whose items are built from the database's collection names. */
@@ -593,7 +599,10 @@ export function shouldAutoOpenMongoCompletion(text: string, cursor: number): boo
   if (text.slice(0, cursor).endsWith("db.")) return true;
   // `use ` and `show ` name a database or subcommand next; open the list as soon as the space is typed.
   if (previousChar === " " && (matchUseDatabasePrefix(text.slice(0, cursor)) || matchShowSubcommandPrefix(text.slice(0, cursor)))) return true;
-  if (previousChar === "$" || previousChar === "." || previousChar === '"' || previousChar === "'") return true;
+  if (previousChar === ".") {
+    return getMongoCompletionContext(text, cursor).mode !== "none";
+  }
+  if (previousChar === "$" || previousChar === '"' || previousChar === "'") return true;
   if (/[{,[:]/.test(previousChar) || /[{,[:]\s+$/.test(text.slice(0, cursor))) {
     return getMongoCompletionContext(text, cursor).mode !== "none";
   }
@@ -1049,6 +1058,7 @@ function classifyFilter(scan: MongoCallScan, rootIndex: number): MongoCursorClas
     if (enumKey) return { mode: "enumValue", enumKey };
     return { mode: scan.inString ? "none" : "value" };
   }
+  if (inner.key === "$elemMatch") return { mode: "elemMatchKey" };
   if (innerDepth(scan, rootIndex) === 0) return { mode: "filterField" };
 
   // Inside a nested object: whose value is it?
@@ -1059,8 +1069,6 @@ function classifyFilter(scan: MongoCallScan, rootIndex: number): MongoCursorClas
       const parent = scan.stack[scan.stack.length - 2];
       return { mode: parent?.kind === "array" && VALUE_ARRAY_OPERATORS.has(parent.key ?? "") ? "valueWrapper" : "filterField" };
     }
-    case "$elemMatch":
-      return { mode: "filterField" };
     case "$expr":
       return { mode: "expression" };
     default:
@@ -2154,6 +2162,15 @@ function isAfterShowKeyword(beforeCursor: string): boolean {
   return /(?:^|[\s;])show\s+[\w$-]*(?:\s+[\w$-]*)*$/i.test(currentLine);
 }
 
+/** After a closing parenthesis and a dot on a call chain that is not a modeled cursor chain. */
+function isAfterCallResultDot(beforeCursor: string): boolean {
+  const masked = maskMongoLiterals(beforeCursor);
+  if (!/\)\s*\.\s*[\w$-]*$/.test(masked)) return false;
+  if (/(?:getCollection|getSiblingDB)\s*\([^()]*\)\s*\.\s*[\w$-]*$/.test(masked)) return false;
+  const cursorChain = matchCursorMethodDot(beforeCursor);
+  return !cursorChain || cursorChain.terminal === true;
+}
+
 /** Blank out string/comment CONTENT (preserving length, so offsets stay valid) before pattern matching. */
 function maskMongoLiterals(text: string): string {
   const chars = [...text];
@@ -2342,10 +2359,13 @@ function collectFieldTypes(value: unknown, prefix: string, out: Map<string, Set<
   }
 }
 
+const LEGACY_ISODATE_PATTERN = /^ISODate\("[^"]*"\)$/;
+
 function describeMongoValueType(value: unknown): string {
   if (value == null) return "null";
   if (Array.isArray(value)) return "array";
   if (value instanceof Date) return "date";
+  if (typeof value === "string" && LEGACY_ISODATE_PATTERN.test(value)) return "date";
   return mongoExtendedJsonValueType(value) ?? (typeof value === "object" ? "object" : typeof value);
 }
 

@@ -102,4 +102,78 @@ describe("connectionStore listMongoCompletionFields", () => {
     expect(cached).toEqual(fields);
     expect(api.mongoFindDocuments).toHaveBeenCalledOnce();
   });
+
+  it("infers types from extended_documents when returned by mongoAggregateDocuments", async () => {
+    const api = {
+      mongoAggregateDocuments: vi.fn().mockResolvedValue({
+        documents: [{ _id: "65f0c0ffee00000000000001", createdAt: "2026-01-01T00:00:00Z", ref: "65f0c0ffee0000000000abcd" }],
+        extended_documents: [{ _id: { $oid: "65f0c0ffee00000000000001" }, createdAt: { $date: "2026-01-01T00:00:00Z" }, ref: { $oid: "65f0c0ffee0000000000abcd" } }],
+      }),
+      mongoFindDocuments: vi.fn(),
+    };
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => api);
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const config = mongoConnection();
+    store.addEphemeralConnection(config);
+
+    const fields = await store.listMongoCompletionFields(config.id, "app", "users");
+
+    expect(fields).toEqual([
+      { name: "_id", type: "objectId" },
+      { name: "createdAt", type: "date" },
+      { name: "ref", type: "objectId" },
+    ]);
+  });
+
+  it("infers types from extended_documents when returned by mongoFindDocuments fallback", async () => {
+    const api = {
+      mongoAggregateDocuments: vi.fn().mockRejectedValue(new Error("Aggregation not supported")),
+      mongoFindDocuments: vi.fn().mockResolvedValue({
+        documents: [{ _id: "65f0c0ffee00000000000001", createdAt: "2026-01-01T00:00:00Z", ref: "65f0c0ffee0000000000abcd" }],
+        extended_documents: [{ _id: { $oid: "65f0c0ffee00000000000001" }, createdAt: { $date: "2026-01-01T00:00:00Z" }, ref: { $oid: "65f0c0ffee0000000000abcd" } }],
+      }),
+    };
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => api);
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const config = mongoConnection();
+    store.addEphemeralConnection(config);
+
+    const fields = await store.listMongoCompletionFields(config.id, "app", "users");
+
+    expect(fields).toEqual([
+      { name: "_id", type: "objectId" },
+      { name: "createdAt", type: "date" },
+      { name: "ref", type: "objectId" },
+    ]);
+  });
+
+  it("falls back to documents when extended_documents is absent or length mismatches", async () => {
+    const api = {
+      mongoAggregateDocuments: vi.fn().mockResolvedValue({
+        documents: [{ _id: "1", fallbackField: "val" }],
+        extended_documents: [],
+      }),
+      mongoFindDocuments: vi.fn(),
+    };
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => api);
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const config = mongoConnection();
+    store.addEphemeralConnection(config);
+
+    const fields = await store.listMongoCompletionFields(config.id, "app", "users");
+
+    expect(fields).toEqual([
+      { name: "_id", type: "string" },
+      { name: "fallbackField", type: "string" },
+    ]);
+  });
 });

@@ -142,6 +142,7 @@ const toolbarProps = {
   hasConnections: false,
   canNewQuery: false,
   hasSqlFileConnections: false,
+  immediateSyncing: false,
 };
 
 describe("always-on-top button visibility", () => {
@@ -243,6 +244,19 @@ describe("always-on-top button visibility", () => {
 
     expect(openBackups).toHaveBeenCalledOnce();
     expect(openMcpSettings).toHaveBeenCalledOnce();
+
+    unmount();
+  });
+
+  it("disables the immediate sync action while syncing", async () => {
+    const settingsStore = useSettingsStore();
+    settingsStore.editorSettings.toolbarItems.immediateSync = true;
+    const { host, unmount } = mount(AppToolbar, { ...toolbarProps, immediateSyncing: true });
+    await settled();
+
+    const button = host.querySelector('[aria-label="toolbar.immediateSync"]');
+    expect(button?.getAttribute("aria-busy")).toBe("true");
+    expect((button as HTMLButtonElement | null)?.disabled).toBe(true);
 
     unmount();
   });

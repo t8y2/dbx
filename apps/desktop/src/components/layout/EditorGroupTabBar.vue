@@ -42,6 +42,7 @@ import {
   Clock3,
   Copy,
   Database,
+  FoldHorizontal,
   ListFilter,
   ListOrdered,
   Maximize2,
@@ -189,8 +190,15 @@ const showTabTreeGuides = computed(() => isVerticalLayout.value && !isTabBarColl
 // the shared vertical rail width; fill that rail so nested pane bars stay in
 // sync while the resize handle updates the outer panel (issue #9977).
 const tabBarStyle = computed<CSSProperties | undefined>(() => {
-  if (!isVerticalLayout.value) return undefined;
-  return { width: "100%", flex: "0 0 100%" };
+  const styles: CSSProperties = {};
+  if (isVerticalLayout.value) {
+    styles.width = "100%";
+    styles.flex = "0 0 100%";
+  }
+  if (!isVerticalLayout.value && settingsStore.editorSettings.tabMaxWidth > 0) {
+    styles["--tab-max-width"] = `${settingsStore.editorSettings.tabMaxWidth}px`;
+  }
+  return Object.keys(styles).length > 0 ? styles : undefined;
 });
 const tabBarCollapseIcon = computed(() => {
   const isLeft = settingsStore.editorSettings.tabPlacement === "left";
@@ -375,8 +383,15 @@ const tabPlacementItems = computed(() => [
   { value: "left", label: t("settings.tabPlacementLeft") },
   { value: "right", label: t("settings.tabPlacementRight") },
 ]);
+const tabMaxWidthItems = computed(() => [
+  { value: 0, label: t("settings.tabMaxWidthUnlimited") },
+  { value: 160, label: t("settings.tabMaxWidthCompact") },
+  { value: 200, label: t("settings.tabMaxWidthMedium") },
+  { value: 240, label: t("settings.tabMaxWidthStandard") },
+  { value: 320, label: t("settings.tabMaxWidthWide") },
+]);
 
-type TabPreferencePatch = Partial<Pick<EditorSettings, "tabPlacement" | "tabGroupMode" | "tabSortMode" | "tabGroupCustomizations">>;
+type TabPreferencePatch = Partial<Pick<EditorSettings, "tabPlacement" | "tabGroupMode" | "tabSortMode" | "tabGroupCustomizations" | "tabMaxWidth">>;
 
 async function persistTabPreferences(partial: TabPreferencePatch) {
   try {
@@ -396,6 +411,10 @@ function updateTabSortMode(value: string) {
 
 function updateTabPlacement(value: string) {
   if (value === "top" || value === "bottom" || value === "left" || value === "right") void persistTabPreferences({ tabPlacement: value });
+}
+
+function updateTabMaxWidth(value: number) {
+  if (Number.isFinite(value) && value >= 0) void persistTabPreferences({ tabMaxWidth: value });
 }
 
 function databaseTabGroupKey(tab: QueryTab) {
@@ -879,8 +898,9 @@ const tabOrganizationItems = computed(() => [
     groupLabel: index === 0 ? t("settings.tabGroup") : undefined,
   })),
   ...tabSortItems.value.map((item, index) => ({ ...item, value: `sort:${item.value}`, icon: { manual: ListOrdered, "created-asc": Clock3, "title-asc": ArrowDownAZ }[item.value], separatorBefore: index === 0, groupLabel: index === 0 ? t("settings.tabSort") : undefined })),
+  ...tabMaxWidthItems.value.map((item, index) => ({ ...item, value: `maxwidth:${item.value}`, icon: item.value === 0 ? Maximize2 : FoldHorizontal, separatorBefore: index === 0, groupLabel: index === 0 ? t("settings.tabMaxWidth") : undefined })),
 ]);
-const selectedTabOrganizationItems = computed(() => [`placement:${settingsStore.editorSettings.tabPlacement}`, `group:${settingsStore.editorSettings.tabGroupMode}`, `sort:${settingsStore.editorSettings.tabSortMode}`]);
+const selectedTabOrganizationItems = computed(() => [`placement:${settingsStore.editorSettings.tabPlacement}`, `group:${settingsStore.editorSettings.tabGroupMode}`, `sort:${settingsStore.editorSettings.tabSortMode}`, `maxwidth:${settingsStore.editorSettings.tabMaxWidth}`]);
 
 function selectTabOrganizationItem(value: string) {
   const [section, option] = value.split(":");
@@ -888,6 +908,7 @@ function selectTabOrganizationItem(value: string) {
   if (section === "placement") updateTabPlacement(option);
   else if (section === "group") updateTabGroupMode(option);
   else if (section === "sort") updateTabSortMode(option);
+  else if (section === "maxwidth") updateTabMaxWidth(Number(option));
 }
 
 function getTabGroupMenuItems(tab: QueryTab): ContextMenuItem[] {
@@ -1566,6 +1587,7 @@ watch(
     props.specialPageTabs?.driverStoreOpen,
     settingsStore.editorSettings.tabLayout,
     settingsStore.editorSettings.tabGroupMode,
+    settingsStore.editorSettings.tabMaxWidth,
     compactTabTitle.value,
     Array.from(collapsedTabGroups.value).sort().join("|"),
   ],
@@ -1618,6 +1640,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
     :data-group-id="groupId"
     :data-group-mode="settingsStore.editorSettings.tabGroupMode"
     :data-placement="settingsStore.editorSettings.tabPlacement"
+    :data-has-max-tab-width="!isVerticalLayout && settingsStore.editorSettings.tabMaxWidth > 0"
   >
     <!-- Compact vertical toolbar: search, tab organization, collapse. -->
     <div v-if="isVerticalLayout" class="flex h-9 shrink-0 items-center gap-0.5 border-b p-1" :class="isTabBarCollapsed ? 'justify-center' : ''">

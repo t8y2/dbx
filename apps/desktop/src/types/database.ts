@@ -2057,6 +2057,11 @@ export interface QueryTab {
     line: number;
     column?: number;
   };
+  /** Ephemeral request to reveal/scroll to a specific column in the data grid. */
+  gridRevealColumnRequest?: {
+    id: number;
+    columnName: string;
+  };
   executionId?: string;
   /** Ephemeral result run targeted by the current execution; null means a new run is being produced. */
   executingResultRunId?: string | null;

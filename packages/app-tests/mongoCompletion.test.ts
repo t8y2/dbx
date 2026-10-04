@@ -437,14 +437,42 @@ test("offers whole-filter operators at the top level and field operators under a
   assert.ok(bare.includes("$or"));
 });
 
-test("treats $and / $or sub-filters, $elemMatch bodies and $match as filters", () => {
-  for (const text of ["db.users.find({ $or: [{ $", "db.users.find({ items: { $elemMatch: { $", "db.users.aggregate([{ $match: { $"]) {
+test("treats $and / $or sub-filters and $match as filters", () => {
+  for (const text of ["db.users.find({ $or: [{ $", "db.users.aggregate([{ $match: { $"]) {
     const items = labels(text, { fields });
     assert.ok(items.includes("$or"), text);
     assert.equal(items.includes("$gte"), false, text);
   }
   assert.ok(labels("db.users.find({ $or: [{ ", { fields }).includes("name"));
   assert.ok(labels("db.users.find({ $or: [{ age: { $", { fields }).includes("$gte"));
+});
+
+test("completes $elemMatch body with field names, field query operators and logical operators", () => {
+  const findItems = labels("db.users.find({ tags: { $elemMatch: { $", { fields });
+  for (const op of ["$gte", "$lt", "$in", "$regex", "$exists", "$and", "$or", "$nor"]) {
+    assert.ok(findItems.includes(op), `find $elemMatch must include ${op}`);
+  }
+  for (const op of ["$expr", "$text", "$where", "$jsonSchema"]) {
+    assert.equal(findItems.includes(op), false, `find $elemMatch must exclude ${op}`);
+  }
+
+  const bare = labels("db.users.find({ tags: { $elemMatch: { ", { fields });
+  assert.ok(
+    bare.slice(0, fields.length).every((label) => !label.startsWith("$")),
+    `fields first: ${bare.join(", ")}`,
+  );
+  assert.deepEqual(bare.slice(0, fields.length), ["_id", "createdAt", "name", "profile.email"]);
+
+  assert.ok(labels("db.users.find({ tags: { $elemMatch: { qty: { $", { fields }).includes("$gte"));
+  assert.ok(labels("db.users.find({ tags: { $elemMatch: { $or: [{ ", { fields }).includes("name"));
+
+  const aggItems = labels("db.users.aggregate([{ $match: { tags: { $elemMatch: { $", { fields });
+  for (const op of ["$gte", "$lt", "$in", "$regex", "$exists", "$and", "$or", "$nor"]) {
+    assert.ok(aggItems.includes(op), `aggregate $elemMatch must include ${op}`);
+  }
+  for (const op of ["$expr", "$text", "$where", "$jsonSchema"]) {
+    assert.equal(aggItems.includes(op), false, `aggregate $elemMatch must exclude ${op}`);
+  }
 });
 
 test("does not offer filter operators in update or insert documents", () => {
@@ -1016,6 +1044,10 @@ test("suggests projection operators in find projections", () => {
   assert.deepEqual(labels("db.users.find({}, { tags: { $elemMatch: { ", { fields }).slice(0, 3), ["_id", "createdAt", "name"]);
   assert.ok(labels("db.users.find({}, { tags: { $elemMatch: { score: { ", { fields }).includes("$gt"));
   assert.ok(labels("db.users.find({}, { tags: { $elemMatch: { score: { $gt: ", { fields }).includes("NumberInt"));
+  const projElemMatch = labels("db.users.find({}, { tags: { $elemMatch: { $", { fields });
+  assert.ok(projElemMatch.includes("$gte"));
+  assert.ok(projElemMatch.includes("$or"));
+  assert.equal(projElemMatch.includes("$expr"), false);
 });
 
 test("every suggested projection operator parses", () => {
@@ -1747,6 +1779,35 @@ test("treats extended JSON wrappers as scalars, not subdocuments", () => {
   assert.ok(inferred.find((field) => field.name === "profile.email" && field.type === "string"));
 });
 
+test("infers BSON types from extended JSON values and legacy ISODate strings", () => {
+  const inferred = inferMongoCompletionFields([
+    {
+      createdAt: { $date: "2026-01-01T00:00:00Z" },
+      ref: { $oid: "65f0c0ffee0000000000abcd" },
+      price: { $numberDecimal: "1.5" },
+    },
+  ]);
+
+  for (const phantom of ["createdAt.$date", "ref.$oid", "price.$numberDecimal"]) {
+    assert.equal(
+      inferred.some((field) => field.name === phantom),
+      false,
+      phantom,
+    );
+  }
+
+  assert.equal(inferred.find((field) => field.name === "createdAt")?.type, "date");
+  assert.equal(inferred.find((field) => field.name === "ref")?.type, "objectId");
+  assert.equal(inferred.find((field) => field.name === "price")?.type, "decimal128");
+
+  const legacyInferred = inferMongoCompletionFields([
+    {
+      createdAt: 'ISODate("2026-01-01T00:00:00Z")',
+    },
+  ]);
+  assert.equal(legacyInferred.find((field) => field.name === "createdAt")?.type, "date");
+});
+
 test("infers dotted MongoDB fields from sampled documents", () => {
   const inferred = inferMongoCompletionFields([
     { _id: "1", profile: { email: "a@example.com" }, tags: ["a"] },
@@ -2106,4 +2167,101 @@ test("completes bracket collection references db['name'] and db[\"name\"]", () =
   assert.equal(ctxSiblingMethod.collection, "orders");
   assert.equal(ctxSiblingMethod.database, "shop");
   assert.ok(labels(siblingMethod).includes("find"));
+});
+
+test("suppresses completion after a dot following findOne", () => {
+  const text = "db.users.findOne({}).";
+  const context = getMongoCompletionContext(text, text.length);
+  assert.equal(context.mode, "none");
+  assert.deepEqual(labels(text, { collections, fields }), []);
+  assert.equal(shouldAutoOpenMongoCompletion(text, text.length), false);
+});
+
+test("suppresses completion after a dot following countDocuments", () => {
+  const text = "db.users.countDocuments({}).";
+  const context = getMongoCompletionContext(text, text.length);
+  assert.equal(context.mode, "none");
+  assert.deepEqual(labels(text, { collections, fields }), []);
+  assert.equal(shouldAutoOpenMongoCompletion(text, text.length), false);
+});
+
+test("suppresses completion after a dot following explain", () => {
+  const text = "db.users.explain().";
+  const context = getMongoCompletionContext(text, text.length);
+  assert.equal(context.mode, "none");
+  assert.deepEqual(labels(text, { collections, fields }), []);
+  assert.equal(shouldAutoOpenMongoCompletion(text, text.length), false);
+});
+
+test("suppresses completion after a dot and typed prefix following findOne", () => {
+  const text = "db.users.findOne({}).na";
+  const context = getMongoCompletionContext(text, text.length);
+  assert.equal(context.mode, "none");
+  assert.deepEqual(labels(text, { collections, fields }), []);
+});
+
+test("suppresses completion after a dot following a non-cursor call with masked parens in literals", () => {
+  for (const text of ['db.users.findOne({ note: "(x)" }).', "db.users.findOne({ /* ) */ }).", "db.users.findOne({}) ."]) {
+    const context = getMongoCompletionContext(text, text.length);
+    assert.equal(context.mode, "none", text);
+    assert.deepEqual(labels(text, { collections, fields }), [], text);
+    assert.equal(shouldAutoOpenMongoCompletion(text, text.length), false, text);
+  }
+  const typed = "db.users.findOne({}) .na";
+  assert.equal(getMongoCompletionContext(typed, typed.length).mode, "none");
+  assert.deepEqual(labels(typed, { collections, fields }), []);
+});
+
+test("preserves completion behavior for cursor chains, root triggers, and multiline statements", () => {
+  // cursor methods
+  assert.equal(getMongoCompletionContext("db.users.find({}).", "db.users.find({}).".length).mode, "cursorMethod");
+  assert.ok(labels("db.users.find({}).", { fields }).includes("sort"));
+
+  assert.equal(getMongoCompletionContext("db.users.find({}).sort({ name: 1 }).", "db.users.find({}).sort({ name: 1 }).".length).mode, "cursorMethod");
+  assert.ok(labels("db.users.find({}).sort({ name: 1 }).", { fields }).includes("limit"));
+
+  // aggregate cursor methods
+  assert.equal(getMongoCompletionContext("db.users.aggregate([]).", "db.users.aggregate([]).".length).mode, "cursorMethod");
+  assert.deepEqual(labels("db.users.aggregate([]).").sort(), ["pretty", "toArray"]);
+
+  // terminal cursor method count()
+  assert.equal(getMongoCompletionContext("db.users.find({}).count().", "db.users.find({}).count().".length).mode, "none");
+  assert.deepEqual(labels("db.users.find({}).count()."), []);
+
+  // db root dot / collection prefix / use / show / sh / empty doc
+  assert.equal(getMongoCompletionContext("db.", "db.".length).mode, "collection");
+  assert.ok(labels("db.", { collections }).includes("users"));
+
+  assert.equal(getMongoCompletionContext("db.us", "db.us".length).mode, "collection");
+  assert.ok(labels("db.us", { collections }).includes("users"));
+  assert.ok(labels("db.us", { collections }).includes("user_events"));
+
+  assert.equal(getMongoCompletionContext("use ", "use ".length).mode, "database");
+  assert.equal(getMongoCompletionContext("show ", "show ".length).mode, "showSubcommand");
+  assert.equal(getMongoCompletionContext("sh", "sh".length).mode, "root");
+  assert.equal(getMongoCompletionContext("", 0).mode, "root");
+
+  assert.equal(getMongoCompletionContext("db.users.find({ name: 'x' });\ndb.", "db.users.find({ name: 'x' });\ndb.".length).mode, "collection");
+  assert.ok(labels("db.users.find({ name: 'x' });\ndb.", { collections }).includes("users"));
+
+  // statement on a new line after a finished statement
+  assert.equal(getMongoCompletionContext("db.users.findOne({})\ndb.", "db.users.findOne({})\ndb.".length).mode, "collection");
+  assert.ok(labels("db.users.findOne({})\ndb.", { collections }).includes("users"));
+
+  assert.equal(getMongoCompletionContext("db.users.findOne({})\nfi", "db.users.findOne({})\nfi".length).mode, "root");
+  assert.ok(labels("db.users.findOne({})\nfi").includes("find"));
+});
+
+test("preserves auto-trigger and completion for getCollection and getSiblingDB dot chains", () => {
+  const getCollectionDot = 'db.getCollection("users").';
+  assert.equal(getMongoCompletionContext(getCollectionDot, getCollectionDot.length).mode, "method");
+  assert.equal(shouldAutoOpenMongoCompletion(getCollectionDot, getCollectionDot.length), true);
+
+  const siblingDbDot = 'db.getSiblingDB("shop").';
+  assert.equal(getMongoCompletionContext(siblingDbDot, siblingDbDot.length).mode, "collection");
+  assert.equal(shouldAutoOpenMongoCompletion(siblingDbDot, siblingDbDot.length), true);
+
+  const siblingGetCollectionDot = 'db.getSiblingDB("shop").getCollection("a").';
+  assert.equal(getMongoCompletionContext(siblingGetCollectionDot, siblingGetCollectionDot.length).mode, "method");
+  assert.equal(shouldAutoOpenMongoCompletion(siblingGetCollectionDot, siblingGetCollectionDot.length), true);
 });

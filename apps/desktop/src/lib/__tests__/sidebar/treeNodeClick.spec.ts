@@ -218,4 +218,11 @@ describe("treeNodeClick", () => {
       signature: undefined,
     });
   });
+
+  it("locates column in data grid on single click in single-activation mode and double click in double-activation mode", () => {
+    expect(treeNodeRowAction("column", false, "single")).toBe("locate-column");
+    expect(treeNodeRowAction("column", false, "double")).toBe("none");
+    expect(treeNodeRowDoubleClickAction("column", false, "single")).toBe("none");
+    expect(treeNodeRowDoubleClickAction("column", false, "double")).toBe("locate-column");
+  });
 });

@@ -52,6 +52,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "colorizeConnectionTabs",
   "tabGroupMode",
   "tabSortMode",
+  "tabMaxWidth",
   "showColumnCommentsInHeader",
   "showColumnTypesInHeader",
   "showColumnHeaderTooltips",

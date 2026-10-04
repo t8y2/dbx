@@ -55,6 +55,14 @@ async fn set_macos_traffic_light_position_inner(
                 button.setFrameOrigin(rect.origin);
             }
 
+            // AppKit re-runs the title bar layout during a live window resize and resets
+            // the standard buttons to their default frames. The vendored wry re-applies
+            // the traffic light inset from `drawRect:` (after that layout pass), which is
+            // what the user actually sees. Hand it the position computed above so both
+            // writers agree; otherwise the buttons flicker between the toolbar alignment
+            // and wry's window creation inset while the window is being resized.
+            apply_traffic_light_inset_to_wry(ns_window, target_x, target_y);
+
             let Some(close) = ns_window.standardWindowButton(NSWindowButton::CloseButton) else {
                 let _ = tx.send(None);
                 return;
@@ -96,6 +104,32 @@ fn validate_macos_traffic_light_position(x: f64, y: f64, scale: f64) -> Result<(
         return Err("Invalid traffic light position".to_string());
     }
     Ok(())
+}
+
+/// Hands the traffic light inset DBX computed to the vendored wry parent view.
+///
+/// wry re-applies the stored inset from `drawRect:` and that write is the one that
+/// survives AppKit's title bar layout, so keeping it in sync with DBX's toolbar
+/// alignment removes the flicker between the two during a window resize.
+#[cfg(target_os = "macos")]
+fn apply_traffic_light_inset_to_wry(ns_window: &objc2_app_kit::NSWindow, x: f64, y: f64) {
+    use objc2::runtime::Sel;
+    use objc2_app_kit::NSView;
+
+    let selector: Sel = objc2::sel!(dbxUpdateTrafficLightInsetX:y:);
+
+    fn visit(view: &NSView, selector: Sel, x: f64, y: f64) -> bool {
+        let responds: bool = unsafe { objc2::msg_send![view, respondsToSelector: selector] };
+        if responds {
+            let _: () = unsafe { objc2::msg_send![view, dbxUpdateTrafficLightInsetX: x, y: y] };
+            return true;
+        }
+        view.subviews().iter().any(|subview| visit(&subview, selector, x, y))
+    }
+
+    if let Some(content_view) = ns_window.contentView() {
+        let _ = visit(&content_view, selector, x, y);
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

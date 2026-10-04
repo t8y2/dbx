@@ -2021,6 +2021,7 @@ export default withEnglishFallback({
     bar: "柱状图",
     pie: "饼图",
     noNumericData: "没有可用于图表的数值数据",
+    showLabels: "显示数值",
   },
   grid: {
     rows: "{count} 行",

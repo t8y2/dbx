@@ -1899,6 +1899,7 @@ export default withEnglishFallback({
     bar: "막대",
     pie: "파이",
     noNumericData: "차트에 사용할 숫자 데이터가 없습니다",
+    showLabels: "값 표시",
   },
   grid: {
     agentExecuteTime: "실행 시간: {duration}",

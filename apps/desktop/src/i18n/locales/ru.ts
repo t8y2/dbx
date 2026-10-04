@@ -1992,6 +1992,7 @@ export default withEnglishFallback({
     bar: "Столбчатая",
     pie: "Круговая",
     noNumericData: "Нет числовых данных для построения диаграммы",
+    showLabels: "Показывать значения",
   },
   grid: {
     rows: "Строк: {count}",

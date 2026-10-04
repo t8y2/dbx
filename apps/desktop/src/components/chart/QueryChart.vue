@@ -12,7 +12,7 @@ import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMe
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import type { QueryResult } from "@/types/database";
 import { useTheme } from "@/composables/useTheme";
-import { axisColumnLabel, chartableColumnIndexes, toChartNumber } from "@/lib/dataGrid/chartData";
+import { axisColumnLabel, chartableColumnIndexes, buildQueryChartOption, type ChartType } from "@/lib/dataGrid/chartData";
 
 use([CanvasRenderer, LineChart, BarChart, PieChart, GridComponent, TooltipComponent, LegendComponent]);
 
@@ -23,10 +23,28 @@ const props = defineProps<{
 const { t } = useI18n();
 const { isDark } = useTheme();
 
-type ChartType = "line" | "bar" | "pie";
+const QUERY_CHART_SHOW_LABELS_KEY = "dbx-query-chart-show-labels";
+
+function readShowLabelsPreference(): boolean {
+  try {
+    return typeof localStorage !== "undefined" && localStorage.getItem(QUERY_CHART_SHOW_LABELS_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
 const chartType = ref<ChartType>("bar");
 const xColumnIndex = ref(0);
 const yColumnIndexes = ref<number[]>([]);
+const showLabels = ref(readShowLabelsPreference());
+
+watch(showLabels, (val) => {
+  try {
+    localStorage.setItem(QUERY_CHART_SHOW_LABELS_KEY, String(val));
+  } catch {
+    // ignore
+  }
+});
 
 const numericColumnIndexes = computed(() => chartableColumnIndexes(props.result));
 
@@ -70,55 +88,13 @@ function setYColumn(index: number, selected: boolean | "indeterminate") {
 }
 
 const chartOption = computed(() => {
-  const xIdx = xColumnIndex.value;
-  if (xIdx < 0 || yColumnIndexes.value.length === 0) return null;
-
-  const xData = props.result.rows.map((row) => String(row[xIdx] ?? ""));
-
-  if (chartType.value === "pie") {
-    const yIdx = yColumnIndexes.value[0];
-    if (yIdx < 0) return null;
-    return {
-      tooltip: { trigger: "item" },
-      legend: { bottom: 0, textStyle: { color: isDark.value ? "#ccc" : "#333" } },
-      series: [
-        {
-          type: "pie",
-          radius: ["30%", "60%"],
-          data: xData.map((name, i) => ({
-            name,
-            value: toChartNumber(props.result.rows[i][yIdx]) ?? 0,
-          })),
-        },
-      ],
-    };
-  }
-
-  const yIndices = yColumnIndexes.value.filter((index) => index >= 0 && index < props.result.columns.length);
-
-  return {
-    tooltip: { trigger: "axis" },
-    legend: {
-      bottom: 0,
-      textStyle: { color: isDark.value ? "#ccc" : "#333" },
-    },
-    grid: { left: 60, right: 20, top: 20, bottom: 40 },
-    xAxis: {
-      type: "category" as const,
-      data: xData,
-      axisLabel: { color: isDark.value ? "#aaa" : "#666" },
-    },
-    yAxis: {
-      type: "value" as const,
-      axisLabel: { color: isDark.value ? "#aaa" : "#666" },
-    },
-    series: yIndices.map((yIdx) => ({
-      name: axisColumnLabel(props.result.columns, yIdx),
-      type: chartType.value,
-      data: props.result.rows.map((row) => toChartNumber(row[yIdx]) ?? 0),
-      smooth: chartType.value === "line",
-    })),
-  };
+  return buildQueryChartOption(props.result, {
+    chartType: chartType.value,
+    xColumnIndex: xColumnIndex.value,
+    yColumnIndexes: yColumnIndexes.value,
+    showLabels: showLabels.value,
+    isDark: isDark.value,
+  });
 });
 
 const hasData = computed(() => props.result.rows.length > 0 && numericColumnIndexes.value.length > 0);
@@ -169,6 +145,10 @@ const hasData = computed(() => props.result.rows.length > 0 && numericColumnInde
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
+        <span class="h-4 w-px bg-border" />
+        <Button size="sm" :variant="showLabels ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs" data-testid="query-chart-show-labels-btn" @click="showLabels = !showLabels">
+          {{ t("chart.showLabels") }}
+        </Button>
       </div>
       <div class="flex-1 min-h-0 p-2">
         <VChart v-if="chartOption" :option="chartOption" autoresize class="h-full w-full" />

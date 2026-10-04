@@ -1991,6 +1991,7 @@ export default withEnglishFallback({
     bar: "Batang",
     pie: "Pai",
     noNumericData: "Tidak ada data numerik yang tersedia untuk membuat chart",
+    showLabels: "Tampilkan Nilai",
   },
   grid: {
     rows: "{count} baris",

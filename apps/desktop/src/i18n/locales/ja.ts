@@ -1961,6 +1961,7 @@ export default withEnglishFallback({
     bar: "棒",
     pie: "円",
     noNumericData: "グラフ化できる数値データがありません",
+    showLabels: "値を表示",
   },
   grid: {
     agentExecuteTime: "実行時間：{duration}",

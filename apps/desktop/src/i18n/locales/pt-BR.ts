@@ -1941,6 +1941,7 @@ export default withEnglishFallback({
     bar: "Barra",
     pie: "Pizza",
     noNumericData: "Nenhum dado numérico disponível para gerar o gráfico",
+    showLabels: "Mostrar valores",
   },
   grid: {
     agentExecuteTime: "Execução: {duration}",

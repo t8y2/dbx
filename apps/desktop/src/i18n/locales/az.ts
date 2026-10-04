@@ -1751,6 +1751,7 @@ export default withEnglishFallback({
     bar: "Sütunlu",
     pie: "Dairəvi",
     noNumericData: "Diaqram qurmaq üçün ədədi verilənlər yoxdur",
+    showLabels: "Dəyərləri göstər",
   },
   grid: {
     rows: "{count} sətir",

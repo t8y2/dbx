@@ -1945,6 +1945,7 @@ export default withEnglishFallback({
     bar: "柱狀圖",
     pie: "餅圖",
     noNumericData: "沒有可用於圖表的數值資料",
+    showLabels: "顯示數值",
   },
   grid: {
     rows: "{count} 列",

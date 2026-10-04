@@ -219,10 +219,12 @@ describe("treeNodeClick", () => {
     });
   });
 
-  it("locates column in data grid on single click in single-activation mode and double click in double-activation mode", () => {
+  it("keeps column single-click navigation and opens structure editor on double click", () => {
     expect(treeNodeRowAction("column", false, "single")).toBe("locate-column");
     expect(treeNodeRowAction("column", false, "double")).toBe("none");
-    expect(treeNodeRowDoubleClickAction("column", false, "single")).toBe("none");
-    expect(treeNodeRowDoubleClickAction("column", false, "double")).toBe("locate-column");
+    expect(treeNodeRowDoubleClickAction("column", false, "single")).toBe("open-structure-editor");
+    expect(treeNodeRowDoubleClickAction("column", false, "double")).toBe("open-structure-editor");
+    expect(treeNodeRowDoubleClickAction("index", false, "single")).toBe("open-structure-editor");
+    expect(treeNodeRowDoubleClickAction("index", false, "double")).toBe("open-structure-editor");
   });
 });

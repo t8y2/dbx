@@ -1618,8 +1618,8 @@ function onDoubleClick(event: MouseEvent) {
     return;
   }
   const action = treeNodeRowDoubleClickAction(activeNode.value.type, canOpenObjectBrowser.value, settingsStore.editorSettings.sidebarActivation, canExpand.value, currentDatabaseType(), canOpenConnectionDatabaseBrowser.value, settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation);
-  // In single-click mode the trailing dblclick normally has no action and must
-  // leave the first click's request ownership intact.
+  // Most trailing dblclick events are intentionally inert in single-click
+  // mode, but field and index rows have an explicit editor action.
   if (action === "none") return;
   const requestId = beginNavigationRequest();
   if (action === "open-database-browser") {
@@ -1635,6 +1635,8 @@ function onDoubleClick(event: MouseEvent) {
     activateDataTableFromDoubleClick();
   } else if (action === "locate-column") {
     locateColumnInDataGrid(activeNode.value);
+  } else if (action === "open-structure-editor") {
+    if (canOpenStructureEditor.value) openStructureEditor();
   } else if (action === "open-source") {
     openObjectSourceDialog(false);
   } else if (action === "open-extension-details") {

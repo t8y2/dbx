@@ -38,6 +38,7 @@ const settings = {
 };
 
 const openDataMock = vi.fn();
+const openStructureEditorMock = vi.fn();
 
 vi.mock("@/stores/connectionStore", () => ({
   CONNECTION_ATTEMPT_CANCELLED_MESSAGE: "connection attempt cancelled",
@@ -55,7 +56,7 @@ vi.mock("@/composables/useSidebarConnectionMutationRuntime", () => ({ useSidebar
 vi.mock("@/composables/useSidebarDatabaseSpecificMutationRuntime", () => ({ useSidebarDatabaseSpecificMutationRuntime: () => ({}) }));
 vi.mock("@/composables/useSidebarTableMutationRuntime", () => ({ useSidebarTableMutationRuntime: () => ({}) }));
 vi.mock("@/composables/useSidebarTreeExportRuntime", () => ({ useSidebarTreeExportRuntime: () => ({}) }));
-vi.mock("@/composables/useSidebarTreeToolRuntime", () => ({ useSidebarTreeToolRuntime: () => ({}) }));
+vi.mock("@/composables/useSidebarTreeToolRuntime", () => ({ useSidebarTreeToolRuntime: () => ({ openStructureEditor: openStructureEditorMock }) }));
 
 const mountedApps: App[] = [];
 
@@ -64,6 +65,7 @@ afterEach(() => {
   document.body.innerHTML = "";
   connectionStore.treeNodes = [];
   openDataMock.mockReset();
+  openStructureEditorMock.mockReset();
   vi.clearAllMocks();
 });
 
@@ -119,7 +121,7 @@ describe("SidebarTreeRuntimeHost column locate", () => {
     expect(openDataMock).toHaveBeenCalledWith(expect.objectContaining({ label: "users" }), expect.anything(), "default", { revealColumn: "email" });
   });
 
-  it("locates column in data grid on double click in double-activation mode", async () => {
+  it("opens the structure editor for a double-clicked column", async () => {
     settings.sidebarActivation = "double";
 
     const tableNode: TreeNode = {
@@ -166,7 +168,8 @@ describe("SidebarTreeRuntimeHost column locate", () => {
     host.value?.handleRowDoubleClick(columnNode, new MouseEvent("dblclick"));
     await nextTick();
 
-    expect(onOpenData).toHaveBeenCalledWith(expect.objectContaining({ label: "users", connectionId: "mysql", database: "app" }), false, "default", expect.any(Function));
-    expect(openDataMock).toHaveBeenCalledWith(expect.objectContaining({ label: "users" }), expect.anything(), "default", { revealColumn: "age" });
+    expect(onOpenData).not.toHaveBeenCalled();
+    expect(openDataMock).not.toHaveBeenCalled();
+    expect(openStructureEditorMock).toHaveBeenCalledTimes(1);
   });
 });

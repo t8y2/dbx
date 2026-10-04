@@ -143,6 +143,10 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridCellDetailButtonVisible");
   });
 
+  it("includes dataGridCellDetailDialogDefault", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridCellDetailDialogDefault");
+  });
+
   it("includes completionTriggerMode", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("completionTriggerMode");
   });
@@ -357,6 +361,15 @@ describe("editorSettingsPatchFromDraft", () => {
     expect(editorSettingsPatchFromDraft(hidden, visible)).toEqual({ dataGridCellDetailButtonVisible: false });
     expect(editorSettingsPatchFromDraft(visible, visible)).toEqual({});
     expect(editorSettingsPatchFromDraft(visible, hidden)).toEqual({ dataGridCellDetailButtonVisible: true });
+  });
+
+  it("applies, cancels, and re-enables cell detail dialog default", () => {
+    const enabled = editorSettingsDraftFromSettings(makeSettings({ dataGridCellDetailDialogDefault: true }));
+    const disabled = editorSettingsDraftFromSettings(makeSettings({ dataGridCellDetailDialogDefault: false }));
+
+    expect(editorSettingsPatchFromDraft(enabled, disabled)).toEqual({ dataGridCellDetailDialogDefault: true });
+    expect(editorSettingsPatchFromDraft(enabled, enabled)).toEqual({});
+    expect(editorSettingsPatchFromDraft(disabled, enabled)).toEqual({ dataGridCellDetailDialogDefault: false });
   });
 
   it("includes the multi-statement default view when changed", () => {

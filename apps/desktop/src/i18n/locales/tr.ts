@@ -7166,6 +7166,8 @@ export default withEnglishFallback({
     dataGridAutoTransposeSingleRowDescription: "Etkinleştirildiğinde, tam olarak bir satır ve birden çok sütun içeren SQL sorgu sonuçları otomatik olarak devrik görünüme geçer.",
     dataGridCellDetailButtonVisible: "Hücre ayrıntısı düğmesini göster",
     dataGridCellDetailButtonVisibleDescription: "Bir hücrenin üzerine gelindiğinde hücre ayrıntısı düğmesini göster.",
+    dataGridCellDetailDialogDefault: "Hücre ayrıntılarını varsayılan olarak iletişim kutusunda aç",
+    dataGridCellDetailDialogDefaultDescription: "Hücre ayrıntıları düğmesine tıklandığında yan veya alt panel yerine varsayılan olarak bir modal iletişim kutusunda açar.",
     dataGridCrosshairHighlight: "Artı imleç satır ve sütun vurgusu",
     dataGridCrosshairHighlightDescription: "Etkinleştirildiğinde etkin hücrenin tüm satırı ve sütunu hafifçe vurgulanır (Excel gibi). Odaklanan hücre kendi seçili biçemini korur.",
     infiniteScroll: "Sonsuz kaydırmayla yükleme",

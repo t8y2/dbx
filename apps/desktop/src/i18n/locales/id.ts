@@ -7952,6 +7952,8 @@ export default withEnglishFallback({
     dataGridAutoTransposeSingleRowDescription: "Jika diaktifkan, hasil kueri SQL dengan tepat satu baris dan beberapa kolom akan otomatis beralih ke tampilan transpos.",
     dataGridCellDetailButtonVisible: "Tampilkan tombol detail sel",
     dataGridCellDetailButtonVisibleDescription: "Tampilkan tombol detail sel saat kursor diarahkan ke suatu sel.",
+    dataGridCellDetailDialogDefault: "Buka detail sel dalam dialog secara default",
+    dataGridCellDetailDialogDefaultDescription: "Buka detail sel dalam dialog modal secara default daripada di panel samping atau bawah.",
     dataGridCrosshairHighlight: "Sorot baris & kolom crosshair",
     dataGridCrosshairHighlightDescription: "Jika diaktifkan, sorot secara samar seluruh baris dan kolom dari sel aktif (seperti Excel). Sel yang difokuskan tetap mempertahankan gaya terpilihnya.",
     infiniteScroll: "Pemuatan gulir tak terbatas",

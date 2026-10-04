@@ -7273,6 +7273,8 @@ export default withEnglishFallback({
     dataGridAutoTransposeSingleRowDescription: "Quando ativado, os resultados de consultas SQL com exatamente uma linha e várias colunas alternam automaticamente para a visualização transposta.",
     dataGridCellDetailButtonVisible: "Mostrar botão de detalhes da célula",
     dataGridCellDetailButtonVisibleDescription: "Mostrar o botão de detalhes da célula ao passar o mouse sobre uma célula.",
+    dataGridCellDetailDialogDefault: "Abrir detalhes da célula em diálogo por padrão",
+    dataGridCellDetailDialogDefaultDescription: "Abre os detalhes da célula em uma caixa de diálogo modal por padrão, em vez do painel lateral ou inferior.",
     dataGridCrosshairHighlight: "Destacar linha e coluna em cruz",
     dataGridCrosshairHighlightDescription: "Quando ativado, destaca levemente toda a linha e a coluna da célula ativa (como no Excel). A célula focada mantém o estilo selecionado.",
     infiniteScroll: "Carregamento por rolagem infinita",

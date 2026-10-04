@@ -7075,6 +7075,8 @@ export default withEnglishFallback({
     dataGridAutoTransposeSingleRowDescription: "활성화하면 정확히 한 행과 여러 열이 있는 SQL 쿼리 결과가 자동으로 전치 보기로 전환됩니다.",
     dataGridCellDetailButtonVisible: "셀 세부 정보 버튼 표시",
     dataGridCellDetailButtonVisibleDescription: "셀 위에 마우스를 올리면 셀 세부 정보 버튼을 표시합니다.",
+    dataGridCellDetailDialogDefault: "셀 세부 정보를 기본적으로 대화상자로 표시",
+    dataGridCellDetailDialogDefaultDescription: "셀 세부 정보 버튼을 클릭할 때 사이드 또는 하단 패널 대신 모달 대화상자로 표시합니다.",
     dataGridCrosshairHighlight: "행·열 십자 강조",
     dataGridCrosshairHighlightDescription: "활성화하면 활성 셀의 전체 행과 열을 연하게 강조합니다(Excel과 유사). 포커스 셀은 기존 선택 스타일을 유지합니다.",
     infiniteScroll: "무한 스크롤 로딩",

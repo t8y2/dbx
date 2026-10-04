@@ -8477,6 +8477,8 @@ export default withEnglishFallback({
     dataGridAutoTransposeSingleRowDescription: "Если включено, результаты SQL-запроса ровно с одной строкой и несколькими столбцами автоматически открываются в транспонированном виде.",
     dataGridCellDetailButtonVisible: "Показывать кнопку подробностей ячейки",
     dataGridCellDetailButtonVisibleDescription: "Показывать кнопку подробностей при наведении на ячейку.",
+    dataGridCellDetailDialogDefault: "По умолчанию открывать сведения о ячейке в диалоговом окне",
+    dataGridCellDetailDialogDefaultDescription: "Открывать сведения о ячейке в модальном окне по умолчанию вместо боковой или нижней панели.",
     dataGridCrosshairHighlight: "Подсветка строки и столбца перекрестием",
     dataGridCrosshairHighlightDescription: "Если включено, слегка подсвечиваются вся строка и столбец активной ячейки (как в Excel). Ячейка в фокусе сохраняет свой выделенный стиль.",
     infiniteScroll: "Бесконечная прокрутка с подгрузкой",

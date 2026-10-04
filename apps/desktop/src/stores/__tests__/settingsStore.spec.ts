@@ -639,6 +639,16 @@ describe("normalizeEditorSettings", () => {
     }
   });
 
+  it("defaults cell detail dialog default off and preserves only boolean values", () => {
+    expect(normalizeEditorSettings({}).dataGridCellDetailDialogDefault).toBe(false);
+    expect(normalizeEditorSettings({ dataGridCellDetailDialogDefault: true }).dataGridCellDetailDialogDefault).toBe(true);
+    expect(normalizeEditorSettings({ dataGridCellDetailDialogDefault: false }).dataGridCellDetailDialogDefault).toBe(false);
+
+    for (const invalidValue of [0, 1, "true", null]) {
+      expect(normalizeEditorSettings({ dataGridCellDetailDialogDefault: invalidValue as never }).dataGridCellDetailDialogDefault).toBe(false);
+    }
+  });
+
   it("defaults the crosshair highlight off and preserves only boolean values", () => {
     expect(normalizeEditorSettings({}).dataGridCrosshairHighlight).toBe(false);
     expect(normalizeEditorSettings({ dataGridCrosshairHighlight: true }).dataGridCrosshairHighlight).toBe(true);
@@ -1471,6 +1481,28 @@ describe("settingsStore persisted settings initialization", () => {
     const restartedStore = useSettingsStore();
     await restartedStore.initEditorSettings();
     expect(restartedStore.editorSettings.dataGridCellDetailButtonVisible).toBe(true);
+  });
+
+  it("defaults cell detail dialog default to off, persists an opt-in, and reloads it", async () => {
+    let persistedSettings: Record<string, unknown> = { dataGridCellDetailDialogDefault: true };
+    const loadEditorSettings = vi.fn(async () => JSON.parse(JSON.stringify(persistedSettings)));
+    const saveEditorSettings = vi.fn(async (settings: Record<string, unknown>) => {
+      persistedSettings = JSON.parse(JSON.stringify(settings));
+    });
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+
+    expect(store.editorSettings.dataGridCellDetailDialogDefault).toBe(true);
+    await store.updateEditorSettingsAndPersist({ dataGridCellDetailDialogDefault: false });
+    expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ dataGridCellDetailDialogDefault: false }));
+
+    setActivePinia(createPinia());
+    const restartedStore = useSettingsStore();
+    await restartedStore.initEditorSettings();
+    expect(restartedStore.editorSettings.dataGridCellDetailDialogDefault).toBe(false);
   });
 
   it("defaults the crosshair highlight to off, persists an opt-in, and reloads it", async () => {

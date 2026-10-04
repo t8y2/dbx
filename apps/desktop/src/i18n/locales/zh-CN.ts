@@ -8145,6 +8145,8 @@ export default withEnglishFallback({
     dataGridAutoTransposeSingleRowDescription: "开启后，SQL 查询结果只有一行且包含多列时，自动切换为转置视图。",
     dataGridCellDetailButtonVisible: "显示单元格详情按钮",
     dataGridCellDetailButtonVisibleDescription: "鼠标悬停在单元格上时显示单元格详情按钮。",
+    dataGridCellDetailDialogDefault: "单元格详情默认弹窗展示",
+    dataGridCellDetailDialogDefaultDescription: "点击单元格详情按钮时，默认使用弹窗展示而非侧边或下方分屏。",
     dataGridCrosshairHighlight: "行列十字高亮",
     dataGridCrosshairHighlightDescription: "开启后，以当前活动单元格为中心淡色高亮整行和整列（类似 Excel）。焦点单元格仍保留原有的选中样式。",
     infiniteScroll: "无限滚动加载",

@@ -7282,6 +7282,8 @@ export default withEnglishFallback({
     dataGridAutoTransposeSingleRowDescription: "Aktiv olduqda yalnız bir sətri və bir neçə sütunu olan SQL sorğu nəticələri avtomatik transpozisiya görünüşünə keçir.",
     dataGridCellDetailButtonVisible: "Xana təfərrüatları düyməsini göstər",
     dataGridCellDetailButtonVisibleDescription: "Kursor xananın üzərinə gətirildikdə xana təfərrüatları düyməsini göstər.",
+    dataGridCellDetailDialogDefault: "Xana təfərrüatlarını standart olaraq dialoq pəncərəsində aç",
+    dataGridCellDetailDialogDefaultDescription: "Xana təfərrüatları düyməsinə kliklədikdə yan və ya aşağı panel yerinə standart olaraq modal dialoq pəncərəsində açır.",
     dataGridCrosshairHighlight: "Sətir və sütunun çarpaz vurğulanması",
     dataGridCrosshairHighlightDescription: "Aktiv olduqda aktiv xananın bütün sətrini və sütununu yüngülcə vurğula (Excel-dəki kimi). Fokuslanmış xana seçilmiş üslubunu saxlayır.",
     infiniteScroll: "Sonsuz sürüşdürmə ilə yükləmə",

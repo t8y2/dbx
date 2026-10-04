@@ -7271,6 +7271,8 @@ export default withEnglishFallback({
     dataGridAutoTransposeSingleRowDescription: "Quando è attivata, i risultati delle query SQL con esattamente una riga e più colonne passano automaticamente alla vista trasposta.",
     dataGridCellDetailButtonVisible: "Mostra il pulsante dei dettagli della cella",
     dataGridCellDetailButtonVisibleDescription: "Mostra il pulsante dei dettagli della cella al passaggio del mouse su una cella.",
+    dataGridCellDetailDialogDefault: "Apri dettagli cella in finestra di dialogo per impostazione predefinita",
+    dataGridCellDetailDialogDefaultDescription: "Apre i dettagli della cella in una finestra di dialogo modale per impostazione predefinita anziché nel pannello laterale o inferiore.",
     dataGridCrosshairHighlight: "Evidenzia riga e colonna a croce",
     dataGridCrosshairHighlightDescription: "Se attivato, evidenzia leggermente l'intera riga e la colonna della cella attiva (come Excel). La cella focalizzata mantiene il suo stile selezionato.",
     infiniteScroll: "Caricamento a scorrimento infinito",

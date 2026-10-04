@@ -128,6 +128,7 @@ fn registry_with_driver(db_type: &str, version: &str, jre: &str) -> AgentRegistr
                 sha256: None,
                 size: 42,
                 format: None,
+                delta: None,
             }),
             native: std::collections::HashMap::new(),
         },
@@ -158,6 +159,7 @@ fn registry_with_native_driver(db_type: &str, version: &str, jre: &str) -> Agent
                 sha256: None,
                 size: 0,
                 format: None,
+                delta: None,
             }),
             native: [(
                 AgentManager::current_platform().to_string(),
@@ -166,6 +168,7 @@ fn registry_with_native_driver(db_type: &str, version: &str, jre: &str) -> Agent
                     sha256: None,
                     size: 42,
                     format: None,
+                    delta: None,
                 },
             )]
             .into_iter()
@@ -190,6 +193,7 @@ fn registry_with_foreign_platform_native_driver(db_type: &str, version: &str) ->
                     sha256: None,
                     size: 42,
                     format: None,
+                    delta: None,
                 },
             )
         })
@@ -209,6 +213,7 @@ fn registry_with_foreign_platform_native_driver(db_type: &str, version: &str) ->
                 sha256: None,
                 size: 0,
                 format: None,
+                delta: None,
             }),
             native,
         },

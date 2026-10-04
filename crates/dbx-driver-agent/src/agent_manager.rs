@@ -185,6 +185,42 @@ mod tests {
     }
 
     #[test]
+    fn registry_artifact_parses_optional_delta_and_stays_backward_compatible() {
+        let with_delta: ArtifactInfo = serde_json::from_str(
+            r#"{
+                "url": "https://example.com/dbx-agent-demo-0.2.0.tar.zst",
+                "sha256": "52da05589c140cdf5ceba54999422dfc50a1fd23ee19c9f26ee92869ad099d09",
+                "size": 71239014,
+                "delta": {
+                    "base_version": "0.1.73",
+                    "url": "https://example.com/dbx-agent-demo-0.1.73-to-0.2.0.tar.zst.delta",
+                    "sha256": "aa05555555c140cdf5feba54999422dfc50a1fd23ee19c9f26ee92869ad099d09",
+                    "size": 4432615
+                }
+            }"#,
+        )
+        .unwrap();
+        let delta = with_delta.delta.as_ref().expect("delta parsed");
+        assert_eq!(delta.base_version, "0.1.73");
+        assert_eq!(delta.size, 4_432_615);
+        assert!(delta.url.ends_with(".delta"));
+        // Round-trips through serialization for the offline export path.
+        let serialized = serde_json::to_value(&with_delta).unwrap();
+        assert!(serialized.get("delta").is_some());
+
+        // Registries published before delta support have no `delta` key.
+        let without_delta: ArtifactInfo = serde_json::from_str(
+            r#"{
+                "url": "https://example.com/dbx-agent-demo-0.1.73.tar.zst",
+                "sha256": "52da05589c140cdf5ceba54999422dfc50a1fd23ee19c9f26ee92869ad099d09",
+                "size": 71239014
+            }"#,
+        )
+        .unwrap();
+        assert!(without_delta.delta.is_none());
+    }
+
+    #[test]
     fn cleanup_pending_jre_removes_stash_dirs_and_persists() {
         let manager = test_manager("pending-cleanup");
         std::fs::create_dir_all(manager.base_dir()).unwrap();
@@ -704,6 +740,25 @@ pub struct ArtifactInfo {
     pub size: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<ArtifactFormat>,
+    /// Optional incremental update payload: a zstd patch-from frame that
+    /// reconstructs this artifact from the artifact of `base_version`. Clients
+    /// without a matching retained base (or on any reconstruct failure) fall
+    /// back to downloading `url` in full.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delta: Option<DeltaInfo>,
+}
+
+/// Describes the incremental update payload of an [ArtifactInfo].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeltaInfo {
+    /// Version whose downloaded artifact the delta applies onto.
+    pub base_version: String,
+    /// URL of the delta frame (a `.delta` file on the same release as the full artifact).
+    pub url: String,
+    /// SHA-256 of the delta file itself.
+    pub sha256: String,
+    /// Size of the delta file in bytes.
+    pub size: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

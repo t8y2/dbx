@@ -1631,9 +1631,26 @@ jobs:
       - name: Verify managed JDBC assets in all offline ZIPs
         run: node agents/scripts/verify_offline_jdbc_release.mjs release
 
+      - name: Fetch previous agent registry for delta patches
+        env:
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
+        run: |
+          mkdir -p prev-release
+          if gh release download agents-latest --repo "$GITHUB_REPOSITORY" \
+              --pattern agent-registry.json --dir prev-release --clobber; then
+            echo "previous agent-registry.json fetched for delta generation"
+          else
+            echo "no previous agents-latest registry found; delta patches are skipped"
+            rm -rf prev-release
+          fi
+
       - name: Build single-driver packages
         run: |
-          python3 agents/scripts/build_driver_zips.py release --cleanup-sources
+          PREV_ARGS=()
+          if [ -f prev-release/agent-registry.json ]; then
+            PREV_ARGS+=(--previous-registry prev-release/agent-registry.json)
+          fi
+          python3 agents/scripts/build_driver_zips.py release --cleanup-sources "${PREV_ARGS[@]}"
           python3 -m json.tool release/agent-registry.json > /dev/null
           echo "=== final agent-registry.json ==="
           cat release/agent-registry.json

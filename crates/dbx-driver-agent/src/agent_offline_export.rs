@@ -442,6 +442,7 @@ fn build_export_registry(am: &AgentManager, drivers: &[PreparedDriver], jres: &[
             sha256: Some(driver.sha256.clone()),
             size: driver.size,
             format: None,
+            delta: None,
         };
         let (jar, native) = match driver.kind {
             AgentOfflineArtifactKind::Jar => (Some(artifact), HashMap::new()),
@@ -473,6 +474,7 @@ fn build_export_registry(am: &AgentManager, drivers: &[PreparedDriver], jres: &[
                         sha256: Some(jre.sha256.clone()),
                         size: jre.size,
                         format: Some(ArtifactFormat::TarZstd),
+                        delta: None,
                     },
                 )]),
             },

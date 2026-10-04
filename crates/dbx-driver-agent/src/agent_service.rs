@@ -1665,18 +1665,14 @@ async fn install_sqlite_worker_from_registry(
             current,
             total_drivers,
         ));
-        download_with_progress(
+        obtain_driver_artifact(
             am,
             progress,
-            "driver",
             source,
-            &artifact.url,
-            &r2_path_with_cache_buster(&github_url_to_r2_path(&artifact.url, "driver"), &driver.version),
+            artifact,
+            db_type,
+            &driver.version,
             &download_path,
-            artifact.size,
-            artifact.sha256.as_deref(),
-            Some(CacheIdentity::Driver { db_type, version: &driver.version }),
-            Some(db_type),
             current,
             total_drivers,
             cancellations,
@@ -1798,18 +1794,14 @@ async fn install_agent_driver_from_registry(
         current,
         total_drivers,
     ));
-    download_with_progress(
+    obtain_driver_artifact(
         am,
         progress,
-        "driver",
         source,
-        &artifact.url,
-        &r2_path_with_cache_buster(&github_url_to_r2_path(&artifact.url, "driver"), &driver.version),
+        artifact,
+        db_type,
+        &driver.version,
         &download_path,
-        artifact.size,
-        artifact.sha256.as_deref(),
-        Some(CacheIdentity::Driver { db_type, version: &driver.version }),
-        Some(db_type),
         current,
         total_drivers,
         cancellations,
@@ -1821,6 +1813,9 @@ async fn install_agent_driver_from_registry(
         std::fs::remove_file(&download_path).ok();
         return Err(AGENT_DOWNLOAD_CANCELED_ERROR.to_string());
     }
+    // Retain the artifact bytes for future incremental updates before the
+    // install consumes (and deletes) the staged download.
+    retain_driver_delta_base(am, db_type, &driver.version, &download_path);
     stop_driver_processes_before_replacement(am, db_type).await?;
     install_downloaded_driver_artifact(
         &download_path,
@@ -2046,6 +2041,131 @@ fn agent_registry_driver<'a>(
     db_type: &str,
 ) -> Option<&'a crate::agent_manager::DriverInfo> {
     registry.drivers.get(db_type)
+}
+
+/// Downloads `artifact` for installation, preferring the registry's
+/// incremental delta when a matching base artifact was retained by a previous
+/// install of `db_type`. The staged full artifact lands at `dest` either way;
+/// every delta failure falls back to a full download.
+#[allow(clippy::too_many_arguments)]
+async fn obtain_driver_artifact(
+    am: &AgentManager,
+    progress: &impl Fn(AgentProgressEvent),
+    source: DownloadSource,
+    artifact: &crate::agent_manager::ArtifactInfo,
+    db_type: &str,
+    driver_version: &str,
+    dest: &Path,
+    current: Option<u32>,
+    total_drivers: Option<u32>,
+    cancellations: &[&AgentInstallCancellation],
+) -> Result<(), String> {
+    if let Some(delta) = artifact.delta.as_ref() {
+        let base = crate::driver_delta::find_delta_base(&am.download_cache_dir(), db_type, &delta.base_version);
+        if let Some(base) = base {
+            match try_delta_artifact(
+                am,
+                progress,
+                source,
+                artifact,
+                delta,
+                &base,
+                db_type,
+                driver_version,
+                dest,
+                current,
+                total_drivers,
+                cancellations,
+            )
+            .await
+            {
+                Ok(()) => {
+                    log::info!(
+                        "[driver-delta:{db_type}] applied incremental update {} -> {} (delta {} bytes of a {} byte artifact)",
+                        delta.base_version,
+                        driver_version,
+                        delta.size,
+                        artifact.size
+                    );
+                    return Ok(());
+                }
+                Err(err) => {
+                    log::warn!(
+                        "[driver-delta:{db_type}] incremental update failed, falling back to full download: {err}"
+                    );
+                    let _ = std::fs::remove_file(dest);
+                }
+            }
+        }
+    }
+    download_with_progress(
+        am,
+        progress,
+        "driver",
+        source,
+        &artifact.url,
+        &r2_path_with_cache_buster(&github_url_to_r2_path(&artifact.url, "driver"), driver_version),
+        dest,
+        artifact.size,
+        artifact.sha256.as_deref(),
+        Some(CacheIdentity::Driver { db_type, version: driver_version }),
+        Some(db_type),
+        current,
+        total_drivers,
+        cancellations,
+    )
+    .await
+}
+
+/// Downloads the delta frame and reconstructs the full artifact onto `dest`.
+/// The reconstructed bytes are verified against the full artifact's size and
+/// SHA-256; a mismatching (e.g. corrupt) base is caught here and reported as a
+/// plain error so the caller can fall back to a full download.
+#[allow(clippy::too_many_arguments)]
+async fn try_delta_artifact(
+    am: &AgentManager,
+    progress: &impl Fn(AgentProgressEvent),
+    source: DownloadSource,
+    artifact: &crate::agent_manager::ArtifactInfo,
+    delta: &crate::agent_manager::DeltaInfo,
+    base: &Path,
+    db_type: &str,
+    driver_version: &str,
+    dest: &Path,
+    current: Option<u32>,
+    total_drivers: Option<u32>,
+    cancellations: &[&AgentInstallCancellation],
+) -> Result<(), String> {
+    let file_name = dest
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "Driver artifact has no file name".to_string())?;
+    let delta_path = dest
+        .parent()
+        .ok_or_else(|| "Driver artifact has no parent directory".to_string())?
+        .join(format!(".{file_name}.delta"));
+    let cache_buster_version = format!("{driver_version}-from-{}", delta.base_version);
+    download_with_progress(
+        am,
+        progress,
+        "driver",
+        source,
+        &delta.url,
+        &r2_path_with_cache_buster(&github_url_to_r2_path(&delta.url, "driver"), &cache_buster_version),
+        &delta_path,
+        delta.size,
+        Some(delta.sha256.as_str()),
+        None,
+        Some(db_type),
+        current,
+        total_drivers,
+        cancellations,
+    )
+    .await?;
+    let outcome = crate::driver_delta::apply_zstd_delta(base, &delta_path, dest)
+        .and_then(|()| validate_artifact_integrity(dest, artifact.size, artifact.sha256.as_deref()));
+    let _ = std::fs::remove_file(&delta_path);
+    outcome
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2525,8 +2645,25 @@ fn prune_jre_download_cache(am: &AgentManager, jre_key: &str) -> Result<(), Stri
 }
 
 fn cleanup_driver_download_cache_after_success(am: &AgentManager, db_type: &str) {
-    if let Err(err) = prune_driver_download_cache(am, db_type) {
+    // Keep the retained delta base (future incremental updates read it back);
+    // drop the transient download entries for this driver.
+    let prefix = format!("driver-{}-", cache_file_token(db_type));
+    let base_prefix = format!("driver-{}-base-", cache_file_token(db_type));
+    if let Err(err) = remove_download_cache_entries(
+        am,
+        |name| name.starts_with(&prefix) && !name.starts_with(&base_prefix),
+        "cached driver download",
+    ) {
         log::warn!("Failed to clean cached download for {db_type}: {err}");
+    }
+}
+
+/// Retains the just-installed artifact as the delta base for the next
+/// incremental update of `db_type`. Best-effort: a missing base only costs a
+/// full download later.
+fn retain_driver_delta_base(am: &AgentManager, db_type: &str, version: &str, downloaded: &Path) {
+    if let Err(err) = crate::driver_delta::retain_delta_base(&am.download_cache_dir(), db_type, version, downloaded) {
+        log::warn!("Failed to retain delta base for {db_type} {version}: {err}");
     }
 }
 
@@ -4543,10 +4680,17 @@ mod agent_registry_install_tests {
                     sha256: None,
                     size: 0,
                     format: None,
+                    delta: None,
                 }),
                 native: [(
                     AgentManager::current_platform().to_string(),
-                    ArtifactInfo { url: native_url.to_string(), sha256: None, size: native_size, format: None },
+                    ArtifactInfo {
+                        url: native_url.to_string(),
+                        sha256: None,
+                        size: native_size,
+                        format: None,
+                        delta: None,
+                    },
                 )]
                 .into_iter()
                 .collect(),
@@ -4564,7 +4708,7 @@ mod agent_registry_install_tests {
                 label: db_type.to_string(),
                 min_app_version: "0.1.0".to_string(),
                 jre: DEFAULT_JRE_KEY.to_string(),
-                jar: Some(ArtifactInfo { url: url.to_string(), sha256: None, size, format: None }),
+                jar: Some(ArtifactInfo { url: url.to_string(), sha256: None, size, format: None, delta: None }),
                 native: std::collections::HashMap::new(),
             },
         );
@@ -4809,7 +4953,7 @@ mod agent_registry_install_tests {
                     version: version.to_string(),
                     platforms: [(
                         AgentManager::current_platform().to_string(),
-                        ArtifactInfo { url: url.to_string(), sha256: None, size, format: None },
+                        ArtifactInfo { url: url.to_string(), sha256: None, size, format: None, delta: None },
                     )]
                     .into_iter()
                     .collect(),
@@ -4951,6 +5095,7 @@ mod agent_registry_install_tests {
                 sha256: None,
                 size: 8,
                 format: None,
+                delta: None,
             },
         );
         cache_test_registry(registry).await;
@@ -5197,11 +5342,23 @@ mod agent_registry_install_tests {
         let mut native = std::collections::HashMap::new();
         native.insert(
             "linux-x64".to_string(),
-            ArtifactInfo { url: x64_url.to_string(), sha256: None, size: x64_bytes.len() as u64, format: None },
+            ArtifactInfo {
+                url: x64_url.to_string(),
+                sha256: None,
+                size: x64_bytes.len() as u64,
+                format: None,
+                delta: None,
+            },
         );
         native.insert(
             "linux-aarch64".to_string(),
-            ArtifactInfo { url: arm_url.to_string(), sha256: None, size: arm_bytes.len() as u64, format: None },
+            ArtifactInfo {
+                url: arm_url.to_string(),
+                sha256: None,
+                size: arm_bytes.len() as u64,
+                format: None,
+                delta: None,
+            },
         );
         let mut drivers = std::collections::HashMap::new();
         drivers.insert(
@@ -5216,6 +5373,7 @@ mod agent_registry_install_tests {
                     sha256: None,
                     size: 0,
                     format: None,
+                    delta: None,
                 }),
                 native,
             },
@@ -6387,6 +6545,7 @@ mod agent_registry_install_tests {
                             sha256: Some(sha256_bytes(&jre_bytes)),
                             size: jre_bytes.len() as u64,
                             format: None,
+                            delta: None,
                         },
                     )]
                     .into_iter()
@@ -6406,6 +6565,7 @@ mod agent_registry_install_tests {
                         sha256: Some(sha256_bytes(&jar_bytes)),
                         size: jar_bytes.len() as u64,
                         format: None,
+                        delta: None,
                     }),
                     native: std::collections::HashMap::new(),
                     jre: jre_key.to_string(),
@@ -6466,6 +6626,7 @@ mod agent_registry_install_tests {
                             sha256: Some(sha256_bytes(&unrelated_jre_bytes)),
                             size: unrelated_jre_bytes.len() as u64,
                             format: None,
+                            delta: None,
                         },
                     )]
                     .into_iter()
@@ -6485,6 +6646,7 @@ mod agent_registry_install_tests {
                         sha256: Some(sha256_bytes(&jar_bytes)),
                         size: jar_bytes.len() as u64,
                         format: None,
+                        delta: None,
                     }),
                     native: std::collections::HashMap::new(),
                     jre: "temurin-21".to_string(),
@@ -6527,6 +6689,7 @@ mod agent_registry_install_tests {
                             sha256: Some(sha256),
                             size,
                             format: None,
+                            delta: None,
                         },
                     )]
                     .into_iter()
@@ -6571,6 +6734,7 @@ mod agent_registry_install_tests {
                             sha256: Some(sha256_bytes(&jre_bytes)),
                             size: jre_bytes.len() as u64,
                             format: None,
+                            delta: None,
                         },
                     )]
                     .into_iter()
@@ -6590,6 +6754,7 @@ mod agent_registry_install_tests {
                         sha256: Some(sha256_bytes(&jar_bytes)),
                         size: jar_bytes.len() as u64,
                         format: None,
+                        delta: None,
                     }),
                     native: std::collections::HashMap::new(),
                     jre: jre_key.to_string(),
@@ -6666,6 +6831,7 @@ mod agent_registry_install_tests {
                         sha256: None,
                         size: 0,
                         format: None,
+                        delta: None,
                     },
                 )
             })

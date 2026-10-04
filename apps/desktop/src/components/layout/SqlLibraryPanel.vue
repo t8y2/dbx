@@ -2,7 +2,34 @@
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { ArrowDownWideNarrow, ArrowRightLeft, ChevronsDownUp, Database, Download, FilePlus, FileText, FolderCog, FolderClosed, FolderOpen, FolderPlus, Layers, Library, Loader2, LocateFixed, Pencil, Play, Search, Trash2, Upload, X } from "@lucide/vue";
+import {
+  ArrowDownAZ,
+  ArrowDownWideNarrow,
+  ArrowRightLeft,
+  ArrowUpAZ,
+  ArrowUpDown,
+  Calendar,
+  ChevronsDownUp,
+  Clock,
+  Database,
+  Download,
+  FilePlus,
+  FileText,
+  FolderCog,
+  FolderClosed,
+  FolderOpen,
+  FolderPlus,
+  Layers,
+  Library,
+  Loader2,
+  LocateFixed,
+  Pencil,
+  Play,
+  Search,
+  Trash2,
+  Upload,
+  X,
+} from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { SearchableSelect } from "@/components/ui/searchable-select";
@@ -16,7 +43,7 @@ import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import * as api from "@/lib/backend/api";
 import { externalSqlFileOpenErrorMessage } from "@/lib/sql/sqlFileOpen";
-import { useSavedSqlStore } from "@/stores/savedSqlStore";
+import { useSavedSqlStore, type SavedSqlFileSortMode, type SavedSqlFolderSortMode } from "@/stores/savedSqlStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -1021,6 +1048,33 @@ function folderMoveMenuItems(fileIds: string[]): CtxMenuItem[] {
   ];
 }
 
+async function handleSortFolderFiles(folderId: string | undefined, mode: SavedSqlFileSortMode) {
+  try {
+    await savedSqlStore.sortFolderFiles(folderId, mode);
+    toast(t("sqlLibrary.sortSuccess"));
+  } catch (error) {
+    toast(t("sqlLibrary.moveFailed", { message: savedSqlErrorMessage(error, t) }), 5000);
+  }
+}
+
+async function handleSortFolderChildren(parentFolderId: string | undefined, mode: SavedSqlFolderSortMode) {
+  try {
+    await savedSqlStore.sortFolderChildren(parentFolderId, mode);
+    toast(t("sqlLibrary.sortSuccess"));
+  } catch (error) {
+    toast(t("sqlLibrary.moveFailed", { message: savedSqlErrorMessage(error, t) }), 5000);
+  }
+}
+
+async function handleSortAllFolderFiles(mode: SavedSqlFileSortMode) {
+  try {
+    await savedSqlStore.sortAllFolderFiles(mode);
+    toast(t("sqlLibrary.sortSuccess"));
+  } catch (error) {
+    toast(t("sqlLibrary.moveFailed", { message: savedSqlErrorMessage(error, t) }), 5000);
+  }
+}
+
 const contextMenuItems = computed<CtxMenuItem[]>(() => {
   const target = contextTarget.value;
   if (!target) return [];
@@ -1054,11 +1108,50 @@ const contextMenuItems = computed<CtxMenuItem[]>(() => {
   }
 
   if (target === "panel") {
+    const unfiledFiles = savedSqlStore.filesWithoutFolder();
+    const rootFolders = childFolders();
+    const hasSortOptions = unfiledFiles.length > 1 || rootFolders.length > 1 || savedSqlStore.allFiles.length > 1;
     return [
       { label: t("savedSql.newFolder"), action: openNewFolderInput, icon: FolderPlus },
       { label: t("savedSql.newQuery"), action: () => openNewQueryInFolder(), icon: FilePlus },
       { label: t("sqlLibrary.importDirectory"), action: () => importDirectoryIntoLibrary(), icon: Download },
       { label: t("sqlLibrary.exportLibrary"), action: () => exportFolderContents(), icon: Upload },
+      ...(hasSortOptions
+        ? [
+            { label: "", separator: true },
+            {
+              label: t("sqlLibrary.sortUnfiledFiles"),
+              icon: ArrowDownAZ,
+              visible: unfiledFiles.length > 1,
+              children: [
+                { label: t("sqlLibrary.sortNameAsc"), action: () => handleSortFolderFiles(undefined, "name-asc"), icon: ArrowDownAZ },
+                { label: t("sqlLibrary.sortNameDesc"), action: () => handleSortFolderFiles(undefined, "name-desc"), icon: ArrowUpAZ },
+                { label: t("sqlLibrary.sortDateDesc"), action: () => handleSortFolderFiles(undefined, "updated-desc"), icon: Clock },
+                { label: t("sqlLibrary.sortDateAsc"), action: () => handleSortFolderFiles(undefined, "updated-asc"), icon: Calendar },
+              ],
+            },
+            {
+              label: t("sqlLibrary.sortRootFolders"),
+              icon: FolderClosed,
+              visible: rootFolders.length > 1,
+              children: [
+                { label: t("sqlLibrary.sortNameAsc"), action: () => handleSortFolderChildren(undefined, "name-asc"), icon: ArrowDownAZ },
+                { label: t("sqlLibrary.sortNameDesc"), action: () => handleSortFolderChildren(undefined, "name-desc"), icon: ArrowUpAZ },
+              ],
+            },
+            {
+              label: t("sqlLibrary.sortAllFiles"),
+              icon: ArrowUpDown,
+              visible: savedSqlStore.allFiles.length > 1,
+              children: [
+                { label: t("sqlLibrary.sortNameAsc"), action: () => handleSortAllFolderFiles("name-asc"), icon: ArrowDownAZ },
+                { label: t("sqlLibrary.sortNameDesc"), action: () => handleSortAllFolderFiles("name-desc"), icon: ArrowUpAZ },
+                { label: t("sqlLibrary.sortDateDesc"), action: () => handleSortAllFolderFiles("updated-desc"), icon: Clock },
+                { label: t("sqlLibrary.sortDateAsc"), action: () => handleSortAllFolderFiles("updated-asc"), icon: Calendar },
+              ],
+            },
+          ]
+        : []),
       { label: "", separator: true },
       { label: t("sqlLibrary.openStorageDirectory"), action: openSqlStorageDirectory, icon: LocateFixed },
       { label: t("sqlLibrary.chooseSyncDirectory"), action: chooseSyncDirectory, icon: FolderCog },
@@ -1094,6 +1187,8 @@ const contextMenuItems = computed<CtxMenuItem[]>(() => {
     ];
   }
   const folderFiles = allFilesInFolderBranch(target.id);
+  const directFiles = savedSqlStore.filesInFolder(target.id);
+  const directFolders = childFolders(target.id);
   return [
     { label: t("savedSql.newSubfolder"), action: () => openNewFolderInput(target.id), icon: FolderPlus },
     { label: t("savedSql.newQuery"), action: () => openNewQueryInFolder(target), icon: FilePlus },
@@ -1105,6 +1200,27 @@ const contextMenuItems = computed<CtxMenuItem[]>(() => {
     },
     { label: t("sqlLibrary.importIntoFolder"), action: () => importDirectoryIntoLibrary(target), icon: Download },
     { label: t("sqlLibrary.exportFolder"), action: () => exportFolderContents(target), icon: Upload },
+    { label: "", separator: true },
+    {
+      label: t("sqlLibrary.sortFiles"),
+      icon: ArrowDownAZ,
+      disabled: directFiles.length <= 1,
+      children: [
+        { label: t("sqlLibrary.sortNameAsc"), action: () => handleSortFolderFiles(target.id, "name-asc"), icon: ArrowDownAZ },
+        { label: t("sqlLibrary.sortNameDesc"), action: () => handleSortFolderFiles(target.id, "name-desc"), icon: ArrowUpAZ },
+        { label: t("sqlLibrary.sortDateDesc"), action: () => handleSortFolderFiles(target.id, "updated-desc"), icon: Clock },
+        { label: t("sqlLibrary.sortDateAsc"), action: () => handleSortFolderFiles(target.id, "updated-asc"), icon: Calendar },
+      ],
+    },
+    {
+      label: t("sqlLibrary.sortSubfolders"),
+      icon: FolderClosed,
+      visible: directFolders.length > 1,
+      children: [
+        { label: t("sqlLibrary.sortNameAsc"), action: () => handleSortFolderChildren(target.id, "name-asc"), icon: ArrowDownAZ },
+        { label: t("sqlLibrary.sortNameDesc"), action: () => handleSortFolderChildren(target.id, "name-desc"), icon: ArrowUpAZ },
+      ],
+    },
     { label: "", separator: true },
     { label: t("savedSql.renameFolder"), action: () => startRenameFolder(target), icon: Pencil },
     { label: "", separator: true },

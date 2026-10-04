@@ -1485,6 +1485,8 @@ export default withEnglishFallback({
     doltShowSystemTablesHint: "Показывать встроенные таблицы контроля версий Dolt в списках таблиц для этого подключения.",
     showSystemSchemas: "Показывать системные схемы",
     showSystemSchemasHint: "Показывать встроенные схемы и схемы метаданных на боковой панели и в выборе схем для этого подключения.",
+    showDatabaseLinks: "Показывать связи баз данных",
+    showDatabaseLinksHint: "Показывать раздел связей баз данных (DB Link) на боковой панели для этого подключения.",
     docsNotesPath: "Файл заметок",
     docsNotesPathPlaceholder: "docs/dbx-docs.json",
     docsNotesPathHint: "Где хранятся заметки документации. Оставьте пустым, чтобы хранить их в каталоге данных приложения, или укажите файл в вашем репозитории, чтобы просматривать документацию схемы в pull request.",

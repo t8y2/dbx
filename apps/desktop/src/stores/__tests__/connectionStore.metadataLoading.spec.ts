@@ -820,6 +820,38 @@ describe("connectionStore metadata loading", () => {
     expect(schemaNode?.children?.map((node) => [node.type, node.label, node.schema])).toEqual([["table", "sheet", "DBX_TEST"]]);
   });
 
+  it("omits oracle-db-links when show_database_links is configured as false", async () => {
+    vi.resetModules();
+    const listDatabases = vi.fn().mockResolvedValue([]);
+    const listSchemas = vi.fn().mockResolvedValue(["DBX_TEST"]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listDatabases,
+      listObjects: vi.fn().mockResolvedValue([]),
+      listSchemas,
+      listTables: vi.fn().mockResolvedValue([]),
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = { ...oracleJdbcConnection(), show_database_links: false };
+    const connectionNode: TreeNode = { id: connection.id, label: connection.name, type: "connection", connectionId: connection.id, isExpanded: false, children: [] };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [connectionNode];
+
+    await store.loadDatabases(connection.id, { force: true });
+
+    expect(connectionNode.children?.map((node) => [node.type, node.label])).toEqual([["schema", "DBX_TEST"]]);
+  });
+
   it.each([
     { mode: "simple", names: [] },
     { mode: "grouped", names: [] },

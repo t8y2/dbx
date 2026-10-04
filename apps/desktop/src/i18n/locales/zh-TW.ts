@@ -1422,6 +1422,8 @@ export default withEnglishFallback({
     doltShowSystemTablesHint: "在目前連線的資料表清單中顯示 Dolt 內建的版本控制資料表。",
     showSystemSchemas: "顯示系統 Schema",
     showSystemSchemasHint: "為目前連線在側邊欄和 Schema 選擇器中顯示內建/中繼資料 Schema。",
+    showDatabaseLinks: "顯示資料庫連結",
+    showDatabaseLinksHint: "在側邊欄中顯示目前連線的資料庫連結（DB Link）入口。",
     docsNotesPath: "筆記檔案",
     docsNotesPathPlaceholder: "docs/dbx-docs.json",
     docsNotesPathHint: "文件筆記的儲存位置。留空則儲存在應用程式資料目錄中；指向存放庫中的檔案後，即可在 Pull Request 中審閱 Schema 文件。",

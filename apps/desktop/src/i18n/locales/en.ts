@@ -1575,6 +1575,8 @@ export default {
     doltShowSystemTablesHint: "Show Dolt's built-in version-control tables in table lists for this connection.",
     showSystemSchemas: "Show System Schemas",
     showSystemSchemasHint: "Show built-in and metadata schemas in the sidebar and schema pickers for this connection.",
+    showDatabaseLinks: "Show Database Links",
+    showDatabaseLinksHint: "Show the database links entry in the sidebar for this connection.",
     tableLoading: "Table loading",
     autoLoadAllTables: "Load all tables automatically",
     autoLoadAllTablesHint: "In Advanced sidebar view, opening a Tables group loads every page for this connection so table-name filtering covers all tables. Large schemas may take longer.",

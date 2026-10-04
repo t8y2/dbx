@@ -88,6 +88,7 @@ import { MQ_PINNED_VERSION_OPTIONS, pinnedVersionToSelection, selectionToPinnedV
 import { mongodbAuthFailureHint, mongoConnectionUsesOidc, mongoUrlParam, mongoUrlParamIsTrue, normalizeMongoTlsFormState, setMongoUrlParam, setMongoUrlParamBoolean } from "@/lib/mongo/mongoConnectionOptions";
 import { isMongoLegacyDriverProfile } from "@/lib/mongo/mongoCapabilities";
 import { mysqlCleartextPasswordAuthEnabled, setMysqlCleartextPasswordAuthEnabled } from "@/lib/database/mysqlConnectionOptions";
+import { supportsOracleDatabaseLinks } from "@/lib/database/oracleDatabaseLinks";
 import { applyDamengSslUrlParams, damengSslFormConfig } from "@/lib/database/damengSslOptions";
 import { DAMENG_BUILTIN_DRIVER_PROFILE, DAMENG_CUSTOM_DRIVER_PROFILE, DAMENG_DEFAULT_JDBC_DRIVER_CLASS, damengCustomJdbcUrl, damengDriverModeForConfig, defaultDamengJdbcUrl, type DamengDriverMode } from "@/lib/database/damengDriverOptions";
 import { doltSystemTablesVisible, isDoltDriverProfile, setDoltSystemTablesVisible } from "@/lib/database/doltProfile";
@@ -448,6 +449,7 @@ const defaultForm = (): ConnectionForm => ({
   docs_notes_path: undefined,
   read_only: false,
   show_system_schemas: false,
+  show_database_links: true,
   sidebar_auto_load_all_tables: false,
   is_production: false,
   production_databases: [],
@@ -3139,6 +3141,7 @@ watch(
         docs_notes_path: config.docs_notes_path,
         read_only: config.read_only || false,
         show_system_schemas: config.show_system_schemas || false,
+        show_database_links: config.show_database_links !== false,
         sidebar_auto_load_all_tables: config.sidebar_auto_load_all_tables === true,
         is_production: config.is_production || false,
         production_databases: config.production_databases || [],
@@ -5382,6 +5385,7 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.visible_databases = Array.isArray(config.visible_databases) && config.visible_databases.length > 0 ? config.visible_databases : undefined;
   }
   if (!config.show_system_schemas) config.show_system_schemas = undefined;
+  if (config.show_database_links !== false) config.show_database_links = undefined;
   if (!config.sidebar_auto_load_all_tables) config.sidebar_auto_load_all_tables = undefined;
   if (config.visible_schemas && Object.keys(config.visible_schemas).length === 0) config.visible_schemas = undefined;
   if (config.agent_java_options && config.agent_java_options.length === 0) config.agent_java_options = undefined;
@@ -10269,6 +10273,13 @@ function openExternalUrl(url: string) {
                   <label class="col-span-3 flex items-center gap-2 cursor-pointer">
                     <input type="checkbox" v-model="form.show_system_schemas" class="mr-0" />
                     <span class="text-xs text-muted-foreground">{{ t("connection.showSystemSchemasHint") }}</span>
+                  </label>
+                </div>
+                <div v-if="supportsOracleDatabaseLinks(form.db_type)" class="grid grid-cols-4 items-center gap-4">
+                  <Label :class="connectionLabelSmallClass">{{ t("connection.showDatabaseLinks") }}</Label>
+                  <label class="col-span-3 flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" v-model="form.show_database_links" class="mr-0" />
+                    <span class="text-xs text-muted-foreground">{{ t("connection.showDatabaseLinksHint") }}</span>
                   </label>
                 </div>
                 <div v-if="supportsAutomaticTableLoading" class="grid grid-cols-4 items-start gap-4">

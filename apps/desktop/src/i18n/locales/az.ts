@@ -1279,6 +1279,8 @@ export default withEnglishFallback({
     doltShowSystemTablesHint: "Bu əlaqənin cədvəl siyahılarında Dolt-un daxili versiya idarəetmə cədvəllərini göstər.",
     showSystemSchemas: "Sistem sxemlərini göstər",
     showSystemSchemasHint: "Bu əlaqə üçün yan paneldə və sxem seçicilərində daxili və metaməlumat sxemlərini göstər.",
+    showDatabaseLinks: "Verilənlər bazası keçidlərini göstər",
+    showDatabaseLinksHint: "Bu əlaqə üçün yan paneldə verilənlər bazası keçidləri (DB Link) bölməsini göstər.",
     docsNotesPath: "Qeydlər faylı",
     docsNotesPathPlaceholder: "docs/dbx-docs.json",
     docsNotesPathHint: "Sənədləşdirmə qeydlərinin saxlandığı yer. Onları tətbiqin məlumat qovluğunda saxlamaq üçün boş buraxın və ya dəyişiklik sorğularında sxem sənədlərini nəzərdən keçirmək üçün repozitoriyanızdakı faylı göstərin.",

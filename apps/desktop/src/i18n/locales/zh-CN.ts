@@ -1514,6 +1514,8 @@ export default withEnglishFallback({
     doltShowSystemTablesHint: "在当前连接的表列表中显示 Dolt 内置的版本控制表。",
     showSystemSchemas: "显示系统 Schema",
     showSystemSchemasHint: "为当前连接在侧边栏和 Schema 选择器中显示内置/元数据 Schema。",
+    showDatabaseLinks: "显示数据库链接",
+    showDatabaseLinksHint: "在侧边栏中显示当前连接的数据库链接（DB Link）入口。",
     tableLoading: "表加载策略",
     autoLoadAllTables: "自动加载全部表",
     autoLoadAllTablesHint: "使用侧边栏高级视图时，展开“表”分组会自动加载该连接的全部分页，使表名筛选覆盖所有表。表很多时可能需要更长时间。",

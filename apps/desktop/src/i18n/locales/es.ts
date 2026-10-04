@@ -1495,6 +1495,8 @@ export default withEnglishFallback({
     jdbcMissingRuntimeDependencyHint: "El controlador JDBC actual carece de dependencias de ejecución. Utilice las coordenadas Maven en 'Administración de controladores' para instalar, o importe el controlador y todos los JAR de dependencia de una vez.",
     showSystemSchemas: "Mostrar Schema del sistema",
     showSystemSchemasHint: "Mostrar el Schema integrado/de metadatos para la conexión actual en la barra lateral y el selector de Schema.",
+    showDatabaseLinks: "Mostrar enlaces de base de datos",
+    showDatabaseLinksHint: "Mostrar la entrada de enlaces de base de datos (DB Link) en la barra lateral para esta conexión.",
     tableLoading: "Carga de tablas",
     autoLoadAllTables: "Cargar todas las tablas automáticamente",
     autoLoadAllTablesHint: "En la vista avanzada de la barra lateral, abrir un grupo de Tablas carga todas las páginas para esta conexión, de modo que el filtro por nombre de tabla cubra todas las tablas. Los esquemas grandes pueden tardar más.",

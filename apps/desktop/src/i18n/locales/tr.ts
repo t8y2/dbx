@@ -1279,6 +1279,8 @@ export default withEnglishFallback({
     doltShowSystemTablesHint: "Bu bağlantı için Dolt'un yerleşik sürüm denetimi tablolarını tablo listelerinde göster.",
     showSystemSchemas: "Sistem Şemalarını Göster",
     showSystemSchemasHint: "Bu bağlantı için yerleşik ve meta veri şemalarını kenar çubuğunda ve şema seçicilerinde göster.",
+    showDatabaseLinks: "Veritabanı Bağlantılarını Göster",
+    showDatabaseLinksHint: "Bu bağlantı için kenar çubuğunda veritabanı bağlantıları (DB Link) girişini göster.",
     docsNotesPath: "Not dosyası",
     docsNotesPathPlaceholder: "docs/dbx-docs.json",
     docsNotesPathHint: "Dokümantasyon notlarının saklandığı yer. Uygulama veri dizininde tutmak için boş bırakın veya şema dokümantasyonunu pull request'lerde incelemek için deponuzdaki bir dosyayı gösterin.",

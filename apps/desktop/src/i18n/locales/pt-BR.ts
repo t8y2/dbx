@@ -1408,6 +1408,8 @@ export default withEnglishFallback({
     jdbcMissingRuntimeDependencyHint: "O driver JDBC atual está sem dependências de execução. Por favor, instale-o usando as coordenadas Maven no 'Gerenciamento de Drivers' ou importe o driver e todos os JARs de dependência de uma só vez.",
     showSystemSchemas: "Mostrar Schema do sistema",
     showSystemSchemasHint: "Exibir Schemas de sistema/metadados integrados na barra lateral e no seletor de Schema para a conexão atual.",
+    showDatabaseLinks: "Mostrar links de banco de dados",
+    showDatabaseLinksHint: "Exibir a entrada de links de banco de dados (DB Link) na barra lateral para esta conexão.",
     docsNotesPath: "Arquivo de notas",
     docsNotesPathPlaceholder: "docs/dbx-docs.json",
     docsNotesPathHint: "Onde as notas da documentação são gravadas. Deixe vazio para mantê-las no diretório de dados do aplicativo, ou aponte para um arquivo do seu repositório para revisar a documentação do schema em pull requests.",

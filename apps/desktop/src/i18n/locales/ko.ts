@@ -1393,6 +1393,8 @@ export default withEnglishFallback({
     readOnlyHint: "모든 쓰기 작업 차단 (INSERT, UPDATE, DELETE 등)",
     showSystemSchemas: "시스템 스키마 표시",
     showSystemSchemasHint: "이 연결의 사이드바와 스키마 선택기에 내장 및 메타데이터 스키마를 표시합니다.",
+    showDatabaseLinks: "데이터베이스 링크 표시",
+    showDatabaseLinksHint: "이 연결의 사이드바에 데이터베이스 링크(DB Link) 항목을 표시합니다.",
     docsNotesPath: "노트 파일",
     docsNotesPathPlaceholder: "docs/dbx-docs.json",
     docsNotesPathHint: "문서 노트를 저장할 위치입니다. 비워 두면 앱 데이터 디렉터리에 저장되며, 저장소 내 파일을 지정하면 스키마 문서를 풀 리퀘스트에서 검토할 수 있습니다.",

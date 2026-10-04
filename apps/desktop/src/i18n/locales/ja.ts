@@ -1407,6 +1407,8 @@ export default withEnglishFallback({
     jdbcMissingRuntimeDependencyHint: "現在のJDBCドライバーには実行依存関係が不足しています。「ドライバー管理」でMaven座標を使用してインストールするか、ドライバーとすべての依存JARを一度にインポートしてください。",
     showSystemSchemas: "システムスキーマを表示",
     showSystemSchemasHint: "現在の接続で、サイドバーとスキーマセレクターに組み込み/メタデータスキーマを表示します。",
+    showDatabaseLinks: "データベースリンクを表示",
+    showDatabaseLinksHint: "現在の接続でサイドバーにデータベースリンク（DB Link）のエントリを表示します。",
     docsNotesPath: "ノートファイル",
     docsNotesPathPlaceholder: "docs/dbx-docs.json",
     docsNotesPathHint: "ドキュメントのノートの保存先です。空のままにするとアプリのデータディレクトリに保存されます。リポジトリ内のファイルを指定すると、スキーマのドキュメントをプルリクエストでレビューできます。",

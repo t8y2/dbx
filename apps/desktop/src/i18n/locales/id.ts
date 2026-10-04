@@ -1511,6 +1511,8 @@ export default withEnglishFallback({
     doltShowSystemTablesHint: "Tampilkan tabel version-control bawaan Dolt di daftar tabel untuk koneksi ini.",
     showSystemSchemas: "Tampilkan Skema Sistem",
     showSystemSchemasHint: "Tampilkan skema bawaan dan metadata di bilah sisi dan pemilih skema untuk koneksi ini.",
+    showDatabaseLinks: "Tampilkan Tautan Basis Data",
+    showDatabaseLinksHint: "Tampilkan entri tautan basis data (DB Link) di bilah sisi untuk koneksi ini.",
     tableLoading: "Pemuatan tabel",
     autoLoadAllTables: "Muat semua tabel secara otomatis",
     autoLoadAllTablesHint: "Pada tampilan bilah sisi Lanjutan, membuka grup Tables akan memuat setiap halaman untuk koneksi ini sehingga filter nama tabel mencakup semua tabel. Skema besar mungkin memerlukan waktu lebih lama.",

@@ -3067,8 +3067,17 @@ body.dbx-is-resizing .panel-resize-handle::before {
    CodeMirror themes paint opaque editor backgrounds via EditorView.theme, so
    clear them app-wide to let the background image show through. Active line,
    selection, and search-highlight layers keep their own translucent colors
-   and stay readable on top. */
+   and stay readable on top.
+   Also clear outer body/root/shell wrappers and scrollers so translucent
+   surfaces don't compound opacity over the wallpaper layer. */
+html.dbx-bg-active,
+html.dbx-bg-active body,
+html.dbx-bg-active #root,
+html.dbx-bg-active [data-app-shell],
+html.dbx-bg-active [data-welcome-screen],
 html.dbx-bg-active .cm-editor,
-html.dbx-bg-active .cm-gutters {
+html.dbx-bg-active .cm-gutters,
+html.dbx-bg-active .cm-scroller {
   background-color: transparent !important;
 }
+

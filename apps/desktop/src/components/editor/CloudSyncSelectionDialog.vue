@@ -64,6 +64,7 @@ const editorSettingCategoryOverrides: Partial<Record<string, BackupSettingsCateg
   tabGroupMode: "appearance",
   tabGroupCustomizations: "appearance",
   tabSortMode: "appearance",
+  tabMaxWidth: "appearance",
   compactTabTitle: "appearance",
   executeModeDefaultVersion: "editor",
   globalConnectTimeoutSecs: "editor",

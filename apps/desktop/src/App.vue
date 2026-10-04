@@ -68,6 +68,7 @@ import { disposeAllSqlServerActivityTraces } from "@/lib/sqlserver/sqlServerActi
 import { useVisibilityChange } from "@/composables/useVisibilityChange";
 import { useExternalSqlFileChanges } from "@/composables/useExternalSqlFileChanges";
 import { useWebDavAutoUpload } from "@/composables/useWebDavAutoUpload";
+import { readSyncMethod, readWebDavAutoUploadConfig, readWebDavBackupSelection } from "@/lib/webdav/webdavAutoUploadConfig";
 import { useScheduledDatabaseBackups } from "@/composables/useScheduledDatabaseBackups";
 import { shouldDrawDesktopWindowFrame } from "@/composables/useWindowControls";
 import { createOpenTabsRestorationBarrier, initializeDesktopOpenTabs, initializeOpenTabs, type OpenTabsRestorationBarrier } from "@/lib/app/openTabsStartup";
@@ -109,6 +110,7 @@ import {
   isBrowserTaskManagerShortcut,
   isCloseOtherTabsShortcut,
   isCloseTabShortcut,
+  isEditTableStructureShortcut,
   isExecuteSqlInNewResultTabShortcut,
   isExecuteSqlShortcut,
   isFocusSearchShortcut,
@@ -152,7 +154,7 @@ import { countAvailableAgentDriverUpdates } from "@/lib/connection/agentDriverUp
 import type { DriverStoreFocus, DriverStoreTab } from "@/lib/connection/agentDriverInstallHint";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { webPath } from "@/lib/common/webPath";
-import { shouldBlockAppNativeSelectAll } from "@/lib/common/clipboard";
+import { eventTargetAllowsNativeClipboard, shouldBlockAppNativeSelectAll } from "@/lib/common/clipboard";
 import { APP_FONT_SANS_CSS_VAR, DATA_GRID_FONT_FAMILY_CSS_VAR, DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_MONO_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY, FONT_MONO_CSS_VAR } from "@/lib/app/appFonts";
 import { DATA_GRID_TYPE_COLOR_KEYS, dataGridTypeColorCssVar, resolveActiveDataGridTypeColors } from "@/lib/dataGrid/dataGridTypeColorScheme";
 import { rankSavedSqlHistory } from "@/lib/savedSql/savedSqlHistory";
@@ -396,6 +398,7 @@ const pluginCenterActive = ref(false);
 const pluginCenterFocus = ref<PluginCenterFocus | null>(null);
 const connectionPluginProvider = ref<PluginCenterFocus | null>(null);
 const settingsReturnSurface = ref<"query" | "driverStore" | "pluginCenter" | "welcome">("welcome");
+const immediateSyncing = ref(false);
 const showDriverStore = computed(() => driverStoreTabOpen.value && driverStoreActive.value);
 const showPluginCenter = computed(() => pluginCenterTabOpen.value && pluginCenterActive.value);
 const showSettingsPage = computed(() => Boolean(settingsPageTabOpen.value && settingsStore.settingsPageActive));
@@ -1176,6 +1179,35 @@ function openSettings(initialTab = "appearance", initialSection?: string) {
   activateSettingsPage();
 }
 
+async function openImmediateSync() {
+  const syncMethod = readSyncMethod();
+  if (syncMethod !== "webdav") {
+    openSettings("sync", syncMethod === "snippet" ? "sync-snippet" : "sync-local");
+    return;
+  }
+  const autoUploadConfig = readWebDavAutoUploadConfig();
+  if (!autoUploadConfig.webDavConfig) {
+    openSettings("sync", "sync-webdav");
+    return;
+  }
+  const webDavConfig = autoUploadConfig.webDavConfig;
+  if (immediateSyncing.value) return;
+  immediateSyncing.value = true;
+  await nextTick();
+
+  try {
+    const secretsStatus = await api.webdavSyncSecretsStatus();
+    const selection = readWebDavBackupSelection();
+    const includeSecrets = Boolean((selection?.includeSecrets ?? secretsStatus.enabled) && secretsStatus.enabled && secretsStatus.hasSavedPassphrase);
+    const summary = await api.webdavSyncUpload(webDavConfig, settingsStore.editorSettings, undefined, includeSecrets, selection);
+    toast(t("settings.syncUploadSuccess", { bytes: summary.bytes, path: summary.remotePath }), 3000);
+  } catch (error: any) {
+    toast(error?.message || String(error), 5000);
+  } finally {
+    immediateSyncing.value = false;
+  }
+}
+
 type MainContentSurface = "query" | "settings" | "driverStore" | "pluginCenter";
 
 function activateMainContentSurface(surface: MainContentSurface) {
@@ -1450,7 +1482,7 @@ async function updateAllAvailable() {
   }
 }
 const hasSqlFileConnections = computed(() => connectionStore.connections.some((c) => supportsSqlFileExecution(c.db_type)));
-const welcomePageMode = computed(() => (settingsStore.isEditorSettingsLoaded ? settingsStore.editorSettings.welcomePageMode : "intro"));
+const welcomePageMode = computed(() => (settingsStore.isEditorSettingsLoaded ? settingsStore.editorSettings.welcomePageMode : "workspace"));
 const queryEditorDdlDatabaseType = computed(() => {
   if (!queryEditorDdlTarget.value?.connectionId) return undefined;
   return effectiveDatabaseTypeForConnection(connectionStore.getConfig(queryEditorDdlTarget.value.connectionId));
@@ -3833,6 +3865,14 @@ async function handleKeydown(e: KeyboardEvent) {
       return;
     }
   }
+  if (isEditTableStructureShortcut(e, shortcuts) && !showSettingsPage.value && !showPluginCenter.value && !showDriverStore.value) {
+    const target = e.target instanceof Element ? e.target : null;
+    if (!target?.closest('[role="dialog"], [role="alertdialog"]') && !eventTargetAllowsNativeClipboard(e) && contentAreaRef.value?.openTableStructureEditor?.()) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+  }
   // Grid-scoped shortcuts normally win inside DataGrid. Keep that precedence
   // for a data tab even when focus is in a sibling input, where the grid's
   // local listener intentionally leaves native editing untouched.
@@ -4366,7 +4406,7 @@ onUnmounted(() => {
       <div class="h-full w-full" :style="appBackgroundImageStyle"></div>
     </div>
     <TooltipProvider :delay-duration="300">
-      <div class="h-screen w-screen max-w-full min-w-[760px] min-h-[600px] flex flex-col bg-background text-foreground overflow-hidden" :class="{ 'dbx-desktop-window-frame': drawDesktopWindowFrame }" :style="appUiFontFamilyStyle">
+      <div data-app-shell class="h-screen w-screen max-w-full min-w-[760px] min-h-[600px] flex flex-col bg-background text-foreground overflow-hidden" :class="{ 'dbx-desktop-window-frame': drawDesktopWindowFrame }" :style="appUiFontFamilyStyle">
         <AppToolbar
           v-if="!isDetachedWindowContext"
           :is-dark="isDark"
@@ -4394,6 +4434,7 @@ onUnmounted(() => {
           :has-connections="connectionStore.connections.length > 0"
           :can-new-query="canCreateNewQuery"
           :has-sql-file-connections="hasSqlFileConnections"
+          :immediate-syncing="immediateSyncing"
           :show-logout="!isDesktop && needsAuth"
           @new-connection="showConnectionDialog = true"
           @expand-sidebar="setSidebarOpen(true)"
@@ -4408,6 +4449,7 @@ onUnmounted(() => {
           @open-driver-store="openDriverStorePage"
           @open-plugin-center="openPluginCenterPage()"
           @check-updates="handleToolbarUpdateClick"
+          @immediate-sync="openImmediateSync"
           @open-transfer="dialogs.showTransferDialog.value = true"
           @open-sql-file="dialogs.showSqlFileDialog.value = true"
           @open-schema-diff="dialogs.showSchemaDiffDialog.value = true"

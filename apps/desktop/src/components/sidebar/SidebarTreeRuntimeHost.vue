@@ -1190,6 +1190,8 @@ function runRowClickAction(clickDetail: number) {
   const requestId = beginNavigationRequest();
   if (action === "open-data") {
     scheduleOpenData(node);
+  } else if (action === "locate-column") {
+    locateColumnInDataGrid(node);
   } else if (action === "open-object-browser") {
     void openObjectBrowser(false, false, true);
   } else if (action === "open-object-browser-and-expand") {
@@ -1631,6 +1633,8 @@ function onDoubleClick(event: MouseEvent) {
     openDataImmediately(activeNode.value);
   } else if (action === "activate-data") {
     activateDataTableFromDoubleClick();
+  } else if (action === "locate-column") {
+    locateColumnInDataGrid(activeNode.value);
   } else if (action === "open-source") {
     openObjectSourceDialog(false);
   } else if (action === "open-extension-details") {
@@ -1669,6 +1673,57 @@ function findExistingSameTableDataTab() {
   const config = connectionStore.getConfig(node.connectionId);
   const tableSchema = connectionObjectTreeNodeSchema(config, node.database, node.schema);
   return queryStore.tabs.find((tab) => tab.mode === "data" && tab.connectionId === node.connectionId && tab.database === node.database && (tab.tableMeta?.catalog || "") === (node.catalog || "") && (tab.schema || "") === (tableSchema || "") && (tab.tableMeta?.tableName || tab.title) === node.label);
+}
+
+function extractColumnNameFromTreeNode(node: TreeNode): string {
+  if (node.meta && typeof node.meta === "object" && "name" in node.meta && typeof (node.meta as any).name === "string") {
+    return (node.meta as any).name;
+  }
+  return node.label.replace(/\s+\(.+\)$/, "").trim();
+}
+
+function findTableNodeForColumn(columnNode: TreeNode): TreeNode | undefined {
+  if (!columnNode.tableName) return undefined;
+  const match = (n: TreeNode): boolean => {
+    return (
+      (n.type === "table" || n.type === "view" || n.type === "materialized_view") &&
+      n.connectionId === columnNode.connectionId &&
+      n.database === columnNode.database &&
+      (n.schema || "") === (columnNode.schema || "") &&
+      (n.catalog || "") === (columnNode.catalog || "") &&
+      (n.label === columnNode.tableName || n.tableName === columnNode.tableName)
+    );
+  };
+  const search = (nodes: TreeNode[]): TreeNode | undefined => {
+    for (const n of nodes) {
+      if (match(n)) return n;
+      if (n.children?.length) {
+        const found = search(n.children);
+        if (found) return found;
+      }
+    }
+    return undefined;
+  };
+  return search(connectionStore.treeNodes);
+}
+
+function locateColumnInDataGrid(columnNode: TreeNode) {
+  if (!columnNode.tableName || !hasNodeDatabaseContext(columnNode)) return;
+  const columnName = extractColumnNameFromTreeNode(columnNode);
+  if (!columnName) return;
+
+  const tableNode = findTableNodeForColumn(columnNode) ?? {
+    id: columnNode.schema ? `${columnNode.connectionId}:${columnNode.database}:${columnNode.schema}:${columnNode.tableName}` : `${columnNode.connectionId}:${columnNode.database}:${columnNode.tableName}`,
+    label: columnNode.tableName,
+    type: "table" as const,
+    connectionId: columnNode.connectionId,
+    database: columnNode.database,
+    schema: columnNode.schema,
+    catalog: columnNode.catalog,
+    tableName: columnNode.tableName,
+  };
+
+  emit("open-data", tableNode, false, "default", (target, request) => openData(target, request, "default", { revealColumn: columnName }));
 }
 
 function openMongoTreeData(node: TreeNode) {
@@ -6089,7 +6144,11 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   const { node, items } = context;
 
-  if (node.type === "saved-sql-root") {
+  if (node.type === "saved-sql-root" || node.type === "saved-sql-folder") {
+    if (supportsConnectionQueryActions(currentDatabaseType())) {
+      items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      items.push({ label: "", separator: true });
+    }
     items.push({
       label: t("savedSql.pasteFile"),
       action: () => requestPasteTreeClipboard(),
@@ -6102,6 +6161,9 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 
   if (node.type === "saved-sql-file") {
     items.push({ label: t("savedSql.open"), action: openSavedSqlFile, icon: FileCode });
+    if (supportsConnectionQueryActions(currentDatabaseType())) {
+      items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+    }
     items.push({ label: "", separator: true });
     items.push({ label: t("savedSql.copyFile"), action: copySavedSqlFiles, icon: Copy, shortcut: shortcutCopyName.value });
     items.push({

@@ -429,4 +429,18 @@ describe("background image theme and scope lifecycle", () => {
     expect(createObjectURL).toHaveBeenCalledTimes(1);
     expect(revokeObjectURL).not.toHaveBeenCalled();
   });
+
+  it("clears body, #root, outer app shell, welcome screen and CodeMirror scroller in globals.css", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const globalsCss = fs.readFileSync(path.resolve(__dirname, "../../styles/globals.css"), "utf8");
+    expect(globalsCss).toContain("html.dbx-bg-active,");
+    expect(globalsCss).toContain("html.dbx-bg-active body,");
+    expect(globalsCss).toContain("html.dbx-bg-active #root,");
+    expect(globalsCss).toContain("html.dbx-bg-active [data-app-shell],");
+    expect(globalsCss).toContain("html.dbx-bg-active [data-welcome-screen],");
+    expect(globalsCss).toContain("html.dbx-bg-active .cm-editor,");
+    expect(globalsCss).toContain("html.dbx-bg-active .cm-gutters,");
+    expect(globalsCss).toContain("html.dbx-bg-active .cm-scroller");
+  });
 });

@@ -84,6 +84,15 @@ export const TOP_LEVEL_QUERY_OPERATORS: MongoOperatorSpec[] = specs([
   ["$jsonSchema", "Matches documents against a JSON schema", "$jsonSchema: { ${} }"],
 ]);
 
+/** Logical operators accepted inside `$elemMatch` and at the root of a filter. */
+export const LOGICAL_QUERY_OPERATORS: MongoOperatorSpec[] = TOP_LEVEL_QUERY_OPERATORS.filter((op) => ["$and", "$or", "$nor"].includes(op.label));
+
+/**
+ * Operators accepted directly inside the body of `$elemMatch`.
+ * Matches both scalar elements (via field query operators) and document elements (via field names + logical operators).
+ */
+export const ELEM_MATCH_QUERY_OPERATORS: MongoOperatorSpec[] = [...FIELD_QUERY_OPERATORS, ...LOGICAL_QUERY_OPERATORS];
+
 /** Every query operator, for callers that do not care about position. */
 export const QUERY_OPERATORS: MongoOperatorSpec[] = [...FIELD_QUERY_OPERATORS, ...TOP_LEVEL_QUERY_OPERATORS];
 

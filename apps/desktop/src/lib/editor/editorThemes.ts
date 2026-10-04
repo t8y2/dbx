@@ -535,9 +535,6 @@ function createIdeEditorTheme(EditorView: typeof import("@codemirror/view").Edit
         [EDITOR_SELECTION_BACKGROUND_CSS_VAR]: c.selection,
         [SQL_TABLE_COLOR_CSS_VAR]: c.table,
       },
-      ".cm-scroller": {
-        backgroundColor: c.background,
-      },
       ".cm-content": {
         caretColor: c.cursor,
       },

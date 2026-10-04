@@ -15,7 +15,7 @@ import EditorGroup from "./EditorGroup.vue";
 import QueryResultSurface from "./QueryResultSurface.vue";
 import { createContentSurfaceEventForwarders } from "@/lib/tabs/contentSurfaceEvents";
 import type { ContentAreaSurfaceEmits, ContentAreaSurfaceProps, StatementRange } from "./querySurfaces";
-import type { QueryTab } from "@/types/database";
+import type { QueryTab, TableInfoTab } from "@/types/database";
 import type { AiConversationBinding } from "@/lib/ai/aiConversationBinding";
 
 defineOptions({ inheritAttrs: false });
@@ -74,6 +74,7 @@ defineExpose({
   },
   focusWhere: () => activeEditorGroup()?.focusWhere() ?? false,
   openGoToColumn: () => activeEditorGroup()?.openGoToColumn() ?? false,
+  openTableStructureEditor: (initialTab?: TableInfoTab) => activeEditorGroup()?.openTableStructureEditor?.(initialTab) ?? false,
   refreshData: (target: Element | null = null) => {
     const element = commandTargetElement(target);
     if (element?.closest("[data-shared-result-surface]")) {

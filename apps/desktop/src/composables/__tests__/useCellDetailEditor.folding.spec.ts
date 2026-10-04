@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { EditorState } from "@codemirror/state";
 import { json } from "@codemirror/lang-json";
-import { foldable } from "@codemirror/language";
+import { ensureSyntaxTree, foldable } from "@codemirror/language";
 
 describe("Redis JSON editor folding", () => {
   it("provides foldable ranges for JSON objects and arrays", () => {
@@ -14,6 +14,7 @@ describe("Redis JSON editor folding", () => {
 }`,
       extensions: [json()],
     });
+    ensureSyntaxTree(state, state.doc.length);
 
     const objectLine = state.doc.line(1);
     const arrayLine = state.doc.line(2);

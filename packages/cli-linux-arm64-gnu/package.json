@@ -1,6 +1,6 @@
 {
   "name": "@dbx-app/cli-linux-arm64-gnu",
-  "version": "0.4.106",
+  "version": "0.4.107",
   "description": "Precompiled DBX CLI binary for Linux arm64 glibc",
   "license": "Apache-2.0",
   "repository": {

@@ -1348,7 +1348,15 @@ impl Storage {
     }
 
     fn resolve_secret_key(&self, allow_create: bool) -> Result<SecretKeyResolution, String> {
-        if !allow_create {
+        self.resolve_secret_key_with_error_cache(allow_create, true)
+    }
+
+    fn resolve_secret_key_with_error_cache(
+        &self,
+        allow_create: bool,
+        use_cached_error: bool,
+    ) -> Result<SecretKeyResolution, String> {
+        if !allow_create && use_cached_error {
             let key_files = self.key_file_digests();
             let mut cache = self.secret_key_error_cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(cached) = cache.as_ref() {
@@ -1557,6 +1565,20 @@ impl Storage {
     }
 
     pub async fn inspect_data_migration(&self) -> Result<MigrationPreflight, String> {
+        self.inspect_data_migration_with_error_cache(true).await
+    }
+
+    /// Repeat the read-only migration probe after an explicit user action.
+    /// Only this call bypasses a cached provider failure; its success or error
+    /// replaces that cache before ordinary startup/background reads resume.
+    pub async fn retry_data_migration_inspection(&self) -> Result<MigrationPreflight, String> {
+        self.inspect_data_migration_with_error_cache(false).await
+    }
+
+    async fn inspect_data_migration_with_error_cache(
+        &self,
+        use_cached_key_error: bool,
+    ) -> Result<MigrationPreflight, String> {
         let files = self.legacy_json_files().await?;
         let mut stored = self.load_migration_state().await?;
         let failure = self.migration_failure.lock().unwrap_or_else(|p| p.into_inner()).clone();
@@ -1664,7 +1686,7 @@ impl Storage {
         // This probe is deliberately read-only. It must not create a keyring
         // entry, key file, or change permissions while displaying status.
         let key_files_before = self.key_file_digests();
-        let key_probe = self.resolve_secret_key(false);
+        let key_probe = self.resolve_secret_key_with_error_cache(false, use_cached_key_error);
         if let Err(error) = key_probe.as_ref() {
             // Keep one startup probe from being repeated by each subsequent
             // storage read while the desktop keyring is locked or unavailable.
@@ -9428,6 +9450,38 @@ mod tests {
         assert!(storage.resolve_secret_key(true).is_ok());
         assert!(storage.resolve_secret_key(false).is_ok());
         assert!(storage.secret_codec(false).is_ok());
+    }
+
+    #[tokio::test]
+    async fn explicit_status_retry_bypasses_cached_error_and_keeps_the_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = storage_with_managed_key(dir.path()).await;
+        let cached_error = "KEYRING_ACCESS_FAILED: cached locked keyring";
+        storage.cache_secret_key_error(cached_error, storage.key_file_digests());
+
+        let cached = storage.inspect_data_migration().await.unwrap();
+        assert_eq!(cached.error_code.as_deref(), Some("KEYRING_ACCESS_FAILED"));
+        assert_eq!(storage.resolve_secret_key(false).err().unwrap(), cached_error);
+
+        let retried = storage.retry_data_migration_inspection().await.unwrap();
+        assert!(retried.key_provider_available);
+        assert_eq!(retried.key_status, super::MigrationKeyStatus::Ready);
+        assert_eq!(retried.key_source, "managed_data_dir");
+        assert!(storage.resolve_secret_key(false).is_ok());
+    }
+
+    #[tokio::test]
+    async fn failed_status_retry_replaces_the_cached_provider_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = storage_with_managed_key(dir.path()).await;
+        std::fs::write(managed_key_path(dir.path()), "\n").unwrap();
+        let cached_error = "KEYRING_ACCESS_FAILED: cached locked keyring";
+        storage.cache_secret_key_error(cached_error, storage.key_file_digests());
+
+        assert_eq!(storage.resolve_secret_key(false).err().unwrap(), cached_error);
+        let retried = storage.retry_data_migration_inspection().await.unwrap();
+        assert_eq!(retried.error_code.as_deref(), Some("SECRET_KEY_INVALID"));
+        assert_eq!(storage.resolve_secret_key(false).err().unwrap(), "SECRET_KEY_INVALID");
     }
 
     #[tokio::test]

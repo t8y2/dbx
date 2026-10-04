@@ -37,7 +37,7 @@ function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> 
 
 import type { MigrationPreflight, MigrationReport } from "./migration";
 export type { MigrationPreflight, MigrationReport } from "./migration";
-export const migrationStatus = (): Promise<MigrationPreflight> => invoke("migration_status");
+export const migrationStatus = (retry = false): Promise<MigrationPreflight> => invoke("migration_status", { retry });
 export const migrationStart = (): Promise<MigrationReport> => invoke("migration_start");
 export const migrationRetry = (): Promise<MigrationReport> => invoke("migration_retry");
 export const migrationCleanupBackups = (): Promise<void> => invoke("migration_cleanup_backups");

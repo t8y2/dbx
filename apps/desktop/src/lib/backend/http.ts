@@ -206,7 +206,7 @@ import type { PluginToolPreview } from "@/types/pluginAiTools";
 import type { CsvQuoteMode } from "@/lib/export/csvQuoteMode";
 import type { MigrationPreflight, MigrationReport } from "./migration";
 export type { MigrationPreflight, MigrationReport } from "./migration";
-export const migrationStatus = (): Promise<MigrationPreflight> => get("/api/migration/status");
+export const migrationStatus = (retry = false): Promise<MigrationPreflight> => get(`/api/migration/status${retry ? "?retry=true" : ""}`);
 export const migrationStart = (): Promise<MigrationReport> => post("/api/migration/start", {});
 export const migrationRetry = (): Promise<MigrationReport> => post("/api/migration/retry", {});
 export const migrationCleanupBackups = (): Promise<void> => post("/api/migration/cleanup-backups", {});

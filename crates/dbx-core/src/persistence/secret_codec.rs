@@ -345,6 +345,31 @@ where
     worker.join().map_err(|_| "KEYRING_ACCESS_FAILED: secret service worker failed".to_string())?
 }
 
+#[cfg(any(test, all(feature = "os-keyring", target_os = "linux")))]
+fn read_secret_service_item<I, U, R, E>(mut is_locked: I, mut unlock: U, mut read: R) -> Result<Vec<u8>, String>
+where
+    I: FnMut() -> Result<bool, E>,
+    U: FnMut() -> Result<(), E>,
+    R: FnMut() -> Result<Vec<u8>, E>,
+    E: std::fmt::Display,
+{
+    let locked =
+        is_locked().map_err(|error| format!("KEYRING_ACCESS_FAILED: secret lock status check failed: {error}"))?;
+    if locked {
+        // Unlock drives the provider's prompt flow (KWallet, GNOME Keyring,
+        // and other Secret Service implementations). Never treat a denied or
+        // failed prompt as a missing item: doing so could provision a
+        // replacement key and strand existing ciphertext.
+        unlock().map_err(|error| format!("KEYRING_ACCESS_FAILED: secret unlock failed: {error}"))?;
+        let still_locked = is_locked()
+            .map_err(|error| format!("KEYRING_ACCESS_FAILED: secret lock status check failed after unlock: {error}"))?;
+        if still_locked {
+            return Err("KEYRING_ACCESS_FAILED: secret remained locked after unlock".to_string());
+        }
+    }
+    read().map_err(|error| format!("KEYRING_ACCESS_FAILED: secret read failed: {error}"))
+}
+
 #[cfg(all(feature = "os-keyring", target_os = "linux"))]
 fn secret_service_keyring_codec(allow_create: bool) -> Result<Option<SecretCodec>, String> {
     use secret_service::{blocking::SecretService, EncryptionType, Error as SecretServiceError};
@@ -372,8 +397,7 @@ fn secret_service_keyring_codec(allow_create: bool) -> Result<Option<SecretCodec
 
     let item = search.unlocked.into_iter().next().or_else(|| search.locked.into_iter().next());
     if let Some(item) = item {
-        let secret =
-            item.get_secret().map_err(|error| format!("KEYRING_ACCESS_FAILED: secret read failed: {error}"))?;
+        let secret = read_secret_service_item(|| item.is_locked(), || item.unlock(), || item.get_secret())?;
         let material = String::from_utf8(secret).map_err(|_| "SECRET_KEY_INVALID".to_string())?;
         let codec = SecretCodec::from_key_material(material.trim()).map_err(|_| "SECRET_KEY_INVALID".to_string())?;
         return Ok(Some(codec));
@@ -411,8 +435,7 @@ fn secret_service_keyring_codec(allow_create: bool) -> Result<Option<SecretCodec
     let item = found.into_iter().next();
     match item {
         Some(item) => {
-            let secret =
-                item.get_secret().map_err(|error| format!("KEYRING_ACCESS_FAILED: secret read failed: {error}"))?;
+            let secret = read_secret_service_item(|| item.is_locked(), || item.unlock(), || item.get_secret())?;
             let material = String::from_utf8(secret).map_err(|_| "SECRET_KEY_INVALID".to_string())?;
             let codec =
                 SecretCodec::from_key_material(material.trim()).map_err(|_| "SECRET_KEY_INVALID".to_string())?;
@@ -599,8 +622,8 @@ mod tests {
     }
 
     use super::{
-        managed_key_path, read_key_file_with_retry, run_secret_service_operation, SecretCodec, SecretKeyPolicy,
-        SecretKeySource,
+        managed_key_path, read_key_file_with_retry, read_secret_service_item, run_secret_service_operation,
+        SecretCodec, SecretKeyPolicy, SecretKeySource,
     };
     use base64::Engine as _;
     use std::sync::{Mutex, OnceLock};
@@ -697,6 +720,84 @@ mod tests {
         });
         assert!(matches!(result, Err(error) if error == "KEYRING_ACCESS_FAILED: secret service worker failed"));
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn locked_secret_service_item_is_unlocked_before_read() {
+        use std::cell::{Cell, RefCell};
+
+        let locked = Cell::new(true);
+        let calls = RefCell::new(Vec::new());
+        let secret = read_secret_service_item(
+            || {
+                calls.borrow_mut().push("is_locked");
+                Ok::<_, &'static str>(locked.get())
+            },
+            || {
+                calls.borrow_mut().push("unlock");
+                locked.set(false);
+                Ok::<_, &'static str>(())
+            },
+            || {
+                calls.borrow_mut().push("read");
+                Ok::<_, &'static str>(b"secret".to_vec())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(secret, b"secret");
+        assert_eq!(*calls.borrow(), ["is_locked", "unlock", "is_locked", "read"]);
+    }
+
+    #[test]
+    fn unlocked_secret_service_item_is_read_without_an_unlock_prompt() {
+        let unlock_called = std::cell::Cell::new(false);
+        let secret = read_secret_service_item(
+            || Ok::<_, &'static str>(false),
+            || {
+                unlock_called.set(true);
+                Ok::<_, &'static str>(())
+            },
+            || Ok::<_, &'static str>(b"secret".to_vec()),
+        )
+        .unwrap();
+
+        assert_eq!(secret, b"secret");
+        assert!(!unlock_called.get());
+    }
+
+    #[test]
+    fn secret_service_unlock_rejection_or_provider_failure_is_not_treated_as_missing() {
+        for detail in ["prompt dismissed by user", "provider returned an error"] {
+            let read_called = std::cell::Cell::new(false);
+            let result = read_secret_service_item(
+                || Ok::<_, &'static str>(true),
+                || Err(detail),
+                || {
+                    read_called.set(true);
+                    Ok::<_, &'static str>(Vec::new())
+                },
+            );
+
+            assert_eq!(result.unwrap_err(), format!("KEYRING_ACCESS_FAILED: secret unlock failed: {detail}"));
+            assert!(!read_called.get());
+        }
+    }
+
+    #[test]
+    fn secret_service_item_still_locked_after_unlock_is_an_access_error() {
+        let read_called = std::cell::Cell::new(false);
+        let result = read_secret_service_item(
+            || Ok::<_, &'static str>(true),
+            || Ok::<_, &'static str>(()),
+            || {
+                read_called.set(true);
+                Ok::<_, &'static str>(Vec::new())
+            },
+        );
+
+        assert_eq!(result.unwrap_err(), "KEYRING_ACCESS_FAILED: secret remained locked after unlock");
+        assert!(!read_called.get());
     }
 
     #[cfg(all(feature = "os-keyring", target_os = "linux"))]

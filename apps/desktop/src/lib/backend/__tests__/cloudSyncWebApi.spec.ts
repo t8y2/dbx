@@ -125,6 +125,17 @@ describe("WebDAV sync HTTP API", () => {
     await expect(migrationCleanupBackups()).resolves.toBeUndefined();
     expect(lastCall(fetchMock)).toEqual({ url: "/api/migration/cleanup-backups", body: {} });
   });
+
+  it("forwards explicit migration status retries to the Web backend", async () => {
+    const fetchMock = stubFetch({});
+    const { migrationStatus } = await import("@/lib/backend/http");
+
+    await migrationStatus();
+    await migrationStatus(true);
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/migration/status");
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/migration/status?retry=true");
+  });
 });
 
 describe("GitLab snippet sync HTTP API", () => {

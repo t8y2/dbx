@@ -148,7 +148,7 @@ async function diagnostic() {
             <p>{{ t(errorAdviceKey) }}</p>
           </div>
           <div class="flex flex-wrap gap-3">
-            <button v-if="props.store.state.error === 'statusFailed' || (status?.keyProviderAvailable === false && !status?.keyCreationAllowed)" class="rounded-md bg-primary px-4 py-2 text-primary-foreground disabled:opacity-50" :disabled="props.store.state.busy" @click="props.store.initialize">
+            <button v-if="props.store.state.error === 'statusFailed' || (status?.keyProviderAvailable === false && !status?.keyCreationAllowed)" class="rounded-md bg-primary px-4 py-2 text-primary-foreground disabled:opacity-50" :disabled="props.store.state.busy" @click="props.store.retryStatus">
               {{ t("migration.retryStatus") }}</button
             ><button
               v-else
@@ -173,7 +173,7 @@ async function diagnostic() {
             <p class="mt-3 text-sm text-muted-foreground">{{ props.store.state.error ? t(errorAdviceKey) : t("migration.progress") }}</p>
           </div>
           <div v-if="props.store.state.error" class="flex flex-wrap gap-3">
-            <button class="rounded-md bg-primary px-4 py-2 text-primary-foreground disabled:opacity-50" :disabled="props.store.state.busy" @click="props.store.state.error === 'statusFailed' ? props.store.initialize() : props.store.retry()">
+            <button class="rounded-md bg-primary px-4 py-2 text-primary-foreground disabled:opacity-50" :disabled="props.store.state.busy" @click="props.store.state.error === 'statusFailed' ? props.store.retryStatus() : props.store.retry()">
               {{ props.store.state.busy ? t("migration.running") : props.store.state.error === "statusFailed" ? t("migration.retryStatus") : t("migration.retryMigration") }}</button
             ><button class="rounded-md border px-4 py-2 disabled:opacity-50" :disabled="props.store.state.busy" @click="diagnostic">{{ t("migration.exportDiagnostic") }}</button
             ><button class="rounded-md border px-4 py-2 disabled:opacity-50" :disabled="props.store.state.busy" @click="exitApp">{{ t("migration.exit") }}</button>

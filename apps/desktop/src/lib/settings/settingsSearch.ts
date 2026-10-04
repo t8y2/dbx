@@ -272,6 +272,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "shortcuts", category: "shortcuts", titleKey: "settings.shortcutsTab", targetId: "shortcuts" },
   { id: "sql-shortcuts", category: "shortcuts", titleKey: "settings.sqlShortcutsTitle", descriptionKey: "settings.sqlShortcutsDescription", targetId: "sql-shortcuts" },
   { id: "snippets", category: "snippets", titleKey: "settings.snippetsTab", descriptionKey: "settings.snippetsDescription", targetId: "snippets" },
+  { id: "snippet-trigger-key", category: "snippets", titleKey: "settings.snippetTriggerKey", descriptionKey: "settings.snippetTriggerKeyDescription", targetId: "snippet-trigger-key" },
   { id: "sync-webdav", category: "sync", titleKey: "settings.syncWebDavTitle", descriptionKey: "settings.syncWebDavDescription", targetId: "sync-webdav", route: { syncMethodTab: "webdav" } },
   { id: "sync-webdav-endpoint", category: "sync", titleKey: "settings.syncEndpoint", targetId: "sync-webdav", route: { syncMethodTab: "webdav" } },
   { id: "sync-webdav-username", category: "sync", titleKey: "settings.syncUsername", targetId: "sync-webdav", route: { syncMethodTab: "webdav" } },

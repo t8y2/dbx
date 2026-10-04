@@ -114,6 +114,7 @@ import {
   normalizeMcpGlobalPolicy,
   type ClickTableNavigationTarget,
   type EditorSettings,
+  type SnippetTriggerKey,
   type SqlCompletionTriggerMode,
   type SqlTableCompletionSchemaQualification,
   type TableHoverLookupMode,
@@ -967,6 +968,7 @@ function editableSnippet(snippet: SqlSnippet): SqlSnippet {
 }
 
 const editSnippets = ref<SqlSnippet[]>(settingsStore.editorSettings.snippets.map(editableSnippet));
+const editSnippetTriggerKey = ref<SnippetTriggerKey>(settingsStore.editorSettings.snippetTriggerKey);
 
 function editableSqlShortcut(action: SqlShortcutAction): SqlShortcutAction {
   const next: SqlShortcutAction = { ...action, enabled: action.enabled !== false };
@@ -1179,6 +1181,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     updateDownloadSource: editUpdateDownloadSource.value,
     toolbarItems: { ...editToolbarItems.value },
     snippets: editSnippets.value,
+    snippetTriggerKey: editSnippetTriggerKey.value,
     sqlShortcuts: editSqlShortcuts.value,
     sqlVariableSubstitutionEnabled: editSqlVariableSubstitutionEnabled.value,
     sqlVariableSyntaxOverrides: editSqlVariableSyntaxOverrides.value,
@@ -1851,6 +1854,7 @@ function syncEditorSettingsDraftFromStore() {
   editUpdateDownloadSource.value = settingsStore.editorSettings.updateDownloadSource;
   editToolbarItems.value = { ...settingsStore.editorSettings.toolbarItems };
   editSnippets.value = settingsStore.editorSettings.snippets.map(editableSnippet);
+  editSnippetTriggerKey.value = settingsStore.editorSettings.snippetTriggerKey;
   editSqlShortcuts.value = mergeDefaultSqlShortcuts(settingsStore.editorSettings.sqlShortcuts.map(editableSqlShortcut));
   editSqlVariableSubstitutionEnabled.value = settingsStore.editorSettings.sqlVariableSubstitutionEnabled;
   editSqlVariableSyntaxOverrides.value = normalizeSqlVariableSyntaxOverrides(settingsStore.editorSettings.sqlVariableSyntaxOverrides);
@@ -1997,6 +2001,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   updateDownloadSource: editUpdateDownloadSource,
   toolbarItems: editToolbarItems,
   snippets: editSnippets,
+  snippetTriggerKey: editSnippetTriggerKey,
   sqlShortcuts: editSqlShortcuts,
   sqlVariableSubstitutionEnabled: editSqlVariableSubstitutionEnabled,
   sqlVariableSyntaxOverrides: editSqlVariableSyntaxOverrides,
@@ -2544,6 +2549,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editShortcuts.value = normalizeShortcutSettings(DEFAULT_EDITOR_SETTINGS.shortcuts);
   } else if (tab === "snippets") {
     editSnippets.value = DEFAULT_SQL_SNIPPETS.map((s) => ({ ...s }));
+    editSnippetTriggerKey.value = DEFAULT_EDITOR_SETTINGS.snippetTriggerKey;
   } else if (tab === "updates") {
     editAutoUpdateApp.value = DEFAULT_EDITOR_SETTINGS.autoUpdateApp;
     editAutoUpdateDrivers.value = DEFAULT_EDITOR_SETTINGS.autoUpdateDrivers;
@@ -2694,6 +2700,7 @@ function resetAllDefaults() {
   editUpdateDownloadSource.value = DEFAULT_EDITOR_SETTINGS.updateDownloadSource;
   editToolbarItems.value = { ...DEFAULT_EDITOR_SETTINGS.toolbarItems };
   editSnippets.value = DEFAULT_SQL_SNIPPETS.map((s) => ({ ...s }));
+  editSnippetTriggerKey.value = DEFAULT_EDITOR_SETTINGS.snippetTriggerKey;
   editSqlShortcuts.value = DEFAULT_SQL_SHORTCUTS.map(editableSqlShortcut);
 }
 
@@ -2832,6 +2839,12 @@ function onDefaultTransactionModeChange(v: any) {
 function onCompletionTriggerModeChange(v: any) {
   if (v === "manual" || v === "require-prefix" || v === "positional") {
     editCompletionTriggerMode.value = v;
+  }
+}
+
+function onSnippetTriggerKeyChange(v: any) {
+  if (v === "tab" || v === "space" || v === "both") {
+    editSnippetTriggerKey.value = v;
   }
 }
 
@@ -9395,6 +9408,26 @@ onUnmounted(() => {
                   {{ t("settings.snippetsAdd") }}
                 </Button>
               </div>
+
+              <div data-settings-search-id="snippet-trigger-key" :class="['settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2', settingsSearchTargetClass('snippet-trigger-key')]">
+                <div class="min-w-0 space-y-1">
+                  <Label>{{ t("settings.snippetTriggerKey") }}</Label>
+                  <p class="text-xs leading-tight text-muted-foreground">
+                    {{ t("settings.snippetTriggerKeyDescription") }}
+                  </p>
+                </div>
+                <Select :model-value="editSnippetTriggerKey" @update:model-value="onSnippetTriggerKeyChange">
+                  <SelectTrigger class="h-8 w-44 shrink-0">
+                    <SelectValue :placeholder="t('settings.snippetTriggerKey')" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="tab">{{ t("settings.snippetTriggerKeyTab") }}</SelectItem>
+                    <SelectItem value="space">{{ t("settings.snippetTriggerKeySpace") }}</SelectItem>
+                    <SelectItem value="both">{{ t("settings.snippetTriggerKeyBoth") }}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
               <div class="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
                 <p>{{ t("settings.snippetsPlaceholderHint") }}</p>
                 <pre class="mt-2 overflow-x-auto whitespace-pre-wrap rounded bg-background/70 px-2 py-1.5 font-mono text-[11px] leading-relaxed text-foreground">

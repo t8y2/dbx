@@ -30,6 +30,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "tableCompletionSchemaQualification",
   "insertSpaceAfterCompletion",
   "sqlServerSpaceConfirmsCompletion",
+  "snippetTriggerKey",
   "sortCompletionColumnsAlphabetically",
   "selectFirstCompletionOnOpen",
   "wordWrap",
@@ -177,6 +178,7 @@ function normalizedDraftValue(key: EditorSettingsDraftKey, value: unknown): unkn
   if (key === "redisKeyTemplates") return normalizeRedisKeyTemplates(value);
   if (key === "csvNullMode") return normalizeCsvNullMode(value);
   if (key === "backgroundImage") return normalizeBackgroundImageSettings(value);
+  if (key === "snippetTriggerKey") return value === "space" || value === "both" ? value : "tab";
   return value;
 }
 

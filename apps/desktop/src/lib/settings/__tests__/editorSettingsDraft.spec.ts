@@ -99,6 +99,12 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("openDataTabsNextToActive");
   });
 
+  it("includes snippet trigger key setting in draft keys and draft conversion", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("snippetTriggerKey");
+    const draft = editorSettingsDraftFromSettings(makeSettings({ snippetTriggerKey: "space" }));
+    expect(draft.snippetTriggerKey).toBe("space");
+  });
+
   it("includes data grid type colors", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("colorizeDataGridCellTypes");
   });

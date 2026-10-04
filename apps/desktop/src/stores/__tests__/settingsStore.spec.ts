@@ -353,6 +353,14 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ sqlServerSpaceConfirmsCompletion: "yes" as unknown as boolean }).sqlServerSpaceConfirmsCompletion).toBe(false);
   });
 
+  it("defaults snippetTriggerKey to tab and preserves valid options while falling back on invalid values", () => {
+    expect(normalizeEditorSettings({}).snippetTriggerKey).toBe("tab");
+    expect(normalizeEditorSettings({ snippetTriggerKey: "tab" }).snippetTriggerKey).toBe("tab");
+    expect(normalizeEditorSettings({ snippetTriggerKey: "space" }).snippetTriggerKey).toBe("space");
+    expect(normalizeEditorSettings({ snippetTriggerKey: "both" }).snippetTriggerKey).toBe("both");
+    expect(normalizeEditorSettings({ snippetTriggerKey: "enter" as any }).snippetTriggerKey).toBe("tab");
+  });
+
   it("selects the first completion candidate by default and preserves the opt-out", () => {
     expect(normalizeEditorSettings({}).selectFirstCompletionOnOpen).toBe(true);
     expect(normalizeEditorSettings({ selectFirstCompletionOnOpen: true }).selectFirstCompletionOnOpen).toBe(true);

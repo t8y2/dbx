@@ -33,4 +33,10 @@ describe("EditorSettingsDialog settings search targets", () => {
     expect(entry?.category).toBe(owningTab);
     expect(dialogSource).toContain(`data-settings-search-id="${entry?.targetId}"`);
   });
+
+  it("renders the snippet trigger key setting in the tab its search entry points at", () => {
+    const entry = SETTINGS_SEARCH_DEFINITIONS.find((definition) => definition.id === "snippet-trigger-key");
+    expect(entry?.category).toBe("snippets");
+    expect(dialogSource).toContain(`data-settings-search-id="${entry?.targetId}"`);
+  });
 });

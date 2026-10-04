@@ -1812,7 +1812,7 @@ const completion = useQueryEditorCompletion({
 });
 const { triggerSqlCompletion, shouldTriggerSqlCompletionForPosition, scheduleSqlCompletionStart, consumeSqlCompletionAutoStartSuppression, scheduleDeferredCompletionTrigger, clearDeferredCompletionTrigger } = completion;
 
-const { editorIndentUnit, handleTab, handleEnter, acceptCompletionOrNextSnippetField, acceptSqlServerCompletionOnSpace, clearPendingCompletionEnter, clearPendingCompletionTab } = useQueryEditorCompletionKeys({
+const { editorIndentUnit, handleTab, handleEnter, acceptCompletionOrNextSnippetField, handleSpace, clearPendingCompletionEnter, clearPendingCompletionTab } = useQueryEditorCompletionKeys({
   props,
   settingsStore,
   runtime: codeMirrorRuntime,
@@ -1998,7 +1998,7 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
         initializedRuntime.vimModeComp.of(vimModeExtension(initialSettings.vimModeEnabled)),
         initializedRuntime.defaultKeymapComp.of(defaultKeymapExtension()),
         keymap.of([...searchKeymapWithoutModD(searchKeymap), ...historyKeymap, ...foldKeymapWithoutAllBindings(foldKeymap, initializedRuntime.codeMirrorFoldAll, initializedRuntime.codeMirrorUnfoldAll), ...completionKeymap]),
-        Prec.highest(keymap.of([{ key: "Space", run: acceptSqlServerCompletionOnSpace }])),
+        Prec.highest(keymap.of([{ key: "Space", run: handleSpace }])),
         initializedRuntime.sqlLanguageComp.of(sqlExtensions.buildSqlLanguageExtension()),
         initializedRuntime.sqlSemanticHighlightComp.of(sqlExtensions.buildSqlSemanticHighlightExtension()),
         createSqlUnknownObjectHighlights({

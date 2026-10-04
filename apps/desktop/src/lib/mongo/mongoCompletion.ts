@@ -6,6 +6,7 @@ import {
   ENUM_VALUES,
   EXTENDED_JSON_VALUES,
   FIELD_QUERY_OPERATORS,
+  ELEM_MATCH_QUERY_OPERATORS,
   PIPELINE_STAGES,
   PUSH_MODIFIERS,
   BULK_WRITE_OPERATION_FIELDS,
@@ -45,6 +46,7 @@ export type MongoCompletionMode =
   | "field"
   | "filterField"
   | "pullCondition"
+  | "elemMatchKey"
   | "fieldPath"
   | "fieldRef"
   | "indexName"
@@ -496,6 +498,10 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
       // Fields lead; query operators follow once `$` is typed.
       items = [...fieldItems(prefix, fields), ...specItems(FIELD_QUERY_OPERATORS, prefix, "query operator", 80)];
       break;
+    case "elemMatchKey":
+      // Fields lead; field query operators and $and / $or / $nor follow once `$` is typed.
+      items = [...fieldItems(prefix, fields), ...specItems(ELEM_MATCH_QUERY_OPERATORS, prefix, "query operator", 80)];
+      break;
     case "fieldPath":
       items = fieldPathItems(prefix, fields);
       break;
@@ -569,7 +575,7 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
 
 /** Modes whose items are built from the target collection's sampled fields. */
 export function mongoCompletionNeedsFields(mode: MongoCompletionMode): boolean {
-  return mode === "field" || mode === "filterField" || mode === "pullCondition" || mode === "fieldPath" || mode === "fieldRef" || mode === "expression";
+  return mode === "field" || mode === "filterField" || mode === "pullCondition" || mode === "elemMatchKey" || mode === "fieldPath" || mode === "fieldRef" || mode === "expression";
 }
 
 /** Modes whose items are built from the database's collection names. */
@@ -1049,6 +1055,7 @@ function classifyFilter(scan: MongoCallScan, rootIndex: number): MongoCursorClas
     if (enumKey) return { mode: "enumValue", enumKey };
     return { mode: scan.inString ? "none" : "value" };
   }
+  if (inner.key === "$elemMatch") return { mode: "elemMatchKey" };
   if (innerDepth(scan, rootIndex) === 0) return { mode: "filterField" };
 
   // Inside a nested object: whose value is it?
@@ -1059,8 +1066,6 @@ function classifyFilter(scan: MongoCallScan, rootIndex: number): MongoCursorClas
       const parent = scan.stack[scan.stack.length - 2];
       return { mode: parent?.kind === "array" && VALUE_ARRAY_OPERATORS.has(parent.key ?? "") ? "valueWrapper" : "filterField" };
     }
-    case "$elemMatch":
-      return { mode: "filterField" };
     case "$expr":
       return { mode: "expression" };
     default:

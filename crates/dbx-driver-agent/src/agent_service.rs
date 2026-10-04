@@ -6765,6 +6765,106 @@ mod agent_registry_install_tests {
         assert!(!manager.driver_native_platform_path(SQLITE_WORKER_DRIVER_KEY, "linux-x64").exists());
         assert!(!manager.driver_native_installed(SQLITE_WORKER_DRIVER_KEY));
     }
+
+    /// The website drivers page assembles custom offline bundles in the
+    /// browser: raw artifacts under `drivers/`, the JRE tarball under `jre/`,
+    /// and a synthesized registry whose artifact URLs are `offline://` file
+    /// names. This test feeds exactly that JSON shape (including the extra
+    /// `external_driver_required` field the package registries carry) through
+    /// the real inspect + import pipeline.
+    #[tokio::test]
+    async fn offline_zip_imports_a_web_assembled_custom_bundle() {
+        let platform = AgentManager::current_platform();
+        let jar_name = "dbx-agent-h2-1.0.0.jar";
+        let worker_x64 = "dbx-agent-sqlite-worker-0.1.6-linux-x64";
+        let worker_arm = "dbx-agent-sqlite-worker-0.1.6-linux-aarch64";
+        let jre_name = format!("dbx-jre-21-{platform}.tar.zst");
+        let jar_bytes = test_agent_jar();
+        let jre_bytes = b"fake-jre-archive".to_vec();
+        let worker_x64_bytes = linux_native_binary(62);
+        let worker_arm_bytes = linux_native_binary(183);
+
+        let registry_json = serde_json::json!({
+            "jres": {
+                "21": {
+                    "version": "21",
+                    "platforms": {
+                        platform: {
+                            "url": format!("offline://{jre_name}"),
+                            "sha256": sha256_bytes(&jre_bytes),
+                            "size": jre_bytes.len(),
+                            "format": "tar_zstd"
+                        }
+                    }
+                }
+            },
+            "drivers": {
+                "h2": {
+                    "version": "1.0.0",
+                    "label": "H2",
+                    "min_app_version": "0.6.33",
+                    "jre": "21",
+                    "external_driver_required": false,
+                    "jar": {
+                        "url": format!("offline://{jar_name}"),
+                        "sha256": sha256_bytes(&jar_bytes),
+                        "size": jar_bytes.len()
+                    }
+                },
+                "sqlite-worker": {
+                    "version": "0.1.6",
+                    "label": "SQLite SSH Worker",
+                    "min_app_version": "0.6.30",
+                    "jre": "21",
+                    "external_driver_required": false,
+                    "native": {
+                        "linux-x64": {
+                            "url": format!("offline://{worker_x64}"),
+                            "sha256": sha256_bytes(&worker_x64_bytes),
+                            "size": worker_x64_bytes.len()
+                        },
+                        "linux-aarch64": {
+                            "url": format!("offline://{worker_arm}"),
+                            "sha256": sha256_bytes(&worker_arm_bytes),
+                            "size": worker_arm_bytes.len()
+                        }
+                    }
+                }
+            }
+        });
+        let registry: AgentRegistry =
+            serde_json::from_value(registry_json).expect("web-synthesized registry JSON must deserialize");
+
+        let (_dir, package) = write_offline_zip(
+            &registry,
+            &[
+                (format!("drivers/{jar_name}"), jar_bytes),
+                (format!("drivers/{worker_x64}"), worker_x64_bytes),
+                (format!("drivers/{worker_arm}"), worker_arm_bytes),
+                (format!("jre/{jre_name}"), jre_bytes),
+            ],
+        );
+
+        let plan = inspect_offline_zip(&package).expect("web-synthesized bundle must pass inspection");
+        assert_eq!(plan.driver_keys, vec!["h2".to_string(), SQLITE_WORKER_DRIVER_KEY.to_string()]);
+        assert!(plan.includes_jre);
+
+        let manager = test_manager("offline-web-custom-bundle");
+        let result = import_offline_zip(&manager, &package, |_| {}).await.unwrap();
+        // The fake JRE archive cannot extract (no java executable inside), but
+        // that must only surface as an isolated JRE failure — never block the
+        // drivers, exactly like a corrupt real-world package.
+        assert!(result.failures.iter().all(|failure| failure.is_jre), "unexpected failures: {:?}", result.failures);
+        // The worker contributes one entry per remote platform, so it appears twice.
+        assert_eq!(
+            result.drivers_installed,
+            vec!["h2".to_string(), SQLITE_WORKER_DRIVER_KEY.to_string(), SQLITE_WORKER_DRIVER_KEY.to_string()]
+        );
+        assert!(manager.driver_jar_path("h2").is_file());
+        assert!(manager.driver_native_platform_path(SQLITE_WORKER_DRIVER_KEY, "linux-x64").is_file());
+        assert!(manager.driver_native_platform_path(SQLITE_WORKER_DRIVER_KEY, "linux-aarch64").is_file());
+        assert_eq!(manager.load_state().installed_drivers.get("h2").map(|d| d.version.as_str()), Some("1.0.0"));
+    }
 }
 
 #[cfg(test)]

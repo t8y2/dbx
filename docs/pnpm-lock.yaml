@@ -5,9 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 patchedDependencies:
-  next-themes@0.4.6:
-    hash: bc954c2c679c43ecf5351d4a9d68d9f36a9b8fb2dc4237fdbf57304cae4b0c04
-    path: patches/next-themes@0.4.6.patch
+  next-themes@0.4.6: bc954c2c679c43ecf5351d4a9d68d9f36a9b8fb2dc4237fdbf57304cae4b0c04
 
 importers:
 
@@ -37,6 +35,9 @@ importers:
       fumadocs-ui:
         specifier: ^16.8.7
         version: 16.8.7(@tailwindcss/oxide@4.2.4)(@types/mdx@2.0.13)(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(fumadocs-core@16.8.7(@mdx-js/mdx@3.1.1)(@types/estree-jsx@1.0.5)(@types/hast@3.0.4)(@types/mdast@4.0.4)(@types/react@19.2.14)(lucide-react@0.515.0(react@19.2.5))(next@16.3.0(@types/node@25.6.0)(react-dom@19.2.5(react@19.2.5))(react@19.2.5))(react-dom@19.2.5(react@19.2.5))(react@19.2.5)(zod@4.4.3))(next@16.3.0(@types/node@25.6.0)(react-dom@19.2.5(react@19.2.5))(react@19.2.5))(react-dom@19.2.5(react@19.2.5))(react@19.2.5)(tailwindcss@4.2.4)
+      fzstd:
+        specifier: ^0.1.1
+        version: 0.1.1
       lucide-react:
         specifier: ^0.515.0
         version: 0.515.0(react@19.2.5)
@@ -1311,6 +1312,9 @@ packages:
         optional: true
       next:
         optional: true
+
+  fzstd@0.1.1:
+    resolution: {integrity: sha512-dkuVSOKKwh3eas5VkJy1AW1vFpet8TA/fGmVA5krThl8YcOVE/8ZIoEA1+U1vEn5ckxxhLirSdY837azmbaNHA==}
 
   get-nonce@1.0.1:
     resolution: {integrity: sha512-FJhYRoDaiatfEkUK8HKlicmu/3SGFD51q3itKDGoSTysQJBnfOcxU5GxnhE1E6soB76MbT0MBtnKJuXyAx+96Q==}
@@ -3036,6 +3040,8 @@ snapshots:
       - '@tailwindcss/oxide'
       - '@types/react-dom'
       - tailwindcss
+
+  fzstd@0.1.1: {}
 
   get-nonce@1.0.1: {}
 

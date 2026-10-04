@@ -301,6 +301,32 @@ async function contributorAvatar(request: Request): Promise<Response> {
   });
 }
 
+const AGENT_ASSET_URL_PATTERN = /^https:\/\/github\.com\/t8y2\/dbx\/releases\/download\/(agents-v[0-9][A-Za-z0-9._-]*|agents-latest)\/([A-Za-z0-9][A-Za-z0-9._-]*\.(?:tar\.zst|zip|jar|exe|json))$/;
+
+/**
+ * Streams GitHub agents-release assets through the site because GitHub release
+ * downloads send no CORS headers; the browser custom-bundle builder on the
+ * drivers page fetches tar.zst driver packages through this route. CNB stays
+ * the primary source — this is the fallback for networks where CNB is slow.
+ */
+async function agentReleaseAsset(request: Request): Promise<Response> {
+  const target = new URL(request.url).searchParams.get("url") ?? "";
+  if (!AGENT_ASSET_URL_PATTERN.test(target)) return json({ error: "Unsupported asset URL" }, 400);
+
+  const response = await fetch(target, { redirect: "follow" });
+  if (!response.ok || !response.body) return json({ error: "Asset unavailable" }, 502);
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/octet-stream",
+    "Cache-Control": "public, max-age=3600, s-maxage=86400",
+    "X-Content-Type-Options": "nosniff",
+    "Cross-Origin-Resource-Policy": "same-origin",
+  };
+  const length = response.headers.get("Content-Length");
+  if (length) headers["Content-Length"] = length;
+  return new Response(request.method === "HEAD" ? null : response.body, { headers });
+}
+
 function issueSessionCookie(value: string, maxAge: number): string {
   return `${ISSUE_SESSION_COOKIE}=${encodeURIComponent(value)}; Max-Age=${maxAge}; Path=/; HttpOnly; Secure; SameSite=Strict`;
 }
@@ -658,6 +684,7 @@ export default {
     if (url.pathname === "/api/auth/me" && request.method === "GET") return currentUser(request, env);
     if (url.pathname === "/api/auth/logout" && request.method === "POST") return logout();
     if (url.pathname === "/api/contributor-avatar" && request.method === "GET") return contributorAvatar(request);
+    if (url.pathname === "/api/agent-asset" && (request.method === "GET" || request.method === "HEAD")) return agentReleaseAsset(request);
     // API paths must never fall through to the cached HTML 404 page: a navigation to an
     // unmatched /api route would otherwise be edge-cached and shadow this worker.
     if (url.pathname.startsWith("/api/")) return json({ error: "NOT_FOUND" }, 404);

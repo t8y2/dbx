@@ -9492,6 +9492,7 @@ export default withEnglishFallback({
     resultTabPreferCommentsDescription: "Использовать комментарий над SQL-запросом; отключите, чтобы всегда отображать имя исходной таблицы.",
     sidebarSearchOpenedDatabasesOnly: "Искать только в открытых базах данных",
     sidebarSearchOpenedDatabasesOnlyDescription: "Поиск на боковой панели загружает только открытые базы данных в текущем подключении (если ни одна не открыта, поиск выполняется по всем). Если отключить, поиск будет выполняться по всем базам данных этого подключения.",
+    shortcutSelectLineEnds: "Выделить концы строк",
   },
   driverStore: {
     jreDirRemoveFailed: "Не удалось удалить старый каталог JRE: {path} (исходная ошибка: {error})",

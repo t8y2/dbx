@@ -376,6 +376,7 @@ export default withEnglishFallback({
     logoutConfirm: "¿Seguro que deseas cerrar sesión?",
   },
   toolbar: {
+    immediateSync: "Sincronizar ahora",
     commitOutcomeUnknown: "El resultado del commit es desconocido y la sesión ya no existe. Compruebe los datos antes de volver a ejecutar el SQL.",
     moreActions: "Más acciones",
     newConnection: "Nueva conexión",

@@ -1094,6 +1094,7 @@ export interface EditorSettings {
 }
 
 export interface ToolbarItems {
+  immediateSync: boolean;
   dataTransfer: boolean;
   driverManager: boolean;
   pluginCenter: boolean;
@@ -1115,6 +1116,7 @@ export interface ToolbarItems {
 }
 
 export const DEFAULT_TOOLBAR_ITEMS: ToolbarItems = {
+  immediateSync: false,
   dataTransfer: true,
   driverManager: true,
   pluginCenter: true,
@@ -1700,6 +1702,7 @@ function normalizeToolbarItems(items: Partial<ToolbarItems> | undefined): Toolba
   const defaults = DEFAULT_TOOLBAR_ITEMS;
   if (!items || typeof items !== "object") return { ...defaults };
   return {
+    immediateSync: items.immediateSync ?? defaults.immediateSync,
     dataTransfer: items.dataTransfer ?? defaults.dataTransfer,
     driverManager: items.driverManager ?? defaults.driverManager,
     pluginCenter: items.pluginCenter ?? defaults.pluginCenter,

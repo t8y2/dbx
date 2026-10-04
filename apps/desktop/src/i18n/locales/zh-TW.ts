@@ -429,6 +429,7 @@ export default withEnglishFallback({
     alwaysOnTopOff: "取消置頂",
     blockDangerousRedisCommands: "攔截危險命令",
     multiDbExecute: "多庫執行",
+    immediateSync: "立即同步",
   },
   multiDbExecute: {
     manualTransaction: "手動交易",

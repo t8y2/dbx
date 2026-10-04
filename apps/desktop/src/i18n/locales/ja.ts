@@ -371,6 +371,7 @@ export default withEnglishFallback({
     logoutConfirm: "ログアウトしてもよろしいですか？",
   },
   toolbar: {
+    immediateSync: "今すぐ同期",
     commitOutcomeUnknown: "コミット結果は不明で、セッションは既に存在しません。SQL を再実行する前にデータを確認してください。",
     moreActions: "その他の操作",
     newConnection: "新しい接続",

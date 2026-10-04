@@ -468,6 +468,16 @@ pub struct SshTunnelConfig {
     /// TCP-forwarding policy; enable only for trusted JumpServer/Koko setups.
     #[serde(default, skip_serializing_if = "is_false")]
     pub allow_exec_channel_proxy: bool,
+    /// OpenSSH-style `ProxyCommand` used to reach this SSH host instead of a
+    /// direct TCP connection (e.g. `nc %h %p` or
+    /// `cloudflared access ssh --hostname %h`). Empty means a direct
+    /// connection. Resolved from `~/.ssh/config` when the host is an alias and
+    /// otherwise taken from the connection form. `%h`/`%p`/`%r`/`%%` are
+    /// expanded from the effective host, port, and user before the command
+    /// starts; the executable must be one of
+    /// `dbx_drivers::db::ssh_proxy_command::ALLOWED_PROXY_COMMAND_BINARIES`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub proxy_command: String,
     /// When non-empty, this layer references a shared tunnel profile
     /// (Settings > Tunnels). The profile's configuration replaces this
     /// layer's own fields at connect time; only `id` and `enabled` are

@@ -508,6 +508,7 @@ function defaultSshTunnel(): SshTunnelConfig {
     ssh_agent_sock_path: "",
     auth_method: "password",
     allow_exec_channel_proxy: false,
+    proxy_command: "",
   };
 }
 
@@ -528,6 +529,7 @@ function normalizeSshTunnel(hop: Partial<SshTunnelConfig>): SshTunnelConfig {
     ssh_agent_sock_path: hop.ssh_agent_sock_path || "",
     auth_method: hop.auth_method || inferSshAuthMethod(hop),
     allow_exec_channel_proxy: !!hop.allow_exec_channel_proxy,
+    proxy_command: hop.proxy_command || "",
     profile_id: hop.profile_id || undefined,
   };
 }
@@ -10532,6 +10534,13 @@ function openExternalUrl(url: string) {
                         <input type="checkbox" v-model="selectedSshLayer.allow_exec_channel_proxy" class="mt-0.5 mr-0" :disabled="selectedSshLayer.enabled === false" />
                         <span class="text-xs text-muted-foreground">{{ t("connection.sshAllowExecChannelProxy") }}</span>
                       </label>
+                    </div>
+                    <div class="grid grid-cols-4 items-start gap-4">
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.sshProxyCommand") }}</Label>
+                      <div class="col-span-3 space-y-1">
+                        <Input v-model="selectedSshLayer.proxy_command" :placeholder="t('connection.sshProxyCommandPlaceholder')" :disabled="selectedSshLayer.enabled === false" />
+                        <p class="text-xs text-muted-foreground">{{ t("connection.sshProxyCommandHint") }}</p>
+                      </div>
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.sshConnectTimeout") }}</Label>

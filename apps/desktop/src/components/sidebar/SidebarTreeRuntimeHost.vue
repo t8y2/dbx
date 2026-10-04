@@ -6144,7 +6144,11 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   const { node, items } = context;
 
-  if (node.type === "saved-sql-root") {
+  if (node.type === "saved-sql-root" || node.type === "saved-sql-folder") {
+    if (supportsConnectionQueryActions(currentDatabaseType())) {
+      items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      items.push({ label: "", separator: true });
+    }
     items.push({
       label: t("savedSql.pasteFile"),
       action: () => requestPasteTreeClipboard(),
@@ -6157,6 +6161,9 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 
   if (node.type === "saved-sql-file") {
     items.push({ label: t("savedSql.open"), action: openSavedSqlFile, icon: FileCode });
+    if (supportsConnectionQueryActions(currentDatabaseType())) {
+      items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+    }
     items.push({ label: "", separator: true });
     items.push({ label: t("savedSql.copyFile"), action: copySavedSqlFiles, icon: Copy, shortcut: shortcutCopyName.value });
     items.push({

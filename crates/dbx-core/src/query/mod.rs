@@ -10194,7 +10194,7 @@ for line in sys.stdin:
         assert_eq!(cells.len(), 1);
         assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 4);
 
-        session.shutdown().await;
+        session.shutdown().await.unwrap();
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -10379,7 +10379,7 @@ for line in sys.stdin:
         assert_eq!(result.rows, vec![vec![serde_json::json!(42)]]);
         assert_eq!(std::fs::read_to_string(&calls).unwrap(), "executeQueryPage\nexecuteQuery\n");
 
-        session.shutdown().await;
+        session.shutdown().await.unwrap();
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -10443,7 +10443,7 @@ for line in sys.stdin:
         assert_eq!(error, "Incorrect syntax near SELECT");
         assert_eq!(std::fs::read_to_string(&calls).unwrap(), "request\n");
 
-        session.shutdown().await;
+        session.shutdown().await.unwrap();
         let _ = std::fs::remove_dir_all(dir);
     }
 

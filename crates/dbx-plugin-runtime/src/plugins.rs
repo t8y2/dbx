@@ -313,8 +313,16 @@ impl PluginRegistry {
         let env = env.with_plugin_data_dir(&self.plugin_data_dir(&plugin.manifest.id));
         let session = PluginSidecarSession::start(plugin, self.app_version.clone(), env).await?;
         let result = session.invoke_with_timeout(method, params, Some(driver_id), timeout_duration).await;
-        session.shutdown().await;
-        result
+        match (result, session.shutdown().await) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(invoke_error), Ok(())) => Err(invoke_error),
+            (Ok(_), Err(shutdown_error)) => {
+                Err(format!("Plugin invocation completed but shutdown failed: {shutdown_error}"))
+            }
+            (Err(invoke_error), Err(shutdown_error)) => {
+                Err(format!("{invoke_error}; additionally failed to stop plugin: {shutdown_error}"))
+            }
+        }
     }
 
     pub async fn start_driver_session(&self, driver_id: &str) -> Result<Arc<PluginDriverSession>, String> {
@@ -426,12 +434,12 @@ impl PluginDriverSession {
         self.sidecar.invoke_with_timeout(method, params, Some(&self.driver_id), timeout_duration).await
     }
 
-    pub async fn shutdown(&self) {
+    pub async fn shutdown(&self) -> Result<(), String> {
         if let Some(logical) = &self.logical {
             logical.close().await;
-            return;
+            return Ok(());
         }
-        self.sidecar.shutdown().await;
+        self.sidecar.shutdown().await
     }
 
     pub fn is_available(&self) -> bool {
@@ -584,7 +592,7 @@ sleep 30
         pending.abort();
         assert!(pending.await.unwrap_err().is_cancelled());
         assert!(lifecycle.begin_update("sample.sidecar").is_ok());
-        host.stop_all().await;
+        host.stop_all().await.unwrap();
     }
 
     #[cfg(unix)]
@@ -627,7 +635,7 @@ sleep 30
             .expect("session should start");
         let pid = session.pid().await.expect("child should have a pid");
 
-        session.shutdown().await;
+        session.shutdown().await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         assert!(!process_exists(pid));

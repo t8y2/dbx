@@ -163,7 +163,7 @@ async fn embedded_h2_jdbc_failed_connect_cancel_drop_and_last_close_are_isolated
         panic!()
     };
     drop(dropped);
-    good.shutdown().await;
+    good.shutdown().await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         while good.pid().await.is_some() {
             tokio::task::yield_now().await;
@@ -176,7 +176,7 @@ async fn embedded_h2_jdbc_failed_connect_cancel_drop_and_last_close_are_isolated
         panic!()
     };
     assert_ne!(reopened.pid().await, pid);
-    reopened.shutdown().await;
+    reopened.shutdown().await.unwrap();
     state.shutdown(Duration::from_secs(5)).await;
     std::fs::remove_dir_all(directory).unwrap();
 }
@@ -201,8 +201,8 @@ async fn embedded_h2_jdbc_keeps_remote_memory_and_unrelated_drivers_dedicated() 
         };
         assert_ne!(first.pid().await, second.pid().await);
         assert_eq!(identity(&first).await["session"], "legacy");
-        first.shutdown().await;
-        second.shutdown().await;
+        first.shutdown().await.unwrap();
+        second.shutdown().await.unwrap();
     }
     state.shutdown(Duration::from_secs(5)).await;
     std::fs::remove_dir_all(directory).unwrap();
@@ -268,9 +268,9 @@ async fn embedded_h2_jdbc_rejects_old_plugins_and_preserves_selected_driver_runt
         panic!()
     };
     assert_ne!(first.pid().await, different.pid().await);
-    different.shutdown().await;
-    first.shutdown().await;
-    second.shutdown().await;
+    different.shutdown().await.unwrap();
+    first.shutdown().await.unwrap();
+    second.shutdown().await.unwrap();
     state.shutdown(Duration::from_secs(5)).await;
     std::fs::remove_dir_all(directory).unwrap();
 }
@@ -293,7 +293,7 @@ async fn embedded_h2_jdbc_last_owner_close_can_race_a_new_session() {
         let PoolKind::ExternalDriver { session: replacement, .. } = replacement.unwrap() else { panic!() };
         assert!(replacement.is_available(), "cycle {cycle_index}");
         identity(&replacement).await;
-        replacement.shutdown().await;
+        replacement.shutdown().await.unwrap();
         assert!(replacement.pid().await.is_none());
     }
     state.shutdown(Duration::from_secs(5)).await;
@@ -332,7 +332,7 @@ async fn embedded_h2_jdbc_cancelled_open_releases_its_member_and_server_state() 
     })
     .await
     .unwrap();
-    survivor.shutdown().await;
+    survivor.shutdown().await.unwrap();
     assert!(survivor.pid().await.is_none());
     state.shutdown(Duration::from_secs(5)).await;
     std::fs::remove_dir_all(directory).unwrap();
@@ -366,9 +366,11 @@ async fn embedded_h2_jdbc_replaces_dead_runtime_with_sibling_handles_still_alive
     };
     assert_ne!(replacement.pid().await, original_pid);
     assert!(replacement.pid().await.is_some());
-    tokio::join!(first.shutdown(), sibling.shutdown());
+    let (first_closed, sibling_closed) = tokio::join!(first.shutdown(), sibling.shutdown());
+    first_closed.unwrap();
+    sibling_closed.unwrap();
     identity(&replacement).await;
-    replacement.shutdown().await;
+    replacement.shutdown().await.unwrap();
     assert!(replacement.pid().await.is_none());
     state.shutdown(Duration::from_secs(5)).await;
     std::fs::remove_dir_all(directory).unwrap();
@@ -392,7 +394,7 @@ async fn embedded_h2_jdbc_timeout_and_interrupted_shutdown_finish_session_cleanu
         .unwrap_err();
     assert!(error.contains("timed out"));
     assert!(!timed.is_available());
-    timed.shutdown().await;
+    timed.shutdown().await.unwrap();
     identity(&survivor).await;
     let mut delayed = config.clone();
     delayed.username = "delay-close".into();
@@ -402,7 +404,7 @@ async fn embedded_h2_jdbc_timeout_and_interrupted_shutdown_finish_session_cleanu
     };
     let close_session = closing.clone();
     let close = tokio::spawn(async move {
-        close_session.shutdown().await;
+        close_session.shutdown().await.unwrap();
     });
     tokio::time::timeout(Duration::from_secs(5), async {
         while closing.is_available() {
@@ -414,7 +416,7 @@ async fn embedded_h2_jdbc_timeout_and_interrupted_shutdown_finish_session_cleanu
     close.abort();
     assert!(close.await.unwrap_err().is_cancelled());
     identity(&survivor).await;
-    survivor.shutdown().await;
+    survivor.shutdown().await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         while survivor.pid().await.is_some() {
             tokio::task::yield_now().await;
@@ -422,7 +424,7 @@ async fn embedded_h2_jdbc_timeout_and_interrupted_shutdown_finish_session_cleanu
     })
     .await
     .unwrap();
-    closing.shutdown().await;
+    closing.shutdown().await.unwrap();
     state.shutdown(Duration::from_secs(5)).await;
     std::fs::remove_dir_all(directory).unwrap();
 }

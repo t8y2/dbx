@@ -45,7 +45,9 @@ impl PluginRegistry {
             if !members.1 && existing.process.sidecar.status().state == super::PluginSessionState::Running {
                 members.0 += 1;
             } else {
-                existing.process.sidecar.shutdown().await;
+                if let Err(error) = existing.process.sidecar.shutdown().await {
+                    log::warn!("Failed to stop the stale shared JDBC plugin runtime: {error}");
+                }
                 members.1 = true;
                 drop(members);
                 runtime = None;
@@ -58,9 +60,17 @@ impl PluginRegistry {
                 let mut startup = StartupGuard(Some(process.clone()));
                 let protocol = process.invoke::<serde_json::Value>("jdbcSessionProtocol", serde_json::json!({})).await;
                 if !matches!(protocol, Ok(ref value) if value["version"] == 2) {
-                    process.shutdown().await;
+                    let shutdown = process.shutdown().await;
                     startup.0 = None;
-                    return Err("Update the JDBC plugin to a version supporting embedded H2 logical sessions".into());
+                    return Err(match shutdown {
+                        Ok(()) => {
+                            "Update the JDBC plugin to a version supporting embedded H2 logical sessions".to_string()
+                        }
+                        Err(error) => format!(
+                            "Update the JDBC plugin to a version supporting embedded H2 logical sessions; additionally \
+                             failed to stop its runtime: {error}"
+                        ),
+                    });
                 }
                 startup.0 = None;
                 let runtime = Arc::new(JdbcRuntime { process, members: Mutex::new((1, false)) });
@@ -149,7 +159,9 @@ impl JdbcLogicalSession {
                 members.0 -= 1;
                 if members.0 == 0 {
                     members.1 = true;
-                    runtime.process.sidecar.shutdown().await;
+                    if let Err(error) = runtime.process.sidecar.shutdown().await {
+                        log::warn!("Failed to stop the shared JDBC plugin runtime: {error}");
+                    }
                 }
                 session.close_done.send_replace(true);
             });
@@ -166,7 +178,9 @@ impl Drop for StartupGuard {
         if let Some(process) = self.0.take() {
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 handle.spawn(async move {
-                    process.sidecar.shutdown().await;
+                    if let Err(error) = process.sidecar.shutdown().await {
+                        log::warn!("Failed to stop the discarded JDBC plugin runtime: {error}");
+                    }
                 });
             }
         }

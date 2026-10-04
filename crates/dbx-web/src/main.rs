@@ -16,6 +16,9 @@ use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHasher};
 use axum::extract::DefaultBodyLimit;
+
+/// Login/setup payloads are one password field; 64 KiB is generous.
+const AUTH_BODY_LIMIT_BYTES: usize = 64 * 1024;
 use axum::http::{Request, StatusCode, Uri};
 use axum::middleware;
 use axum::response::{IntoResponse, Redirect, Response};
@@ -597,10 +600,13 @@ async fn serve() -> Result<(), String> {
         .route("/database-backups/{id}/files/{index}", get(routes::scheduled_backup::download))
         .route("/database-backups/{id}/files/{index}/restore", post(routes::scheduled_backup::prepare_restore))
         // Auth
-        .route("/auth/login", post(auth::login))
+        // Auth payloads are tiny password strings: cap them far below the
+        // global limit so the extractor cannot buffer an unauthenticated DoS
+        // body before any rate limiting runs.
+        .route("/auth/login", post(auth::login).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)))
         .route("/auth/check", get(auth::check))
-        .route("/auth/setup", post(auth::setup))
-        .route("/auth/change-password", post(auth::change_password))
+        .route("/auth/setup", post(auth::setup).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)))
+        .route("/auth/change-password", post(auth::change_password).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)))
         .route("/auth/logout", post(auth::logout))
         // Connection
         .route("/connection/test", post(routes::connection::test_connection))
@@ -1491,7 +1497,19 @@ async fn serve() -> Result<(), String> {
 
     // Bind address
     let port: u16 = std::env::var("DBX_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(4224);
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    // Defaults to all interfaces for container deployments; operators who
+    // expose the service through a local reverse proxy can pin the listener
+    // (DBX_BIND_ADDR=127.0.0.1) without a firewall change. The value is an
+    // IP only — the port always comes from DBX_PORT so the HTTP listener and
+    // the Redis PubSub server (which reads DBX_PORT independently) stay in
+    // sync.
+    let ip = match std::env::var("DBX_BIND_ADDR").ok().as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => {
+            value.parse::<IpAddr>().unwrap_or_else(|error| panic!("invalid DBX_BIND_ADDR \"{value}\": {error}"))
+        }
+        None => IpAddr::from([0, 0, 0, 0]),
+    };
+    let addr = SocketAddr::new(ip, port);
 
     tracing::info!("DBX Web server starting on http://{}", addr);
     if public_base_path != "/" {

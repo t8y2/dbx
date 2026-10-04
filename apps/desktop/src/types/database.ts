@@ -2220,6 +2220,8 @@ export interface QueryTab {
     database?: string;
     columns: ColumnInfo[];
     primaryKeys: string[];
+    /** User-declared row identifier columns, used only when no automatic stable identifier exists. */
+    virtualPrimaryKeys?: string[];
     /** Physical primary keys used for table-open default sorting; excludes unique and synthetic row identifiers. */
     physicalPrimaryKeys?: string[];
   };

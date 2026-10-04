@@ -1,5 +1,13 @@
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { saveVirtualRowIdentifier } from "@/lib/table/virtualRowIdentifier";
+
+const localStorageValues = new Map<string, string>();
+vi.stubGlobal("localStorage", {
+  getItem: (key: string) => localStorageValues.get(key) ?? null,
+  setItem: (key: string, value: string) => localStorageValues.set(key, value),
+  removeItem: (key: string) => localStorageValues.delete(key),
+});
 
 const executeMulti = vi.fn();
 const executeQuery = vi.fn();
@@ -88,6 +96,7 @@ function queryAnalysis(sql: string) {
 describe("queryStore hidden primary key editing", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
+    localStorageValues.clear();
     const { clearTableMetadataCache } = await import("@/lib/metadata/tableMetadataCache");
     clearTableMetadataCache();
     setActivePinia(createPinia());
@@ -1356,13 +1365,13 @@ describe("queryStore hidden primary key editing", () => {
     expect(executeMulti).toHaveBeenCalledWith("oracle-1", "ORCL", 'SELECT PAYLOAD, "ID" AS "__DBX_PK_0" FROM APP.DOCUMENTS', undefined, expect.any(String), expect.objectContaining({ tableDataPreview: true, timeoutSecs: 30 }));
   });
 
-  it("defers DB2 BLOB materialization for a stable-key star query", async () => {
+  it("defers DB2 BLOB materialization for a non-null unique-index star query", async () => {
     getConnectionConfig.mockReturnValue({ id: "db2-1", name: "DB2", db_type: "db2", database: "MAXIMO", query_timeout_secs: 60 });
     getColumns.mockResolvedValue([
-      { name: "MAFAPPDATAID", data_type: "BIGINT", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      { name: "MAFAPPDATAID", data_type: "BIGINT", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
       { name: "APP", data_type: "BLOB", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
     ]);
-    listIndexes.mockResolvedValue([{ name: "MAFAPPDATA_PK", columns: ["MAFAPPDATAID"], is_unique: true, is_primary: true }]);
+    listIndexes.mockResolvedValue([{ name: "MAFAPPDATA_UQ", columns: ["MAFAPPDATAID"], is_unique: true, is_primary: false }]);
     analyzeEditableQueryEditability.mockResolvedValue({
       editable: true,
       analysis: {
@@ -1392,6 +1401,46 @@ describe("queryStore hidden primary key editing", () => {
 
     expect(executeMulti).toHaveBeenCalledWith("db2-1", "MAXIMO", "select * from MAFAPPDATA mf", "MAXIMO", expect.any(String), expect.objectContaining({ tableDataPreview: true, timeoutSecs: 60 }));
     expect(store.tabs.find((tab) => tab.id === tabId)?.result?.large_value_cells).toEqual([{ row_index: 0, column_index: 1, original_bytes: 64 * 1024 * 1024 }]);
+  });
+
+  it("defers DB2 BLOB materialization through a persisted virtual unique key", async () => {
+    getConnectionConfig.mockReturnValue({ id: "db2-1", name: "DB2", db_type: "db2", database: "MAXIMO", query_timeout_secs: 60 });
+    const columns = [
+      { name: "MAFAPPDATAID", data_type: "BIGINT", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+      { name: "APP", data_type: "BLOB", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ];
+    getColumns.mockResolvedValue(columns);
+    listIndexes.mockResolvedValue([]);
+    expect(saveVirtualRowIdentifier({ connectionId: "db2-1", database: "MAXIMO", schema: "MAXIMO", tableName: "MAFAPPDATA" }, ["MAFAPPDATAID"], columns)).toBe(true);
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: {
+        schema: undefined,
+        tableName: "MAFAPPDATA",
+        tableAlias: "mf",
+        selectStar: true,
+        columns: [],
+      },
+    });
+    executeMulti.mockResolvedValue([
+      {
+        columns: ["MAFAPPDATAID", "APP"],
+        rows: [[1, "<BLOB>"]],
+        affected_rows: 0,
+        execution_time_ms: 57,
+        large_value_cells: [{ row_index: 0, column_index: 1, original_bytes: 64 * 1024 * 1024 }],
+      },
+    ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("db2-1", "MAXIMO", "Query", "query", "MAXIMO");
+    store.setAutoCommit(tabId, true);
+
+    await store.executeTabSql(tabId, "select * from MAFAPPDATA mf");
+
+    expect(executeMulti).toHaveBeenCalledWith("db2-1", "MAXIMO", "select * from MAFAPPDATA mf", "MAXIMO", expect.any(String), expect.objectContaining({ tableDataPreview: true, timeoutSecs: 60 }));
+    await vi.waitFor(() => expect(store.tabs.find((tab) => tab.id === tabId)?.tableMeta?.virtualPrimaryKeys).toEqual(["MAFAPPDATAID"]));
   });
 
   it("keeps deferred DB2 LOB handling disabled without a stable key", async () => {
@@ -1830,16 +1879,25 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.result?.hidden_column_indexes).toBeUndefined();
   });
 
-  it("does not hide a unique index when the table has no declared primary key", async () => {
+  it("injects a non-null unique index when the table has no declared primary key", async () => {
     getColumns.mockResolvedValue([
       { name: "email", data_type: "varchar", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
       { name: "name", data_type: "varchar", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
     ]);
     listIndexes.mockResolvedValue([{ name: "uq_users_email", columns: ["email"], is_unique: true, is_primary: false }]);
+    analyzeEditableQueryEditability.mockImplementation(async (sql: string) => ({
+      editable: true,
+      analysis: {
+        schema: undefined,
+        tableName: "users",
+        selectStar: false,
+        columns: [{ sourceName: "name", resultName: "name", expression: "name" }, ...(sql.includes("__DBX_PK_0") ? [{ sourceName: "email", resultName: "__DBX_PK_0", expression: "`email`" }] : [])],
+      },
+    }));
     executeMulti.mockResolvedValue([
       {
-        columns: ["name"],
-        rows: [["Alice"]],
+        columns: ["name", "__DBX_PK_0"],
+        rows: [["Alice", "alice@example.com"]],
         affected_rows: 0,
         execution_time_ms: 1,
       },
@@ -1851,10 +1909,11 @@ describe("queryStore hidden primary key editing", () => {
 
     await store.executeTabSql(tabId, "SELECT name FROM users");
 
-    expect(executeMulti).toHaveBeenCalledWith("mysql-1", "app", "SELECT name FROM users", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+    expect(executeMulti).toHaveBeenCalledWith("mysql-1", "app", "SELECT name, `email` AS `__DBX_PK_0` FROM users", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
     const tab = store.tabs.find((item) => item.id === tabId)!;
-    await vi.waitFor(() => expect(tab.queryEditabilityReason).toBe("primary-key-not-returned"));
-    expect(tab.result?.hidden_column_indexes).toBeUndefined();
+    expect(tab.result?.hidden_column_indexes).toEqual([1]);
+    await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["name", "email"]));
+    expect(tab.queryEditabilityReason).toBeUndefined();
   });
 
   it("hides returned internal keys but remains read-only when another hidden key is missing", async () => {

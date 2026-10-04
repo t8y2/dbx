@@ -77,7 +77,7 @@ import { isRedisMutatingCommand } from "@/lib/redis/redisCommandTable";
 import { formatRedisConsoleValue } from "@/lib/redis/redisValuePresentation";
 import { usesAgentCursorForQuery, usesAgentCursorForTableData } from "@/lib/database/databaseDriverManifest";
 import { connectionIsDorisFamilyCatalogCapable, defaultAutoCommitForDbType, supportsClearableQuerySchema, supportsTransaction, usesOracleStickyTransactionState, usesProvenReadOnlyStickyTransactionState } from "@/lib/database/databaseFeatureSupport";
-import { canInsertTableRows, canUseKeylessRowPredicate, DBX_ROWID_COLUMN, editablePrimaryKeys, shouldIncludeSyntheticRowId, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
+import { canInsertTableRows, canUseKeylessRowPredicate, DBX_ROWID_COLUMN, shouldIncludeSyntheticRowId, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/table/tableDataExport";
 import { repairRestoredDataTabTableIdentity, tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import { isDataTabMetadataLifecycleStale } from "@/lib/sidebar/dataTabOpenPolicy";
@@ -4768,7 +4768,14 @@ export const useQueryStore = defineStore("query", () => {
       objectBrowser: original.objectBrowser ? { ...original.objectBrowser } : undefined,
       objectSource: original.objectSource ? { ...original.objectSource } : undefined,
       sourceView: original.sourceView,
-      tableMeta: original.tableMeta ? { ...original.tableMeta, columns: [...original.tableMeta.columns], primaryKeys: [...original.tableMeta.primaryKeys] } : undefined,
+      tableMeta: original.tableMeta
+        ? {
+            ...original.tableMeta,
+            columns: [...original.tableMeta.columns],
+            primaryKeys: [...original.tableMeta.primaryKeys],
+            ...(original.tableMeta.virtualPrimaryKeys ? { virtualPrimaryKeys: [...original.tableMeta.virtualPrimaryKeys] } : {}),
+          }
+        : undefined,
       tableMetaGeneration: original.mode === "data" ? original.tableMetaGeneration : undefined,
       tableMetaUpdatedAt: original.mode === "data" ? original.tableMetaUpdatedAt : undefined,
       queryAnalysis: original.queryAnalysis ? { ...original.queryAnalysis, sources: original.queryAnalysis.sources?.map((source) => ({ ...source })), columns: original.queryAnalysis.columns.map((c) => ({ ...c })) } : undefined,
@@ -6126,6 +6133,7 @@ export const useQueryStore = defineStore("query", () => {
         tableType: metadata.tableType,
         columns: metadata.columns,
         primaryKeys: metadata.primaryKeys,
+        ...(metadata.virtualPrimaryKeys?.length ? { virtualPrimaryKeys: metadata.virtualPrimaryKeys } : {}),
       },
     };
   }
@@ -6334,14 +6342,13 @@ export const useQueryStore = defineStore("query", () => {
       }
       if (loaded.tableMeta.columns.length === 0) return unchanged;
       if (loaded.tableMeta.tableType?.toUpperCase().includes("VIEW")) return unchanged;
-      const columnPrimaryKeys = loaded.tableMeta.columns.filter((column) => column.is_primary_key).map((column) => column.name);
-      const primaryKeys = databaseType === "oracle" ? loaded.tableMeta.primaryKeys : editablePrimaryKeys(databaseType, loaded.tableMeta.columns, loaded.tableMeta.tableType);
+      const primaryKeys = loaded.tableMeta.primaryKeys;
       const syntheticRowId = (databaseType === "oracle" || databaseType === "xugu") && usesSyntheticRowIdKey(databaseType, primaryKeys, loaded.tableMeta.tableType);
       // Base tables without a natural identifier use the same ROWID identity
       // as table-data tabs (Oracle and Xugu). Confirm the object is a base
       // table because selecting ROWID from a view can fail with ORA-01445.
       if (syntheticRowId && !(await resolveOracleRowIdSafety(tab, loaded, databaseType))) return unchanged;
-      const declaredPrimaryKeys = databaseType === "oracle" && !syntheticRowId ? primaryKeys : columnPrimaryKeys;
+      const declaredPrimaryKeys = syntheticRowId ? [] : primaryKeys;
       return buildHiddenPrimaryKeyPreparation(tab, sql, databaseType, loaded, primaryKeys, declaredPrimaryKeys, traceId, elapsed);
     } catch (error) {
       // Metadata enrichment is optional. Query execution must retain its prior

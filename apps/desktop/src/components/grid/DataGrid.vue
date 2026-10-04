@@ -84,6 +84,7 @@ import DataGridCellDetailPanel from "@/components/grid/DataGridCellDetailPanel.v
 import DataGridPagination from "@/components/grid/DataGridPagination.vue";
 import DataGridSearchBar from "@/components/grid/DataGridSearchBar.vue";
 import DataGridToolbar from "@/components/grid/DataGridToolbar.vue";
+import DataGridVirtualRowIdentifier from "@/components/grid/DataGridVirtualRowIdentifier.vue";
 import DataGridExtractorDialog from "@/components/grid/DataGridExtractorDialog.vue";
 import DataGridColumnHeader from "@/components/grid/DataGridColumnHeader.vue";
 import DataGridQueryControls from "@/components/grid/DataGridQueryControls.vue";
@@ -317,6 +318,7 @@ import {
   splitForeignKeyDisplayValues,
   type ForeignKeyDisplayConfig,
 } from "@/lib/dataGrid/dataGridForeignKeyDisplay";
+import { removeVirtualRowIdentifier, saveVirtualRowIdentifier, type VirtualRowIdentifierScope } from "@/lib/table/virtualRowIdentifier";
 
 import { useToast } from "@/composables/useToast";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -521,6 +523,7 @@ interface DataGridProps {
     tableType?: string;
     columns: ColumnInfo[];
     primaryKeys: string[];
+    virtualPrimaryKeys?: string[];
   };
   tableInfoTab?: TableInfoTab;
   autoShowTableInfo?: boolean;
@@ -4441,6 +4444,41 @@ const saveToolbarState = computed(() =>
 const hasSearchBarSlot = computed(() => !!slots["search-bar"]);
 const hasResultToolbarLeadingSlot = computed(() => !!slots["result-toolbar-leading"]);
 const hasResultToolbarActionsSlot = computed(() => !!slots["result-toolbar-actions"]);
+const virtualRowIdentifierScope = computed<VirtualRowIdentifierScope | undefined>(() => {
+  if (!props.connectionId || !props.database || !props.tableMeta?.tableName) return undefined;
+  return {
+    connectionId: props.connectionId,
+    database: props.tableMeta.database ?? props.database,
+    catalog: props.tableMeta.catalog,
+    schema: props.tableMeta.schema,
+    tableName: props.tableMeta.tableName,
+  };
+});
+const virtualRowIdentifierColumns = computed(() => props.tableMeta?.virtualPrimaryKeys ?? []);
+const showVirtualRowIdentifierControl = computed(() => {
+  if (!virtualRowIdentifierScope.value || !props.tableMeta?.columns.length || props.customSaveHandler) return false;
+  return virtualRowIdentifierColumns.value.length > 0 || props.tableMeta.primaryKeys.length === 0;
+});
+const virtualRowIdentifierDisabled = computed(() => props.loading === true || isSaving.value || hasPendingChanges.value);
+
+function applyVirtualRowIdentifier(columns: string[]) {
+  const scope = virtualRowIdentifierScope.value;
+  const tableColumns = props.tableMeta?.columns;
+  if (!scope || !tableColumns || !saveVirtualRowIdentifier(scope, columns, tableColumns)) {
+    toast(t("grid.virtualRowIdentifierSaveFailed"), 5000);
+    return;
+  }
+  toast(t("grid.virtualRowIdentifierApplied"));
+  void reloadTableData("row-identifier-change");
+}
+
+function clearVirtualRowIdentifier() {
+  const scope = virtualRowIdentifierScope.value;
+  if (!scope) return;
+  removeVirtualRowIdentifier(scope);
+  toast(t("grid.virtualRowIdentifierCleared"));
+  void reloadTableData("row-identifier-change");
+}
 const quickEntryEnabled = computed(() => settingsStore.editorSettings.dataGridQuickEntry);
 const showQuickEntryDraftRow = computed(() =>
   shouldShowQuickEntryDraftRow({
@@ -4459,6 +4497,7 @@ const showDataGridTopbar = computed(
     hasSearchBarSlot.value ||
     hasResultToolbarLeadingSlot.value ||
     hasResultToolbarActionsSlot.value ||
+    showVirtualRowIdentifierControl.value ||
     showQueryEditReadOnlyBadge.value ||
     props.context !== "results" ||
     (!!props.editable && hasDataGridSaveTarget.value) ||
@@ -12893,6 +12932,15 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           >
             <template #leading>
               <slot v-if="hasResultToolbarActionsSlot" name="result-toolbar-actions" :compact="compactDataGridToolbar" />
+              <DataGridVirtualRowIdentifier
+                v-if="showVirtualRowIdentifierControl"
+                :columns="props.tableMeta!.columns"
+                :selected-columns="virtualRowIdentifierColumns"
+                :compact="compactDataGridToolbar"
+                :disabled="virtualRowIdentifierDisabled"
+                @apply="applyVirtualRowIdentifier"
+                @clear="clearVirtualRowIdentifier"
+              />
               <Tooltip v-if="showQueryEditReadOnlyBadge">
                 <TooltipTrigger as-child>
                   <div class="flex h-5 items-center gap-1 rounded border border-muted-foreground/30 bg-muted/60 px-1.5 text-xs font-medium text-muted-foreground">

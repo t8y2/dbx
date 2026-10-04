@@ -32,7 +32,7 @@ export function isDataGridToolbarActionCompact(action: DataGridToolbarActionKey,
   return actionIndex < Math.max(0, Math.floor(compactActionCount));
 }
 
-export type DataGridReloadIntent = "refresh" | "auto-refresh";
+export type DataGridReloadIntent = "refresh" | "auto-refresh" | "row-identifier-change";
 
 export interface DataGridToolbarActionCapability {
   label: string;

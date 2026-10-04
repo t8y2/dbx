@@ -15,6 +15,7 @@ import {
   Eye,
   FileCode,
   FoldVertical,
+  GitBranch,
   Highlighter,
   MessageSquareText,
   Minimize2,
@@ -50,11 +51,14 @@ export interface QueryEditorContextMenuState {
   contextObjectTarget: SqlObjectNavigationTarget | null;
   shortcuts: ShortcutSettings;
   expandSelectStar: (() => void) | undefined;
+  canExplain?: boolean;
+  hasContent?: boolean;
 }
 
 export interface QueryEditorContextMenuActions {
   executeFromContextMenu: () => void;
   executeInNewResultTabFromContextMenu: () => void;
+  explainFromContextMenu?: () => void;
   requestPreviewChanges: (sql?: string) => void;
   exportQueryFromContextMenu: (format: "csv" | "xlsx" | "txt") => void;
   toggleCommentFromContextMenu: () => void;
@@ -164,6 +168,13 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
             shortcut: shortcuts.executeSqlInNewResultTab,
           },
           {
+            label: t("toolbar.explainPlan"),
+            action: actions.explainFromContextMenu,
+            disabled: state.canExplain === false || !canExecuteContextSql,
+            icon: GitBranch,
+            shortcut: shortcuts.explainSql,
+          },
+          {
             label: t("editor.previewChanges"),
             action: () => void actions.requestPreviewChanges(props.getState().previewContextSql),
             disabled: !state.previewContextSql,
@@ -204,9 +215,9 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
       shortcut: shortcuts.toggleBlockComment,
     },
     {
-      label: t("editor.contextMenu.formatSelectionSql"),
+      label: canCopySelectedSql ? t("editor.contextMenu.formatSelectionSql") : t("toolbar.formatSql"),
       action: () => void actions.formatCurrentSql(),
-      disabled: state.readOnly || !canCopySelectedSql || !canFormatSqlForDatabaseType(state.databaseType),
+      disabled: state.readOnly || (!canCopySelectedSql && !canExecuteContextSql && !state.hasContent) || !canFormatSqlForDatabaseType(state.databaseType),
       icon: AlignLeft,
       shortcut: shortcuts.formatSql,
     },

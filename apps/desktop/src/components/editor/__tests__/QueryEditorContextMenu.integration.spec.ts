@@ -17,6 +17,7 @@ function mountMenu() {
   const actions = {
     executeFromContextMenu: vi.fn(),
     executeInNewResultTabFromContextMenu: vi.fn(),
+    explainFromContextMenu: vi.fn(),
     requestPreviewChanges: vi.fn(),
     exportQueryFromContextMenu: vi.fn(),
     toggleCommentFromContextMenu: vi.fn(),
@@ -172,6 +173,7 @@ describe("QueryEditor extracted context menu", () => {
   it.each([
     ["editor.contextMenu.executeCurrent", "executeFromContextMenu"],
     ["settings.shortcutExecuteSqlInNewResultTab", "executeInNewResultTabFromContextMenu"],
+    ["toolbar.explainPlan", "explainFromContextMenu"],
     ["editor.contextMenu.screenshotSelection", "openCodeSnapshot"],
     ["editor.contextMenu.delimitedList", "openDelimitedListDialog"],
     ["editor.contextMenu.sendToAi", "sendSelectionToAi"],
@@ -184,6 +186,50 @@ describe("QueryEditor extracted context menu", () => {
     await open();
     button(label).click();
     expect(actions[action]).toHaveBeenCalledTimes(1);
+  });
+
+  it("enables explain plan only when executable SQL exists and explain is permitted", async () => {
+    const { state, actions, open } = mountMenu();
+    await open();
+    expect(button("toolbar.explainPlan").disabled).toBe(true);
+
+    await open(() => {
+      state.executableSql = "SELECT * FROM users";
+    });
+    expect(button("toolbar.explainPlan").disabled).toBe(false);
+    button("toolbar.explainPlan").click();
+    expect(actions.explainFromContextMenu).toHaveBeenCalledTimes(1);
+
+    await open(() => {
+      state.canExplain = false;
+    });
+    expect(button("toolbar.explainPlan").disabled).toBe(true);
+  });
+
+  it("dynamically switches format SQL label and enablement between selection and whole document", async () => {
+    const { state, actions, open } = mountMenu();
+    await open();
+    expect(button("toolbar.formatSql").disabled).toBe(true);
+
+    await open(() => {
+      state.hasContent = true;
+      state.executableSql = "SELECT 1";
+    });
+    expect(button("toolbar.formatSql").disabled).toBe(false);
+    button("toolbar.formatSql").click();
+    expect(actions.formatCurrentSql).toHaveBeenCalledTimes(1);
+
+    await open(() => {
+      state.selectedSql = "SELECT 1";
+    });
+    expect(button("editor.contextMenu.formatSelectionSql").disabled).toBe(false);
+    button("editor.contextMenu.formatSelectionSql").click();
+    expect(actions.formatCurrentSql).toHaveBeenCalledTimes(2);
+
+    await open(() => {
+      state.readOnly = true;
+    });
+    expect(button("editor.contextMenu.formatSelectionSql").disabled).toBe(true);
   });
 
   it.each([

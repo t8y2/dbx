@@ -8816,7 +8816,8 @@ export const useConnectionStore = defineStore("connection", () => {
       } catch {
         result = await api.mongoFindDocuments(connectionId, database, collection, 0, 100, "{}");
       }
-      const fields = inferMongoCompletionFields(result.documents ?? []);
+      const sampled = result.extended_documents?.length === result.documents.length ? result.extended_documents : result.documents;
+      const fields = inferMongoCompletionFields(sampled ?? []);
       mongoCompletionFieldsCache.value[cacheKey] = fields;
       evictOldestCacheEntries(mongoCompletionFieldsCache.value, COMPLETION_CACHE_MAX);
       return fields;

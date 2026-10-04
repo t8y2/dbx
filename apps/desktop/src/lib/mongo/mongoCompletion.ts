@@ -2326,10 +2326,13 @@ function collectFieldTypes(value: unknown, prefix: string, out: Map<string, Set<
   }
 }
 
+const LEGACY_ISODATE_PATTERN = /^ISODate\("[^"]*"\)$/;
+
 function describeMongoValueType(value: unknown): string {
   if (value == null) return "null";
   if (Array.isArray(value)) return "array";
   if (value instanceof Date) return "date";
+  if (typeof value === "string" && LEGACY_ISODATE_PATTERN.test(value)) return "date";
   return mongoExtendedJsonValueType(value) ?? (typeof value === "object" ? "object" : typeof value);
 }
 

@@ -1779,6 +1779,35 @@ test("treats extended JSON wrappers as scalars, not subdocuments", () => {
   assert.ok(inferred.find((field) => field.name === "profile.email" && field.type === "string"));
 });
 
+test("infers BSON types from extended JSON values and legacy ISODate strings", () => {
+  const inferred = inferMongoCompletionFields([
+    {
+      createdAt: { $date: "2026-01-01T00:00:00Z" },
+      ref: { $oid: "65f0c0ffee0000000000abcd" },
+      price: { $numberDecimal: "1.5" },
+    },
+  ]);
+
+  for (const phantom of ["createdAt.$date", "ref.$oid", "price.$numberDecimal"]) {
+    assert.equal(
+      inferred.some((field) => field.name === phantom),
+      false,
+      phantom,
+    );
+  }
+
+  assert.equal(inferred.find((field) => field.name === "createdAt")?.type, "date");
+  assert.equal(inferred.find((field) => field.name === "ref")?.type, "objectId");
+  assert.equal(inferred.find((field) => field.name === "price")?.type, "decimal128");
+
+  const legacyInferred = inferMongoCompletionFields([
+    {
+      createdAt: 'ISODate("2026-01-01T00:00:00Z")',
+    },
+  ]);
+  assert.equal(legacyInferred.find((field) => field.name === "createdAt")?.type, "date");
+});
+
 test("infers dotted MongoDB fields from sampled documents", () => {
   const inferred = inferMongoCompletionFields([
     { _id: "1", profile: { email: "a@example.com" }, tags: ["a"] },

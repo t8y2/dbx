@@ -430,10 +430,10 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
   // Top-level snippets belong at the start of a command. Inside an argument list — of a method
   // this engine does not model (`limit(`, `drop(`, `renameCollection(`, `runCommand({`, …) or after a
   // `use` — they are noise: `db.collection.find` is not something you can type there.
-  if (!call) return isInsideCallArguments(beforeCursor) || isAfterUseKeyword(beforeCursor) || isAfterShowKeyword(beforeCursor) ? at("none") : at("root");
+  if (!call) return isInsideCallArguments(beforeCursor) || isAfterUseKeyword(beforeCursor) || isAfterShowKeyword(beforeCursor) || isAfterCallResultDot(beforeCursor) ? at("none") : at("root");
 
   const scan = scanMongoCallArguments(text, call.openParenIndex + 1, safeCursor);
-  if (!scan) return isInsideCallArguments(beforeCursor) || isAfterUseKeyword(beforeCursor) || isAfterShowKeyword(beforeCursor) ? at("none") : at("root");
+  if (!scan) return isInsideCallArguments(beforeCursor) || isAfterUseKeyword(beforeCursor) || isAfterShowKeyword(beforeCursor) || isAfterCallResultDot(beforeCursor) ? at("none") : at("root");
 
   const classified = classifyCursorInCall(call.method, scan);
   const variables = classified.mode === "fieldRef" || classified.mode === "expression" ? collectScopeVariables(scan) : undefined;
@@ -593,7 +593,10 @@ export function shouldAutoOpenMongoCompletion(text: string, cursor: number): boo
   if (text.slice(0, cursor).endsWith("db.")) return true;
   // `use ` and `show ` name a database or subcommand next; open the list as soon as the space is typed.
   if (previousChar === " " && (matchUseDatabasePrefix(text.slice(0, cursor)) || matchShowSubcommandPrefix(text.slice(0, cursor)))) return true;
-  if (previousChar === "$" || previousChar === "." || previousChar === '"' || previousChar === "'") return true;
+  if (previousChar === ".") {
+    return getMongoCompletionContext(text, cursor).mode !== "none";
+  }
+  if (previousChar === "$" || previousChar === '"' || previousChar === "'") return true;
   if (/[{,[:]/.test(previousChar) || /[{,[:]\s+$/.test(text.slice(0, cursor))) {
     return getMongoCompletionContext(text, cursor).mode !== "none";
   }
@@ -2151,6 +2154,15 @@ function isAfterUseKeyword(beforeCursor: string): boolean {
 function isAfterShowKeyword(beforeCursor: string): boolean {
   const currentLine = maskMongoLiterals(beforeCursor).split("\n").pop() ?? "";
   return /(?:^|[\s;])show\s+[\w$-]*(?:\s+[\w$-]*)*$/i.test(currentLine);
+}
+
+/** After a closing parenthesis and a dot on a call chain that is not a modeled cursor chain. */
+function isAfterCallResultDot(beforeCursor: string): boolean {
+  const masked = maskMongoLiterals(beforeCursor);
+  if (!/\)\s*\.\s*[\w$-]*$/.test(masked)) return false;
+  if (/(?:getCollection|getSiblingDB)\s*\([^()]*\)\s*\.\s*[\w$-]*$/.test(masked)) return false;
+  const cursorChain = matchCursorMethodDot(beforeCursor);
+  return !cursorChain || cursorChain.terminal === true;
 }
 
 /** Blank out string/comment CONTENT (preserving length, so offsets stay valid) before pattern matching. */

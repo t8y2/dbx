@@ -13,6 +13,7 @@ import { copyToClipboard } from "@/lib/common/clipboard";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { joinExportedDdls } from "@/lib/export/ddlExport";
+import { promptExportSavePath } from "@/lib/export/exportPath";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { sidebarStructureExportTargets, sidebarTableDataExportTargets } from "@/lib/sidebar/sidebarExportRuntime";
 import { fetchTableDataForExport } from "@/lib/table/tableDataExport";
@@ -111,11 +112,11 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
 
   async function saveFileContent(content: string, defaultFileName: string, filterName: string, filterExt: string) {
     if (isTauriRuntime()) {
-      const { save } = await import("@tauri-apps/plugin-dialog");
       const { writeTextFile } = await import("@tauri-apps/plugin-fs");
-      const path = await save({
-        defaultPath: defaultFileName,
+      const path = await promptExportSavePath({
+        defaultFileName,
         filters: [{ name: filterName, extensions: [filterExt] }],
+        preferredPath: settingsStore.editorSettings.preferredExportPath,
       });
       if (path) await writeTextFile(path, content);
       return;
@@ -337,10 +338,10 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
       return outputDirectory ? joinExportFilePath(outputDirectory, fileName) : fileName;
     }
     if (isTauriRuntime()) {
-      const { save } = await import("@tauri-apps/plugin-dialog");
-      const path = await save({
-        defaultPath: fileName,
+      const path = await promptExportSavePath({
+        defaultFileName: fileName,
         filters: [{ name: exportFilterName(format), extensions: [format === "bson.gz" ? "gz" : format] }],
+        preferredPath: settingsStore.editorSettings.preferredExportPath,
       });
       return path ? String(path) : null;
     }

@@ -1,5 +1,6 @@
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { appendDebugLog, getBrowserMemorySnapshot, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
+import { promptExportSavePath } from "./exportPath";
 
 export async function saveTextFile(content: string, defaultFileName: string, filterName: string, filterExt: string, diagnostics: { exportId?: string; operation?: string } = {}): Promise<boolean> {
   const logSaveStage = (stage: string, details: Record<string, unknown> = {}) => {
@@ -16,10 +17,9 @@ export async function saveTextFile(content: string, defaultFileName: string, fil
 
   logSaveStage("start");
   if (isTauriRuntime()) {
-    const { save } = await import("@tauri-apps/plugin-dialog");
     const { writeTextFile } = await import("@tauri-apps/plugin-fs");
-    const path = await save({
-      defaultPath: defaultFileName,
+    const path = await promptExportSavePath({
+      defaultFileName,
       filters: [{ name: filterName, extensions: [filterExt] }],
     });
     logSaveStage("dialog-result", { selected: !!path });

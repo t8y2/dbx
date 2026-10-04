@@ -1050,6 +1050,22 @@ describe("normalizeEditorSettings - sidebarPinDefaultDatabase", () => {
   });
 });
 
+describe("normalizeEditorSettings - preferredExportPath", () => {
+  it("defaults preferredExportPath to empty string", () => {
+    expect(normalizeEditorSettings({}).preferredExportPath).toBe("");
+  });
+
+  it("trims and preserves valid string paths", () => {
+    expect(normalizeEditorSettings({ preferredExportPath: "  /home/user/exports  " }).preferredExportPath).toBe("/home/user/exports");
+  });
+
+  it("falls back to default for non-string values", () => {
+    expect(normalizeEditorSettings({ preferredExportPath: null } as any).preferredExportPath).toBe("");
+    expect(normalizeEditorSettings({ preferredExportPath: undefined } as any).preferredExportPath).toBe("");
+    expect(normalizeEditorSettings({ preferredExportPath: 123 } as any).preferredExportPath).toBe("");
+  });
+});
+
 // --- Helpers for Pinia store tests ---
 
 function makeTestConfig(overrides: Partial<AiConfigItem> & { id: string }): AiConfigItem {
@@ -1706,6 +1722,20 @@ describe("settingsStore persisted settings initialization", () => {
     expect(store.editorSettings.sidebarShowConnectionNotes).toBe(true);
     expect(saveEditorSettings).toHaveBeenCalledTimes(2);
     expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ sidebarShowConnectionNotes: true }));
+  });
+
+  it("persists preferredExportPath update", async () => {
+    const loadEditorSettings = vi.fn().mockResolvedValue({ preferredExportPath: "" });
+    const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+
+    await store.updateEditorSettingsAndPersist({ preferredExportPath: "  /custom/export/dir  " });
+    expect(store.editorSettings.preferredExportPath).toBe("/custom/export/dir");
+    expect(saveEditorSettings).toHaveBeenCalledWith(expect.objectContaining({ preferredExportPath: "/custom/export/dir" }));
   });
 });
 

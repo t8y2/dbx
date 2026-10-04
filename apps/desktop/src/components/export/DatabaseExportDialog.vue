@@ -15,6 +15,7 @@ import { databaseOptionsForConnection, fetchNamespaceOptionsForConnection } from
 import { buildAllDatabaseExportPlan, filterExportableSchemas, generateDatabaseExportId, runDatabaseExportUntilTerminal, runWithDatabaseBackupSnapshot, shouldUseDatabaseBackupSnapshot, type AllDatabaseExportPlanItem } from "@/lib/export/databaseExport";
 import { buildSelectedTablesPayload, isDatabaseExportTableSelectionValid } from "@/lib/export/databaseExportSelection";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { promptExportSavePath } from "@/lib/export/exportPath";
 import { useToast } from "@/composables/useToast";
 import { Input } from "@/components/ui/input";
 import { Download, Square, CheckSquare, Search, X, Loader2, Wrench } from "@lucide/vue";
@@ -339,10 +340,9 @@ async function startExport() {
 
   if (isTauriRuntime()) {
     try {
-      const { save } = await import("@tauri-apps/plugin-dialog");
       const safeName = sanitizeFileName(database.value || "database");
-      const path = await save({
-        defaultPath: `${safeName}.${splitSqlOutput.value ? "zip" : "sql"}`,
+      const path = await promptExportSavePath({
+        defaultFileName: `${safeName}.${splitSqlOutput.value ? "zip" : "sql"}`,
         filters: [{ name: splitSqlOutput.value ? "ZIP" : "SQL", extensions: [splitSqlOutput.value ? "zip" : "sql"] }],
       });
       if (!path) return;

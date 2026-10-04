@@ -5,6 +5,7 @@ import { Check, Download, RefreshCw, Undo2 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { promptExportSavePath } from "@/lib/export/exportPath";
 import { useToast } from "@/composables/useToast";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { formatSelectionAggregate } from "@/lib/dataGrid/gridSelection";
@@ -230,8 +231,7 @@ async function exportMergedRows(scope: "page" | "all"): Promise<void> {
   try {
     let outputPath = exportFileName(scope);
     if (isTauriRuntime()) {
-      const { save } = await import("@tauri-apps/plugin-dialog");
-      const path = await save({ defaultPath: outputPath, filters: [{ name: "Excel", extensions: ["xlsx"] }] });
+      const path = await promptExportSavePath({ defaultFileName: outputPath, filters: [{ name: "Excel", extensions: ["xlsx"] }] });
       if (!path) return;
       outputPath = String(path);
     }

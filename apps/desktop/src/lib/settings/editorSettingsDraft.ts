@@ -133,6 +133,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "redisKeyTemplates",
   "redisDatabaseDisplayLimit",
   "exportBatchSize",
+  "preferredExportPath",
   "csvQuoteMode",
   "csvNullMode",
   "exportRowLimitEnabled",

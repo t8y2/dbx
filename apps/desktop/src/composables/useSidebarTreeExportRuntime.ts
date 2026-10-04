@@ -13,7 +13,7 @@ import { copyToClipboard } from "@/lib/common/clipboard";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { joinExportedDdls } from "@/lib/export/ddlExport";
-import { promptExportSavePath } from "@/lib/export/exportPath";
+import { autoRevealExportedPathIfConfigured, promptExportSavePath } from "@/lib/export/exportPath";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { sidebarStructureExportTargets, sidebarTableDataExportTargets } from "@/lib/sidebar/sidebarExportRuntime";
 import { fetchTableDataForExport } from "@/lib/table/tableDataExport";
@@ -386,6 +386,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
       if (!outputPath) return false;
       await api.exportQueryResultJson(outputPath, result.columns, result.rows);
       if (!suppressDoneToast) toast(t("grid.exported"));
+      void autoRevealExportedPathIfConfigured(outputPath);
       return true;
     } catch (error: any) {
       toast(t("grid.exportFailed", { message: translateBackendError(t, error) }), 5000);

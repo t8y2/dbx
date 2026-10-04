@@ -106,3 +106,36 @@ export async function promptExportSavePath(options: { defaultFileName: string; f
   }
   return null;
 }
+
+let lastRevealedPath = "";
+let lastRevealedTime = 0;
+
+export async function revealExportedPath(path: string): Promise<void> {
+  const trimmed = path?.trim();
+  if (!trimmed) return;
+  const now = Date.now();
+  if (trimmed === lastRevealedPath && now - lastRevealedTime < 2000) {
+    return;
+  }
+  lastRevealedPath = trimmed;
+  lastRevealedTime = now;
+  const { revealPathInFileManager } = await import("@/lib/backend/api");
+  await revealPathInFileManager(trimmed);
+}
+
+export async function autoRevealExportedPathIfConfigured(path: string | null | undefined): Promise<boolean> {
+  const trimmed = path?.trim();
+  if (!trimmed) return false;
+  const { isTauriRuntime } = await import("@/lib/backend/tauriRuntime");
+  if (!isTauriRuntime()) return false;
+  try {
+    const { getActivePinia } = await import("pinia");
+    if (!getActivePinia()) return false;
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    if (!useSettingsStore().editorSettings.autoOpenExportFolder) return false;
+    await revealExportedPath(trimmed);
+    return true;
+  } catch {
+    return false;
+  }
+}

@@ -9,6 +9,11 @@ vi.mock("@/lib/backend/api", () => ({
   cancelTableExport: vi.fn(),
 }));
 
+const mockAutoRevealExportedPathIfConfigured = vi.fn();
+vi.mock("@/lib/export/exportPath", () => ({
+  autoRevealExportedPathIfConfigured: (...args: unknown[]) => mockAutoRevealExportedPathIfConfigured(...args),
+}));
+
 import * as api from "@/lib/backend/api";
 import {
   formatDataTransferDuration,
@@ -485,5 +490,46 @@ describe("formatDataTransferDuration", () => {
     expect(formatDataTransferDuration(3_599_999)).toBe("59m 59s");
     expect(formatDataTransferDuration(3_600_000)).toBe("1h 0m 0s");
     expect(formatDataTransferDuration(3_661_000)).toBe("1h 1m 1s");
+  });
+});
+
+describe("auto-revealing export directory on completion", () => {
+  it("triggers auto-reveal when manual export task succeeds with a file path", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDatabaseExportTask("db-export-1", "mydb", "/tmp/backup.sql", "manual");
+    tracker.updateDatabaseExportTask(task.exportId, {
+      exportId: task.exportId,
+      status: "Done",
+      rowsExported: 100,
+      totalRows: 100,
+    } as any);
+
+    expect(mockAutoRevealExportedPathIfConfigured).toHaveBeenCalledTimes(1);
+    expect(mockAutoRevealExportedPathIfConfigured).toHaveBeenCalledWith("/tmp/backup.sql");
+  });
+
+  it("does not trigger auto-reveal for scheduled exports", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDatabaseExportTask("db-export-sched", "mydb", "/tmp/backup.sql", "scheduled");
+    tracker.updateDatabaseExportTask(task.exportId, {
+      exportId: task.exportId,
+      status: "Done",
+      rowsExported: 100,
+      totalRows: 100,
+    } as any);
+
+    expect(mockAutoRevealExportedPathIfConfigured).not.toHaveBeenCalled();
+  });
+
+  it("does not trigger auto-reveal when export ends with error or cancellation", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDatabaseExportTask("db-export-err", "mydb", "/tmp/backup.sql", "manual");
+    tracker.updateDatabaseExportTask(task.exportId, {
+      exportId: task.exportId,
+      status: "Error",
+      errorMessage: "disk full",
+    } as any);
+
+    expect(mockAutoRevealExportedPathIfConfigured).not.toHaveBeenCalled();
   });
 });

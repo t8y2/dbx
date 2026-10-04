@@ -8640,6 +8640,8 @@ export default {
     preferredExportPathPlaceholder: "Not set (use last export path)",
     preferredExportPathChoose: "Choose preferred export directory",
     preferredExportPathClear: "Clear preferred export path",
+    autoOpenExportFolder: "Auto-open folder after export",
+    autoOpenExportFolderDescription: "Automatically reveal and open the containing folder in the file manager after data export succeeds.",
     exportSection: "Export",
     csvQuoteMode: "CSV field quotes",
     csvQuoteModeDescription: "Choose how CSV fields use double quotes.",

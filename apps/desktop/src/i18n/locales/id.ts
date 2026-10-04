@@ -8422,6 +8422,8 @@ export default withEnglishFallback({
     preferredExportPathPlaceholder: "Belum diatur (gunakan jalur ekspor terakhir)",
     preferredExportPathChoose: "Pilih direktori ekspor pilihan",
     preferredExportPathClear: "Hapus jalur ekspor pilihan",
+    autoOpenExportFolder: "Buka folder otomatis setelah ekspor",
+    autoOpenExportFolderDescription: "Buka dan tampilkan folder yang berisi berkas hasil ekspor secara otomatis di pengelola berkas setelah ekspor data berhasil.",
     exportSection: "Ekspor",
     csvQuoteMode: "Tanda kutip bidang CSV",
     csvQuoteModeDescription: "Pilih bagaimana bidang CSV menggunakan tanda kutip ganda.",

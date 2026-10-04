@@ -7691,6 +7691,8 @@ export default withEnglishFallback({
     preferredExportPathPlaceholder: "Non impostato (usa l'ultimo percorso)",
     preferredExportPathChoose: "Scegli la directory di esportazione preferita",
     preferredExportPathClear: "Cancella il percorso di esportazione preferito",
+    autoOpenExportFolder: "Apri cartella automaticamente dopo l'esportazione",
+    autoOpenExportFolderDescription: "Apre e mostra automaticamente la cartella contenente il file esportato nel file manager dopo il completamento dell'esportazione.",
     exportSection: "Esportazione",
     csvQuoteMode: "Virgolette campi CSV",
     csvQuoteModeDescription: "Scegli come usare le virgolette doppie nei campi CSV.",

@@ -7600,6 +7600,8 @@ export default withEnglishFallback({
     preferredExportPathPlaceholder: "未設定（自動使用上次匯出路徑）",
     preferredExportPathChoose: "選擇首選匯出目錄",
     preferredExportPathClear: "清除首選匯出路徑",
+    autoOpenExportFolder: "匯出後自動開啟所在資料夾",
+    autoOpenExportFolderDescription: "資料匯出成功後，自動在系統檔案管理器中開啟並定位匯出檔案所在的資料夾。",
     shortcutUppercaseSelection: "選取內容轉為大寫",
     shortcutLowercaseSelection: "選取內容轉為小寫",
     shortcutToggleCaseSelection: "切換選取內容大小寫",

@@ -8943,6 +8943,8 @@ export default withEnglishFallback({
     preferredExportPathPlaceholder: "Не задан (использовать последний путь)",
     preferredExportPathChoose: "Выбрать предпочтительный каталог экспорта",
     preferredExportPathClear: "Очистить предпочтительный путь экспорта",
+    autoOpenExportFolder: "Автоматически открывать папку после экспорта",
+    autoOpenExportFolderDescription: "Автоматически открывать папку с экспортированным файлом в файловом менеджере после завершения экспорта данных.",
     exportSection: "Экспорт",
     csvQuoteMode: "Кавычки в полях CSV",
     csvQuoteModeDescription: "Выберите, как поля CSV используют двойные кавычки.",

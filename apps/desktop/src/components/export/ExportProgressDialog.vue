@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Loader2, CheckCircle2, XCircle, AlertCircle, FolderOpen, Minimize2, Wrench, X } from "@lucide/vue";
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
-import * as api from "@/lib/backend/api";
+import { autoRevealExportedPathIfConfigured, revealExportedPath } from "@/lib/export/exportPath";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { formatDataTransferDuration } from "@/composables/useExportTracker";
 import { isQueryTimeoutErrorMessage } from "@/lib/sql/queryError";
@@ -86,13 +86,22 @@ async function revealExportFile() {
   if (!props.filePath || isRevealing.value) return;
   isRevealing.value = true;
   try {
-    await api.revealPathInFileManager(props.filePath);
+    await revealExportedPath(props.filePath);
   } catch (error) {
     toast(t("exportProgress.openFolderFailed", { message: translateBackendError(t, error) }), 5000);
   } finally {
     isRevealing.value = false;
   }
 }
+
+watch(
+  () => props.status,
+  (status, oldStatus) => {
+    if (status === "Done" && oldStatus !== "Done" && props.filePath) {
+      void autoRevealExportedPathIfConfigured(props.filePath);
+    }
+  },
+);
 </script>
 
 <template>

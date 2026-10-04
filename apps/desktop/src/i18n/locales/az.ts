@@ -7697,6 +7697,8 @@ export default withEnglishFallback({
     preferredExportPathPlaceholder: "Təyin edilməyib (son ixrac yolunu istifadə edin)",
     preferredExportPathChoose: "Üstünlük verilən ixrac qovluğunu seçin",
     preferredExportPathClear: "Üstünlük verilən ixrac yolunu təmizləyin",
+    autoOpenExportFolder: "İxracdan sonra qovluğu avtomatik aç",
+    autoOpenExportFolderDescription: "Məlumat ixracı uğurla başa çatdıqda fayl menecerində ixrac edilən faylın qovluğunu avtomatik açır.",
     exportSection: "İxrac",
     csvQuoteMode: "CSV sahələrinin dırnaqları",
     csvQuoteModeDescription: "CSV sahələrində qoşa dırnaqların necə istifadə olunacağını seçin.",

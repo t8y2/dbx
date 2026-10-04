@@ -7932,6 +7932,8 @@ export default withEnglishFallback({
     preferredExportPathPlaceholder: "No establecido (usar última ruta)",
     preferredExportPathChoose: "Elegir directorio de exportación preferido",
     preferredExportPathClear: "Borrar ruta de exportación preferida",
+    autoOpenExportFolder: "Abrir carpeta automáticamente después de exportar",
+    autoOpenExportFolderDescription: "Abre y muestra automáticamente la carpeta que contiene el archivo exportado en el administrador de archivos tras completarse la exportación.",
     exportSection: "Exportar",
     csvQuoteMode: "Comillas de campos CSV",
     csvQuoteModeDescription: "Elige cómo usar comillas dobles en los campos CSV.",

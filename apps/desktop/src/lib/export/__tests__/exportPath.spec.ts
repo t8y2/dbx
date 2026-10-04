@@ -1,17 +1,48 @@
 // @vitest-environment happy-dom
 
+import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { clearLastExportDirectory, getLastExportDirectory, getParentDirectory, isAbsolutePath, joinExportPath, LAST_EXPORT_DIRECTORY_STORAGE_KEY, promptExportSavePath, rememberLastExportPath, resolveExportDefaultPath, setLastExportDirectory } from "../exportPath";
+import {
+  autoRevealExportedPathIfConfigured,
+  clearLastExportDirectory,
+  getLastExportDirectory,
+  getParentDirectory,
+  isAbsolutePath,
+  joinExportPath,
+  LAST_EXPORT_DIRECTORY_STORAGE_KEY,
+  promptExportSavePath,
+  rememberLastExportPath,
+  resolveExportDefaultPath,
+  revealExportedPath,
+  setLastExportDirectory,
+} from "../exportPath";
+import { useSettingsStore } from "@/stores/settingsStore";
 
 const mockSave = vi.fn();
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   save: (args: unknown) => mockSave(args),
 }));
 
+const mockRevealPathInFileManager = vi.fn();
+vi.mock("@/lib/backend/api", async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return {
+    ...actual,
+    revealPathInFileManager: (...args: unknown[]) => mockRevealPathInFileManager(...args),
+  };
+});
+
+const mockIsTauriRuntime = vi.fn(() => true);
+vi.mock("@/lib/backend/tauriRuntime", () => ({
+  isTauriRuntime: () => mockIsTauriRuntime(),
+}));
+
 describe("exportPath", () => {
   beforeEach(() => {
     localStorage.clear();
     mockSave.mockReset();
+    mockRevealPathInFileManager.mockReset();
+    mockIsTauriRuntime.mockReturnValue(true);
   });
 
   describe("isAbsolutePath", () => {
@@ -161,6 +192,85 @@ describe("exportPath", () => {
 
       expect(result).toBeNull();
       expect(getLastExportDirectory()).toBe("/existing/dir");
+    });
+  });
+
+  describe("revealExportedPath", () => {
+    beforeEach(() => {
+      mockRevealPathInFileManager.mockReset();
+    });
+
+    it("ignores empty or whitespace path", async () => {
+      await revealExportedPath("");
+      await revealExportedPath("   ");
+      expect(mockRevealPathInFileManager).not.toHaveBeenCalled();
+    });
+
+    it("calls revealPathInFileManager and deduplicates rapid repeated calls within 2000ms", async () => {
+      let currentTime = 10_000;
+      const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => currentTime);
+
+      await revealExportedPath("  /path/to/exported1.csv  ");
+      expect(mockRevealPathInFileManager).toHaveBeenCalledTimes(1);
+      expect(mockRevealPathInFileManager).toHaveBeenCalledWith("/path/to/exported1.csv");
+
+      // Same path within 2000ms should be skipped
+      currentTime += 1000;
+      await revealExportedPath("/path/to/exported1.csv");
+      expect(mockRevealPathInFileManager).toHaveBeenCalledTimes(1);
+
+      // Different path should be revealed immediately
+      currentTime += 100;
+      await revealExportedPath("/path/to/exported2.csv");
+      expect(mockRevealPathInFileManager).toHaveBeenCalledTimes(2);
+      expect(mockRevealPathInFileManager).toHaveBeenLastCalledWith("/path/to/exported2.csv");
+
+      // Same path after 2000ms should be revealed
+      currentTime += 2001;
+      await revealExportedPath("/path/to/exported2.csv");
+      expect(mockRevealPathInFileManager).toHaveBeenCalledTimes(3);
+
+      nowSpy.mockRestore();
+    });
+  });
+
+  describe("autoRevealExportedPathIfConfigured", () => {
+    beforeEach(() => {
+      setActivePinia(createPinia());
+      mockRevealPathInFileManager.mockReset();
+      mockIsTauriRuntime.mockReturnValue(true);
+    });
+
+    it("returns false for empty or null paths", async () => {
+      expect(await autoRevealExportedPathIfConfigured(null)).toBe(false);
+      expect(await autoRevealExportedPathIfConfigured("")).toBe(false);
+      expect(await autoRevealExportedPathIfConfigured("   ")).toBe(false);
+      expect(mockRevealPathInFileManager).not.toHaveBeenCalled();
+    });
+
+    it("returns false when not running in Tauri", async () => {
+      mockIsTauriRuntime.mockReturnValue(false);
+      const settings = useSettingsStore();
+      settings.editorSettings.autoOpenExportFolder = true;
+
+      expect(await autoRevealExportedPathIfConfigured("/path/to/file.csv")).toBe(false);
+      expect(mockRevealPathInFileManager).not.toHaveBeenCalled();
+    });
+
+    it("returns false when autoOpenExportFolder setting is disabled", async () => {
+      const settings = useSettingsStore();
+      settings.editorSettings.autoOpenExportFolder = false;
+
+      expect(await autoRevealExportedPathIfConfigured("/path/to/file.csv")).toBe(false);
+      expect(mockRevealPathInFileManager).not.toHaveBeenCalled();
+    });
+
+    it("returns true and reveals path when setting is enabled in Tauri", async () => {
+      const settings = useSettingsStore();
+      settings.editorSettings.autoOpenExportFolder = true;
+
+      expect(await autoRevealExportedPathIfConfigured("/path/to/file_auto.csv")).toBe(true);
+      expect(mockRevealPathInFileManager).toHaveBeenCalledWith("/path/to/file_auto.csv");
     });
   });
 });

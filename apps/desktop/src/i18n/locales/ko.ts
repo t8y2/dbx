@@ -7512,6 +7512,8 @@ export default withEnglishFallback({
     preferredExportPathPlaceholder: "설정되지 않음 (마지막 내보내기 경로 사용)",
     preferredExportPathChoose: "기본 내보내기 디렉터리 선택",
     preferredExportPathClear: "기본 내보내기 경로 지우기",
+    autoOpenExportFolder: "내보내기 후 폴더 자동 열기",
+    autoOpenExportFolderDescription: "데이터 내보내기가 완료된 후 파일 관리자에서 저장된 폴더를 자동으로 엽니다.",
     exportSection: "내보내기",
     performanceSection: "성능",
     shortcutExecuteSql: "SQL 실행",

@@ -7599,6 +7599,8 @@ export default withEnglishFallback({
     preferredExportPathPlaceholder: "Ayarlanmadı (son dışa aktarma yolunu kullan)",
     preferredExportPathChoose: "Tercih edilen dışa aktarma dizinini seçin",
     preferredExportPathClear: "Tercih edilen dışa aktarma yolunu temizle",
+    autoOpenExportFolder: "Dışa aktardıktan sonra klasörü otomatik aç",
+    autoOpenExportFolderDescription: "Veri dışa aktarımı başarılı olduğunda dosya yöneticisinde dışa aktarılan dosyanın klasörünü otomatik olarak açar.",
     exportSection: "Dışa Aktar",
     csvQuoteMode: "CSV alan tırnakları",
     csvQuoteModeDescription: "CSV alanlarının çift tırnağı nasıl kullanacağını seçin.",

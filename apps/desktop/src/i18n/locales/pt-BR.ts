@@ -7692,6 +7692,8 @@ export default withEnglishFallback({
     preferredExportPathPlaceholder: "Não definido (usar último caminho)",
     preferredExportPathChoose: "Escolher diretório de exportação preferencial",
     preferredExportPathClear: "Limpar caminho de exportação preferencial",
+    autoOpenExportFolder: "Abrir pasta automaticamente após exportar",
+    autoOpenExportFolderDescription: "Abre e revela automaticamente a pasta que contém o arquivo exportado no gerenciador de arquivos após a conclusão da exportação.",
     exportSection: "Exportar",
     csvQuoteMode: "Aspas dos campos CSV",
     csvQuoteModeDescription: "Escolha como usar aspas duplas nos campos CSV.",

@@ -2155,7 +2155,7 @@ async fn try_delta_artifact(
         &delta_path,
         delta.size,
         Some(delta.sha256.as_str()),
-        None,
+        Some(CacheIdentity::Driver { db_type, version: &cache_buster_version }),
         Some(db_type),
         current,
         total_drivers,
@@ -5288,6 +5288,77 @@ mod agent_registry_install_tests {
 
         assert!(cached_download_is_valid(&manager, &cache_path, 4, Some(&expected_sha256)));
         assert!(cache_path.exists());
+    }
+
+    #[tokio::test]
+    async fn successful_delta_download_is_removed_by_driver_cache_cleanup() {
+        let manager = test_manager("delta-cache-cleanup");
+        let db_type = "demo";
+        let base_version = "0.1.0";
+        let driver_version = "0.2.0";
+        let delta_url = "https://example.invalid/demo.delta";
+        let rebuilt = b"reconstructed driver package";
+        let delta_bytes = zstd::stream::encode_all(rebuilt.as_slice(), 3).unwrap();
+        let delta_sha256 = format!("{:x}", Sha256::digest(&delta_bytes));
+        let artifact_sha256 = format!("{:x}", Sha256::digest(rebuilt));
+
+        let base_path = manager.download_cache_dir().join(crate::driver_delta::delta_base_file_name(
+            db_type,
+            base_version,
+            "base.tar.zst",
+        ));
+        std::fs::create_dir_all(base_path.parent().unwrap()).unwrap();
+        std::fs::write(&base_path, b"unused base for a standalone zstd frame").unwrap();
+
+        let dest = manager.driver_dir(db_type).join(".agent.tar.zst");
+        let delta_path = dest.parent().unwrap().join("..agent.tar.zst.delta");
+        let cache_version = format!("{driver_version}-from-{base_version}");
+        let cache_path = cached_download_path(
+            &manager,
+            delta_url,
+            delta_bytes.len() as u64,
+            Some(&delta_sha256),
+            Some(CacheIdentity::Driver { db_type, version: &cache_version }),
+            &delta_path,
+        );
+        std::fs::write(&cache_path, &delta_bytes).unwrap();
+
+        let artifact = ArtifactInfo {
+            url: "https://example.invalid/demo.tar.zst".to_string(),
+            sha256: Some(artifact_sha256),
+            size: rebuilt.len() as u64,
+            format: Some(ArtifactFormat::TarZstd),
+            delta: None,
+        };
+        let delta = crate::agent_manager::DeltaInfo {
+            base_version: base_version.to_string(),
+            url: delta_url.to_string(),
+            sha256: delta_sha256,
+            size: delta_bytes.len() as u64,
+        };
+
+        try_delta_artifact(
+            &manager,
+            &|_| {},
+            DownloadSource::Cnb,
+            &artifact,
+            &delta,
+            &base_path,
+            db_type,
+            driver_version,
+            &dest,
+            None,
+            None,
+            &[],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(std::fs::read(&dest).unwrap(), rebuilt);
+        assert!(cache_path.exists());
+        cleanup_driver_download_cache_after_success(&manager, db_type);
+        assert!(!cache_path.exists());
+        assert!(base_path.exists());
     }
 
     #[tokio::test]

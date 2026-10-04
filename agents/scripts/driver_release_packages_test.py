@@ -600,6 +600,12 @@ class DriverDeltaPatchTest(unittest.TestCase):
             self.assertEqual(removed, [raw])
             self.assertTrue(delta.is_file())
 
+    def test_release_uploads_delta_files_to_r2(self) -> None:
+        workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/agents-release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('--include "dbx-agent-*.tar.zst.delta"', workflow)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1847,6 +1847,7 @@ jobs:
             --recursive \
             --exclude "*" \
             --include "dbx-agent-*.tar.zst" \
+            --include "dbx-agent-*.tar.zst.delta" \
             --endpoint-url "$R2_ENDPOINT"
           echo "Uploaded single-driver packages"
 

@@ -23,6 +23,9 @@ import {
   type MongoOperatorSpec,
 } from "@/lib/mongo/mongoCompletionTables";
 
+/** Snippets callable with `new` — every shell constructor accepts it (bare `Date(` is the only rejected spelling); literals like `null` do not. */
+const NEW_CONSTRUCTIBLE_VALUE_SNIPPETS: readonly MongoOperatorSpec[] = VALUE_SNIPPETS.filter((spec) => spec.label === "new Date" || /^[A-Z]/.test(spec.label));
+
 /**
  * What the cursor may usefully be completed with. Each mode maps to exactly one
  * item source, so `buildMongoCompletionItemsFromContext` never has to re-derive
@@ -510,12 +513,9 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
       break;
     case "value":
       if (/^new\s+/i.test(prefix)) {
-        items = specItems(
-          VALUE_SNIPPETS.filter((spec) => spec.label === "new Date"),
-          prefix,
-          "value",
-          100,
-        );
+        // Match against what follows `new ` so `new O` still finds `ObjectId("…")`;
+        // the replacement range already covers the typed keyword via adjustValuePrefixForNew.
+        items = specItems(NEW_CONSTRUCTIBLE_VALUE_SNIPPETS, normalizeMongoKeyPrefix(prefix).replace(/^new\s+/i, ""), "value", 100);
         break;
       }
       // Shell constructors first; the extended JSON spellings need their own braces here.

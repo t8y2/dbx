@@ -2023,9 +2023,11 @@ test("replaces typed new keyword when completing new Date", () => {
   assert.equal(item1.apply, 'new Date("${date}")');
   const inserted1 = text1.slice(0, context1.from) + item1.apply + text1.slice(cursor1);
   assert.equal(inserted1, 'db.users.find({ name: new Date("${date}")');
+  // Every shell constructor accepts `new`, so matching the part after `new `
+  // keeps the other `…d…` constructors alongside `new Date`.
   assert.deepEqual(
     items1.map((candidate) => candidate.label),
-    ["new Date"],
+    ["ISODate", "ObjectId", "BinData", "new Date", "NumberDecimal", "UUID"],
   );
 
   // Bad case 2: cursor after `new ` (trailing space)
@@ -2040,10 +2042,25 @@ test("replaces typed new keyword when completing new Date", () => {
   assert.equal(item2.apply, 'new Date("${date}")');
   const inserted2 = text2.slice(0, context2.from) + item2.apply + text2.slice(cursor2);
   assert.equal(inserted2, 'db.users.find({ name: new Date("${date}")');
-  assert.deepEqual(
-    items2.map((candidate) => candidate.label),
-    ["new Date"],
-  );
+  const labels2 = items2.map((candidate) => candidate.label);
+  assert.ok(labels2.includes("new Date"));
+  assert.ok(labels2.includes("ObjectId"));
+  assert.ok(labels2.includes("NumberLong"));
+  assert.equal(labels2.includes("null"), false, "literals are not constructible");
+  assert.equal(labels2.includes("true"), false);
+  assert.equal(labels2.includes("false"), false);
+
+  // `new O` finds the other constructible constructors (mongosh BSON classes accept `new`)
+  const text2b = "db.users.find({ name: new O";
+  const cursor2b = text2b.length;
+  const context2b = getMongoCompletionContext(text2b, cursor2b);
+  const items2b = buildMongoCompletionItems(text2b, cursor2b, { fields });
+  const item2b = items2b.find((candidate) => candidate.label === "ObjectId");
+  assert.ok(item2b);
+  assert.equal(context2b.from, text2b.indexOf("new O"));
+  assert.equal(item2b.apply, 'ObjectId("${id}")');
+  const inserted2b = text2b.slice(0, context2b.from) + item2b.apply + text2b.slice(cursor2b);
+  assert.equal(inserted2b, 'db.users.find({ name: ObjectId("${id}")');
 
   // ValidFor regex allows typing after new in value mode
   const pattern = getMongoCompletionResultValidFor(context1);

@@ -205,6 +205,7 @@ describe("data grid icon-only toolbar tooltips", () => {
     await hover(button);
 
     expect(showsTooltip("Go to column")).toBe(true);
+    expect(visibleTooltipTexts().some((text) => text.includes("Go to column (") && text.includes("G)"))).toBe(true);
   });
 });
 

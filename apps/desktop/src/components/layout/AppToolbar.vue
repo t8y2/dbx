@@ -14,6 +14,7 @@ import { MAC_TRAFFIC_LIGHT_X, macTrafficLightInsetPaddingForScale, shouldReserve
 import { useToast } from "@/composables/useToast";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { isSystemAppThemeMode, type AppThemeMode } from "@/lib/app/appTheme";
+import { formatShortcutTooltip } from "@/lib/editor/shortcutDisplay";
 
 const GithubIcon = {
   render() {
@@ -96,6 +97,10 @@ const updateTooltip = computed(() => {
   if (props.hasUpdateAvailable && props.updateReadyToInstall) return t("updates.downloadedReady", { version: props.updateVersion ?? "" });
   return t("updates.check");
 });
+const sidebarExpandTooltip = computed(() => formatShortcutTooltip(t("sidebar.expand"), settingsStore.editorSettings.shortcuts.toggleSidebar));
+const newQueryTooltip = computed(() => formatShortcutTooltip(t("toolbar.newQuery"), settingsStore.editorSettings.shortcuts.newQuery));
+const aiTooltip = computed(() => formatShortcutTooltip("AI", settingsStore.editorSettings.shortcuts.toggleAiPanel));
+const settingsTooltip = computed(() => (props.hasMcpUpdateAvailable ? t("toolbar.mcpUpdateAvailable") : formatShortcutTooltip(t("settings.title"), settingsStore.editorSettings.shortcuts.openSettings)));
 
 const sqlLibrarySaveFeedbackActive = ref(false);
 const SQL_LIBRARY_BOOKMARK_PATH = "M10 2 L10 10 L13 7 L16 10 L16 2";
@@ -554,7 +559,7 @@ const toolbarStyle = computed(() => {
           <ChevronsRight class="h-4 w-4" />
         </Button>
       </TooltipTrigger>
-      <TooltipContent>{{ t("sidebar.expand") }}</TooltipContent>
+      <TooltipContent>{{ sidebarExpandTooltip }}</TooltipContent>
     </Tooltip>
     <Button variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('new-connection')">
       <span class="inline-flex items-center gap-1">
@@ -563,10 +568,15 @@ const toolbarStyle = computed(() => {
       </span>
     </Button>
 
-    <Button v-if="canNewQuery" variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('new-query')">
-      <FilePlus2 class="h-3.5 w-3.5" />
-      <span :class="toolbarTextLabelClass">{{ t("toolbar.newQuery") }}</span>
-    </Button>
+    <Tooltip v-if="canNewQuery">
+      <TooltipTrigger as-child>
+        <Button variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('new-query')">
+          <FilePlus2 class="h-3.5 w-3.5" />
+          <span :class="toolbarTextLabelClass">{{ t("toolbar.newQuery") }}</span>
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>{{ newQueryTooltip }}</TooltipContent>
+    </Tooltip>
 
     <template v-if="!toolbarCollapsed">
       <Button v-if="toolbarItems.dataTransfer" variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('open-transfer')" :disabled="!hasConnections">
@@ -746,7 +756,7 @@ const toolbarStyle = computed(() => {
             <span v-if="showAiPanel" class="toolbar-panel-status" aria-hidden="true" />
           </Button>
         </TooltipTrigger>
-        <TooltipContent>AI</TooltipContent>
+        <TooltipContent>{{ aiTooltip }}</TooltipContent>
       </Tooltip>
 
       <Tooltip v-if="toolbarItems.theme">
@@ -781,7 +791,7 @@ const toolbarStyle = computed(() => {
           <span v-if="hasMcpUpdateAvailable" class="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-red-500 ring-2 ring-background" :aria-label="t('toolbar.mcpUpdateAvailable')" :title="t('toolbar.mcpUpdateAvailable')" />
         </Button>
       </TooltipTrigger>
-      <TooltipContent>{{ hasMcpUpdateAvailable ? t("toolbar.mcpUpdateAvailable") : t("settings.title") }}</TooltipContent>
+      <TooltipContent>{{ settingsTooltip }}</TooltipContent>
     </Tooltip>
 
     <Tooltip v-if="showLogout">

@@ -246,4 +246,33 @@ describe("always-on-top button visibility", () => {
 
     unmount();
   });
+
+  it("renders shortcut hints in toolbar button tooltips", async () => {
+    const settingsStore = useSettingsStore();
+    settingsStore.updateEditorSettings({
+      shortcuts: {
+        ...settingsStore.editorSettings.shortcuts,
+        newQuery: "Mod+N",
+        toggleSidebar: "Mod+B",
+        openSettings: "Mod+,",
+        toggleAiPanel: "Mod+I",
+      },
+    });
+
+    const { host, unmount } = mount(AppToolbar, {
+      ...toolbarProps,
+      showSidebarExpand: true,
+      canNewQuery: true,
+    });
+    await settled();
+    await nextTick();
+
+    const tooltips = [...host.querySelectorAll(".app-toolbar span")].map((el) => el.textContent?.trim() ?? "");
+    expect(tooltips.some((text) => text.includes("toolbar.newQuery (") && text.includes("N)"))).toBe(true);
+    expect(tooltips.some((text) => text.includes("sidebar.expand (") && text.includes("B)"))).toBe(true);
+    expect(tooltips.some((text) => text.includes("settings.title (") && text.includes(","))).toBe(true);
+    expect(tooltips.some((text) => text.includes("AI (") && text.includes("I)"))).toBe(true);
+
+    unmount();
+  });
 });

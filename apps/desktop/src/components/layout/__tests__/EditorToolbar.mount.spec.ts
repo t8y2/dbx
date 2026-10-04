@@ -635,4 +635,63 @@ describe("EditorToolbar mount contract", () => {
     app.unmount();
     host.remove();
   });
+
+  it("renders shortcut hints on button hover tooltips", async () => {
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [
+      {
+        id: "conn-shortcut",
+        name: "test",
+        db_type: "mysql",
+        color: "",
+      } as never,
+    ];
+    const settingsStore = useSettingsStore();
+    settingsStore.updateEditorSettings({
+      shortcuts: {
+        ...settingsStore.editorSettings.shortcuts,
+        explainSql: "Mod+E",
+        formatSql: "Shift+Mod+F",
+        saveSql: "Mod+S",
+      },
+    });
+
+    const host = createHost();
+    const app = createApp(EditorToolbar, {
+      activeTab: {
+        id: "tab-shortcut",
+        title: "SQL",
+        connectionId: "conn-shortcut",
+        sql: "SELECT 1",
+        mode: "query",
+        isExecuting: false,
+        isCancelling: false,
+        isExplaining: false,
+      },
+      activeConnection: connectionStore.getConfig("conn-shortcut"),
+      executableSql: "SELECT 1",
+      explainMode: "explain",
+      blockDangerousRedisCommands: false,
+      sqlKeywordCase: "preserve",
+      databaseRequiredSignal: 0,
+      autoCommit: true,
+      txnSessionId: undefined,
+      txnAutoRolledBack: false,
+      txnPossiblyDirty: false,
+      stickyProvenReadOnlyState: false,
+    });
+    app.use(pinia);
+    app.use(i18n);
+    app.mount(host);
+    await nextTick();
+    await nextTick();
+
+    const tooltips = [...host.querySelectorAll(".app-editor-toolbar span")].map((el) => el.textContent?.trim() ?? "");
+    expect(tooltips.some((text) => text.includes("toolbar.explainPlan (") && text.includes("E)"))).toBe(true);
+    expect(tooltips.some((text) => text.includes("toolbar.formatSql (") && text.includes("F)"))).toBe(true);
+    expect(tooltips.some((text) => text.includes("toolbar.saveSql (") && text.includes("S)"))).toBe(true);
+
+    app.unmount();
+    host.remove();
+  });
 });

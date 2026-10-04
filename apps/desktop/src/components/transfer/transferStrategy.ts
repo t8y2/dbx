@@ -5,6 +5,9 @@ import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 
 export type TransferStrategy = TransferMode | "rebuild";
 
+/** Fail-closed discriminator: a structure-only transfer may not run without its SQL preview. */
+export const TRANSFER_STRUCTURE_PREVIEW_UNAVAILABLE = "TRANSFER_STRUCTURE_PREVIEW_UNAVAILABLE";
+
 export function resolveTransferStrategy(options: { mode?: TransferMode; dropTargetBeforeCreate?: boolean }): TransferStrategy {
   return options.dropTargetBeforeCreate ? "rebuild" : (options.mode ?? "append");
 }
@@ -42,6 +45,26 @@ function freezeTransferRequest(request: TransferRequest): TransferRequest {
   return Object.freeze(snapshot);
 }
 
+/**
+ * The SQL document a SQL-preview confirmation shows and reviews.
+ *
+ * A rebuild is composed around the structure plan so each operation appears exactly once and
+ * in execution order — rename the old target aside, create the new structure, drop the
+ * backups after success. Without a rebuild (or without a structure plan) it is just the
+ * structure SQL, and a backend that only reports the combined rebuild plan keeps its
+ * existing `rebuild.sql`.
+ */
+export function transferPreviewSql(preview: TransferOwnershipPreview): string {
+  const sections = [preview.rebuild?.backupSql, preview.structure?.sql, preview.rebuild?.cleanupSql].filter((section): section is string => Boolean(section));
+  if (sections.length > 0) return sections.join("\n\n");
+  return preview.rebuild?.sql ?? "";
+}
+
+/** Whether this preview has SQL the user must review in a read-only confirmation. */
+export function hasTransferSqlPreview(preview: TransferOwnershipPreview): boolean {
+  return Boolean(preview.rebuild || preview.structure);
+}
+
 interface TransferSubmissionOptions {
   ensureWritable?: (request: TransferRequest) => Promise<boolean>;
   preview: (request: TransferRequest) => Promise<TransferOwnershipPreview>;
@@ -75,6 +98,9 @@ export function createTransferSubmission(options: TransferSubmissionOptions) {
           }
         }
         if (request.dropTargetBeforeCreate && !preview.rebuild) throw new Error("TRANSFER_REBUILD_PREVIEW_UNAVAILABLE");
+        // A structure-only transfer changes the target schema; never fall back to the plain
+        // start confirmation when the backend did not say what it is going to run.
+        if (request.content === "structureOnly" && !preview.structure) throw new Error(TRANSFER_STRUCTURE_PREVIEW_UNAVAILABLE);
         if (!(await options.confirm(request, preview)) || !isCurrent()) return false;
         options.execute(Object.freeze({ ...request, dropTargetConfirmed: request.dropTargetBeforeCreate }));
         return true;

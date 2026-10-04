@@ -5450,13 +5450,32 @@ export interface TransferRequest {
   dropTargetConfirmed: boolean;
 }
 
+export interface TransferStructurePreviewTable {
+  sourceTable: string;
+  targetTable: string;
+  /** The target table already exists, so this transfer plans no structure DDL for it. */
+  preexisting: boolean;
+  sql: string;
+}
+
+export interface TransferStructurePreview {
+  sql: string;
+  tables: TransferStructurePreviewTable[];
+}
+
 export interface TransferOwnershipPreview {
   missingOwners: string[];
   targetOwner: string;
   rebuild?: {
     sql: string;
     tables: Array<{ sourceTable: string; targetTable: string; backupTable?: string }>;
+    /** The rename phase on its own, so the structure plan can sit between rename and cleanup. */
+    backupSql?: string;
+    /** The drop-backups phase on its own. */
+    cleanupSql?: string;
   };
+  /** Structure-plan preview: present for structure-only transfers. */
+  structure?: TransferStructurePreview;
 }
 
 export interface TransferProgress {

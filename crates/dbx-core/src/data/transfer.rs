@@ -23,6 +23,7 @@ mod iris_tests;
 
 mod db2;
 mod ddl_plan;
+mod structure_plan;
 
 use crate::connection::{config_for_pool_key, AppState, PoolKind};
 use crate::db;
@@ -297,6 +298,12 @@ pub struct TransferOwnershipPreview {
     pub missing_owners: Vec<String>,
     pub target_owner: String,
     pub rebuild: Option<TransferRebuildPreview>,
+    /// Structure statements a structure-only transfer is about to run. Absent for every
+    /// other content mode (`dataOnly` has no DDL, `structureAndData` keeps its current
+    /// behavior). Built without executing any DDL, but not a frozen script: `start_transfer`
+    /// re-reads source and target metadata before executing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structure: Option<TransferStructurePreview>,
 }
 
 /// SQL plan preview for a `drop_target_before_create` (rebuild) transfer.
@@ -309,6 +316,13 @@ pub struct TransferOwnershipPreview {
 pub struct TransferRebuildPreview {
     pub sql: String,
     pub tables: Vec<TransferRebuildPreviewTable>,
+    /// The backup (rename) phase on its own, for callers that place the structure preview
+    /// between the rename and the cleanup phases instead of showing the combined `sql`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backup_sql: Option<String>,
+    /// The cleanup (drop backups) phase on its own. `sql` stays the combined plan.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cleanup_sql: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -318,6 +332,31 @@ pub struct TransferRebuildPreviewTable {
     pub target_table: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backup_table: Option<String>,
+}
+
+/// SQL plan preview for a structure-only transfer.
+///
+/// Plans rather than executes: every statement comes from the generator the execution pass
+/// uses for the same operation, so preview and execution can never disagree on the DDL they
+/// render. It is still a preview — the target is re-inspected when the transfer starts.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferStructurePreview {
+    pub sql: String,
+    pub tables: Vec<TransferStructurePreviewTable>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferStructurePreviewTable {
+    pub source_table: String,
+    pub target_table: String,
+    /// The target table already exists and this transfer plans no structure DDL for it,
+    /// mirroring the execution pass' skip when the target table is present.
+    pub preexisting: bool,
+    /// The structure the transfer plans for this table, or an explanatory comment when the
+    /// execution pass will skip the table entirely.
+    pub sql: String,
 }
 
 impl TransferRequest {
@@ -7385,28 +7424,39 @@ async fn get_existing_postgres_sequence_names_for_transfer(
         .collect())
 }
 
-/// Create owned PostgreSQL sequences before executing reused table DDL because
-/// serial defaults still reference `nextval('...')` in `CREATE TABLE`.
-async fn prepare_postgres_owned_sequences_for_transfer(
+/// Read-only half of [`prepare_postgres_owned_sequences_for_transfer`]: resolves which
+/// owned sequences the transfer must create and renders their `CREATE SEQUENCE` statements,
+/// executing nothing.
+///
+/// The structure SQL preview calls this so it can show the same sequence DDL the transfer
+/// pass will run (and the serial-column rewrite that DDL implies) without ever triggering a
+/// statement. Nothing in here may execute DDL — that is what
+/// [`execute_planned_postgres_owned_sequences_for_transfer`] is for.
+struct PlannedPostgresOwnedSequences {
+    create_statements: Vec<String>,
+    owned_sequences: Vec<PostgresOwnedSequence>,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn plan_postgres_owned_sequences_for_transfer(
     state: &AppState,
     request: &TransferRequest,
     table: &str,
-    target_table: &str,
     source_pool_key: &str,
     target_pool_key: &str,
     pg_compat_transfer: bool,
     preserves_target_table_name: bool,
     target_table_preexisting: bool,
-) -> Result<Vec<PostgresOwnedSequence>, String> {
+) -> Result<PlannedPostgresOwnedSequences, String> {
     if !(request.create_table && pg_compat_transfer && preserves_target_table_name && !target_table_preexisting) {
-        return Ok(Vec::new());
+        return Ok(PlannedPostgresOwnedSequences { create_statements: Vec::new(), owned_sequences: Vec::new() });
     }
 
     let owned_sequences =
         get_postgres_owned_sequences_for_transfer(state, source_pool_key, &request.source_schema, &[table.to_string()])
             .await?;
     if owned_sequences.is_empty() {
-        return Ok(Vec::new());
+        return Ok(PlannedPostgresOwnedSequences { create_statements: Vec::new(), owned_sequences });
     }
 
     let sequence_names = owned_sequences.iter().map(|sequence| sequence.name.clone()).collect::<Vec<_>>();
@@ -7425,6 +7475,7 @@ async fn prepare_postgres_owned_sequences_for_transfer(
             .collect::<HashMap<_, _>>();
 
     let sequence_if_not_exists = target_supports_if_not_exists_ddl(state, target_pool_key).await;
+    let mut create_statements = Vec::new();
     for sequence in &owned_sequences {
         let should_create = validate_existing_postgres_sequence(
             sequence,
@@ -7435,18 +7486,69 @@ async fn prepare_postgres_owned_sequences_for_transfer(
             let definition = definitions
                 .get(&sequence.name)
                 .ok_or_else(|| format!("PostgreSQL sequence definition not found: {}", sequence.name))?;
-            let create_sql = generate_postgres_transfer_sequence_create_ddl(
+            create_statements.push(generate_postgres_transfer_sequence_create_ddl(
                 definition,
                 &request.target_schema,
                 sequence_if_not_exists,
-            );
-            execute_on_pool(state, target_pool_key, &create_sql)
-                .await
-                .map_err(|e| format!("Failed to create PostgreSQL sequence for {target_table}: {e}"))?;
+            ));
         }
     }
 
-    Ok(owned_sequences)
+    Ok(PlannedPostgresOwnedSequences { create_statements, owned_sequences })
+}
+
+/// Executes the `CREATE SEQUENCE` statements a [`PlannedPostgresOwnedSequences`] planned.
+async fn execute_planned_postgres_owned_sequences_for_transfer(
+    state: &AppState,
+    target_pool_key: &str,
+    target_table: &str,
+    plan: &PlannedPostgresOwnedSequences,
+) -> Result<(), String> {
+    for create_sql in &plan.create_statements {
+        execute_on_pool(state, target_pool_key, create_sql)
+            .await
+            .map_err(|e| format!("Failed to create PostgreSQL sequence for {target_table}: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Create owned PostgreSQL sequences before executing reused table DDL because
+/// serial defaults still reference `nextval('...')` in `CREATE TABLE`.
+async fn prepare_postgres_owned_sequences_for_transfer(
+    state: &AppState,
+    request: &TransferRequest,
+    table: &str,
+    target_table: &str,
+    source_pool_key: &str,
+    target_pool_key: &str,
+    pg_compat_transfer: bool,
+    preserves_target_table_name: bool,
+    target_table_preexisting: bool,
+) -> Result<Vec<PostgresOwnedSequence>, String> {
+    let plan = plan_postgres_owned_sequences_for_transfer(
+        state,
+        request,
+        table,
+        source_pool_key,
+        target_pool_key,
+        pg_compat_transfer,
+        preserves_target_table_name,
+        target_table_preexisting,
+    )
+    .await?;
+    execute_planned_postgres_owned_sequences_for_transfer(state, target_pool_key, target_table, &plan).await?;
+    Ok(plan.owned_sequences)
+}
+
+/// Bind a planned sequence to its column after the table exists. Shared with the structure
+/// SQL preview so both render the identical statement.
+fn postgres_owned_sequence_bind_sql(request: &TransferRequest, sequence: &PostgresOwnedSequence) -> String {
+    format!(
+        "ALTER SEQUENCE {} OWNED BY {}.{}",
+        postgres_sequence_qualified_name(&request.target_schema, &sequence.name),
+        qualified_table(&sequence.owner_table, &request.target_schema, &DatabaseType::Postgres, None),
+        quote_identifier(&sequence.owner_column, &DatabaseType::Postgres)
+    )
 }
 
 /// Bind created or reused sequences after the table exists so
@@ -7459,12 +7561,7 @@ async fn bind_postgres_owned_sequences_for_transfer(
     owned_sequences: &[PostgresOwnedSequence],
 ) -> Result<(), String> {
     for sequence in owned_sequences {
-        let owner_sql = format!(
-            "ALTER SEQUENCE {} OWNED BY {}.{}",
-            postgres_sequence_qualified_name(&request.target_schema, &sequence.name),
-            qualified_table(&sequence.owner_table, &request.target_schema, &DatabaseType::Postgres, None),
-            quote_identifier(&sequence.owner_column, &DatabaseType::Postgres)
-        );
+        let owner_sql = postgres_owned_sequence_bind_sql(request, sequence);
         execute_on_pool(state, target_pool_key, &owner_sql)
             .await
             .map_err(|e| format!("Failed to bind PostgreSQL sequence for {target_table}: {e}"))?;
@@ -8533,18 +8630,28 @@ async fn build_rebuild_preview(
     }
 
     let mut phases: Vec<String> = Vec::new();
-    if !rename_statements.is_empty() {
-        phases.push(format!("-- 1. Backup existing target tables\n{}", rename_statements.join(";\n")));
+    let backup_sql = if rename_statements.is_empty() {
+        None
+    } else {
+        Some(format!("-- 1. Backup existing target tables\n{}", rename_statements.join(";\n")))
+    };
+    let cleanup_sql = if drop_statements.is_empty() {
+        None
+    } else {
+        Some(format!("-- 3. Drop backups after success\n{}", drop_statements.join(";\n")))
+    };
+    if let Some(sql) = &backup_sql {
+        phases.push(sql.clone());
     }
     phases.push(format!(
         "-- 2. Recreate the {} selected table(s) from the source structure and transfer the selected data",
         resolved.len()
     ));
-    if !drop_statements.is_empty() {
-        phases.push(format!("-- 3. Drop backups after success\n{}", drop_statements.join(";\n")));
+    if let Some(sql) = &cleanup_sql {
+        phases.push(sql.clone());
     }
 
-    Ok(TransferRebuildPreview { sql: phases.join("\n\n"), tables })
+    Ok(TransferRebuildPreview { sql: phases.join("\n\n"), tables, backup_sql, cleanup_sql })
 }
 
 pub async fn preview_transfer_ownership(
@@ -8590,7 +8697,26 @@ pub async fn preview_transfer_ownership(
         None
     };
 
-    Ok(TransferOwnershipPreview { missing_owners, target_owner, rebuild })
+    // Structure-only transfers expose the statements their create pass will run. The other
+    // content modes keep their existing previews: data-only runs no DDL, and
+    // structure-and-data is deliberately unchanged here.
+    let structure = if matches!(request.content, TransferContent::StructureOnly) {
+        Some(
+            structure_plan::build_structure_preview(
+                state,
+                request,
+                source_db_type,
+                target_db_type,
+                source_pool_key,
+                target_pool_key,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
+    Ok(TransferOwnershipPreview { missing_owners, target_owner, rebuild, structure })
 }
 
 fn postgres_transfer_grant_statements_sql(

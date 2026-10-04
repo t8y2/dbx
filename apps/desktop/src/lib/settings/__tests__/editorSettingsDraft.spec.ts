@@ -73,6 +73,7 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
 
   it("includes the privacy-safe welcome page mode", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("welcomePageMode");
+    expect(editorSettingsDraftFromSettings(makeSettings({ welcomePageMode: "intro" })).welcomePageMode).toBe("intro");
     expect(editorSettingsDraftFromSettings(makeSettings({ welcomePageMode: "workspace" })).welcomePageMode).toBe("workspace");
   });
 

@@ -18,6 +18,7 @@ import {
   normalizeMcpGlobalPolicy,
   type RightSidebarPanelState,
   transitionRightSidebarPanels,
+  WELCOME_PAGE_DEFAULT_VERSION,
 } from "@/stores/settingsStore";
 import type { AiConfigItem } from "@/types/ai";
 import { DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION } from "@/lib/dataGrid/dataGridCopyExtractor";
@@ -29,6 +30,16 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({}).resultTabPreferComments).toBe(true);
     expect(normalizeEditorSettings({ resultTabPreferComments: false }).resultTabPreferComments).toBe(false);
     expect(normalizeEditorSettings({ resultTabPreferComments: "false" } as any).resultTabPreferComments).toBe(true);
+  });
+
+  it("defaults the welcome page to the workspace overview and honors an explicitly saved intro mode", () => {
+    expect(DEFAULT_EDITOR_SETTINGS.welcomePageMode).toBe("workspace");
+    expect(normalizeEditorSettings({}).welcomePageMode).toBe("workspace");
+    expect(normalizeEditorSettings({ welcomePageMode: "bogus", welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION }).welcomePageMode).toBe("workspace");
+    // A persisted intro from the intro-default builds carries no version marker and migrates back.
+    expect(normalizeEditorSettings({ welcomePageMode: "intro" }).welcomePageMode).toBe("workspace");
+    expect(normalizeEditorSettings({ welcomePageMode: "intro", welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION }).welcomePageMode).toBe("intro");
+    expect(normalizeEditorSettings({ welcomePageMode: "workspace", welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION }).welcomePageMode).toBe("workspace");
   });
 
   it("defaults and sanitizes AI conversation typography independently", () => {
@@ -1327,6 +1338,31 @@ describe("settingsStore persisted settings initialization", () => {
     expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ dataGridKeepFilterEditorExpanded: false }));
   });
 
+  it("resets a persisted intro welcome page from the intro-default builds and keeps later explicit choices", async () => {
+    const loadEditorSettings = vi.fn().mockResolvedValueOnce({
+      welcomePageMode: "intro",
+      executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
+      sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
+      dataGridExtractorOptionsMigrationVersion: DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION,
+    });
+    const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+
+    expect(store.editorSettings.welcomePageMode).toBe("workspace");
+    expect(store.editorSettings.welcomePageModeDefaultVersion).toBe(WELCOME_PAGE_DEFAULT_VERSION);
+    await vi.waitFor(() => expect(saveEditorSettings).toHaveBeenCalledOnce());
+    expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ welcomePageMode: "workspace", welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION }));
+
+    store.updateEditorSettings({ welcomePageMode: "intro" });
+    expect(store.editorSettings.welcomePageMode).toBe("intro");
+    await vi.waitFor(() => expect(saveEditorSettings).toHaveBeenCalledTimes(2));
+    expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ welcomePageMode: "intro", welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION }));
+  });
+
   it("persists table completion schema qualification updates", async () => {
     const loadEditorSettings = vi.fn().mockResolvedValue({});
     const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
@@ -1696,6 +1732,7 @@ describe("settingsStore editor settings persistence", () => {
       ignoredUpdateVersion: "",
       executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
       sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
+      welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION,
     });
     const saveEditorSettings = vi.fn().mockRejectedValueOnce(new Error("save failed")).mockResolvedValueOnce(undefined);
     vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
@@ -1743,6 +1780,7 @@ describe("settingsStore editor settings persistence", () => {
       ignoredUpdateVersion: "",
       executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
       sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
+      welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION,
     });
     const saveEditorSettings = vi.fn().mockImplementationOnce(
       () =>
@@ -1779,6 +1817,7 @@ describe("settingsStore editor settings persistence", () => {
       theme: "system",
       executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
       sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
+      welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION,
     });
     const saveEditorSettings = vi.fn().mockImplementationOnce(
       () =>

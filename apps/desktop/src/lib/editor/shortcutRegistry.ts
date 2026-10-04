@@ -29,6 +29,7 @@ export type ShortcutActionId =
   | "selectAllSelectionOccurrences"
   | "uppercaseSelection"
   | "lowercaseSelection"
+  | "toggleCaseSelection"
   | "convertNamingStyle"
   | "exPasteSqlInCondition"
   | "toggleFold"
@@ -329,6 +330,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutLowercaseSelection",
     scope: "editor",
     defaultShortcut: "Shift+Alt+L",
+  },
+  {
+    id: "toggleCaseSelection",
+    labelKey: "settings.shortcutToggleCaseSelection",
+    scope: "editor",
+    defaultShortcut: "Mod+Shift+U",
   },
   {
     id: "convertNamingStyle",

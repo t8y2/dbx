@@ -3,6 +3,7 @@ import { computed } from "vue";
 import { useI18n } from "vue-i18n";
 import {
   AlignLeft,
+  ArrowDownUp,
   Camera,
   CaseLower,
   CaseSensitive,
@@ -39,6 +40,7 @@ import { supportsQueryEditorBlockComments } from "@/lib/database/databaseFeature
 import { normalizeShortcutSettings, type ShortcutSettings } from "@/lib/editor/shortcutRegistry";
 import { queryContextObjectActions, type QueryContextObjectAction } from "@/lib/sql/queryCursorTableTarget";
 import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
+import type { SqlSelectionCaseMode } from "@/lib/sql/sqlSelectionCase";
 import type { QueryEditorProps } from "./queryEditorTypes";
 
 export interface QueryEditorContextMenuState {
@@ -70,7 +72,7 @@ export interface QueryEditorContextMenuActions {
   cutSelectedSqlFromContextMenu: () => void;
   pasteClipboardSqlFromContextMenu: () => void;
   pasteClipboardSqlRestoringSource: () => void;
-  convertSelectedSqlCase: (mode: "upper" | "lower") => void;
+  convertSelectedSqlCase: (mode: SqlSelectionCaseMode) => void;
   convertSelectedNamingStyle: () => void;
   openDelimitedListDialog: () => void;
   addNextSelectionOccurrenceFromContextMenu: () => void;
@@ -299,6 +301,13 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
       disabled: !canCopySelectedSql,
       icon: Sparkles,
       shortcut: shortcuts.sendSelectionToAi,
+    },
+    {
+      label: t("editor.contextMenu.toggleCaseSelection"),
+      action: () => actions.convertSelectedSqlCase("toggle"),
+      disabled: !canCopySelectedSql,
+      icon: ArrowDownUp,
+      shortcut: shortcuts.toggleCaseSelection,
     },
     {
       label: t("editor.contextMenu.uppercaseSelection"),

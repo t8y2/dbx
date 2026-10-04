@@ -132,6 +132,18 @@ function damengConnection(): ConnectionConfig {
   } as ConnectionConfig;
 }
 
+function db2Connection(): ConnectionConfig {
+  return {
+    ...postgresConnection(),
+    id: "db2-1",
+    name: "DB2",
+    db_type: "db2",
+    port: 50000,
+    username: "DBX_TEST",
+    database: "",
+  } as ConnectionConfig;
+}
+
 function dorisConnection(): ConnectionConfig {
   return {
     ...postgresConnection(),
@@ -924,6 +936,33 @@ describe("connectionStore completion assistant", () => {
     expect(getColumns).toHaveBeenCalledWith("dameng-1", "", "dbx_test", "tb_user", undefined, undefined);
     expect(first).toEqual([expect.objectContaining({ name: "ID", table: "tb_user", schema: "dbx_test" })]);
     expect(cached).toEqual(first);
+  });
+
+  it("uses the DB2 login schema for unqualified column completion", async () => {
+    // DB2's CURRENT SCHEMA starts as the authorization ID of the session user, so an
+    // unqualified reference resolves against the login schema — the same convention
+    // as Dameng (see the test above). Without the fallback `listCompletionColumns`
+    // takes its schema-required early return and never asks for the columns at all,
+    // so a tab that has no schema selected gets an empty candidate list.
+    const completionAssistantSearch = vi.fn().mockRejectedValue(new Error("assistant unavailable"));
+    const getColumns = vi.fn().mockResolvedValue([{ name: "PMNUM", data_type: "VARCHAR", is_nullable: false, column_default: null, is_primary_key: false, extra: null, comment: null }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      getColumns,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [db2Connection()];
+    store.connectedIds.add("db2-1");
+
+    const first = await store.listCompletionColumns("db2-1", "", "pm");
+
+    expect(getColumns).toHaveBeenCalledWith("db2-1", "", "DBX_TEST", "pm", undefined, undefined);
+    expect(first).toEqual([expect.objectContaining({ name: "PMNUM", table: "pm", schema: "DBX_TEST" })]);
   });
 
   it("rejects assistant columns returned for a different MySQL parent table", async () => {

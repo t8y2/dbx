@@ -328,7 +328,14 @@ pub async fn object_source(
         )
         .await?,
     )?;
-    Ok(ObjectSource { name: name.to_string(), object_type: object_type.clone(), schema: None, source, editable: None })
+    Ok(ObjectSource {
+        name: name.to_string(),
+        object_type: object_type.clone(),
+        schema: None,
+        source,
+        editable: None,
+        routine_parameters: None,
+    })
 }
 
 pub async fn execute_query(client: &TursoClient, sql: &str) -> Result<QueryResult, String> {

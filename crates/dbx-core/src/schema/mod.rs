@@ -4480,6 +4480,7 @@ done
             schema: None,
             source: "CREATE EVENT event_daily_sync ON SCHEDULE EVERY 1 DAY DO SELECT 1".to_string(),
             editable: None,
+            routine_parameters: None,
         });
 
         assert_eq!(source.editable, Some(false));
@@ -10810,6 +10811,7 @@ async fn get_object_source_once(
                     schema: if schema.is_empty() { None } else { Some(schema.to_string()) },
                     source,
                     editable: None,
+                    routine_parameters: None,
                 });
             }
             let result: db::ObjectSource = session
@@ -10868,6 +10870,7 @@ async fn get_object_source_once(
                             schema: if schema.is_empty() { None } else { Some(schema.to_string()) },
                             source,
                             editable: None,
+                            routine_parameters: None,
                         });
                     }
                     None => String::new(),
@@ -10993,6 +10996,7 @@ async fn get_object_source_once(
         schema: if schema.is_empty() { None } else { Some(schema.to_string()) },
         source,
         editable,
+        routine_parameters: None,
     })
 }
 

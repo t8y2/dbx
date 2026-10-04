@@ -1024,12 +1024,28 @@ export interface ObjectStatistics {
 
 export type ObjectSourceKind = "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "SYNONYM" | "JOB" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
 
+export type RoutineParameterMetadataMode = "IN" | "OUT" | "INOUT" | "RETURN" | "UNKNOWN";
+
+export interface RoutineParameterMetadata {
+  name?: string | null;
+  mode: RoutineParameterMetadataMode;
+  jdbc_type?: number | null;
+  type_name?: string | null;
+  precision?: number | null;
+  length?: number | null;
+  scale?: number | null;
+  nullable?: boolean | null;
+  ordinal?: number | null;
+}
+
 export interface ObjectSource {
   name: string;
   object_type: ObjectSourceKind;
   schema?: string | null;
   source: string;
   editable?: boolean;
+  /** Optional structured metadata exposed by generic JDBC sidecars. */
+  routine_parameters?: RoutineParameterMetadata[];
 }
 
 export interface MysqlEventInfo {

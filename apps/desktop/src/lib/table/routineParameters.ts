@@ -1,5 +1,5 @@
 import * as api from "@/lib/backend/api";
-import type { DatabaseType, QueryResult } from "@/types/database";
+import type { DatabaseType, QueryResult, RoutineParameterMetadata } from "@/types/database";
 import type { RoutineParameter, RoutineParameterMode } from "@/lib/table/routineExecutionSql";
 
 export interface LoadRoutineParametersOptions {
@@ -142,10 +142,70 @@ ORDER BY SEQUENCE;`.trim();
   return null;
 }
 
-export interface XuguRoutineMetadata {
+export interface RoutineMetadata {
   kind?: "PROCEDURE" | "FUNCTION";
   parameters: RoutineParameter[];
   returnType?: string;
+}
+
+export type XuguRoutineMetadata = RoutineMetadata;
+
+/** Convert optional generic-JDBC wire metadata into the existing read-only panel model. */
+export function jdbcRoutineMetadata(parameters: RoutineParameterMetadata[] | undefined): RoutineMetadata | null {
+  if (parameters === undefined) return null;
+
+  const ordered = parameters
+    .map((parameter, index) => ({ parameter, index }))
+    .sort((left, right) => routineMetadataOrdinal(left.parameter) - routineMetadataOrdinal(right.parameter) || left.index - right.index)
+    .map(({ parameter }) => parameter);
+  const returnParameter = ordered.find((parameter) => parameter.mode === "RETURN");
+  return {
+    parameters: ordered
+      .filter((parameter) => parameter.mode !== "RETURN")
+      .map((parameter, index) => ({
+        name: parameter.name?.trim() || `arg${positiveRoutineOrdinal(parameter.ordinal) ?? index + 1}`,
+        dataType: jdbcRoutineParameterType(parameter),
+        mode: parameter.mode,
+        ordinal: positiveRoutineOrdinal(parameter.ordinal) ?? index + 1,
+        hasDefault: false,
+        nullable: parameter.nullable,
+      })),
+    returnType: returnParameter ? jdbcRoutineParameterType(returnParameter) : undefined,
+  };
+}
+
+function routineMetadataOrdinal(parameter: RoutineParameterMetadata): number {
+  return typeof parameter.ordinal === "number" && Number.isFinite(parameter.ordinal) ? parameter.ordinal : Number.MAX_SAFE_INTEGER;
+}
+
+function positiveRoutineOrdinal(ordinal: number | null | undefined): number | undefined {
+  return typeof ordinal === "number" && Number.isFinite(ordinal) && ordinal > 0 ? ordinal : undefined;
+}
+
+function jdbcRoutineParameterType(parameter: RoutineParameterMetadata): string {
+  const typeName = parameter.type_name?.trim() || (typeof parameter.jdbc_type === "number" ? `JDBC ${parameter.jdbc_type}` : "UNKNOWN");
+  if (/\([^)]*\)\s*$/.test(typeName)) return typeName;
+
+  const jdbcType = parameter.jdbc_type;
+  const precision = positiveMetadataSize(parameter.precision);
+  const length = positiveMetadataSize(parameter.length);
+  const scale = typeof parameter.scale === "number" && Number.isFinite(parameter.scale) && parameter.scale >= 0 ? parameter.scale : undefined;
+  if (jdbcType === 2 || jdbcType === 3) {
+    if (precision === undefined) return typeName;
+    return scale === undefined ? `${typeName}(${precision})` : `${typeName}(${precision},${scale})`;
+  }
+  if (jdbcType === 92 || jdbcType === 93 || jdbcType === 2013 || jdbcType === 2014) {
+    return scale === undefined ? typeName : `${typeName}(${scale})`;
+  }
+  if (jdbcType === 1 || jdbcType === 12 || jdbcType === -1 || jdbcType === -15 || jdbcType === -9 || jdbcType === -16 || jdbcType === -2 || jdbcType === -3 || jdbcType === -4) {
+    const size = length ?? precision;
+    return size === undefined ? typeName : `${typeName}(${size})`;
+  }
+  return typeName;
+}
+
+function positiveMetadataSize(value: number | null | undefined): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
 interface XuguRoutineToken {

@@ -4682,6 +4682,122 @@ final class DbxJdbcPluginTest {
         return value == null ? "<null>" : String.valueOf(value);
     }
 
+    private static final class RoutineColumnsDriver implements Driver {
+        private final String urlPrefix;
+        private final List<String> calls;
+        private final boolean unsupported;
+
+        private RoutineColumnsDriver(String urlPrefix, List<String> calls, boolean unsupported) {
+            this.urlPrefix = urlPrefix;
+            this.calls = calls;
+            this.unsupported = unsupported;
+        }
+
+        @Override
+        public Connection connect(String url, Properties info) {
+            return acceptsURL(url) ? routineColumnsConnection(calls, unsupported) : null;
+        }
+
+        @Override
+        public boolean acceptsURL(String url) {
+            return url != null && url.startsWith(urlPrefix);
+        }
+
+        @Override
+        public DriverPropertyInfo[] getPropertyInfo(String url, Properties info) {
+            return new DriverPropertyInfo[0];
+        }
+
+        @Override
+        public int getMajorVersion() {
+            return 1;
+        }
+
+        @Override
+        public int getMinorVersion() {
+            return 0;
+        }
+
+        @Override
+        public boolean jdbcCompliant() {
+            return false;
+        }
+
+        @Override
+        public java.util.logging.Logger getParentLogger() {
+            return java.util.logging.Logger.getGlobal();
+        }
+    }
+
+    private static Connection routineColumnsConnection(List<String> calls, boolean unsupported) {
+        DatabaseMetaData metadata = (DatabaseMetaData) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { DatabaseMetaData.class },
+            (proxy, method, args) -> {
+                if ("getSearchStringEscape".equals(method.getName())) {
+                    return "\\";
+                }
+                if ("getProcedureColumns".equals(method.getName())) {
+                    calls.add("getProcedureColumns:" + metadataArgument(args[0]) + ":" + metadataArgument(args[1])
+                        + ":" + metadataArgument(args[2]) + ":" + metadataArgument(args[3]));
+                    if (unsupported) {
+                        throw new SQLFeatureNotSupportedException("routine columns unavailable");
+                    }
+                    return rowsResultSet(
+                        new String[] {
+                            "COLUMN_NAME", "COLUMN_TYPE", "DATA_TYPE", "TYPE_NAME", "LENGTH",
+                            "NULLABLE", "SCALE", "PRECISION", "ORDINAL_POSITION"
+                        },
+                        new Object[][] {
+                            { "p_out", DatabaseMetaData.procedureColumnOut, Types.VARCHAR, "VARCHAR", 80,
+                                DatabaseMetaData.procedureNullable, null, null, 3 },
+                            { null, DatabaseMetaData.procedureColumnReturn, Types.INTEGER, "INTEGER", 4,
+                                DatabaseMetaData.procedureNullableUnknown, 0, 10, 0 },
+                            { "p_id", DatabaseMetaData.procedureColumnIn, Types.BIGINT, "BIGINT", 8,
+                                DatabaseMetaData.procedureNoNulls, 0, 19, 1 },
+                            { null, DatabaseMetaData.procedureColumnInOut, Types.DECIMAL, "DECIMAL", 16,
+                                DatabaseMetaData.procedureNullable, 3, 12, 2 },
+                            { "p_mystery", null, null, null, null, null, null, null, null }
+                        }
+                    );
+                }
+                if ("getFunctionColumns".equals(method.getName())) {
+                    calls.add("getFunctionColumns:" + metadataArgument(args[0]) + ":" + metadataArgument(args[1])
+                        + ":" + metadataArgument(args[2]) + ":" + metadataArgument(args[3]));
+                    if (unsupported) {
+                        throw new SQLFeatureNotSupportedException("routine columns unavailable");
+                    }
+                    return rowsResultSet(
+                        new String[] {
+                            "COLUMN_NAME", "COLUMN_TYPE", "DATA_TYPE", "TYPE_NAME", "LENGTH",
+                            "NULLABLE", "SCALE", "PRECISION", "ORDINAL_POSITION"
+                        },
+                        new Object[][] {
+                            { "answer", DatabaseMetaData.functionColumnOut, Types.INTEGER, "INTEGER", 4,
+                                DatabaseMetaData.functionNullable, 0, 10, 2 },
+                            { null, DatabaseMetaData.functionReturn, Types.NUMERIC, "NUMERIC", 16,
+                                DatabaseMetaData.functionNullableUnknown, 2, 15, 0 },
+                            { "value", DatabaseMetaData.functionColumnIn, Types.INTEGER, "INTEGER", 4,
+                                DatabaseMetaData.functionNoNulls, 0, 10, 1 }
+                        }
+                    );
+                }
+                return defaultValue(method.getReturnType());
+            }
+        );
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getMetaData" -> metadata;
+                case "isClosed" -> false;
+                case "isValid" -> true;
+                case "close", "setCatalog", "setSchema" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
     private static void closeAndDeregister(String connection, Driver driver) throws Exception {
         try {
             request("close", """
@@ -5723,6 +5839,147 @@ final class DbxJdbcPluginTest {
         request("close", """
             { "connection": { "connection_string": "%s", "username": "sa" } }
             """.formatted(targetUrl));
+    }
+
+    @Test
+    void getObjectSourceReturnsSortedProcedureMetadataWithoutInventingSource() throws Exception {
+        List<String> calls = new ArrayList<>();
+        String url = "jdbc:dbx-routine-columns-procedure:";
+        Driver driver = new RoutineColumnsDriver(url, calls, false);
+        DriverManager.registerDriver(driver);
+        String connection = """
+            { "connection_string": "%sdemo" }
+            """.formatted(url);
+        try {
+            JsonNode response = request("getObjectSource", """
+                {
+                  "connection": %s,
+                  "database": "catalog1",
+                  "schema": "APP",
+                  "name": "process_order",
+                  "object_type": "PROCEDURE"
+                }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            JsonNode result = response.path("result");
+            assertEquals("", result.path("source").asText());
+            assertFalse(result.path("editable").asBoolean(true));
+            assertEquals(List.of("getProcedureColumns:catalog1:APP:process\\_order:%"), calls);
+            JsonNode parameters = result.path("routine_parameters");
+            assertEquals(5, parameters.size());
+            assertEquals("RETURN", parameters.path(0).path("name").asText());
+            assertEquals("RETURN", parameters.path(0).path("mode").asText());
+            assertEquals(0, parameters.path(0).path("ordinal").asInt());
+            assertFalse(parameters.path(0).has("nullable"));
+            assertEquals("p_id", parameters.path(1).path("name").asText());
+            assertEquals("IN", parameters.path(1).path("mode").asText());
+            assertEquals(Types.BIGINT, parameters.path(1).path("jdbc_type").asInt());
+            assertEquals(19, parameters.path(1).path("precision").asInt());
+            assertFalse(parameters.path(1).path("nullable").asBoolean(true));
+            assertTrue(parameters.path(2).path("name").isNull());
+            assertEquals("INOUT", parameters.path(2).path("mode").asText());
+            assertEquals(3, parameters.path(2).path("scale").asInt());
+            assertTrue(parameters.path(2).path("nullable").asBoolean());
+            assertEquals("OUT", parameters.path(3).path("mode").asText());
+            assertEquals(80, parameters.path(3).path("length").asInt());
+            assertEquals("UNKNOWN", parameters.path(4).path("mode").asText());
+            assertFalse(parameters.path(4).has("ordinal"));
+            assertFalse(parameters.path(4).has("jdbc_type"));
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
+    void getObjectSourceUsesFunctionColumnConstants() throws Exception {
+        List<String> calls = new ArrayList<>();
+        String url = "jdbc:dbx-routine-columns-function:";
+        Driver driver = new RoutineColumnsDriver(url, calls, false);
+        DriverManager.registerDriver(driver);
+        String connection = """
+            { "connection_string": "%sdemo" }
+            """.formatted(url);
+        try {
+            JsonNode response = request("getObjectSource", """
+                {
+                  "connection": %s,
+                  "database": "catalog1",
+                  "schema": "APP",
+                  "name": "calculate_total",
+                  "object_type": "FUNCTION"
+                }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals(List.of("getFunctionColumns:catalog1:APP:calculate\\_total:%"), calls);
+            JsonNode parameters = response.path("result").path("routine_parameters");
+            assertEquals("RETURN", parameters.path(0).path("mode").asText());
+            assertEquals("IN", parameters.path(1).path("mode").asText());
+            assertEquals("OUT", parameters.path(2).path("mode").asText());
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
+    void getObjectSourceKeepsRoutineDetailsAvailableWhenColumnMetadataIsUnsupported() throws Exception {
+        List<String> calls = new ArrayList<>();
+        String url = "jdbc:dbx-routine-columns-unsupported:";
+        Driver driver = new RoutineColumnsDriver(url, calls, true);
+        DriverManager.registerDriver(driver);
+        String connection = """
+            { "connection_string": "%sdemo" }
+            """.formatted(url);
+        try {
+            JsonNode response = request("getObjectSource", """
+                {
+                  "connection": %s,
+                  "database": "catalog1",
+                  "schema": "APP",
+                  "name": "legacy_proc",
+                  "object_type": "PROCEDURE"
+                }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals("", response.path("result").path("source").asText());
+            assertFalse(response.path("result").path("editable").asBoolean(true));
+            assertFalse(response.path("result").has("routine_parameters"));
+            assertEquals(List.of("getProcedureColumns:catalog1:APP:legacy\\_proc:%"), calls);
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
+    void getObjectSourceKeepsSybaseRoutineBehaviorUnchanged() throws Exception {
+        List<String> calls = new ArrayList<>();
+        String url = "jdbc:sybase:Tds:sybase-routine-unsupported-test:5000";
+        Driver driver = new SybaseViewSourceDriver(url, calls);
+        DriverManager.registerDriver(driver);
+        String connection = """
+            { "connection_string": "%s" }
+            """.formatted(url);
+        try {
+            JsonNode response = request("getObjectSource", """
+                {
+                  "connection": %s,
+                  "database": "appdb",
+                  "schema": "dbo",
+                  "name": "legacy_proc",
+                  "object_type": "PROCEDURE"
+                }
+                """.formatted(connection));
+
+            assertEquals(
+                "Object source is not supported by this JDBC driver",
+                response.path("error").path("message").asText()
+            );
+            assertTrue(calls.isEmpty());
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
     }
 
     @Test

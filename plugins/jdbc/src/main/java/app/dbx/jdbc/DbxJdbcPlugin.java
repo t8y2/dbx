@@ -4374,7 +4374,156 @@ public final class DbxJdbcPlugin {
             return genericTableObjectSource(connection, database, schema, name);
         }
 
+        String normalizedType = normalizeObjectType(objectType);
+        if (!isSybaseConnection(connection) && ("PROCEDURE".equals(normalizedType) || "FUNCTION".equals(normalizedType))) {
+            return genericRoutineObjectSource(connection, conn, database, schema, name, normalizedType);
+        }
+
         throw new SQLException("Object source is not supported by this JDBC driver");
+    }
+
+    /**
+     * Generic JDBC does not define a routine DDL API. Return the structured
+     * parameter metadata that it does define and leave source empty/read-only.
+     * Drivers are allowed to omit or reject this optional metadata; that must
+     * not turn opening an already-listed routine into a fatal error.
+     */
+    private static JsonNode genericRoutineObjectSource(
+        JsonNode connection,
+        Connection conn,
+        String database,
+        String schema,
+        String name,
+        String objectType
+    ) {
+        ObjectNode item = MAPPER.createObjectNode();
+        item.put("name", name);
+        item.put("object_type", objectType);
+        putNullable(item, "schema", emptyToNull(schema));
+        item.put("source", "");
+        item.put("editable", false);
+
+        try {
+            DatabaseMetaData meta = conn.getMetaData();
+            JdbcDriverQuirks quirks = driverQuirks(connection);
+            String catalog = metadataCatalog(database, quirks);
+            String schemaPattern = escapeJdbcMetadataPattern(meta, resolveSchemaPattern(meta, database, schema, quirks));
+            String routineName = escapeJdbcMetadataPattern(meta, stripRoutineSignature(name));
+            ResultSet columns = "PROCEDURE".equals(objectType)
+                ? meta.getProcedureColumns(catalog, schemaPattern, routineName, "%")
+                : meta.getFunctionColumns(catalog, schemaPattern, routineName, "%");
+            if (columns == null) {
+                return item;
+            }
+            try (columns) {
+                List<ObjectNode> parameters = new ArrayList<>();
+                while (columns.next()) {
+                    parameters.add(genericRoutineParameter(columns, "PROCEDURE".equals(objectType)));
+                }
+                parameters.sort((left, right) -> {
+                    JsonNode leftOrdinal = left.get("ordinal");
+                    JsonNode rightOrdinal = right.get("ordinal");
+                    int leftValue = leftOrdinal == null ? Integer.MAX_VALUE : leftOrdinal.asInt();
+                    int rightValue = rightOrdinal == null ? Integer.MAX_VALUE : rightOrdinal.asInt();
+                    return Integer.compare(leftValue, rightValue);
+                });
+                ArrayNode result = MAPPER.createArrayNode();
+                result.addAll(parameters);
+                item.set("routine_parameters", result);
+            }
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            // Parameter metadata is optional. The empty read-only source still
+            // lets the details dialog open when a driver does not implement it.
+        }
+        return item;
+    }
+
+    private static ObjectNode genericRoutineParameter(ResultSet columns, boolean procedure) {
+        ObjectNode parameter = MAPPER.createObjectNode();
+        Integer columnType = metadataInteger(columns, "COLUMN_TYPE");
+        String mode = routineParameterMode(columnType, procedure);
+        String name = metadataString(columns, "COLUMN_NAME");
+        if ((name == null || name.isBlank()) && "RETURN".equals(mode)) {
+            name = "RETURN";
+        }
+        putNullable(parameter, "name", name);
+        parameter.put("mode", mode);
+        putOptionalInt(parameter, "jdbc_type", metadataInteger(columns, "DATA_TYPE"));
+        putNullable(parameter, "type_name", metadataString(columns, "TYPE_NAME"));
+        putOptionalInt(parameter, "precision", metadataInteger(columns, "PRECISION"));
+        putOptionalInt(parameter, "length", metadataInteger(columns, "LENGTH"));
+        putOptionalInt(parameter, "scale", metadataInteger(columns, "SCALE"));
+        Integer nullable = metadataInteger(columns, "NULLABLE");
+        if (nullable != null && nullable != DatabaseMetaData.procedureNullableUnknown) {
+            parameter.put("nullable", nullable != DatabaseMetaData.procedureNoNulls);
+        }
+        putOptionalInt(parameter, "ordinal", metadataInteger(columns, "ORDINAL_POSITION"));
+        return parameter;
+    }
+
+    private static String routineParameterMode(Integer columnType, boolean procedure) {
+        if (columnType == null) {
+            return "UNKNOWN";
+        }
+        if (procedure) {
+            return switch (columnType) {
+                case DatabaseMetaData.procedureColumnIn -> "IN";
+                case DatabaseMetaData.procedureColumnInOut -> "INOUT";
+                case DatabaseMetaData.procedureColumnOut -> "OUT";
+                case DatabaseMetaData.procedureColumnReturn -> "RETURN";
+                default -> "UNKNOWN";
+            };
+        }
+        return switch (columnType) {
+            case DatabaseMetaData.functionColumnIn -> "IN";
+            case DatabaseMetaData.functionColumnInOut -> "INOUT";
+            case DatabaseMetaData.functionColumnOut -> "OUT";
+            case DatabaseMetaData.functionReturn -> "RETURN";
+            default -> "UNKNOWN";
+        };
+    }
+
+    private static String metadataString(ResultSet result, String column) {
+        try {
+            return result.getString(column);
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            return null;
+        }
+    }
+
+    private static Integer metadataInteger(ResultSet result, String column) {
+        try {
+            Object value = result.getObject(column);
+            if (value instanceof Number number) {
+                return number.intValue();
+            }
+            if (value instanceof String text && !text.isBlank()) {
+                return Integer.valueOf(text.trim());
+            }
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException | NumberFormatException ignored) {
+        }
+        return null;
+    }
+
+    private static String escapeJdbcMetadataPattern(DatabaseMetaData meta, String value) {
+        if (value == null) {
+            return null;
+        }
+        try {
+            String escape = meta.getSearchStringEscape();
+            if (escape == null || escape.isEmpty()) {
+                return value;
+            }
+            return value.replace(escape, escape + escape).replace("%", escape + "%").replace("_", escape + "_");
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            return value;
+        }
+    }
+
+    private static void putOptionalInt(ObjectNode node, String field, Integer value) {
+        if (value != null) {
+            node.put(field, value);
+        }
     }
 
     private static JsonNode sybaseViewObjectSource(

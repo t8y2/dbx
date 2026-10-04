@@ -2055,11 +2055,80 @@ test("suggests SQL Server data types in CREATE TABLE column definitions", () => 
   const items = buildSqlCompletionItems(sql, sql.length, {
     tables,
     columnsByTable,
+    databaseType: "sqlserver",
   });
 
   assert.ok(items.some((item) => item.type === "keyword" && item.label === "INT"));
   assert.ok(items.some((item) => item.type === "keyword" && item.label === "BIGINT"));
   assert.ok(items.some((item) => item.type === "keyword" && item.label === "NVARCHAR"));
+  assert.ok(items.some((item) => item.type === "keyword" && item.label === "UNIQUEIDENTIFIER"));
+  const intItem = items.find((item) => item.label === "INT");
+  assert.equal(intItem?.detail, "data type");
+  assert.equal(items[0]?.detail, "data type");
+});
+
+test("prioritizes UNIQUEIDENTIFIER above UNION and UPDATE and suppresses external columns in SQL Server temp table (#8300)", () => {
+  const customColumns = new Map<string, SqlCompletionColumn[]>([
+    [
+      "dbo.Bills",
+      [
+        { name: "UpdateDate", table: "Bills", schema: "dbo", dataType: "datetime" },
+        { name: "UserId", table: "Bills", schema: "dbo", dataType: "int" },
+      ],
+    ],
+  ]);
+  const sql = "SELECT * FROM dbo.Bills\nCREATE TABLE #Tables (\n  Id U";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [{ name: "Bills", schema: "dbo", type: "table" }],
+    columnsByTable: customColumns,
+    databaseType: "sqlserver",
+  });
+
+  // Should NOT suggest columns from other tables when defining column types
+  assert.equal(items.some((item) => item.label === "UpdateDate"), false);
+
+  // UNIQUEIDENTIFIER must rank above UNION and UPDATE
+  const uniqueIdIdx = items.findIndex((item) => item.label === "UNIQUEIDENTIFIER");
+  const unionIdx = items.findIndex((item) => item.label === "UNION");
+  const updateIdx = items.findIndex((item) => item.label === "UPDATE");
+
+  assert.ok(uniqueIdIdx >= 0, "UNIQUEIDENTIFIER should be suggested");
+  assert.equal(items[uniqueIdIdx]?.detail, "data type");
+  if (unionIdx >= 0) {
+    assert.ok(uniqueIdIdx < unionIdx, "UNIQUEIDENTIFIER should rank before UNION");
+  }
+  if (updateIdx >= 0) {
+    assert.ok(uniqueIdIdx < updateIdx, "UNIQUEIDENTIFIER should rank before UPDATE");
+  }
+});
+
+test("suggests data types in ALTER TABLE ADD and ALTER COLUMN definitions", () => {
+  const addSql = "ALTER TABLE dbo.jobs ADD col ";
+  const addItems = buildSqlCompletionItems(addSql, addSql.length, {
+    databaseType: "sqlserver",
+    tables,
+    columnsByTable,
+  });
+  assert.ok(addItems.some((item) => item.label === "INT" && item.detail === "data type"));
+
+  const alterSql = "ALTER TABLE dbo.jobs ALTER COLUMN col ";
+  const alterItems = buildSqlCompletionItems(alterSql, alterSql.length, {
+    databaseType: "sqlserver",
+    tables,
+    columnsByTable,
+  });
+  assert.ok(alterItems.some((item) => item.label === "NVARCHAR" && item.detail === "data type"));
+});
+
+test("auto-opens completion on space after column name in CREATE TABLE", () => {
+  const sql = "CREATE TABLE #Tables (\n  Id ";
+  assert.equal(shouldAutoOpenSqlCompletion(sql, sql.length, { databaseType: "sqlserver" }), true);
+
+  const regularTableSql = "CREATE TABLE jobs (\n  Id ";
+  assert.equal(shouldAutoOpenSqlCompletion(regularTableSql, regularTableSql.length), true);
+
+  const afterTypeSql = "CREATE TABLE #Tables (\n  Id INT ";
+  assert.equal(shouldAutoOpenSqlCompletion(afterTypeSql, afterTypeSql.length, { databaseType: "sqlserver" }), false);
 });
 
 test("does not auto-open completion after structural punctuation", () => {

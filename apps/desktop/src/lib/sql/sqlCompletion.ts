@@ -206,6 +206,7 @@ const SQL_KEYWORDS = [
   "FLOAT",
   "IMAGE",
   "INT",
+  "INTEGER",
   "MONEY",
   "NCHAR",
   "NTEXT",
@@ -516,6 +517,12 @@ const SQLSERVER_SQL_KEYWORDS = [
   "IDENTITY",
   "IDENTITY_INSERT",
   "UNIQUEIDENTIFIER",
+  "INTEGER",
+  "ROWVERSION",
+  "HIERARCHYID",
+  "SQL_VARIANT",
+  "GEOMETRY",
+  "GEOGRAPHY",
   "NVARCHAR",
   "DATETIME2",
   "DATETIMEOFFSET",
@@ -827,6 +834,12 @@ const DATA_TYPE_KEYWORDS = new Set([
   "FLOAT",
   "IMAGE",
   "INT",
+  "INTEGER",
+  "ROWVERSION",
+  "HIERARCHYID",
+  "SQL_VARIANT",
+  "GEOMETRY",
+  "GEOGRAPHY",
   "MONEY",
   "NCHAR",
   "NTEXT",
@@ -1742,13 +1755,15 @@ class SqlCompletionProvider {
     }
 
     const preferReferencedColumns = hasMatchingReferencedColumnPrefix(context, this.input.columnsByTable);
-    this.items.push(...customSnippetItems);
+    if (!context.dataTypeContext) {
+      this.items.push(...customSnippetItems);
+    }
     this.items.push(...buildSqlServerLocalVariableItems(context));
     if (!pendingJoinKeyword && !context.exclusiveTableSuggestions && !context.exclusiveColumnSuggestions && !context.exclusiveRoutineSuggestions) {
-      if (!preferReferencedColumns) {
+      if (!preferReferencedColumns && !context.dataTypeContext) {
         this.items.push(...buildSnippetItems(context.prefix, snippets.filter(shouldFormatBuiltinSnippet), this.input.keywordCase, this.databaseType));
       }
-      if (!preferReferencedColumns || context.suggestRoutines) {
+      if ((!preferReferencedColumns && !context.dataTypeContext) || context.suggestRoutines) {
         const functionItems = context.dataTypeContext ? [] : buildFunctionSnippetItems(context.prefix, getFunctionDescriptions(this.t), this.databaseType, context.openingParenAfterCursor, this.input.keywordCase, this.input.functionCase, this.input.functionCompletionIncludeParams);
         this.items.push(...(preferReferencedColumns ? functionItems.filter((item) => item.label.toLowerCase().startsWith(context.prefix.toLowerCase())) : functionItems));
         if (isOracleLikeDatabase(this.databaseType)) {
@@ -1879,6 +1894,7 @@ export function shouldAutoOpenSqlCompletion(sql: string, cursor: number, options
     return true;
   }
   if (context.exclusiveColumnSuggestions || shouldAutoOpenColumnCompletion(context, beforeCursor, beforeCursor.length, options.databaseType)) return true;
+  if (context.dataTypeContext) return true;
   return /[A-Za-z_$@.]/.test(previousChar);
 }
 
@@ -2605,12 +2621,12 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
   const prioritizeSelectAliases = isInOrderOrGroupByContext(beforeCursor, options.databaseType);
   const inCallRoutineContext = isCallRoutineContext(beforeCursor);
   const inPotentialPackageMemberContext = !!qualifier && !exclusiveTableSuggestions && !insertInfo && !updateInfo?.inSetClause && !oracleTableFunctionContext;
-  const suggestColumns = !!qualifier || !!updateInfo?.inSetClause || !!insertInfo || (inColumnContext && referencedTables.length > 0);
-  const suggestRoutines = inCallRoutineContext || oracleTableFunctionContext || inPotentialPackageMemberContext || (!exclusiveTableSuggestions && !exclusiveColumnSuggestions && !insertInfo && !updateInfo?.inSetClause && prefix.length >= 2);
+  const dataTypeContext = isColumnDataTypeContext(beforeToken, options.databaseType);
+  const suggestColumns = !dataTypeContext && (!!qualifier || !!updateInfo?.inSetClause || !!insertInfo || (inColumnContext && referencedTables.length > 0));
+  const suggestRoutines = !dataTypeContext && (inCallRoutineContext || oracleTableFunctionContext || inPotentialPackageMemberContext || (!exclusiveTableSuggestions && !exclusiveColumnSuggestions && !insertInfo && !updateInfo?.inSetClause && prefix.length >= 2));
 
   const statementKind = detectStatementKind(beforeCursor || fullStatement);
   const selectListWildcardAfterCursor = isStandaloneSelectWildcard(rawStatement, cursor - statementSpan.start, selectListColumnContext, statementKind, resolveSqlDialectId(options));
-  const dataTypeContext = isCreateTableColumnTypeContext(beforeToken, options.databaseType);
   const preferredValueKeywords = sqlServerDatepartCompletionValues(beforeCursor, options.databaseType);
   const localVariables = prefix.startsWith("@") ? collectSqlServerLocalVariables(sql, cursor, options) : undefined;
   const preferredKeywords = qualifier ? [] : preferredKeywordsForCompletion(beforeCursor, beforeToken, selectListColumnContext, exclusiveTableSuggestions, updateInfo, deleteInfo, options.databaseType);
@@ -2635,7 +2651,7 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
     localVariables,
     qualifier: insertInfo ? undefined : qualifier,
     qualifierParts: insertInfo ? undefined : qualifierParts,
-    suggestTables: insertInfo ? false : afterTableTrigger,
+    suggestTables: insertInfo || dataTypeContext ? false : afterTableTrigger,
     suggestColumns,
     suggestKeywords: !exclusiveTableSuggestions && !exclusiveColumnSuggestions && !insertInfo && !inCallRoutineContext,
     suggestRoutines,
@@ -2780,11 +2796,58 @@ function sqlServerDatepartCompletionValues(beforeCursor: string, databaseType?: 
   return countTopLevelCommas(call.groupText) === 0 ? SQLSERVER_DATEPART_VALUES : undefined;
 }
 
+function findEnclosingCreateTableBodyStart(cleaned: string): number {
+  let depth = 0;
+  let bodyStart = -1;
+  for (let i = cleaned.length - 1; i >= 0; i--) {
+    const char = cleaned[i];
+    if (char === ")") {
+      depth++;
+    } else if (char === "(") {
+      if (depth > 0) {
+        depth--;
+      } else {
+        bodyStart = i;
+        break;
+      }
+    }
+  }
+  if (bodyStart < 0) return -1;
+  const beforeParen = cleaned.slice(0, bodyStart).trimEnd();
+  const createTableRegex = /\bcreate\s+(?:(?:temp|temporary|global\s+temporary|local\s+temporary|or\s+replace)\s+)*table\b(?:\s+if\s+not\s+exists)?\s+[^();,]+$/i;
+  if (!createTableRegex.test(beforeParen)) {
+    return -1;
+  }
+  return bodyStart;
+}
+
+function findEnclosingAlterTableBodyStart(cleaned: string): number {
+  let depth = 0;
+  let bodyStart = -1;
+  for (let i = cleaned.length - 1; i >= 0; i--) {
+    const char = cleaned[i];
+    if (char === ")") {
+      depth++;
+    } else if (char === "(") {
+      if (depth > 0) {
+        depth--;
+      } else {
+        bodyStart = i;
+        break;
+      }
+    }
+  }
+  if (bodyStart < 0) return -1;
+  const beforeParen = cleaned.slice(0, bodyStart).trimEnd();
+  if (!/\balter\s+table\b[\s\S]*?\badd\s*$/i.test(beforeParen)) {
+    return -1;
+  }
+  return bodyStart;
+}
+
 function isCreateTableColumnTypeContext(beforeToken: string, databaseType: DatabaseType | undefined): boolean {
   const cleaned = maskSqlLiteralsAndComments(beforeToken, databaseType);
-  if (!/^\s*create\s+table\b/i.test(cleaned)) return false;
-
-  const bodyStart = cleaned.indexOf("(");
+  const bodyStart = findEnclosingCreateTableBodyStart(cleaned);
   if (bodyStart < 0) return false;
 
   let depth = 0;
@@ -2797,7 +2860,31 @@ function isCreateTableColumnTypeContext(beforeToken: string, databaseType: Datab
   }
 
   const segment = cleaned.slice(segmentStart).trim();
-  return /^(?:[A-Za-z_][\w$]*|`[^`]+`|"[^"]+"|\[[^\]]+\])$/.test(segment);
+  return /^(?:[A-Za-z_#@][\w$#@]*|`[^`]+`|"[^"]+"|\[[^\]]+\])$/.test(segment);
+}
+
+function isAlterTableColumnTypeContext(beforeToken: string, databaseType: DatabaseType | undefined): boolean {
+  const cleaned = maskSqlLiteralsAndComments(beforeToken, databaseType);
+  const bodyStart = findEnclosingAlterTableBodyStart(cleaned);
+  if (bodyStart >= 0) {
+    let depth = 0;
+    let segmentStart = bodyStart + 1;
+    for (let index = bodyStart + 1; index < cleaned.length; index += 1) {
+      const char = cleaned[index];
+      if (char === "(") depth += 1;
+      else if (char === ")") depth = Math.max(0, depth - 1);
+      else if (char === "," && depth === 0) segmentStart = index + 1;
+    }
+    const segment = cleaned.slice(segmentStart).trim();
+    return /^(?:[A-Za-z_#@][\w$#@]*|`[^`]+`|"[^"]+"|\[[^\]]+\])$/.test(segment);
+  }
+
+  const alterRegex = /\balter\s+table\b[\s\S]*?\b(?:add(?:\s+column)?|alter\s+column|modify(?:\s+column)?)\s+(?:[A-Za-z_#@][\w$#@]*|`[^`]+`|"[^"]+"|\[[^\]]+\])$/i;
+  return alterRegex.test(cleaned.trimEnd());
+}
+
+function isColumnDataTypeContext(beforeToken: string, databaseType: DatabaseType | undefined): boolean {
+  return isCreateTableColumnTypeContext(beforeToken, databaseType) || isAlterTableColumnTypeContext(beforeToken, databaseType);
 }
 
 function removeActiveTableCompletionReference(referencedTables: SqlCompletionReferencedTable[], prefix: string, qualifier?: string): SqlCompletionReferencedTable[] {
@@ -5743,7 +5830,7 @@ function isPendingJoinKeywordContext(context: SqlCompletionContext): boolean {
 
 function buildKeywordItems(prefix: string, context: SqlCompletionContext, databaseType?: DatabaseType, keywordCase?: SqlKeywordCase): SqlCompletionItem[] {
   const isDml = context.statementKind === "select" || context.statementKind === "insert" || context.statementKind === "update" || context.statementKind === "delete";
-  const showDdl = !isDml || context.suggestTables;
+  const showDdl = !isDml || context.suggestTables || context.dataTypeContext;
   const functionSignatures = activeFunctionSignatures(databaseType);
 
   return activeSqlKeywords(databaseType)
@@ -5756,11 +5843,14 @@ function buildKeywordItems(prefix: string, context: SqlCompletionContext, databa
     })
     .map((keyword) => {
       const base = computeBoost(keyword, prefix);
-      const freqBoost = HIGH_FREQUENCY_KEYWORDS.has(keyword) ? 100 : 0;
+      const isDataType = DATA_TYPE_KEYWORDS.has(keyword);
+      const freqBoost = !context.dataTypeContext && HIGH_FREQUENCY_KEYWORDS.has(keyword) ? 100 : 0;
+      const typeBoost = context.dataTypeContext && isDataType ? 2500 : 0;
       return {
         label: applySqlKeywordCase(keyword, keywordCase),
         type: "keyword" as const,
-        boost: base + freqBoost,
+        detail: isDataType ? "data type" : undefined,
+        boost: base + freqBoost + typeBoost,
       };
     });
 }

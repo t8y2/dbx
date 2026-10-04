@@ -42,6 +42,9 @@ const SQL_KEYWORDS = [
   "INNER",
   "OUTER",
   "ON",
+  "GROUP",
+  "ORDER",
+  "BY",
   "GROUP BY",
   "ORDER BY",
   "ASC",
@@ -301,6 +304,9 @@ const COMMON_SQL_KEYWORDS = [
   "INNER",
   "OUTER",
   "ON",
+  "GROUP",
+  "ORDER",
+  "BY",
   "GROUP BY",
   "ORDER BY",
   "ASC",
@@ -724,6 +730,9 @@ const HIGH_FREQUENCY_KEYWORDS = new Set([
   "ON",
   "IN",
   "AS",
+  "GROUP",
+  "ORDER",
+  "BY",
   "GROUP BY",
   "ORDER BY",
   "LEFT",
@@ -5764,7 +5773,7 @@ function buildKeywordPrefixContinuationItems(prefix: string, context: SqlComplet
   const normalizedPrefix = prefix.toLowerCase();
   return buildKeywordItems(prefix, context, databaseType, keywordCase).filter((item) => {
     const normalizedLabel = item.label.toLowerCase();
-    return normalizedLabel.length > normalizedPrefix.length && normalizedLabel.startsWith(normalizedPrefix);
+    return (normalizedLabel.length > normalizedPrefix.length && normalizedLabel.startsWith(normalizedPrefix)) || (normalizedLabel === normalizedPrefix && item.label !== prefix);
   });
 }
 

@@ -5057,18 +5057,22 @@ export const useConnectionStore = defineStore("connection", () => {
    * sidebar" guidance instead of triggering an interactive prompt from a
    * background re-init.
    */
-  async function repushPluginConnection(connectionId: string): Promise<void> {
+  async function repushPluginConnection(connectionId: string, options: { ignoreRecentHealthCheck?: boolean } = {}): Promise<boolean> {
     const config = getConfig(connectionId);
-    if (!config || config.db_type !== "plugin" || !connectedIds.value.has(connectionId)) return;
+    if (!config || config.db_type !== "plugin" || !connectedIds.value.has(connectionId)) return false;
     // A successful connect/health probe within the TTL means the sidebar open
     // (or a fresh restore connect) pushed the config moments ago and the
     // sidecar registry cannot plausibly be empty yet — skipping here keeps the
     // first open from paying a redundant disconnect+connect cycle on the
     // plugin's first `ready`. The 2s in-memory TTL dies with the frontend, so
-    // every realistic reload path still re-pushes.
-    if (hasRecentConnectionHealthCheck(connectionId)) return;
-    if (!(await canReconnectPluginConnectionWithoutPrompt(config))) return;
+    // every realistic reload path still re-pushes. The restore path overrides
+    // the skip: the SPA's boot restore can mark a connection healthy without
+    // ever delivering credentials to the sidecar, so trusting the TTL there
+    // strands the plugin with an empty registry (dbx-plugin-ssh#144).
+    if (!options.ignoreRecentHealthCheck && hasRecentConnectionHealthCheck(connectionId)) return false;
+    if (!(await canReconnectPluginConnectionWithoutPrompt(config))) return false;
     await ensureConnected(connectionId, { activate: false, forceReconnect: true, allowPasswordPrompt: false });
+    return true;
   }
 
   /**

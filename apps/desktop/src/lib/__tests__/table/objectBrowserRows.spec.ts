@@ -39,6 +39,21 @@ describe("buildObjectBrowserRows", () => {
 
     expect(rows.map((row) => row.valid)).toEqual([true, false, null]);
   });
+
+  it("preserves routine and package validity in browser rows", () => {
+    const rows = buildObjectBrowserRows({
+      objects: [
+        { name: "valid_proc", object_type: "PROCEDURE", valid: true },
+        { name: "invalid_proc", object_type: "PROCEDURE", valid: false },
+        { name: "invalid_func", object_type: "FUNCTION", valid: false },
+        { name: "invalid_pkg", object_type: "PACKAGE", valid: false },
+      ],
+      database: "app",
+      fallbackSchema: "app",
+    });
+
+    expect(rows.map((row) => row.valid)).toEqual([true, false, false, false]);
+  });
 });
 
 describe("Object Browser pinned ordering", () => {

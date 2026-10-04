@@ -8,6 +8,8 @@ import { isValidPluginAiRecommendationTemplate, resolvePluginAiRecommendationUpd
 import type { PluginAiRecommendation } from "@/types/pluginAiRecommendations";
 import { MAX_PLUGIN_SCHEMA_METADATA_NAME_CHARS, PLUGIN_SCHEMA_METADATA_CAPABILITY, PLUGIN_SCHEMA_METADATA_PERMISSION, type PluginTableContext, type PluginTableMetadata } from "@/types/pluginSchemaMetadata";
 import { MAX_PLUGIN_DATA_MAX_ROWS, MAX_PLUGIN_DATA_NAME_CHARS, MAX_PLUGIN_DATA_SQL_CHARS, MAX_PLUGIN_DATA_TIMEOUT_MS, PLUGIN_DATA_ACCESS_NOT_GRANTED, PLUGIN_DATA_CAPABILITY, PLUGIN_DATA_READ_PERMISSION, type PluginDataQueryRequest, type PluginDataQueryResult } from "@/types/pluginData";
+import { floatingWindowLabel } from "@/lib/app/windowContext";
+import { parseFloatingWindowRequest, type FloatingRect, type OpenFloatingWindowRequest, type OpenFloatingWindowResult } from "@/lib/plugins/pluginFloatingWindow";
 
 const PLUGIN_MESSAGE_SOURCE = "dbx-plugin";
 const HOST_MESSAGE_SOURCE = "dbx-host";
@@ -225,6 +227,27 @@ export interface PluginHostBridgeApi {
   /** Persists the grant the user just allowed. */
   grantDataAccess?(pluginId: string, connectionId: string): Promise<void>;
   closeTab?(): Promise<void> | void;
+  /**
+   * Floating plugin windows (the §8.3 "window" surface): a frameless,
+   * always-on-top desktop widget outside the main shell. Desktop hosts only — a
+   * host without it omits these so `capabilities.floating` stays false and the
+   * plugin can fall back to an in-shell surface (tab or dock).
+   *
+   * Geometry is host-owned end to end: the plugin asks to open/close its window
+   * and reports drag intent, while positions, work-area snapping, and DPI
+   * conversion stay here. A drag is driven by the native cursor position rather
+   * than plugin-supplied coordinates, which would be relative to a viewport that
+   * is itself moving.
+   */
+  openFloatingWindow?(request: OpenFloatingWindowRequest): Promise<OpenFloatingWindowResult>;
+  /** Closes floating windows by host label; callers derive labels from their own manifest, never from plugin input. */
+  closeFloatingWindows?(labels: string[]): Promise<void>;
+  /** Hands the calling floating window's movement to the OS drag loop. */
+  beginFloatingDrag?(): Promise<void>;
+  /** Ends a drag, snapping the window onto the work-area edges it landed near. Resolves the final physical rect. */
+  endFloatingDrag?(snap: boolean): Promise<FloatingRect | null>;
+  /** Resizes the calling floating window (logical pixels). */
+  setFloatingSize?(width: number, height: number): Promise<void>;
   /** Persist plugin bytes through the host's native save dialog. Resolves null when the user cancels. */
   saveFile?(pluginId: string, request: PluginSaveFileRequest, data: Uint8Array): Promise<PluginSaveFileResult | null>;
   downloadFile?(pluginId: string, request: PluginDownloadRequest, onProgress: (progress: unknown) => void): Promise<PluginSaveFileResult | null>;
@@ -484,6 +507,9 @@ export class PluginHostBridge {
         clipboardRead: !!this.api.clipboardRead,
         clipboardImageRead: !!this.api.clipboardReadImage,
         mediaUrl: !!this.api.openMedia && !!this.api.closeMedia,
+        // Floating desktop widget windows: advertised only when the host can both
+        // open a window and drive its geometry, so a plugin sees one honest flag.
+        floating: !!this.api.openFloatingWindow && !!this.api.beginFloatingDrag && !!this.api.endFloatingDrag,
         // The namespace exists on both hosts, but what it can DO differs:
         // portable plugins gate on these flags instead of probing calls.
         fileTransfer: {
@@ -933,7 +959,52 @@ export class PluginHostBridge {
       await this.api.storageDelete(this.plugin.manifest.id, requireStorageKey(input.key));
       return null;
     }
+    if (method === "host.openFloating") {
+      // A floating window is a workbench surface in its own right, so it shares
+      // the workbench permission gate instead of introducing a new one.
+      this.requirePermission("host.workbench");
+      if (!this.api.openFloatingWindow) throw new Error("Floating plugin windows require the desktop host");
+      const request = parseFloatingWindowRequest(this.plugin.manifest.id, requireRecord(params, "host.openFloating params"));
+      if (!this.ownWorkbenchContributionIds().has(request.contributionId)) throw new Error("Unknown workbench contribution");
+      return this.api.openFloatingWindow(request);
+    }
+    if (method === "host.closeFloating") {
+      if (!this.api.closeFloatingWindows) throw new Error("Floating plugin windows require the desktop host");
+      const input = isRecord(params) ? params : {};
+      const contributionId = optionalTrimmedString(input.contributionId);
+      const own = this.ownWorkbenchContributionIds();
+      if (contributionId && !own.has(contributionId)) throw new Error("Unknown workbench contribution");
+      // Without an explicit contribution every floating window of this plugin
+      // closes; labels are host-derived, so a plugin can never reach another
+      // plugin's window (or the main shell) through this path.
+      const contributionIds = contributionId ? [contributionId] : [...own];
+      await this.api.closeFloatingWindows(contributionIds.map((id) => floatingWindowLabel(this.plugin.manifest.id, id)));
+      return null;
+    }
+    if (method === "host.beginFloatingDrag") {
+      if (!this.api.beginFloatingDrag) throw new Error("Floating plugin windows require the desktop host");
+      await this.api.beginFloatingDrag();
+      return null;
+    }
+    if (method === "host.endFloatingDrag") {
+      if (!this.api.endFloatingDrag) throw new Error("Floating plugin windows require the desktop host");
+      const input = isRecord(params) ? params : {};
+      return (await this.api.endFloatingDrag(input.snap !== false)) ?? null;
+    }
+    if (method === "host.setFloatingSize") {
+      if (!this.api.setFloatingSize) throw new Error("Floating plugin windows require the desktop host");
+      const input = requireRecord(params, "host.setFloatingSize params");
+      const width = requireFloatingDimension(input.width, "width");
+      const height = requireFloatingDimension(input.height, "height");
+      await this.api.setFloatingSize(width, height);
+      return null;
+    }
     throw new Error(`Unsupported plugin host method '${method}'`);
+  }
+
+  /** The plugin's own declared workbench contributions — the only ones it may host in a floating window. */
+  private ownWorkbenchContributionIds(): Set<string> {
+    return new Set((this.plugin.manifest.contributions || []).filter((candidate) => candidate.type === "workbench").map((candidate) => candidate.id));
   }
 
   private async requireClipboardRead(): Promise<number> {
@@ -1311,6 +1382,29 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         return URL.createObjectURL(new Blob([decode(asset.dataBase64)], { type: asset.contentType }));
       },
       openWorkbench: (contributionId, childContext, options) => request('host.openWorkbench', { contributionId, context: childContext, forceNew: !!(options && options.forceNew), target: options && options.target === "tab" ? "tab" : undefined }),
+      // Closes whatever surface hosts this plugin UI — a workbench tab, a dock
+      // entry, or this plugin's floating window. Same path as the Ctrl+W
+      // shortcut, so a plugin can offer its own close/minimize affordance.
+      closeWorkbench: () => parent.postMessage({ source: '${PLUGIN_MESSAGE_SOURCE}', version: ${BRIDGE_VERSION}, type: 'shortcut', shortcut: 'closeTab' }, '*'),
+      // Floating desktop widget windows (the "window" surface): a frameless,
+      // always-on-top window that stays visible over other applications. Gate on
+      // capabilities.floating — a web host, or a desktop host without window
+      // support, omits it and the plugin should fall back to tab or dock.
+      //
+      // Dragging is split by design: the plugin decides WHEN a drag starts
+      // (thresholds, which element is a grip) and the host owns the movement —
+      // beginDrag hands the window to the OS move loop, and the host snaps it
+      // onto the work-area edges and remembers the spot once the loop goes
+      // quiet. Per-move coordinates are deliberately not part of the protocol:
+      // once the window follows the pointer, the webview's pointer capture is
+      // cancelled and the move stream dies mid-drag.
+      floating: Object.freeze({
+        open: (options) => request('host.openFloating', options || {}),
+        close: (contributionId) => request('host.closeFloating', { contributionId }),
+        beginDrag: () => request('host.beginFloatingDrag'),
+        endDrag: (options) => request('host.endFloatingDrag', options || {}),
+        setSize: (width, height) => request('host.setFloatingSize', { width, height }),
+      }),
       // §4/§5 command execution from a webview — the same registry path a menu
       // placement takes (enablement, §4.1 reuse, host-authored context),
       // scoped to the plugin's own declared commands. The optional context
@@ -1650,6 +1744,12 @@ function requireStorageKey(value: unknown): string {
   if (typeof value !== "string" || !value || value.length > MAX_PLUGIN_STORAGE_KEY_CHARS || /[\u0000-\u001f]/.test(value)) {
     throw new Error("storage key is invalid");
   }
+  return value;
+}
+
+/** A floating window dimension in logical pixels; the host clamps it to its own bounds. */
+function requireFloatingDimension(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) throw new Error(`${label} must be a positive number`);
   return value;
 }
 

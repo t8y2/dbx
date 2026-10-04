@@ -97,6 +97,17 @@ async function inlineLocalUiAssets(html: string, pluginId: string): Promise<Plug
       resource.replaceWith(script);
     } else {
       const style = document.createElement("style");
+      // Carry the stylesheet's own attributes over, exactly like the script
+      // branch does: they are how a plugin addresses the sheet later (a theme or
+      // skin switch selects sheets by a data-* marker and toggles `disabled`),
+      // so dropping them here silently breaks every runtime stylesheet lookup in
+      // plugin form. Note that `disabled` does not reflect from the content
+      // attribute on a <style> element the way it does on a <link>, and it cannot
+      // survive serialization as an IDL property either — a plugin that ships a
+      // disabled stylesheet has to re-apply `sheet.disabled` itself.
+      for (const attribute of [...resource.attributes]) {
+        if (attribute.name !== "href" && attribute.name !== "rel") style.setAttribute(attribute.name, attribute.value);
+      }
       style.textContent = content;
       resource.replaceWith(style);
     }

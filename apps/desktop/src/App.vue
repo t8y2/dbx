@@ -188,6 +188,7 @@ import { useBackgroundImage } from "@/composables/useBackgroundImage";
 import ExternalSqlFileChangeDialog from "@/components/editor/ExternalSqlFileChangeDialog.vue";
 import { resolveWindowContext } from "@/lib/app/windowContext";
 import { openDetachedTabWindow } from "@/lib/app/detachedTabWindow";
+import { FLOATING_OPEN_FILESYSTEM_EVENT, FLOATING_OPEN_WORKBENCH_EVENT, type FloatingOpenFilesystemPayload, type FloatingOpenWorkbenchPayload } from "@/lib/plugins/pluginFloatingWindow";
 import { OPEN_PLUGIN_AI_CONVERSATION, type AiPluginConversationRequest } from "@/lib/ai/aiPluginConversation";
 import type { PluginAiRecommendationHostUpdate } from "@/lib/plugins/pluginHostBridge";
 
@@ -539,6 +540,7 @@ const pluginWorkbenchTabRefs = new Map<string, PluginWorkbenchTabHandle>();
 const tabNavigationHistory = ref(createTabNavigationHistory());
 let pendingTabHistoryNavigationId: string | null = null;
 let detachedEventUnlisteners: Array<() => void> = [];
+let floatingEventUnlisteners: Array<() => void> = [];
 let detachedCloseInProgress = false;
 const detachedDropTargetTabId = ref<string | null>(null);
 const showDetachedClosePrompt = ref(false);
@@ -786,6 +788,54 @@ async function setupDetachedWindowEvents() {
   for (const [event, handler] of events) {
     detachedEventUnlisteners.push(await listen(event, (message) => void (handler as (payload: unknown) => Promise<void>)(message.payload)));
   }
+}
+
+// A floating plugin window hosts a single widget and has no shell of its own, so
+// its shell-bound navigation is forwarded here (emitTo "main"): raise this window
+// and open the tab the widget asked for. Payloads are validated field by field —
+// they cross a window boundary, and a malformed one must not open a half-titled tab.
+async function raiseMainWindow() {
+  const { getCurrentWindow } = await import("@tauri-apps/api/window");
+  const currentWindow = getCurrentWindow();
+  await currentWindow.show().catch(() => undefined);
+  await currentWindow.unminimize().catch(() => undefined);
+  await currentWindow.setFocus().catch(() => undefined);
+}
+
+async function handleFloatingOpenWorkbench(payload: unknown) {
+  const data = payload as Partial<FloatingOpenWorkbenchPayload> | null;
+  if (typeof data?.pluginId !== "string" || typeof data.contributionId !== "string") return;
+  const context = data.context && typeof data.context === "object" ? data.context : undefined;
+  await raiseMainWindow();
+  queryStore.openPluginWorkbench(data.pluginId, data.contributionId, {
+    ...(typeof data.title === "string" && data.title ? { title: data.title } : {}),
+    ...(context ? { context } : {}),
+    forceNew: data.forceNew === true,
+  });
+}
+
+async function handleFloatingOpenFilesystem(payload: unknown) {
+  const data = payload as Partial<FloatingOpenFilesystemPayload> | null;
+  if (typeof data?.pluginId !== "string" || typeof data.providerId !== "string") return;
+  const context = data.context && typeof data.context === "object" ? data.context : undefined;
+  await raiseMainWindow();
+  queryStore.openPluginFilesystem(data.pluginId, data.providerId, {
+    ...(typeof data.title === "string" && data.title ? { title: data.title } : {}),
+    ...(typeof data.rootUri === "string" && data.rootUri ? { rootUri: data.rootUri } : {}),
+    ...(typeof context?.connectionId === "string" ? { connectionId: context.connectionId } : {}),
+    ...(typeof context?.uri === "string" ? { currentUri: context.uri } : {}),
+  });
+}
+
+async function setupFloatingWindowEvents() {
+  if (!isDesktop || isDetachedWindowContext) return;
+  const { listen } = await import("@tauri-apps/api/event");
+  floatingEventUnlisteners.push(await listen(FLOATING_OPEN_WORKBENCH_EVENT, (message) => void handleFloatingOpenWorkbench(message.payload)));
+  floatingEventUnlisteners.push(await listen(FLOATING_OPEN_FILESYSTEM_EVENT, (message) => void handleFloatingOpenFilesystem(message.payload)));
+  // A floating window whose renderer dies cannot dismiss itself (frameless, and
+  // nothing inside it runs), so the main window reaps silent ones.
+  const { startFloatingWindowReaper } = await import("@/lib/plugins/pluginFloatingWindow");
+  floatingEventUnlisteners.push(startFloatingWindowReaper());
 }
 
 async function detachTab(tab: QueryTab, position?: { x: number; y: number }) {
@@ -4422,6 +4472,7 @@ onMounted(async () => {
   });
   setupCloseActionPromptListener();
   void setupDetachedWindowEvents();
+  void setupFloatingWindowEvents();
   console.log(`[STARTUP] onMounted sync done: ${(performance.now() - mountStart).toFixed(0)}ms`);
 });
 
@@ -4432,6 +4483,8 @@ onUnmounted(() => {
   connectionLivenessUnlisten = null;
   detachedEventUnlisteners.forEach((unlisten) => unlisten());
   detachedEventUnlisteners = [];
+  floatingEventUnlisteners.forEach((unlisten) => unlisten());
+  floatingEventUnlisteners = [];
   cleanupTauriListeners();
   cleanupCloseActionPromptListener();
   if (updateCheckTimer) {

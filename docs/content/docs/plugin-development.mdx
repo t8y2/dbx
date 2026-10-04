@@ -321,6 +321,8 @@ Context may contain `null`, booleans, finite numbers, strings, arrays, and plain
 
 Connection provider fields using `binding: "config"` are persisted in `external_config`; fields using `binding: "secret"` are persisted in the Secret Store. Plugin connection configuration keeps `external_config` through create, edit, save, and reconnect flows.
 
+The host also authors three reserved fields on every workbench context: `workbenchId` (a stable host-generated instance id), `restored`, and `surface`. `surface` tells the UI which container it is running in — `"tab"` (the main multi-tab workbench), `"dock"` (the bottom panel), or `"window"` (a floating desktop widget window, see [Floating Windows](#floating-windows)). The same plugin and contribution can be open on several surfaces at once, each with its own context and lifecycle; unknown values should fall back to `"tab"` behavior.
+
 ## Frontend Host API
 
 The UI runs in an isolated iframe. DBX exposes the bridge as `window.dbxPlugin`; do not import DBX Vue/Tauri modules or assume that Node.js, local files, or arbitrary network access are available.
@@ -350,13 +352,14 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | `sendBinary(channel, data)` / `onBinary(fn)` | Sends or receives binary data; requires framed transport and `host.binary`. |
 | `readAsset(path)` / `readAssetUrl(path)` | Reads a packaged asset within the plugin resource root. |
 | `openWorkbench(id, context)` | Opens another workbench from this plugin; requires `host.workbench`. |
+| `closeWorkbench()` | Closes the surface hosting this UI — a workbench tab, a dock entry, or this plugin's floating window. It is the same path as the `Ctrl/Cmd+W` shortcut, so a plugin can offer its own close or minimize affordance. |
 | `executeCommand(commandId, context?)` | Executes one of this plugin's own declared commands through the same path as a menu placement — re-checks `enablement`, applies singleton reuse, and follows the declared `presentation` (panel commands dock, tab commands open tabs). `context` merges over the command context and scopes `instance_key` `{{path}}` placeholders, so `instance_key: "logs:{{connectionId}}"` yields one panel instance per connection. Resolves `{ error }` for expected outcomes; requires `host.workbench`. |
 | `openFilesystem(id, context)` | Opens a filesystem entry; requires `host.filesystem`. |
 | `getPlanCapabilities(connectionId)` | Reads what the host and this connection can plan; requires `host.plans:read`. |
 | `explainPlan({ connectionId, database?, schema?, sql, mode, timeoutMs? })` | Returns the estimated plan for `sql`; requires `host.plans:read`. |
 | `getTableMetadata({ connectionId, database?, schema?, table })` | Reads narrow table schema metadata from an already-open connection; requires `host.schema:read`. |
 | `queryData({ connectionId, database?, schema?, sql, maxRows?, timeoutMs? })` | Runs one read-only SQL statement on a connection the user granted to the plugin; requires `host.data:read`. |
-| `capabilities` | `{ downloadFile, planApi, schemaMetadataApi, dataApi, storage, ai, aiRecommendations, clipboardWrite, clipboardRead }` from the init message. A missing or `false` entry means that Host API group is unavailable here, so gate the matching call on it instead of probing with a request. |
+| `capabilities` | `{ downloadFile, planApi, schemaMetadataApi, dataApi, storage, ai, aiRecommendations, clipboardWrite, clipboardRead, floating }` from the init message. A missing or `false` entry means that Host API group is unavailable here, so gate the matching call on it instead of probing with a request. |
 | `ai.openConversation({ title, prompt, context, send?, mode? })` | Opens a new plugin conversation in the built-in AI panel; `send` defaults to `false` and `mode` defaults to `ask`. `mode: "agent"` uses live plugin tools when context includes an open plugin connection; requires `host.ai` and is advertised as `capabilities.ai`. |
 | `ai.setRecommendations({ context, items })` | Replaces the current workbench's default recommendations and refreshes the global AI panel; up to five items are shown and `{{path.to.value}}` placeholders are supported; requires `host.ai` and `capabilities.aiRecommendations`. |
 | `ai.clearRecommendations()` | Clears recommendations for the current workbench; requires `host.ai` and `capabilities.aiRecommendations`. |
@@ -364,6 +367,7 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | `storage` | Persistent per-plugin key-value state; requires `host.storage`; see below. |
 | `fileTransfer` | Streams local files, downloads, and (desktop) OS drops; see below. |
 | `clipboard` | System clipboard access from the sandbox; see below. |
+| `floating` | Opens and drives a floating desktop widget window (desktop hosts only); see [Floating Windows](#floating-windows). |
 
 Failed calls reject their Promise; show a useful error and offer retry. Host methods, parameters, and results are versioned API surface—do not call undocumented DBX internals.
 
@@ -680,6 +684,59 @@ await dbxPlugin.ai.openConversation({
 
 `title` allows 200 characters and `prompt` allows 32000. `context` must be a plain JSON object and is limited to 2 MiB. An Agent can use only tools exposed by the Host for that plugin connection; the plugin receives no model response or model configuration and gains no database execution capability. Older plugins without recommendations continue to use the existing AI API, and older hosts omit the new capability fields, so disable only the unavailable entry points and keep the rest of the plugin usable.
 
+### Floating Windows
+
+A floating window is one of your plugin's workbenches hosted in its own frameless, always-on-top desktop window instead of inside the DBX shell — the surface a small always-visible widget wants (a player capsule, a session badge, a quick picker). It stays on top of other applications and can be dragged anywhere on the desktop. Released mid-screen it stays where it landed; released on or past a work-area edge — however hard it was shoved — it snaps flush onto that edge and docks there. Docking never hides the widget the moment it lands: it stays a fully readable capsule, tucks off-screen behind a thin strip about 2.5 seconds after the cursor leaves it, and slides back out while the cursor is over that strip. Reopening a widget that was left docked behaves the same way (capsule first, then tuck); one that was simply summoned is left as a capsule even though its default placement touches an edge. Gate on `capabilities.floating`: the web host has no windows, and neither does a desktop host that cannot manage them.
+
+```js
+if (window.dbxPlugin.capabilities.floating) {
+  // From a tab or dock workbench: open the widget. One window per
+  // (plugin, workbench contribution), so a second call focuses the existing one.
+  const { windowId } = await window.dbxPlugin.floating.open({
+    contributionId: "capsule",
+    title: "Now playing",
+    width: 260,
+    height: 60,
+    context: { queueId: currentQueueId },
+  });
+}
+
+// Inside the widget (context.surface === "window"): drive its own window.
+grip.addEventListener("pointerdown", (event) => {
+  grip.setPointerCapture(event.pointerId);
+  dragging = false;
+});
+grip.addEventListener("pointermove", async (event) => {
+  if (dragging || Math.hypot(event.clientX - downX, event.clientY - downY) < 4) return;
+  dragging = true;
+  // The host takes over: it follows the native cursor and moves the window.
+  await window.dbxPlugin.floating.beginDrag();
+});
+grip.addEventListener("pointerup", async () => {
+  if (!dragging) return;
+  dragging = false;
+  await window.dbxPlugin.floating.endDrag(); // snaps + remembers the position
+});
+```
+
+| API | Purpose |
+| --- | --- |
+| `floating.open(options)` | Opens (or focuses) the floating window for one of this plugin's `workbench` contributions. `options`: `contributionId` (required), `title`, `width`/`height` in logical pixels, `x`/`y` in physical screen pixels, `alwaysOnTop` (default `true`), `skipTaskbar` (default `true`), `resizable` (default `false`), `context`. Resolves `{ windowId, reused }`; requires `host.workbench`. |
+| `floating.close(contributionId?)` | Closes this plugin's floating window — one contribution, or every floating window of this plugin when the id is omitted. Inside a widget, calling it without an argument closes the widget itself. |
+| `floating.beginDrag()` | Hands the window to the host's drag loop. Call it from `pointermove` once your drag threshold trips, while the button is still down. The host reads the native cursor itself from here on, so there is no per-move call to make. |
+| `floating.endDrag({ snap? })` | Ends the drag. With `snap` (default `true`) the host pulls the window flush onto a work-area edge it reached or passed — docking it there, capsule first and tucked behind a thin strip once the cursor has been away — or clamps it fully on screen otherwise, and remembers the position (and the dock) for the next open. Resolves the final rect in physical pixels. Optional in practice: the host also ends a drag on its own once the cursor goes quiet, so a widget that never sees the pointerup cannot leave the window glued to it. |
+| `floating.setSize(width, height)` | Resizes the hosting window in logical pixels; the host clamps to its own bounds. |
+
+The widget decides *when* a drag starts (which element is a grip, how far the pointer must travel first); the host moves the window and owns the snap and the remembered position. There is deliberately no per-move bridge call: the host polls the native cursor, which keeps the widget under the pointer even when the webview is busy, and ends the drag on a quiet cursor if the pointerup never arrives. Geometry calls (`beginDrag`/`endDrag`/`setSize`) only work inside a floating window and reject elsewhere, so a tab can never move a window it is not in.
+
+A few rules make the surface predictable:
+
+- **One window per contribution.** The window id is derived from the plugin and contribution ids, so `floating.open` is idempotent: the second call focuses the window that is already open instead of stacking widgets.
+- **The window is opaque.** The host paints no chrome of its own, so the widget is what the user sees: give your page a background plus rounded corners and it reads as a floating card once the host sizes the window to the content. Per-pixel transparency (a shaped widget with see-through corners) is deliberately not offered — whether a transparent region still receives mouse input differs per platform, and a widget the user is meant to drag has to stay clickable everywhere.
+- **Shell navigation is forwarded.** A floating window has no tab strip, dock, or panels, so `openWorkbench` and `openFilesystem` from it open in the main DBX window, which raises itself. `executeCommand` is not offered there at all: every command action opens a shell surface, so it would resolve successfully and show nothing.
+- **Position survives restarts** per plugin and contribution, and is discarded when it no longer lands on a connected monitor (an unplugged display falls back to the work-area default rather than opening off-screen).
+- **The widget is a full workbench.** It gets the same bridge, permissions, context contract, and sidecar RPC as a tab; `context.surface` is `"window"` and `context.workbenchId` is the window id. It boots its own copy of your UI, so shared state has to travel through your sidecar (or `storage`), not through module memory.
+
 ### Themes, Layout, and Static Assets
 
 DBX injects theme tokens on the document root and updates `data-dbx-theme`. Custom libraries, including Svelte and shadcn-svelte, should consume these variables; parent-page CSS does not cross the iframe:
@@ -722,6 +779,14 @@ Build the UI as packaged static assets, not references to a Vite server or CDN s
 #### Lazy loading and code splitting
 
 The host inlines the entry script into the sandbox document; further `ui/` assets stay addressable at runtime through the `dbx-plugin` scheme — `dbx-plugin://localhost/<plugin-id>/<path-under-ui.root>` (WebView2 maps it to `http://dbx-plugin.localhost/<plugin-id>/…`). The host injects the platform-correct form as the sandbox document's `<base>` and allows it in the resource CSP, so dynamic `import()` of code-split chunks works in packaged plugins — provided the build emits **relative** asset URLs: set `base: "./"` (Vite) or `publicPath: "./"` (webpack) so chunk and CSS asset URLs resolve against the injected base instead of the host origin. Absolute `/assets/…` references cannot carry the plugin id and will 404. The scheme serves files only, confined to each plugin's `ui.root`, and responses are never cached across plugin updates.
+
+#### Inlined stylesheets
+
+The host reads every `<link rel="stylesheet">` that points inside `ui.root` and replaces it with a `<style>` element carrying the same attributes, so a plugin can still address its sheets at runtime (`document.querySelectorAll("style[data-skin-css]")`) and toggle them. One difference matters: `disabled` does not reflect from the content attribute on a `<style>` element the way it does on a `<link>`, and the state cannot survive as an IDL property through the host's re-serialization either. A plugin that ships a disabled stylesheet must re-apply `sheet.disabled = true` itself after load; every other attribute (ids, `data-*` markers, `media`) arrives unchanged.
+
+#### Fullscreen
+
+`requestFullscreen()` inside the sandbox depends on the frame's Permissions-Policy, which the host delegates (`allow="clipboard-write; fullscreen"`). A plugin cannot grant it to itself, so feature-detect `document.fullscreenEnabled` and fall back to an in-page maximized layout when it is `false` — an older host that does not delegate would otherwise reject every fullscreen request.
 
 ## Native Sidecars and RPC
 

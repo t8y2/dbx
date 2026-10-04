@@ -19,6 +19,8 @@ import {
   type PluginAiRecommendationHostUpdate,
 } from "@/lib/plugins/pluginHostBridge";
 import { getCachedPluginUiHtml, getOrLoadPluginUiHtml } from "@/lib/plugins/pluginUiHtmlCache";
+import { beginFloatingWindowDrag, closeFloatingWindows, endFloatingWindowDrag, openFloatingWindow, setFloatingWindowSize } from "@/lib/plugins/pluginFloatingWindow";
+import { isFloatingPluginWindow } from "@/lib/app/windowContext";
 import { buildPluginEditorAppearance } from "@/lib/plugins/pluginAppearance";
 import { createFrontendPluginRegistry } from "@/lib/plugins/frontendPlugin";
 import { executePluginCommand } from "@/lib/plugins/pluginCommandRegistry";
@@ -469,6 +471,19 @@ function onHostFileDrop(event: Event): void {
 
 const title = computed(() => `${props.plugin.manifest.name} · ${props.contribution.label}`);
 
+/**
+ * The §8.3 surface this host renders on. The tab surface keeps a minimum height
+ * (a workbench needs room to be usable); the dock and floating-window surfaces
+ * are sized by their own container, where a floor would make the frame taller
+ * than the visible area and swallow clicks near its bottom edge. The floating
+ * surface is transparent: the widget paints its own shape.
+ */
+const surface = computed(() => (typeof props.context?.surface === "string" ? props.context.surface : "tab"));
+const hostSurfaceClass = computed(() => (surface.value === "tab" ? "min-h-40 bg-background" : surface.value === "window" ? "min-h-0 bg-transparent" : "min-h-0 bg-background"));
+/** The loading overlays must not paint an opaque box inside a transparent floating window. */
+const overlayClass = computed(() => (surface.value === "window" ? "bg-transparent" : "bg-background"));
+const isFloatingSurface = isFloatingPluginWindow();
+
 /** Collect resolved DBX design tokens so the sandbox can theme itself with the same values. */
 function currentBridgeTheme(): PluginBridgeTheme {
   const tokens: Record<string, string> = {};
@@ -509,8 +524,12 @@ function createBridge() {
       // the single-plugin registry is equivalent here because findCommand /
       // findWorkbench / enablement never cross plugins. Panel commands dock,
       // tab commands open tabs, §4.1 reuse with `instance_key` placeholder
-      // scoping — identical to menu execution.
-      executeCommand: (pluginId, commandId, context) => executePluginCommand(createFrontendPluginRegistry([props.plugin], appLocale.value), useQueryStore(), pluginId, commandId, context),
+      // scoping — identical to menu execution. Not offered on the floating
+      // surface: every command action opens a shell surface (a dock entry or a
+      // workbench tab) that a floating widget window does not have, so it would
+      // resolve successfully and show nothing. There, plugins navigate with
+      // openWorkbench / floating.open, which the host routes to the main window.
+      ...(isFloatingSurface ? {} : { executeCommand: (pluginId: string, commandId: string, context?: Record<string, unknown>) => executePluginCommand(createFrontendPluginRegistry([props.plugin], appLocale.value), useQueryStore(), pluginId, commandId, context) }),
       openFilesystem: async (pluginId, providerId, context) => emit("openFilesystem", pluginId, providerId, context),
       reopenConnection: (pluginId, connectionId) => useConnectionStore().reopenPluginConnection(connectionId, pluginId),
       // PR-A4 generic extension point: a read-only, secret-free, plugin-scoped connection list (for in-panel connection switching).
@@ -541,6 +560,16 @@ function createBridge() {
         await api.setPluginDataGrant(pluginId, connectionId, true);
       },
       closeTab: () => emit("closeTab"),
+      // Floating widget windows (§8.3 surface "window"). Desktop-only: the web
+      // host omits them so capabilities.floating stays false and the plugin can
+      // fall back to an in-shell surface. Opening and closing work from any
+      // window; the geometry calls act on the window that hosts the caller and
+      // reject elsewhere, so a tab can never move a window it is not inside.
+      openFloatingWindow: isTauriRuntime() ? (request) => openFloatingWindow(request) : undefined,
+      closeFloatingWindows: isTauriRuntime() ? (labels) => closeFloatingWindows(labels) : undefined,
+      beginFloatingDrag: isTauriRuntime() ? () => beginFloatingWindowDrag() : undefined,
+      endFloatingDrag: isTauriRuntime() ? (snap) => endFloatingWindowDrag(snap) : undefined,
+      setFloatingSize: isTauriRuntime() ? (width, height) => setFloatingWindowSize(width, height) : undefined,
       saveFile: (_pluginId, request, data) => savePluginFile(request, data),
       downloadFile: isTauriRuntime() ? downloadPluginFile : undefined,
       cancelDownload: isTauriRuntime() ? cancelPluginDownload : undefined,
@@ -794,8 +823,8 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="relative flex size-full min-h-40 overflow-hidden bg-background">
-    <div v-if="loading" class="absolute inset-0 z-10 flex items-center justify-center bg-background text-sm text-muted-foreground">
+  <div class="relative flex size-full overflow-hidden" :class="hostSurfaceClass">
+    <div v-if="loading" class="absolute inset-0 z-10 flex items-center justify-center text-sm text-muted-foreground" :class="overlayClass">
       <Loader2 class="mr-2 size-4 animate-spin" />
       {{ t("pluginPlatform.loadingTitle", { title }) }}
     </div>
@@ -804,13 +833,17 @@ onBeforeUnmount(() => {
       <span>{{ error }}</span>
     </div>
     <template v-else>
-      <iframe ref="iframe" :title="title" :srcdoc="source" sandbox="allow-scripts" allow="clipboard-write" referrerpolicy="no-referrer" class="size-full border-0 bg-transparent" @load="onFrameLoad" />
+      <!-- `allow` delegates fullscreen into the sandboxed frame: without the
+           Permissions-Policy entry, requestFullscreen() rejects there no matter
+           which sandbox tokens are set (the legacy `allow-fullscreen` sandbox
+           flag was removed from the platform and logs an error when present). -->
+      <iframe ref="iframe" :title="title" :srcdoc="source" sandbox="allow-scripts" allow="clipboard-write; fullscreen" referrerpolicy="no-referrer" class="size-full border-0 bg-transparent" @load="onFrameLoad" />
       <!-- Cover until the frame has actually painted: the iframe stays mounted
            underneath so its load event can fire (v-else on the overlay would
            deadlock), it just isn't visible yet. Fully opaque so the covered
            phase is visually identical to the host background, and faded out
            instead of removed so the reveal is never a hard swap. -->
-      <div class="absolute inset-0 z-10 flex items-center justify-center bg-background text-sm text-muted-foreground transition-opacity duration-150 ease-out" :class="frameReady ? 'pointer-events-none opacity-0' : 'opacity-100'">
+      <div class="absolute inset-0 z-10 flex items-center justify-center text-sm text-muted-foreground transition-opacity duration-150 ease-out" :class="[overlayClass, frameReady ? 'pointer-events-none opacity-0' : 'opacity-100']">
         <Loader2 class="mr-2 size-4 animate-spin" />
         {{ t("pluginPlatform.loadingTitle", { title }) }}
       </div>

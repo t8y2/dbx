@@ -1837,6 +1837,14 @@ pub fn run() {
                 return;
             }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Floating plugin widgets (label prefix shared with the frontend's
+                // floatingWindowLabel) close like ordinary windows. Hiding them to
+                // the tray would keep their plugin instance — audio included —
+                // running invisibly, and the app-wide close prompt belongs to the
+                // main shell, not to a widget the user dismissed.
+                if window.label().starts_with("plugin-floating-") {
+                    return;
+                }
                 if let Some(tab_id) = window.label().strip_prefix("detached-tab-") {
                     if commands::app_settings::take_approved_detached_window_close(window.label()) {
                         return;

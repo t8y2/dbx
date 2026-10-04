@@ -6,6 +6,7 @@ import { retryStartupAfterPreloadFailure } from "@/lib/startup/startupPreloadRec
 import { markStartupPhase } from "@/lib/startup/startupTiming";
 import { applyLegacyWebViewClass, isBlockingCompatFailure } from "@/lib/ui/legacyWebView";
 import { hydrateAppAppearance } from "@/lib/app/appAppearance";
+import { isFloatingPluginWindow } from "@/lib/app/windowContext";
 
 function startupErrorMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -92,6 +93,23 @@ async function bootstrap() {
   // durable appearance record before importing i18n and the theme composable;
   // those modules synchronously read the compatibility keys during evaluation.
   await hydrateAppAppearance();
+  // A floating plugin window is a widget, not the workbench: it mounts its own
+  // root (one plugin workbench on a transparent page) and skips StartupGate/App,
+  // so shell singletons — authentication, tab restore, update prompts — stay in
+  // the main window instead of booting a second time per widget.
+  if (isFloatingPluginWindow()) {
+    const [{ default: i18n, loadSavedLocale }, { default: PluginFloatingWindow }] = await Promise.all([import("./i18n"), import("@/components/plugins/PluginFloatingWindow.vue")]);
+    const localeReady = loadSavedLocale();
+    const floatingApp = createApp(PluginFloatingWindow, { localeReady });
+    floatingApp.use(createPinia());
+    floatingApp.use(i18n);
+    floatingApp.mount("#root");
+    // The inline startup guard in index.html swallows Escape until this fires; a
+    // widget has no startup wizard, so release it as soon as the root is mounted.
+    window.dispatchEvent(new Event("dbx:startup-ready"));
+    void localeReady.catch(() => {});
+    return;
+  }
   const [{ default: i18n, loadSavedLocale }, { default: App }] = await Promise.all([import("./i18n"), import("./StartupGate.vue")]);
   console.log("[STARTUP] frontend modules loaded");
   const localeReady = loadSavedLocale();

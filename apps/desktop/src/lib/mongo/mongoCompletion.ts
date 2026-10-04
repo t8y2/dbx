@@ -1905,6 +1905,7 @@ function readMethodPrefix(beforeCursor: string): { prefix: string; from: number 
 const DB_ROOT = String.raw`db(?:\s*\.\s*getSiblingDB\s*\(\s*(?:"[^"]*"|'[^']*')\s*\))?`;
 const SIBLING_ROOT_PATTERN = String.raw`db\s*\.\s*getSiblingDB\s*\(\s*(?:"[^"]*"|'[^']*')\s*\)`;
 const COLLECTION_REF = String.raw`(?:[A-Za-z_][\w$-]*|getCollection\(["'][^"']+["']\))`;
+const COLLECTION_RECEIVER = String.raw`(?:${DB_ROOT}\.${COLLECTION_REF}|${DB_ROOT}\s*\[\s*(?:"[^"]*"|'[^']*')\s*\])`;
 
 /** `db.` or `db.getSiblingDB("other").` immediately before the cursor. */
 function endsAtDbRootDot(beforeCursor: string): boolean {
@@ -1965,14 +1966,14 @@ function matchShowSubcommandPrefix(beforeCursor: string): { prefix: string; from
 }
 
 function matchGetCollectionPrefix(beforeCursor: string): { prefix: string; from: number } | null {
-  const match = lastCodeMatch(new RegExp(String.raw`(?:^|[\s;(])${DB_ROOT}\.getCollection\(\s*(["'][^"'\\]*)$`), beforeCursor);
+  const match = lastCodeMatch(new RegExp(String.raw`(?:^|[\s;(])${DB_ROOT}(?:\.getCollection\(|\s*\[)\s*(["'][^"'\\]*)$`), beforeCursor);
   if (!match) return null;
   const prefix = match[1] ?? "";
   return { prefix, from: beforeCursor.length - prefix.length };
 }
 
 function isAfterCollectionDot(beforeCursor: string): boolean {
-  return !!lastCodeMatch(new RegExp(String.raw`(?:^|[\s;(])${DB_ROOT}\.${COLLECTION_REF}\.[\w$-]*$`), beforeCursor);
+  return !!lastCodeMatch(new RegExp(String.raw`(?:^|[\s;(])${COLLECTION_RECEIVER}\.[\w$-]*$`), beforeCursor);
 }
 
 /**
@@ -1981,7 +1982,7 @@ function isAfterCollectionDot(beforeCursor: string): boolean {
  * chains (which only accept `toArray()` and `pretty()`).
  */
 function matchCursorMethodDot(beforeCursor: string): { find: boolean; countable: boolean; terminal?: boolean } | null {
-  const collectionCall = new RegExp(String.raw`(?:^|[\s;(])${DB_ROOT}\.${COLLECTION_REF}\.(find|aggregate)\s*\(`, "g");
+  const collectionCall = new RegExp(String.raw`(?:^|[\s;(])${COLLECTION_RECEIVER}\.(find|aggregate)\s*\(`, "g");
   const lastMatch = lastCodeMatch(collectionCall, beforeCursor);
   if (!lastMatch) return null;
 
@@ -2223,13 +2224,28 @@ function extractActiveCollection(before: string): string | undefined {
   const literals = mongoLiteralRanges(before);
   const isCode = (match: RegExpMatchArray) => match.index === undefined || !isInsideMongoLiteral(literals, match.index);
   const getCollectionMatches = [...before.matchAll(new RegExp(String.raw`${DB_ROOT}\.getCollection\(["']([^"']+)["']\)`, "g"))].filter(isCode);
+  const bracketMatches = [...before.matchAll(new RegExp(String.raw`${DB_ROOT}\s*\[\s*(["'])([^"']+)\1\s*\]`, "g"))].filter(isCode);
   const directMatches = [...before.matchAll(new RegExp(String.raw`${DB_ROOT}\.([A-Za-z_][\w$-]*)\s*\.`, "g"))].filter(isCode).filter((match) => match[1] !== "getCollection");
   const lastGetCollection = getCollectionMatches[getCollectionMatches.length - 1];
+  const lastBracket = bracketMatches[bracketMatches.length - 1];
   const lastDirect = directMatches[directMatches.length - 1];
   const getCollectionIndex = lastGetCollection?.index ?? -1;
+  const bracketIndex = lastBracket?.index ?? -1;
   const directIndex = lastDirect?.index ?? -1;
-  if (getCollectionIndex > directIndex) return lastGetCollection?.[1];
-  return lastDirect?.[1];
+
+  let lastIndex = directIndex;
+  let activeCollection = lastDirect?.[1];
+
+  if (getCollectionIndex > lastIndex) {
+    lastIndex = getCollectionIndex;
+    activeCollection = lastGetCollection?.[1];
+  }
+  if (bracketIndex > lastIndex) {
+    lastIndex = bracketIndex;
+    activeCollection = lastBracket?.[2];
+  }
+
+  return activeCollection;
 }
 
 const USE_COMMAND_PATTERN = /use\s+([a-zA-Z0-9_-]+)(?=[\s;]|$)/iy;

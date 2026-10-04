@@ -7906,6 +7906,8 @@ export default withEnglishFallback({
     defaultAutoKeepResultsDescription: "Menerapkan pengaturan ini memperbarui tab kueri yang terbuka dan mengatur default untuk tab baru. Anda tetap dapat mengaktifkan/menonaktifkannya per tab.",
     multiStatementDefaultView: "Tampilan default untuk beberapa pernyataan",
     multiStatementDefaultViewDescription: "Pilih apakah batch dengan beberapa pernyataan SQL terbuka pada tabel hasil atau ringkasan eksekusi.",
+    defaultExplainView: "Tampilan default untuk rencana eksekusi",
+    defaultExplainViewDescription: "Pilih mode tampilan default yang ditampilkan setelah menjalankan rencana eksekusi (canvas, pohon, ringkasan, tabel, atau mentah).",
     queryResultMaxRows: "Jumlah baris maksimum hasil kueri",
     queryResultMaxRowsEnabled: "Batasi jumlah baris hasil kueri",
     queryResultMaxRowsDescription: "Membatasi baris yang dikembalikan oleh kueri, data tabel, prosedur tersimpan, dan pemuatan berkelanjutan.",

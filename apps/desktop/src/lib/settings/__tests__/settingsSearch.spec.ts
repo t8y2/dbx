@@ -113,6 +113,16 @@ describe("settings search", () => {
     });
   });
 
+  it("indexes the default explain view and its settings control", () => {
+    expect(SETTINGS_SEARCH_DEFINITIONS).toContainEqual({
+      id: "default-explain-view",
+      category: "data",
+      titleKey: "settings.defaultExplainView",
+      descriptionKey: "settings.defaultExplainViewDescription",
+      targetId: "default-explain-view",
+    });
+  });
+
   it("places SQL file limits in their owning settings categories", () => {
     expect(SETTINGS_SEARCH_DEFINITIONS).toContainEqual({
       id: "sql-file-editor-max-mb",

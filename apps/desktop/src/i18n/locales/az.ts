@@ -7236,6 +7236,8 @@ export default withEnglishFallback({
     defaultAutoKeepResultsDescription: "Tətbiq edildikdə açıq sorğu vərəqləri yenilənir və yeni vərəqlər üçün standart təyin olunur. Hər vərəqdə ayrıca dəyişə bilərsiniz.",
     multiStatementDefaultView: "Bir neçə əmr üçün standart görünüş",
     multiStatementDefaultViewDescription: "Bir neçə SQL əmrindən ibarət toplunun nəticə cədvəlində, yoxsa icra xülasəsində açılacağını seçin.",
+    defaultExplainView: "İcra planı üçün standart görünüş",
+    defaultExplainViewDescription: "İcra planı işə salındıqdan sonra standart olaraq göstəriləcək görünüş rejimini seçin (iş səthi, ağac, xülasə, cədvəl və ya xam).",
     queryResultMaxRows: "Sorğu nəticəsində maksimum sətir sayı",
     queryResultMaxRowsEnabled: "Sorğu nəticəsindəki sətirləri məhdudlaşdır",
     queryResultMaxRowsDescription: "Sorğuların, cədvəl verilənlərinin, saxlanılan prosedurların və davamlı yükləmənin qaytardığı sətirləri məhdudlaşdırır.",

@@ -734,6 +734,8 @@ export const RESULT_TAB_NAMING_MODES = ["source", "ordinal", "comment"] as const
 export type ResultTabNamingMode = (typeof RESULT_TAB_NAMING_MODES)[number];
 const MULTI_STATEMENT_DEFAULT_VIEWS = ["result", "summary"] as const;
 export type MultiStatementDefaultView = (typeof MULTI_STATEMENT_DEFAULT_VIEWS)[number];
+export const DEFAULT_EXPLAIN_VIEWS = ["canvas", "tree", "summary", "table", "raw"] as const;
+export type DefaultExplainView = (typeof DEFAULT_EXPLAIN_VIEWS)[number];
 export const TABLE_FONT_SIZE_MIN = 8;
 export const TABLE_FONT_SIZE_MAX = 16;
 export const TABLE_FONT_SIZE_DEFAULT = 13;
@@ -988,6 +990,7 @@ export interface EditorSettings {
   resultRunDisplayMode: ResultRunDisplayMode;
   defaultAutoKeepResults: boolean;
   multiStatementDefaultView: MultiStatementDefaultView;
+  defaultExplainView: DefaultExplainView;
   dataGridAutoTransposeSingleRow: boolean;
   dataGridCellDetailButtonVisible: boolean;
   dataGridCellDetailDialogDefault: boolean;
@@ -1299,6 +1302,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   resultRunDisplayMode: "tabs",
   defaultAutoKeepResults: false,
   multiStatementDefaultView: "result",
+  defaultExplainView: "canvas",
   dataGridAutoTransposeSingleRow: false,
   dataGridCellDetailButtonVisible: true,
   dataGridCellDetailDialogDefault: false,
@@ -1516,6 +1520,10 @@ function normalizeResultTabNamingMode(value: unknown): ResultTabNamingMode {
 
 function normalizeMultiStatementDefaultView(value: unknown): MultiStatementDefaultView {
   return MULTI_STATEMENT_DEFAULT_VIEWS.includes(value as MultiStatementDefaultView) ? (value as MultiStatementDefaultView) : DEFAULT_EDITOR_SETTINGS.multiStatementDefaultView;
+}
+
+function normalizeDefaultExplainView(value: unknown): DefaultExplainView {
+  return DEFAULT_EXPLAIN_VIEWS.includes(value as DefaultExplainView) ? (value as DefaultExplainView) : DEFAULT_EDITOR_SETTINGS.defaultExplainView;
 }
 
 function normalizeTableFontSize(value: unknown): number {
@@ -1911,6 +1919,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     resultRunDisplayMode: normalizeResultRunDisplayMode(settings.resultRunDisplayMode),
     defaultAutoKeepResults: settings.defaultAutoKeepResults === true,
     multiStatementDefaultView: normalizeMultiStatementDefaultView(settings.multiStatementDefaultView),
+    defaultExplainView: normalizeDefaultExplainView(settings.defaultExplainView),
     dataGridAutoTransposeSingleRow: settings.dataGridAutoTransposeSingleRow === true,
     dataGridCellDetailButtonVisible: typeof settings.dataGridCellDetailButtonVisible === "boolean" ? settings.dataGridCellDetailButtonVisible : DEFAULT_EDITOR_SETTINGS.dataGridCellDetailButtonVisible,
     dataGridCellDetailDialogDefault: settings.dataGridCellDetailDialogDefault === true,
@@ -2776,6 +2785,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.resultRunDisplayMode !== undefined) editorSettings.value.resultRunDisplayMode = normalizeResultRunDisplayMode(partial.resultRunDisplayMode);
     if (partial.defaultAutoKeepResults !== undefined) editorSettings.value.defaultAutoKeepResults = partial.defaultAutoKeepResults === true;
     if (partial.multiStatementDefaultView !== undefined) editorSettings.value.multiStatementDefaultView = normalizeMultiStatementDefaultView(partial.multiStatementDefaultView);
+    if (partial.defaultExplainView !== undefined) editorSettings.value.defaultExplainView = normalizeDefaultExplainView(partial.defaultExplainView);
     if (partial.dataGridAutoTransposeSingleRow !== undefined) editorSettings.value.dataGridAutoTransposeSingleRow = partial.dataGridAutoTransposeSingleRow === true;
     if (partial.dataGridCellDetailButtonVisible !== undefined) editorSettings.value.dataGridCellDetailButtonVisible = typeof partial.dataGridCellDetailButtonVisible === "boolean" ? partial.dataGridCellDetailButtonVisible : DEFAULT_EDITOR_SETTINGS.dataGridCellDetailButtonVisible;
     if (partial.dataGridCellDetailDialogDefault !== undefined) editorSettings.value.dataGridCellDetailDialogDefault = partial.dataGridCellDetailDialogDefault === true;

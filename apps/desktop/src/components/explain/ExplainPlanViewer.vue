@@ -7,8 +7,11 @@ import { flattenExplainPlanNodes, formatExplainPlanDetails } from "@/lib/diagram
 import { extractActualRows } from "@/lib/diagram/planCanvas";
 import { Button } from "@/components/ui/button";
 import type { QueryResult } from "@/types/database";
+import type { DefaultExplainView } from "@/stores/settingsStore";
 import ExplainPlanNodeTree from "./ExplainPlanNodeTree.vue";
 import ExplainPlanDiagram from "./ExplainPlanDiagram.vue";
+
+export type ExplainView = DefaultExplainView;
 
 const props = defineProps<{
   plan?: ParsedExplainPlan;
@@ -18,18 +21,51 @@ const props = defineProps<{
   explainSql?: string;
   tableResult?: QueryResult;
   tableError?: string;
+  defaultView?: ExplainView;
 }>();
 
 const { t } = useI18n();
-const activeView = ref<"canvas" | "tree" | "summary" | "raw" | "table">("canvas");
+const userSelectedView = ref<ExplainView | null>(null);
+const activeView = ref<ExplainView>("canvas");
 const hasTableView = computed(() => !!props.tableResult || !!props.tableError);
 
+function isViewAvailable(view: ExplainView): boolean {
+  if (view === "table") return hasTableView.value;
+  return !!props.plan;
+}
+
+function resolveView(): ExplainView {
+  if (userSelectedView.value && isViewAvailable(userSelectedView.value)) {
+    return userSelectedView.value;
+  }
+
+  const preferred = props.defaultView ?? "canvas";
+  if (preferred === "table") {
+    if (hasTableView.value) return "table";
+    if (props.plan) return "canvas";
+    return "table";
+  }
+
+  if (props.plan) return preferred;
+  if (!props.loading && hasTableView.value) return "table";
+  return preferred;
+}
+
+function selectView(view: ExplainView) {
+  userSelectedView.value = view;
+  activeView.value = view;
+}
+
+watch([() => props.loading, () => props.sourceSql, () => props.explainSql, () => props.defaultView], ([loading, sourceSql, explainSql, defaultView], [prevLoading, prevSourceSql, prevExplainSql, prevDefaultView]) => {
+  if ((loading && !prevLoading) || sourceSql !== prevSourceSql || explainSql !== prevExplainSql || defaultView !== prevDefaultView) {
+    userSelectedView.value = null;
+  }
+});
+
 watch(
-  [hasTableView, () => !!props.tableResult, () => !!props.plan, () => props.loading],
-  ([available, hasTableResult, hasPlan, loading]) => {
-    if (!available && activeView.value === "table") activeView.value = "canvas";
-    // Wait for JSON EXPLAIN to finish so regular MySQL still defaults to its visual tree.
-    if (!loading && hasTableResult && !hasPlan) activeView.value = "table";
+  [hasTableView, () => !!props.tableResult, () => !!props.plan, () => props.loading, () => props.defaultView],
+  () => {
+    activeView.value = resolveView();
   },
   { immediate: true },
 );
@@ -86,24 +122,24 @@ function tableCellText(value: unknown): string {
       <span v-if="measuredRowsLabel" class="shrink-0 whitespace-nowrap ml-1 inline-flex items-center gap-1 rounded bg-green-100 px-1.5 py-0.5 font-semibold text-green-700 dark:bg-green-900/30 dark:text-green-300" style="font-size: 10px">{{ measuredRowsLabel }}</span>
       <span class="flex-1 min-w-2" />
       <div v-if="plan || hasTableView" class="shrink-0 inline-flex rounded-md border bg-muted/40 p-0.5">
-        <Button v-if="plan" size="sm" :variant="activeView === 'canvas' ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs gap-1" @click="activeView = 'canvas'">
+        <Button v-if="plan" size="sm" :variant="activeView === 'canvas' ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs gap-1" @click="selectView('canvas')">
           <Workflow class="h-3.5 w-3.5" />
           {{ t("explain.canvas") }}
         </Button>
-        <Button v-if="plan" size="sm" :variant="activeView === 'tree' ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs gap-1" @click="activeView = 'tree'">
+        <Button v-if="plan" size="sm" :variant="activeView === 'tree' ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs gap-1" @click="selectView('tree')">
           <GitBranch class="h-3.5 w-3.5" />
           {{ t("explain.tree") }}
         </Button>
-        <Button v-if="plan" size="sm" :variant="activeView === 'summary' ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs gap-1" @click="activeView = 'summary'">
+        <Button v-if="plan" size="sm" :variant="activeView === 'summary' ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs gap-1" @click="selectView('summary')">
           <Table2 class="h-3.5 w-3.5" />
           {{ t("explain.summary") }}
         </Button>
-        <Button v-if="plan" size="sm" :variant="activeView === 'raw' ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs gap-1" @click="activeView = 'raw'">
+        <Button v-if="plan" size="sm" :variant="activeView === 'raw' ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs gap-1" @click="selectView('raw')">
           <FileText v-if="isRawString" class="h-3.5 w-3.5" />
           <Braces v-else class="h-3.5 w-3.5" />
           {{ rawFormatLabel }}
         </Button>
-        <Button v-if="hasTableView" size="sm" :variant="activeView === 'table' ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs gap-1" @click="activeView = 'table'">
+        <Button v-if="hasTableView" size="sm" :variant="activeView === 'table' ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs gap-1" @click="selectView('table')">
           <Table2 class="h-3.5 w-3.5" />
           {{ t("explain.standardTable") }}
         </Button>

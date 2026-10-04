@@ -614,6 +614,15 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ multiStatementDefaultView: "invalid" as any }).multiStatementDefaultView).toBe("result");
   });
 
+  it("defaults execution plan view to canvas and preserves valid options", () => {
+    expect(normalizeEditorSettings({}).defaultExplainView).toBe("canvas");
+    expect(normalizeEditorSettings({ defaultExplainView: "table" }).defaultExplainView).toBe("table");
+    expect(normalizeEditorSettings({ defaultExplainView: "tree" }).defaultExplainView).toBe("tree");
+    expect(normalizeEditorSettings({ defaultExplainView: "summary" }).defaultExplainView).toBe("summary");
+    expect(normalizeEditorSettings({ defaultExplainView: "raw" }).defaultExplainView).toBe("raw");
+    expect(normalizeEditorSettings({ defaultExplainView: "invalid" as any }).defaultExplainView).toBe("canvas");
+  });
+
   it("defaults persistent data grid view options off and preserves enabled values", () => {
     const defaults = normalizeEditorSettings({});
     expect(defaults.dataGridMultiRowTranspose).toBe(false);

@@ -7120,6 +7120,8 @@ export default withEnglishFallback({
     defaultAutoKeepResultsDescription: "Bu ayar uygulandığında açık sorgu sekmeleri güncellenir ve yeni sekmeler için varsayılan belirlenir. Her sekmede ayrı ayrı değiştirebilirsiniz.",
     multiStatementDefaultView: "Birden çok ifade için varsayılan görünüm",
     multiStatementDefaultViewDescription: "Birden çok SQL ifadesi içeren toplu işlerin sonuç tablosunda mı yoksa yürütme özetinde mi açılacağını seçin.",
+    defaultExplainView: "Yürütme planı için varsayılan görünüm",
+    defaultExplainViewDescription: "Yürütme planı çalıştırıldıktan sonra varsayılan olarak görüntülenecek görünüm modunu seçin (canvas, ağaç, özet, tablo veya ham).",
     queryResultMaxRows: "En fazla sorgu sonucu satırı",
     queryResultMaxRowsEnabled: "Sorgu sonucu satırlarını sınırla",
     queryResultMaxRowsDescription: "Sorgular, tablo verisi, saklı yordamlar ve sürekli yükleme tarafından döndürülen satırlara üst sınır koyar.",

@@ -2367,6 +2367,7 @@ defineExpose({
               :explain-sql="activeTab.explainSql"
               :table-result="activeTab.explainTableResult"
               :table-error="activeTab.explainTableError"
+              :default-view="settingsStore.editorSettings.defaultExplainView"
             />
 
             <ElasticsearchProfilePanel v-else-if="activeOutputView === 'profile' && canShowProfile" class="flex-1 min-h-0" :body="activeElasticsearchProfileBody ?? ''" />

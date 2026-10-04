@@ -270,16 +270,17 @@ function alignCanvasPixel(value: number, dpr: number): number {
   return Math.round(value * dpr) / dpr;
 }
 
-function drawBooleanCheckbox(ctx: CanvasRenderingContext2D, options: { drawX: number; y: number; colWidth: number; scaleX: number; scaleY: number; theme: DataGridPaintTheme; checked: boolean }): void {
+export function drawBooleanCheckbox(ctx: CanvasRenderingContext2D, options: { drawX: number; y: number; colWidth: number; scaleX: number; scaleY: number; theme: DataGridPaintTheme; checked: boolean }): void {
   const { drawX, y, colWidth, scaleX, scaleY, theme, checked } = options;
   const size = BOOLEAN_CHECKBOX_SIZE;
   const boxX = alignCanvasPixel(drawX + (colWidth - size) / 2, scaleX);
   const boxY = alignCanvasPixel(y + (CANVAS_DATA_GRID_ROW_HEIGHT - size) / 2, scaleY);
   ctx.lineWidth = 1;
+  ctx.fillStyle = theme.background;
+  ctx.fillRect(boxX, boxY, size, size);
   if (checked) {
-    ctx.fillStyle = theme.primary;
-    ctx.fillRect(boxX, boxY, size, size);
-    ctx.strokeStyle = theme.background;
+    ctx.strokeStyle = theme.foreground;
+    ctx.strokeRect(boxX + 0.5, boxY + 0.5, size - 1, size - 1);
     ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.moveTo(boxX + 3, boxY + size / 2);

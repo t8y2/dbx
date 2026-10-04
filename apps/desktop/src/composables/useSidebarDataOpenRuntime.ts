@@ -30,7 +30,7 @@ export function useSidebarDataOpenRuntime() {
   const queryStore = useQueryStore();
   const settingsStore = useSettingsStore();
 
-  async function openData(node: TreeNode, request?: SidebarDataOpenRequest, openMode: DataTabOpenMode = "default", options: { reuseMode?: DataTabReuseMode } = {}) {
+  async function openData(node: TreeNode, request?: SidebarDataOpenRequest, openMode: DataTabOpenMode = "default", options: { reuseMode?: DataTabReuseMode; revealColumn?: string } = {}) {
     if (!(node.type === "table" || node.type === "view" || node.type === "materialized_view") || !hasNodeDatabaseContext(node)) return;
     const config = connectionStore.getConfig(node.connectionId);
     const reuseMode = options.reuseMode ?? settingsStore.editorSettings.dataTabReuseMode;
@@ -200,6 +200,9 @@ export function useSidebarDataOpenRuntime() {
           tableType,
         });
       }
+      if (options.revealColumn) {
+        queryStore.requestGridRevealColumn(existingSameTableTab.id, options.revealColumn);
+      }
       queryStore.switchTab(existingSameTableTab.id);
       logPhase("existing-tab-activated", { table: node.label });
       // 代次失配视同冷缓存（即使位于 30s TTL 窗口内也要重建）：disconnect /
@@ -220,6 +223,9 @@ export function useSidebarDataOpenRuntime() {
         queryStore.switchTab(existingDataTabCandidate.tab.id);
         resetReusedDataTabState(existingDataTabCandidate.tab);
         existingDataTabCandidate.tab.tableComment = node.comment;
+        if (options.revealColumn) {
+          queryStore.requestGridRevealColumn(existingDataTabCandidate.tab.id, options.revealColumn);
+        }
         return existingDataTabCandidate.tab.id;
       }
       const createdTabId = queryStore.createTab(node.connectionId, node.database, node.label, "data", tableSchema, undefined, node.catalog, {
@@ -227,7 +233,12 @@ export function useSidebarDataOpenRuntime() {
         insertAfterActive: settingsStore.editorSettings.openDataTabsNextToActive,
       });
       const createdTab = queryStore.tabs.find((tab) => tab.id === createdTabId);
-      if (createdTab) createdTab.tableComment = node.comment;
+      if (createdTab) {
+        createdTab.tableComment = node.comment;
+        if (options.revealColumn) {
+          queryStore.requestGridRevealColumn(createdTab.id, options.revealColumn);
+        }
+      }
       return createdTabId;
     })();
     openDataLog("info", "tab-created", { traceId, tabId, elapsed: elapsed() });

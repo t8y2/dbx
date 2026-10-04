@@ -945,6 +945,8 @@ let persistTimer: ReturnType<typeof setTimeout> | null = null;
 let persistGeneration = 0;
 /** Monotonic id for content-search jump requests; lets repeated clicks on the same result re-trigger the editor reveal. */
 let contentRevealSeq = 0;
+/** Monotonic id for data-grid column reveal requests; lets repeated clicks on the same column re-trigger grid scroll and highlight. */
+let gridRevealColumnSeq = 0;
 
 function saveTabs(tabs: QueryTab[], activeTabId: string | null, workspace?: EditorWorkspacePersistState): Promise<void> {
   if (isDetachedWindow()) return Promise.resolve();
@@ -3414,6 +3416,17 @@ export const useQueryStore = defineStore("query", () => {
     activeTabId.value = tabId;
     settingsStore.settingsPageActive = false;
     if (typeof window !== "undefined") window.dispatchEvent(new Event(QUERY_SURFACE_ACTIVATION_EVENT));
+  }
+
+  function requestGridRevealColumn(tabId: string, columnName: string) {
+    const tab = tabs.value.find((t) => t.id === tabId);
+    if (!tab) return;
+    tab.gridRevealColumnRequest = { id: ++gridRevealColumnSeq, columnName };
+  }
+
+  function revealColumnInDataGrid(tabId: string, columnName: string) {
+    requestGridRevealColumn(tabId, columnName);
+    switchTab(tabId);
   }
 
   function openUserAdmin(connectionId: string) {
@@ -9587,6 +9600,8 @@ export const useQueryStore = defineStore("query", () => {
     moveTabToGroup,
     unsplitTab,
     switchTab,
+    requestGridRevealColumn,
+    revealColumnInDataGrid,
     closeTab,
     forceClosePendingTab,
     forceCloseAllPendingTabs,

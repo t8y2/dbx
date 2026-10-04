@@ -47,7 +47,7 @@ function welcomeConnectionSubtitle(connection: ConnectionConfig): string {
 </script>
 
 <template>
-  <div class="min-w-0 flex-1 overflow-x-hidden overflow-y-auto bg-background">
+  <div data-welcome-screen class="min-w-0 flex-1 overflow-x-hidden overflow-y-auto bg-background">
     <div v-if="welcomePageMode !== 'workspace'" class="welcome-intro mx-auto flex min-h-full w-full min-w-0 max-w-5xl flex-col justify-center px-6 py-10 sm:px-8">
       <div class="welcome-intro-hero relative overflow-hidden rounded-2xl border px-6 py-10 sm:px-10 sm:py-14">
         <div class="welcome-intro-glow pointer-events-none absolute -right-24 -top-24 h-64 w-64 rounded-full bg-primary/15 blur-3xl" />

@@ -334,6 +334,7 @@
 
 .app-tab-bar:not(.vertical-tab-layout) .app-tab-pill {
   border: 0.5px solid color-mix(in oklch, var(--foreground) 14%, var(--border));
+  max-width: var(--tab-max-width, none);
 }
 
 .app-tab-bar:not(.vertical-tab-layout) .app-tab-pill[data-active-tab="true"] {
@@ -843,7 +844,7 @@
  * expand smoothly instead of appearing and disappearing in one frame. */
 .app-tab-bar:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-entry {
   min-width: 0;
-  max-width: var(--tab-group-entry-expanded-width, 100%);
+  max-width: var(--tab-group-entry-expanded-width, var(--tab-max-width, 100%));
   max-height: 2rem;
   overflow: hidden;
   transition:
@@ -857,6 +858,11 @@
   width: var(--tab-group-entry-expanded-width, auto);
   min-width: var(--tab-group-entry-expanded-width, max-content) !important;
   flex: none;
+}
+
+.app-tab-bar:not(.vertical-tab-layout):not(:has(.wrap-mode))[data-has-max-tab-width="true"] .tab-group-entry[data-tab-group-id] > .tab-group-tab {
+  min-width: var(--tab-group-entry-expanded-width, 0) !important;
+  max-width: var(--tab-max-width, 100%);
 }
 
 /* The classic single-row strip is 2.25rem tall. Keep ordinary tab wrappers
@@ -906,6 +912,10 @@
 
 /* Do not animate dimensions in wrapped mode. The browser must reflow the
  * complete set of rows immediately when a group is expanded or collapsed. */
+.app-tab-scroll.wrap-mode .tab-group-entry {
+  max-width: var(--tab-max-width, none);
+}
+
 .app-tab-scroll.wrap-mode .tab-group-entry,
 .app-tab-scroll.wrap-mode .tab-group-entry--collapsed,
 .app-tab-scroll.wrap-mode .tab-group-tab,

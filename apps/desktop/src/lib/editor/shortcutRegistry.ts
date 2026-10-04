@@ -27,6 +27,7 @@ export type ShortcutActionId =
   | "extendSelection"
   | "addNextSelectionOccurrence"
   | "selectAllSelectionOccurrences"
+  | "selectLineEnds"
   | "uppercaseSelection"
   | "lowercaseSelection"
   | "toggleCaseSelection"
@@ -121,6 +122,12 @@ export function selectionOccurrenceDefaultShortcut(actionId: "addNextSelectionOc
   return actionId === "addNextSelectionOccurrence" ? "Alt+J" : "Ctrl+Alt+Shift+J";
 }
 
+export function selectLineEndsDefaultShortcut(_platform = globalThis.navigator?.platform || ""): string {
+  // VS Code uses Option+Shift+I on macOS; CodeMirror's physical shortcut
+  // representation is Alt+Shift+I on every platform.
+  return "Alt+Shift+I";
+}
+
 export function tabNavigationHistoryDefaultShortcut(direction: "back" | "forward", platform = globalThis.navigator?.platform || ""): string {
   const modifier = isMacShortcutPlatform(platform) ? "Ctrl" : "Mod";
   const key = direction === "back" ? "ArrowLeft" : "ArrowRight";
@@ -152,6 +159,7 @@ const PLATFORM_DEFAULT_SHORTCUTS: Partial<Record<ShortcutActionId, ReadonlySet<s
   navigateTabHistoryForward: new Set(["Ctrl+Alt+ArrowRight", "Mod+Alt+ArrowRight"]),
   addNextSelectionOccurrence: new Set(["Ctrl+G", "Alt+J"]),
   selectAllSelectionOccurrences: new Set(["Ctrl+Mod+G", "Ctrl+Alt+Shift+J"]),
+  selectLineEnds: new Set(["Alt+Shift+I"]),
   toggleAiPanel: new Set(["Ctrl+Mod+I", "Ctrl+Alt+I"]),
   gotoLine: new Set(["Mod+G", "Mod+Alt+G"]),
   foldAll: new Set(["Mod+Alt+[", "Ctrl+Alt+[", "Shift+Alt+["]),
@@ -318,6 +326,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutSelectAllSelectionOccurrences",
     scope: "editor",
     defaultShortcut: "Ctrl+Mod+G",
+  },
+  {
+    id: "selectLineEnds",
+    labelKey: "settings.shortcutSelectLineEnds",
+    scope: "editor",
+    defaultShortcut: "Alt+Shift+I",
   },
   {
     id: "uppercaseSelection",
@@ -709,6 +723,7 @@ function shortcutsUseSameKeys(first: string, second: string, platform = globalTh
 function shortcutDefaultForPlatform(definition: ShortcutDefinition, platform: string): string {
   if (definition.id === "addNextSelectionOccurrence") return selectionOccurrenceDefaultShortcut("addNextSelectionOccurrence", platform);
   if (definition.id === "selectAllSelectionOccurrences") return selectionOccurrenceDefaultShortcut("selectAllSelectionOccurrences", platform);
+  if (definition.id === "selectLineEnds") return selectLineEndsDefaultShortcut(platform);
   if (definition.id === "closeOtherTabs") return closeOtherTabsDefaultShortcut(platform);
   if (definition.id === "gotoLine") return gotoLineDefaultShortcut(platform);
   if (definition.id === "navigateTabHistoryBack") return tabNavigationHistoryDefaultShortcut("back", platform);

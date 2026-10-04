@@ -45,6 +45,7 @@ import EditorGroupTabBar from "../EditorGroupTabBar.vue";
 import { createNoopEditorToolbarActions, EDITOR_TOOLBAR_ACTIONS, type EditorToolbarActions } from "../editorToolbarActions";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import type { ConnectionConfig } from "@/types/database";
 
 function createHost(): HTMLDivElement {
@@ -725,6 +726,29 @@ describe("EditorGroupTabBar behavior", () => {
     await settle();
 
     expect(sourcePill.style.opacity).toBe("");
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("applies --tab-max-width and data-has-max-tab-width when tabMaxWidth is configured", async () => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabMaxWidth = 240;
+    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+    const mainGroup = store.groups[0];
+    const { app, host } = mountBar(mainGroup.id, [firstId], firstId, pinia);
+    await settle();
+
+    const bar = host.querySelector<HTMLElement>(".app-tab-bar")!;
+    expect(bar.dataset.hasMaxTabWidth).toBe("true");
+    expect(bar.style.getPropertyValue("--tab-max-width")).toBe("240px");
+
+    // Setting tabMaxWidth to 0 removes the limit
+    settings.editorSettings.tabMaxWidth = 0;
+    await settle();
+    expect(bar.dataset.hasMaxTabWidth).toBe("false");
+    expect(bar.style.getPropertyValue("--tab-max-width")).toBe("");
 
     app.unmount();
     host.remove();

@@ -489,3 +489,10 @@ test("matches configurable sidebar shortcuts", () => {
   assert.equal(isDisconnectSidebarConnectionShortcut({ key: "e", metaKey: true, shiftKey: true }, shortcuts), false);
   assert.equal(isDisconnectSidebarConnectionShortcut({ key: "d", altKey: true }, shortcuts), true);
 });
+
+test("defaults and normalizes select-line-ends shortcut", () => {
+  const defaults = DEFAULT_SHORTCUT_SETTINGS;
+  assert.equal(defaults.selectLineEnds, "Alt+Shift+I");
+  assert.equal(normalizeShortcutSettings({ selectLineEnds: "Shift+Alt+L" }).selectLineEnds, "Shift+Alt+L");
+  assert.equal(shortcutToCodeMirrorKey(defaults.selectLineEnds), "Alt-Shift-i");
+});

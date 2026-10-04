@@ -846,6 +846,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
           autoAliasTables: settingsStore.editorSettings.autoAliasTables,
           tableCompletionSchemaQualification: settingsStore.editorSettings.tableCompletionSchemaQualification,
           quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
+          functionCompletionIncludeParams: settingsStore.editorSettings.functionCompletionIncludeParams,
         });
         return buildSqlCompletionResult(items, completionContext, fullDoc, position);
       }
@@ -909,6 +910,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
           autoAliasTables: settingsStore.editorSettings.autoAliasTables,
           tableCompletionSchemaQualification: settingsStore.editorSettings.tableCompletionSchemaQualification,
           quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
+          functionCompletionIncludeParams: settingsStore.editorSettings.functionCompletionIncludeParams,
         });
         return buildSqlCompletionResult(items, completionContext, fullDoc, position);
       }
@@ -1213,6 +1215,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       autoAliasTables: settingsStore.editorSettings.autoAliasTables,
       tableCompletionSchemaQualification: settingsStore.editorSettings.tableCompletionSchemaQualification,
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
+      functionCompletionIncludeParams: settingsStore.editorSettings.functionCompletionIncludeParams,
     });
 
     return buildSqlCompletionResult(items, completionContext, fullDoc, position);
@@ -1677,6 +1680,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       autoAliasTables: settingsStore.editorSettings.autoAliasTables,
       tableCompletionSchemaQualification: settingsStore.editorSettings.tableCompletionSchemaQualification,
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
+      functionCompletionIncludeParams: settingsStore.editorSettings.functionCompletionIncludeParams,
     });
 
     return buildSqlCompletionResult(items, completionContext, fullDoc, position);

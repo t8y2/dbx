@@ -1649,6 +1649,7 @@ export interface SqlCompletionProviderInput {
   autoAliasTables?: boolean;
   tableCompletionSchemaQualification?: SqlTableCompletionSchemaQualification;
   quoteIdentifiers?: boolean;
+  functionCompletionIncludeParams?: boolean;
 }
 
 export function buildSqlCompletionItems(
@@ -1670,6 +1671,7 @@ export function buildSqlCompletionItems(
     autoAliasTables?: boolean;
     tableCompletionSchemaQualification?: SqlTableCompletionSchemaQualification;
     quoteIdentifiers?: boolean;
+    functionCompletionIncludeParams?: boolean;
   },
 ): SqlCompletionItem[] {
   if (isSqlCompletionSuppressedContext(sql, cursor, input)) return [];
@@ -1738,7 +1740,7 @@ class SqlCompletionProvider {
         this.items.push(...buildSnippetItems(context.prefix, snippets.filter(shouldFormatBuiltinSnippet), this.input.keywordCase, this.databaseType));
       }
       if (!preferReferencedColumns || context.suggestRoutines) {
-        const functionItems = context.dataTypeContext ? [] : buildFunctionSnippetItems(context.prefix, getFunctionDescriptions(this.t), this.databaseType, context.openingParenAfterCursor, this.input.keywordCase, this.input.functionCase);
+        const functionItems = context.dataTypeContext ? [] : buildFunctionSnippetItems(context.prefix, getFunctionDescriptions(this.t), this.databaseType, context.openingParenAfterCursor, this.input.keywordCase, this.input.functionCase, this.input.functionCompletionIncludeParams);
         this.items.push(...(preferReferencedColumns ? functionItems.filter((item) => item.label.toLowerCase().startsWith(context.prefix.toLowerCase())) : functionItems));
         if (isOracleLikeDatabase(this.databaseType)) {
           this.items.push(...buildOracleSystemValueItems(context.prefix, this.input.keywordCase));
@@ -1806,10 +1808,10 @@ class SqlCompletionProvider {
       this.items.push(...buildForeignKeyRelatedTableItems(context, completionTables, this.input.foreignKeysByTable, this.dialect, autoAliasTables, this.databaseType, this.input.currentSchema, schemaQualification));
       this.items.push(...buildTableItems(context, completionTables, this.dialect, autoAliasTables, context.referencedTables, this.databaseType, this.input.currentSchema, schemaQualification));
       if (this.databaseType === "clickhouse") {
-        this.items.push(...buildClickHouseFunctionItems(context.prefix, context.openingParenAfterCursor, "table"));
+        this.items.push(...buildClickHouseFunctionItems(context.prefix, context.openingParenAfterCursor, "table", this.input.functionCompletionIncludeParams));
       }
       if (isOracleLikeDatabase(this.databaseType)) {
-        this.items.push(...buildOracleTableFunctionItems(context.prefix, this.input.keywordCase, this.input.functionCase));
+        this.items.push(...buildOracleTableFunctionItems(context.prefix, this.input.keywordCase, this.input.functionCase, this.input.functionCompletionIncludeParams));
       }
       if (this.input.schemas && this.input.schemas.length > 0) {
         this.items.push(...buildSchemaItems(context.prefix, this.input.schemas, this.dialect));
@@ -1818,7 +1820,7 @@ class SqlCompletionProvider {
 
     if (context.suggestRoutines || context.exclusiveRoutineSuggestions || context.oracleTableFunctionContext) {
       const profileObjects = driverProfileCompletionObjects(this.input.driverProfile, context);
-      this.items.push(...buildObjectItems(context, [...(this.input.objects ?? []), ...profileObjects], this.dialect, this.databaseType, this.input.currentSchema));
+      this.items.push(...buildObjectItems(context, [...(this.input.objects ?? []), ...profileObjects], this.dialect, this.databaseType, this.input.currentSchema, this.input.functionCompletionIncludeParams));
     }
 
     if (context.comparisonLeftColumn && context.suggestKeywords) {
@@ -4246,7 +4248,7 @@ function buildSchemaItems(prefix: string, schemas: string[], dialect?: SqlComple
     }));
 }
 
-function buildObjectItems(context: SqlCompletionContext, objects: SqlCompletionObject[], dialect?: SqlCompletionApplyDialect, databaseType?: DatabaseType, currentSchema?: string): SqlCompletionItem[] {
+function buildObjectItems(context: SqlCompletionContext, objects: SqlCompletionObject[], dialect?: SqlCompletionApplyDialect, databaseType?: DatabaseType, currentSchema?: string, includeParams = true): SqlCompletionItem[] {
   if (completionQualifierIsReferencedTable(context)) return [];
   const onlyProcedures = context.contextKind === "exec";
   const onlyFunctions = context.suggestColumns && context.referencedTables.length > 0 && !context.qualifier;
@@ -4272,7 +4274,7 @@ function buildObjectItems(context: SqlCompletionContext, objects: SqlCompletionO
         type: "function" as const,
         detail,
         info: buildRoutineInfo(object),
-        apply: object.type === "trigger" || object.type === "package" ? applyName : buildRoutineApply(applyName, object.signature),
+        apply: object.type === "trigger" || object.type === "package" ? applyName : buildRoutineApply(applyName, object.signature, includeParams),
         boost: computeBoost(object.name, context.prefix) + typeBoost + schemaBoost,
         dedupeKey: signature ? `${baseDedupeKey ?? object.name}(${signature})` : baseDedupeKey,
         // Preserve exact routine matches before the capped candidate list is truncated.
@@ -4283,9 +4285,10 @@ function buildObjectItems(context: SqlCompletionContext, objects: SqlCompletionO
     .slice(0, MAX_TABLE_COMPLETION_ITEMS);
 }
 
-function buildRoutineApply(applyName: string, signature?: string): string {
+function buildRoutineApply(applyName: string, signature?: string, includeParams = true): string {
   const parameters = splitRoutineSignatureParameters(signature?.trim() ?? "");
   if (parameters.length === 0) return `${applyName}()`;
+  if (!includeParams) return `${applyName}(\${})`;
   return `${applyName}(${parameters.map((parameter, index) => `\${${index + 1}:${escapeSnippetFieldName(parameter)}}`).join(", ")})`;
 }
 
@@ -4372,12 +4375,12 @@ function objectMatchesCompletionContext(object: SqlCompletionObject, context: Sq
   return matchesPrefix(object.name, context.prefix);
 }
 
-function buildOracleTableFunctionItems(prefix: string, keywordCase?: SqlKeywordCase, functionCase?: SqlKeywordCase): SqlCompletionItem[] {
+function buildOracleTableFunctionItems(prefix: string, keywordCase?: SqlKeywordCase, functionCase?: SqlKeywordCase, includeParams = true): SqlCompletionItem[] {
   const items = [
-    { label: applySqlKeywordCase("TABLE", keywordCase), detail: "Oracle table function", apply: `${applySqlKeywordCase("TABLE", keywordCase)}(\${function_call})` },
-    { label: applySqlKeywordCase("THE", keywordCase), detail: "Oracle nested-table expression", apply: `${applySqlKeywordCase("THE", keywordCase)}(\${subquery})` },
-    { label: applySqlFunctionCase("XMLTABLE", functionCase), detail: "XML to relational rows", apply: `${applySqlFunctionCase("XMLTABLE", functionCase)}(\${xpath})` },
-    { label: applySqlFunctionCase("JSON_TABLE", functionCase), detail: "JSON to relational rows", apply: `${applySqlFunctionCase("JSON_TABLE", functionCase)}(\${expr}, \${path})` },
+    { label: applySqlKeywordCase("TABLE", keywordCase), detail: "Oracle table function", apply: includeParams ? `${applySqlKeywordCase("TABLE", keywordCase)}(\${function_call})` : `${applySqlKeywordCase("TABLE", keywordCase)}(\${})` },
+    { label: applySqlKeywordCase("THE", keywordCase), detail: "Oracle nested-table expression", apply: includeParams ? `${applySqlKeywordCase("THE", keywordCase)}(\${subquery})` : `${applySqlKeywordCase("THE", keywordCase)}(\${})` },
+    { label: applySqlFunctionCase("XMLTABLE", functionCase), detail: "XML to relational rows", apply: includeParams ? `${applySqlFunctionCase("XMLTABLE", functionCase)}(\${xpath})` : `${applySqlFunctionCase("XMLTABLE", functionCase)}(\${})` },
+    { label: applySqlFunctionCase("JSON_TABLE", functionCase), detail: "JSON to relational rows", apply: includeParams ? `${applySqlFunctionCase("JSON_TABLE", functionCase)}(\${expr}, \${path})` : `${applySqlFunctionCase("JSON_TABLE", functionCase)}(\${})` },
   ];
   return items
     .filter((item) => matchesPrefix(item.label, prefix))
@@ -5526,9 +5529,13 @@ function activeFunctionDescriptions(databaseType?: DatabaseType): Map<string, st
   return databaseType === "doris" || databaseType === "starrocks" ? DORIS_FUNCTION_DESCRIPTIONS : EMPTY_FUNCTION_DESCRIPTIONS;
 }
 
-function formatFunctionSignatureApply(definition: ClickHouseFunctionDefinition, omitOpeningParen: boolean): string {
+function formatFunctionSignatureApply(definition: ClickHouseFunctionDefinition, omitOpeningParen: boolean, includeParams = true): string {
   if (omitOpeningParen) return definition.name;
   const signature = definition.signatures[definition.preferredSignature ?? 0];
+  if (!includeParams) {
+    const hasParams = signature.parameterGroups.some((group) => group.filter((parameter) => !parameter.endsWith("?")).length > 0);
+    return hasParams ? `${definition.name}(\${})` : `${definition.name}()`;
+  }
   return (
     definition.name +
     signature.parameterGroups
@@ -5549,7 +5556,7 @@ function clickHouseFunctionDetail(definition: ClickHouseFunctionDefinition): str
   return `ClickHouse · ${definition.category}${overloads}${status}`;
 }
 
-function buildClickHouseFunctionItems(prefix: string, omitOpeningParen: boolean, kind?: ClickHouseFunctionKind): SqlCompletionItem[] {
+function buildClickHouseFunctionItems(prefix: string, omitOpeningParen: boolean, kind?: ClickHouseFunctionKind, includeParams = true): SqlCompletionItem[] {
   return searchClickHouseFunctions(prefix, 200, kind).map((definition) => {
     const statusPenalty = definition.status === "deprecated" ? -600 : definition.status === "experimental" ? -300 : 0;
     const generatedPenalty = definition.generated ? -75 : 0;
@@ -5558,14 +5565,14 @@ function buildClickHouseFunctionItems(prefix: string, omitOpeningParen: boolean,
       type: "function" as const,
       detail: clickHouseFunctionDetail(definition),
       info: definition.description,
-      apply: formatFunctionSignatureApply(definition, omitOpeningParen),
+      apply: formatFunctionSignatureApply(definition, omitOpeningParen, includeParams),
       boost: computeBoost(definition.name, prefix) + 300 + statusPenalty + generatedPenalty,
     };
   });
 }
 
-function buildFunctionSnippetItems(prefix: string, functionDescriptions: Map<string, string>, databaseType?: DatabaseType, omitOpeningParen = false, keywordCase?: SqlKeywordCase, functionCase?: SqlKeywordCase): SqlCompletionItem[] {
-  if (databaseType === "clickhouse") return buildClickHouseFunctionItems(prefix, omitOpeningParen);
+function buildFunctionSnippetItems(prefix: string, functionDescriptions: Map<string, string>, databaseType?: DatabaseType, omitOpeningParen = false, keywordCase?: SqlKeywordCase, functionCase?: SqlKeywordCase, includeParams = true): SqlCompletionItem[] {
+  if (databaseType === "clickhouse") return buildClickHouseFunctionItems(prefix, omitOpeningParen, undefined, includeParams);
   const items: SqlCompletionItem[] = [];
 
   for (const [name, parameters] of activeFunctionSignatures(databaseType).entries()) {
@@ -5573,11 +5580,21 @@ function buildFunctionSnippetItems(prefix: string, functionDescriptions: Map<str
     const functionName = applySqlFunctionCase(name, functionCase);
     const paramStr = parameters.length > 0 ? parameters.map((p) => `\${${applyGeneratedSqlTemplateKeywordCase(p, keywordCase)}}`).join(", ") : "";
     const applyTemplate = functionApplyTemplate(databaseType, name);
+    let apply: string;
+    if (omitOpeningParen) {
+      apply = functionName;
+    } else if (!includeParams) {
+      apply = parameters.length > 0 ? `${functionName}(\${})` : `${functionName}()`;
+    } else if (applyTemplate) {
+      apply = `${functionName}${applyGeneratedSqlTemplateKeywordCase(applyTemplate.slice(name.length), keywordCase)}`;
+    } else {
+      apply = `${functionName}(${paramStr})`;
+    }
     items.push({
       label: functionName,
       type: "function" as const,
       detail: activeFunctionDescriptions(databaseType).get(name) ?? functionDescriptions.get(name) ?? "function",
-      apply: applyTemplate ? `${functionName}${applyGeneratedSqlTemplateKeywordCase(applyTemplate.slice(name.length), keywordCase)}` : `${functionName}(${paramStr})`,
+      apply,
       boost: computeBoost(name, prefix) + 300,
     });
   }
@@ -5586,11 +5603,12 @@ function buildFunctionSnippetItems(prefix: string, functionDescriptions: Map<str
   for (const name of WINDOW_FUNCTIONS) {
     if (!matchesPrefix(name, prefix)) continue;
     const functionName = applySqlFunctionCase(name, functionCase);
+    const apply = omitOpeningParen ? functionName : includeParams ? applyGeneratedSqlTemplateKeywordCase(`${functionName}() OVER (PARTITION BY \${col} ORDER BY \${col})`, keywordCase) : applyGeneratedSqlTemplateKeywordCase(`${functionName}() OVER (\${})`, keywordCase);
     items.push({
       label: functionName,
       type: "function" as const,
       detail: "window function",
-      apply: applyGeneratedSqlTemplateKeywordCase(`${functionName}() OVER (PARTITION BY \${col} ORDER BY \${col})`, keywordCase),
+      apply,
       boost: computeBoost(name, prefix) + 250,
     });
   }

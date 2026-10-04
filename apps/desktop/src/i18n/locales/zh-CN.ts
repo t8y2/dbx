@@ -8588,6 +8588,8 @@ export default withEnglishFallback({
     autoAliasTablesDescription: "补全 FROM 或 JOIN 表名时自动添加别名。",
     sqlServerSpaceConfirmsCompletion: "空格确认补全（SQL Server 习惯）",
     sqlServerSpaceConfirmsCompletionDescription: "补全列表打开时，按空格直接采用选中的关键字、表名或列名，并保留空格。Enter 和 Tab 保持原有行为。",
+    functionCompletionIncludeParams: "函数补全带参数示例",
+    functionCompletionIncludeParamsDescription: "使用函数补全时，是否在括号内附带参数占位示例；关闭后仅补全括号并将光标置于括号内。",
     redisKeyTemplatesSection: "Redis",
     redisKeyTemplates: "Key 搜索模板",
     redisKeyTemplatesPlaceholder: "例如：\nuser:{'{'}$userId{'}'}\nv3:adui:{'{'}$positionID{'}'}",

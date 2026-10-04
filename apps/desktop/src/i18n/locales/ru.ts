@@ -8908,6 +8908,8 @@ export default withEnglishFallback({
     autoAliasTablesDescription: "При выборе автодополнения таблицы в FROM или JOIN вставлять сгенерированный псевдоним, например order_items AS oi.",
     sqlServerSpaceConfirmsCompletion: "Пробел подтверждает автодополнение (стиль SQL Server)",
     sqlServerSpaceConfirmsCompletionDescription: "Пока список автодополнения открыт, нажатие пробела принимает выбранное ключевое слово, таблицу или столбец и сохраняет пробел. Enter и Tab работают как раньше.",
+    functionCompletionIncludeParams: "Примеры параметров при автодополнении функций",
+    functionCompletionIncludeParamsDescription: "Включать примеры параметров внутри скобок при автодополнении функций. Если выключено, вставляются только скобки с курсором внутри.",
     redisKeyTemplatesSection: "Redis",
     redisKeyTemplates: "Шаблоны поиска ключей",
     redisKeyTemplatesPlaceholder: "Пример:\nuser:{'{'}$userId{'}'}\nv3:adui:{'{'}$positionID{'}'}",

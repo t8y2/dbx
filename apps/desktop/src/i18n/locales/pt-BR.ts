@@ -7668,6 +7668,8 @@ export default withEnglishFallback({
     autoAliasTablesDescription: "Ao escolher uma tabela em FROM ou JOIN, insere um alias gerado como order_items AS oi.",
     sqlServerSpaceConfirmsCompletion: "Confirmar a conclusão com espaço (estilo SQL Server)",
     sqlServerSpaceConfirmsCompletionDescription: "Com a lista de sugestões aberta, pressionar espaço aceita a palavra-chave, tabela ou coluna selecionada e mantém o espaço. Enter e Tab continuam iguais.",
+    functionCompletionIncludeParams: "Incluir exemplos de parâmetros no preenchimento de funções",
+    functionCompletionIncludeParamsDescription: "Incluir marcadores de posição de parâmetros dentro dos parênteses ao autocompletar funções. Quando desativado, apenas os parênteses são inseridos com o cursor posicionado dentro.",
     redisKeyTemplatesSection: "Redis",
     redisKeyTemplates: "Modelos de busca de chave",
     redisKeyTemplatesPlaceholder: "Example:\nuser:{'{'}$userId{'}'}\nv3:adui:{'{'}$positionID{'}'}",

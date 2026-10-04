@@ -7670,6 +7670,8 @@ export default withEnglishFallback({
     autoAliasTablesDescription: "FROM または JOIN でテーブル補完を選択すると、order_items AS oi のような生成済み別名を挿入します。",
     sqlServerSpaceConfirmsCompletion: "スペースで補完を確定（SQL Server 方式）",
     sqlServerSpaceConfirmsCompletionDescription: "補完リストの表示中にスペースを押すと、選択中のキーワード・テーブル・列を確定し、空白を保持します。Enter と Tab は従来どおり動作します。",
+    functionCompletionIncludeParams: "関数補全に引数プレースホルダーを含める",
+    functionCompletionIncludeParamsDescription: "関数補全の確定時に括弧内に引数のプレースホルダーを含めます。無効にすると括弧のみが補全され、カーソルが括弧内に配置されます。",
     redisKeyTemplatesSection: "Redis",
     redisKeyTemplates: "キー検索テンプレート",
     redisKeyTemplatesPlaceholder: "Example:\nuser:{'{'}$userId{'}'}\nv3:adui:{'{'}$positionID{'}'}",

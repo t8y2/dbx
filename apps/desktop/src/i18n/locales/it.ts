@@ -7667,6 +7667,8 @@ export default withEnglishFallback({
     autoAliasTablesDescription: "Quando scegli una tabella in FROM o JOIN, inserisce un alias generato come order_items AS oi.",
     sqlServerSpaceConfirmsCompletion: "Conferma il completamento con lo spazio (stile SQL Server)",
     sqlServerSpaceConfirmsCompletionDescription: "Con l'elenco dei suggerimenti aperto, premendo spazio si accetta la parola chiave, la tabella o la colonna selezionata mantenendo lo spazio. Invio e Tab restano invariati.",
+    functionCompletionIncludeParams: "Includi esempi di parametri nel completamento funzioni",
+    functionCompletionIncludeParamsDescription: "Include segnaposto per i parametri tra parentesi durante il completamento delle funzioni. Quando disattivato, inserisce solo le parentesi con il cursore posizionato all'interno.",
     redisKeyTemplatesSection: "Redis",
     redisKeyTemplates: "Modelli di ricerca chiavi",
     redisKeyTemplatesPlaceholder: "Example:\nuser:{'{'}$userId{'}'}\nv3:adui:{'{'}$positionID{'}'}",

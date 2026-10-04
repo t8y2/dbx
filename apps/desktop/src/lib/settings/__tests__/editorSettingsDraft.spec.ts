@@ -167,6 +167,15 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
   it("includes the SQL variable substitution master switch", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("sqlVariableSubstitutionEnabled");
   });
+
+  it("includes functionCompletionIncludeParams in draft keys, draft conversion, and patch", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("functionCompletionIncludeParams");
+    const draft = editorSettingsDraftFromSettings(makeSettings({ functionCompletionIncludeParams: false }));
+    const base = editorSettingsDraftFromSettings(makeSettings({ functionCompletionIncludeParams: true }));
+    expect(draft.functionCompletionIncludeParams).toBe(false);
+    expect(editorSettingsDraftChanged(draft, base)).toBe(true);
+    expect(editorSettingsPatchFromDraft(draft, base)).toEqual({ functionCompletionIncludeParams: false });
+  });
 });
 
 describe("editorSettingsDraftFromSettings", () => {

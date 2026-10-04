@@ -23,6 +23,15 @@ describe("settingsTransfer", () => {
     expect(parseSettingsTransferFile(fileWith({ resultTabPreferComments: "false" })).ok).toBe(false);
   });
 
+  it("round-trips functionCompletionIncludeParams as an editor setting and rejects non-booleans", () => {
+    const text = serializeSettingsTransfer({ ...DEFAULT_EDITOR_SETTINGS, functionCompletionIncludeParams: false });
+    const result = parseSettingsTransferFile(text);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.editorSettings.functionCompletionIncludeParams).toBe(false);
+    expect(transferCategoryForKey("functionCompletionIncludeParams")).toBe("editor");
+    expect(parseSettingsTransferFile(fileWith({ functionCompletionIncludeParams: "false" })).ok).toBe(false);
+  });
+
   it("round-trips the welcome page mode and rejects invalid values", () => {
     const result = parseSettingsTransferFile(fileWith({ welcomePageMode: "workspace" }));
     expect(result.ok).toBe(true);

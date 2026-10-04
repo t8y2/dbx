@@ -147,6 +147,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "editor-double-click-string", category: "editor", titleKey: "settings.doubleClickStringSelectionMode", descriptionKey: "settings.doubleClickStringSelectionModeDescription", targetId: "editor" },
   { id: "editor-completion-spacing", category: "editor", titleKey: "settings.insertSpaceAfterCompletion", descriptionKey: "settings.insertSpaceAfterCompletionDescription", targetId: "editor" },
   { id: "editor-sqlserver-space-completion", category: "editor", titleKey: "settings.sqlServerSpaceConfirmsCompletion", descriptionKey: "settings.sqlServerSpaceConfirmsCompletionDescription", targetId: "editor", visible: sqlServerSpaceCompletionVisible },
+  { id: "editor-function-completion-include-params", category: "editor", titleKey: "settings.functionCompletionIncludeParams", descriptionKey: "settings.functionCompletionIncludeParamsDescription", targetId: "editor" },
   { id: "editor-completion-trigger-mode", category: "editor", titleKey: "settings.completionTriggerMode", descriptionKey: "settings.completionTriggerModeDescription", targetId: "editor" },
   { id: "editor-table-completion-schema-qualification", category: "editor", titleKey: "settings.tableCompletionSchemaQualification", descriptionKey: "settings.tableCompletionSchemaQualificationDescription", targetId: "editor" },
   { id: "editor-auto-alias", category: "editor", titleKey: "settings.autoAliasTables", descriptionKey: "settings.autoAliasTablesDescription", targetId: "editor" },

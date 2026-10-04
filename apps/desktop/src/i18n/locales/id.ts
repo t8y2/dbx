@@ -8387,6 +8387,8 @@ export default withEnglishFallback({
     autoAliasTablesDescription: "Saat memilih pelengkapan tabel di FROM atau JOIN, sisipkan alias yang dihasilkan seperti order_items AS oi.",
     sqlServerSpaceConfirmsCompletion: "Spasi mengonfirmasi pelengkapan (gaya SQL Server)",
     sqlServerSpaceConfirmsCompletionDescription: "Saat daftar pelengkapan terbuka, menekan Spasi akan menerima kata kunci, tabel, atau kolom yang dipilih serta mempertahankan spasi di akhir. Enter dan Tab tetap berperilaku seperti sebelumnya.",
+    functionCompletionIncludeParams: "Sertakan contoh parameter dalam pelengkapan fungsi",
+    functionCompletionIncludeParamsDescription: "Sertakan contoh placeholder parameter di dalam tanda kurung saat melengkapi fungsi. Jika dinonaktifkan, hanya tanda kurung yang disisipkan dengan kursor di dalamnya.",
     redisKeyTemplatesSection: "Redis",
     redisKeyTemplates: "Template pencarian key",
     redisKeyTemplatesPlaceholder: "Contoh:\nuser:{'{'}$userId{'}'}\nv3:adui:{'{'}$positionID{'}'}",

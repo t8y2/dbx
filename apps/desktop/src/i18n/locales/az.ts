@@ -7665,6 +7665,8 @@ export default withEnglishFallback({
     autoAliasTablesDescription: "FROM və ya JOIN daxilində cədvəl tamamlaması seçilərkən order_items AS oi kimi yaradılmış ləqəb daxil et.",
     sqlServerSpaceConfirmsCompletion: "Boşluqla tamamlamanı təsdiqlə (SQL Server üslubu)",
     sqlServerSpaceConfirmsCompletionDescription: "Tamamlama siyahısı açıqkən boşluq düyməsini basmaq seçilmiş açar sözü, cədvəli və ya sütunu təsdiqləyir və boşluğu saxlayır. Enter və Tab əvvəlki kimi işləyir.",
+    functionCompletionIncludeParams: "Funksiya tamamlamasında parametr nümunələrini daxil et",
+    functionCompletionIncludeParamsDescription: "Funksiyaları tamamlayarkən mötərizə içində yer tutucu parametr nümunələrini əlavə edin. Deaktiv edildikdə yalnız mötərizələr əlavə edilir və kursor içəridə yerləşdirilir.",
     redisKeyTemplatesSection: "Redis",
     redisKeyTemplates: "Açar axtarışı şablonları",
     redisKeyTemplatesPlaceholder: "Nümunə:\nuser:{'{'}$userId{'}'}\nv3:adui:{'{'}$positionID{'}'}",

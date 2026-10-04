@@ -30,6 +30,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "tableCompletionSchemaQualification",
   "insertSpaceAfterCompletion",
   "sqlServerSpaceConfirmsCompletion",
+  "functionCompletionIncludeParams",
   "snippetTriggerKey",
   "sortCompletionColumnsAlphabetically",
   "selectFirstCompletionOnOpen",

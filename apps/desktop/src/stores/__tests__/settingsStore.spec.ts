@@ -364,6 +364,13 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ sqlServerSpaceConfirmsCompletion: "yes" as unknown as boolean }).sqlServerSpaceConfirmsCompletion).toBe(false);
   });
 
+  it("enables function completion parameter examples by default and preserves an explicit opt-out", () => {
+    expect(DEFAULT_EDITOR_SETTINGS.functionCompletionIncludeParams).toBe(true);
+    expect(normalizeEditorSettings({}).functionCompletionIncludeParams).toBe(true);
+    expect(normalizeEditorSettings({ functionCompletionIncludeParams: false }).functionCompletionIncludeParams).toBe(false);
+    expect(normalizeEditorSettings({ functionCompletionIncludeParams: "yes" as unknown as boolean }).functionCompletionIncludeParams).toBe(true);
+  });
+
   it("defaults snippetTriggerKey to tab and preserves valid options while falling back on invalid values", () => {
     expect(normalizeEditorSettings({}).snippetTriggerKey).toBe("tab");
     expect(normalizeEditorSettings({ snippetTriggerKey: "tab" }).snippetTriggerKey).toBe("tab");

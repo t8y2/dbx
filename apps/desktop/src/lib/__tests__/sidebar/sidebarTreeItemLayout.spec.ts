@@ -1,5 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { alignedCommentLeadingWidth, alignedSidebarCommentLabelWidths, canTreeNodeShowExpander, sidebarTreeNaturalContentWidth, sidebarTreeNodeComment, trailingCommentAvailableWidth, treeItemPaddingLeft, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
+import {
+  alignedCommentLeadingWidth,
+  alignedSidebarCommentLabelWidths,
+  canTreeNodeShowExpander,
+  isSidebarCommentAlignableNode,
+  isSidebarCommentSupportedType,
+  sidebarTreeNaturalContentWidth,
+  sidebarTreeNodeComment,
+  trailingCommentAvailableWidth,
+  treeItemPaddingLeft,
+  treeLabelWidthClass,
+  usesFullWidthTreeLabel,
+} from "@/lib/sidebar/sidebarTreeItemLayout";
 import type { TreeNode } from "@/types/database";
 
 describe("sidebar tree item layout", () => {
@@ -105,5 +117,41 @@ describe("sidebar tree item layout", () => {
     const measure = (text: string) => text.length * 7;
     expect(sidebarTreeNaturalContentWidth(items, measure, 16)).toBe(4 * 16 + 8 + 54 + "nested".length * 7 + 20);
     expect(sidebarTreeNaturalContentWidth(items, measure, 32)).toBe(4 * 32 + 8 + 54 + "nested".length * 7 + 20);
+  });
+
+  it("supports comments and full-width labels for stored procedures and functions (#9962)", () => {
+    const procedure: TreeNode = { id: "p1", label: "calculate_tax", type: "procedure", comment: "Computes order tax" };
+    const func: TreeNode = { id: "f1", label: "get_user_name", type: "function", comment: "Returns formatted user name" };
+    const trigger: TreeNode = { id: "t1", label: "trg_audit", type: "trigger", comment: "Audit changes" };
+    const seq: TreeNode = { id: "s1", label: "order_id_seq", type: "sequence", comment: "Order id sequence" };
+
+    expect(sidebarTreeNodeComment(procedure, false)).toBe("Computes order tax");
+    expect(sidebarTreeNodeComment(func, false)).toBe("Returns formatted user name");
+    expect(sidebarTreeNodeComment(trigger, false)).toBe("Audit changes");
+    expect(sidebarTreeNodeComment(seq, false)).toBe("Order id sequence");
+
+    expect(isSidebarCommentSupportedType("procedure")).toBe(true);
+    expect(isSidebarCommentSupportedType("function")).toBe(true);
+    expect(isSidebarCommentSupportedType("materialized_view")).toBe(true);
+    expect(isSidebarCommentAlignableNode(procedure)).toBe(true);
+    expect(isSidebarCommentAlignableNode(func)).toBe(true);
+
+    expect(usesFullWidthTreeLabel("procedure", true)).toBe(true);
+    expect(usesFullWidthTreeLabel("procedure", true, true)).toBe(false);
+    expect(usesFullWidthTreeLabel("function", true)).toBe(true);
+    expect(usesFullWidthTreeLabel("function", true, true)).toBe(false);
+  });
+
+  it("aligns routine comments among sibling procedures and functions", () => {
+    const widths = alignedSidebarCommentLabelWidths([
+      { id: "group-procedures", depth: 1, alignable: false, hasComment: false, labelWidth: 0 },
+      { id: "proc-short", depth: 2, alignable: true, hasComment: true, labelWidth: 50 },
+      { id: "proc-long", depth: 2, alignable: true, hasComment: false, labelWidth: 120 },
+      { id: "group-functions", depth: 1, alignable: false, hasComment: false, labelWidth: 0 },
+      { id: "func-one", depth: 2, alignable: true, hasComment: true, labelWidth: 80 },
+    ]);
+
+    expect(widths.get("proc-short")).toBe(120);
+    expect(widths.get("func-one")).toBe(80);
   });
 });

@@ -17,6 +17,7 @@ import {
   OPERATOR_SUB_KEYS,
   STAGE_OPTION_KEYS,
   TOP_LEVEL_QUERY_OPERATORS,
+  UPDATE_OPERATOR_LABELS,
   UPDATE_OPERATORS,
   VALUE_SNIPPETS,
   WINDOW_FUNCTION_OPERATORS,
@@ -121,6 +122,8 @@ export interface MongoCompletionContext {
   enumKey?: string;
   /** User variables in scope for aggregation expressions. */
   variables?: string[];
+  /** Keys already defined in the innermost object container (before and after cursor). */
+  usedKeys?: string[];
 }
 
 export interface MongoCompletionInput {
@@ -445,6 +448,7 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
     ...(classified.enumKey ? { enumKey: classified.enumKey } : {}),
     ...(classified.pipelineKind ? { pipelineKind: classified.pipelineKind } : {}),
     ...(variables ? { variables } : {}),
+    ...(scan.usedKeys && scan.usedKeys.length > 0 ? { usedKeys: scan.usedKeys } : {}),
     collection: classified.collection ?? collection,
   };
 }
@@ -452,6 +456,24 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
 export function buildMongoCompletionItems(text: string, cursor: number, input: MongoCompletionInput = {}): MongoCompletionItem[] {
   return buildMongoCompletionItemsFromContext(getMongoCompletionContext(text, cursor), input);
 }
+
+const KEY_POSITION_MODES: ReadonlySet<MongoCompletionMode> = new Set([
+  "filterField",
+  "field",
+  "queryOperator",
+  "updateOperator",
+  "pullCondition",
+  "pushModifier",
+  "projectionOperator",
+  "stage",
+  "stageOption",
+  "methodOption",
+  "bulkWriteOperation",
+  "bulkWriteField",
+  "operatorField",
+  "accumulator",
+  "windowOperator",
+]);
 
 export function buildMongoCompletionItemsFromContext(context: MongoCompletionContext, input: MongoCompletionInput = {}): MongoCompletionItem[] {
   const { mode, prefix } = context;
@@ -570,6 +592,11 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
     default:
       items = [];
   }
+
+  if (context.usedKeys && context.usedKeys.length > 0 && KEY_POSITION_MODES.has(mode)) {
+    const used = new Set(context.usedKeys);
+    items = items.filter((item) => !used.has(item.label));
+  }
   return finalizeQuotedMongoCompletionItems(context, items);
 }
 
@@ -647,7 +674,14 @@ export function getMongoDocumentQueryCompletionContext(text: string, cursor: num
 
   const { prefix, from } = readMongoPropertyPrefix(text, safeCursor);
   const variables = classified.mode === "fieldRef" || classified.mode === "expression" ? collectScopeVariables(scan) : undefined;
-  return { ...classified, prefix, from, replaceClosingQuote: closingQuoteAtCursor(prefix, text, safeCursor), ...(variables ? { variables } : {}) };
+  return {
+    ...classified,
+    prefix,
+    from,
+    replaceClosingQuote: closingQuoteAtCursor(prefix, text, safeCursor),
+    ...(variables ? { variables } : {}),
+    ...(scan.usedKeys && scan.usedKeys.length > 0 ? { usedKeys: scan.usedKeys } : {}),
+  };
 }
 
 /**
@@ -784,6 +818,8 @@ interface MongoCallScan {
   valueKey: string | null;
   inValue: boolean;
   inString: boolean;
+  /** Keys already defined in the innermost object container (before and after cursor). */
+  usedKeys?: string[];
 }
 
 interface MongoCursorClass {
@@ -903,7 +939,87 @@ function scanMongoCallArguments(text: string, start: number, cursor: number): Mo
     if (!/\s/.test(char)) token += char;
   }
 
-  return { argIndex, stack, valueKey, inValue, inString: quote !== null };
+  const innermostAtCursor = stack[stack.length - 1];
+  const usedKeys = innermostAtCursor && innermostAtCursor.kind === "object" && !inValue ? collectInnermostObjectKeys(text, cursor, stack, innermostAtCursor, token, quote) : undefined;
+
+  return { argIndex, stack, valueKey, inValue, inString: quote !== null, ...(usedKeys && usedKeys.length > 0 ? { usedKeys } : {}) };
+}
+
+function collectInnermostObjectKeys(text: string, cursor: number, stack: MongoContainer[], innermostObj: MongoContainer, tokenAtCursor: string, quoteAtCursor: string | null): string[] {
+  const keys = new Set(innermostObj.keys ?? []);
+  const continuationStack: MongoContainer[] = [...stack];
+  let token = tokenAtCursor;
+  let quote = quoteAtCursor;
+  let skippingCursorKey = true;
+
+  for (let i = cursor; i < text.length; i++) {
+    const char = text[i] ?? "";
+    if (quote) {
+      if (char === "\\") {
+        i++;
+        if (i < text.length) token += text[i];
+        continue;
+      }
+      if (char === quote) {
+        quote = null;
+      } else {
+        token += char;
+      }
+      continue;
+    }
+    if ((char === "/" && (text[i + 1] === "/" || text[i + 1] === "*")) || (char === "-" && text[i + 1] === "-")) {
+      const skipped = skipMongoStringOrComment(text, i, text.length);
+      if (skipped > i) {
+        i = skipped - 1;
+        continue;
+      }
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      token = "";
+      continue;
+    }
+    if (char === "{" || char === "[" || char === "(") {
+      skippingCursorKey = false;
+      continuationStack.push({
+        kind: char === "{" ? "object" : char === "[" ? "array" : "call",
+        key: null,
+      });
+      token = "";
+      continue;
+    }
+    if (char === "}" || char === "]" || char === ")") {
+      skippingCursorKey = false;
+      if (continuationStack.length === 0) break;
+      const popped = continuationStack.pop();
+      if (popped === innermostObj) {
+        break;
+      }
+      token = "";
+      continue;
+    }
+    if (char === ":") {
+      if (skippingCursorKey) {
+        skippingCursorKey = false;
+        token = "";
+        continue;
+      }
+      if (continuationStack[continuationStack.length - 1] === innermostObj) {
+        const cleanKey = token.trim().replace(/^["']|["']$/g, "");
+        if (cleanKey) keys.add(cleanKey);
+      }
+      token = "";
+      continue;
+    }
+    if (char === ",") {
+      skippingCursorKey = false;
+      token = "";
+      continue;
+    }
+    if (!/\s/.test(char)) token += char;
+  }
+
+  return [...keys];
 }
 
 function isExpressionArray(scan: MongoCallScan): boolean {
@@ -1142,6 +1258,10 @@ function classifyUpdate(scan: MongoCallScan, rootIndex: number): MongoCursorClas
 
   const parent = scan.stack[scan.stack.length - 2];
   if (scan.inValue) {
+    if (innerDepth(scan, rootIndex) === 0 && scan.valueKey) {
+      const cleanKey = scan.valueKey.replace(/^["']|["']$/g, "");
+      if (UPDATE_OPERATOR_LABELS.has(cleanKey)) return { mode: "none" };
+    }
     // `$currentDate: { at: { $type: "timestamp" } }`.
     if (scan.valueKey === "$type" && parent?.key === "$currentDate") return { mode: "enumValue", enumKey: "currentDateType" };
     return { mode: scan.inString ? "none" : "value" };

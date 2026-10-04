@@ -392,7 +392,7 @@ test("treats -- as a line comment, matching the editor's SQL language mode", () 
   assert.deepEqual(labels("db.users.find({ -- fi", { fields }), []);
   assert.deepEqual(labels("db.users.find({ age: { -- $", { fields }), []);
   // Code after a closed `--` line still completes.
-  assert.deepEqual(labels("db.users.find({ name: 1, -- note\n  na", { fields }), ["name"]);
+  assert.deepEqual(labels("db.users.find({ createdAt: 1, -- note\n  na", { fields }), ["name"]);
   // A double dash inside a string value is not a comment.
   assert.deepEqual(labels('db.users.find({ note: "a--b", na', { fields }), ["name"]);
 });
@@ -1627,8 +1627,9 @@ test("completes runCommand command names and their collection arguments", () => 
   assert.deepEqual(labels('db.runCommand({ collStats: "', { collections }), collections);
   assert.deepEqual(labels('db.runCommand({ find: "us', { collections }), ["users", "user_events"]);
   assert.deepEqual(labels('db.runCommand({ ping: "', { collections }), []);
-  // A second key still completes commands, and `db.` offers the helper.
-  assert.ok(labels('db.runCommand({ find: "users", ').includes("find"));
+  // A second key still completes commands (and drops the used command), and `db.` offers the helper.
+  assert.ok(labels('db.runCommand({ find: "users", ').includes("ping"));
+  assert.equal(labels('db.runCommand({ find: "users", ').includes("find"), false);
   assert.ok(labels("db.").includes("runCommand"));
 });
 
@@ -2069,6 +2070,65 @@ test("keeps the find chain completable when a comment holds an unbalanced parent
   assert.deepEqual(labels(balanced, { fields }), ["limit"]);
   assert.deepEqual(labels(lineComment, { fields }), ["limit"]);
   assert.deepEqual(labels('db.users.find({ note: "(x" }).li', { fields }), ["limit"]);
+});
+
+test("offers $comment as a top-level query operator", () => {
+  const items = labels("db.users.find({ $c", { fields });
+  assert.ok(items.includes("$comment"), "db.users.find({ $c should offer $comment");
+
+  const snippet = buildMongoCompletionItems("db.users.find({ $comment", "db.users.find({ $comment".length, { fields }).find((item) => item.label === "$comment");
+  assert.equal(snippet?.apply, '$comment: "${comment}"');
+  assert.ok(parseMongoCommand('db.users.find({ status: "A", $comment: "audit" })'));
+});
+
+test("skips keys already present in the same object", () => {
+  // Query operator keys
+  const queryOps = labels("db.users.find({ age: { $gt: 1, $g", { fields });
+  assert.equal(queryOps.includes("$gt"), false, "expected no $gt in second operator position");
+  assert.ok(queryOps.includes("$gte"), "expected $gte to be offered");
+
+  // Filter fields
+  const filterKeys = labels('db.users.find({ name: "a", n', { fields });
+  assert.equal(filterKeys.includes("name"), false, "expected no `name` when name already present");
+
+  // Update operators
+  const updateOps = labels("db.users.updateOne({}, { $set: { a: 1 }, $s", { fields });
+  assert.equal(updateOps.includes("$set"), false, "expected no $set when $set already present");
+  assert.ok(updateOps.includes("$setOnInsert"), "expected $setOnInsert to remain available");
+
+  // Guards:
+  // find({ still lists all fields
+  assert.ok(labels("db.users.find({ ", { fields }).includes("name"));
+  // find({ age: { $ still lists $gt
+  assert.ok(labels("db.users.find({ age: { $", { fields }).includes("$gt"));
+
+  // Key after the cursor is also excluded
+  const textWithKeyAfterCursor = "db.users.find({ n , name: 1 })";
+  const cursor = textWithKeyAfterCursor.indexOf("n") + 1;
+  const itemsAfterCursor = buildMongoCompletionItems(textWithKeyAfterCursor, cursor, { fields }).map((item) => item.label);
+  assert.equal(itemsAfterCursor.includes("name"), false, "expected key after cursor to be excluded");
+});
+
+test("withholds scalar values in value position right after a top-level update operator", () => {
+  // At the root of an update document, $set: requires an object, so value position must be quiet (mode none)
+  const context = getMongoCompletionContext("db.users.updateOne({}, { $set: ", "db.users.updateOne({}, { $set: ".length);
+  assert.equal(context.mode, "none");
+  assert.deepEqual(labels("db.users.updateOne({}, { $set: ", { fields }), []);
+
+  // Applies to every UPDATE_OPERATORS key at the root of updateOne / updateMany / findOneAndUpdate and bulkWrite
+  assert.equal(getMongoCompletionContext("db.users.updateMany({}, { $inc: ", "db.users.updateMany({}, { $inc: ".length).mode, "none");
+  assert.equal(getMongoCompletionContext("db.users.findOneAndUpdate({}, { $unset: ", "db.users.findOneAndUpdate({}, { $unset: ".length).mode, "none");
+  assert.equal(getMongoCompletionContext("db.users.bulkWrite([{ updateOne: { filter: {}, update: { $set: ", "db.users.bulkWrite([{ updateOne: { filter: {}, update: { $set: ".length).mode, "none");
+
+  // Guard: values INSIDE the operator object ($set: { name: ) must keep the value list unchanged
+  const insideOperatorValues = labels("db.users.updateOne({}, { $set: { name: ", { fields });
+  assert.ok(insideOperatorValues.includes("ObjectId"));
+  assert.ok(insideOperatorValues.includes("ISODate"));
+  assert.ok(insideOperatorValues.includes("true"));
+
+  // Guard: pipeline-style updates are unaffected
+  assert.ok(labels("db.users.updateOne({}, [{ $", { fields }).includes("$set"));
+  assert.deepEqual(labels("db.users.updateOne({}, [{ $set: { ", { fields }), ["_id", "createdAt", "name", "profile.email"]);
 });
 
 test("completes bracket collection references db['name'] and db[\"name\"]", () => {

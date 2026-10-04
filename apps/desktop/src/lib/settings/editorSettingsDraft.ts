@@ -94,6 +94,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "autoCalculateTotalRows",
   "flatteningMultiLineText",
   "dataGridShowWhitespace",
+  "modelGenerationTemplates",
   "tableColumnTemplateFields",
   "shortcuts",
   "sqlFormatter",

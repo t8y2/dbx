@@ -5,6 +5,28 @@ import { meilisearchManagementRu } from "./meilisearchManagement";
 
 // Russian locale. Entries omitted here fall back to English at runtime.
 export default withEnglishFallback({
+  modelGeneration: {
+    title: "Создать модель",
+    editTemplate: "Изменить шаблон",
+    addTemplate: "Добавить шаблон",
+    deleteTemplate: "Удалить шаблон",
+    templateName: "Название шаблона",
+    extension: "Расширение файла",
+    templateBody: "Исходный текст шаблона",
+    search: "Поиск языков",
+    targets: "Цели модели",
+    languages: "Языки",
+    customTemplates: "Пользовательские шаблоны",
+    noMatches: "Подходящие языки или шаблоны не найдены",
+    outputFormat: "Формат вывода",
+    showHeaderComments: "Показывать комментарии заголовка",
+    preview: "Предпросмотр сгенерированного кода",
+    copy: "Копировать код",
+    save: "Сохранить код",
+    unknownTypes: "Некоторые типы базы данных не распознаны. Проверьте сгенерированные типы перед использованием.",
+    templateHelp:
+      "Переменные: table.name, table.schema, table.comment, class.name; внутри секции columns доступны column.name, column.type, column.originalType, column.comment, column.defaultValue, column.nullable, column.primaryKey. Используйте двойные фигурные скобки для переменных, #columns и /columns для циклов, а #column.nullable и /column.nullable для условных блоков.",
+  },
   docs,
   dataDictionary,
   cellTransform: {

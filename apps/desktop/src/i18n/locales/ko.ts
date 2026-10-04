@@ -61,6 +61,28 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  modelGeneration: {
+    title: "모델 생성",
+    editTemplate: "템플릿 편집",
+    addTemplate: "템플릿 추가",
+    deleteTemplate: "템플릿 삭제",
+    templateName: "템플릿 이름",
+    extension: "파일 확장자",
+    templateBody: "템플릿 소스",
+    search: "언어 검색",
+    targets: "모델 대상",
+    languages: "언어",
+    customTemplates: "사용자 지정 템플릿",
+    noMatches: "일치하는 언어나 템플릿이 없습니다",
+    outputFormat: "출력 형식",
+    showHeaderComments: "헤더 주석 표시",
+    preview: "생성 코드 미리보기",
+    copy: "코드 복사",
+    save: "코드 저장",
+    unknownTypes: "일부 데이터베이스 유형을 인식할 수 없습니다. 생성된 유형을 사용하기 전에 확인하세요.",
+    templateHelp:
+      "변수: table.name, table.schema, table.comment, class.name. columns 섹션 안에서는 column.name, column.type, column.originalType, column.comment, column.defaultValue, column.nullable, column.primaryKey를 사용할 수 있습니다. 변수는 중괄호 두 개로 감싸고, #columns와 /columns는 반복, #column.nullable와 /column.nullable는 조건 블록을 나타냅니다.",
+  },
   mongoDump,
   cellTransform: {
     title: "변환 미리보기",

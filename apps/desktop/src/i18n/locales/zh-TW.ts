@@ -64,6 +64,28 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  modelGeneration: {
+    title: "產生模型",
+    editTemplate: "編輯範本",
+    addTemplate: "新增範本",
+    deleteTemplate: "刪除範本",
+    templateName: "範本名稱",
+    extension: "檔案副檔名",
+    templateBody: "範本內容",
+    search: "搜尋語言",
+    targets: "模型目標",
+    languages: "語言",
+    customTemplates: "自訂範本",
+    noMatches: "沒有符合的語言或範本",
+    outputFormat: "輸出格式",
+    showHeaderComments: "顯示頂部註解",
+    preview: "產生程式碼預覽",
+    copy: "複製程式碼",
+    save: "儲存程式碼",
+    unknownTypes: "部分資料庫類型未識別，請檢查產生的欄位類型。",
+    templateHelp:
+      "變數：table.name、table.schema、table.comment、class.name；欄位迴圈內可用 column.name、column.type、column.originalType、column.comment、column.defaultValue、column.nullable、column.primaryKey。變數使用雙大括號，#columns 與 /columns 表示迴圈，#column.nullable 與 /column.nullable 表示條件區塊。",
+  },
   mongoDump,
   cellTransform: {
     title: "轉換預覽",

@@ -81,6 +81,7 @@ function orderSidebarTreeChildrenForParent(parent: Pick<TreeNode, "type">, child
       databaseType === "easysearch" ||
       databaseType === "meilisearch" ||
       databaseType === "solr" ||
+      databaseType === "couchdb" ||
       databaseType === "qdrant" ||
       databaseType === "milvus" ||
       databaseType === "weaviate" ||

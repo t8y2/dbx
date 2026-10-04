@@ -2063,6 +2063,19 @@ async fn do_execute_typed(
             }
             result
         }
+        PoolKind::CouchDb(client) => {
+            let client = client.clone();
+            let sql = sql.to_string();
+            let max_rows = options.max_rows;
+            let result =
+                wait_for_query_opt(cancel_token, query_timeout, db::couchdb_driver::execute_rest_query(&client, &sql))
+                    .await
+                    .map(|result| truncate_result_with_max_rows(result, max_rows));
+            if matches!(result.as_ref(), Err(err) if should_discard_pool_after_error(pool_db_type, err)) {
+                state.remove_pool_by_key(pool_key).await;
+            }
+            result
+        }
         PoolKind::Meilisearch(client) => {
             let client = client.clone();
             let sql = sql.to_string();
@@ -3123,6 +3136,11 @@ pub async fn close_query_session(
         PoolKind::Solr(client) => {
             let client = client.clone();
             db::solr_driver::close_cursor(&client, session_id).await?;
+            Ok(true)
+        }
+        PoolKind::CouchDb(client) => {
+            let client = client.clone();
+            db::couchdb_driver::close_cursor(&client, session_id).await?;
             Ok(true)
         }
         _ => Ok(false),
@@ -4735,6 +4753,7 @@ fn pool_kind_has_transactional_path(pool: &PoolKind) -> bool {
         | PoolKind::Elasticsearch(_)
         | PoolKind::Easysearch(_)
         | PoolKind::Solr(_)
+        | PoolKind::CouchDb(_)
         | PoolKind::Meilisearch(_)
         | PoolKind::Salesforce(_)
         | PoolKind::VectorDb(_)
@@ -5140,6 +5159,7 @@ fn batch_transaction_path(pool: &PoolKind) -> BatchTransactionPath {
         | PoolKind::Elasticsearch(_)
         | PoolKind::Easysearch(_)
         | PoolKind::Solr(_)
+        | PoolKind::CouchDb(_)
         | PoolKind::Meilisearch(_)
         | PoolKind::Salesforce(_)
         | PoolKind::VectorDb(_)

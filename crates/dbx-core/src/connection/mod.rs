@@ -119,6 +119,7 @@ pub enum PoolKind {
     Elasticsearch(db::elasticsearch_driver::EsClient),
     Easysearch(db::easysearch_driver::EasysearchClient),
     Solr(db::solr_driver::SolrClient),
+    CouchDb(db::couchdb_driver::CouchDbClient),
     Meilisearch(db::meilisearch_driver::MeilisearchClient),
     Salesforce(db::salesforce_driver::SfClient),
     HBase(db::hbase_driver::HBaseClient),
@@ -3020,6 +3021,22 @@ impl AppState {
                 db::solr_driver::test_connection(&mut client, connect_timeout).await?;
                 PoolKind::Solr(client)
             }
+            DatabaseType::CouchDb => {
+                let client = db::couchdb_driver::CouchDbClient::from_config(
+                    &url,
+                    Some(&db_config.username),
+                    Some(&db_config.password),
+                    db_config.ssl,
+                    db_config.url_params.as_deref(),
+                    db_config.external_config.as_ref(),
+                    connect_timeout,
+                    Some(db_config.ca_cert_path.as_str()),
+                    Some(db_config.client_cert_path.as_str()),
+                    Some(db_config.client_key_path.as_str()),
+                )?;
+                db::couchdb_driver::test_connection(&client, connect_timeout).await?;
+                PoolKind::CouchDb(client)
+            }
             DatabaseType::Meilisearch => {
                 let client = db::meilisearch_driver::MeilisearchClient::new_for_config(
                     &url,
@@ -4455,6 +4472,17 @@ impl AppState {
                         }
                     }
                 }
+                PoolKind::CouchDb(client) => {
+                    let client = client.clone();
+                    let timeout = crate::db::connection_timeout();
+                    match db::couchdb_driver::test_connection(&client, timeout).await {
+                        Ok(()) => false,
+                        Err(err) => {
+                            log::warn!("CouchDB connection pool '{pool_key}' is stale: {err}");
+                            true
+                        }
+                    }
+                }
                 PoolKind::Meilisearch(client) => {
                     let client = client.clone();
                     let timeout = crate::db::connection_timeout();
@@ -5692,6 +5720,16 @@ impl AppState {
                         }
                     }
                 }
+                PoolKind::CouchDb(client) => {
+                    let client = client.clone();
+                    match db::couchdb_driver::test_connection(&client, timeout).await {
+                        Ok(()) => true,
+                        Err(e) => {
+                            log::warn!("CouchDB connection pool '{key}' is unhealthy: {e}");
+                            false
+                        }
+                    }
+                }
                 PoolKind::Meilisearch(client) => {
                     let client = client.clone();
                     match db::meilisearch_driver::test_connection(&client, timeout).await {
@@ -6105,6 +6143,7 @@ enum KeepaliveTarget {
     Easysearch(db::easysearch_driver::EasysearchClient),
     Salesforce(db::salesforce_driver::SfClient),
     Solr(db::solr_driver::SolrClient),
+    CouchDb(db::couchdb_driver::CouchDbClient),
     HBase(db::hbase_driver::HBaseClient),
     VectorDb(db::vector_driver::VectorClient),
     InfluxDb(db::influxdb_driver::InfluxdbClient),
@@ -6264,6 +6303,7 @@ fn keepalive_target_from_pool(pool: &PoolKind, config: &ConnectionConfig) -> Opt
         PoolKind::Easysearch(client) => Some(KeepaliveTarget::Easysearch(client.clone())),
         PoolKind::Salesforce(client) => Some(KeepaliveTarget::Salesforce(client.clone())),
         PoolKind::Solr(client) => Some(KeepaliveTarget::Solr(client.clone())),
+        PoolKind::CouchDb(client) => Some(KeepaliveTarget::CouchDb(client.clone())),
         PoolKind::HBase(client) => Some(KeepaliveTarget::HBase(client.clone())),
         PoolKind::VectorDb(client) => Some(KeepaliveTarget::VectorDb(client.clone())),
         PoolKind::InfluxDb(client) => Some(KeepaliveTarget::InfluxDb(client.clone())),
@@ -6316,6 +6356,9 @@ async fn ping_keepalive_target(target: &mut KeepaliveTarget, timeout: Duration) 
             db::salesforce_driver::SfClient::test_connection(client, timeout).await.map_err(Into::into)
         }
         KeepaliveTarget::Solr(client) => db::solr_driver::test_connection(client, timeout).await.map_err(Into::into),
+        KeepaliveTarget::CouchDb(client) => {
+            db::couchdb_driver::test_connection(client, timeout).await.map_err(Into::into)
+        }
         KeepaliveTarget::HBase(client) => {
             db::hbase_driver::test_connection(client, timeout).await.map(|_| ()).map_err(Into::into)
         }
@@ -6768,6 +6811,7 @@ fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
         PoolKind::Elasticsearch(client) => PoolKind::Elasticsearch(client.clone()),
         PoolKind::Easysearch(client) => PoolKind::Easysearch(client.clone()),
         PoolKind::Solr(client) => PoolKind::Solr(client.clone()),
+        PoolKind::CouchDb(client) => PoolKind::CouchDb(client.clone()),
         PoolKind::Meilisearch(client) => PoolKind::Meilisearch(client.clone()),
         PoolKind::Salesforce(client) => PoolKind::Salesforce(client.clone()),
         PoolKind::HBase(client) => PoolKind::HBase(client.clone()),
@@ -6829,6 +6873,9 @@ async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {
             drop(client);
         }
         PoolKind::Solr(client) => {
+            drop(client);
+        }
+        PoolKind::CouchDb(client) => {
             drop(client);
         }
         PoolKind::Meilisearch(client) => {
@@ -6962,6 +7009,7 @@ fn base_pool_key_for_with_catalog(
                     DatabaseType::Elasticsearch
                         | DatabaseType::Easysearch
                         | DatabaseType::Solr
+                        | DatabaseType::CouchDb
                         | DatabaseType::Qdrant
                         | DatabaseType::Milvus
                         | DatabaseType::Weaviate

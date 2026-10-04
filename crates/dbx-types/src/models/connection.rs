@@ -1188,6 +1188,7 @@ impl ConnectionConfig {
             DatabaseType::Elasticsearch
             | DatabaseType::Easysearch
             | DatabaseType::Solr
+            | DatabaseType::CouchDb
             | DatabaseType::Meilisearch
             | DatabaseType::Hbase
             | DatabaseType::Qdrant
@@ -1376,6 +1377,7 @@ impl ConnectionConfig {
             DatabaseType::Elasticsearch
             | DatabaseType::Easysearch
             | DatabaseType::Solr
+            | DatabaseType::CouchDb
             | DatabaseType::Meilisearch
             | DatabaseType::Hbase
             | DatabaseType::Qdrant

@@ -19,6 +19,10 @@ export function isSolrDatabaseType(dbType?: DatabaseType): boolean {
   return dbType === "solr";
 }
 
+export function isCouchDbDatabaseType(dbType?: DatabaseType): boolean {
+  return dbType === "couchdb";
+}
+
 export interface SqlSnippet {
   id: string;
   label: string;

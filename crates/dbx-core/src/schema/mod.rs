@@ -8130,6 +8130,9 @@ async fn get_columns_core_for_session_inner_with_pool(
             PoolKind::Easysearch(client) => {
                 db::easysearch_driver::get_columns(client, table).await.map(deduplicate_column_infos)
             }
+            PoolKind::CouchDb(client) => {
+                db::couchdb_driver::get_columns(client, table).await.map(deduplicate_column_infos)
+            }
             PoolKind::Meilisearch(client) => {
                 db::meilisearch_driver::get_columns(client, table).await.map(deduplicate_column_infos)
             }

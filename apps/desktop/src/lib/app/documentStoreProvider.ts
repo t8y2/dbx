@@ -1,10 +1,10 @@
 import type { ComposerTranslation } from "vue-i18n";
 import { normalizeJsonArgument } from "@dbx-app/mongo-shell";
-import { isElasticsearchCompatibleDatabaseType, isMeilisearchDatabaseType, isSolrDatabaseType, type DatabaseType } from "@/types/database";
+import { isCouchDbDatabaseType, isElasticsearchCompatibleDatabaseType, isMeilisearchDatabaseType, isSolrDatabaseType, type DatabaseType } from "@/types/database";
 import { quoteUnquotedObjectKeys } from "@/lib/mongo/mongoShellCommand";
 import { formatMongoShellLiteral, normalizeMongoDateInput } from "@/lib/mongo/mongoDocumentValues";
 
-export type DocumentStoreKind = "mongodb" | "dynamodb" | "elasticsearch" | "meilisearch" | "solr";
+export type DocumentStoreKind = "mongodb" | "dynamodb" | "elasticsearch" | "meilisearch" | "solr" | "couchdb";
 export type DocumentFilterMode = "equals" | "not-equals" | "like" | "not-like" | "begins-with" | "ends-with" | "greater-than" | "greater-than-or-equal" | "less-than" | "less-than-or-equal" | "in" | "not-in" | "between" | "not-between" | "is-null" | "is-not-null";
 export type DocumentFilterValueType = "auto" | "string" | "number" | "boolean" | "object-id" | "date" | "int32" | "int64" | "decimal128" | "json";
 export type ElasticsearchBoolClause = "filter" | "must" | "should" | "must_not";
@@ -82,7 +82,7 @@ export function documentFilterModeOptionsFor(kind: DocumentStoreKind): Array<{ v
   if (kind === "meilisearch") return documentFilterModeOptions.filter((option) => option.value !== "like" && option.value !== "not-like" && !MONGO_ONLY_DOCUMENT_FILTER_MODES.has(option.value));
   // Solr's driver translates every mode — including $in/$nin and range pairs —
   // into fq clauses, so the full Mongo-style operator set is available.
-  if (kind === "mongodb" || kind === "solr") return documentFilterModeOptions;
+  if (kind === "mongodb" || kind === "solr" || kind === "couchdb") return documentFilterModeOptions;
   return documentFilterModeOptions.filter((option) => !MONGO_ONLY_DOCUMENT_FILTER_MODES.has(option.value));
 }
 
@@ -184,6 +184,22 @@ const solrDocumentProvider: DocumentStoreProvider = {
   sortInputForColumn: mongoDocumentProvider.sortInputForColumn,
 };
 
+const couchdbDocumentProvider: DocumentStoreProvider = {
+  kind: "couchdb",
+  filterInputLabel: "selector",
+  sortInputLabel: "sort",
+  documentsLabel: ({ total }) => `${total} Documents`,
+  queryPreview: ({ collection, filterJson, sortJson, skip, limit }) => {
+    const lines = ["DBX COUCHDB FIND DOCUMENTS", `database: ${JSON.stringify(collection)}`, `skip: ${skip}`, `limit: ${limit}`];
+    const filter = documentStorePreviewJson(filterJson);
+    if (filter) lines.push("selector:", filter);
+    const sort = documentStorePreviewJson(sortJson);
+    if (sort) lines.push("sort:", sort);
+    return lines.join("\n");
+  },
+  sortInputForColumn: mongoDocumentProvider.sortInputForColumn,
+};
+
 const dynamodbDocumentProvider: DocumentStoreProvider = {
   kind: "dynamodb",
   filterInputLabel: "filter",
@@ -216,6 +232,7 @@ export function documentStoreProviderFor(databaseType?: DatabaseType): DocumentS
   if (isElasticsearchCompatibleDatabaseType(databaseType)) return elasticsearchDocumentProvider;
   if (isMeilisearchDatabaseType(databaseType)) return meilisearchDocumentProvider;
   if (isSolrDatabaseType(databaseType)) return solrDocumentProvider;
+  if (isCouchDbDatabaseType(databaseType)) return couchdbDocumentProvider;
   return mongoDocumentProvider;
 }
 
@@ -617,7 +634,7 @@ function mongoDocumentFilterKind(options: DocumentFilterParseOptions): boolean {
   // Solr shares the Mongo-style filter document — the driver translates $in,
   // $gte/$lte and anchored $regex into fq clauses — so it uses the same
   // operator-rich condition shapes.
-  return options.kind === undefined || options.kind === "mongodb" || options.kind === "solr";
+  return options.kind === undefined || options.kind === "mongodb" || options.kind === "solr" || options.kind === "couchdb";
 }
 
 /** Splits a comma/newline separated filter value list, keeping quoted values intact. */
@@ -854,6 +871,7 @@ const documentQueryInputNormalizers: Record<DocumentStoreKind, DocumentQueryInpu
   elasticsearch: quoteUnquotedObjectKeys,
   meilisearch: quoteUnquotedObjectKeys,
   solr: quoteUnquotedObjectKeys,
+  couchdb: quoteUnquotedObjectKeys,
 };
 
 function normalizeDocumentQueryObjectInput(input: string, kind?: DocumentStoreKind): string {

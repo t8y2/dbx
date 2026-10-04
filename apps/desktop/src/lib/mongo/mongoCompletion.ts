@@ -437,8 +437,11 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
 
   const classified = classifyCursorInCall(call.method, scan);
   const variables = classified.mode === "fieldRef" || classified.mode === "expression" ? collectScopeVariables(scan) : undefined;
+  const valuePrefix = classified.mode === "value" ? adjustValuePrefixForNew(text, safeCursor, from) : { prefix, from };
   return {
     ...at(classified.mode, classified.stage, classified.method, classified.bulkWriteOperation, classified.keyMap),
+    prefix: valuePrefix.prefix,
+    from: valuePrefix.from,
     ...(classified.operator ? { operator: classified.operator } : {}),
     ...(classified.enumKey ? { enumKey: classified.enumKey } : {}),
     ...(classified.pipelineKind ? { pipelineKind: classified.pipelineKind } : {}),
@@ -506,6 +509,15 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
       items = indexNameItems(prefix, input.indexes ?? [], context.method);
       break;
     case "value":
+      if (/^new\s+/i.test(prefix)) {
+        items = specItems(
+          VALUE_SNIPPETS.filter((spec) => spec.label === "new Date"),
+          prefix,
+          "value",
+          100,
+        );
+        break;
+      }
       // Shell constructors first; the extended JSON spellings need their own braces here.
       items = [...specItems(VALUE_SNIPPETS, prefix, "value", 100), ...specItems(BRACED_EXTENDED_JSON_VALUES, prefix, "extended JSON value", 90)];
       break;
@@ -592,7 +604,9 @@ export function shouldAutoOpenMongoCompletion(text: string, cursor: number): boo
   if (!previousChar) return false;
   if (text.slice(0, cursor).endsWith("db.")) return true;
   // `use ` and `show ` name a database or subcommand next; open the list as soon as the space is typed.
-  if (previousChar === " " && (matchUseDatabasePrefix(text.slice(0, cursor)) || matchShowSubcommandPrefix(text.slice(0, cursor)))) return true;
+  if (previousChar === " " && (matchUseDatabasePrefix(text.slice(0, cursor)) || matchShowSubcommandPrefix(text.slice(0, cursor)) || (/(?:^|[^\w$.])new\s+$/.test(text.slice(0, cursor)) && getMongoCompletionContext(text, cursor).mode === "value"))) {
+    return true;
+  }
   if (previousChar === "$" || previousChar === "." || previousChar === '"' || previousChar === "'") return true;
   if (/[{,[:]/.test(previousChar) || /[{,[:]\s+$/.test(text.slice(0, cursor))) {
     return getMongoCompletionContext(text, cursor).mode !== "none";
@@ -636,7 +650,8 @@ export function getMongoDocumentQueryCompletionContext(text: string, cursor: num
   const classified = kind === "filter" ? classifyFilter(scan, 0) : classifyKeyMap(scan, 0, "sort");
   if (classified.mode === "none") return nothing;
 
-  const { prefix, from } = readMongoPropertyPrefix(text, safeCursor);
+  const rawPrefix = readMongoPropertyPrefix(text, safeCursor);
+  const { prefix, from } = classified.mode === "value" ? adjustValuePrefixForNew(text, safeCursor, rawPrefix.from) : rawPrefix;
   const variables = classified.mode === "fieldRef" || classified.mode === "expression" ? collectScopeVariables(scan) : undefined;
   return { ...classified, prefix, from, replaceClosingQuote: closingQuoteAtCursor(prefix, text, safeCursor), ...(variables ? { variables } : {}) };
 }
@@ -723,7 +738,10 @@ export function shouldAutoOpenMongoDocumentQueryCompletion(text: string, cursor:
  * of the identifier and are safe to keep.
  */
 export function getMongoCompletionResultValidFor(context?: MongoCompletionContext): RegExp {
-  if (!context || !DOT_SCOPED_MODES.has(context.mode)) return /["']?[\w_$.-]*$/;
+  if (!context || !DOT_SCOPED_MODES.has(context.mode)) {
+    if (context?.mode === "value") return /(?:new\s+)?["']?[\w_$.-]*$/;
+    return /["']?[\w_$.-]*$/;
+  }
   const segments = context.prefix.split(".").length;
   return new RegExp(`["']?[\\w_$-]*${"\\.[\\w_$-]*".repeat(segments - 1)}$`);
 }
@@ -1865,6 +1883,15 @@ export function readMongoPropertyPrefix(text: string, cursor: number): { prefix:
   return { prefix: text.slice(from, safeCursor), from };
 }
 
+export function adjustValuePrefixForNew(text: string, cursor: number, from: number): { prefix: string; from: number } {
+  const beforeFrom = text.slice(0, from);
+  const match = /(?:^|[^\w$.])(new\s+)$/.exec(beforeFrom);
+  if (!match || !match[1]) return { prefix: text.slice(from, cursor), from };
+  const newStart = from - match[1].length;
+  if (isInsideMongoComment(text, newStart)) return { prefix: text.slice(from, cursor), from };
+  return { prefix: text.slice(newStart, cursor), from: newStart };
+}
+
 function findOpenMongoQuoteStart(text: string, cursor: number): number | null {
   for (let index = 0; index < cursor; index++) {
     const char = text[index];
@@ -2380,11 +2407,11 @@ function escapeSingleQuoted(value: string): string {
 }
 
 function startsWithPrefix(value: string, prefix: string): boolean {
-  return value.toLowerCase().startsWith(prefix.toLowerCase());
+  return value.toLowerCase().startsWith(prefix.toLowerCase().replace(/\s+/g, " "));
 }
 
 function matchesFuzzyPrefix(value: string, prefix: string): boolean {
-  const normalizedPrefix = normalizeMongoKeyPrefix(prefix).toLowerCase();
+  const normalizedPrefix = normalizeMongoKeyPrefix(prefix).toLowerCase().replace(/\s+/g, " ");
   if (!normalizedPrefix) return true;
   return value.toLowerCase().includes(normalizedPrefix);
 }

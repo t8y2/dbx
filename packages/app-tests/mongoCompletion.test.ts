@@ -2009,3 +2009,76 @@ test("keeps the find chain completable when a comment holds an unbalanced parent
   assert.deepEqual(labels(lineComment, { fields }), ["limit"]);
   assert.deepEqual(labels('db.users.find({ note: "(x" }).li', { fields }), ["limit"]);
 });
+
+test("replaces typed new keyword when completing new Date", () => {
+  // Bad case 1: cursor after `new D`
+  const text1 = "db.users.find({ name: new D";
+  const cursor1 = text1.length;
+  const context1 = getMongoCompletionContext(text1, cursor1);
+  const items1 = buildMongoCompletionItems(text1, cursor1, { fields });
+  const item1 = items1.find((candidate) => candidate.label === "new Date");
+  assert.ok(item1);
+  assert.equal(context1.from, text1.indexOf("new D"));
+  assert.equal(context1.prefix, "new D");
+  assert.equal(item1.apply, 'new Date("${date}")');
+  const inserted1 = text1.slice(0, context1.from) + item1.apply + text1.slice(cursor1);
+  assert.equal(inserted1, 'db.users.find({ name: new Date("${date}")');
+  assert.deepEqual(
+    items1.map((candidate) => candidate.label),
+    ["new Date"],
+  );
+
+  // Bad case 2: cursor after `new ` (trailing space)
+  const text2 = "db.users.find({ name: new ";
+  const cursor2 = text2.length;
+  const context2 = getMongoCompletionContext(text2, cursor2);
+  const items2 = buildMongoCompletionItems(text2, cursor2, { fields });
+  const item2 = items2.find((candidate) => candidate.label === "new Date");
+  assert.ok(item2);
+  assert.equal(context2.from, text2.indexOf("new "));
+  assert.equal(context2.prefix, "new ");
+  assert.equal(item2.apply, 'new Date("${date}")');
+  const inserted2 = text2.slice(0, context2.from) + item2.apply + text2.slice(cursor2);
+  assert.equal(inserted2, 'db.users.find({ name: new Date("${date}")');
+  assert.deepEqual(
+    items2.map((candidate) => candidate.label),
+    ["new Date"],
+  );
+
+  // ValidFor regex allows typing after new in value mode
+  const pattern = getMongoCompletionResultValidFor(context1);
+  const isValid = (typed: string) => new RegExp(`^(?:${pattern.source})$`).test(typed);
+  assert.equal(isValid("new "), true);
+  assert.equal(isValid("new D"), true);
+  assert.equal(isValid("new Date"), true);
+  assert.equal(isValid("new Date("), false);
+
+  // Document query completion in filter mode
+  const docText = "{ name: new D";
+  const docCursor = docText.length;
+  const docContext = getMongoDocumentQueryCompletionContext(docText, docCursor, "filter");
+  assert.equal(docContext.from, docText.indexOf("new D"));
+  assert.equal(docContext.prefix, "new D");
+
+  // `ne` case unchanged
+  const text3 = "db.users.find({ name: ne";
+  const cursor3 = text3.length;
+  const context3 = getMongoCompletionContext(text3, cursor3);
+  const items3 = buildMongoCompletionItems(text3, cursor3, { fields });
+  const item3 = items3.find((candidate) => candidate.label === "new Date");
+  assert.ok(item3);
+  assert.equal(context3.from, text3.indexOf("ne"));
+  assert.equal(context3.prefix, "ne");
+  assert.equal(item3.apply, 'new Date("${date}")');
+  const inserted3 = text3.slice(0, context3.from) + item3.apply + text3.slice(cursor3);
+  assert.equal(inserted3, 'db.users.find({ name: new Date("${date}")');
+
+  // `{ name: "new D` (inside a string) unchanged
+  const text4 = 'db.users.find({ name: "new D';
+  const cursor4 = text4.length;
+  const context4 = getMongoCompletionContext(text4, cursor4);
+  const items4 = buildMongoCompletionItems(text4, cursor4, { fields });
+  assert.equal(context4.mode, "none");
+  assert.equal(context4.prefix, '"new D');
+  assert.deepEqual(items4, []);
+});

@@ -7170,6 +7170,7 @@ export default withEnglishFallback({
     dataGridCellDetailDialogDefaultDescription: "Hücre ayrıntıları düğmesine tıklandığında yan veya alt panel yerine varsayılan olarak bir modal iletişim kutusunda açar.",
     dataGridCrosshairHighlight: "Artı imleç satır ve sütun vurgusu",
     dataGridCrosshairHighlightDescription: "Etkinleştirildiğinde etkin hücrenin tüm satırı ve sütunu hafifçe vurgulanır (Excel gibi). Odaklanan hücre kendi seçili biçemini korur.",
+    dataGridZebraRowBg: "Çizgi Rengi",
     infiniteScroll: "Sonsuz kaydırmayla yükleme",
     autoCalculateTotalRows: "Toplam satır sayısını otomatik hesapla",
     autoCalculateTotalRowsDescription: "Eşleşen toplam satırı göstermek için her sorgunun ardından otomatik olarak COUNT(*) çalıştır. Büyük sorguların hızlı kalması için varsayılan olarak kapalıdır — sonuç alt bilgisinden istediğinizde hesaplayın.",

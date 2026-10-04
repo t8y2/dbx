@@ -8163,6 +8163,7 @@ export default {
     dataGridCellDetailDialogDefaultDescription: "Open cell details in a modal dialog by default instead of the side or bottom panel.",
     dataGridCrosshairHighlight: "Crosshair row & column highlight",
     dataGridCrosshairHighlightDescription: "When enabled, lightly highlight the entire row and column of the active cell (like Excel). The focused cell keeps its selected style.",
+    dataGridZebraRowBg: "Stripe Color",
     infiniteScroll: "Infinite scroll loading",
     autoCalculateTotalRows: "Auto-calculate total row count",
     autoCalculateTotalRowsDescription: "Run COUNT(*) automatically after each query to show the total matching rows. Off by default to keep large queries fast — calculate it on demand from the result footer.",

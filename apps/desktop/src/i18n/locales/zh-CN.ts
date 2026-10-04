@@ -8149,6 +8149,7 @@ export default withEnglishFallback({
     dataGridCellDetailDialogDefaultDescription: "点击单元格详情按钮时，默认使用弹窗展示而非侧边或下方分屏。",
     dataGridCrosshairHighlight: "行列十字高亮",
     dataGridCrosshairHighlightDescription: "开启后，以当前活动单元格为中心淡色高亮整行和整列（类似 Excel）。焦点单元格仍保留原有的选中样式。",
+    dataGridZebraRowBg: "斑马纹颜色",
     infiniteScroll: "无限滚动加载",
     autoCalculateTotalRows: "自动统计总行数",
     autoCalculateTotalRowsDescription: "每次查询后自动执行 COUNT(*) 显示匹配的总行数。默认关闭以保证大查询速度 —— 可在结果栏按需手动统计。",

@@ -659,6 +659,12 @@ describe("normalizeEditorSettings", () => {
     }
   });
 
+  it("defaults zebra row background empty and normalizes custom color", () => {
+    expect(normalizeEditorSettings({}).dataGridZebraRowBg).toBe("");
+    expect(normalizeEditorSettings({ dataGridZebraRowBg: " #334455 \n" }).dataGridZebraRowBg).toBe("#334455");
+    expect(normalizeEditorSettings({ dataGridZebraRowBg: null as never }).dataGridZebraRowBg).toBe("");
+  });
+
   it("defaults the data grid font and preserves a custom font family", () => {
     const defaultFontFamily = `"Geist Variable Tabular", "Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif`;
     expect(normalizeEditorSettings({}).tableFontFamily).toBe(defaultFontFamily);

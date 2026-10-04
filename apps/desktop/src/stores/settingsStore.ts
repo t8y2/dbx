@@ -989,6 +989,7 @@ export interface EditorSettings {
   dataGridCellDetailDialogDefault: boolean;
   dataGridCrosshairHighlight: boolean;
   dataGridStripedRows: boolean;
+  dataGridZebraRowBg: string;
   dataGridMultiRowTranspose: boolean;
   dataGridHideNullColumns: boolean;
   dataGridBooleanDisplayMode: "dropdown" | "checkbox";
@@ -1289,6 +1290,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   dataGridCellDetailDialogDefault: false,
   dataGridCrosshairHighlight: false,
   dataGridStripedRows: true,
+  dataGridZebraRowBg: "",
   dataGridMultiRowTranspose: false,
   dataGridHideNullColumns: false,
   dataGridBooleanDisplayMode: "dropdown",
@@ -1884,6 +1886,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     dataGridCellDetailDialogDefault: settings.dataGridCellDetailDialogDefault === true,
     dataGridCrosshairHighlight: typeof settings.dataGridCrosshairHighlight === "boolean" ? settings.dataGridCrosshairHighlight : DEFAULT_EDITOR_SETTINGS.dataGridCrosshairHighlight,
     dataGridStripedRows: typeof settings.dataGridStripedRows === "boolean" ? settings.dataGridStripedRows : DEFAULT_EDITOR_SETTINGS.dataGridStripedRows,
+    dataGridZebraRowBg: typeof settings.dataGridZebraRowBg === "string" ? settings.dataGridZebraRowBg.trim() : DEFAULT_EDITOR_SETTINGS.dataGridZebraRowBg,
     dataGridMultiRowTranspose: settings.dataGridMultiRowTranspose === true,
     dataGridHideNullColumns: settings.dataGridHideNullColumns === true,
     dataGridBooleanDisplayMode: settings.dataGridBooleanDisplayMode === "checkbox" ? "checkbox" : "dropdown",
@@ -2743,6 +2746,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.dataGridCellDetailDialogDefault !== undefined) editorSettings.value.dataGridCellDetailDialogDefault = partial.dataGridCellDetailDialogDefault === true;
     if (partial.dataGridCrosshairHighlight !== undefined) editorSettings.value.dataGridCrosshairHighlight = typeof partial.dataGridCrosshairHighlight === "boolean" ? partial.dataGridCrosshairHighlight : DEFAULT_EDITOR_SETTINGS.dataGridCrosshairHighlight;
     if (partial.dataGridStripedRows !== undefined) editorSettings.value.dataGridStripedRows = typeof partial.dataGridStripedRows === "boolean" ? partial.dataGridStripedRows : DEFAULT_EDITOR_SETTINGS.dataGridStripedRows;
+    if (partial.dataGridZebraRowBg !== undefined) editorSettings.value.dataGridZebraRowBg = typeof partial.dataGridZebraRowBg === "string" ? partial.dataGridZebraRowBg.trim() : DEFAULT_EDITOR_SETTINGS.dataGridZebraRowBg;
     if (partial.dataGridMultiRowTranspose !== undefined) editorSettings.value.dataGridMultiRowTranspose = partial.dataGridMultiRowTranspose === true;
     if (partial.dataGridHideNullColumns !== undefined) editorSettings.value.dataGridHideNullColumns = partial.dataGridHideNullColumns === true;
     if (partial.dataGridBooleanDisplayMode !== undefined) editorSettings.value.dataGridBooleanDisplayMode = partial.dataGridBooleanDisplayMode === "dropdown" ? "dropdown" : "checkbox";

@@ -76,6 +76,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "dataGridCellDetailDialogDefault",
   "dataGridCrosshairHighlight",
   "dataGridStripedRows",
+  "dataGridZebraRowBg",
   "pageSize",
   "tableOpenPageSize",
   "tableOpenSortMode",

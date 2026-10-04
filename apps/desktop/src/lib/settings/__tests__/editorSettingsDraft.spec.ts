@@ -143,6 +143,10 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridCellDetailButtonVisible");
   });
 
+  it("includes zebra row background in draft keys", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridZebraRowBg");
+  });
+
   it("includes dataGridCellDetailDialogDefault", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridCellDetailDialogDefault");
   });

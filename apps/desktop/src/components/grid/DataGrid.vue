@@ -7030,7 +7030,7 @@ function dataGridRowStyle(item: RowItem): CSSProperties {
             ? "rgb(51, 51, 55)"
             : "rgb(243, 243, 243)"
           : dataGridStripedRows.value && item.displayIndex % 2 === 1
-            ? `var(--data-grid-row-muted-bg, ${dark ? DATA_GRID_DARK_STRIPED_ROW_BG : DATA_GRID_LIGHT_STRIPED_ROW_BG})`
+            ? settingsStore.editorSettings.dataGridZebraRowBg?.trim() || `var(--data-grid-row-muted-bg, ${dark ? DATA_GRID_DARK_STRIPED_ROW_BG : DATA_GRID_LIGHT_STRIPED_ROW_BG})`
             : "var(--data-grid-background)";
   const rowNumberBg =
     item.status === "new"
@@ -7107,7 +7107,8 @@ const dataGridTypeColorKey = computed(() => {
   return colors ? DATA_GRID_TYPE_COLOR_KEYS.map((key) => colors[key]).join(",") : "auto";
 });
 const canvasRenderStyleKey = computed(
-  () => `${settingsStore.editorSettings.theme}:${settingsStore.editorSettings.uiScale}:${canvasBackingPixelRatio.value}:${isDark.value}:${themePalette.value}:${tableFontFamily.value}:${tableFontSize.value}:${!!saveError.value}:${dataGridTypeColorKey.value}:${dataGridStripedRows.value}`,
+  () =>
+    `${settingsStore.editorSettings.theme}:${settingsStore.editorSettings.uiScale}:${canvasBackingPixelRatio.value}:${isDark.value}:${themePalette.value}:${tableFontFamily.value}:${tableFontSize.value}:${!!saveError.value}:${dataGridTypeColorKey.value}:${dataGridStripedRows.value}:${settingsStore.editorSettings.dataGridZebraRowBg}`,
 );
 const CANVAS_MOUSE_WHEEL_SCROLL_MULTIPLIER = 1.5;
 const CANVAS_TRACKPAD_DELTA_THRESHOLD = 40;
@@ -7884,6 +7885,7 @@ function drawCanvasGrid() {
     flatteningMultiLineEnabled: flatteningMultiLineEnabled.value,
     showWhitespace: showWhitespaceEnabled.value,
     stripedRows: dataGridStripedRows.value,
+    zebraRowBg: settingsStore.editorSettings.dataGridZebraRowBg,
     rowNumberMode: dataGridRowNumberMode.value,
   });
   if (!drawn) return;

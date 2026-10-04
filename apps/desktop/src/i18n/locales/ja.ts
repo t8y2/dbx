@@ -7302,6 +7302,7 @@ export default withEnglishFallback({
     dataGridCellDetailDialogDefaultDescription: "セル詳細ボタンをクリックしたときに、サイドや下部パネルではなくモーダルダイアログで表示します。",
     dataGridCrosshairHighlight: "行と列の十字ハイライト",
     dataGridCrosshairHighlightDescription: "有効にすると、アクティブなセルの行と列全体を淡くハイライトします（Excel と同様）。フォーカスされたセルは選択スタイルを維持します。",
+    dataGridZebraRowBg: "縞模様の色",
     tableColumnTemplateFields: "新規テーブルのプリセット列",
     tableColumnTemplateFieldsDescription: "データベース種別を選択し、新規テーブル作成時に使うプリセット列の型を設定します。",
     tableColumnTemplateAdd: "列を追加",

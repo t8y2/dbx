@@ -104,6 +104,8 @@ export interface DrawCanvasDataGridOptions {
   flatteningMultiLineEnabled: boolean;
   showWhitespace?: boolean;
   stripedRows?: boolean;
+  zebraStriping?: boolean;
+  zebraRowBg?: string;
   /** 行号栏取值：`view` = 当前视图序号（默认，与筛选前一致），`source` = 筛选前的原始行号 */
   rowNumberMode?: "view" | "source";
 }
@@ -153,12 +155,18 @@ export function resolveCanvasBackingStoreMetrics(options: { width: number; heigh
   };
 }
 
-export function resolveCanvasDataGridRowBase(theme: Pick<DataGridPaintTheme, "rowDeleted" | "rowNew" | "rowMuted" | "background">, item: Pick<CanvasDataGridRow, "isDeleted" | "isNew" | "isDraft" | "displayIndex">, options: { isActive: boolean; stripedRows?: boolean }): string {
-  const { isActive, stripedRows = true } = options;
+export function resolveCanvasDataGridRowBase(
+  theme: Pick<DataGridPaintTheme, "rowDeleted" | "rowNew" | "rowMuted" | "background">,
+  item: Pick<CanvasDataGridRow, "isDeleted" | "isNew" | "isDraft" | "displayIndex">,
+  options: { isActive: boolean; stripedRows?: boolean; zebraStriping?: boolean; zebraRowBg?: string },
+): string {
+  const { isActive } = options;
+  const stripedRows = options.stripedRows ?? options.zebraStriping ?? true;
+  const stripedRowBg = options.zebraRowBg?.trim() || theme.rowMuted;
   if (item.isDeleted) return theme.rowDeleted;
   if (item.isNew && !isActive) return theme.rowNew;
   if (item.isDraft && !isActive) return theme.rowMuted;
-  if (stripedRows && item.displayIndex % 2 === 1 && !isActive) return theme.rowMuted;
+  if (stripedRows && item.displayIndex % 2 === 1 && !isActive) return stripedRowBg;
   return theme.background;
 }
 
@@ -378,9 +386,12 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions): boolean 
     booleanDisplayMode = "dropdown",
     flatteningMultiLineEnabled,
     showWhitespace = false,
-    stripedRows = true,
+    stripedRows: rawStripedRows,
+    zebraStriping,
+    zebraRowBg,
     rowNumberMode = "view",
   } = options;
+  const stripedRows = rawStripedRows ?? zebraStriping ?? true;
   // 框选热路径：整次绘制只判断一次。常见情况（单矩形 / 多列且每段都是多格）可跳过逐格 kind 查询
   const paintSelectionOuterFrame = dataGridSelectionUsesOuterFrame(selectionFrames);
   const suppressAllSelectedCellBorders = selectionFrames.length > 0 && selectionFrames.every(dataGridFrameIsMultiCell);
@@ -444,6 +455,8 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions): boolean 
     const rowBase = resolveCanvasDataGridRowBase(theme, item, {
       isActive: rowIsActive,
       stripedRows,
+      zebraStriping,
+      zebraRowBg,
     });
     const rowFill = resolveCanvasDataGridRowFill(theme, rowBase, {
       isActive: rowIsActive,

@@ -7275,6 +7275,7 @@ export default withEnglishFallback({
     dataGridCellDetailDialogDefaultDescription: "Apre i dettagli della cella in una finestra di dialogo modale per impostazione predefinita anziché nel pannello laterale o inferiore.",
     dataGridCrosshairHighlight: "Evidenzia riga e colonna a croce",
     dataGridCrosshairHighlightDescription: "Se attivato, evidenzia leggermente l'intera riga e la colonna della cella attiva (come Excel). La cella focalizzata mantiene il suo stile selezionato.",
+    dataGridZebraRowBg: "Colore riga alterna",
     infiniteScroll: "Caricamento a scorrimento infinito",
     autoCalculateTotalRows: "Calcola automaticamente il totale delle righe",
     autoCalculateTotalRowsDescription: "Esegue COUNT(*) automaticamente dopo ogni query per mostrare il totale delle righe corrispondenti. Disattivato per impostazione predefinita per mantenere veloci le query grandi; puoi calcolarlo all'occorrenza dal piè di pagina dei risultati.",

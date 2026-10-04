@@ -7497,6 +7497,7 @@ export default withEnglishFallback({
     dataGridCellDetailDialogDefaultDescription: "Abre los detalles de celda en un diálogo modal por defecto en lugar del panel lateral o inferior.",
     dataGridCrosshairHighlight: "Resaltado de fila y columna en cruz",
     dataGridCrosshairHighlightDescription: "Cuando esté activado, resalta ligeramente toda la fila y la columna de la celda activa (como Excel). La celda enfocada conserva su estilo seleccionado.",
+    dataGridZebraRowBg: "Color de fila alterna",
     infiniteScroll: "Carga de desplazamiento infinito",
     autoCalculateTotalRows: "Calcular automáticamente el total de filas",
     autoCalculateTotalRowsDescription: "Ejecuta COUNT(*) automáticamente tras cada consulta para mostrar el total de filas coincidentes. Desactivado por defecto para mantener rápidas las consultas grandes; puedes calcularlo cuando quieras desde el pie de resultados.",

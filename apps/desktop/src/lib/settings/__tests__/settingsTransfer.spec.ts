@@ -475,4 +475,17 @@ describe("settingsTransfer", () => {
     expect(transferCategoryForKey("csvNullMode")).toBe("data");
     expect(collectTransferCategories(["csvNullMode", "csvQuoteMode"])).toEqual(["data"]);
   });
+
+  it("round-trips zebra row background in data category", () => {
+    expect(transferCategoryForKey("dataGridZebraRowBg")).toBe("data");
+
+    const text = serializeSettingsTransfer({
+      ...DEFAULT_EDITOR_SETTINGS,
+      dataGridZebraRowBg: "#232323",
+    });
+    const result = parseSettingsTransferFile(text);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.editorSettings.dataGridZebraRowBg).toBe("#232323");
+  });
 });

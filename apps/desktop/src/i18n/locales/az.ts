@@ -7286,6 +7286,7 @@ export default withEnglishFallback({
     dataGridCellDetailDialogDefaultDescription: "Xana təfərrüatları düyməsinə kliklədikdə yan və ya aşağı panel yerinə standart olaraq modal dialoq pəncərəsində açır.",
     dataGridCrosshairHighlight: "Sətir və sütunun çarpaz vurğulanması",
     dataGridCrosshairHighlightDescription: "Aktiv olduqda aktiv xananın bütün sətrini və sütununu yüngülcə vurğula (Excel-dəki kimi). Fokuslanmış xana seçilmiş üslubunu saxlayır.",
+    dataGridZebraRowBg: "Zolaq rəngi",
     infiniteScroll: "Sonsuz sürüşdürmə ilə yükləmə",
     autoCalculateTotalRows: "Ümumi sətir sayını avtomatik hesabla",
     autoCalculateTotalRowsDescription: "Uyğun gələn sətirlərin ümumi sayını göstərmək üçün hər sorğudan sonra COUNT(*) avtomatik işlədilir. Böyük sorğuların sürətini qorumaq üçün standart olaraq söndürülüb — ehtiyac olduqda nəticənin alt hissəsindən hesablayın.",

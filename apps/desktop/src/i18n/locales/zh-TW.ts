@@ -6625,6 +6625,7 @@ export default withEnglishFallback({
     dataGridCellDetailDialogDefaultDescription: "點擊儲存格詳情按鈕時，預設使用彈窗展示而非側邊或下方分屏。",
     dataGridCrosshairHighlight: "行列十字高亮",
     dataGridCrosshairHighlightDescription: "開啟後，以目前活動儲存格為中心淡色高亮整列和整行（類似 Excel）。焦點儲存格仍保留原有選取樣式。",
+    dataGridZebraRowBg: "斑馬紋顏色",
     infiniteScroll: "無限滾動載入",
     autoCalculateTotalRows: "自動統計總筆數",
     autoCalculateTotalRowsDescription: "每次查詢後自動執行 COUNT(*) 顯示符合的總筆數。預設關閉以確保大型查詢速度 —— 可在結果列按需手動統計。",

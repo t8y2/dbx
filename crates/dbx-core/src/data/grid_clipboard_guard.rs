@@ -41,17 +41,37 @@ use serde_json::Value;
 /// evaluates any pasted field that starts with a trigger character. `PipeSeparated`
 /// and `Dsv` are the same shape. The one-row and CSV writers are RFC4180 records, so
 /// Excel treats their fields the same way.
+///
+/// Written as an exhaustive match with no `_` arm on purpose. The extractor dispatch
+/// in `dbx-sql-data` is exhaustive too, so a new variant already fails to build there;
+/// this is the cross-crate half of that contract. Without it, a variant added for a
+/// new spreadsheet-bound format would be handled by the dispatch yet silently skip the
+/// guard here, because nothing in `dbx-core` would mention it.
 fn is_spreadsheet_extractor(extractor: DataGridExtractorId) -> bool {
-    matches!(
-        extractor,
+    match extractor {
         DataGridExtractorId::Tsv
-            | DataGridExtractorId::TsvWithHeaders
-            | DataGridExtractorId::Csv
-            | DataGridExtractorId::CsvWithHeaders
-            | DataGridExtractorId::PipeSeparated
-            | DataGridExtractorId::Dsv
-            | DataGridExtractorId::OneRow
-    )
+        | DataGridExtractorId::TsvWithHeaders
+        | DataGridExtractorId::Csv
+        | DataGridExtractorId::CsvWithHeaders
+        | DataGridExtractorId::PipeSeparated
+        | DataGridExtractorId::Dsv
+        | DataGridExtractorId::OneRow => true,
+
+        // Not spreadsheet cells: a leading apostrophe would corrupt the document or
+        // the statement, and the raw extractor must stay byte-exact.
+        DataGridExtractorId::Raw
+        | DataGridExtractorId::Json
+        | DataGridExtractorId::JsonLines
+        | DataGridExtractorId::SqlInList
+        | DataGridExtractorId::SqlInserts
+        | DataGridExtractorId::SqlUpdates
+        | DataGridExtractorId::SqlSelect
+        | DataGridExtractorId::WhereClause
+        | DataGridExtractorId::Markdown
+        | DataGridExtractorId::Html
+        | DataGridExtractorId::Xml
+        | DataGridExtractorId::Pretty => false,
+    }
 }
 
 /// Returns the request with spreadsheet-triggering text cells prefixed by `'`.

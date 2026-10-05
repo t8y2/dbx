@@ -213,6 +213,8 @@ import { runBatchTableDrop } from "@/lib/table/batchTableDrop";
 import { buildSidebarDdlTemplateSql, formatSidebarDdlTemplateForDisplay } from "@/lib/sidebar/sidebarDdlTemplate";
 import { resolveSidebarDdlTargets } from "@/lib/sidebar/sidebarDdlTargets";
 import { sidebarTableDataExportTargets } from "@/lib/sidebar/sidebarExportRuntime";
+import { createColumnDrafts } from "@/lib/table/tableStructureEditorState";
+import type { BuildSingleColumnAlterSqlOptions } from "@/lib/table/tableStructureEditorSql";
 import { formatSidebarTableCopyText, type FormatSidebarTableNamesOptions } from "@/lib/sidebar/sidebarTableNameCopy";
 import { supportsScheduledDatabaseBackup } from "@/lib/backup/scheduledDatabaseBackup";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -256,6 +258,8 @@ import {
   showStructureDocCopyDialog,
   structurePreviewSql,
   structurePreviewTitle,
+  structurePreviewDefaultFileName,
+  structurePreviewDdlStorageType,
   structurePreviewError,
   structureDocCopyText,
   structureDocCopyTitle,
@@ -2403,6 +2407,71 @@ async function openDdlForSelection(node: TreeNode, selectedNodeIds: readonly str
   }
   emit("open-ddl", targets[0]!);
   return true;
+}
+
+function selectedColumnNodes(node: TreeNode): Array<TreeNode & { connectionId: string; database: string; tableName: string }> {
+  if (node.type !== "column" || !node.connectionId || !node.database || !node.tableName) return [];
+  const selectedIds = acceptedSelectionIds ?? connectionStore.selectedTreeNodeIds;
+  const selected = orderSelectedTreeNodes(visibleTreeNodes(), selectedIds).filter(
+    (candidate): candidate is TreeNode & { connectionId: string; database: string; tableName: string } =>
+      candidate.type === "column" &&
+      (candidate.id === node.id || (candidate.connectionId === node.connectionId && candidate.database === node.database && (candidate.schema || "") === (node.schema || "") && (candidate.catalog || "") === (node.catalog || "") && candidate.tableName === node.tableName)),
+  );
+  return selected.length > 0 ? selected : [node as TreeNode & { connectionId: string; database: string; tableName: string }];
+}
+
+async function openColumnDdl() {
+  const node = activeNode.value;
+  const columnNodes = selectedColumnNodes(node);
+  if (!columnNodes.length) return;
+  const firstNode = columnNodes[0]!;
+  const config = connectionStore.getConfig(firstNode.connectionId);
+  const databaseType = effectiveDatabaseTypeForConnection(config);
+  const columns = columnNodes.map((columnNode) => columnNode.meta as ColumnInfo | undefined);
+  if (columns.some((column) => !column)) return;
+  const drafts = createColumnDrafts(columns as ColumnInfo[], databaseType);
+  if (!drafts.length || drafts.length !== columnNodes.length) return;
+  for (const draft of drafts) {
+    // Keep the original snapshot so MySQL generated-column expressions remain
+    // available to the SQL builder. The internal id marks this request as an
+    // ADD preview without changing the meaning of originalPosition.
+    draft.id = `ddl-preview:${draft.id}`;
+    draft.markedForDrop = false;
+  }
+
+  const tableSchema = connectionObjectTreeNodeSchema(config, firstNode.database, firstNode.schema);
+  const options: BuildSingleColumnAlterSqlOptions[] = drafts.map((columnDraft) => ({
+    databaseType,
+    driverProfile: config?.driver_profile,
+    schema: tableSchema,
+    tableName: firstNode.tableName,
+    column: columnDraft,
+  }));
+  const names = drafts.map((draft) => draft.name).join(", ");
+  const tableLabel = `${firstNode.tableName}.${names}`;
+  structurePreviewTitle.value = t("contextMenu.exportStructurePreviewTitle", { name: tableLabel });
+  structurePreviewDefaultFileName.value = `${firstNode.tableName}.columns.sql`;
+  structurePreviewDdlStorageType.value = undefined;
+  structurePreviewError.value = "";
+  structurePreviewSql.value = "";
+  isLoadingStructurePreview.value = true;
+  showStructurePreviewDialog.value = true;
+
+  try {
+    await connectionStore.ensureConnected(firstNode.connectionId);
+    const results = await Promise.all(options.map((option) => api.buildSingleColumnAlterSql(option)));
+    structurePreviewSql.value = joinExportedDdls(results.flatMap((result) => result.statements));
+    const warnings = results.flatMap((result) => result.warnings);
+    if (!structurePreviewSql.value) {
+      structurePreviewError.value = warnings.join("\n") || t("customType.ddl.empty");
+    } else if (warnings.length > 0) {
+      toast(warnings.join("\n"), 5000);
+    }
+  } catch (error: any) {
+    structurePreviewError.value = translateBackendError(t, error);
+  } finally {
+    isLoadingStructurePreview.value = false;
+  }
 }
 
 function openElasticsearchIndexMetadata(kind: ElasticsearchIndexMetadataKind) {
@@ -6600,6 +6669,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   if (node.type === "column") {
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     const columnActions: ContextMenuItem[] = [];
+    columnActions.push({ label: t("contextMenu.viewDdl"), action: openColumnDdl, icon: FileCode });
     if (canOpenStructureEditor.value) {
       columnActions.push({ label: t("contextMenu.editColumn"), action: openStructureEditor, icon: PencilRuler });
     }

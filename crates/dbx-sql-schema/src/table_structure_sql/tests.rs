@@ -7054,6 +7054,88 @@ fn mysql_character_column_add_with_charset_collation() {
 }
 
 #[test]
+fn single_column_alter_builder_generates_add_for_new_mysql_column() {
+    let mut col = column("category");
+    col.id = "ddl-preview:new:category".to_string();
+    col.data_type = "varchar(50)".to_string();
+    col.character_set = "utf8mb4".to_string();
+    col.collation = "utf8mb4_general_ci".to_string();
+    col.comment = "所属类别".to_string();
+
+    let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        driver_profile: None,
+        schema: None,
+        table_name: "apis".to_string(),
+        column: col,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `apis` ADD COLUMN `category` varchar(50) CHARACTER SET `utf8mb4` COLLATE `utf8mb4_general_ci` COMMENT '所属类别';"
+        ]
+    );
+}
+
+#[test]
+fn single_column_alter_builder_preserves_mysql_generated_expression_for_add_preview() {
+    let mut col = column("total");
+    col.id = "ddl-preview:existing:total".to_string();
+    col.data_type = "int".to_string();
+    col.original = Some(ColumnInfo {
+        name: "total".to_string(),
+        data_type: "int".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: Some("GENERATED ALWAYS AS (`quantity` * `price`) STORED".to_string()),
+        comment: None,
+        character_set: None,
+        collation: None,
+    });
+    col.original_position = None;
+
+    let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        driver_profile: None,
+        schema: None,
+        table_name: "orders".to_string(),
+        column: col,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["ALTER TABLE `orders` ADD COLUMN `total` int GENERATED ALWAYS AS (`quantity` * `price`) STORED;"]
+    );
+}
+
+#[test]
+fn single_column_alter_builder_keeps_existing_column_without_position_as_edit() {
+    let mut col = column("id");
+    col.data_type = "INTEGER".to_string();
+    col.original = Some(ColumnInfo {
+        name: "id".to_string(),
+        data_type: "SMALLINT".to_string(),
+        is_nullable: true,
+        ..Default::default()
+    });
+
+    let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::DuckDb),
+        driver_profile: None,
+        schema: None,
+        table_name: "issue_9980".to_string(),
+        column: col,
+    });
+
+    assert!(result.statements.is_empty());
+    assert_eq!(result.warnings, vec!["Editing existing columns is not supported for duckdb yet."]);
+}
+
+#[test]
 fn mysql_numeric_column_omits_charset_collation_in_column_definition() {
     let mut col = column("score");
     col.data_type = "int".to_string();

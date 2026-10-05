@@ -188,7 +188,7 @@ import { applyMongoGridChangesToDocument, applyMongoGridChangesToDocumentBaselin
 import { buildMongoQueryResultOperations, formatMongoQueryResultOperationPreview } from "@/lib/mongo/mongoQueryResultEditing";
 import { buildInfluxDbV1DeleteStatements, canDeleteInfluxDbV1Row, resolveInfluxDbV1DeleteTarget } from "@/lib/influxdb/influxDbV1Delete";
 import type { DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
-import { isDataGridToolbarCompact, type DataGridReloadIntent } from "@/lib/dataGrid/dataGridToolbar";
+import { isDataGridToolbarCompact, type DataGridReloadIntent, type DataGridToolbarActionCapability } from "@/lib/dataGrid/dataGridToolbar";
 import { useTabScroll } from "@/composables/useTabScroll";
 import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
 import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
@@ -206,6 +206,7 @@ import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAcc
 import { isAiRedisConsoleTarget, type AiConversationBinding } from "@/lib/ai/aiConversationBinding";
 
 type DataGridHandle = DataGridColumnLayoutHandle & {
+  tableInfoToolbarCapability: DataGridToolbarActionCapability;
   onToolbarRefresh: () => Promise<void> | void;
   focusSearch: (target?: Element | null) => boolean;
   focusWhere: () => boolean;
@@ -2050,6 +2051,24 @@ defineExpose({
                 />
               </template>
               <div class="ml-auto flex shrink-0 items-center gap-1">
+                <template v-if="activeOutputView === 'result' && redisResultViewMode === 'grid' && activeTab.result && hasTabularResult && !activeElasticsearchJsonResponse && !showElasticsearchRawJson">
+                  <DataGridColumnLayoutPopover :grid="dataGridRef" trigger-class="px-1.5" />
+                  <LightTooltip v-if="dataGridRef?.tableInfoToolbarCapability?.visible" :text="t('contextMenu.viewDdl')" side="bottom" nowrap>
+                    <Button
+                      data-query-result-ddl
+                      variant="ghost"
+                      size="sm"
+                      class="h-6 shrink-0 gap-1 px-1.5 text-xs"
+                      :class="{ 'bg-accent': dataGridRef.tableInfoToolbarCapability.active }"
+                      :aria-label="t('contextMenu.viewDdl')"
+                      :aria-pressed="dataGridRef.tableInfoToolbarCapability.active"
+                      @click="dataGridRef.tableInfoToolbarCapability.onTrigger()"
+                    >
+                      <TableProperties class="h-3.5 w-3.5" />
+                      DDL
+                    </Button>
+                  </LightTooltip>
+                </template>
                 <Popover v-if="activeOutputView === 'result' && redisResultViewMode === 'grid' && activeTab.result && hasTabularResult && !activeElasticsearchJsonResponse" v-model:open="dataGridViewOptionsOpen">
                   <PopoverTrigger as-child>
                     <Button variant="ghost" size="icon" class="h-6 w-7 shrink-0 text-foreground hover:bg-accent" :title="t('grid.viewOptions')" :aria-label="t('grid.viewOptions')">
@@ -2517,6 +2536,7 @@ defineExpose({
                 :editable="!hasNeo4jNodes && (!!activeTab.queryAnalysis || !!mongoQueryResultSaveHandler)"
                 :source-columns="hasNeo4jNodes ? undefined : activeTab.querySourceColumns"
                 :joined-write-targets="hasNeo4jNodes ? undefined : activeTab.queryWriteTargets"
+                :query-multi-source="(activeTab.queryWriteTargets?.length ?? 0) > 1"
                 :readonly-column-indexes="hasNeo4jNodes ? undefined : groupedQueryReadonlyColumnIndexes(activeTab)"
                 :result-column-comments="hasNeo4jNodes ? undefined : activeTab.resultColumnComments"
                 :query-display-source-columns="hasNeo4jNodes ? undefined : activeTab.queryDisplaySourceColumns"
@@ -2617,7 +2637,6 @@ defineExpose({
                   </template>
                 </template>
                 <template #result-toolbar-actions="{ compact }">
-                  <DataGridColumnLayoutPopover :grid="dataGridRef" :compact="compact" />
                   <QueryResultToolbarActions
                     :active-view="activeOutputView"
                     :can-show-explain="canShowExplainOutput"

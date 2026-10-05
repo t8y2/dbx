@@ -1,6 +1,6 @@
 ---
 title: Specialized Workspaces
-description: Manage Redis, MongoDB, search and vector databases, HBase, message queues, etcd, ZooKeeper, Nacos, and Consul KV in DBX.
+description: Manage Redis, MongoDB, Apache CouchDB, search and vector databases, HBase, message queues, etcd, ZooKeeper, Nacos, and Consul KV in DBX.
 ---
 
 In addition to the SQL editor and data grid, DBX opens specialized workspaces for specific connection types. These interfaces use each system's native object model and management APIs, including Redis keys, MongoDB documents, vector collections, message queue topics, etcd keys, ZooKeeper ZNodes, Nacos configurations, and Consul KV entries.
@@ -11,7 +11,7 @@ In addition to the SQL editor and data grid, DBX opens specialized workspaces fo
 
 | Category | Connection types | Main entry points |
 | --- | --- | --- |
-| Key/value and document | Redis, MongoDB | Key or document browsing, filtering, editing, commands, and aggregation workflows |
+| Key/value and document | Redis, MongoDB, CouchDB | Key or document browsing, filtering, editing, commands, and aggregation workflows |
 | Search and document indexes | Elasticsearch, Easysearch, Meilisearch, Manticore Search | Index/document browsing and engine-specific requests |
 | Vector databases | Qdrant, Milvus, Weaviate, ChromaDB | Collection browsing, vector search, upsert, delete, and request preview |
 | Wide-column and column family | HBase | Namespaces, table structure, column families, and row data |
@@ -45,6 +45,18 @@ Keep these boundaries in mind:
 - TLS, proxying, and authentication depend on the connection type and server configuration
 - Document queries and mutations vary by driver, server version, and account privileges
 - SQL workflows such as schema diff or SQL file execution only appear when the engine reliably supports them
+
+## Apache CouchDB
+
+Apache CouchDB uses DBX's built-in Rust HTTP driver. Each CouchDB database appears as a document collection that opens in the document browser.
+
+- Connect to the CouchDB HTTP/HTTPS endpoint, default port `5984`. Enable TLS for `https://`; `couchdb://host:5984` URLs can be pasted directly
+- Credentials use HTTP Basic authentication from the connection username and password fields
+- Without a filter, documents are paged through `_all_docs`. A filter is sent as a Mango `selector` to `_find`, and pagination follows CouchDB's `bookmark`
+- Documents can be inserted, edited, and deleted; if an update omits `_rev`, DBX fetches the current revision first, and deletes always use the current revision
+- The query editor accepts REST requests in the form `METHOD /path` followed by an optional JSON body, for example `GET /_all_dbs` or `POST /mydb/_find`
+
+DBX classifies every request before it runs. `GET`, `HEAD`, `OPTIONS`, and read-only `POST` endpoints (`_find`, `_explain`, `_all_docs`, `_bulk_get`, and view queries under `_design/*/_view/*`) are reads. Other `POST`, `PUT`, and document-level `DELETE` requests are writes, while `PUT /{db}` and `DELETE /{db}` are treated as dangerous. These levels drive the same confirmation and read-only safeguards used for other engines.
 
 ## Vector Databases
 

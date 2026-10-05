@@ -1,6 +1,6 @@
 ---
 title: 专项工作台
-description: 使用 DBX 管理 Redis、MongoDB、搜索与向量数据库、HBase、消息队列、etcd、ZooKeeper、Nacos 和 Consul KV。
+description: 使用 DBX 管理 Redis、MongoDB、Apache CouchDB、搜索与向量数据库、HBase、消息队列、etcd、ZooKeeper、Nacos 和 Consul KV。
 ---
 
 除了 SQL 编辑器和数据表格，DBX 还会根据连接类型打开专项工作台。它们直接使用对应系统的对象模型和管理 API，例如 Redis Key、MongoDB 文档、向量集合、消息队列 Topic、etcd Key、ZooKeeper ZNode、Nacos 配置和 Consul KV。
@@ -11,7 +11,7 @@ description: 使用 DBX 管理 Redis、MongoDB、搜索与向量数据库、HBas
 
 | 类别 | 连接类型 | 主要入口 |
 | --- | --- | --- |
-| 键值与文档 | Redis、MongoDB | Key/文档浏览、筛选、编辑、命令或聚合流程 |
+| 键值与文档 | Redis、MongoDB、CouchDB | Key/文档浏览、筛选、编辑、命令或聚合流程 |
 | 搜索与文档索引 | Elasticsearch、Easysearch、Meilisearch、Manticore Search | 索引/文档浏览和对应请求入口 |
 | 向量数据库 | Qdrant、Milvus、Weaviate、ChromaDB | Collection 浏览、向量检索、Upsert、删除和请求预览 |
 | 宽表与列族 | HBase | Namespace、表结构、Column Family 和行数据浏览 |
@@ -45,6 +45,18 @@ Elasticsearch、Easysearch、Meilisearch 和 Manticore Search 使用面向索引
 - TLS、代理和认证方式取决于连接类型及服务端配置
 - 文档查询和写入能力会随驱动、服务端版本和账号权限变化
 - 结构对比、SQL 文件执行等 SQL 工作流只在对应引擎确实支持时开放
+
+## Apache CouchDB
+
+Apache CouchDB 使用 DBX 内置的 Rust HTTP 驱动。每个 CouchDB 数据库会作为文档集合展示，并在文档浏览器中打开。
+
+- 连接 CouchDB 的 HTTP/HTTPS 服务端点，默认端口为 `5984`。使用 `https://` 时开启 TLS；也可以直接粘贴 `couchdb://host:5984` 形式的 URL
+- 认证使用 HTTP Basic，凭据取自连接的用户名和密码字段
+- 未设置筛选条件时通过 `_all_docs` 分页浏览文档；设置筛选条件后会作为 Mango `selector` 发送到 `_find`，并使用 CouchDB 的 `bookmark` 翻页
+- 支持新增、编辑和删除文档；更新时若未提供 `_rev`，DBX 会先获取当前版本号；删除始终使用当前版本号
+- 查询编辑器接受 `METHOD /path` 加可选 JSON 请求体的 REST 请求，例如 `GET /_all_dbs` 或 `POST /mydb/_find`
+
+DBX 会在执行前对每个请求分级。`GET`、`HEAD`、`OPTIONS` 以及只读的 `POST` 端点（`_find`、`_explain`、`_all_docs`、`_bulk_get` 和 `_design/*/_view/*` 视图查询）属于读取；其他 `POST`、`PUT` 和文档级 `DELETE` 属于写入；`PUT /{db}` 和 `DELETE /{db}` 视为危险操作。这些级别会接入与其他引擎相同的确认和只读保护。
 
 ## 向量数据库
 

@@ -377,6 +377,49 @@ pub fn decode_sql_file_bytes(bytes: &[u8]) -> Result<String, String> {
     decode_sql_file_with_encoding(bytes, encoding_rs::GBK)
 }
 
+/// Decode an SQL/text file using an explicit user-selected encoding.
+pub fn decode_sql_file_bytes_with_encoding(bytes: &[u8], encoding: &str) -> Result<String, String> {
+    match encoding {
+        "utf8" => decode_sql_file_with_encoding(bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes), encoding_rs::UTF_8),
+        "utf8Bom" => {
+            let payload = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+            decode_sql_file_with_encoding(payload, encoding_rs::UTF_8)
+        }
+        "utf16le" => decode_sql_file_with_encoding(bytes.strip_prefix(&[0xFF, 0xFE]).unwrap_or(bytes), encoding_rs::UTF_16LE),
+        "utf16be" => decode_sql_file_with_encoding(bytes.strip_prefix(&[0xFE, 0xFF]).unwrap_or(bytes), encoding_rs::UTF_16BE),
+        "gbk" => decode_sql_file_with_encoding(bytes, encoding_rs::GBK),
+        "auto" | "" => decode_sql_file_bytes(bytes),
+        _ => Err(format!("Unsupported SQL file encoding: {encoding}")),
+    }
+}
+
+/// Encode editor text for an explicit file encoding. The returned bytes include
+/// a BOM for UTF-8 BOM and UTF-16 variants.
+pub fn encode_sql_file_text(content: &str, encoding: &str) -> Result<Vec<u8>, String> {
+    if encoding == "utf16le" || encoding == "utf16be" {
+        let mut bytes = if encoding == "utf16le" { vec![0xFF, 0xFE] } else { vec![0xFE, 0xFF] };
+        for unit in content.encode_utf16() {
+            bytes.extend_from_slice(&if encoding == "utf16le" { unit.to_le_bytes() } else { unit.to_be_bytes() });
+        }
+        return Ok(bytes);
+    }
+    let (encoded, _, had_errors) = match encoding {
+        "utf8" | "auto" | "" => encoding_rs::UTF_8.encode(content),
+        "utf8Bom" => encoding_rs::UTF_8.encode(content),
+        "gbk" => encoding_rs::GBK.encode(content),
+        _ => return Err(format!("Unsupported SQL file encoding: {encoding}")),
+    };
+    if had_errors { return Err(sql_file_encoding_error()); }
+    let mut bytes = encoded.into_owned();
+    match encoding {
+        "utf8Bom" => { bytes.splice(0..0, [0xEF, 0xBB, 0xBF]); }
+        "utf16le" => { bytes.splice(0..0, [0xFF, 0xFE]); }
+        "utf16be" => { bytes.splice(0..0, [0xFE, 0xFF]); }
+        _ => {}
+    }
+    Ok(bytes)
+}
+
 fn decode_sql_file_with_encoding(bytes: &[u8], encoding: &'static encoding_rs::Encoding) -> Result<String, String> {
     let (text, had_errors) = encoding.decode_without_bom_handling(bytes);
     if had_errors {
@@ -5615,5 +5658,21 @@ delimiter ;";
         let sql = "SELECT 1 # mysql comment";
         let cursor = sql.encode_utf16().count();
         assert_eq!(find_statement_at_cursor_for_database(sql, cursor, DatabaseType::Mysql), "SELECT 1 # mysql comment");
+    }
+}
+
+#[cfg(test)]
+mod editor_encoding_tests {
+    use super::*;
+    #[test]
+    fn utf16_bytes_and_round_trip() {
+        for (encoding, expected) in [
+            ("utf16le", vec![0xff, 0xfe, 0x41, 0, 0x2d, 0x4e, 0x3d, 0xd8, 0, 0xde]),
+            ("utf16be", vec![0xfe, 0xff, 0, 0x41, 0x4e, 0x2d, 0xd8, 0x3d, 0xde, 0]),
+        ] {
+            let bytes = encode_sql_file_text("A中😀", encoding).unwrap();
+            assert_eq!(bytes, expected);
+            assert_eq!(decode_sql_file_bytes_with_encoding(&bytes, encoding).unwrap(), "A中😀");
+        }
     }
 }

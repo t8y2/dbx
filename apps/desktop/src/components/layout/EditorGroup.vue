@@ -14,6 +14,8 @@ import { isPreviewTab } from "@/lib/tabs/tabPresentation";
 import { resolveExecutableSql } from "@/lib/sql/sqlExecutionTarget";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { usesProvenReadOnlyStickyTransactionState } from "@/lib/database/databaseFeatureSupport";
+import * as api from "@/lib/backend/api";
+import { externalSqlEditorMaxBytes } from "@/lib/sql/sqlFileOpen";
 import { GROUP_TAB_BAR_PORTAL } from "./groupTabBarPortal";
 import type { ContentAreaSurfaceEmits, ContentAreaSurfaceProps, QueryEditorSurfaceHandle, StatementRange } from "./querySurfaces";
 import type { QueryTab, TableInfoTab } from "@/types/database";
@@ -113,6 +115,27 @@ const groupTabs = computed(() => {
 const activeTab = computed(() => groupTabs.value.find((tab) => tab.id === props.activeTabId) ?? groupTabs.value[0] ?? null);
 const activeConnection = computed(() => (activeTab.value ? connectionStore.getConfig(activeTab.value.connectionId) : undefined));
 const showGroupToolbar = computed(() => activeTab.value?.mode === "query" && !activeTab.value.ddlViewer && !isPreviewTab(activeTab.value));
+
+let encodingRequest = 0;
+async function changeExternalSqlEncoding(encoding: NonNullable<QueryTab["externalSqlEncoding"]>) {
+  const tab = activeTab.value;
+  if (!tab?.externalSqlPath) return;
+  const request = ++encodingRequest;
+  if (queryStore.isTabDirty(tab) && !window.confirm(t("externalSqlFile.unsavedWarning"))) return;
+  const path = tab.externalSqlPath;
+  const sql = tab.sql;
+  const version = tab.externalSqlFileVersion;
+  const stillCurrent = () => request === encodingRequest && queryStore.tabs.includes(tab) && tab.externalSqlPath === path && tab.sql === sql && tab.externalSqlFileVersion === version;
+  try {
+    const snapshot = await api.readExternalSqlFileSnapshot(tab.externalSqlPath, externalSqlEditorMaxBytes(settingsStore.editorSettings.externalSqlEditorMaxMb), encoding);
+    if (!stillCurrent()) return;
+    queryStore.applyExternalSqlFileSnapshot(tab.id, snapshot.content, snapshot.version);
+    tab.externalSqlEncoding = snapshot.encoding ?? encoding;
+  } catch (error) {
+    if (!stillCurrent()) return;
+    window.alert(error instanceof Error ? error.message : String(error));
+  }
+}
 const isGroupStickyManualTransaction = computed(() => usesProvenReadOnlyStickyTransactionState(effectiveDatabaseTypeForConnection(activeConnection.value)) && (activeTab.value?.autoCommit ?? true) === false);
 // Each group previews the executable SQL of its own active tab (selection
 // stored on the tab), not the focused tab's global selection.
@@ -220,6 +243,7 @@ const groupExecutableSql = computed(() => {
         @unfold-all="activeSurfaceRef?.unfoldAll?.()"
         @toggle-sql-keyword-case="toolbar.toggleSqlKeywordCase()"
         @save-sql="(tabId: string) => toolbar.saveSql(tabId)"
+        @change-encoding="changeExternalSqlEncoding"
         @open-sql="toolbar.openSqlFile()"
         @import-result-archive="toolbar.importResultArchive()"
         @paste-sql-in-condition="toolbar.pasteSqlInCondition()"

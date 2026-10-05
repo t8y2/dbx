@@ -213,6 +213,8 @@ export default withEnglishFallback({
     logoutConfirm: "Çıkış yapmak istediğinizden emin misiniz?",
   },
   toolbar: {
+    fileEncoding: "Dosya kodlaması",
+    encodingAuto: "Otomatik",
     commitOutcomeUnknown: "Onaylama sonucu bilinmiyor ve oturum artık mevcut değil. SQL'i yeniden çalıştırmadan önce verileri doğrulayın.",
     moreActions: "Diğer İşlemler",
     newConnection: "Yeni Bağlantı",

@@ -411,6 +411,8 @@ export default {
     logoutConfirm: "Are you sure you want to log out?",
   },
   toolbar: {
+    fileEncoding: "File encoding",
+    encodingAuto: "Auto",
     immediateSync: "Sync now",
     commitOutcomeUnknown: "Commit result is unknown and the session no longer exists. Verify the data before running this SQL again.",
     moreActions: "More actions",

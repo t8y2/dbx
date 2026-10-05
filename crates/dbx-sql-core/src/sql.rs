@@ -419,11 +419,8 @@ pub fn encode_sql_file_text(content: &str, encoding: &str) -> Result<Vec<u8>, St
         return Err(sql_file_encoding_error());
     }
     let mut bytes = encoded.into_owned();
-    match encoding {
-        "utf8Bom" => {
-            bytes.splice(0..0, [0xEF, 0xBB, 0xBF]);
-        }
-        _ => {}
+    if encoding == "utf8Bom" {
+        bytes.splice(0..0, [0xEF, 0xBB, 0xBF]);
     }
     Ok(bytes)
 }

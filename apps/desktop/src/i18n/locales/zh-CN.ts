@@ -130,6 +130,12 @@ export default withEnglishFallback({
       needsApproval: "需确认",
       saveFailed: "保存设置失败：{message}",
     },
+    graphicsEngine: {
+      title: "图形引擎",
+      description: "允许此插件的界面运行 WebGL 图形引擎（PixiJS 一类）。关闭时依赖它的画面无法启动，插件会提示图形引擎不可用。",
+      securityNote: "开启后此插件的脚本可以在运行时编译代码（CSP unsafe-eval），放宽只作用于这一个插件。",
+      saveFailed: "保存设置失败：{message}",
+    },
     dataAccess: {
       title: "数据访问",
       description: "该插件可以执行只读查询的连接。插件首次需要某个连接时会征求你的同意，你可以随时在这里撤销。",

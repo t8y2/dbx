@@ -187,6 +187,12 @@ export default withEnglishFallback({
       needsApproval: "需確認",
       saveFailed: "儲存設定失敗：{message}",
     },
+    graphicsEngine: {
+      title: "圖形引擎",
+      description: "允許此外掛的介面執行 WebGL 圖形引擎（PixiJS 一類）。關閉時依賴它的畫面無法啟動，外掛會提示圖形引擎不可用。",
+      securityNote: "開啟後此外掛的指令碼可以在執行期編譯程式碼（CSP unsafe-eval），放寬只作用於這一個外掛。",
+      saveFailed: "儲存設定失敗：{message}",
+    },
     dataAccess: {
       title: "資料存取",
       description: "此外掛可以執行唯讀查詢的連線。外掛首次需要某個連線時會徵求你的同意，你可以隨時在這裡撤銷。",

@@ -19,6 +19,7 @@ import {
   type PluginAiRecommendationHostUpdate,
 } from "@/lib/plugins/pluginHostBridge";
 import { getCachedPluginUiHtml, getOrLoadPluginUiHtml } from "@/lib/plugins/pluginUiHtmlCache";
+import { isPluginGraphicsEngineEnabled } from "@/lib/plugins/pluginGraphicsEngine";
 import { beginFloatingWindowDrag, closeFloatingWindows, endFloatingWindowDrag, openFloatingWindow, setFloatingWindowSize } from "@/lib/plugins/pluginFloatingWindow";
 import { isFloatingPluginWindow } from "@/lib/app/windowContext";
 import { buildPluginEditorAppearance } from "@/lib/plugins/pluginAppearance";
@@ -56,6 +57,9 @@ const { t, locale: appLocale } = useI18n();
 const { isDark, themeRevision } = useTheme();
 const settingsStore = useSettingsStore();
 const openAiConversation = inject(OPEN_PLUGIN_AI_CONVERSATION, undefined);
+// Per-plugin grant for `script-src 'unsafe-eval'`; flipping it rebuilds the
+// sandbox document (and must not reuse a doc cached under the other setting).
+const graphicsEngineEnabled = computed(() => isPluginGraphicsEngineEnabled(settingsStore.editorSettings.pluginGraphicsEngineIds, props.plugin.manifest.id));
 
 // --- Plugin AI generation consent (E2) --------------------------------------
 // Every host.ai.generateText send is consented through this in-app dialog: it
@@ -711,12 +715,17 @@ async function loadWorkbench() {
     const { html, entryDirectory } = cachedHtml;
     // The final sandbox document is cached alongside the html: generating it
     // re-runs megabyte-scale string surgery on every boot.
-    if (!cachedHtml.sandboxDoc) {
-      cachedHtml.sandboxDoc = pluginSandboxDocument(html, props.plugin.manifest.permissions, currentBridgeTheme(), {
-        baseUrl: pluginUiBaseUrl(props.plugin.manifest.id, entryDirectory),
-      });
+    const allowUnsafeEval = graphicsEngineEnabled.value;
+    if (!cachedHtml.sandboxDoc || cachedHtml.sandboxDoc.allowUnsafeEval !== allowUnsafeEval) {
+      cachedHtml.sandboxDoc = {
+        allowUnsafeEval,
+        doc: pluginSandboxDocument(html, props.plugin.manifest.permissions, currentBridgeTheme(), {
+          baseUrl: pluginUiBaseUrl(props.plugin.manifest.id, entryDirectory),
+          allowUnsafeEval,
+        }),
+      };
     }
-    source.value = cachedHtml.sandboxDoc;
+    source.value = cachedHtml.sandboxDoc.doc;
     await nextTick();
     if (disposed || generation !== loadGeneration) return;
     createBridge();
@@ -773,7 +782,7 @@ onMounted(async () => {
 // Identity changes require rebuilding the sandbox document; context and locale
 // changes are pushed through the bridge so plugin UI state survives them.
 watch(
-  () => [props.plugin.manifest.id, props.plugin.manifest.version, props.contribution.id] as const,
+  () => [props.plugin.manifest.id, props.plugin.manifest.version, props.contribution.id, graphicsEngineEnabled.value] as const,
   () => void loadWorkbench(),
 );
 watch(

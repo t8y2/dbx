@@ -183,6 +183,12 @@ export default withEnglishFallback({
       needsApproval: "승인 필요",
       saveFailed: "설정을 저장할 수 없습니다: {message}",
     },
+    graphicsEngine: {
+      title: "그래픽 엔진",
+      description: "이 플러그인 인터페이스가 WebGL 그래픽 엔진(PixiJS 등)을 실행할 수 있게 합니다. 꺼져 있으면 해당 엔진이 필요한 화면은 시작되지 않으며 플러그인이 그래픽 엔진을 사용할 수 없다고 표시합니다.",
+      securityNote: "켜면 이 플러그인 스크립트가 런타임에 코드를 컴파일할 수 있습니다(CSP unsafe-eval). 완화는 이 플러그인에만 적용됩니다.",
+      saveFailed: "설정을 저장할 수 없습니다: {message}",
+    },
     dataAccess: {
       title: "데이터 액세스",
       description: "이 플러그인이 읽기 전용 쿼리로 읽을 수 있는 연결입니다. 플러그인이 처음 연결이 필요할 때 동의를 요청하며, 여기에서 언제든지 취소할 수 있습니다.",

@@ -185,6 +185,12 @@ export default withEnglishFallback({
       needsApproval: "Requiere aprobación",
       saveFailed: "No se pudo guardar la configuración: {message}",
     },
+    graphicsEngine: {
+      title: "Motor gráfico",
+      description: "Permite que la interfaz de este plugin ejecute un motor gráfico WebGL (PixiJS y similares). Mientras esté desactivado, los elementos visuales que lo necesiten no podrán iniciarse y el plugin indicará que el motor gráfico no está disponible.",
+      securityNote: "Activarlo permite que los scripts de este plugin compilen código en tiempo de ejecución (CSP unsafe-eval). La relajación se aplica solo a este plugin.",
+      saveFailed: "No se pudo guardar la configuración: {message}",
+    },
     dataAccess: {
       title: "Acceso a datos",
       description: "Conexiones que este plugin puede leer con consultas de solo lectura. El plugin te pregunta la primera vez que necesita una conexión; puedes revocar el acceso aquí en cualquier momento.",

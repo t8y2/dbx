@@ -183,6 +183,12 @@ export default withEnglishFallback({
       needsApproval: "Richiede approvazione",
       saveFailed: "Impossibile salvare l'impostazione: {message}",
     },
+    graphicsEngine: {
+      title: "Motore grafico",
+      description: "Consente all'interfaccia di questo plugin di eseguire un motore grafico WebGL (PixiJS e simili). Quando è disattivato, gli elementi visivi che ne hanno bisogno non si avviano e il plugin segnala che il motore grafico non è disponibile.",
+      securityNote: "Attivandolo, gli script di questo plugin possono compilare codice in fase di esecuzione (CSP unsafe-eval). L'allentamento vale solo per questo plugin.",
+      saveFailed: "Impossibile salvare l'impostazione: {message}",
+    },
     dataAccess: {
       title: "Accesso ai dati",
       description: "Connessioni che questo plugin può leggere con query di sola lettura. Il plugin te lo chiede la prima volta che gli serve una connessione; puoi revocare l'accesso qui in qualsiasi momento.",

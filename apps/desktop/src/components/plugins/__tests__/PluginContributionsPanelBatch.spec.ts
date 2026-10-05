@@ -30,6 +30,9 @@ vi.mock("@/lib/backend/api", () => mocks);
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ connections: [] }) }));
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({}) }));
+vi.mock("@/stores/settingsStore", () => ({
+  useSettingsStore: () => ({ editorSettings: { pluginGraphicsEngineIds: [] }, updateEditorSettings: vi.fn() }),
+}));
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: mocks.isTauriRuntime }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => vi.fn()) }));
 vi.mock("@tauri-apps/plugin-shell", () => ({ open: mocks.openExternal }));
@@ -61,6 +64,9 @@ vi.mock("@/components/plugins/PluginIcon.vue", async () => ({ default: (await im
 // Shortcut preferences have their own component/store tests. Keep this batch
 // harness scoped to plugin mutations and their exact backend call counts.
 vi.mock("@/components/plugins/PluginShortcutSettings.vue", async () => ({ default: (await import("@/components/grid/__tests__/vueHostHarness")).createPassthroughStub("PluginShortcutSettings") }));
+// The graphics-engine grant lives in the settings store; this batch harness has
+// no pinia, so the section is stubbed like the other store-backed child panels.
+vi.mock("@/components/plugins/PluginGraphicsEngineSection.vue", async () => ({ default: (await import("@/components/grid/__tests__/vueHostHarness")).createPassthroughStub("PluginGraphicsEngineSection") }));
 
 import PluginContributionsPanel from "@/components/plugins/PluginContributionsPanel.vue";
 

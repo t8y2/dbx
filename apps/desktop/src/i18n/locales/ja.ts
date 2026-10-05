@@ -184,6 +184,12 @@ export default withEnglishFallback({
       needsApproval: "承認が必要",
       saveFailed: "設定を保存できませんでした: {message}",
     },
+    graphicsEngine: {
+      title: "グラフィックスエンジン",
+      description: "このプラグインの UI が WebGL グラフィックスエンジン（PixiJS など）を使えるようにします。オフのときは、それを必要とする表示は開始できず、プラグインはグラフィックスエンジンを利用できないと報告します。",
+      securityNote: "オンにすると、このプラグインのスクリプトが実行時にコードを生成できます（CSP unsafe-eval）。緩和はこのプラグインにのみ適用されます。",
+      saveFailed: "設定を保存できませんでした: {message}",
+    },
     dataAccess: {
       title: "データアクセス",
       description: "このプラグインが読み取り専用クエリを実行できる接続です。プラグインが初めて接続を必要とするときに確認を求めます。ここでいつでも取り消せます。",

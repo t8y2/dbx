@@ -105,6 +105,12 @@ export default withEnglishFallback({
       needsApproval: "Perlu persetujuan",
       saveFailed: "Tidak dapat menyimpan pengaturan: {message}",
     },
+    graphicsEngine: {
+      title: "Mesin grafis",
+      description: "Mengizinkan antarmuka plugin ini menjalankan mesin grafis WebGL (PixiJS dan sejenisnya). Saat nonaktif, visual yang membutuhkannya tidak dapat dimulai dan plugin melaporkan mesin grafis tidak tersedia.",
+      securityNote: "Jika aktif, skrip plugin ini dapat mengompilasi kode saat runtime (CSP unsafe-eval). Pelonggaran hanya berlaku untuk plugin ini.",
+      saveFailed: "Tidak dapat menyimpan pengaturan: {message}",
+    },
     dataAccess: {
       title: "Akses data",
       description: "Koneksi yang boleh dibaca plugin ini dengan kueri read-only. Plugin akan meminta izin saat pertama kali membutuhkan koneksi; Anda dapat mencabut akses ini kapan saja.",

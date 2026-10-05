@@ -184,6 +184,12 @@ export default {
       needsApproval: "Needs approval",
       saveFailed: "Could not save the setting: {message}",
     },
+    graphicsEngine: {
+      title: "Graphics engine",
+      description: "Lets this plugin's interface run a WebGL graphics engine (PixiJS and similar). While this is off, visuals that need one cannot start and the plugin reports that its graphics engine is unavailable.",
+      securityNote: "On means this plugin's scripts may compile code at runtime (CSP unsafe-eval). The relaxation applies to this plugin only.",
+      saveFailed: "Could not save the setting: {message}",
+    },
     dataAccess: {
       title: "Data access",
       description: "Connections this plugin may read with read-only queries. The plugin asks you the first time it needs a connection; you can revoke access here at any time.",

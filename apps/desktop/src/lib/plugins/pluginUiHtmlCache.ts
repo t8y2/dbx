@@ -12,8 +12,10 @@ export interface PluginUiHtml {
   /** Final sandbox document (html + CSP/SDK/theme injection); built lazily once
    * per plugin version — regenerating it re-runs megabyte-scale string surgery
    * on every panel/tab boot. The embedded appearance only affects the pre-init
-   * first paint; the init message pushes the live theme right after. */
-  sandboxDoc?: string;
+   * first paint; the init message pushes the live theme right after. Carries the
+   * `unsafe-eval` grant it was built with: that grant is a user setting that can
+   * flip while the html stays valid, and it changes the CSP. */
+  sandboxDoc?: { allowUnsafeEval: boolean; doc: string };
 }
 
 const cache = new Map<string, PluginUiHtml>();

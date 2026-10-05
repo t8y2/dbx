@@ -1059,6 +1059,22 @@ describe("PluginHostBridge", () => {
     expect(document).not.toContain("<base ");
   });
 
+  it("adds unsafe-eval to script-src only for the granted plugin", () => {
+    const granted = pluginSandboxDocument("<html><head></head><body></body></html>", [], undefined, {
+      baseUrl: "http://dbx-plugin.localhost/io.github.t8y2.s3/assets/",
+      allowUnsafeEval: true,
+    });
+    expect(granted).toContain("script-src 'unsafe-inline' 'unsafe-eval' blob: http://dbx-plugin.localhost;");
+    // The grant is scoped to script-src; no other directive picks it up.
+    expect(granted).toContain("style-src 'unsafe-inline' blob:;");
+    expect(granted).not.toContain("img-src data: blob: http://dbx-plugin.localhost 'unsafe-eval'");
+
+    const withheld = pluginSandboxDocument("<html><head></head><body></body></html>", [], undefined, {
+      baseUrl: "http://dbx-plugin.localhost/io.github.t8y2.s3/assets/",
+    });
+    expect(withheld).not.toContain("unsafe-eval");
+  });
+
   it("pre-seeds the current theme as the sandbox first paint", () => {
     const themed = pluginSandboxDocument("<html><head></head><body></body></html>", ["host.events"], { appearance: "dark", tokens: { "--color-background": "#131416", "--color-foreground": "rgb(215 215 219)" } });
     expect(themed).toContain("color-scheme: dark");

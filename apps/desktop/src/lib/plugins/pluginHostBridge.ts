@@ -1097,13 +1097,21 @@ export interface PluginSandboxOptions {
    * hosts without the plugin asset protocol (the web host).
    */
   baseUrl?: string;
+  /**
+   * Adds `'unsafe-eval'` to `script-src`. WebGL graphics engines codegen their
+   * uniform sync with `new Function` and refuse to initialize without it, so
+   * the user grants this per plugin (see `pluginGraphicsEngine.ts`). Off by
+   * default: the sandbox stays eval-free for every other plugin.
+   */
+  allowUnsafeEval?: boolean;
 }
 
 export function pluginSandboxDocument(html: string, permissions?: readonly string[], theme?: PluginBridgeTheme, options?: PluginSandboxOptions): string {
   const networkOrigins = pluginNetworkOrigins(permissions);
   const connectSrc = networkOrigins.length > 0 ? `connect-src ${networkOrigins.join(" ")};` : "connect-src 'none';";
   const assetSource = pluginAssetCspSource(options?.baseUrl);
-  const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' blob:${assetSource}; style-src 'unsafe-inline' blob:; img-src data: blob:${assetSource}; font-src data: blob:${assetSource}; ${connectSrc} media-src data: blob:${assetSource};">`;
+  const scriptSrc = options?.allowUnsafeEval ? "script-src 'unsafe-inline' 'unsafe-eval'" : "script-src 'unsafe-inline'";
+  const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; ${scriptSrc} blob:${assetSource}; style-src 'unsafe-inline' blob:; img-src data: blob:${assetSource}; font-src data: blob:${assetSource}; ${connectSrc} media-src data: blob:${assetSource};">`;
   // <base> must precede every relative URL the document resolves (inlined CSS
   // url(), dynamic import specifiers), so it leads the injection.
   const base = options?.baseUrl && assetSource ? `<base href="${escapeHtmlAttribute(options.baseUrl)}">` : "";

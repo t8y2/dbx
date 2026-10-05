@@ -1,4 +1,5 @@
 import { normalizeModelTemplates, type ModelTemplate } from "@/lib/model/modelTemplates";
+import { normalizePluginGraphicsEngineIds } from "@/lib/plugins/pluginGraphicsEngine";
 import { normalizePluginShortcutSettings, type PluginShortcutSettings } from "@/lib/plugins/pluginShortcuts";
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
@@ -1085,6 +1086,8 @@ export interface EditorSettings {
   updateDownloadSource: UpdateDownloadSource;
   ignoredUpdateVersion: string;
   pluginShortcuts: PluginShortcutSettings;
+  /** Plugin ids the user granted `script-src 'unsafe-eval'` in the workbench sandbox. */
+  pluginGraphicsEngineIds: string[];
   toolbarItems: ToolbarItems;
   objectBrowserShowCheckbox: boolean;
   objectBrowserViewMode: "list" | "grid";
@@ -1393,6 +1396,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   updateDownloadSource: "official",
   ignoredUpdateVersion: "",
   pluginShortcuts: normalizePluginShortcutSettings(undefined),
+  pluginGraphicsEngineIds: [],
   toolbarItems: { ...DEFAULT_TOOLBAR_ITEMS },
   objectBrowserShowCheckbox: false,
   objectBrowserViewMode: "list",
@@ -2066,6 +2070,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     updateDownloadSource: normalizeUpdateDownloadSource(settings.updateDownloadSource),
     ignoredUpdateVersion: typeof settings.ignoredUpdateVersion === "string" ? settings.ignoredUpdateVersion : DEFAULT_EDITOR_SETTINGS.ignoredUpdateVersion,
     pluginShortcuts: normalizePluginShortcutSettings(settings.pluginShortcuts),
+    pluginGraphicsEngineIds: normalizePluginGraphicsEngineIds(settings.pluginGraphicsEngineIds),
     toolbarItems: normalizeToolbarItems(settings.toolbarItems),
     objectBrowserShowCheckbox: typeof settings.objectBrowserShowCheckbox === "boolean" ? settings.objectBrowserShowCheckbox : DEFAULT_EDITOR_SETTINGS.objectBrowserShowCheckbox,
     objectBrowserViewMode: settings.objectBrowserViewMode === "grid" ? "grid" : DEFAULT_EDITOR_SETTINGS.objectBrowserViewMode,
@@ -2895,6 +2900,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.updateDownloadSource !== undefined) editorSettings.value.updateDownloadSource = normalizeUpdateDownloadSource(partial.updateDownloadSource);
     if (partial.ignoredUpdateVersion !== undefined) editorSettings.value.ignoredUpdateVersion = typeof partial.ignoredUpdateVersion === "string" ? partial.ignoredUpdateVersion : "";
     if (partial.pluginShortcuts !== undefined) editorSettings.value.pluginShortcuts = normalizePluginShortcutSettings(partial.pluginShortcuts);
+    if (partial.pluginGraphicsEngineIds !== undefined) editorSettings.value.pluginGraphicsEngineIds = normalizePluginGraphicsEngineIds(partial.pluginGraphicsEngineIds);
     if (partial.toolbarItems !== undefined) editorSettings.value.toolbarItems = normalizeToolbarItems(partial.toolbarItems);
     if (partial.objectBrowserShowCheckbox !== undefined) editorSettings.value.objectBrowserShowCheckbox = partial.objectBrowserShowCheckbox === true;
     if (partial.objectBrowserViewMode !== undefined) editorSettings.value.objectBrowserViewMode = partial.objectBrowserViewMode === "grid" ? "grid" : "list";

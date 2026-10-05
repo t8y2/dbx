@@ -76,6 +76,12 @@ export default withEnglishFallback({
       needsApproval: "Təsdiq tələb olunur",
       saveFailed: "Ayar saxlanılmadı: {message}",
     },
+    graphicsEngine: {
+      title: "Qrafika mühərriki",
+      description: "Bu plaginin interfeysinə WebGL qrafika mühərrikini (PixiJS və bənzərləri) işə salmağa icazə verir. Bağlı olduqda ona ehtiyac duyan vizual elementlər işə düşmür və plagin qrafika mühərrikinin əlçatmaz olduğunu bildirir.",
+      securityNote: "Açıq olduqda bu plaginin skriptləri icra zamanı kod tərtib edə bilər (CSP unsafe-eval). Güzəşt yalnız bu plaginə şamil olunur.",
+      saveFailed: "Ayar saxlanılmadı: {message}",
+    },
     dataAccess: {
       title: "Məlumat girişi",
       description: "Bu plaginin yalnız oxuma sorğuları ilə oxuya biləcəyi bağlantılar. Plagin bağlantıya ilk dəfə ehtiyac duyanda sizdən soruşur; girişi burada istənilən vaxt ləğv edə bilərsiniz.",

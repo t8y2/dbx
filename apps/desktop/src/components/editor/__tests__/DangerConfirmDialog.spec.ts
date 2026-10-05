@@ -121,6 +121,21 @@ describe("DangerConfirmDialog SQL preview", () => {
     expect(copyToClipboard).toHaveBeenCalledWith(sql);
   });
 
+  it("builds lazy full SQL only when the copy action is used", async () => {
+    const fullSql = "DELETE FROM orders;\nDELETE FROM customers;";
+    const getCopySql = vi.fn(() => fullSql);
+
+    await mountDialog("DELETE FROM orders;", { copySql: getCopySql });
+    expect(getCopySql).not.toHaveBeenCalled();
+
+    const copyButton = Array.from(document.body.querySelectorAll("button")).find((button) => button.title === "Copy full text");
+    copyButton?.click();
+    await nextTick();
+
+    expect(getCopySql).toHaveBeenCalledOnce();
+    expect(copyToClipboard).toHaveBeenCalledWith(fullSql);
+  });
+
   it("restores a previously focused CodeMirror editor through EditorView on close", async () => {
     const editorRoot = document.createElement("div");
     editorRoot.className = "cm-editor";

@@ -2921,6 +2921,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
       :title="sidebarDangerDialogRequest.title"
       :message="sidebarDangerDialogRequest.message"
       :sql="sidebarDangerDialogRequest.sql"
+      :copy-sql="sidebarDangerDialogRequest.copySql"
       :details="sidebarDangerDialogRequest.details"
       :details-text="sidebarDangerDialogRequest.detailsText"
       :confirm-label="sidebarDangerDialogRequest.confirmLabel"
@@ -2933,9 +2934,9 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
       @cancel-running="cancelSidebarDangerDialogRunning"
     >
       <template #options>
-        <div v-if="sidebarDangerDialogConfirming && sidebarDangerDialogRequest.progress" class="mb-3 rounded-md border bg-muted/20 px-3 py-2.5">
+        <div v-if="sidebarDangerDialogRequest.progress" class="mb-3 rounded-md border bg-muted/20 px-3 py-2.5">
           <div class="mb-1.5 flex items-center justify-between text-xs tabular-nums text-muted-foreground">
-            <span>{{ sidebarDangerDialogRequest.progress.completed }} / {{ sidebarDangerDialogRequest.progress.total }}</span>
+            <span>{{ sidebarDangerDialogRequest.progress.phase === "preparing" ? t("databaseEmpty.preparing", { database: sidebarDangerDialogRequest.target.database }) : "" }} {{ sidebarDangerDialogRequest.progress.completed }} / {{ sidebarDangerDialogRequest.progress.total }}</span>
             <span>{{ Math.round((sidebarDangerDialogRequest.progress.completed / sidebarDangerDialogRequest.progress.total) * 100) }}%</span>
           </div>
           <div class="h-2 overflow-hidden rounded-full bg-muted" role="progressbar" :aria-valuemin="0" :aria-valuemax="sidebarDangerDialogRequest.progress.total" :aria-valuenow="sidebarDangerDialogRequest.progress.completed">

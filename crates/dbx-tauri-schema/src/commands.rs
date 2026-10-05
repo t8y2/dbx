@@ -1,8 +1,27 @@
+use std::future::Future;
 use std::sync::Arc;
 use tauri::State;
 
 use dbx_core::connection::AppState;
 use dbx_core::db;
+
+async fn run_cancellable<T, F>(state: &Arc<AppState>, execution_id: Option<String>, future: F) -> Result<T, String>
+where
+    F: Future<Output = Result<T, String>>,
+{
+    let registered =
+        execution_id.as_ref().filter(|id| !id.trim().is_empty()).map(|id| state.running_queries.register(id.clone()));
+    if let Some(query) = registered.as_ref() {
+        let token = query.token();
+        tokio::select! {
+            biased;
+            _ = token.cancelled() => Err(dbx_core::query::canceled_error()),
+            result = future => result,
+        }
+    } else {
+        future.await
+    }
+}
 
 /// Resolve a non-internal catalog for dispatch to the Doris multi-catalog path.
 /// Thin wrapper around the shared dbx-core resolver so the Tauri and HTTP
@@ -230,6 +249,7 @@ pub async fn get_mysql_table_auto_increment(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn list_objects(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
@@ -241,51 +261,57 @@ pub async fn list_objects(
     object_types: Option<Vec<String>>,
     catalog: Option<String>,
     table_name_filter: Option<dbx_core::schema::TableNameFilter>,
+    execution_id: Option<String>,
 ) -> Result<Vec<db::ObjectInfo>, String> {
-    if let Some(catalog) = external_doris_catalog(&state, &connection_id, catalog.as_deref()).await {
-        let tables = dbx_core::schema::list_doris_catalog_tables_core(
-            &state,
+    let app = Arc::clone(state.inner());
+    let operation_app = Arc::clone(&app);
+    run_cancellable(&app, execution_id, async move {
+        if let Some(catalog) = external_doris_catalog(&operation_app, &connection_id, catalog.as_deref()).await {
+            let tables = dbx_core::schema::list_doris_catalog_tables_core(
+                &operation_app,
+                &connection_id,
+                &catalog,
+                &database,
+                filter.as_deref(),
+                limit,
+                offset,
+                object_types.as_deref(),
+                table_name_filter.as_ref(),
+            )
+            .await?;
+            return Ok(tables
+                .into_iter()
+                .map(|table| db::ObjectInfo {
+                    name: table.name,
+                    object_type: table.table_type,
+                    schema: Some(database.clone()),
+                    valid: None,
+                    signature: None,
+                    comment: table.comment,
+                    created_at: None,
+                    updated_at: None,
+                    parent_schema: table.parent_schema,
+                    parent_name: table.parent_name,
+                    custom_type_kind: None,
+                    has_members: None,
+                    trigger: None,
+                    xugu_type_members_expandable: None,
+                })
+                .collect());
+        }
+        dbx_core::schema::list_objects_core(
+            &operation_app,
             &connection_id,
-            &catalog,
             &database,
+            &schema,
             filter.as_deref(),
             limit,
             offset,
             object_types.as_deref(),
             table_name_filter.as_ref(),
         )
-        .await?;
-        return Ok(tables
-            .into_iter()
-            .map(|table| db::ObjectInfo {
-                name: table.name,
-                object_type: table.table_type,
-                schema: Some(database.clone()),
-                valid: None,
-                signature: None,
-                comment: table.comment,
-                created_at: None,
-                updated_at: None,
-                parent_schema: table.parent_schema,
-                parent_name: table.parent_name,
-                custom_type_kind: None,
-                has_members: None,
-                trigger: None,
-                xugu_type_members_expandable: None,
-            })
-            .collect());
-    }
-    dbx_core::schema::list_objects_core(
-        &state,
-        &connection_id,
-        &database,
-        &schema,
-        filter.as_deref(),
-        limit,
-        offset,
-        object_types.as_deref(),
-        table_name_filter.as_ref(),
-    )
+        .await
+    })
     .await
 }
 
@@ -491,6 +517,26 @@ pub async fn list_foreign_keys(
         .await;
     }
     dbx_core::schema::list_foreign_keys_core(&state, &connection_id, &database, &schema, &table).await
+}
+
+#[tauri::command]
+pub async fn list_foreign_keys_for_database(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    catalog: Option<String>,
+    execution_id: Option<String>,
+) -> Result<std::collections::HashMap<String, Vec<db::ForeignKeyInfo>>, String> {
+    let app = Arc::clone(state.inner());
+    let operation_app = Arc::clone(&app);
+    run_cancellable(&app, execution_id, async move {
+        if external_doris_catalog(&operation_app, &connection_id, catalog.as_deref()).await.is_some() {
+            return Ok(std::collections::HashMap::new());
+        }
+        dbx_core::schema::list_foreign_keys_for_database_core(&operation_app, &connection_id, &database, &schema).await
+    })
+    .await
 }
 
 #[tauri::command]

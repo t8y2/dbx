@@ -761,6 +761,7 @@ async fn serve() -> Result<(), String> {
         .route("/schema/reference-key-columns", get(routes::schema::list_reference_key_columns))
         .route("/schema/reference-keys", get(routes::schema::list_reference_keys))
         .route("/schema/foreign-keys", get(routes::schema::list_foreign_keys))
+        .route("/schema/foreign-keys-for-database", get(routes::schema::list_foreign_keys_for_database))
         .route("/schema/triggers", get(routes::schema::list_triggers))
         .route("/schema/constraints", get(routes::schema::list_constraints))
         .route("/schema/partitions", get(routes::schema::list_partitions))

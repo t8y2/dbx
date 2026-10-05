@@ -249,6 +249,7 @@ export const listIndexes = forward("listIndexes");
 export const listReferenceKeyColumns = forward("listReferenceKeyColumns");
 export const listReferenceKeys = forward("listReferenceKeys");
 export const listForeignKeys = forward("listForeignKeys");
+export const listForeignKeysForDatabase = forward("listForeignKeysForDatabase");
 export const listTriggers = forward("listTriggers");
 export const listConstraints = forward("listConstraints");
 export const listPartitions = forward("listPartitions");

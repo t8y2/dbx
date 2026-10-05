@@ -2689,6 +2689,7 @@ version = "0.1.0"
 dependencies = [
  "dbx-core",
  "tauri",
+ "tokio",
 ]
 
 [[package]]

@@ -44,3 +44,13 @@ cargo test -p dbx-plugin-runtime
 pnpm check
 git diff --check
 ```
+
+## Windows 本机环境注意事项
+
+- **cargo 必须用 Strawberry Perl**：PATH 里的默认 perl 是 Git Bash 的 cygwin 版，会导致 openssl-sys vendored 构建失败。运行任何 cargo 命令前先执行：
+  ```bash
+  export PATH="/e/env/perl/perl/bin:$PATH"
+  ```
+- **本机没有 node**（只有 bun 1.4.0），`pnpm check`（oxfmt/oxlint/vue-tsc/vitest）暂不可执行；涉及前端的 Agent 跳过 pnpm 检查并在报告中注明，待安装 Node.js LTS 后补跑。
+- Rust 全量构建约 10–15 分钟（target 已预热的 worktree 会快很多），Agent 需耐心等待构建完成，不要中途放弃。
+- 本仓库是 `E:\dbx-plugins` 超项目的 git 子模块；worktree 统一放在 `E:/dbx-wt/<name>`。

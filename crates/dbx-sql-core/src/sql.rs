@@ -135,6 +135,19 @@ pub struct SqlFileImportStatement {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SqlDialectProfile {
     supports_hash_line_comments: bool,
+    /// Whether a backslash inside an ordinary `'...'` string escapes the next
+    /// character, so `'it\'s'` stays one string.
+    ///
+    /// This defaults to the historical behaviour (escape) because several
+    /// engines — MySQL and ClickHouse among them — do escape there, and the ones
+    /// that do not are listed explicitly below. PostgreSQL and its forks are the
+    /// engines this repository has evidence for: `standard_conforming_strings` is
+    /// on by default, which is also why the generated PostgreSQL SQL writes
+    /// newlines as `E'\n'` instead of `'\n'`.
+    supports_backslash_escaped_quotes: bool,
+    /// PostgreSQL escape string literals (`E'...'`), which keep backslash escapes
+    /// even where ordinary `'...'` literals do not.
+    supports_postgres_escape_strings: bool,
     supports_oracle_plsql_blocks: bool,
     supports_oracle_style_routine_bodies: bool,
     supports_slash_line_block_delimiter: bool,
@@ -154,6 +167,8 @@ impl Default for SqlDialectProfile {
     fn default() -> Self {
         Self {
             supports_hash_line_comments: false,
+            supports_backslash_escaped_quotes: true,
+            supports_postgres_escape_strings: false,
             supports_oracle_plsql_blocks: false,
             supports_oracle_style_routine_bodies: false,
             supports_slash_line_block_delimiter: false,
@@ -206,12 +221,38 @@ impl SqlDialectProfile {
             return Self::sap_hana();
         }
 
+        if Self::is_postgres_string_lexer_database(db_type) {
+            return Self {
+                supports_backslash_escaped_quotes: false,
+                supports_postgres_escape_strings: true,
+                ..Self::default()
+            };
+        }
+
         Self::default()
+    }
+
+    /// PostgreSQL and the forks that inherit its string literal rules without
+    /// inheriting the routine/delimiter handling of [`Self::postgres_family`].
+    ///
+    /// Redshift is deliberately absent: it descends from PostgreSQL 8.0, which
+    /// predates `standard_conforming_strings` defaulting to `on`, so it keeps the
+    /// historical behaviour until its own evidence shows otherwise.
+    fn is_postgres_string_lexer_database(db_type: DatabaseType) -> bool {
+        matches!(
+            db_type,
+            DatabaseType::Vastbase
+                | DatabaseType::Kingbase
+                | DatabaseType::Highgo
+                | DatabaseType::Uxdb
+                | DatabaseType::Kwdb
+        )
     }
 
     fn mysql_compatible() -> Self {
         Self {
             supports_hash_line_comments: true,
+            supports_backslash_escaped_quotes: true,
             supports_mysql_routine_blocks: true,
             requires_whitespace_after_line_comment_dashes: true,
             ..Self::default()
@@ -230,7 +271,9 @@ impl SqlDialectProfile {
     /// Oracle PL/SQL dialect.
     fn postgres_family() -> Self {
         Self {
+            supports_backslash_escaped_quotes: false,
             supports_oracle_style_routine_bodies: true,
+            supports_postgres_escape_strings: true,
             supports_slash_line_block_delimiter: true,
             supports_psql_control_commands: true,
             ..Self::default()
@@ -239,7 +282,9 @@ impl SqlDialectProfile {
 
     fn gaussdb() -> Self {
         Self {
+            supports_backslash_escaped_quotes: false,
             supports_postgres_dollar_quoted_routines: true,
+            supports_postgres_escape_strings: true,
             supports_psql_control_commands: true,
             ..Self::oracle_like()
         }
@@ -406,6 +451,9 @@ fn dash_dash_starts_line_comment(profile: SqlDialectProfile, char_after_dashes: 
 pub struct SqlStatementSplitter {
     buffer: String,
     in_single_quote: bool,
+    /// Whether the open `'...'` literal reads a backslash as escaping the next
+    /// character: MySQL strings always do, PostgreSQL only inside `E'...'`.
+    single_quote_escape_string: bool,
     in_double_quote: bool,
     in_backtick: bool,
     in_line_comment: bool,
@@ -579,11 +627,22 @@ impl SqlStatementSplitter {
             }
 
             match ch {
-                '\'' if !self.in_double_quote && !self.in_backtick && !has_odd_trailing_backslashes(&self.buffer) => {
+                '\'' if !self.in_double_quote
+                    && !self.in_backtick
+                    && !(self.single_quote_backslash_escapes() && has_odd_trailing_backslashes(&self.buffer)) =>
+                {
                     self.in_single_quote = !self.in_single_quote;
+                    self.single_quote_escape_string = self.in_single_quote
+                        && (self.options.profile.supports_backslash_escaped_quotes
+                            || (self.options.profile.supports_postgres_escape_strings
+                                && ends_with_escape_string_prefix(&self.buffer)));
                     self.buffer.push(ch);
                 }
-                '"' if !self.in_single_quote && !self.in_backtick && !has_odd_trailing_backslashes(&self.buffer) => {
+                '"' if !self.in_single_quote
+                    && !self.in_backtick
+                    && !(self.options.profile.supports_backslash_escaped_quotes
+                        && has_odd_trailing_backslashes(&self.buffer)) =>
+                {
                     self.in_double_quote = !self.in_double_quote;
                     self.buffer.push(ch);
                 }
@@ -758,6 +817,18 @@ impl SqlStatementSplitter {
         self.pending_mysql_line_comment_dashes = false;
     }
 
+    /// A backslash escapes a quote only where the dialect says so: MySQL for
+    /// ordinary strings, PostgreSQL for `E'...'` literals. Outside a string the
+    /// profile decides, which keeps the historical MySQL guard that a quote
+    /// preceded by an odd number of backslashes does not open a literal.
+    fn single_quote_backslash_escapes(&self) -> bool {
+        if self.in_single_quote {
+            self.single_quote_escape_string
+        } else {
+            self.options.profile.supports_backslash_escaped_quotes
+        }
+    }
+
     fn on_delimiter_line(&self) -> bool {
         let start = self.buffer.rfind('\n').map_or(0, |p| p + 1);
         let line = self.buffer[start..].trim_start().as_bytes();
@@ -769,6 +840,17 @@ impl SqlStatementSplitter {
 
 fn has_odd_trailing_backslashes(sql: &str) -> bool {
     sql.as_bytes().iter().rev().take_while(|byte| **byte == b'\\').count() % 2 == 1
+}
+
+/// True when `text` ends with a PostgreSQL `E'`/`e'` escape-string introducer.
+/// The `E` must start its own token: a type name that merely ends in `e`
+/// (`DATE'2020-01-01'`) or an identifier such as `x$e` is not an escape string.
+fn ends_with_escape_string_prefix(text: &str) -> bool {
+    let mut chars = text.chars().rev();
+    if !matches!(chars.next(), Some('E' | 'e')) {
+        return false;
+    }
+    !chars.next().is_some_and(|ch| ch.is_alphanumeric() || ch == '_' || ch == '$')
 }
 
 pub fn split_sql_statements(sql: &str) -> Vec<String> {
@@ -1021,6 +1103,7 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
     let mut in_block_comment = false;
     let mut dollar_quote_tag: Option<String> = None;
     let mut custom_delimiter: Option<String> = None;
+    let mut single_quote_escape_string = false;
     let mut postgres_dollar_quoted_routine = false;
 
     while i < sql.len() {
@@ -1120,12 +1203,29 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
             }
         }
 
+        let single_quote_backslash_escapes = if in_single_quote {
+            single_quote_escape_string
+        } else {
+            options.profile.supports_backslash_escaped_quotes
+        };
+
         match ch {
-            '\'' if !in_double_quote && !in_backtick && !has_odd_trailing_backslashes(&sql[start..i]) => {
+            '\'' if !in_double_quote
+                && !in_backtick
+                && !(single_quote_backslash_escapes && has_odd_trailing_backslashes(&sql[start..i])) =>
+            {
                 in_single_quote = !in_single_quote;
+                single_quote_escape_string = in_single_quote
+                    && (options.profile.supports_backslash_escaped_quotes
+                        || (options.profile.supports_postgres_escape_strings
+                            && ends_with_escape_string_prefix(&sql[start..i])));
                 i += ch.len_utf8();
             }
-            '"' if !in_single_quote && !in_backtick && !has_odd_trailing_backslashes(&sql[start..i]) => {
+            '"' if !in_single_quote
+                && !in_backtick
+                && !(options.profile.supports_backslash_escaped_quotes
+                    && has_odd_trailing_backslashes(&sql[start..i])) =>
+            {
                 in_double_quote = !in_double_quote;
                 i += ch.len_utf8();
             }
@@ -3396,6 +3496,73 @@ mod tests {
     }
 
     #[test]
+    fn postgres_plain_string_ends_before_a_trailing_backslash() {
+        let sql = r#"SELECT 'dir\'; DELETE FROM users;"#;
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Postgres),
+            vec![r#"SELECT 'dir\'"#, "DELETE FROM users"]
+        );
+    }
+
+    #[test]
+    fn vastbase_plain_string_ends_before_a_trailing_backslash() {
+        let sql = r#"SELECT 'dir\'; DELETE FROM users;"#;
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Vastbase),
+            vec![r#"SELECT 'dir\'"#, "DELETE FROM users"]
+        );
+    }
+
+    #[test]
+    fn vastbase_escape_string_keeps_a_backslash_escaped_quote() {
+        let sql = r#"COMMENT ON COLUMN "s"."t"."c" IS E'C:\\tmp\n\t\'';"#;
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Vastbase),
+            vec![r#"COMMENT ON COLUMN "s"."t"."c" IS E'C:\\tmp\n\t\''"#]
+        );
+    }
+
+    #[test]
+    fn duckdb_escape_strings_match_the_existing_expectations() {
+        let sql = r#"SELECT E'it\'s;ok'; SELECT e'path\\;name'; SELECT 2"#;
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::DuckDb),
+            vec![r#"SELECT E'it\'s;ok'"#, r#"SELECT e'path\\;name'"#, "SELECT 2"]
+        );
+    }
+
+    #[test]
+    fn postgres_escape_string_keeps_a_backslash_escaped_quote() {
+        let sql = r#"SELECT E'it\'s; still one value'; SELECT 1;"#;
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Postgres),
+            vec![r#"SELECT E'it\'s; still one value'"#, "SELECT 1"]
+        );
+    }
+
+    #[test]
+    fn cursor_statement_keeps_postgres_delete_after_a_trailing_backslash() {
+        let sql = "SELECT 'dir\\';\nDELETE FROM users;";
+        let cursor = sql.find("DELETE FROM users").unwrap() + 3;
+
+        assert_eq!(find_statement_at_cursor_for_database(sql, cursor, DatabaseType::Postgres), "DELETE FROM users");
+    }
+
+    #[test]
+    fn cursor_statement_keeps_postgres_escape_string_quote_together() {
+        let sql = "SELECT E'it\\'s; x';\nSELECT 2;";
+        let cursor = sql.find("SELECT 2").unwrap() + 3;
+
+        assert_eq!(find_statement_at_cursor_for_database(sql, cursor, DatabaseType::Postgres), "SELECT 2");
+        assert_eq!(find_statement_at_cursor_for_database(sql, 3, DatabaseType::Postgres), r#"SELECT E'it\'s; x'"#);
+    }
+
+    #[test]
     fn emits_trailing_statement_without_semicolon() {
         assert_eq!(
             split_sql_script("CREATE TABLE a(id int);\nINSERT INTO a VALUES (1)").unwrap(),
@@ -3998,6 +4165,8 @@ SELECT 2;";
         assert!(default.supports_custom_delimiter_commands);
         assert!(default.supports_dollar_quoted_strings);
         assert!(!default.supports_hash_line_comments);
+        assert!(default.supports_backslash_escaped_quotes);
+        assert!(!default.supports_postgres_escape_strings);
         assert!(!default.supports_mysql_routine_blocks);
         assert!(!default.supports_oracle_plsql_blocks);
         assert!(!default.supports_oracle_style_routine_bodies);
@@ -4012,11 +4181,14 @@ SELECT 2;";
             assert_eq!(profile, SqlDialectProfile::postgres_family());
             assert!(!profile.supports_oracle_plsql_blocks);
             assert!(profile.supports_oracle_style_routine_bodies);
+            assert!(profile.supports_postgres_escape_strings);
+            assert!(!profile.supports_backslash_escaped_quotes);
             assert!(profile.supports_slash_line_block_delimiter);
         }
 
         let mysql = SqlDialectProfile::for_database_type(DatabaseType::Mysql);
         assert!(mysql.supports_hash_line_comments);
+        assert!(mysql.supports_backslash_escaped_quotes);
         assert!(mysql.supports_mysql_routine_blocks);
         assert!(mysql.preserves_tdsql_leading_directives);
         assert!(SqlDialectProfile::for_database_type(DatabaseType::Doris).supports_hash_line_comments);
@@ -4024,6 +4196,24 @@ SELECT 2;";
         assert!(SqlDialectProfile::for_database_type(DatabaseType::StarRocks).supports_hash_line_comments);
         assert!(SqlDialectProfile::for_database_type(DatabaseType::ManticoreSearch).supports_hash_line_comments);
         assert!(SqlDialectProfile::for_database_type(DatabaseType::Goldendb).supports_hash_line_comments);
+        assert!(SqlDialectProfile::for_database_type(DatabaseType::Gaussdb).supports_postgres_escape_strings);
+
+        for db_type in [
+            DatabaseType::Vastbase,
+            DatabaseType::Kingbase,
+            DatabaseType::Highgo,
+            DatabaseType::Uxdb,
+            DatabaseType::Kwdb,
+        ] {
+            let profile = SqlDialectProfile::for_database_type(db_type);
+            assert!(!profile.supports_backslash_escaped_quotes);
+            assert!(profile.supports_postgres_escape_strings);
+        }
+
+        // Engines without PostgreSQL string literals keep the historical escape
+        // rule until their own evidence is recorded.
+        assert!(SqlDialectProfile::for_database_type(DatabaseType::DuckDb).supports_backslash_escaped_quotes);
+        assert!(SqlDialectProfile::for_database_type(DatabaseType::ClickHouse).supports_backslash_escaped_quotes);
 
         for db_type in [
             DatabaseType::Oracle,

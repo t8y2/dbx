@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { canFetchNextDataGridSegment, canGoNextDataGridPage, dataGridLoadAllSegment, dataGridUserFacingPage, hasCompleteLocalDataGridResult, resolveDataGridPaginationTotal } from "../../apps/desktop/src/lib/dataGrid/dataGridPagination.ts";
+import { canFetchNextDataGridSegment, canGoNextDataGridPage, dataGridLoadAllInitialTarget, dataGridLoadAllSegment, dataGridUserFacingPage, hasCompleteLocalDataGridResult, resolveDataGridPaginationTotal } from "../../apps/desktop/src/lib/dataGrid/dataGridPagination.ts";
 
 test("estimated display totals do not become pagination bounds", () => {
   assert.equal(
@@ -195,6 +195,25 @@ test("load-all requests every remaining row up to the configured cap", () => {
 test("load-all does not request past the cap or after the result is complete", () => {
   assert.equal(dataGridLoadAllSegment(5_000, 5_000, true), null);
   assert.equal(dataGridLoadAllSegment(100, 5_000, false), null);
+});
+
+test("load-all initial target calculates chunk target across boundaries and known totals", () => {
+  // Below cap: targets cap or total
+  assert.equal(dataGridLoadAllInitialTarget(100, 100_000, 260_000), 100_000);
+  assert.equal(dataGridLoadAllInitialTarget(100, 100_000, 50_000), 50_000);
+  assert.equal(dataGridLoadAllInitialTarget(100, 100_000), 100_000);
+
+  // At or past cap: targets next chunk increment up to total
+  assert.equal(dataGridLoadAllInitialTarget(100_000, 100_000, 260_000), 200_000);
+  assert.equal(dataGridLoadAllInitialTarget(200_000, 100_000, 260_000), 260_000);
+  assert.equal(dataGridLoadAllInitialTarget(260_000, 100_000, 260_000), 260_000);
+
+  // When total is reached, dataGridLoadAllSegment returns null
+  const target = dataGridLoadAllInitialTarget(260_000, 100_000, 260_000);
+  assert.equal(dataGridLoadAllSegment(260_000, target, true), null);
+
+  // Without known total, continues by chunk increment
+  assert.equal(dataGridLoadAllInitialTarget(100_000, 100_000), 200_000);
 });
 
 // --- auto-redirect page calculation after refresh ---

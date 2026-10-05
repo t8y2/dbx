@@ -164,6 +164,21 @@ export function dataGridLoadAllSegment(loadedRowCount: number, maxRows: number, 
 }
 
 /**
+ * Target cumulative row count for the initial chunk of an explicit "load all"
+ * run. Each chunk is bounded by `chunkLimit` (the per-request result-row cap,
+ * e.g. 100,000), but an existing dataset that has already reached or exceeded
+ * `chunkLimit` must still be able to start loading subsequent chunks up to
+ * `totalRowCount` (if known) or by another chunk increment (#10752).
+ */
+export function dataGridLoadAllInitialTarget(loadedRowCount: number, chunkLimit: number, totalRowCount?: number): number {
+  const loaded = Number.isFinite(loadedRowCount) ? Math.max(0, Math.trunc(loadedRowCount)) : 0;
+  const chunk = Number.isFinite(chunkLimit) ? Math.max(1, Math.trunc(chunkLimit)) : 1;
+  const chunkCap = loaded < chunk ? chunk : loaded + chunk;
+  const total = typeof totalRowCount === "number" && Number.isFinite(totalRowCount) && totalRowCount >= 0 ? Math.trunc(totalRowCount) : undefined;
+  return total !== undefined ? Math.min(chunkCap, total) : chunkCap;
+}
+
+/**
  * Next chunk of an explicit "load all" run, issued after the previous chunk
  * completed. The per-request result-row cap bounds each request, not the run:
  * the button promises every remaining row (the confirm dialog quotes the real

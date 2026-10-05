@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { dataGridBottomScrollTop, dataGridInfiniteScrollAppendCompletion, didDataGridInfiniteScrollContextChange, isDataGridAtScrollBottom, restoredDataGridScrollLeft } from "@/lib/dataGrid/dataGridInfiniteScroll";
-import { dataGridLoadAllNextSegment } from "@/lib/dataGrid/dataGridPagination";
+import { dataGridLoadAllInitialTarget, dataGridLoadAllNextSegment } from "@/lib/dataGrid/dataGridPagination";
 
 describe("data grid bottom anchoring", () => {
   it("keeps DOM rows anchored when scrollbar padding increases the scroll height", () => {
@@ -143,5 +143,24 @@ describe("dataGridLoadAllNextSegment", () => {
 
   it("returns null when a chunk appended nothing (loop guard)", () => {
     expect(dataGridLoadAllNextSegment({ loadedRowCount: 200_000, requestedOffset: 200_000, requestedLimit: 100_000 })).toBeNull();
+  });
+});
+
+describe("dataGridLoadAllInitialTarget", () => {
+  it("targets the cap or total when below the chunk limit", () => {
+    expect(dataGridLoadAllInitialTarget(100, 100_000, 260_000)).toBe(100_000);
+    expect(dataGridLoadAllInitialTarget(100, 100_000, 50_000)).toBe(50_000);
+    expect(dataGridLoadAllInitialTarget(100, 100_000)).toBe(100_000);
+  });
+
+  it("targets the next chunk increment when already at or past the chunk limit", () => {
+    expect(dataGridLoadAllInitialTarget(100_000, 100_000, 260_000)).toBe(200_000);
+    expect(dataGridLoadAllInitialTarget(200_000, 100_000, 260_000)).toBe(260_000);
+    expect(dataGridLoadAllInitialTarget(260_000, 100_000, 260_000)).toBe(260_000);
+  });
+
+  it("advances by chunk increment when total is unknown", () => {
+    expect(dataGridLoadAllInitialTarget(100_000, 100_000)).toBe(200_000);
+    expect(dataGridLoadAllInitialTarget(200_000, 100_000)).toBe(300_000);
   });
 });

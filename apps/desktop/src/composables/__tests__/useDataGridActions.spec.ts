@@ -2,6 +2,7 @@ import { computed, reactive } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useDataGridActions } from "@/composables/useDataGridActions";
 import { clearTableMetadataCache } from "@/lib/metadata/tableMetadataCache";
+import { MAX_QUERY_RESULT_MAX_ROWS } from "@/lib/dataGrid/queryResultRowLimit";
 import { restoredDataTabReloadFilters } from "@/lib/table/tableDataRefresh";
 import type { IndexInfo, QueryTab } from "@/types/database";
 
@@ -616,6 +617,37 @@ describe("useDataGridActions", () => {
 
     expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ limit: 99_900, offset: 100, largeValuePreviewSize: 1033 }));
     expect(mocks.executeTabSql).toHaveBeenCalledWith("tab-1", expect.any(String), expect.objectContaining({ pagination: { offset: 100, limit: 99_900, sessionId: undefined, clientSessionId: undefined } }));
+  });
+
+  it("allows load-all to append rows past the continuous query result cap", async () => {
+    mocks.queryResultMaxRows = 100_000;
+    const tab = tableDataTab({
+      id: "tab-large",
+      resultTotalRowCount: 260_000,
+      resultPageLimit: 100,
+      resultPageOffset: 0,
+      result: {
+        columns: ["id"],
+        rows: Array.from({ length: 100_000 }, (_, index) => [index + 1]),
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+    });
+    mocks.buildTableSelectSql.mockResolvedValueOnce('SELECT * FROM "public"."users" LIMIT 100000 OFFSET 100000;');
+    mocks.tabs.push(tab);
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onPaginate(tab.id, 100_000, 100_000, "", undefined, true);
+
+    expect(mocks.executeTabSql).toHaveBeenCalledWith(
+      "tab-large",
+      expect.any(String),
+      expect.objectContaining({
+        appendResult: {
+          maxRows: MAX_QUERY_RESULT_MAX_ROWS,
+        },
+      }),
+    );
   });
 
   it("continues the matching Cassandra table cursor and client session", async () => {

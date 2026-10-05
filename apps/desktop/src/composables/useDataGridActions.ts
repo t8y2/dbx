@@ -21,7 +21,7 @@ import { applyMongoFindSort } from "@/lib/mongo/mongoShellCommand";
 import { uuid } from "@/lib/common/utils";
 import { simpleDataGridOrderByReferencesMissingColumn, type DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 import type { DataGridReloadIntent } from "@/lib/dataGrid/dataGridToolbar";
-import { continuousQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
+import { continuousQueryResultMaxRows, MAX_QUERY_RESULT_MAX_ROWS } from "@/lib/dataGrid/queryResultRowLimit";
 import { queryResultBaseSql, queryResultExecutionSql } from "@/lib/tabs/tabPresentation";
 import { sqlExecutionTargetCapabilities } from "@/lib/database/sqlExecutionTargetCapabilities";
 import { usesAgentCursorForTableData } from "@/lib/database/databaseDriverManifest";
@@ -503,7 +503,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     const appendOptions = appendResult
       ? {
           appendResult: {
-            maxRows: continuousQueryResultMaxRows(settingsStore.editorSettings.queryResultMaxRowsEnabled, settingsStore.editorSettings.queryResultMaxRows),
+            maxRows: appendRequested ? MAX_QUERY_RESULT_MAX_ROWS : continuousQueryResultMaxRows(settingsStore.editorSettings.queryResultMaxRowsEnabled, settingsStore.editorSettings.queryResultMaxRows),
           },
         }
       : {};

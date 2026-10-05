@@ -7724,7 +7724,7 @@ export const useQueryStore = defineStore("query", () => {
         return producedResult;
       }
 
-      const queryResultMaxRows = tab.mode === "query" ? effectiveQueryResultMaxRows(settingsStore.editorSettings.queryResultMaxRowsEnabled, settingsStore.editorSettings.queryResultMaxRows) : undefined;
+      const queryResultMaxRows = tab.mode === "query" ? (options?.appendResult ? options.appendResult.maxRows : effectiveQueryResultMaxRows(settingsStore.editorSettings.queryResultMaxRowsEnabled, settingsStore.editorSettings.queryResultMaxRows)) : undefined;
 
       if (tab.mode === "query") {
         const prepared = await prepareEditableQueryExecution(tab, sqlToExecute, conn, effectiveDbType, executionDatabase, traceId, elapsed);

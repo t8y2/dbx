@@ -380,13 +380,19 @@ pub fn decode_sql_file_bytes(bytes: &[u8]) -> Result<String, String> {
 /// Decode an SQL/text file using an explicit user-selected encoding.
 pub fn decode_sql_file_bytes_with_encoding(bytes: &[u8], encoding: &str) -> Result<String, String> {
     match encoding {
-        "utf8" => decode_sql_file_with_encoding(bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes), encoding_rs::UTF_8),
+        "utf8" => {
+            decode_sql_file_with_encoding(bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes), encoding_rs::UTF_8)
+        }
         "utf8Bom" => {
             let payload = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
             decode_sql_file_with_encoding(payload, encoding_rs::UTF_8)
         }
-        "utf16le" => decode_sql_file_with_encoding(bytes.strip_prefix(&[0xFF, 0xFE]).unwrap_or(bytes), encoding_rs::UTF_16LE),
-        "utf16be" => decode_sql_file_with_encoding(bytes.strip_prefix(&[0xFE, 0xFF]).unwrap_or(bytes), encoding_rs::UTF_16BE),
+        "utf16le" => {
+            decode_sql_file_with_encoding(bytes.strip_prefix(&[0xFF, 0xFE]).unwrap_or(bytes), encoding_rs::UTF_16LE)
+        }
+        "utf16be" => {
+            decode_sql_file_with_encoding(bytes.strip_prefix(&[0xFE, 0xFF]).unwrap_or(bytes), encoding_rs::UTF_16BE)
+        }
         "gbk" => decode_sql_file_with_encoding(bytes, encoding_rs::GBK),
         "auto" | "" => decode_sql_file_bytes(bytes),
         _ => Err(format!("Unsupported SQL file encoding: {encoding}")),
@@ -409,12 +415,20 @@ pub fn encode_sql_file_text(content: &str, encoding: &str) -> Result<Vec<u8>, St
         "gbk" => encoding_rs::GBK.encode(content),
         _ => return Err(format!("Unsupported SQL file encoding: {encoding}")),
     };
-    if had_errors { return Err(sql_file_encoding_error()); }
+    if had_errors {
+        return Err(sql_file_encoding_error());
+    }
     let mut bytes = encoded.into_owned();
     match encoding {
-        "utf8Bom" => { bytes.splice(0..0, [0xEF, 0xBB, 0xBF]); }
-        "utf16le" => { bytes.splice(0..0, [0xFF, 0xFE]); }
-        "utf16be" => { bytes.splice(0..0, [0xFE, 0xFF]); }
+        "utf8Bom" => {
+            bytes.splice(0..0, [0xEF, 0xBB, 0xBF]);
+        }
+        "utf16le" => {
+            bytes.splice(0..0, [0xFF, 0xFE]);
+        }
+        "utf16be" => {
+            bytes.splice(0..0, [0xFE, 0xFF]);
+        }
         _ => {}
     }
     Ok(bytes)

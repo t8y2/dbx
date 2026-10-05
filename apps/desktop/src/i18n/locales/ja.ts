@@ -8382,6 +8382,8 @@ export default withEnglishFallback({
     sidebarSearchOpenedDatabasesOnly: "開いているデータベースのみを検索",
     sidebarSearchOpenedDatabasesOnlyDescription: "サイドバー検索は、現在の接続で開いているデータベースのみを読み込みます（1つも開いていない場合はすべてを検索します）。オフにすると、その接続のすべてのデータベースを検索します。",
     shortcutSelectLineEnds: "行末を選択",
+    openQueryOnConnectionOpen: "接続を開いたときにクエリページを開く",
+    openQueryOnConnectionOpenDescription: "有効にすると、接続またはデータベースを開いたときにデフォルトでクエリページが開きます。",
   },
   driverStore: {
     jreDirRemoveFailed: "古い JRE ディレクトリを削除できませんでした: {path}（元のエラー: {error}）",

@@ -31,6 +31,7 @@ pub mod redis;
 pub mod redis_pubsub_ws;
 pub mod saved_sql;
 pub mod scheduled_backup;
+pub mod scheduler;
 pub mod schema;
 pub mod schema_cache;
 pub mod schema_diff;

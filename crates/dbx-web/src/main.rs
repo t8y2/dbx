@@ -599,6 +599,7 @@ async fn serve() -> Result<(), String> {
         .route("/database-backups", post(routes::scheduled_backup::command))
         .route("/database-backups/{id}/files/{index}", get(routes::scheduled_backup::download))
         .route("/database-backups/{id}/files/{index}/restore", post(routes::scheduled_backup::prepare_restore))
+        .merge(routes::scheduler::router())
         // Auth
         // Auth payloads are tiny password strings: cap them far below the
         // global limit so the extractor cannot buffer an unauthenticated DoS

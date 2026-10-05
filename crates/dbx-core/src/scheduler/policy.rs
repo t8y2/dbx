@@ -10,11 +10,12 @@ use super::trigger::TaskTrigger;
 
 /// How many missed fires happened between the persisted `next_run_at` and now.
 /// Iterates the trigger forward with a generous cap so a bad trigger cannot
-/// spin forever.
+/// spin forever. A fire due exactly at `now` is the pending run enqueue_due
+/// still has to pick up, so it is not counted as missed.
 pub fn count_missed_fires(trigger: &TaskTrigger, next_run_at: DateTime<Utc>, now: DateTime<Utc>) -> u32 {
     let mut missed = 0u32;
     let mut cursor = next_run_at;
-    while cursor <= now {
+    while cursor < now {
         missed += 1;
         if missed >= 1000 {
             break;

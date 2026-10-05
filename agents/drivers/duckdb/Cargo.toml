@@ -42,6 +42,7 @@ tokio-postgres = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", r
 postgres-types = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "ac8ad476de59093d33ab9f294531c956e0c6a724" }
 postgres-protocol = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "ac8ad476de59093d33ab9f294531c956e0c6a724" }
 mysql_async = { git = "https://github.com/t8y2/mysql_async.git", rev = "b615bb0b10b5975182a4aa069cabc3d09021f6ab" }
+tiberius = { path = "../../../vendor/tiberius" }
 
 [profile.release]
 panic = "abort"

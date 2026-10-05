@@ -181,7 +181,7 @@ describe("supportsTransaction", () => {
     expect(supportsTransaction("cloudflare-d1")).toBe(false);
     expect(supportsTransaction("sqlite")).toBe(false);
     expect(supportsTransaction("clickhouse")).toBe(false);
-    expect(supportsTransaction("sqlserver")).toBe(false);
+    expect(supportsTransaction("sqlserver")).toBe(true);
     expect(supportsTransaction("rqlite")).toBe(false);
     expect(supportsTransaction("agent")).toBe(false);
   });
@@ -204,6 +204,8 @@ describe("defaultAutoCommitForDbType", () => {
   it("honors the configured default transaction mode", () => {
     expect(defaultAutoCommitForDbType("mysql", "manual")).toBe(false);
     expect(defaultAutoCommitForDbType("postgres", "manual")).toBe(false);
+    expect(defaultAutoCommitForDbType("sqlserver", "manual")).toBe(false);
+    expect(defaultAutoCommitForDbType("sqlserver", "auto")).toBe(true);
     expect(defaultAutoCommitForDbType("oracle", "manual")).toBe(false);
     expect(defaultAutoCommitForDbType("jdbc", "manual")).toBe(false);
     expect(defaultAutoCommitForDbType("oceanbase-oracle", "manual")).toBe(false);

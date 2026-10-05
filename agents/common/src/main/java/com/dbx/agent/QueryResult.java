@@ -20,6 +20,22 @@ public final class QueryResult {
     private Long server_execute_time_us;
     private java.util.Map<String, Double> query_timings_ms;
     private boolean truncated;
+    // Optional protocol field: existing drivers omit it, manual SQL Server batches retain PRINT/warnings.
+    private List<Map<String, Object>> messages;
+
+    public List<Map<String, Object>> getMessages() {
+        return messages == null ? Collections.emptyList() : messages;
+    }
+
+    public void addInformationalMessage(String message, String code) {
+        if (messages == null) messages = new ArrayList<>();
+        if (messages.size() >= 512) return;
+        Map<String, Object> entry = new java.util.LinkedHashMap<>();
+        entry.put("severity", "INFO");
+        entry.put("message", message);
+        if (code != null) entry.put("code", code);
+        messages.add(entry);
+    }
 
     public QueryResult() {
         this(Collections.emptyList(), Collections.emptyList(), 0L, 0L, false);

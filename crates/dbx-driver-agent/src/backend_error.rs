@@ -105,6 +105,28 @@ pub struct BackendErrorDiagnostics {
     adapter_code: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransactionOutcome {
+    Committed,
+    RolledBack,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualTransactionFailureKind {
+    Unsupported,
+    Busy,
+    ContextChanged,
+    ConnectionLost,
+    RollbackFailed,
+    CommitUnknown,
+    ControlConflict,
+    IdleTimeout,
+    ExecutionFailed,
+}
+
 /// Public v1 backend error envelope.
 ///
 /// The fields are private on purpose: callers create envelopes through the
@@ -130,9 +152,49 @@ pub struct BackendError {
     /// envelope version; clients that do not understand it simply ignore it.
     #[serde(skip_serializing_if = "Option::is_none")]
     error_position: Option<crate::sql_error_position::SqlErrorPosition>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transaction_outcome: Option<TransactionOutcome>,
 }
 
 impl BackendError {
+    pub fn from_manual_transaction_failure(
+        kind: ManualTransactionFailureKind,
+        outcome: TransactionOutcome,
+        detail: &str,
+    ) -> Self {
+        let code = match kind {
+            ManualTransactionFailureKind::Unsupported => CatalogCode::TransactionUnsupported,
+            ManualTransactionFailureKind::Busy => CatalogCode::TransactionBusy,
+            ManualTransactionFailureKind::ContextChanged => CatalogCode::TransactionContextChanged,
+            ManualTransactionFailureKind::ConnectionLost => CatalogCode::TransactionConnectionLost,
+            ManualTransactionFailureKind::RollbackFailed => CatalogCode::TransactionRollbackFailed,
+            ManualTransactionFailureKind::CommitUnknown => CatalogCode::TransactionCommitUnknown,
+            ManualTransactionFailureKind::ControlConflict => CatalogCode::TransactionControlConflict,
+            ManualTransactionFailureKind::IdleTimeout => CatalogCode::TransactionIdleTimeout,
+            ManualTransactionFailureKind::ExecutionFailed => CatalogCode::TransactionExecutionFailed,
+        };
+        let mut error = Self::new(
+            catalog_entry(code),
+            BackendErrorSource::LegacyBackend,
+            BackendErrorOrigin::database(BackendErrorAdapter::Native),
+            if matches!(
+                kind,
+                ManualTransactionFailureKind::Unsupported
+                    | ManualTransactionFailureKind::Busy
+                    | ManualTransactionFailureKind::ControlConflict
+            ) {
+                BackendOperationOutcome::NotStarted
+            } else {
+                BackendOperationOutcome::Unknown
+            },
+            BTreeMap::new(),
+            bounded_detail(detail),
+            None,
+        );
+        error.transaction_outcome = Some(outcome);
+        error
+    }
+
     /// Convert a typed Agent error into the stable v1 JDBC catalog envelope.
     pub fn from_agent_call_error(error: &AgentCallError) -> Self {
         match error {
@@ -390,6 +452,7 @@ impl BackendError {
             diagnostics,
             help_url: entry.help_url.map(str::to_string),
             error_position: None,
+            transaction_outcome: None,
         }
     }
 }
@@ -401,6 +464,15 @@ enum CatalogCode {
     TimeoutNotStarted,
     TimeoutUnknown,
     TransactionSessionExpired,
+    TransactionUnsupported,
+    TransactionBusy,
+    TransactionContextChanged,
+    TransactionConnectionLost,
+    TransactionRollbackFailed,
+    TransactionCommitUnknown,
+    TransactionControlConflict,
+    TransactionIdleTimeout,
+    TransactionExecutionFailed,
     Canceled,
     BusyRetryLater,
     RuntimeReplaced,
@@ -438,6 +510,87 @@ const NO_PARAMS: &[ParamSpec] = &[];
 
 fn catalog_entry(code: CatalogCode) -> &'static CatalogEntry {
     const ENTRIES: &[(CatalogCode, CatalogEntry)] = &[
+        (
+            CatalogCode::TransactionUnsupported,
+            CatalogEntry {
+                code: "DBX-TXN-1002",
+                message_key: "backendErrors.transaction.unsupported",
+                params: NO_PARAMS,
+                help_url: None,
+            },
+        ),
+        (
+            CatalogCode::TransactionBusy,
+            CatalogEntry {
+                code: "DBX-TXN-1003",
+                message_key: "backendErrors.transaction.busy",
+                params: NO_PARAMS,
+                help_url: None,
+            },
+        ),
+        (
+            CatalogCode::TransactionContextChanged,
+            CatalogEntry {
+                code: "DBX-TXN-1004",
+                message_key: "backendErrors.transaction.contextChanged",
+                params: NO_PARAMS,
+                help_url: None,
+            },
+        ),
+        (
+            CatalogCode::TransactionConnectionLost,
+            CatalogEntry {
+                code: "DBX-TXN-1005",
+                message_key: "backendErrors.transaction.connectionLost",
+                params: NO_PARAMS,
+                help_url: None,
+            },
+        ),
+        (
+            CatalogCode::TransactionRollbackFailed,
+            CatalogEntry {
+                code: "DBX-TXN-1006",
+                message_key: "backendErrors.transaction.rollbackFailed",
+                params: NO_PARAMS,
+                help_url: None,
+            },
+        ),
+        (
+            CatalogCode::TransactionCommitUnknown,
+            CatalogEntry {
+                code: "DBX-TXN-1007",
+                message_key: "backendErrors.transaction.commitUnknown",
+                params: NO_PARAMS,
+                help_url: None,
+            },
+        ),
+        (
+            CatalogCode::TransactionControlConflict,
+            CatalogEntry {
+                code: "DBX-TXN-1008",
+                message_key: "backendErrors.transaction.controlConflict",
+                params: NO_PARAMS,
+                help_url: None,
+            },
+        ),
+        (
+            CatalogCode::TransactionIdleTimeout,
+            CatalogEntry {
+                code: "DBX-TXN-1009",
+                message_key: "backendErrors.transaction.idleTimeout",
+                params: NO_PARAMS,
+                help_url: None,
+            },
+        ),
+        (
+            CatalogCode::TransactionExecutionFailed,
+            CatalogEntry {
+                code: "DBX-TXN-1010",
+                message_key: "backendErrors.transaction.executionFailed",
+                params: NO_PARAMS,
+                help_url: None,
+            },
+        ),
         (
             CatalogCode::ConnectionFailed,
             CatalogEntry {
@@ -1440,6 +1593,27 @@ mod tests {
 
         assert_eq!(error.code(), "DBX-JDBC-9001");
         assert_eq!(error.detail(), Some("无效的表或视图名\n错误码: -2106"));
+    }
+
+    #[test]
+    fn manual_transaction_outcomes_are_optional_and_preserve_confirmed_commit() {
+        let legacy = serde_json::to_value(BackendError::from_legacy_backend("failure")).unwrap();
+        assert!(legacy.get("transactionOutcome").is_none());
+        let committed = BackendError::from_manual_transaction_failure(
+            ManualTransactionFailureKind::ContextChanged,
+            TransactionOutcome::Committed,
+            "Commit acknowledged before connection cleanup failed",
+        );
+        let value = serde_json::to_value(committed).unwrap();
+        assert_eq!(value["transactionOutcome"], "committed");
+        let unknown = BackendError::from_manual_transaction_failure(
+            ManualTransactionFailureKind::CommitUnknown,
+            TransactionOutcome::Unknown,
+            "Commit response lost",
+        );
+        let value = serde_json::to_value(unknown).unwrap();
+        assert_eq!(value["code"], "DBX-TXN-1007");
+        assert_eq!(value["transactionOutcome"], "unknown");
     }
 
     #[test]

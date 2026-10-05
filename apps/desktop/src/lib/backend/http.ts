@@ -1639,7 +1639,19 @@ export async function beginManualTransaction(_connectionId: string, _database: s
   throw new Error("Manual transaction management is only available in the desktop app.");
 }
 
-export async function executeInManualTransaction(_txnSessionId: string, _sql: string, _database: string, _schema?: string, _maxRows?: number, _tableDataPreview?: boolean, _pageSize?: number, _resultSessionId?: string, _classificationSql?: string): Promise<QueryResult[]> {
+export async function executeInManualTransaction(
+  _txnSessionId: string,
+  _sql: string,
+  _database: string,
+  _schema?: string,
+  _maxRows?: number,
+  _tableDataPreview?: boolean,
+  _pageSize?: number,
+  _resultSessionId?: string,
+  _classificationSql?: string,
+  _executionId?: string,
+  _timeoutSecs?: number,
+): Promise<QueryResult[]> {
   throw new Error("Manual transaction management is only available in the desktop app.");
 }
 
@@ -1649,6 +1661,10 @@ export async function commitManualTransaction(_txnSessionId: string): Promise<Qu
 
 export async function rollbackManualTransaction(_txnSessionId: string): Promise<QueryResult> {
   throw new Error("Manual transaction management is only available in the desktop app.");
+}
+
+export async function cancelQueryAndWait(_executionId: string): Promise<{ requested: boolean; terminal: boolean }> {
+  throw new Error("Manual transaction cancellation confirmation is only available in the desktop app.");
 }
 
 export async function cancelQuery(executionId: string): Promise<boolean> {

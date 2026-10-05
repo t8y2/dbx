@@ -1962,6 +1962,10 @@ export async function refreshConnections(): Promise<void> {
   return invoke("refresh_connections");
 }
 
+export async function cancelQueryAndWait(executionId: string): Promise<{ requested: boolean; terminal: boolean }> {
+  return invokeBackend("cancel_conditional_update", { executionId });
+}
+
 export async function cancelQuery(executionId: string): Promise<boolean> {
   return invoke("cancel_query", { executionId });
 }
@@ -2030,11 +2034,23 @@ export async function executeInTransaction(connectionId: string, database: strin
 }
 
 export async function beginManualTransaction(connectionId: string, database: string, schema?: string, catalog?: string): Promise<string> {
-  return invoke("begin_manual_transaction", { connectionId, database, schema, catalog });
+  return invokeBackend("begin_manual_transaction", { connectionId, database, schema, catalog });
 }
 
-export async function executeInManualTransaction(txnSessionId: string, sql: string, database: string, schema?: string, maxRows?: number, tableDataPreview?: boolean, pageSize?: number, resultSessionId?: string, classificationSql?: string): Promise<QueryResult[]> {
-  return invoke("execute_in_manual_transaction", {
+export async function executeInManualTransaction(
+  txnSessionId: string,
+  sql: string,
+  database: string,
+  schema?: string,
+  maxRows?: number,
+  tableDataPreview?: boolean,
+  pageSize?: number,
+  resultSessionId?: string,
+  classificationSql?: string,
+  executionId?: string,
+  timeoutSecs?: number,
+): Promise<QueryResult[]> {
+  return invokeBackend("execute_in_manual_transaction", {
     txnSessionId,
     sql,
     database,
@@ -2044,15 +2060,17 @@ export async function executeInManualTransaction(txnSessionId: string, sql: stri
     pageSize,
     resultSessionId,
     classificationSql,
+    executionId,
+    timeoutSecs,
   });
 }
 
 export async function commitManualTransaction(txnSessionId: string): Promise<QueryResult> {
-  return invoke("commit_manual_transaction", { txnSessionId });
+  return invokeBackend("commit_manual_transaction", { txnSessionId });
 }
 
 export async function rollbackManualTransaction(txnSessionId: string): Promise<QueryResult> {
-  return invoke("rollback_manual_transaction", { txnSessionId });
+  return invokeBackend("rollback_manual_transaction", { txnSessionId });
 }
 
 export async function analyzeSqlReferences(sql: string, dialect?: string): Promise<SqlReferenceAnalysis> {

@@ -42,6 +42,61 @@ public final class JdbcExecutor {
         return effectiveMaxRows == Integer.MAX_VALUE ? Integer.MAX_VALUE : effectiveMaxRows + 1;
     }
 
+    /** Execute one batch once, consuming every row and response even when retention is capped. */
+    public List<QueryResult> executeAll(Connection conn, String sql, int maxRows, Integer fetchSize,
+        int timeoutSecs, ResultValueReader valueReader) {
+        return unchecked(() -> {
+            long start = System.currentTimeMillis();
+            int retainedRows = Math.max(maxRows, 1);
+            List<QueryResult> results = new ArrayList<>();
+            try (Statement stmt = conn.createStatement()) {
+                activeStatements.add(stmt);
+                try {
+                    // setMaxRows can truncate the server response; cap retained rows instead.
+                    applyQueryTimeout(stmt, timeoutSecs);
+                    if (fetchSize != null && fetchSize > 0) stmt.setFetchSize(fetchSize);
+                    boolean hasResult = stmt.execute(sql);
+                    while (true) {
+                        if (hasResult) {
+                            try (ResultSet rs = stmt.getResultSet()) {
+                                QueryResult result = readResultSet(rs, System.currentTimeMillis() - start, retainedRows, valueReader);
+                                while (rs.next()) { /* fully consume rows beyond the UI limit */ }
+                                results.add(result);
+                            }
+                        } else {
+                            int count = stmt.getUpdateCount();
+                            if (count < 0) break;
+                            results.add(new QueryResult(Collections.emptyList(), Collections.emptyList(), count,
+                                System.currentTimeMillis() - start, false));
+                        }
+                        appendStatementWarnings(results.get(results.size() - 1), stmt);
+                        hasResult = stmt.getMoreResults();
+                    }
+                    if (results.isEmpty()) results.add(new QueryResult(Collections.emptyList(), Collections.emptyList(),
+                        0, System.currentTimeMillis() - start, false));
+                    appendStatementWarnings(results.get(results.size() - 1), stmt);
+                    return results;
+                } finally {
+                    activeStatements.remove(stmt);
+                }
+            }
+        });
+    }
+
+    private static void appendStatementWarnings(QueryResult result, Statement stmt) {
+        try {
+            Set<SQLWarning> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+            for (SQLWarning warning = stmt.getWarnings(); warning != null && seen.add(warning); warning = warning.getNextWarning()) {
+                String message = warning.getMessage();
+                if (message != null && !message.isBlank()) result.addInformationalMessage(message,
+                    warning.getErrorCode() == 0 ? null : Integer.toString(warning.getErrorCode()));
+            }
+            stmt.clearWarnings();
+        } catch (SQLException ignored) {
+            // Advisory warnings cannot change an already acknowledged execution.
+        }
+    }
+
     public QueryResult execute(Connection conn, String sql, String schema, Function<String, String> setSchemaSql) {
         return execute(conn, sql, schema, setSchemaSql, DEFAULT_MAX_ROWS, null, this::defaultResultValue);
     }

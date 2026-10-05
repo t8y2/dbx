@@ -263,6 +263,13 @@ enum ConnectionDatabaseInfoSource {
 
 /// Held connection for a manual transaction session
 pub enum TxnConnection {
+    /// Isolated native SQL Server client, discarded after an interrupted stream.
+    SqlServer {
+        client: Option<Arc<Mutex<db::sqlserver::SqlServerClient>>>,
+        client_session_id: String,
+        database: Option<String>,
+        cleanup_guard: ClientSessionPoolCleanupGuard,
+    },
     Postgres(Box<deadpool_postgres::Object>),
     /// A dedicated MySQL connection. Cancellation may consume and discard this
     /// connection instead of trying to reuse it after an interrupted result set.
@@ -286,6 +293,7 @@ pub enum TxnConnection {
 }
 
 pub struct TransactionSession {
+    pub sqlserver: Option<crate::query::sqlserver_manual_transaction::SessionMetadata>,
     pub connection: Arc<Mutex<TxnConnection>>,
     pub pool_key: String,
     pub last_activity: std::time::Instant,
@@ -423,6 +431,7 @@ pub struct AppState {
     /// exists.
     mysql_preserved_transactions: Arc<RwLock<HashSet<String>>>,
     pub transaction_sessions: Arc<RwLock<HashMap<String, TransactionSession>>>,
+    pub sqlserver_transaction_ends: Arc<std::sync::Mutex<crate::query::sqlserver_manual_transaction::EndedSessions>>,
     /// `save_password=false` 连接本次运行期的临时密码（内存，进程退出即丢，
     /// 绝不落盘）。键为 `(owner_scope, connection_id)`：桌面端 owner 为空串，
     /// Web 端 owner 为已认证会话 token，不同登录会话互不可见。建池/池重建/
@@ -1699,6 +1708,7 @@ impl AppState {
             postgres_cancel_contexts: Arc::new(RwLock::new(HashMap::new())),
             mysql_preserved_transactions: Arc::new(RwLock::new(HashSet::new())),
             transaction_sessions: Arc::new(RwLock::new(HashMap::new())),
+            sqlserver_transaction_ends: Arc::new(std::sync::Mutex::new(Default::default())),
             session_credentials: SessionCredentialStore::new(),
             write_unlock_windows: crate::write_unlock::WriteUnlockWindows::default(),
             metadata_gates: Arc::new(Mutex::new(HashMap::new())),
@@ -5951,6 +5961,10 @@ impl AppState {
             keys.into_iter().filter_map(|id| map.remove(&id).map(|session| (id, session))).collect()
         };
         for (session_id, session) in sessions {
+            if session.sqlserver.is_some() {
+                crate::query::sqlserver_manual_transaction::disconnect(self, &session_id, session).await;
+                continue;
+            }
             let mut conn = session.connection.lock().await;
             let outcome = crate::query::rollback_manual_txn_connection(&mut conn).await;
             if let Err(error) = outcome {

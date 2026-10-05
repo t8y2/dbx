@@ -40,11 +40,12 @@ enum SqlServerQueryTransport {
 pub struct SqlServerClient {
     inner: SqlServerTdsClient,
     query_transport: SqlServerQueryTransport,
+    server_major_version: Option<u32>,
 }
 
 impl SqlServerClient {
     fn new(inner: SqlServerTdsClient) -> Self {
-        Self { inner, query_transport: SqlServerQueryTransport::Unknown }
+        Self { inner, query_transport: SqlServerQueryTransport::Unknown, server_major_version: None }
     }
 
     async fn ensure_query_transport(&mut self) -> SqlServerQueryTransport {
@@ -1630,14 +1631,19 @@ fn top_level_sqlserver_tokens(sql: &str) -> Vec<SqlServerToken> {
         }
         if ch == '/' && next == Some('*') {
             i += 2;
-            while i < sql.len() {
+            let mut comment_depth = 1usize;
+            while i < sql.len() && comment_depth > 0 {
                 let current = next_char(sql, i);
                 let following = next_char_at(sql, i + current.len_utf8());
-                if current == '*' && following == Some('/') {
+                if current == '/' && following == Some('*') {
+                    comment_depth += 1;
                     i += 2;
-                    break;
+                } else if current == '*' && following == Some('/') {
+                    comment_depth -= 1;
+                    i += 2;
+                } else {
+                    i += current.len_utf8();
                 }
-                i += current.len_utf8();
             }
             continue;
         }
@@ -3958,6 +3964,98 @@ fn sqlserver_dml_output_returns_rows(sql: &str) -> bool {
     })
 }
 
+/// Transaction controls cannot be mixed with DBX-owned interactive transactions.
+/// The existing lexer skips comments, literals and delimited identifiers.
+pub fn manual_transaction_control_conflict(sql: &str) -> bool {
+    let tokens = top_level_sqlserver_tokens(sql);
+    tokens.iter().enumerate().any(|(index, token)| {
+        matches!(token.text.as_str(), "COMMIT" | "ROLLBACK" | "USE" | "SAVE")
+            || (token.text == "BEGIN"
+                && tokens
+                    .get(index + 1)
+                    .is_some_and(|next| matches!(next.text.as_str(), "TRAN" | "TRANSACTION" | "DISTRIBUTED")))
+            || (token.text == "SET" && tokens.get(index + 1).is_some_and(|next| next.text == "IMPLICIT_TRANSACTIONS"))
+    })
+}
+
+fn manual_transaction_status_error(error: String) -> String {
+    // Inspect the capability probe's server error, not a version allowlist or
+    // a failed login/transport. Preserve unrelated errors for their caller.
+    if sqlserver_error_number(&error) == Some(195) && error.to_ascii_uppercase().contains("XACT_STATE") {
+        format!(
+            "DBX_MANUAL_TRANSACTION_UNSUPPORTED: The native SQL Server driver requires XACT_STATE() \
+             to verify transaction safety. Use the SQL Server legacy compatibility driver \
+             (jTDS for SQL Server 2000). Server error: {error}"
+        )
+    } else {
+        error
+    }
+}
+
+/// SQL Server 2000 has no XACT_STATE(). Keep that absence explicit rather
+/// than infer committability from transaction count. Any execution error ends
+/// the owning session; COMMIT/ROLLBACK acknowledgement remains authoritative.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ManualTransactionStatus {
+    pub count: i64,
+    pub xact_state: Option<i64>,
+}
+impl ManualTransactionStatus {
+    pub fn is_active(self) -> bool {
+        self.count == 1 && self.xact_state.is_none_or(|state| state == 1)
+    }
+}
+/// SQL Server 2000 (product major 8) never offers XACT_STATE() and this driver
+/// negotiates TDS 7.1 with it, so the product major identifies the legacy
+/// count-only status check without reaching into a patched-only tiberius API.
+fn uses_legacy_transaction_status(server_major: Option<u32>) -> bool {
+    server_major == Some(8)
+}
+
+/// Consume the full response, including transaction descriptor ENVCHANGE tokens.
+pub async fn manual_transaction_status(client: &mut SqlServerClient) -> Result<ManualTransactionStatus, String> {
+    if client.server_major_version.is_none() {
+        let version = execute_simple_batch_with_max_rows_metadata(
+            client,
+            "SELECT CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(128))",
+            Some(1),
+        )
+        .await?;
+        client.server_major_version = version
+            .iter()
+            .find_map(|result| result.result.rows.first())
+            .and_then(|row| row.first())
+            .and_then(serde_json::Value::as_str)
+            .and_then(|version| version.split('.').next())
+            .and_then(|major| major.parse().ok());
+        if client.server_major_version.is_none() {
+            return Err("SQL Server did not return its product version for transaction capability detection".to_owned());
+        }
+    }
+    let legacy = uses_legacy_transaction_status(client.server_major_version);
+    let results = execute_simple_batch_with_max_rows_metadata(
+        client,
+        if legacy {
+            "SELECT @@TRANCOUNT AS dbx_transaction_count"
+        } else {
+            "SELECT @@TRANCOUNT AS dbx_transaction_count, XACT_STATE() AS dbx_transaction_state"
+        },
+        Some(1),
+    )
+    .await
+    .map_err(manual_transaction_status_error)?;
+    results
+        .iter()
+        .find_map(|result| result.result.rows.first())
+        .and_then(|row| {
+            Some(ManualTransactionStatus {
+                count: row.first()?.as_i64()?,
+                xact_state: if legacy { None } else { Some(row.get(1)?.as_i64()?) },
+            })
+        })
+        .ok_or_else(|| "SQL Server did not return transaction status".to_owned())
+}
+
 fn contains_transaction_control(sql: &str) -> bool {
     let tokens = top_level_sqlserver_tokens(sql);
     tokens.iter().enumerate().any(|(index, token)| {
@@ -4075,6 +4173,75 @@ fn first_sql_tokens(sql: &str, limit: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn manual_transaction_status_keeps_legacy_and_modern_safety_explicit() {
+        use super::{uses_legacy_transaction_status as legacy, ManualTransactionStatus as Status};
+        assert!(legacy(Some(8)));
+        for major in [None, Some(9), Some(13), Some(16)] {
+            assert!(!legacy(major));
+        }
+        assert!(Status { count: 1, xact_state: None }.is_active());
+        assert!(Status { count: 1, xact_state: Some(1) }.is_active());
+        for count in [0, 2, -1] {
+            assert!(!Status { count, xact_state: None }.is_active());
+            assert!(!Status { count, xact_state: Some(1) }.is_active());
+        }
+        for state in [-1, 0, 2] {
+            assert!(!Status { count: 1, xact_state: Some(state) }.is_active());
+        }
+    }
+
+    #[test]
+    fn manual_transaction_status_missing_xact_state_is_unsupported() {
+        for message in [
+            "'XACT_STATE' is not a recognized built-in function name. (code: 195, state: 10, class: 15)",
+            "无法识别函数 'xact_state'。 (code: 195, state: 10, class: 15)",
+        ] {
+            let error = super::manual_transaction_status_error(message.to_owned());
+            assert!(error.starts_with("DBX_MANUAL_TRANSACTION_UNSUPPORTED:"), "{error}");
+            assert!(error.contains("legacy"));
+            assert!(error.contains(message));
+        }
+    }
+
+    #[test]
+    fn manual_transaction_status_other_errors_keep_their_original_category() {
+        for message in [
+            "Permission denied for XACT_STATE. (code: 229, state: 1, class: 14)",
+            "'OTHER_FUNCTION' is not a recognized function name. (code: 195, state: 10, class: 15)",
+            "Connection reset while querying XACT_STATE",
+            "XACT_STATE query timed out",
+        ] {
+            assert_eq!(super::manual_transaction_status_error(message.to_owned()), message);
+        }
+    }
+    #[test]
+    fn manual_transaction_controls_are_detected_without_false_positive_literals_or_try_blocks() {
+        for sql in [
+            "BEGIN TRAN",
+            "BEGIN DISTRIBUTED TRANSACTION",
+            "COMMIT",
+            "ROLLBACK TRANSACTION",
+            "SAVE TRANSACTION x",
+            "SET IMPLICIT_TRANSACTIONS OFF",
+            "USE [other_db]",
+            "IF 1=1 BEGIN COMMIT; END",
+        ] {
+            assert!(super::manual_transaction_control_conflict(sql), "{sql}");
+        }
+        for sql in [
+            "-- COMMIT\nSELECT 1",
+            "/* BEGIN TRANSACTION */ SELECT 1",
+            "/* outer /* inner */ COMMIT; USE other */ SELECT 1",
+            "SELECT 'ROLLBACK; USE db'",
+            "SELECT [COMMIT], [USE] FROM t",
+            "BEGIN TRY SELECT 1; END TRY BEGIN CATCH SELECT ERROR_MESSAGE(); END CATCH",
+            "DECLARE @message nvarchar(50) = N'SET IMPLICIT_TRANSACTIONS ON'",
+        ] {
+            assert!(!super::manual_transaction_control_conflict(sql), "{sql}");
+        }
+    }
+
     use super::{
         build_sqlserver_unsafe_type_query, capture_sqlserver_messages, completion_context_from_query_result,
         decode_sqlserver_spatial_values, format_sqlserver_numeric, is_blocking_sqlserver_unsafe_probe_error,

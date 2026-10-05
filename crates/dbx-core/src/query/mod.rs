@@ -7,6 +7,7 @@ pub mod plugin_data;
 pub mod plugin_plan;
 pub mod query_cancel;
 pub mod redis_ops;
+pub mod sqlserver_manual_transaction;
 pub mod two_phase_commit;
 
 pub use dbx_drivers::execution::{
@@ -5798,6 +5799,9 @@ async fn begin_transaction_session(
     catalog: Option<&str>,
     consistent_snapshot: bool,
 ) -> Result<String, String> {
+    if !consistent_snapshot && connection_database_type(state, connection_id).await == Some(DatabaseType::SqlServer) {
+        return sqlserver_manual_transaction::begin(state, connection_id, database, schema, catalog).await;
+    }
     let mysql_catalog_dialect = connection_mysql_catalog_dialect(state, connection_id).await;
     let pool_database = query_pool_database(database, catalog);
     // Probe the primary pool to learn the backend kind. Agent manual TX opens a
@@ -5956,6 +5960,7 @@ async fn begin_transaction_session(
 
     let txn_session_id = uuid::Uuid::new_v4().to_string();
     let session = TransactionSession {
+        sqlserver: None,
         connection: Arc::new(tokio::sync::Mutex::new(txn_conn)),
         pool_key: pool_key.clone(),
         last_activity: std::time::Instant::now(),
@@ -6059,6 +6064,8 @@ pub async fn execute_in_manual_transaction(
 pub struct ManualTransactionExecutionOptions {
     pub max_rows: Option<usize>,
     pub table_data_preview: bool,
+    pub execution_id: Option<String>,
+    pub timeout_secs: Option<u64>,
     pub page_size: Option<usize>,
     pub result_session_id: Option<String>,
     /// User-facing SQL to classify (Oracle-only). When present, the core
@@ -6077,6 +6084,9 @@ pub async fn execute_in_manual_transaction_with_options(
     schema: Option<&str>,
     options: ManualTransactionExecutionOptions,
 ) -> Result<Vec<ExecuteMultiResult>, String> {
+    if sqlserver_manual_transaction::is_session_id(txn_session_id) {
+        return sqlserver_manual_transaction::execute(state, txn_session_id, sql, database, schema, options).await;
+    }
     const TXN_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(MANUAL_TRANSACTION_IDLE_TIMEOUT_SECS);
 
     // Resolve statements and validate before taking the per-session connection
@@ -6176,6 +6186,9 @@ pub async fn execute_in_manual_transaction_with_options(
     let mut conn = connection.lock().await;
     for (i, statement) in statements.iter().enumerate() {
         let result = match &mut *conn {
+            TxnConnection::SqlServer { .. } => {
+                return Err("SQL Server transaction must use its batch executor".to_string())
+            }
             TxnConnection::Postgres(conn) => {
                 execute_manual_txn_postgres_statement(conn.as_ref(), statement, row_limit).await
             }
@@ -6423,6 +6436,7 @@ where
             .await
         }
         TxnConnection::Mysql(None) => Err(MANUAL_TRANSACTION_SESSION_NOT_FOUND_ERROR.to_string()),
+        TxnConnection::SqlServer { .. } => Err("Streaming SQL Server manual transactions is not supported".to_owned()),
         TxnConnection::Agent { .. } => {
             Err("Streaming rows inside an agent manual transaction is not supported".to_string())
         }
@@ -6524,6 +6538,28 @@ async fn rollback_manual_txn_connection_with_postgres_timeout(
     postgres_timeout: Option<Duration>,
 ) -> Result<(), String> {
     match conn {
+        TxnConnection::SqlServer { client, client_session_id: _client_session_id, .. } => {
+            if let Some(client) = client {
+                let mut client = client.lock().await;
+                let count = db::sqlserver::manual_transaction_status(&mut client).await?.count;
+                if count == 0 {
+                    return Err("The transaction has already ended; rollback cannot be confirmed".to_string());
+                }
+                #[cfg(feature = "test-support")]
+                sqlserver_manual_transaction::live_test_hooks::run(
+                    _client_session_id,
+                    sqlserver_manual_transaction::live_test_hooks::Phase::BeforeRollback,
+                );
+                db::sqlserver::execute_simple_batch_with_max_rows_metadata(
+                    &mut client,
+                    "ROLLBACK TRANSACTION",
+                    Some(1),
+                )
+                .await?;
+            } else {
+                return Err("The transaction connection was discarded; rollback cannot be confirmed".to_string());
+            }
+        }
         TxnConnection::Postgres(conn) => {
             if let Some(timeout) = postgres_timeout {
                 db::postgres::execute_postgres_infra_statement(conn, "ROLLBACK", timeout, "manual_txn.rollback")
@@ -6586,7 +6622,8 @@ async fn discard_mysql_manual_txn_connection(conn: &mut TxnConnection, timeout: 
 
 async fn release_manual_txn_session_pool(state: &AppState, connection_id: &str, conn: &mut TxnConnection) {
     let (client_session_id, database, cleanup_guard) = match conn {
-        TxnConnection::Agent { client_session_id, database, cleanup_guard, .. }
+        TxnConnection::SqlServer { client_session_id, database, cleanup_guard, .. }
+        | TxnConnection::Agent { client_session_id, database, cleanup_guard, .. }
         | TxnConnection::ExternalDriver { client_session_id, database, cleanup_guard, .. } => {
             (client_session_id, database, cleanup_guard)
         }
@@ -6873,6 +6910,9 @@ async fn execute_manual_txn_mysql_statement(
 
 /// Commit an existing manual transaction session.
 pub async fn commit_manual_transaction(state: &AppState, txn_session_id: &str) -> Result<db::QueryResult, String> {
+    if sqlserver_manual_transaction::is_session_id(txn_session_id) {
+        return sqlserver_manual_transaction::finish(state, txn_session_id, true).await;
+    }
     let session = {
         let mut sessions = state.transaction_sessions.write().await;
         sessions.remove(txn_session_id).ok_or("Transaction session not found")?
@@ -6880,6 +6920,7 @@ pub async fn commit_manual_transaction(state: &AppState, txn_session_id: &str) -
 
     let mut conn = session.connection.lock().await;
     match &mut *conn {
+        TxnConnection::SqlServer { .. } => return Err("SQL Server transaction must use its commit handler".to_string()),
         TxnConnection::Postgres(conn) => {
             conn.execute_typed("COMMIT", &[]).await.map_err(|e| format!("COMMIT failed: {e}"))?;
         }
@@ -6930,6 +6971,9 @@ pub async fn commit_manual_transaction(state: &AppState, txn_session_id: &str) -
 
 /// Rollback an existing manual transaction session.
 pub async fn rollback_manual_transaction(state: &AppState, txn_session_id: &str) -> Result<db::QueryResult, String> {
+    if sqlserver_manual_transaction::is_session_id(txn_session_id) {
+        return sqlserver_manual_transaction::finish(state, txn_session_id, false).await;
+    }
     let session = {
         let mut sessions = state.transaction_sessions.write().await;
         sessions.remove(txn_session_id).ok_or("Transaction session not found")?
@@ -7068,6 +7112,7 @@ mod tests {
             state.transaction_sessions.write().await.insert(
                 "snapshot".to_string(),
                 TransactionSession {
+                    sqlserver: None,
                     connection: Arc::new(tokio::sync::Mutex::new(TxnConnection::Postgres(Box::new(connection)))),
                     pool_key: "conn-1".to_string(),
                     last_activity: std::time::Instant::now(),
@@ -10306,6 +10351,7 @@ for line in sys.stdin:
         state.transaction_sessions.write().await.insert(
             "txn-test".to_string(),
             TransactionSession {
+                sqlserver: None,
                 connection: Arc::new(tokio::sync::Mutex::new(TxnConnection::ExternalDriver {
                     session,
                     config,
@@ -11519,6 +11565,7 @@ for line in sys.stdin:
         state.transaction_sessions.write().await.insert(
             txn_session_id.clone(),
             TransactionSession {
+                sqlserver: None,
                 connection: Arc::new(tokio::sync::Mutex::new(TxnConnection::Agent {
                     client: Arc::new(crate::db::agent_driver::PooledAgentClient::new(client)),
                     client_session_id,

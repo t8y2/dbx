@@ -445,7 +445,7 @@ mod tests {
         assert_eq!(tail.entries[0].seq, 3);
 
         // Unknown run id stays a machine-coded error, never a silent empty page.
-        let error = svc.get_run("ghost".to_owned()).await.unwrap_err();
+        let error = svc.get_run("ghost").await.unwrap_err();
         assert!(error.to_string().starts_with("run_not_found: "), "{error}");
     }
 

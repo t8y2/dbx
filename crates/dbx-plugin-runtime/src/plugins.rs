@@ -15,6 +15,7 @@ mod lifecycle;
 mod manifest;
 mod marketplace;
 mod runtime;
+mod task;
 
 pub use assets::PluginUiAsset;
 pub use filesystem::{
@@ -48,7 +49,8 @@ pub use manifest::{
     PluginEngines, PluginEntrypoints, PluginFieldCondition, PluginFieldConditionClause, PluginFieldConditionLiteral,
     PluginFilesystemCapability, PluginFilesystemProviderContribution, PluginFormFieldBinding,
     PluginFormFieldDefinition, PluginFormFieldOption, PluginFormFieldPicker, PluginFormFieldPickerKind,
-    PluginFormFieldType, PluginManifest, PluginUiEntrypoint, PluginWorkbenchContribution,
+    PluginFormFieldType, PluginManifest, PluginTaskCapability, PluginTaskMode, PluginTaskProviderContribution,
+    PluginTaskRisk, PluginTaskTriggerContribution, PluginUiEntrypoint, PluginWorkbenchContribution,
     PLUGIN_CONNECTION_ACTION_METHOD, PLUGIN_CONNECTION_CONNECT_METHOD, PLUGIN_CONNECTION_DISCONNECT_METHOD,
     PLUGIN_CONNECTION_TEST_METHOD, SUPPORTED_PLUGIN_HOST_API_VERSION, SUPPORTED_PLUGIN_HOST_FEATURES,
     SUPPORTED_PLUGIN_MANIFEST_VERSION, SUPPORTED_PLUGIN_PERMISSIONS, SUPPORTED_PLUGIN_PROTOCOL_VERSION,
@@ -56,6 +58,17 @@ pub use manifest::{
 pub use runtime::{
     PluginBinaryMessage, PluginEvent, PluginHandshake, PluginHandshakeIdentity, PluginSessionState,
     PluginSessionStatus, PluginSidecarSession, PLUGIN_REQUEST_TIMEOUT, PLUGIN_REQUEST_USER_INPUT_METHOD,
+};
+pub use task::{
+    decode_task_event, ensure_task_event_capability, task_payload_contains_secret_key, PluginTaskArtifact,
+    PluginTaskArtifactEvent, PluginTaskEvent, PluginTaskExecuteResult, PluginTaskLogEvent, PluginTaskLogLevel,
+    PluginTaskMethod, PluginTaskProgressEvent, PluginTaskRunRef, PluginTaskRunRequest, PluginTaskRunTask,
+    PluginTaskSessionState, PluginTaskStartResult, PluginTaskStatusRequest, PluginTaskStatusResult,
+    PluginTaskStopRequest, PluginTaskStopResult, PluginTaskStream, PluginTaskValidateRequest, PluginTaskValidateResult,
+    PluginTaskValidateTask, MAX_PLUGIN_TASK_ID_CHARS, MAX_PLUGIN_TASK_LOG_MESSAGE_BYTES, MAX_PLUGIN_TASK_MESSAGE_BYTES,
+    PLUGIN_TASK_ARTIFACT_EVENT, PLUGIN_TASK_EXECUTE_METHOD, PLUGIN_TASK_LOG_EVENT, PLUGIN_TASK_PROGRESS_EVENT,
+    PLUGIN_TASK_START_METHOD, PLUGIN_TASK_STATE_EVENT, PLUGIN_TASK_STATUS_METHOD, PLUGIN_TASK_STOP_METHOD,
+    PLUGIN_TASK_VALIDATE_METHOD,
 };
 
 #[derive(Debug, Clone)]

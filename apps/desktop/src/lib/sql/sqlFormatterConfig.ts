@@ -4,6 +4,7 @@ export const SQL_FORMATTER_CONFIG_FORMATTER = "sql-formatter";
 const CASE_VALUES = ["preserve", "upper", "lower"] as const;
 const INDENT_STYLE_VALUES = ["standard", "tabularLeft", "tabularRight"] as const;
 const LOGICAL_OPERATOR_NEWLINE_VALUES = ["before", "after", "none"] as const;
+const COMMA_POSITION_VALUES = ["after", "before"] as const;
 const FROM_CLAUSE_LAYOUT_VALUES = ["newLine", "sameLine"] as const;
 const TAB_WIDTH_VALUES = [2, 4] as const;
 const EXPRESSION_WIDTH_VALUES = [50, 80, 120] as const;
@@ -15,6 +16,7 @@ const SQL_FORMATTER_LEGACY_OPTION_KEYS = new Set(["params"]);
 export type SqlFormatterCase = (typeof CASE_VALUES)[number];
 export type SqlFormatterIndentStyle = (typeof INDENT_STYLE_VALUES)[number];
 export type SqlFormatterLogicalOperatorNewline = (typeof LOGICAL_OPERATOR_NEWLINE_VALUES)[number];
+export type SqlFormatterCommaPosition = (typeof COMMA_POSITION_VALUES)[number];
 export type SqlFormatterFromClauseLayout = (typeof FROM_CLAUSE_LAYOUT_VALUES)[number];
 export type SqlFormatterTabWidth = (typeof TAB_WIDTH_VALUES)[number];
 export type SqlFormatterExpressionWidth = (typeof EXPRESSION_WIDTH_VALUES)[number];
@@ -46,6 +48,7 @@ export interface SqlFormatterOptionSettings {
   useTabs: boolean;
   tabWidth: SqlFormatterTabWidth;
   logicalOperatorNewline: SqlFormatterLogicalOperatorNewline;
+  commaPosition: SqlFormatterCommaPosition;
   fromClauseLayout: SqlFormatterFromClauseLayout;
   expressionWidth: SqlFormatterExpressionWidth;
   linesBetweenQueries: SqlFormatterLinesBetweenQueries;
@@ -74,6 +77,7 @@ export const DEFAULT_SQL_FORMATTER_SETTINGS: SqlFormatterSettings = {
   useTabs: false,
   tabWidth: 2,
   logicalOperatorNewline: "before",
+  commaPosition: "after",
   fromClauseLayout: "sameLine",
   expressionWidth: 120,
   linesBetweenQueries: 1,
@@ -92,6 +96,7 @@ const SQL_FORMATTER_OPTION_KEYS = new Set<keyof SqlFormatterOptionSettings>([
   "useTabs",
   "tabWidth",
   "logicalOperatorNewline",
+  "commaPosition",
   "fromClauseLayout",
   "expressionWidth",
   "linesBetweenQueries",
@@ -110,6 +115,7 @@ const SQL_FORMATTER_OPTION_VALIDATORS: Record<keyof SqlFormatterOptionSettings, 
   useTabs: (value) => typeof value === "boolean",
   tabWidth: (value) => isNumberChoice(value, TAB_WIDTH_VALUES),
   logicalOperatorNewline: (value) => isStringChoice(value, LOGICAL_OPERATOR_NEWLINE_VALUES),
+  commaPosition: (value) => isStringChoice(value, COMMA_POSITION_VALUES),
   fromClauseLayout: (value) => isStringChoice(value, FROM_CLAUSE_LAYOUT_VALUES),
   expressionWidth: (value) => isNumberChoice(value, EXPRESSION_WIDTH_VALUES),
   linesBetweenQueries: (value) => isNumberChoice(value, LINES_BETWEEN_QUERIES_VALUES),
@@ -192,6 +198,7 @@ export function sqlFormatterOptionSettings(settings: unknown): SqlFormatterOptio
     useTabs: normalizeBoolean(input.useTabs, DEFAULT_SQL_FORMATTER_SETTINGS.useTabs),
     tabWidth: normalizeNumberChoice(input.tabWidth, TAB_WIDTH_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.tabWidth),
     logicalOperatorNewline: normalizeChoice(input.logicalOperatorNewline, LOGICAL_OPERATOR_NEWLINE_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.logicalOperatorNewline),
+    commaPosition: normalizeChoice(input.commaPosition, COMMA_POSITION_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.commaPosition),
     fromClauseLayout: normalizeChoice(input.fromClauseLayout, FROM_CLAUSE_LAYOUT_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.fromClauseLayout),
     expressionWidth: normalizeNumberChoice(input.expressionWidth, EXPRESSION_WIDTH_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.expressionWidth),
     linesBetweenQueries: normalizeNumberChoice(input.linesBetweenQueries, LINES_BETWEEN_QUERIES_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.linesBetweenQueries),

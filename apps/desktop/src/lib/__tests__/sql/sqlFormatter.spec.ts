@@ -632,4 +632,21 @@ AND owner_id = 42`,
     expect(formatted).toContain("SELECT");
     expect(formatted).toContain("::jsonb");
   });
+
+  it("formats multiline items with leading comma position", async () => {
+    const sql = "SELECT col1, col2, col3 FROM tbl WHERE a = 1;";
+    const formatted = await formatSqlText(sql, "generic", { commaPosition: "before", indentStyle: "tabularLeft" });
+
+    expect(formatted).toContain(", col2");
+    expect(formatted).toContain(", col3");
+    expect(formatted).not.toMatch(/col1,/);
+  });
+
+  it("preserves line comments when formatting with leading comma position", async () => {
+    const sql = "SELECT\n  col1, -- first column\n  col2 -- second column\nFROM tbl;";
+    const formatted = await formatSqlText(sql, "generic", { commaPosition: "before", indentStyle: "tabularLeft" });
+
+    expect(formatted).toContain("col1 -- first column");
+    expect(formatted).toMatch(/,\s*col2\s*-- second column/);
+  });
 });

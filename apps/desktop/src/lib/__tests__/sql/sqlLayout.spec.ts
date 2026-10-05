@@ -321,4 +321,42 @@ describe("sql layout", () => {
   it("formats a dialect without its own grammar", async () => {
     expect(await format("select * from t where a = 1 and b = 2;", {}, "generic")).toBe("SELECT * FROM t WHERE a = 1 AND b = 2;");
   });
+
+  it("formats a query with leading comma position (#7723, #5110)", async () => {
+    const sql = lines("SELECT loc_id, loc_name, loc_type, delivery_emp_num, update_time", "FROM tbl", "WHERE rn = 1;");
+
+    expect(await format(sql, { commaPosition: "before" })).toBe(lines("SELECT loc_id", "     , loc_name", "     , loc_type", "     , delivery_emp_num", "     , update_time", "FROM tbl", "WHERE rn = 1;"));
+  });
+
+  it("formats aligned projection aliases with leading commas", async () => {
+    const sql = lines("SELECT id AS emp_id, department_name AS dept, active_status AS status", "FROM employees;");
+
+    expect(await format(sql, { commaPosition: "before" })).toBe(lines("SELECT id              AS emp_id", "     , department_name AS dept", "     , active_status   AS status", "FROM employees;"));
+  });
+
+  it("formats CREATE TABLE with leading commas in DDL", async () => {
+    const sql = lines(
+      "CREATE TABLE IF NOT EXISTS `delivery_emp_info`",
+      "(",
+      "  `id` varchar(20) PRIMARY KEY NOT NULL COMMENT '主键',",
+      "  `emp_id` varchar(20) NOT NULL COMMENT '员工id',",
+      "  `delivery_type_ids` varchar(512) DEFAULT NULL COMMENT '负责的运送类型id集合',",
+      "  `update_time` datetime NOT NULL COMMENT '更新时间',",
+      "  CONSTRAINT idx_emp_phone UNIQUE (emp_id, emp_phone_num) COMMENT '运送员id电话唯一'",
+      ") ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_bin COMMENT '运达员信息表';",
+    );
+
+    expect(await format(sql, { commaPosition: "before" })).toBe(
+      lines(
+        "CREATE TABLE IF NOT EXISTS `delivery_emp_info`",
+        "(",
+        "    `id`                varchar(20)  PRIMARY KEY NOT NULL COMMENT '主键'",
+        "  , `emp_id`            varchar(20)              NOT NULL COMMENT '员工id'",
+        "  , `delivery_type_ids` varchar(512)         DEFAULT NULL COMMENT '负责的运送类型id集合'",
+        "  , `update_time`       datetime                 NOT NULL COMMENT '更新时间'",
+        "  , CONSTRAINT idx_emp_phone UNIQUE (emp_id, emp_phone_num) COMMENT '运送员id电话唯一'",
+        ") ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_bin COMMENT '运达员信息表';",
+      ),
+    );
+  });
 });

@@ -409,6 +409,7 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
     fromClauseSourceOnSameLine: normalizedSettings.fromClauseLayout === "sameLine",
     keywordCase: normalizedSettings.keywordCase,
     logicalOperatorNewline: normalizedSettings.logicalOperatorNewline,
+    commaPosition: normalizedSettings.commaPosition,
   };
   const usesDefaultStyle = normalizedSettings.indentStyle === "standard";
 
@@ -668,6 +669,56 @@ function keepFromClauseAndFirstSourceOnSameLine(sql: string): string {
   return lines.join("\n");
 }
 
+function formatLeadingCommas(sql: string, dialect: SqlFormatDialect = "generic"): string {
+  const { masked, spans } = maskStringAndCommentSpans(sql, dialect);
+  const lines = masked.split("\n");
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const match = lines[i].match(/^(.*),\s*((?:\x00\d+\x00\s*)*)$/);
+    if (!match || match[1].trim().length === 0) continue;
+
+    let j = i + 1;
+    while (j < lines.length) {
+      const trimmed = lines[j].trim();
+      if (!trimmed) {
+        j += 1;
+        continue;
+      }
+      if (/^(?:\x00\d+\x00\s*)+$/.test(trimmed)) {
+        j += 1;
+        continue;
+      }
+      break;
+    }
+    if (j >= lines.length) continue;
+
+    const nextTrimmed = lines[j].trim();
+    if (nextTrimmed.startsWith(")") || nextTrimmed.startsWith("]") || nextTrimmed.startsWith(";") || nextTrimmed.startsWith(",")) {
+      continue;
+    }
+
+    const codeBeforeComma = match[1].trimEnd();
+    const trailingComments = match[2] ? (codeBeforeComma.endsWith(" ") ? match[2] : ` ${match[2]}`) : "";
+    lines[i] = codeBeforeComma + trailingComments;
+
+    const nextIndentMatch = lines[j].match(/^(\s*)/);
+    const nextIndent = nextIndentMatch ? nextIndentMatch[1] : "";
+    const nextRest = lines[j].slice(nextIndent.length);
+    const currentIndentMatch = lines[i].match(/^(\s*)/);
+    const currentIndent = currentIndentMatch ? currentIndentMatch[1] : "";
+
+    if (currentIndent === nextIndent) {
+      lines[j] = `${nextIndent}, ${nextRest}`;
+    } else if (nextIndent.length >= 2) {
+      lines[j] = `${nextIndent.slice(0, -2)}, ${nextRest}`;
+    } else {
+      lines[j] = `${nextIndent}, ${nextRest}`;
+    }
+  }
+
+  return restoreSpans(lines.join("\n"), spans);
+}
+
 /**
  * The text-level passes applied to whatever the formatter produced, whether the
  * default style's layout printer or sql-formatter itself.
@@ -684,6 +735,7 @@ function applySqlFormatterLayout(sql: string, settings: SqlFormatterSettings, di
   let formatted = normalizeLikeOperatorCase(sql, settings, dialect);
   if (settings.logicalOperatorNewline === "none") formatted = keepLogicalOperatorsOnSameLine(formatted, dialect);
   if (settings.fromClauseLayout === "sameLine") formatted = keepFromClauseAndFirstSourceOnSameLine(formatted);
+  if (settings.commaPosition === "before") formatted = formatLeadingCommas(formatted, dialect);
   return formatted;
 }
 

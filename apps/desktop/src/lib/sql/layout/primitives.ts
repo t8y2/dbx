@@ -30,6 +30,13 @@ export interface SqlLayoutOptions {
    * wherever it fits, matching the element alignment rule.
    */
   logicalOperatorNewline: "before" | "after" | "none";
+  /**
+   * Where commas are placed in multiline item lists.
+   *
+   * `after` places commas at the end of the line (trailing comma);
+   * `before` places commas at the start of continuation lines (leading comma).
+   */
+  commaPosition: "after" | "before";
   /** Blank lines left between two statements. */
   linesBetweenQueries: number;
   /** Whether indentation is written with tab characters. */

@@ -83,7 +83,13 @@ function printClause(writer: Writer, clause: ClauseNode, baseColumn: number, ctx
       if (sourceOnOwnLine) writer.newline(baseColumn + ctx.options.indentWidth);
       else writer.space();
     } else {
-      writer.newline(itemColumn);
+      if (ctx.options.commaPosition === "before") {
+        const leadingIndent = sourceOnOwnLine ? baseColumn + ctx.options.indentWidth : Math.max(baseColumn, itemColumn - 2);
+        writer.newline(leadingIndent);
+        writer.write(", ");
+      } else {
+        writer.newline(itemColumn);
+      }
     }
     if (alignedAliases) {
       const aligned = alignedAliases[index];
@@ -97,7 +103,7 @@ function printClause(writer: Writer, clause: ClauseNode, baseColumn: number, ctx
     } else {
       printElement(writer, item, baseColumn, childCtx);
     }
-    if (index < items.length - 1) writer.write(",");
+    if (ctx.options.commaPosition !== "before" && index < items.length - 1) writer.write(",");
   });
 }
 

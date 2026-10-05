@@ -72,4 +72,20 @@ describe("sqlFormatterConfig shortcut storage", () => {
     expect(optIn).toEqual(expect.objectContaining({ ok: true }));
     if (optIn.ok) expect(optIn.settings.preserveEmptyLines).toBe(true);
   });
+
+  it("defaults commaPosition to after and accepts before", () => {
+    const defaultConfig = JSON.parse(serializeSqlFormatterConfig({}));
+    expect(defaultConfig.options.commaPosition).toBe("after");
+
+    const beforeResult = parseSqlFormatterConfig(JSON.stringify({ version: 1, formatter: "sql-formatter", options: { commaPosition: "before" } }));
+    expect(beforeResult).toEqual(expect.objectContaining({ ok: true }));
+    if (beforeResult.ok) expect(beforeResult.settings.commaPosition).toBe("before");
+    expect(JSON.parse(serializeSqlFormatterConfig({ commaPosition: "before" })).options.commaPosition).toBe("before");
+
+    const invalidResult = parseSqlFormatterConfig(JSON.stringify({ version: 1, formatter: "sql-formatter", options: { commaPosition: "invalid" } }));
+    expect(invalidResult).toEqual(expect.objectContaining({ ok: false }));
+
+    // sqlFormatterOptions must not include commaPosition so third-party sql-formatter does not throw
+    expect("commaPosition" in sqlFormatterOptions({ commaPosition: "before" })).toBe(false);
+  });
 });

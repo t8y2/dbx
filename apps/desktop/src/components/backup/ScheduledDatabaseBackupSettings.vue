@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, defineAsyncComponent, onMounted, reactive, ref, watch } from "vue";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useI18n } from "vue-i18n";
 import { Badge } from "@/components/ui/badge";
@@ -39,6 +39,12 @@ import { fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOpt
 const { t, locale } = useI18n();
 const { toast } = useToast();
 const connectionStore = useConnectionStore();
+
+// Migration-window compatibility adapter (plan §41–45): the legacy backup
+// settings stay fully functional; the banner switches this pane over to the
+// unified scheduler task center without deleting anything.
+const SchedulerPage = defineAsyncComponent(() => import("@/components/scheduler/SchedulerPage.vue"));
+const schedulerView = ref(false);
 const { schedules, runs, activeScheduleIds, activeRunIds, cancellingRunIds, activeRuns, heartbeat, destinationRoot, error: backupError, saveSchedule, setScheduleEnabled, deleteSchedule, deleteRuns, renameRun, runSchedule, runOneShot, cancelRun } = useScheduledDatabaseBackups();
 const desktop = isTauriRuntime();
 const backgroundEnabled = ref(false);
@@ -666,6 +672,16 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
 </script>
 
 <template>
+  <!-- Unified scheduler task center, reached from the legacy entry during the migration window. -->
+  <div v-if="schedulerView" class="flex flex-col gap-3">
+    <div class="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border/70 bg-muted/20 px-3 py-2">
+      <p class="text-xs text-muted-foreground">{{ t("scheduler.backupMigration.migratedHint") }}</p>
+      <Button variant="outline" size="sm" data-backup-back-to-legacy @click="schedulerView = false">{{ t("scheduler.backupMigration.backToLegacy") }}</Button>
+    </div>
+    <SchedulerPage />
+  </div>
+
+  <template v-else>
   <div class="flex flex-col gap-6">
     <div class="flex flex-wrap items-center justify-between gap-3">
       <div class="min-w-0">
@@ -674,6 +690,7 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
         <p v-if="!canCreateSchedule" class="mt-1 text-xs text-muted-foreground">{{ t("databaseBackup.noSupportedConnections") }}</p>
       </div>
       <div class="flex flex-wrap items-center justify-end gap-2">
+        <Button variant="outline" size="sm" data-backup-open-scheduler @click="schedulerView = true">{{ t("scheduler.backupMigration.openScheduler") }}</Button>
         <Button variant="outline" size="sm" :disabled="!canCreateSchedule" :title="canCreateSchedule ? t('databaseBackup.oneShotBackup') : t('databaseBackup.noSupportedConnections')" @click="openOneShotBackup">
           <Play class="mr-2 h-4 w-4" />
           {{ t("databaseBackup.oneShotBackup") }}
@@ -1077,6 +1094,7 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
       </DialogFooter>
     </DialogContent>
   </Dialog>
+  </template>
 </template>
 
 <style scoped>

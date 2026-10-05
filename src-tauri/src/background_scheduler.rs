@@ -417,7 +417,11 @@ async fn run_legacy_migration_if_enabled(store: SchedulerStore, data_dir: &Path,
         // start retries the marker-guarded transaction (ADR §8.3).
         Err(error) => log::error!("[scheduler] legacy backup migration failed: {error}"),
     }
-    drop(lease);
+    // LeaseGuard has no Drop release — the async release must be awaited, or
+    // the row lingers until TTL expiry and delays the engine's first acquire.
+    if let Some(lease) = lease {
+        lease.release().await;
+    }
 }
 
 struct WorkerLogger(std::sync::Mutex<std::fs::File>);

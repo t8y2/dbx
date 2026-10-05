@@ -117,6 +117,22 @@ describe("DataGrid manual count freshness", () => {
     expect(totalText(host)).toContain("250");
   });
 
+  it("reconciles a stale exact total when a page lands beyond it (#10968)", async () => {
+    const { host, state } = mountGrid();
+    await settle();
+    clickButton(host, String(i18n.global.t("grid.calculateTotalRowsInline")));
+    await settle();
+    expect(totalText(host)).toContain("250");
+
+    // The COUNT said 250, but the served snapshot holds more: the counted last
+    // page (offset 200, page size 100) comes back full, so row indexes reach
+    // 300 — adopt the observed extent instead of showing rows past the total.
+    state.pageOffset = 200;
+    state.result = pageResult();
+    await settle();
+    expect(totalText(host)).toContain("300");
+  });
+
   it("does not let an old manual count override a refreshed automatic count", async () => {
     let resolveCount!: (total: number) => void;
     const countTotalRows = vi.fn(() => new Promise<number>((resolve) => (resolveCount = resolve)));

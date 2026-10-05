@@ -73,6 +73,34 @@ export function resolveDataGridPaginationTotal(options: { paginationTotalRowCoun
   return Math.min(total, options.maxRows);
 }
 
+export interface ReconcileDataGridExactTotalOptions {
+  offset: number;
+  rowCount: number;
+  exactTotal: number;
+}
+
+/**
+ * Total to display after a page landed with rows beyond the exact counted
+ * total, or `undefined` when the counted total still describes the page.
+ *
+ * The COUNT that produced the exact total and the query that served the page
+ * are two separate snapshots: rows can land between them (a table being
+ * written to), and an agent result session serves the snapshot it was opened
+ * with even after newer rows were counted. Rendering that page against the
+ * stale total shows row indexes past the claimed end of the result (#10968) —
+ * adopt the observed extent instead, so the displayed total always covers
+ * every row the grid actually shows.
+ */
+export function reconcileDataGridExactTotalWithObservedPage(options: ReconcileDataGridExactTotalOptions): number | undefined {
+  const { offset, rowCount, exactTotal } = options;
+  if (!Number.isSafeInteger(offset) || offset < 0) return undefined;
+  if (!Number.isSafeInteger(rowCount) || rowCount <= 0) return undefined;
+  if (!Number.isSafeInteger(exactTotal) || exactTotal < 0) return undefined;
+  const observedExtent = offset + rowCount;
+  if (observedExtent <= exactTotal) return undefined;
+  return observedExtent;
+}
+
 export function hasCompleteLocalDataGridResult(options: CompleteLocalDataGridResultOptions): boolean {
   if (!options.isResultsContext || options.truncated === true || options.hasMore === true) return false;
   if (options.pageLimit === undefined) return true;

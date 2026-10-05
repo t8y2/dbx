@@ -105,6 +105,7 @@ const emit = defineEmits<{
   unfoldAll: [];
   toggleSqlKeywordCase: [];
   saveSql: [tabId: string];
+  "change-encoding": [value: NonNullable<QueryTab["externalSqlEncoding"]>];
   openSql: [];
   importResultArchive: [];
   pasteSqlInCondition: [];
@@ -519,6 +520,14 @@ function onExecuteClick(event: MouseEvent) {
 
 function onExecuteInNewResultTabClick(event: MouseEvent) {
   emit("toolbarExecuteInNewResultTab", event.detail > 0 ? "pointer" : "keyboard");
+}
+
+function changeEncoding(event: Event) {
+  const select = event.target as HTMLSelectElement;
+  const encoding = select.value as NonNullable<QueryTab["externalSqlEncoding"]>;
+  // Keep the visible selection committed until the asynchronous reload succeeds.
+  select.value = props.activeTab.externalSqlEncoding ?? "auto";
+  emit("change-encoding", encoding);
 }
 
 async function changeCatalog(selectedCatalog: string) {
@@ -1048,6 +1057,14 @@ async function changeCatalog(selectedCatalog: string) {
         </SearchableSelect>
       </div>
     </div>
+    <select v-if="activeTab.externalSqlPath" class="ml-1 h-6 rounded border border-border bg-background px-1 text-[11px]" :value="activeTab.externalSqlEncoding ?? 'auto'" :aria-label="t('toolbar.fileEncoding')" @change="changeEncoding">
+      <option value="auto">{{ t("toolbar.encodingAuto") }}</option>
+      <option value="utf8">UTF-8</option>
+      <option value="utf8Bom">UTF-8 BOM</option>
+      <option value="utf16le">UTF-16 LE</option>
+      <option value="utf16be">UTF-16 BE</option>
+      <option value="gbk">GBK / GB18030</option>
+    </select>
     <div v-if="activeTab.mode === 'data' && activeTab.tableMeta" class="ml-2 inline-flex shrink-0 items-center gap-1 rounded border border-border bg-muted/30 px-2 py-0.5 font-medium text-muted-foreground tabular-nums">
       <Table2 class="h-3.5 w-3.5 shrink-0" />
       <span class="truncate">{{ activeTab.tableMeta.columns.length }} {{ t("tree.columns") }}</span>

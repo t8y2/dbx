@@ -405,6 +405,8 @@ export default withEnglishFallback({
     logoutConfirm: "確定要登出嗎？",
   },
   toolbar: {
+    fileEncoding: "檔案編碼",
+    encodingAuto: "自動",
     commitOutcomeUnknown: "提交結果未知，交易工作階段已不存在。請核對資料後再決定是否重新執行 SQL。",
     moreActions: "更多操作",
     newConnection: "建立連線",

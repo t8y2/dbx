@@ -2610,6 +2610,7 @@ export const useQueryStore = defineStore("query", () => {
       editorSelection: t.editorSelection,
       savedSqlId: t.savedSqlId,
       externalSqlPath: t.externalSqlPath,
+      externalSqlEncoding: t.externalSqlEncoding,
       externalSqlFileVersion: t.externalSqlFileVersion,
       externalSqlIgnoredFileVersion: t.externalSqlIgnoredFileVersion,
       externalSqlFileMissing: t.externalSqlFileMissing,
@@ -3249,7 +3250,7 @@ export const useQueryStore = defineStore("query", () => {
     });
   }
 
-  function openExternalSqlFile(connectionId: string, database: string, path: string, sql: string, version?: QueryTab["externalSqlFileVersion"], catalog?: string, schema?: string, reveal?: { line: number; column?: number }) {
+  function openExternalSqlFile(connectionId: string, database: string, path: string, sql: string, version?: QueryTab["externalSqlFileVersion"], catalog?: string, schema?: string, reveal?: { line: number; column?: number }, encoding: QueryTab["externalSqlEncoding"] = "auto") {
     const normalizedPath = normalizeExternalSqlPath(path);
     const existing = tabs.value.find((tab) => tab.mode === "query" && tab.externalSqlPath && normalizeExternalSqlPath(tab.externalSqlPath) === normalizedPath);
     if (existing) {
@@ -3276,6 +3277,7 @@ export const useQueryStore = defineStore("query", () => {
       sql,
       originalSql: sql,
       externalSqlPath: path,
+      externalSqlEncoding: encoding,
       externalSqlFileVersion: version,
       editorRevealRequest: reveal ? { id: ++contentRevealSeq, line: reveal.line, column: reveal.column } : undefined,
       isExecuting: false,
@@ -4726,6 +4728,7 @@ export const useQueryStore = defineStore("query", () => {
       originalSql: "",
       savedSqlId: undefined,
       externalSqlPath: undefined,
+      externalSqlEncoding: undefined,
       lastExecutedSql: undefined,
       resultBaseSql: original.resultBaseSql,
       resultSortedSql: undefined,
@@ -5444,6 +5447,7 @@ export const useQueryStore = defineStore("query", () => {
     if (!tab) return;
     tab.savedSqlId = savedSqlId;
     tab.externalSqlPath = undefined;
+    tab.externalSqlEncoding = undefined;
     tab.externalSqlFileVersion = undefined;
     tab.externalSqlIgnoredFileVersion = undefined;
     tab.externalSqlFileMissing = undefined;
@@ -5453,10 +5457,11 @@ export const useQueryStore = defineStore("query", () => {
     }
   }
 
-  function linkExternalSqlPath(id: string, path: string, title?: string, version?: QueryTab["externalSqlFileVersion"]) {
+  function linkExternalSqlPath(id: string, path: string, title?: string, version?: QueryTab["externalSqlFileVersion"], encoding: QueryTab["externalSqlEncoding"] = "auto") {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab) return;
     tab.externalSqlPath = path;
+    tab.externalSqlEncoding = encoding;
     tab.externalSqlFileVersion = version;
     tab.externalSqlIgnoredFileVersion = undefined;
     tab.externalSqlFileMissing = undefined;

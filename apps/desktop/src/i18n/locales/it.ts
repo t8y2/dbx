@@ -398,6 +398,8 @@ export default withEnglishFallback({
     logoutConfirm: "Sei sicuro di voler uscire?",
   },
   toolbar: {
+    fileEncoding: "Codifica del file",
+    encodingAuto: "Automatica",
     immediateSync: "Sincronizza ora",
     commitOutcomeUnknown: "L'esito del commit è sconosciuto e la sessione non esiste più. Verificare i dati prima di eseguire nuovamente SQL.",
     moreActions: "Altre azioni",

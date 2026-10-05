@@ -1247,39 +1247,41 @@ export async function pendingOpenPluginInstallLinks(): Promise<string[]> {
 export interface ExternalSqlFileSnapshot {
   content: string;
   version: ExternalSqlFileVersion;
+  encoding?: import("@/types/database").QueryTab["externalSqlEncoding"];
 }
 
 export type ExternalSqlFileStatus = { kind: "present"; sizeBytes: number; modifiedNs: string } | { kind: "missing" };
 
 export type ExternalSqlFileWriteResult = { kind: "written"; version: ExternalSqlFileVersion } | { kind: "conflict"; currentVersion: ExternalSqlFileVersion } | { kind: "missing" };
 
-export async function readExternalSqlFileSnapshot(path: string, maxSizeBytes?: number): Promise<ExternalSqlFileSnapshot> {
-  const result = await invoke<{ kind: "content"; content: string; version: ExternalSqlFileVersion } | { kind: "tooLarge"; sizeBytes: number; maxSizeBytes: number }>("read_external_sql_file", { path, maxSizeBytes });
+export async function readExternalSqlFileSnapshot(path: string, maxSizeBytes?: number, encoding?: string): Promise<ExternalSqlFileSnapshot> {
+  const result = await invoke<{ kind: "content"; content: string; version: ExternalSqlFileVersion; encoding?: ExternalSqlFileSnapshot["encoding"] } | { kind: "tooLarge"; sizeBytes: number; maxSizeBytes: number }>("read_external_sql_file", { path, maxSizeBytes, encoding: encoding ?? null });
   if (result.kind === "tooLarge") {
     throw new ExternalSqlFileTooLargeError(result.sizeBytes, result.maxSizeBytes);
   }
-  return { content: result.content, version: result.version };
+  return { content: result.content, version: result.version, ...(result.encoding ? { encoding: result.encoding } : {}) };
 }
 
-export async function readExternalSqlFile(path: string, maxSizeBytes?: number): Promise<string> {
-  return (await readExternalSqlFileSnapshot(path, maxSizeBytes)).content;
+export async function readExternalSqlFile(path: string, maxSizeBytes?: number, encoding?: string): Promise<string> {
+  return (await readExternalSqlFileSnapshot(path, maxSizeBytes, encoding)).content;
 }
 
 export async function inspectExternalSqlFile(path: string): Promise<ExternalSqlFileStatus> {
   return invoke("inspect_external_sql_file", { path });
 }
 
-export async function writeExternalSqlFile(path: string, content: string, options: { expectedContentHash?: string; expectedMissing?: boolean } = {}): Promise<ExternalSqlFileWriteResult> {
+export async function writeExternalSqlFile(path: string, content: string, options: { expectedContentHash?: string; expectedMissing?: boolean; encoding?: string } = {}): Promise<ExternalSqlFileWriteResult> {
   return invoke("write_external_sql_file", {
     path,
     content,
     expectedContentHash: options.expectedContentHash ?? null,
     expectedMissing: options.expectedMissing ?? false,
+    encoding: options.encoding ?? "utf8",
   });
 }
 
-export async function saveExternalSqlFile(defaultFileName: string, content: string, filterExtension?: string): Promise<{ path: string; version: ExternalSqlFileVersion } | null> {
-  return invoke("save_external_sql_file", { defaultFileName, content, filterExtension });
+export async function saveExternalSqlFile(defaultFileName: string, content: string, filterExtension?: string, encoding?: string): Promise<{ path: string; version: ExternalSqlFileVersion } | null> {
+  return invoke("save_external_sql_file", { defaultFileName, content, filterExtension, encoding: encoding ?? "utf8" });
 }
 
 export interface SqlFileEntry {

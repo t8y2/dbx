@@ -333,6 +333,8 @@ export default withEnglishFallback({
     logoutConfirm: "Apakah Anda yakin ingin keluar?",
   },
   toolbar: {
+    fileEncoding: "Pengodean berkas",
+    encodingAuto: "Otomatis",
     commitOutcomeUnknown: "Hasil commit tidak diketahui dan sesi sudah tidak ada lagi. Verifikasi data sebelum menjalankan SQL ini lagi.",
     moreActions: "Tindakan lainnya",
     newConnection: "Koneksi Baru",

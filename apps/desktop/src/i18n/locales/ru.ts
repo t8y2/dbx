@@ -381,6 +381,8 @@ export default withEnglishFallback({
     logoutConfirm: "Вы действительно хотите выйти?",
   },
   toolbar: {
+    fileEncoding: "Кодировка файла",
+    encodingAuto: "Автоматически",
     immediateSync: "Синхронизировать сейчас",
     commitOutcomeUnknown: "Результат фиксации неизвестен, а сессия больше не существует. Проверьте данные перед повторным выполнением этого SQL.",
     moreActions: "Дополнительные действия",

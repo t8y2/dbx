@@ -8348,6 +8348,8 @@ export default withEnglishFallback({
     sidebarSearchOpenedDatabasesOnly: "Cerca solo nei database aperti",
     sidebarSearchOpenedDatabasesOnlyDescription: "La ricerca nella barra laterale carica solo i database aperti nella connessione corrente (se nessuno è aperto, cerca in tutti). Se disattivata, cerca in tutti i database della connessione.",
     shortcutSelectLineEnds: "Seleziona fine riga",
+    openQueryOnConnectionOpen: "Apri la pagina Query all'apertura della connessione",
+    openQueryOnConnectionOpenDescription: "Se abilitato, all'apertura di una connessione o di un database si apre per impostazione predefinita la pagina Query.",
   },
   driverStore: {
     jreDirRemoveFailed: "Impossibile rimuovere la vecchia directory JRE: {path} (errore originale: {error})",

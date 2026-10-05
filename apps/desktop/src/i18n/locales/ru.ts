@@ -9567,6 +9567,8 @@ export default withEnglishFallback({
     sidebarSearchOpenedDatabasesOnly: "Искать только в открытых базах данных",
     sidebarSearchOpenedDatabasesOnlyDescription: "Поиск на боковой панели загружает только открытые базы данных в текущем подключении (если ни одна не открыта, поиск выполняется по всем). Если отключить, поиск будет выполняться по всем базам данных этого подключения.",
     shortcutSelectLineEnds: "Выделить концы строк",
+    openQueryOnConnectionOpen: "Открывать страницу запроса при открытии подключения",
+    openQueryOnConnectionOpenDescription: "Если включено, при открытии подключения или базы данных по умолчанию открывается страница запроса.",
   },
   driverStore: {
     jreDirRemoveFailed: "Не удалось удалить старый каталог JRE: {path} (исходная ошибка: {error})",

@@ -2834,12 +2834,24 @@ export const useQueryStore = defineStore("query", () => {
     schema?: string,
     initialSql?: string,
     catalog?: string,
-    options: { forceNew?: boolean; activate?: boolean; forceWordWrap?: boolean; insertAfterActive?: boolean; sourceView?: boolean } = {},
+    options: { forceNew?: boolean; activate?: boolean; forceWordWrap?: boolean; insertAfterActive?: boolean; sourceView?: boolean; reuseQueryTabByScope?: boolean } = {},
   ) {
     if (title && !options.forceNew) {
       const existing = findTabByIdentity(connectionId, database, title, mode, schema, catalog);
       if (existing) {
         if (options.sourceView) existing.sourceView = true;
+        switchTab(existing.id);
+        return existing.id;
+      }
+    }
+    if (options.reuseQueryTabByScope && !options.forceNew && mode === "query") {
+      // Sidebar activation opens "the" query page for this connection scope:
+      // focus an existing plain query tab instead of stacking duplicates on
+      // repeated clicks (and on the click that precedes every dblclick).
+      // Saved SQL, external SQL files, and object-source tabs are documents
+      // in their own right and never take over the activation slot.
+      const existing = tabs.value.find((tab) => tab.mode === "query" && !tab.savedSqlId && !tab.externalSqlPath && !tab.objectSource && tab.connectionId === connectionId && tab.database === database && (tab.schema || "") === (schema || "") && (tab.catalog || "") === (catalog || ""));
+      if (existing) {
         switchTab(existing.id);
         return existing.id;
       }

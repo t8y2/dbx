@@ -8123,6 +8123,8 @@ export default withEnglishFallback({
     sidebarSearchOpenedDatabasesOnly: "열려 있는 데이터베이스만 검색",
     sidebarSearchOpenedDatabasesOnlyDescription: "사이드바 검색은 현재 연결에서 열려 있는 데이터베이스만 로드합니다(열려 있는 데이터베이스가 하나도 없으면 전체를 검색). 끄면 해당 연결의 모든 데이터베이스를 검색합니다.",
     shortcutSelectLineEnds: "줄 끝 선택",
+    openQueryOnConnectionOpen: "연결을 열 때 쿼리 페이지로 이동",
+    openQueryOnConnectionOpenDescription: "활성화하면 연결 또는 데이터베이스를 열 때 기본적으로 쿼리 페이지로 이동합니다.",
   },
   driverStore: {
     jreDirRemoveFailed: "이전 JRE 디렉터리 제거 실패: {path} (원래 오류: {error})",

@@ -6,6 +6,7 @@ import {
   objectSourceTargetForTreeNode,
   shouldActivateTreeNodeOnSingleClick,
   shouldBrowseObjectsOnDatabaseActivation,
+  shouldOpenQueryOnTreeNodeActivation,
   shouldRunTreeNodeRowAction,
   treeNodeRowAction,
   treeNodeRowDoubleClickAction,
@@ -226,5 +227,25 @@ describe("treeNodeClick", () => {
     expect(treeNodeRowDoubleClickAction("column", false, "double")).toBe("open-structure-editor");
     expect(treeNodeRowDoubleClickAction("index", false, "single")).toBe("open-structure-editor");
     expect(treeNodeRowDoubleClickAction("index", false, "double")).toBe("open-structure-editor");
+  });
+
+  it("opens the query page on activation only for sql-backed connection scopes", () => {
+    for (const type of ["connection", "database", "schema", "mongo-db"] as const) {
+      expect(shouldOpenQueryOnTreeNodeActivation({ type, connectionId: "c1" }, "postgres", true), type).toBe(true);
+    }
+    expect(shouldOpenQueryOnTreeNodeActivation({ type: "connection", connectionId: "c1" }, "mongodb", true)).toBe(true);
+    expect(shouldOpenQueryOnTreeNodeActivation({ type: "connection", connectionId: "c1" }, "postgres", false)).toBe(false);
+    expect(shouldOpenQueryOnTreeNodeActivation({ type: "connection" }, "postgres", true)).toBe(false);
+  });
+
+  it("keeps specialized workbench connections out of the query-on-activation path", () => {
+    for (const dbType of ["nacos", "consul", "hbase", "zookeeper", "plugin", "mq", "mqtt", "meilisearch", "salesforce"] as const) {
+      expect(shouldOpenQueryOnTreeNodeActivation({ type: "connection", connectionId: "c1" }, dbType, true), dbType).toBe(false);
+      expect(shouldOpenQueryOnTreeNodeActivation({ type: "database", connectionId: "c1" }, dbType, true), dbType).toBe(false);
+    }
+    // Object rows and connection-less nodes never hijack activation either.
+    expect(shouldOpenQueryOnTreeNodeActivation({ type: "table", connectionId: "c1" }, "postgres", true)).toBe(false);
+    expect(shouldOpenQueryOnTreeNodeActivation({ type: "nacos-namespace" }, "nacos", true)).toBe(false);
+    expect(shouldOpenQueryOnTreeNodeActivation({ type: "connection" }, undefined, true)).toBe(false);
   });
 });

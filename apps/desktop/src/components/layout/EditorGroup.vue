@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useToast } from "@/composables/useToast";
 import EditorGroupTabBar from "./EditorGroupTabBar.vue";
 import EditorToolbar from "./EditorToolbar.vue";
 import QueryEditorSurface from "./QueryEditorSurface.vue";
@@ -15,7 +16,7 @@ import { resolveExecutableSql } from "@/lib/sql/sqlExecutionTarget";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { usesProvenReadOnlyStickyTransactionState } from "@/lib/database/databaseFeatureSupport";
 import * as api from "@/lib/backend/api";
-import { externalSqlEditorMaxBytes } from "@/lib/sql/sqlFileOpen";
+import { externalSqlEditorMaxBytes, externalSqlFileOpenErrorMessage } from "@/lib/sql/sqlFileOpen";
 import { GROUP_TAB_BAR_PORTAL } from "./groupTabBarPortal";
 import type { ContentAreaSurfaceEmits, ContentAreaSurfaceProps, QueryEditorSurfaceHandle, StatementRange } from "./querySurfaces";
 import type { QueryTab, TableInfoTab } from "@/types/database";
@@ -101,6 +102,7 @@ const { t } = useI18n();
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
+const { toast } = useToast();
 const toolbar = inject(EDITOR_TOOLBAR_ACTIONS, createNoopEditorToolbarActions());
 const tabBarPortal = inject(GROUP_TAB_BAR_PORTAL, null);
 const tabBarTarget = computed(() => {
@@ -133,7 +135,7 @@ async function changeExternalSqlEncoding(encoding: NonNullable<QueryTab["externa
     tab.externalSqlEncoding = snapshot.encoding ?? encoding;
   } catch (error) {
     if (!stillCurrent()) return;
-    window.alert(error instanceof Error ? error.message : String(error));
+    toast(t("toolbar.sqlOpenFailed", { message: externalSqlFileOpenErrorMessage(error, (key, params) => t(key, params)) }), 5000);
   }
 }
 const isGroupStickyManualTransaction = computed(() => usesProvenReadOnlyStickyTransactionState(effectiveDatabaseTypeForConnection(activeConnection.value)) && (activeTab.value?.autoCommit ?? true) === false);

@@ -423,12 +423,6 @@ pub fn encode_sql_file_text(content: &str, encoding: &str) -> Result<Vec<u8>, St
         "utf8Bom" => {
             bytes.splice(0..0, [0xEF, 0xBB, 0xBF]);
         }
-        "utf16le" => {
-            bytes.splice(0..0, [0xFF, 0xFE]);
-        }
-        "utf16be" => {
-            bytes.splice(0..0, [0xFE, 0xFF]);
-        }
         _ => {}
     }
     Ok(bytes)

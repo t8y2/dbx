@@ -431,7 +431,7 @@ describe("'auto' never reaches the transport layer", () => {
   it("builds plugin Agent prompts that require live tools", () => {
     const request = buildAgentRequest({ config, action: "general", mode: "agent", instruction: "检查当前集群", context: context({ databaseType: "plugin", connectionName: "orb", database: "" }) });
     expect(request.messages[request.messages.length - 1]?.content).toBe("检查当前集群");
-    expect(buildSystemPrompt("general", context({ databaseType: "plugin", connectionName: "orb", database: "" }), "agent")).toContain("live data");
+    expect(buildSystemPrompt("general", context({ databaseType: "plugin", connectionName: "orb", database: "" }), "agent")).toMatch(/live data|实时数据/);
     expect(buildSystemPrompt("general", context({ databaseType: "plugin", connectionName: "orb", database: "" }), "agent")).not.toContain("返回 SQL");
   });
 

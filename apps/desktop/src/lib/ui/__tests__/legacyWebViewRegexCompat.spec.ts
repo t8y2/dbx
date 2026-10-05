@@ -43,7 +43,7 @@ describe("WebView startup sources stay compatible with old WebKit regex syntax",
         const source = readFileSync(file, "utf8");
         return source.includes("(?<=") || source.includes("(?<!");
       })
-      .map((file) => path.relative(workspaceRoot, file))
+      .map((file) => path.relative(workspaceRoot, file).split(path.sep).join("/"))
       .filter((relative) => !LOOKBEHIND_ALLOWLIST.has(relative));
     expect(offenders).toEqual([]);
   });

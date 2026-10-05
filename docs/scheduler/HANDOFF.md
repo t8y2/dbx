@@ -38,6 +38,6 @@
 
 ## 五、未决定事项（留给用户/接力会话）
 
-- 未 push 任何分支、未动远端。
+- 全部分支（main + 8 个 feature 分支）已于交接时提交并推送到 `origin`（github.com:jinpy666/dbx），已设置 upstream 跟踪。
 - `deploy/docker-compose.local.yml`（main 未跟踪）是用户自己的文件，未纳入任何提交。
 - SSH / Files 插件的仓库位置未确认（A6/A7 开工前先找 `io.dbx.ssh.connection` 的真实源码，方案 §98 有说明）。

@@ -7479,8 +7479,16 @@ pub async fn get_custom_type_details(pool: &Pool, schema: &str, name: &str) -> R
 /// last known count, often `0` (#10461). `pg_stat_user_tables.n_live_tup` is the
 /// statistics collector's live estimate: it tracks DML within seconds and still
 /// avoids a `COUNT(*)` scan, which is what the UI promises in its column hint.
+///
+/// A zero `n_live_tup` only carries information when the collector has actually
+/// observed DML on the table (`n_tup_ins/upd/del`): after `pg_stat_reset()`, an
+/// import that bypasses the collector, or `pg_upgrade`, the entry reports zeros
+/// while a recent ANALYZE left a perfectly good `reltuples` behind — trusting the
+/// zero masked that count and showed a populated table as `0` rows (#11072).
+/// When no DML was observed, fall back to `reltuples` instead.
 const POSTGRES_OBJECT_STATISTICS_SQL: &str = "SELECT c.relname, \
-        GREATEST(COALESCE(s.n_live_tup, c.reltuples), 0)::bigint AS estimated_rows, \
+        GREATEST(CASE WHEN COALESCE(s.n_tup_ins, 0) + COALESCE(s.n_tup_upd, 0) + COALESCE(s.n_tup_del, 0) > 0 \
+        THEN COALESCE(s.n_live_tup, 0) ELSE c.reltuples END, 0)::bigint AS estimated_rows, \
         pg_catalog.pg_total_relation_size(c.oid)::bigint AS total_bytes \
  FROM pg_catalog.pg_class c \
  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
@@ -15761,9 +15769,15 @@ mod tests {
     #[test]
     fn object_statistics_prefers_live_tuples_and_keeps_a_reltuples_fallback() {
         // #10461: `reltuples` lags behind DML, so the live estimate must win when
-        // `pg_stat_user_tables` is available...
+        // the collector has observed DML on the table...
         assert!(POSTGRES_OBJECT_STATISTICS_SQL.contains("pg_catalog.pg_stat_user_tables"));
-        assert!(POSTGRES_OBJECT_STATISTICS_SQL.contains("COALESCE(s.n_live_tup, c.reltuples)"));
+        assert!(POSTGRES_OBJECT_STATISTICS_SQL.contains("THEN COALESCE(s.n_live_tup, 0)"));
+        // ...while a zeroed collector entry (pg_stat_reset / pg_upgrade / an
+        // import that bypassed the collector, #11072) carries no information and
+        // must not mask a recent ANALYZE's `reltuples`.
+        assert!(POSTGRES_OBJECT_STATISTICS_SQL
+            .contains("WHEN COALESCE(s.n_tup_ins, 0) + COALESCE(s.n_tup_upd, 0) + COALESCE(s.n_tup_del, 0) > 0",));
+        assert!(POSTGRES_OBJECT_STATISTICS_SQL.contains("ELSE c.reltuples END"));
         // ...while an engine without that view still reports counts.
         assert!(!POSTGRES_OBJECT_STATISTICS_FALLBACK_SQL.contains("pg_stat_user_tables"));
         assert!(POSTGRES_OBJECT_STATISTICS_FALLBACK_SQL.contains("GREATEST(c.reltuples, 0)"));

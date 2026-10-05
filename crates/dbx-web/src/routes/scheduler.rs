@@ -33,6 +33,8 @@ const LOG_MAX_LIMIT: u64 = 5000;
 const EVENT_CHANNEL_CAPACITY: usize = 512;
 
 pub fn router() -> Router<Arc<WebState>> {
+    // Engine events (if an engine runs in this process) flow into the SSE hub.
+    register_engine_event_sink();
     Router::new()
         .route("/scheduler/tasks", get(list_tasks).post(create_task))
         .route("/scheduler/tasks/{id}", get(get_task).put(update_task).delete(delete_task))
@@ -108,6 +110,15 @@ fn events_hub() -> &'static tokio::sync::broadcast::Sender<String> {
 /// contract is notification-only and dropped events are acceptable.
 pub fn publish_event(event: &serde_json::Value) {
     let _ = events_hub().send(event.to_string());
+}
+
+/// Bridges engine-originated scheduler events (run-log / run-progress /
+/// engine-driven state changes, ADR §7.4) into the SSE hub whenever an engine
+/// runs in this process. Registration is name-keyed and idempotent, so
+/// repeated router builds stay single-subscriber. No route or payload shape
+/// changes — add-only per the A8 event-bridge contract.
+pub fn register_engine_event_sink() {
+    dbx_core::scheduler::register_event_sink("dbx-web-sse", Arc::new(|event| publish_event(event)));
 }
 
 fn emit_task_changed(task_id: &str) {

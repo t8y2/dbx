@@ -8587,6 +8587,8 @@ export default withEnglishFallback({
     savedSqlOpenTargetCurrent: "当前标签页",
     savedSqlOpenTargetCurrentDescription: "优先使用当前标签页的连接、数据库、Schema 和 Catalog；不可用时回退到保存时的目标。",
     prefillNewQueryWithSelect: "新建查询时预填充 SELECT 语句",
+    openQueryOnConnectionOpen: "打开连接时进入查询页",
+    openQueryOnConnectionOpenDescription: "启用后，打开连接或数据库时默认进入查询页面。",
     prefillNewQueryWithSelectDescription: "新建查询时，根据当前激活的数据表标签页或侧边栏选中的表，自动在编辑器中填充 SELECT * FROM <表名>。",
     generateSqlIncludeDatabaseName: "生成 SQL 时包含数据库名",
     generateSqlIncludeDatabaseNameDescription: "数据库支持时，生成的表 SQL 将使用限定名（SQL Server 为“数据库名.schema.表名”），而不只包含表名。",

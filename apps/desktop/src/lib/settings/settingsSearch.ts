@@ -154,6 +154,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "editor-unsaved-close", category: "editor", titleKey: "settings.confirmUnsavedSqlClose", descriptionKey: "settings.confirmUnsavedSqlCloseDescription", targetId: "editor" },
   { id: "editor-app-close-unsaved-tabs", category: "editor", titleKey: "settings.appCloseUnsavedTabsMode", descriptionKey: "settings.appCloseUnsavedTabsModeDescription", targetId: "editor" },
   { id: "editor-prefill-query", category: "navigation", titleKey: "settings.prefillNewQueryWithSelect", descriptionKey: "settings.prefillNewQueryWithSelectDescription", targetId: "navigation" },
+  { id: "editor-open-query-on-connection", category: "navigation", titleKey: "settings.openQueryOnConnectionOpen", descriptionKey: "settings.openQueryOnConnectionOpenDescription", targetId: "navigation" },
   { id: "editor-generate-sql-include-database", category: "editor", titleKey: "settings.generateSqlIncludeDatabaseName", descriptionKey: "settings.generateSqlIncludeDatabaseNameDescription", targetId: "editor" },
   { id: "editor-generate-sql-quote-identifiers", category: "editor", titleKey: "settings.generateSqlQuoteIdentifiers", descriptionKey: "settings.generateSqlQuoteIdentifiersDescription", targetId: "editor" },
   { id: "editor-format-sql-on-sql-file-save", category: "editor", titleKey: "settings.formatSqlOnSqlFileSave", descriptionKey: "settings.formatSqlOnSqlFileSaveDescription", targetId: "editor" },

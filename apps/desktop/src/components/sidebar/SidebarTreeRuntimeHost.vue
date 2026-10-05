@@ -1160,6 +1160,12 @@ async function toggle(requestId = beginNavigationRequest()) {
 }
 
 function runRowClickAction(clickDetail: number) {
+  if (shouldOpenQueryOnActivation(activeNode.value)) {
+    if (clickDetail > 1) return;
+    beginNavigationRequest();
+    void newQuery();
+    return;
+  }
   const node = activeNode.value;
   if (node.type === "load-more") {
     if (clickDetail > 1) return;
@@ -1615,6 +1621,11 @@ function requestDeleteSelectedNode(): boolean {
 }
 
 function onDoubleClick(event: MouseEvent) {
+  if (shouldOpenQueryOnActivation(activeNode.value)) {
+    beginNavigationRequest();
+    void newQuery();
+    return;
+  }
   if (dataTabOpenModeFromTreeClick(activeNode.value.type, event, settingsStore.editorSettings.shortcuts.openDataInNewTab) === "new-tab") return;
   if (activeNode.value.type === "event") {
     beginNavigationRequest();
@@ -2048,6 +2059,10 @@ function openDataImmediately(node: TreeNode = activeNode.value) {
 
 function openDataInNewTabImmediately(node: TreeNode = activeNode.value) {
   emit("open-data", node, false, "new-tab", (target, request) => openData(target, request, "new-tab"));
+}
+
+function shouldOpenQueryOnActivation(node: TreeNode): boolean {
+  return settingsStore.editorSettings.openQueryOnConnectionOpen && !!node.connectionId && (node.type === "connection" || node.type === "database" || node.type === "schema" || node.type === "mongo-db");
 }
 
 async function newQuery() {

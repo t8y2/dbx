@@ -2703,7 +2703,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-web"
-version = "0.6.28"
+version = "0.6.26"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",

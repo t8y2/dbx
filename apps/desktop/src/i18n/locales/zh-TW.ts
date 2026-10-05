@@ -7878,6 +7878,7 @@ export default withEnglishFallback({
     includeCreateDatabase: "匯出建庫語句（CREATE DATABASE / USE）",
     dropTableIfExists: "匯出前新增 DROP TABLE IF EXISTS",
     omitAutoIncrement: "省略 AUTO_INCREMENT（用於全新安裝的初始化腳本）",
+    preserveOriginalLanguage: "在 SQL 中保留原始語言（解碼 \\uXXXX 轉義）",
     includeData: "資料表資料 (INSERT)",
     sqlColumnSelection: "要匯出的欄位",
     selectedColumns: "已選取 {selected}/{total} 個欄位",

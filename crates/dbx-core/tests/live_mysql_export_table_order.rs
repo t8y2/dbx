@@ -99,6 +99,7 @@ async fn live_mysql_database_export_table_order_is_not_alphabetical_when_fk_reor
         include_create_database: false,
         drop_table_if_exists: false,
         omit_auto_increment: false,
+        preserve_original_language: false,
         fail_on_error: true,
         prevent_overwrite: false,
         output_compression: Default::default(),

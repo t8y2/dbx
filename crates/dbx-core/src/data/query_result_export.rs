@@ -519,6 +519,7 @@ impl SqlInsertWriter {
                 spatial_values: mem::take(&mut self.pending_spatial_values),
                 rows: mem::take(&mut self.pending_rows),
                 batch_size: Some(self.insert_mode.batch_size(SQL_INSERT_BATCH_SIZE)),
+                preserve_original_language: false,
             },
             &self.exclude_columns,
         )?;

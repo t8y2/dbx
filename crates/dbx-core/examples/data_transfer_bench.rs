@@ -104,6 +104,7 @@ fn run() -> Result<(), String> {
         spatial_values: Vec::new(),
         rows: rows.clone(),
         batch_size: Some(options.batch_size),
+        preserve_original_language: false,
     })?;
     let sql_ms = elapsed_ms(sql_started);
 

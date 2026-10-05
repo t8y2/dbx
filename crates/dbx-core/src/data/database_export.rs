@@ -139,6 +139,14 @@ pub struct DatabaseExportRequest {
     /// position. No-op for non-MySQL databases. Defaults to `false` (preserve).
     #[serde(default)]
     pub omit_auto_increment: bool,
+    /// Decode JSON-style `\uXXXX` Unicode escapes back into literal characters
+    /// in exported string literals, so values an application deliberately
+    /// ASCII-escaped before storing (e.g. to keep Vietnamese text safe in a
+    /// non-Unicode TEXT column) read as the original language directly in the
+    /// `.sql` file. Opt-in; defaults to `false` to preserve the exact stored
+    /// bytes on export/import round-trips.
+    #[serde(default)]
+    pub preserve_original_language: bool,
     #[serde(default)]
     pub fail_on_error: bool,
     /// Refuse to truncate an existing destination. Scheduled backups enable
@@ -537,6 +545,19 @@ pub struct BuildExportInsertStatementsOptions {
     pub rows: Vec<Vec<Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_size: Option<usize>,
+    /// Decode JSON-style `\uXXXX` Unicode escapes back into literal characters
+    /// in exported string literals (e.g. `\u1ed0` -> `ố`). Opt-in and defaults
+    /// to `false`: application code may deliberately store ASCII-escaped
+    /// Unicode in a TEXT column (see `decode_unicode_escapes_for_export`), and
+    /// the default export keeps that exact byte-for-byte round trip. Enable
+    /// this only to make the `.sql` file itself readable in the original
+    /// language. Re-importing such an export stores the decoded literal
+    /// characters rather than the original ASCII-escaped form, so it is not a
+    /// byte-faithful backup; any `\uXXXX`-shaped run forming a valid hex code
+    /// point (e.g. `\uface`) is decoded as well, including text that merely
+    /// documents such escapes.
+    #[serde(default)]
+    pub preserve_original_language: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -578,6 +599,9 @@ pub struct BuildDatabaseSqlExportOptions {
     /// Defaults to `false` (preserve). See `DatabaseExportRequest::omit_auto_increment`.
     #[serde(default)]
     pub omit_auto_increment: bool,
+    /// See `DatabaseExportRequest::preserve_original_language`.
+    #[serde(default)]
+    pub preserve_original_language: bool,
 }
 
 pub fn format_export_sql_literal(value: &Value) -> String {
@@ -714,6 +738,64 @@ fn format_postgres_json_export_literal(value: &Value) -> String {
 /// round-trips.
 fn quote_standard_export_sql_string(text: &str) -> String {
     format!("'{}'", text.replace('\'', "''"))
+}
+
+/// Decodes JSON-style `\uXXXX` Unicode escapes (including surrogate pairs)
+/// into their literal characters, leaving every other backslash sequence
+/// untouched. Used only by the opt-in "preserve original language" export
+/// option: application code (e.g. `encodeJsonValuesForDb`-style helpers) may
+/// deliberately store ASCII-escaped Unicode in a TEXT column so the value
+/// survives non-Unicode-aware storage; this renders that text human-readable
+/// directly in the exported `.sql` file without touching the stored bytes in
+/// the source database or breaking the round-trip for any other backslash
+/// usage (e.g. a literal `\n`, a Windows path, or a doubled SQL quote).
+fn decode_unicode_escapes_for_export(text: &str) -> String {
+    if !text.contains("\\u") {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut result = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '\\' && chars.get(i + 1) == Some(&'u') {
+            if let Some(high) = parse_hex4(&chars, i + 2) {
+                if (0xD800..=0xDBFF).contains(&high) {
+                    // Possible surrogate pair: look for a trailing \uDC00-\uDFFF.
+                    let low = if chars.get(i + 6) == Some(&'\\') && chars.get(i + 7) == Some(&'u') {
+                        parse_hex4(&chars, i + 8).filter(|low| (0xDC00..=0xDFFF).contains(low))
+                    } else {
+                        None
+                    };
+                    if let Some(low) = low {
+                        let combined = 0x10000u32 + ((high - 0xD800) << 10) + (low - 0xDC00);
+                        if let Some(decoded) = char::from_u32(combined) {
+                            result.push(decoded);
+                            i += 12;
+                            continue;
+                        }
+                    }
+                    // Lone high surrogate: not representable as a char, keep as-is.
+                    result.push(chars[i]);
+                    i += 1;
+                    continue;
+                }
+                if let Some(decoded) = char::from_u32(high) {
+                    result.push(decoded);
+                    i += 6;
+                    continue;
+                }
+            }
+        }
+        result.push(chars[i]);
+        i += 1;
+    }
+    result
+}
+
+fn parse_hex4(chars: &[char], start: usize) -> Option<u32> {
+    let slice = chars.get(start..start + 4)?;
+    let hex: String = slice.iter().collect();
+    u32::from_str_radix(&hex, 16).ok()
 }
 
 /// SQL Server binary column types. The driver exposes their values as
@@ -1488,6 +1570,17 @@ pub(crate) fn build_export_insert_statements_excluding_with_dialect(
                 .copied()
                 .flatten()
                 .or_else(|| spatial_columns.get(index).copied().flatten());
+            let decoded_value;
+            let value = if options.preserve_original_language {
+                if let Some(text) = value.as_str() {
+                    decoded_value = Value::String(decode_unicode_escapes_for_export(text));
+                    &decoded_value
+                } else {
+                    value
+                }
+            } else {
+                value
+            };
             let literal = if insert_dialect == SqlInsertDialect::Standard {
                 format_standard_sql_literal(value)
             } else {
@@ -1678,6 +1771,7 @@ mod sql_export_projection_tests {
             spatial_values: vec![vec![None, Some(4326), None, None]],
             rows: vec![vec![json!(1), json!("POINT(1 2)"), json!([0, 255]), Value::Null]],
             batch_size: Some(100),
+            preserve_original_language: false,
         };
         let projected = projection.project_insert_options(options);
         assert_eq!(columns, vec!["id", "shape", "blob", "optional"]);
@@ -1796,6 +1890,7 @@ pub fn build_database_sql_export(options: BuildDatabaseSqlExportOptions) -> Resu
                 spatial_values: table.spatial_values,
                 rows: table.rows,
                 batch_size: Some(insert_batch_size),
+                preserve_original_language: options.preserve_original_language,
             },
             &[],
             options.insert_dialect,
@@ -2681,9 +2776,11 @@ fn write_database_export_rows<W: Write>(
         db_type,
         insert_dialect,
         SqlInsertMode::default(),
+        false,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_database_export_rows_with_mode<W: Write>(
     file: &mut W,
     rows: &[Vec<Value>],
@@ -2695,6 +2792,7 @@ fn write_database_export_rows_with_mode<W: Write>(
     db_type: &DatabaseType,
     insert_dialect: SqlInsertDialect,
     insert_mode: SqlInsertMode,
+    preserve_original_language: bool,
 ) -> Result<(), String> {
     let insert_indices = columns
         .iter()
@@ -2758,6 +2856,7 @@ fn write_database_export_rows_with_mode<W: Write>(
             spatial_values: Vec::new(),
             rows: insert_rows.to_vec(),
             batch_size: Some(insert_mode.batch_size(DATABASE_EXPORT_INSERT_BATCH_SIZE)),
+            preserve_original_language,
         },
         &[],
         insert_dialect,
@@ -4203,6 +4302,7 @@ async fn export_database_sql_core_inner(
                                     &db_type,
                                     request.insert_dialect,
                                     request.insert_mode,
+                                    request.preserve_original_language,
                                 )?;
                                 total_rows_exported += rows.len() as u64;
                                 on_progress(ExportProgress {
@@ -4321,6 +4421,7 @@ async fn export_database_sql_core_inner(
                             &db_type,
                             request.insert_dialect,
                             request.insert_mode,
+                            request.preserve_original_language,
                         )?;
                         total_rows_exported += row_count as u64;
                         if use_keyset {
@@ -4709,11 +4810,11 @@ mod tests {
         build_database_export_object_source_sql, build_database_sql_export, build_export_insert_statements,
         build_export_insert_statements_excluding, build_export_object_source_sql, build_export_sql_insert,
         create_database_export_writer, database_export_query_options_for_timeout, database_export_select_sql,
-        database_export_total_objects, drop_table_if_exists_sql, ensure_export_destination_dir,
-        export_destination_identity_mismatch, extract_postgres_deferred_foreign_keys, filter_export_table_infos,
-        format_export_sql_literal, format_export_table_ddl, format_mysql_spatial_export_literal,
-        format_xugu_spatial_export_literal, generate_postgres_enum_ddl, generate_postgres_extension_ddl,
-        generate_postgres_sequence_create_ddl, generate_postgres_sequence_owner_ddl,
+        database_export_total_objects, decode_unicode_escapes_for_export, drop_table_if_exists_sql,
+        ensure_export_destination_dir, export_destination_identity_mismatch, extract_postgres_deferred_foreign_keys,
+        filter_export_table_infos, format_export_sql_literal, format_export_table_ddl,
+        format_mysql_spatial_export_literal, format_xugu_spatial_export_literal, generate_postgres_enum_ddl,
+        generate_postgres_extension_ddl, generate_postgres_sequence_create_ddl, generate_postgres_sequence_owner_ddl,
         generate_postgres_sequence_setval_sql, is_postgres_extension_member_routine, mysql_database_export_preamble,
         mysql_view_dependencies_from_rows, mysql_view_dependencies_sql, normalize_export_table_ddl,
         record_export_destination_identity, record_export_error, replace_database_export_select_list,
@@ -4927,6 +5028,7 @@ mod tests {
             snapshot_session_id: None,
             batch_size: 1000,
             split_max_mb: None,
+            preserve_original_language: false,
         }
     }
 
@@ -5535,6 +5637,7 @@ mod tests {
                 json!("DBX_WKB:0:0101000000000000000000F03F0000000000000040"),
             ]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -5665,6 +5768,7 @@ mod tests {
             spatial_values: vec![vec![Some(3857)]],
             rows: vec![vec![json!("POINT(1 2)")]],
             batch_size: None,
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -5691,6 +5795,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(true), json!(false), Value::Null]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
         let postgres_statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
@@ -5706,6 +5811,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(true), json!(false), Value::Null]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -5736,6 +5842,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(r"C:\new\it's")]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -5758,6 +5865,7 @@ mod tests {
                 spatial_values: Vec::new(),
                 rows: vec![vec![json!(r"C:\new\it's")]],
                 batch_size: Some(10),
+                preserve_original_language: false,
             })
             .unwrap();
 
@@ -5797,6 +5905,7 @@ mod tests {
                 spatial_values: Vec::new(),
                 rows: vec![vec![json!("a\x1ab")]],
                 batch_size: Some(10),
+                preserve_original_language: false,
             })
             .unwrap();
 
@@ -5826,6 +5935,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!("a\x1ab")]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -5868,6 +5978,7 @@ mod tests {
                 Value::Null,
             ]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -5903,6 +6014,7 @@ mod tests {
                 vec![json!(3), json!("0xzz"), json!("text"), json!("not-hex")],
             ],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -5942,6 +6054,7 @@ mod tests {
             database: None,
             schema: None,
             omit_auto_increment: false,
+            preserve_original_language: false,
         })
         .expect("build SQL Server database export");
 
@@ -5964,6 +6077,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!("line1\nline2\tcol\rend\\slash\0\x1aO'Hara")]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -5989,6 +6103,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(long_value.clone())], vec![json!(long_value)]],
             batch_size: Some(100),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6011,6 +6126,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: (0..1001).map(|id| vec![json!(id)]).collect(),
             batch_size: Some(2000),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6034,6 +6150,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!("first\nsecond\tthird")]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6055,6 +6172,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!("line1\nline2\tend")]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6089,6 +6207,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(format!("0x{ZIP_HEX}")), json!("0x"), json!("0XABcd"), Value::Null, json!("0xABcd")]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6115,6 +6234,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!("0xabc"), json!("0xgg"), json!(7)]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6146,6 +6266,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!("line1\rline2"), json!("O'Hara"), json!(r"C:\tmp"), json!("plain")]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6172,6 +6293,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(r#"{"text":"say \"hi\"","path":"C:\\tmp","quote":"O'Hara"}"#)]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6199,6 +6321,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!("逻辑删除标志：'0'-未删除，'1'-已删除"), json!(style)]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6227,6 +6350,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(style)]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6273,6 +6397,7 @@ mod tests {
                 json!([[1.2, 3.4], [5, 6]]),
             ]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6299,6 +6424,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(1), json!("Ada")], vec![json!(2), json!("O'Hara")], vec![json!(3), json!("Linus")]],
             batch_size: Some(2),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6326,6 +6452,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(1), json!("Ada")], vec![json!(2), json!("O'Hara")], vec![json!(3), json!("Linus")]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6350,6 +6477,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(1), json!("Ada")], vec![json!(2), json!("Linus")]],
             batch_size: Some(1),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6358,6 +6486,71 @@ mod tests {
             vec![
                 "INSERT INTO `users` (`id`, `name`) VALUES (1, 'Ada');",
                 "INSERT INTO `users` (`id`, `name`) VALUES (2, 'Linus');",
+            ]
+        );
+    }
+
+    #[test]
+    fn decode_unicode_escapes_for_export_round_trips_vietnamese_text() {
+        assert_eq!(decode_unicode_escapes_for_export("\\u1ed0ng gi\\u00f3 th\\u1eb3ng"), "Ống gió thẳng");
+        // Leaves non-escape backslashes untouched (e.g. a literal path or doubled quote escape).
+        assert_eq!(decode_unicode_escapes_for_export("600x200\\\" width"), "600x200\\\" width");
+        // A text run with no `\u` escapes at all is returned unchanged (fast path).
+        assert_eq!(decode_unicode_escapes_for_export("plain text"), "plain text");
+        // Surrogate pairs decode to a single non-BMP character.
+        assert_eq!(decode_unicode_escapes_for_export("\\ud83d\\ude00"), "😀");
+        // A malformed/lone high surrogate is left as literal text instead of panicking or corrupting data.
+        assert_eq!(decode_unicode_escapes_for_export("\\ud83dxyz"), "\\ud83dxyz");
+    }
+
+    #[test]
+    fn preserve_original_language_option_decodes_unicode_escapes_in_exported_literals() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
+            schema: None,
+            table_name: Some("VersionValue".to_string()),
+            qualified_table_name: None,
+            columns: vec!["jsonValues".to_string()],
+            column_types: Vec::new(),
+            column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![vec![json!("{\"clientBoqItemName\":\"\\u1ed0ng gi\\u00f3 th\\u1eb3ng\"}")]],
+            batch_size: Some(10),
+            preserve_original_language: true,
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec!["INSERT INTO [VersionValue] ([jsonValues]) VALUES ('{\"clientBoqItemName\":\"Ống gió thẳng\"}');"]
+        );
+    }
+
+    #[test]
+    fn preserve_original_language_defaults_to_false_and_keeps_ascii_escapes() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
+            schema: None,
+            table_name: Some("VersionValue".to_string()),
+            qualified_table_name: None,
+            columns: vec!["jsonValues".to_string()],
+            column_types: Vec::new(),
+            column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![vec![json!("{\"clientBoqItemName\":\"\\u1ed0ng gi\\u00f3 th\\u1eb3ng\"}")]],
+            batch_size: Some(10),
+            preserve_original_language: false,
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                "INSERT INTO [VersionValue] ([jsonValues]) VALUES ('{\"clientBoqItemName\":\"\\u1ed0ng gi\\u00f3 th\\u1eb3ng\"}');"
             ]
         );
     }
@@ -6377,6 +6570,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(1), json!("Ada")], vec![json!(2), json!("Linus")]],
             batch_size: Some(100),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6404,6 +6598,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!("AAAPr9AAEAAAAGfAAA"), json!(1), json!("Ada")]],
             batch_size: Some(100),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6425,6 +6620,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!("*AAABk1AAEAAAAAgAAA"), json!(1), json!("Ada")]],
             batch_size: Some(100),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6446,6 +6642,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(7), json!("Ada")]],
             batch_size: Some(100),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6470,6 +6667,7 @@ mod tests {
                 vec![json!(2), json!("2022-08-25T00:00:00Z"), json!("2022-08-25T00:00:00Z")],
             ],
             batch_size: Some(100),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6534,6 +6732,7 @@ mod tests {
                     Value::Null,
                 ]],
                 batch_size: Some(100),
+                preserve_original_language: false,
             })
             .unwrap();
 
@@ -6572,6 +6771,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!("2022-08-25T09:58:43.123456Z"), json!("2022-08-26T10:59:44+08:00")]],
             batch_size: Some(100),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6599,6 +6799,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!("1"), json!("1010"), json!("1010")], vec![json!(false), json!(3), json!("off")]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6625,6 +6826,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(true), json!(false), Value::Null]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6663,6 +6865,7 @@ mod tests {
                 json!("\0"),
             ]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6696,6 +6899,7 @@ mod tests {
                 vec![json!("2"), json!("0X"), json!("1")],
             ],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6732,6 +6936,7 @@ mod tests {
                 json!("2026-06-12T10:11:12Z"),
             ]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6761,6 +6966,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!("2026-06-12T10:11:12Z"), json!("2026-06-12T18:11:12+08:00")]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6787,6 +6993,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!("2026-06-12T10:11:12Z"), json!("2026-06-12T10:11:12.1234567Z")]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6813,6 +7020,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(1), json!("Hello"), json!("'hello':1A")]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6835,6 +7043,7 @@ mod tests {
                 spatial_values: Vec::new(),
                 rows: vec![vec![json!(1), json!("Ada"), json!("ada@example.com")]],
                 batch_size: Some(10),
+                preserve_original_language: false,
             },
             &["id".to_string()],
         )
@@ -6862,6 +7071,7 @@ mod tests {
                 spatial_values: Vec::new(),
                 rows: vec![vec![json!(1), json!("0x00ff")]],
                 batch_size: Some(10),
+                preserve_original_language: false,
             },
             &["v2".to_string()],
         )
@@ -6886,6 +7096,7 @@ mod tests {
                 spatial_values: Vec::new(),
                 rows: vec![vec![json!(1)]],
                 batch_size: Some(10),
+                preserve_original_language: false,
             },
             &["user_id".to_string()],
         );
@@ -7016,6 +7227,7 @@ mod tests {
             database: None,
             schema: None,
             omit_auto_increment: false,
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -7105,6 +7317,7 @@ mod tests {
             &DatabaseType::Mysql,
             SqlInsertDialect::Source,
             SqlInsertMode::Single,
+            false,
         )
         .unwrap();
         drop(file);
@@ -7330,6 +7543,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(1), json!("Ada")]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -7359,6 +7573,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(1), json!("Ada")]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -7398,6 +7613,7 @@ mod tests {
             database: None,
             schema: None,
             omit_auto_increment: false,
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -8027,6 +8243,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(1), json!("login")]],
             batch_size: Some(100),
+            preserve_original_language: false,
         })
         .unwrap();
         assert_eq!(statements, vec!["INSERT INTO `audit-schema`.`events` (`id`, `event_type`) VALUES (1, 'login');"]);

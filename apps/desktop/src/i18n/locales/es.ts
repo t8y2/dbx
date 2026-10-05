@@ -8780,6 +8780,7 @@ export default withEnglishFallback({
     includeCreateDatabase: "Incluir creación de base de datos (CREATE DATABASE / USE)",
     dropTableIfExists: "Agregar DROP TABLE IF EXISTS antes del DDL",
     omitAutoIncrement: "Omitir AUTO_INCREMENT (para scripts de instalación nueva)",
+    preserveOriginalLanguage: "Preservar el idioma original en SQL (decodificar escapes \\uXXXX)",
     includeData: "Datos de tablas (INSERT)",
     sqlColumnSelection: "Columnas para exportar",
     selectedColumns: "{selected}/{total} columnas seleccionadas",

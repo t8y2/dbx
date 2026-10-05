@@ -74,6 +74,7 @@ async fn run_database_export_writes_structure_and_data_for_all_tables() {
         include_create_database: false,
         drop_table_if_exists: true,
         omit_auto_increment: false,
+        preserve_original_language: false,
         fail_on_error: true,
         prevent_overwrite: false,
         output_compression: Default::default(),

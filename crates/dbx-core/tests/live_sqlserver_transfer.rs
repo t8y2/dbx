@@ -941,6 +941,7 @@ async fn live_sqlserver_database_export_replays_composite_foreign_keys() {
         include_create_database: false,
         drop_table_if_exists: false,
         omit_auto_increment: false,
+        preserve_original_language: false,
         fail_on_error: false,
         prevent_overwrite: false,
         output_compression: Default::default(),

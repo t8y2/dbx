@@ -8565,6 +8565,7 @@ export default withEnglishFallback({
     includeCreateDatabase: "データベース作成文を含める（CREATE DATABASE / USE）",
     dropTableIfExists: "DDLの前にDROP TABLE IF EXISTSを追加",
     omitAutoIncrement: "AUTO_INCREMENT を省略（新規インストール用スクリプト向け）",
+    preserveOriginalLanguage: "元の言語を SQL に保持する（\\uXXXX エスケープをデコード）",
     includeData: "テーブルデータ (INSERT)",
     sqlColumnSelection: "エクスポートする列",
     selectedColumns: "{selected}/{total} 列を選択",

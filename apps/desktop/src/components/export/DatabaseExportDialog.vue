@@ -74,6 +74,7 @@ const includeObjects = ref(true);
 const includeCreateDatabase = ref(false);
 const dropTableIfExists = ref(false);
 const omitAutoIncrement = ref(false);
+const preserveOriginalLanguage = ref(false);
 const splitSqlOutput = ref(false);
 const splitSqlPartMaxMb = ref(100);
 const MIN_SPLIT_SQL_PART_MB = 1;
@@ -424,6 +425,7 @@ async function startExport() {
           includeCreateDatabase: includeCreateDatabase.value,
           dropTableIfExists: dropTableIfExists.value,
           omitAutoIncrement: omitAutoIncrement.value,
+          preserveOriginalLanguage: preserveOriginalLanguage.value,
           snapshotSessionId,
           batchSize: 1000,
           splitMaxMb: splitSqlOutput.value ? normalizedSplitSqlPartMaxMb() : undefined,
@@ -569,6 +571,7 @@ async function startAllDatabasesExport() {
               includeCreateDatabase: includeCreateDatabase.value,
               dropTableIfExists: dropTableIfExists.value,
               omitAutoIncrement: omitAutoIncrement.value,
+              preserveOriginalLanguage: preserveOriginalLanguage.value,
               snapshotSessionId,
               batchSize: 1000,
               splitMaxMb: splitSqlOutput.value ? normalizedSplitSqlPartMaxMb() : undefined,
@@ -692,6 +695,7 @@ function resetState() {
   includeCreateDatabase.value = false;
   dropTableIfExists.value = false;
   omitAutoIncrement.value = false;
+  preserveOriginalLanguage.value = false;
   splitSqlOutput.value = false;
   splitSqlPartMaxMb.value = 100;
   isExporting.value = false;
@@ -971,6 +975,11 @@ watch(
               <CheckSquare v-if="omitAutoIncrement" class="w-3.5 h-3.5 text-primary shrink-0" />
               <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
               {{ t("databaseExport.omitAutoIncrement") }}
+            </div>
+            <div v-if="includeData" class="flex items-center gap-2 cursor-pointer text-xs" @click="preserveOriginalLanguage = !preserveOriginalLanguage">
+              <CheckSquare v-if="preserveOriginalLanguage" class="w-3.5 h-3.5 text-primary shrink-0" />
+              <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
+              {{ t("databaseExport.preserveOriginalLanguage") }}
             </div>
             <div class="flex items-center gap-2 cursor-pointer text-xs" @click="includeData = !includeData">
               <CheckSquare v-if="includeData" class="w-3.5 h-3.5 text-primary shrink-0" />

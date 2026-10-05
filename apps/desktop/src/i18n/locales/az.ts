@@ -8460,6 +8460,7 @@ export default withEnglishFallback({
     includeCreateDatabase: "Verilənlər bazasının qurulmasını daxil et (CREATE DATABASE / USE)",
     dropTableIfExists: "DDL-dən əvvəl DROP TABLE IF EXISTS ifadəsini əlavə et",
     omitAutoIncrement: "AUTO_INCREMENT parametrini daxil etmə (yeni quraşdırma skriptləri üçün)",
+    preserveOriginalLanguage: "SQL-də orijinal dili saxla (\\uXXXX kaçış ardıcıllıqlarını deşifr et)",
     includeData: "Cədvəl məlumatları (INSERT)",
     sqlColumnSelection: "İxrac ediləcək sütunlar",
     selectedColumns: "{selected}/{total} sütun seçilib",

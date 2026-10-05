@@ -9742,6 +9742,7 @@ export default withEnglishFallback({
     includeCreateDatabase: "Включить создание базы данных (CREATE DATABASE / USE)",
     dropTableIfExists: "Добавлять DROP TABLE IF EXISTS перед DDL",
     omitAutoIncrement: "Пропускать AUTO_INCREMENT (для скриптов чистой установки)",
+    preserveOriginalLanguage: "Сохранять исходный язык в SQL (декодировать escape-последовательности \\uXXXX)",
     includeData: "Данные таблиц (INSERT)",
     sqlColumnSelection: "Столбцы для экспорта",
     selectedColumns: "Выбрано столбцов: {selected}/{total}",

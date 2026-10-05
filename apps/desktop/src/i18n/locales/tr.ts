@@ -8332,6 +8332,7 @@ export default withEnglishFallback({
     includeCreateDatabase: "Veritabanı kurulumunu dâhil et (CREATE DATABASE / USE)",
     dropTableIfExists: "DDL'den önce DROP TABLE IF EXISTS ekle",
     omitAutoIncrement: "AUTO_INCREMENT'i atla (sıfırdan kurulum betikleri için)",
+    preserveOriginalLanguage: "SQL'de orijinal dili koru (\\uXXXX kaçış dizilerini çöz)",
     includeData: "Tablo verisi (INSERT)",
     sqlColumnSelection: "Dışa aktarılacak sütunlar",
     selectedColumns: "{selected}/{total} sütun seçildi",

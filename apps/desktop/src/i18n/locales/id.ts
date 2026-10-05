@@ -9264,6 +9264,7 @@ export default withEnglishFallback({
     includeCreateDatabase: "Sertakan pengaturan database (CREATE DATABASE / USE)",
     dropTableIfExists: "Tambahkan DROP TABLE IF EXISTS sebelum DDL",
     omitAutoIncrement: "Abaikan AUTO_INCREMENT (untuk skrip instalasi baru)",
+    preserveOriginalLanguage: "Pertahankan bahasa asli dalam SQL (dekode escape \\uXXXX)",
     includeData: "Data tabel (INSERT)",
     sqlColumnSelection: "Kolom yang diekspor",
     selectedColumns: "{selected}/{total} kolom dipilih",

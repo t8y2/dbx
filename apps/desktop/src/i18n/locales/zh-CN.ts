@@ -9419,6 +9419,7 @@ export default withEnglishFallback({
     includeCreateDatabase: "导出建库语句（CREATE DATABASE / USE）",
     dropTableIfExists: "导出前添加 DROP TABLE IF EXISTS",
     omitAutoIncrement: "省略 AUTO_INCREMENT（用于全新安装的初始化脚本）",
+    preserveOriginalLanguage: "在 SQL 中保留原始语言（解码 \\uXXXX 转义）",
     includeData: "表数据 (INSERT)",
     sqlColumnSelection: "要导出的列",
     selectedColumns: "已选择 {selected}/{total} 列",

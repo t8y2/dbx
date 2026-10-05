@@ -30,7 +30,7 @@
       "uniqueItems": true,
       "items": {
         "anyOf": [
-          { "enum": ["host.events", "host.binary", "host.workbench", "host.filesystem", "host.plans:read", "host.schema:read", "host.storage", "host.ai", "host.clipboard:read", "host.data:read"] },
+          { "enum": ["host.events", "host.binary", "host.workbench", "host.filesystem", "host.plans:read", "host.schema:read", "host.storage", "host.ai", "host.clipboard:read", "host.data:read", "host.scheduler"] },
           { "type": "string", "pattern": "^host\\.network:https://[A-Za-z0-9._-]+(:[0-9]+)?$" }
         ]
       }
@@ -46,7 +46,7 @@
     "contributions": {
       "type": "array",
       "items": {
-        "oneOf": [{ "$ref": "#/$defs/connectionProviderContribution" }, { "$ref": "#/$defs/workbenchContribution" }, { "$ref": "#/$defs/filesystemProviderContribution" }, { "$ref": "#/$defs/contextMenuContribution" }, { "$ref": "#/$defs/resultViewContribution" }, { "$ref": "#/$defs/commandContribution" }, { "$ref": "#/$defs/menusContribution" }, { "$ref": "#/$defs/mcpContribution" }]
+        "oneOf": [{ "$ref": "#/$defs/connectionProviderContribution" }, { "$ref": "#/$defs/workbenchContribution" }, { "$ref": "#/$defs/filesystemProviderContribution" }, { "$ref": "#/$defs/taskProviderContribution" }, { "$ref": "#/$defs/contextMenuContribution" }, { "$ref": "#/$defs/resultViewContribution" }, { "$ref": "#/$defs/commandContribution" }, { "$ref": "#/$defs/menusContribution" }, { "$ref": "#/$defs/mcpContribution" }]
       }
     },
     "localizations": {
@@ -336,6 +336,39 @@
         "label": { "type": "string", "minLength": 1, "maxLength": 200 },
         "prompt": { "type": "string", "minLength": 1, "maxLength": 32000 },
         "order": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 }
+      }
+    },
+    "taskProviderContribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id", "label"],
+      "properties": {
+        "type": { "const": "task-provider" },
+        "id": { "$ref": "#/$defs/identifier" },
+        "label": { "type": "string", "minLength": 1 },
+        "connection_providers": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/identifier" }
+        },
+        "capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["run", "resident", "cancel", "logs", "progress", "artifacts"] }
+        },
+        "triggers": { "type": "array", "items": { "$ref": "#/$defs/taskTrigger" } }
+      }
+    },
+    "taskTrigger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "mode"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "label": { "type": "string", "minLength": 1 },
+        "mode": { "enum": ["run", "resident"] },
+        "risk": { "enum": ["low", "medium", "high"] },
+        "fields": { "type": "array", "items": { "$ref": "#/$defs/formField" } }
       }
     },
     "contextMenuContribution": {

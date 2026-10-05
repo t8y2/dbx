@@ -37,6 +37,7 @@ pub const SUPPORTED_PLUGIN_PERMISSIONS: &[&str] = &[
     "host.ai",
     "host.clipboard:read",
     "host.data:read",
+    "host.scheduler",
 ];
 
 /// Cap the number of `host.network:<origin>` entries so a manifest cannot bloat
@@ -246,6 +247,7 @@ pub enum PluginContribution {
     ConnectionProvider(PluginConnectionProviderContribution),
     Workbench(PluginWorkbenchContribution),
     FilesystemProvider(PluginFilesystemProviderContribution),
+    TaskProvider(PluginTaskProviderContribution),
     ContextMenu(PluginContextMenuContribution),
     ResultView(PluginResultViewContribution),
     Command(PluginCommandContribution),
@@ -259,6 +261,7 @@ impl PluginContribution {
             Self::ConnectionProvider(contribution) => &contribution.id,
             Self::Workbench(contribution) => &contribution.id,
             Self::FilesystemProvider(contribution) => &contribution.id,
+            Self::TaskProvider(contribution) => &contribution.id,
             Self::ContextMenu(contribution) => &contribution.id,
             Self::ResultView(contribution) => &contribution.id,
             Self::Command(contribution) => &contribution.id,
@@ -563,7 +566,7 @@ pub enum PluginFormFieldBinding {
     Database,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginFormFieldOption {
     pub label: String,
@@ -984,6 +987,127 @@ impl PluginFilesystemCapability {
     }
 }
 
+/// A scheduled/resident task provider a plugin declares so the scheduler can
+/// drive it over the fixed `task/*` RPC contract (`docs/scheduler`
+/// §22–§36). The contribution only declares *what* the plugin can run; the
+/// host owns scheduling, and a plugin can never invent new task RPC method
+/// names — only the five fixed methods plus the four fixed task events exist.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginTaskProviderContribution {
+    pub id: String,
+    pub label: String,
+    /// Connection providers (declared by the same manifest) a task may bind
+    /// to. The scheduler still validates each task's connection against this
+    /// list; secrets are hydrated by the host at execution time and never
+    /// stored with the task config.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connection_providers: Vec<String>,
+    /// What the provider supports. `task/execute` requires `run`,
+    /// `task/start` requires `resident`, `task/stop` requires `cancel` (or
+    /// `resident`), and `task/log` / `task/progress` / `task/artifact` events
+    /// require `logs`, `progress`, and `artifacts` respectively.
+    #[serde(default)]
+    pub capabilities: Vec<PluginTaskCapability>,
+    /// User-visible task templates. Every trigger becomes one schedulable
+    /// shape (`<provider>/<trigger>` is the stable trigger identity); each
+    /// declares its own config form fields.
+    #[serde(default)]
+    pub triggers: Vec<PluginTaskTriggerContribution>,
+}
+
+impl PluginTaskProviderContribution {
+    pub fn has_capability(&self, capability: PluginTaskCapability) -> bool {
+        self.capabilities.contains(&capability)
+    }
+
+    pub fn trigger(&self, trigger_id: &str) -> Option<&PluginTaskTriggerContribution> {
+        self.triggers.iter().find(|trigger| trigger.id == trigger_id)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginTaskCapability {
+    /// One-shot executions through `task/execute`.
+    Run,
+    /// Long-lived sessions through `task/start` / `task/stop` / `task/status`.
+    Resident,
+    /// Cancelling an active run or resident session through `task/stop`.
+    Cancel,
+    /// The plugin emits `task/log` events.
+    Logs,
+    /// The plugin emits `task/progress` events.
+    Progress,
+    /// The plugin emits `task/artifact` events.
+    Artifacts,
+}
+
+impl PluginTaskCapability {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Run => "run",
+            Self::Resident => "resident",
+            Self::Cancel => "cancel",
+            Self::Logs => "logs",
+            Self::Progress => "progress",
+            Self::Artifacts => "artifacts",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginTaskTriggerContribution {
+    pub id: String,
+    pub label: String,
+    /// Whether one execution is a one-shot run or a long-lived resident
+    /// session. Must be backed by the matching provider capability.
+    pub mode: PluginTaskMode,
+    /// UI confirmation policy: `low` needs no extra prompt, `medium` asks on
+    /// save, `high` requires explicit confirmation on create and edit. Once a
+    /// task is saved and enabled, automatic runs never re-ask.
+    #[serde(default)]
+    pub risk: PluginTaskRisk,
+    /// Config form for this trigger. Reuses the existing connection form
+    /// field system — there is no second form DSL.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<PluginFormFieldDefinition>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginTaskMode {
+    Run,
+    Resident,
+}
+
+impl PluginTaskMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Run => "run",
+            Self::Resident => "resident",
+        }
+    }
+
+    /// The provider capability this mode requires.
+    pub fn capability(self) -> PluginTaskCapability {
+        match self {
+            Self::Run => PluginTaskCapability::Run,
+            Self::Resident => PluginTaskCapability::Resident,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginTaskRisk {
+    #[default]
+    Low,
+    Medium,
+    High,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PluginCompatibility {
     pub compatible: bool,
@@ -1033,6 +1157,13 @@ impl PluginManifest {
     ) -> Result<Option<PluginFilesystemProviderContribution>, String> {
         Ok(self.contributions.iter().find_map(|contribution| match contribution {
             PluginContribution::FilesystemProvider(provider) if provider.id == provider_id => Some(provider.clone()),
+            _ => None,
+        }))
+    }
+
+    pub fn task_provider(&self, provider_id: &str) -> Result<Option<PluginTaskProviderContribution>, String> {
+        Ok(self.contributions.iter().find_map(|contribution| match contribution {
+            PluginContribution::TaskProvider(provider) if provider.id == provider_id => Some(provider.clone()),
             _ => None,
         }))
     }
@@ -1335,8 +1466,10 @@ fn validate_contributions(
     let mut provider_ids = HashSet::new();
     let mut workbench_ids = HashSet::new();
     let mut filesystem_provider_ids = HashSet::new();
+    let mut task_provider_ids = HashSet::new();
     let mut workbench_references = Vec::new();
     let mut filesystem_references = Vec::new();
+    let mut task_connection_references = Vec::new();
     let mut context_menu_workbench_references = Vec::new();
     let mut command_ids = HashSet::new();
     let mut command_workbench_references = Vec::new();
@@ -1419,6 +1552,61 @@ fn validate_contributions(
                 );
                 if !has_ui {
                     errors.push(format!("Result view contribution '{id}' requires a UI entrypoint"));
+                }
+            }
+            PluginContribution::TaskProvider(provider) => {
+                validate_required_text(&provider.label, &format!("Task provider '{id}' label"), errors);
+                if provider.triggers.is_empty() {
+                    errors.push(format!("Task provider '{id}' must declare at least one trigger"));
+                }
+                if valid_identifier(id) {
+                    task_provider_ids.insert(id.to_string());
+                }
+                let mut seen_connection_providers = HashSet::new();
+                for connection_provider in &provider.connection_providers {
+                    if !valid_identifier(connection_provider) {
+                        errors.push(format!(
+                            "Task provider '{id}' has an invalid connection_provider reference '{connection_provider}'"
+                        ));
+                    } else if !seen_connection_providers.insert(connection_provider) {
+                        errors.push(format!(
+                            "Task provider '{id}' references connection provider '{connection_provider}' more than once"
+                        ));
+                    } else {
+                        task_connection_references.push((id.to_string(), connection_provider.clone()));
+                    }
+                }
+                let mut seen_capabilities = HashSet::new();
+                for capability in &provider.capabilities {
+                    if !seen_capabilities.insert(*capability) {
+                        errors.push(format!("Task provider '{id}' has duplicate capabilities"));
+                    }
+                }
+                let mut seen_trigger_ids = HashSet::new();
+                for trigger in &provider.triggers {
+                    if !valid_identifier(&trigger.id) || !seen_trigger_ids.insert(&trigger.id) {
+                        errors.push(format!(
+                            "Task provider '{id}' has an invalid or duplicate trigger id '{}'",
+                            trigger.id
+                        ));
+                    }
+                    validate_required_text(
+                        &trigger.label,
+                        &format!("Task provider '{id}' trigger '{}' label", trigger.id),
+                        errors,
+                    );
+                    if !provider.has_capability(trigger.mode.capability()) {
+                        errors.push(format!(
+                            "Task provider '{id}' trigger '{}' declares {} mode without the '{}' capability",
+                            trigger.id,
+                            trigger.mode.as_str(),
+                            trigger.mode.capability().as_str()
+                        ));
+                    }
+                    validate_form_fields(&trigger.fields, index, errors);
+                }
+                if !has_backend {
+                    errors.push(format!("Task provider '{id}' requires a backend entrypoint"));
                 }
             }
             PluginContribution::ContextMenu(menu) => {
@@ -1576,6 +1764,13 @@ fn validate_contributions(
         if !filesystem_provider_ids.contains(&filesystem_provider) {
             errors.push(format!(
                 "Connection provider '{provider}' references missing filesystem provider '{filesystem_provider}'"
+            ));
+        }
+    }
+    for (provider, connection_provider) in task_connection_references {
+        if !provider_ids.contains(&connection_provider) {
+            errors.push(format!(
+                "Task provider '{provider}' references missing connection provider '{connection_provider}'"
             ));
         }
     }
@@ -2047,8 +2242,8 @@ mod tests {
         PluginCommandAction, PluginCommandContribution, PluginCommandPresentation, PluginCommandRestore,
         PluginCommandReuse, PluginConnectionActionContribution, PluginConnectionProviderContribution,
         PluginContribution, PluginFormFieldBinding, PluginManifest, PluginMcpContribution, PluginMenuItem,
-        PluginMenuLocation, PluginMenusContribution, PluginOpenWorkbenchAction, SUPPORTED_PLUGIN_HOST_API_VERSION,
-        SUPPORTED_PLUGIN_PERMISSIONS,
+        PluginMenuLocation, PluginMenusContribution, PluginOpenWorkbenchAction, PluginTaskMode, PluginTaskRisk,
+        SUPPORTED_PLUGIN_HOST_API_VERSION, SUPPORTED_PLUGIN_PERMISSIONS,
     };
 
     fn context_menu_manifest(menu: &str) -> Result<(tempfile::TempDir, PluginManifest), Box<dyn std::error::Error>> {
@@ -2791,6 +2986,7 @@ mod tests {
             ("connection-provider", "connectionProviderContribution"),
             ("workbench", "workbenchContribution"),
             ("filesystem-provider", "filesystemProviderContribution"),
+            ("task-provider", "taskProviderContribution"),
             ("context-menu", "contextMenuContribution"),
             ("result-view", "resultViewContribution"),
             ("command", "commandContribution"),
@@ -2828,6 +3024,255 @@ mod tests {
         );
         assert_eq!(schema["$defs"]["contextMenuAction"]["properties"]["type"]["const"], "open-workbench");
         assert_eq!(schema["$defs"]["contextMenuAction"]["required"], serde_json::json!(["type", "workbench"]));
+    }
+
+    /// A minimal v1 manifest with a backend plus a task provider, matching the
+    /// frozen ADR §6.1 shape: kebab-case tags, reused form fields, and the
+    /// run/resident capability vocabulary.
+    fn task_provider_manifest() -> PluginManifest {
+        serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.ssh",
+            "name": "SSH",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "permissions": ["host.scheduler"],
+            "entrypoints": { "backend": { "executable": "backend" } },
+            "contributions": [
+                {
+                    "type": "connection-provider",
+                    "id": "io.dbx.ssh.connection",
+                    "label": "SSH",
+                    "database_type": "ssh",
+                    "fields": [{ "key": "host", "label": "Host", "type": "text", "required": true }]
+                },
+                {
+                    "type": "task-provider",
+                    "id": "io.dbx.ssh.tasks",
+                    "label": "SSH Tasks",
+                    "connection_providers": ["io.dbx.ssh.connection"],
+                    "capabilities": ["run", "resident", "cancel", "logs", "progress", "artifacts"],
+                    "triggers": [
+                        {
+                            "id": "execute",
+                            "label": "Execute Command",
+                            "mode": "run",
+                            "risk": "high",
+                            "fields": [
+                                { "key": "command", "label": "Command", "type": "textarea", "required": true },
+                                { "key": "working_directory", "label": "Working Directory", "type": "text" },
+                                { "key": "timeout_seconds", "label": "Timeout", "type": "number", "default": 300 }
+                            ]
+                        },
+                        {
+                            "id": "resident",
+                            "label": "Resident Command",
+                            "mode": "resident",
+                            "fields": [
+                                { "key": "command", "label": "Command", "type": "textarea", "required": true }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn task_provider_contribution_parses_the_frozen_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("backend"), b"backend").unwrap();
+        let manifest = task_provider_manifest();
+        let compatibility = manifest.compatibility(dir.path(), "0.1.0");
+        assert!(compatibility.compatible, "{:?}", compatibility.errors);
+
+        let provider = manifest.task_provider("io.dbx.ssh.tasks").unwrap().expect("task provider is declared");
+        assert_eq!(provider.connection_providers, vec!["io.dbx.ssh.connection"]);
+        for capability in ["run", "resident", "cancel", "logs", "progress", "artifacts"] {
+            assert!(
+                provider.capabilities.iter().any(|declared| declared.as_str() == capability),
+                "{capability} should parse"
+            );
+        }
+        assert_eq!(provider.triggers.len(), 2);
+        let execute = provider.trigger("execute").unwrap();
+        assert_eq!(execute.mode, PluginTaskMode::Run);
+        assert_eq!(execute.risk, PluginTaskRisk::High);
+        assert_eq!(execute.fields.len(), 3);
+        let resident = provider.trigger("resident").unwrap();
+        assert_eq!(resident.mode, PluginTaskMode::Resident);
+        assert_eq!(resident.risk, PluginTaskRisk::Low, "risk defaults to low");
+        assert!(provider.trigger("missing").is_none());
+    }
+
+    #[test]
+    fn task_provider_rejects_unknown_capability_and_unknown_fields() {
+        let unknown_capability = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "task-provider",
+            "id": "sample.tasks",
+            "label": "Tasks",
+            "capabilities": ["deploy"],
+            "triggers": [{ "id": "run", "label": "Run", "mode": "run" }]
+        }));
+        assert!(unknown_capability.is_err(), "unknown capabilities must not parse");
+
+        let unknown_field = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "task-provider",
+            "id": "sample.tasks",
+            "label": "Tasks",
+            "triggers": [],
+            "custom_field": true
+        }));
+        assert!(unknown_field.is_err(), "deny_unknown_fields must hold for the frozen shape");
+
+        let unknown_trigger_field = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "task-provider",
+            "id": "sample.tasks",
+            "label": "Tasks",
+            "triggers": [{ "id": "run", "label": "Run", "mode": "run", "schedule": "* * * * *" }]
+        }));
+        assert!(unknown_trigger_field.is_err(), "triggers must not grow unfrozen fields");
+    }
+
+    #[test]
+    fn task_provider_trigger_without_declared_capability_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "task-provider",
+            "id": "sample.tasks",
+            "label": "Tasks",
+            "capabilities": ["run"],
+            "triggers": [
+                { "id": "run", "label": "Run", "mode": "run" },
+                { "id": "resident", "label": "Resident", "mode": "resident" }
+            ]
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(&[provider], true, false, dir.path(), &mut errors);
+        assert!(
+            errors.iter().any(|error| {
+                error.contains("trigger 'resident'") && error.contains("without the 'resident' capability")
+            }),
+            "{errors:?}"
+        );
+        assert!(!errors.iter().any(|error| error.contains("trigger 'run'")), "{errors:?}");
+    }
+
+    #[test]
+    fn task_provider_requires_backend_trigger_and_valid_connection_references() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "task-provider",
+            "id": "sample.tasks",
+            "label": "Tasks",
+            "connection_providers": ["sample.connection"],
+            "triggers": []
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(&[provider], false, false, dir.path(), &mut errors);
+        assert!(errors.iter().any(|error| error == "Task provider 'sample.tasks' must declare at least one trigger"));
+        assert!(errors.iter().any(|error| error == "Task provider 'sample.tasks' requires a backend entrypoint"));
+        assert!(
+            errors.iter().any(|error| error
+                == "Task provider 'sample.tasks' references missing connection provider 'sample.connection'"),
+            "{errors:?}"
+        );
+
+        let bad_reference: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "task-provider",
+            "id": "sample.tasks",
+            "label": "Tasks",
+            "connection_providers": ["Not A Valid Id"],
+            "triggers": [{ "id": "run", "label": "Run", "mode": "run" }]
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(&[bad_reference], true, false, dir.path(), &mut errors);
+        assert!(
+            errors.iter().any(|error| error.contains("invalid connection_provider reference 'Not A Valid Id'")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn task_provider_trigger_fields_reuse_the_form_field_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "task-provider",
+            "id": "sample.tasks",
+            "label": "Tasks",
+            "triggers": [{
+                "id": "run",
+                "label": "Run",
+                "mode": "run",
+                "fields": [
+                    { "key": "command", "label": "Command", "type": "textarea", "required": true },
+                    { "key": "command", "label": "Duplicate", "type": "text" },
+                    { "key": "retries", "label": "Retries", "type": "select" }
+                ]
+            }]
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(&[provider], true, false, dir.path(), &mut errors);
+        assert!(
+            errors.iter().any(|error| error.contains("invalid or duplicate key")),
+            "duplicate field keys must be rejected: {errors:?}"
+        );
+        assert!(
+            errors.iter().any(|error| error.contains("choice options cannot be empty")),
+            "select fields must follow the shared form rules: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn scheduler_permission_is_accepted_and_old_manifests_stay_compatible() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("backend"), b"backend").unwrap();
+        let manifest = task_provider_manifest();
+        let compatibility = manifest.compatibility(dir.path(), "0.1.0");
+        assert!(compatibility.compatible, "{:?}", compatibility.errors);
+        assert!(
+            manifest.compatibility(dir.path(), "0.1.0").errors.is_empty(),
+            "host.scheduler must be a supported permission"
+        );
+
+        // Backward compatibility: a manifest v1 plugin without any
+        // task-provider contribution (and without the new permission) must
+        // keep validating exactly as before.
+        let without_tasks: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.example",
+            "name": "Example",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "entrypoints": { "ui": { "root": "ui", "entry": "ui/index.html" } },
+            "contributions": [{ "type": "workbench", "id": "sample.main", "label": "Sample" }]
+        }))
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("ui")).unwrap();
+        std::fs::write(dir.path().join("ui").join("index.html"), "<!doctype html>").unwrap();
+        let compatibility = without_tasks.compatibility(dir.path(), "0.1.0");
+        assert!(compatibility.compatible, "{:?}", compatibility.errors);
+        assert!(without_tasks.task_provider("sample.tasks").unwrap().is_none());
+
+        // An unknown contribution type keeps failing to parse, so the union
+        // stays closed even with the new variant in place.
+        let unknown_type = serde_json::from_value::<PluginManifest>(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.example",
+            "name": "Example",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "contributions": [{ "type": "scheduler-provider", "id": "sample.legacy" }]
+        }));
+        assert!(unknown_type.is_err());
     }
 
     #[test]

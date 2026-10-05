@@ -1,11 +1,17 @@
 // @vitest-environment happy-dom
 
-import { createApp, defineComponent, h, markRaw, nextTick, type App, type PropType } from "vue";
+import { createApp, defineComponent, h, markRaw, nextTick, ref, type App, type PropType } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
-import type { QueryResult } from "@/types/database";
+import type { DatabaseType, QueryResult } from "@/types/database";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import type { DataGridToolbarActionCapability } from "@/lib/dataGrid/dataGridToolbar";
+import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
+
+vi.mock("@/lib/metadata/objectDdlCache", () => ({
+  loadObjectDdl: vi.fn(async () => ({ ddl: "CREATE TABLE users (id INT);", cacheStatus: "remote" })),
+}));
 
 vi.mock("@/composables/useDataGridColumnResize", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/composables/useDataGridColumnResize")>();
@@ -46,7 +52,19 @@ const RecycleScroller = defineComponent({
   },
 });
 
-function mountGrid(options: { displayableColumns?: boolean; columns?: string[]; slots?: Record<string, () => ReturnType<typeof h>>; withTableMetadata?: boolean } = {}) {
+function mountGrid(
+  options: {
+    displayableColumns?: boolean;
+    columns?: string[];
+    slots?: Record<string, () => ReturnType<typeof h>>;
+    withTableMetadata?: boolean;
+    context?: "table-data" | "results";
+    queryMultiSource?: boolean;
+    databaseType?: DatabaseType;
+    sourceDatabase?: string;
+    joinedWriteTargetCount?: number;
+  } = {},
+) {
   const pinia = createPinia();
   setActivePinia(pinia);
   const settingsStore = useSettingsStore();
@@ -65,6 +83,7 @@ function mountGrid(options: { displayableColumns?: boolean; columns?: string[]; 
     hidden_column_indexes: options.displayableColumns === false ? [0] : undefined,
   });
 
+  const grid = ref<{ tableInfoToolbarCapability: DataGridToolbarActionCapability }>();
   const host = document.createElement("div");
   document.body.append(host);
   const Root = defineComponent({
@@ -78,14 +97,17 @@ function mountGrid(options: { displayableColumns?: boolean; columns?: string[]; 
               h(
                 DataGrid,
                 {
+                  ref: grid,
                   result,
-                  databaseType: "mysql",
-                  context: "table-data",
+                  databaseType: options.databaseType ?? "mysql",
+                  context: options.context ?? "table-data",
+                  queryMultiSource: options.queryMultiSource,
+                  joinedWriteTargets: options.joinedWriteTargetCount ? Array.from({ length: options.joinedWriteTargetCount }, (_, index) => ({ tableMeta: { tableName: `table_${index}`, columns: [], primaryKeys: [] }, sourceColumns: ["id"] })) : undefined,
                   ...(options.withTableMetadata
                     ? {
                         connectionId: "test-connection",
                         database: "test-database",
-                        tableMeta: { tableName: "users", schema: "test-database", columns: [], primaryKeys: [] },
+                        tableMeta: { tableName: "users", database: options.sourceDatabase, schema: options.databaseType === "sqlserver" ? "dbo" : "test-database", columns: [], primaryKeys: [] },
                       }
                     : {}),
                 },
@@ -102,7 +124,7 @@ function mountGrid(options: { displayableColumns?: boolean; columns?: string[]; 
   app.mount(host);
   const mounted = { app, host };
   mountedApps.push(mounted);
-  return { ...mounted, settingsStore };
+  return { ...mounted, settingsStore, grid };
 }
 
 async function settle() {
@@ -136,6 +158,7 @@ function goToColumnEvent(target: HTMLElement): KeyboardEvent {
 }
 
 afterEach(() => {
+  vi.clearAllMocks();
   vi.restoreAllMocks();
   for (const { app, host } of mountedApps.splice(0)) {
     app.unmount();
@@ -172,11 +195,47 @@ describe("DataGrid go-to-column shortcut", () => {
     expect(host.querySelector('[data-grid-topbar-row="filters"].data-grid-topbar-scroll--row-divider')).not.toBeNull();
   });
 
-  it("does not show a DDL action in the result action toolbar", async () => {
+  it("does not duplicate the DDL action in the table-data toolbar", async () => {
     const { host } = mountGrid({ withTableMetadata: true });
     await settle();
 
     expect(host.querySelector('[data-toolbar-action="tableInfo"]')).toBeNull();
+  });
+
+  it("shows a DDL action for query results with table metadata", async () => {
+    const { host, grid } = mountGrid({ withTableMetadata: true, context: "results" });
+    await settle();
+
+    expect(grid.value?.tableInfoToolbarCapability.visible).toBe(true);
+    expect(grid.value?.tableInfoToolbarCapability.label).toBe("DDL");
+    expect(host.querySelector('[data-toolbar-action="tableInfo"]')).toBeNull();
+  });
+
+  it.each([1, 2])("hides DDL for a multi-source query with %i writable targets", async (joinedWriteTargetCount) => {
+    const { grid } = mountGrid({ withTableMetadata: true, context: "results", queryMultiSource: true, joinedWriteTargetCount });
+    await settle();
+    expect(grid.value?.tableInfoToolbarCapability.visible).toBe(false);
+  });
+
+  it.each([
+    { withTableMetadata: false, databaseType: "mysql" as const },
+    { withTableMetadata: true, databaseType: "mongodb" as const },
+  ])("hides DDL without a supported source: %j", async (options) => {
+    const { grid } = mountGrid({ ...options, context: "results" });
+    await settle();
+    expect(grid.value?.tableInfoToolbarCapability.visible).toBe(false);
+  });
+
+  it.each([undefined, "reporting"])("opens DDL using source database %s with execution-database fallback", async (sourceDatabase) => {
+    const { host, settingsStore, grid } = mountGrid({ withTableMetadata: true, context: "results", databaseType: "sqlserver", sourceDatabase });
+    settingsStore.updateEditorSettings({ tableInfoActiveTab: "indexes" });
+    await settle();
+    await grid.value!.tableInfoToolbarCapability.onTrigger();
+    await vi.waitFor(() => {
+      expect(loadObjectDdl).toHaveBeenCalledWith(expect.objectContaining({ connectionId: "test-connection", database: sourceDatabase ?? "test-database", schema: "dbo", tableName: "users" }), expect.anything());
+      expect(host.querySelector("[data-table-info-drawer]")?.textContent).toContain("CREATE TABLE");
+    });
+    expect(grid.value?.tableInfoToolbarCapability.active).toBe(true);
   });
 
   it("keeps result actions and query filters in their separate toolbar rows", async () => {

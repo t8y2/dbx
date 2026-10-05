@@ -17,6 +17,7 @@ type ConnectionStore = ReturnType<typeof useConnectionStore>;
 interface TableMetadataProps {
   connectionId?: string;
   database?: string;
+  schema?: string;
   context?: "results" | "table-data";
   tableInfoTab?: string;
   autoShowTableInfo?: boolean;
@@ -119,6 +120,10 @@ export function useDataGridTableMetadataLoaders(options: DataGridTableMetadataLo
   async function fetchDdl(force = options.settingsStore.editorSettings.refreshDdlOnOpen) {
     const request = tableRequest();
     if (!request) return;
+    // Query execution and source-table metadata can belong to different
+    // databases (for example SQL Server three-part table references).
+    request.database = props.tableMeta?.database || request.database;
+    request.schema = props.tableMeta?.schema || props.schema || props.database || "";
     options.showTableInfo.value = true;
     state.ddlLoading.value = true;
     try {

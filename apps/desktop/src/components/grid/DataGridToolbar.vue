@@ -257,6 +257,7 @@ function actionLabelClass(action: DataGridToolbarActionKey) {
           size="sm"
           :class="[...actionButtonClass('tableInfo'), tableInfo?.active ? 'bg-primary/10 text-primary hover:bg-primary/15' : '']"
           :disabled="isDataGridToolbarCapabilityDisabled(tableInfo)"
+          :aria-label="tableInfo?.tooltip ?? tableInfo?.label"
           :aria-pressed="tableInfo?.active"
           @click="void triggerDataGridToolbarAction(tableInfo)"
         >

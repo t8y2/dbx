@@ -12,6 +12,7 @@ export interface SidebarDangerDialogOption {
 export interface SidebarDangerDialogProgress {
   completed: number;
   total: number;
+  phase?: "preparing" | "executing";
 }
 
 export interface SidebarDangerDialogTextInput {
@@ -28,6 +29,7 @@ export interface SidebarDangerDialogRequest {
   message: string;
   confirmLabel: string;
   sql?: string;
+  copySql?: string | (() => string);
   details?: string;
   detailsText?: string;
   loading?: boolean;

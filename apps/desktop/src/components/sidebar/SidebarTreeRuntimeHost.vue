@@ -11,6 +11,7 @@ import { useSidebarDatabaseSpecificMutationRuntime } from "@/composables/useSide
 import { useSidebarTableMutationRuntime } from "@/composables/useSidebarTableMutationRuntime";
 import { useSidebarTreeExportRuntime } from "@/composables/useSidebarTreeExportRuntime";
 import { useSidebarTreeToolRuntime } from "@/composables/useSidebarTreeToolRuntime";
+import { canDropDatabaseTables, canEmptyDatabaseTables, useDatabaseTableEmpty } from "@/composables/useDatabaseTableEmpty";
 import { useI18n } from "vue-i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
 import {
@@ -519,6 +520,8 @@ const emit = defineEmits<{
   "open-extension-details": [node: TreeNode];
   "open-event-trigger-details": [node: TreeNode];
 }>();
+
+const { requestEmptyDatabaseTables, requestDropDatabaseTables } = useDatabaseTableEmpty((request) => emit("open-danger-dialog", request));
 
 const {
   setNodeAsDefaultDatabase,
@@ -6187,6 +6190,12 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       items.push({ label: t("dataDictionary.title"), action: openDataDictionary, icon: FileText });
     }
     const destructiveActions: ContextMenuItem[] = [];
+    if (canEmptyDatabaseTables(node, node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined)) {
+      destructiveActions.push({ label: t("databaseEmpty.menu"), action: () => void requestEmptyDatabaseTables(node), icon: Eraser, variant: "destructive" as const });
+    }
+    if (canDropDatabaseTables(node, node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined)) {
+      destructiveActions.push({ label: t("databaseDrop.menu"), action: () => void requestDropDatabaseTables(node), icon: Trash2, variant: "destructive" as const });
+    }
     if (canDropDatabase.value) {
       destructiveActions.push({
         label: t("contextMenu.dropDatabase"),

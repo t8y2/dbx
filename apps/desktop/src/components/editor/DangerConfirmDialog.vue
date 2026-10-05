@@ -29,6 +29,7 @@ let focusRestoreGeneration = 0;
 const props = withDefaults(
   defineProps<{
     sql?: string;
+    copySql?: string | (() => string);
     title?: string;
     message?: string;
     details?: string;
@@ -52,6 +53,7 @@ const props = withDefaults(
   }>(),
   {
     sql: "",
+    copySql: "",
     title: "",
     message: "",
     details: "",
@@ -155,7 +157,8 @@ function onConfirm() {
 }
 
 async function copyFullCode() {
-  await copyToClipboard(code.value);
+  const copySql = typeof props.copySql === "function" ? props.copySql() : props.copySql;
+  await copyToClipboard(copySql || code.value);
   copied.value = true;
   window.setTimeout(() => {
     copied.value = false;

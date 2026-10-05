@@ -43,6 +43,7 @@ define_registry![
     list_reference_key_columns,
     list_reference_keys,
     list_foreign_keys,
+    list_foreign_keys_for_database,
     list_triggers,
     list_constraints,
     list_partitions,

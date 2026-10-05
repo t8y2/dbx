@@ -7,3 +7,4 @@ rust-version = "1.88.0"
 [dependencies]
 dbx-core = { path = "../dbx-core", default-features = false }
 tauri = "2.10.3"
+tokio = { version = "1", features = ["macros", "rt", "sync"] }

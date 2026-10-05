@@ -8437,6 +8437,35 @@ pub async fn list_foreign_keys_core(
     result
 }
 
+pub async fn list_foreign_keys_for_database_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+) -> Result<HashMap<String, Vec<db::ForeignKeyInfo>>, String> {
+    if crate::sql_dialect::parse_sqlserver_linked_schema_ref(schema).is_some() {
+        return Ok(HashMap::new());
+    }
+    retry_metadata_connection(state, connection_id, Some(database), || async {
+        let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
+        let db_config = connection_config(state, connection_id).await;
+        let pool = clone_metadata_pool(state, &pool_key).await.ok_or("Pool not found")?;
+        match &pool {
+            PoolKind::Mysql(p, mode)
+                if *mode != MysqlMode::OceanBaseOracle
+                    && !db_config.as_ref().is_some_and(db::mysql_compatible::uses_show_metadata) =>
+            {
+                db::mysql::list_foreign_keys_for_database(p, mysql_table_metadata_catalog(database, schema)).await
+            }
+            PoolKind::Mysql(_, _) => {
+                Err("Database-wide foreign-key metadata is not supported for this MySQL variant".to_string())
+            }
+            _ => Err("Database-wide foreign-key metadata requires a native MySQL connection".to_string()),
+        }
+    })
+    .await
+}
+
 async fn list_foreign_keys_core_for_session(
     state: &AppState,
     connection_id: &str,

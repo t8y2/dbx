@@ -1691,7 +1691,18 @@ export async function getMysqlTableAutoIncrement(connectionId: string, database:
   return invoke("get_mysql_table_auto_increment", { connectionId, database, table });
 }
 
-export async function listObjects(connectionId: string, database: string, schema: string, objectTypes?: (SidebarObjectKind | "EVENT")[], filter?: string, limit?: number, offset?: number, catalog?: string, tableNameFilter?: import("@/types/database").TableNameFilter): Promise<ObjectInfo[]> {
+export async function listObjects(
+  connectionId: string,
+  database: string,
+  schema: string,
+  objectTypes?: (SidebarObjectKind | "EVENT")[],
+  filter?: string,
+  limit?: number,
+  offset?: number,
+  catalog?: string,
+  tableNameFilter?: import("@/types/database").TableNameFilter,
+  executionId?: string,
+): Promise<ObjectInfo[]> {
   return invoke("list_objects", {
     connectionId,
     database,
@@ -1702,6 +1713,7 @@ export async function listObjects(connectionId: string, database: string, schema
     offset,
     catalog,
     tableNameFilter,
+    executionId,
   });
 }
 
@@ -2426,6 +2438,10 @@ export async function listForeignKeys(connectionId: string, database: string, sc
     table,
     catalog,
   });
+}
+
+export async function listForeignKeysForDatabase(connectionId: string, database: string, schema: string, catalog?: string, executionId?: string): Promise<Record<string, ForeignKeyInfo[]>> {
+  return invoke("list_foreign_keys_for_database", { connectionId, database, schema, catalog, executionId });
 }
 
 export async function listTriggers(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<TriggerInfo[]> {

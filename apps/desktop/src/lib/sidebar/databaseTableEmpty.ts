@@ -66,6 +66,9 @@ async function buildLayers(options: BuildOptions): Promise<DatabaseEmptyTableLay
     const foreignKeys = hasBatchForeignKeys ? (options.foreignKeysByTable![table.name] ?? []) : options.listForeignKeys ? await options.listForeignKeys(table) : [];
     for (const fk of foreignKeys) {
       if (fk.ref_schema && fk.ref_schema !== options.database) continue;
+      // A self-referencing foreign key is not a dependency edge: per-table DELETE/DROP are not
+      // blocked by it and runtime constraints catch any leftover violations.
+      if (fk.ref_table === table.name) continue;
       if (!tables.has(fk.ref_table)) throw new DatabaseTableEmptyPlanError("scope", [fk.ref_table]);
       parents.add(fk.ref_table);
     }

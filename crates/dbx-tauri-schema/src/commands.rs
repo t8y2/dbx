@@ -249,6 +249,7 @@ pub async fn get_mysql_table_auto_increment(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn list_objects(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

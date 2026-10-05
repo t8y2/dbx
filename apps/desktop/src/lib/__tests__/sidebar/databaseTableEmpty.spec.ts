@@ -64,6 +64,26 @@ describe("database table empty plan", () => {
     ).rejects.toBeInstanceOf(DatabaseTableEmptyPlanError);
   });
 
+  it("treats a self-referencing foreign key as independent instead of a cycle", async () => {
+    const plan = await buildDatabaseTableEmptyPlan({
+      database: "app",
+      listTables: async () => [
+        { name: "departments", object_type: "TABLE", schema: "app" },
+        { name: "employees", object_type: "TABLE", schema: "app" },
+      ],
+      listForeignKeys: async (table) =>
+        table.name === "employees"
+          ? [
+              { name: "fk_manager", column: "manager_id", ref_table: "employees", ref_column: "id" },
+              { name: "fk_department", column: "department_id", ref_table: "departments", ref_column: "id" },
+            ]
+          : [],
+      buildSql: async (table) => `DELETE FROM \`${table.schema}\`.\`${table.name}\`;`,
+    });
+
+    expect(plan.map(({ target }) => target.name)).toEqual(["employees", "departments"]);
+  });
+
   it("builds a large no-dependency plan without per-table metadata calls", async () => {
     const tables = Array.from({ length: 1000 }, (_, index) => ({ name: `table_${index}`, object_type: "TABLE", schema: "app" }));
     let metadataCalls = 0;

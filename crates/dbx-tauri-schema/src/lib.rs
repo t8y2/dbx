@@ -85,7 +85,7 @@ mod tests {
 
     #[test]
     fn handles_only_schema_commands() {
-        assert_eq!(COMMANDS.len(), 48);
+        assert_eq!(COMMANDS.len(), 49);
         assert!(handles("list_databases"));
         assert!(handles("list_event_triggers"));
         assert!(!handles("prepare_schema_diff"));

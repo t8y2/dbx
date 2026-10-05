@@ -1634,7 +1634,7 @@ fn is_postgres_identity_extra(extra: Option<&str>) -> bool {
     })
 }
 
-fn is_postgres_generated_always_identity_extra(extra: Option<&str>) -> bool {
+pub(crate) fn is_postgres_generated_always_identity_extra(extra: Option<&str>) -> bool {
     extra.is_some_and(|value| {
         let mut parts = value.split_whitespace();
         parts.next().is_some_and(|part| part.eq_ignore_ascii_case("generated"))
@@ -12415,7 +12415,13 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
         let dir = std::env::temp_dir().join(format!("dbx-transfer-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
-        (AppState::new(storage), dir)
+        let state = AppState::new_with_plugin_and_agent_dir_and_app_version(
+            storage,
+            dir.join("plugins"),
+            dir.join("agents"),
+            env!("CARGO_PKG_VERSION"),
+        );
+        (state, dir)
     }
 
     async fn spawn_influxdb3_transfer_server() -> (String, tokio::task::JoinHandle<String>) {

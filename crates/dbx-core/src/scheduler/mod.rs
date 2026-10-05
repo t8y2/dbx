@@ -9,6 +9,7 @@
 pub mod artifacts;
 pub mod engine;
 pub mod error;
+pub mod events;
 pub mod executor;
 pub mod lease;
 pub mod logs;
@@ -25,6 +26,7 @@ pub mod trigger;
 pub use artifacts::TaskArtifact;
 pub use engine::SchedulerEngine;
 pub use error::{redact_secrets, remove_secret_keys, validate_config_secrets, TaskError, TaskErrorKind};
+pub use events::{register_event_sink, SchedulerEventSink};
 pub use executor::{
     ResidentExecutor, TaskExecutionContext, TaskExecutionResult, TaskExecutor, TaskExecutorRegistry, TaskProgress,
     TaskProgressReporter,

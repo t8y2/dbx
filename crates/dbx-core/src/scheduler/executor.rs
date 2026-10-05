@@ -45,15 +45,26 @@ pub struct TaskProgress {
 }
 
 /// Persists run progress into the store; providers never touch SQLite.
+/// Successful reports also broadcast a `run-progress` event (ADR §7.4,
+/// fire-and-forget — persistence stays the source of truth).
 #[derive(Clone)]
 pub struct TaskProgressReporter {
     store: SchedulerStore,
     run_id: String,
+    task_id: Option<String>,
 }
 
 impl TaskProgressReporter {
     pub fn new(store: SchedulerStore, run_id: &str) -> Self {
-        Self { store, run_id: run_id.to_owned() }
+        Self { store, run_id: run_id.to_owned(), task_id: None }
+    }
+
+    /// Attaches the owning task id so broadcast events carry the frozen
+    /// §7.4 `taskId` field. Add-only builder: `new` keeps its signature for
+    /// existing callers.
+    pub fn with_task_id(mut self, task_id: impl Into<String>) -> Self {
+        self.task_id = Some(task_id.into());
+        self
     }
 
     pub fn run_id(&self) -> &str {
@@ -62,7 +73,17 @@ impl TaskProgressReporter {
 
     pub async fn report(&self, progress: TaskProgress) -> Result<(), TaskError> {
         let percent = progress.percent.map(|value| value.clamp(0.0, 100.0));
-        self.store.update_run_progress(&self.run_id, percent).await
+        self.store.update_run_progress(&self.run_id, percent).await?;
+        super::events::publish(serde_json::json!({
+            "type": "run-progress",
+            "taskId": self.task_id,
+            "runId": self.run_id,
+            "percent": percent,
+            "current": progress.current,
+            "total": progress.total,
+            "label": progress.label,
+        }));
+        Ok(())
     }
 }
 

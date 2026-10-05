@@ -175,8 +175,16 @@ impl SchedulerEngine {
             if in_flight {
                 continue;
             }
-            if let Err(error) = self.store.enqueue_run(task.id.clone(), TaskRunTrigger::Startup, 1, Utc::now()).await {
-                log::warn!("[scheduler] cannot enqueue startup run of task {}: {error}", task.id);
+            match self.store.enqueue_run(task.id.clone(), TaskRunTrigger::Startup, 1, Utc::now()).await {
+                Ok(run) => {
+                    super::events::publish(serde_json::json!({
+                        "type": "run-created",
+                        "taskId": task.id.clone(),
+                        "runId": run.id.clone(),
+                        "status": "queued",
+                    }));
+                }
+                Err(error) => log::warn!("[scheduler] cannot enqueue startup run of task {}: {error}", task.id),
             }
         }
     }
@@ -208,8 +216,16 @@ impl SchedulerEngine {
             log::error!("[scheduler] cannot mark run {run_id} started: {error}");
             return;
         }
+        // Engine-driven state change (ADR §7.4): the dispatch invariant made
+        // this run `running`; broadcast it fire-and-forget.
+        super::events::publish(serde_json::json!({
+            "type": "run-state",
+            "taskId": job.task.id.clone(),
+            "runId": run_id.clone(),
+            "status": "running",
+        }));
         let log_directory = run_log_directory(&self.store, &job.run.created_at, &run_id);
-        let mut logger = match TaskLogger::open(log_directory.clone()) {
+        let mut logger = match TaskLogger::open_with_task(log_directory.clone(), Some(job.task.id.clone())) {
             Ok(logger) => logger,
             Err(error) => {
                 log::error!("[scheduler] cannot open run log for {run_id}: {error}");
@@ -367,6 +383,12 @@ impl SchedulerEngine {
             }
         };
         log::info!("[scheduler] run {} finished as {}", run.id, run.status.as_str());
+        super::events::publish(serde_json::json!({
+            "type": "run-state",
+            "taskId": job.task.id.clone(),
+            "runId": run.id.clone(),
+            "status": run.status.as_str(),
+        }));
         if may_retry && matches!(status, TaskRunStatus::Failed | TaskRunStatus::Timeout) {
             let retry = &job.task.execution.retry;
             if run.attempt < retry.max_attempts {
@@ -379,6 +401,12 @@ impl SchedulerEngine {
                 {
                     Ok(retry_run) => {
                         log::info!("[scheduler] scheduled retry run {} (attempt {})", retry_run.id, retry_run.attempt);
+                        super::events::publish(serde_json::json!({
+                            "type": "run-created",
+                            "taskId": job.task.id.clone(),
+                            "runId": retry_run.id.clone(),
+                            "status": "queued",
+                        }));
                     }
                     Err(error) => log::error!("[scheduler] cannot schedule retry of run {}: {error}", run.id),
                 }
@@ -401,7 +429,7 @@ impl SchedulerEngine {
             run: job.run.clone(),
             cancellation: cancellation.clone(),
             logger: logger.clone(),
-            progress: TaskProgressReporter::new(self.store.clone(), &job.run.id),
+            progress: TaskProgressReporter::new(self.store.clone(), &job.run.id).with_task_id(job.task.id.clone()),
         };
         let execution = executor.execute(context);
         tokio::pin!(execution);
@@ -454,7 +482,7 @@ impl SchedulerEngine {
             run: job.run.clone(),
             cancellation: cancellation.clone(),
             logger: logger.clone(),
-            progress: TaskProgressReporter::new(self.store.clone(), &job.run.id),
+            progress: TaskProgressReporter::new(self.store.clone(), &job.run.id).with_task_id(job.task.id.clone()),
         };
         let start = executor.start(context);
         tokio::pin!(start);

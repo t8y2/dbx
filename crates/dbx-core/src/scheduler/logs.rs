@@ -54,6 +54,10 @@ pub struct LogSegmentStats {
 
 struct LoggerInner {
     directory: PathBuf,
+    /// Owning task id, attached by the engine so broadcast `run-log` events
+    /// carry the frozen ADR §7.4 `taskId` field. `None` when opened without
+    /// task context (e.g. tooling); persistence is unaffected either way.
+    task_id: Option<String>,
     file: Option<std::fs::File>,
     segment: u32,
     byte_size: u64,
@@ -79,6 +83,13 @@ impl TaskLogger {
     /// Opens (or resumes) the log directory of a run. Existing segments are
     /// scanned so reopening a run never restarts `seq` at 1.
     pub fn open(directory: PathBuf) -> Result<Self, TaskError> {
+        Self::open_with_task(directory, None)
+    }
+
+    /// [`TaskLogger::open`] with the owning task id attached, so every
+    /// appended line also broadcasts a `run-log` event (ADR §5.3: persist
+    /// first, broadcast after) with the frozen §7.4 `taskId` field.
+    pub fn open_with_task(directory: PathBuf, task_id: Option<String>) -> Result<Self, TaskError> {
         std::fs::create_dir_all(&directory)
             .map_err(|error| TaskError::unavailable(format!("Cannot create log directory: {error}")))?;
         let mut segment = 0u32;
@@ -97,6 +108,7 @@ impl TaskLogger {
         let mut logger = Self {
             inner: std::sync::Arc::new(Mutex::new(LoggerInner {
                 directory,
+                task_id,
                 file: None,
                 segment,
                 byte_size,
@@ -147,6 +159,21 @@ impl TaskLogger {
         inner.next_seq = seq;
         inner.byte_size += line.len() as u64;
         inner.line_count += 1;
+        // Persisted first (ADR §5.3); the event broadcast below is fire and
+        // forget — log delivery must never depend on a consumer.
+        let task_id = inner.task_id.clone();
+        let run_id = inner.directory.file_name().and_then(|name| name.to_str()).map(str::to_owned);
+        drop(inner);
+        super::events::publish(serde_json::json!({
+            "type": "run-log",
+            "taskId": task_id,
+            "runId": run_id,
+            "seq": seq,
+            "timestamp": entry.timestamp,
+            "level": entry.level,
+            "stream": entry.stream,
+            "message": entry.message,
+        }));
         Ok(seq)
     }
 
@@ -318,5 +345,38 @@ mod tests {
         let page = read_run_logs(&dir.path().join("missing"), &TaskLogQuery::default()).unwrap();
         assert!(page.entries.is_empty());
         assert!(page.eof);
+    }
+
+    #[test]
+    fn appends_broadcast_run_log_events_with_task_and_run_ids() {
+        use std::sync::{Arc, Mutex};
+
+        let received: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&received);
+        // The sink registry is process-global and tests run in parallel, so
+        // filter for this test's unique run id before recording.
+        super::super::events::register_event_sink(
+            "logs-test",
+            Arc::new(move |event| {
+                if event["runId"] == "log-event-test-run" {
+                    sink.lock().unwrap().push(event.clone());
+                }
+            }),
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path().join("log-event-test-run");
+        let mut logger = TaskLogger::open_with_task(run_dir, Some("task-1".into())).unwrap();
+        logger.append("warn", "stderr", "hello").unwrap();
+
+        let events = received.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["type"], "run-log");
+        assert_eq!(events[0]["taskId"], "task-1");
+        assert_eq!(events[0]["runId"], "log-event-test-run");
+        assert_eq!(events[0]["seq"], 1);
+        assert_eq!(events[0]["level"], "warn");
+        assert_eq!(events[0]["stream"], "stderr");
+        assert_eq!(events[0]["message"], "hello");
     }
 }

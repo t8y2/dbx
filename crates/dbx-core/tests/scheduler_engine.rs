@@ -383,3 +383,34 @@ async fn resident_mode_dispatches_through_resident_executor() {
     assert_eq!(finished.status, TaskRunStatus::Success);
     assert_eq!(resident.starts().len(), 1);
 }
+
+#[tokio::test]
+async fn engine_broadcasts_run_state_events_to_registered_sinks() {
+    use std::sync::Mutex;
+
+    // The sink registry is process-global and tests run in parallel; filter
+    // for this test's unique task id before recording.
+    let received: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&received);
+    dbx_core::scheduler::register_event_sink(
+        "engine-events-test",
+        Arc::new(move |event| {
+            if event["taskId"] == "evt-bridge" {
+                sink.lock().unwrap().push(event.clone());
+            }
+        }),
+    );
+
+    let (_dir, store) = temp_store();
+    let engine = engine(&store, registry_with(TestExecutor::new(Behavior::Succeed)), "worker-evt");
+    save(&store, run_definition("evt-bridge", "dbx.test", TaskTrigger::Manual)).await;
+    let run = store.enqueue_manual("evt-bridge".into()).await.unwrap();
+    let finished = drive_until_terminal(&engine, &store, &run.id, &[TaskRunStatus::Success]).await;
+    assert_eq!(finished.status, TaskRunStatus::Success);
+
+    let events = received.lock().unwrap();
+    let states: Vec<(&str, &str)> =
+        events.iter().filter_map(|e| Some((e["type"].as_str()?, e["status"].as_str()?))).collect();
+    assert_eq!(states, vec![("run-state", "running"), ("run-state", "success")]);
+    assert!(events.iter().all(|e| e["runId"] == run.id), "every event carries the run id");
+}

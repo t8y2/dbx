@@ -854,15 +854,176 @@ fn ensure_permission(plugin: &super::InstalledPlugin, required_permission: Optio
     Err(format!("Plugin '{}' has not declared permission '{permission}'", plugin.manifest.id))
 }
 
+/// Permission that gates the scheduler Host API (`SUPPORTED_PLUGIN_PERMISSIONS`
+/// and `plugins/manifest.schema.json` both list it; the two must stay in
+/// sync). First-version semantics are frozen to "open the Scheduler UI": a
+/// plugin may never silently create, enable, or modify tasks — future write
+/// access would arrive as a separate `host.scheduler:write` permission.
+pub const PLUGIN_HOST_SCHEDULER_PERMISSION: &str = "host.scheduler";
+
+/// Host API method that asks the host to open the Scheduler UI pre-filled
+/// with a create-task form (ADR `scheduler-task-contract.md` §6.4). UI-only by
+/// contract: the host renders the form, the user still submits it.
+pub const PLUGIN_HOST_OPEN_SCHEDULER_METHOD: &str = "host.openScheduler";
+
+/// The frozen `host.openScheduler` request. `mode` is a single-variant enum on
+/// purpose: the first version only supports `create`, so there is no payload
+/// shape a plugin could use to create, enable, or edit a task directly, and
+/// `deny_unknown_fields` keeps future write-shaped fields out of this surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginOpenSchedulerRequest {
+    /// The task provider to preselect, e.g. `io.dbx.ssh.tasks`.
+    pub provider_id: String,
+    /// The provider trigger to preselect, e.g. `io.dbx.ssh.tasks/execute`.
+    pub trigger_id: String,
+    /// Connection to prefill the target with, when the form binds to one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
+    pub mode: PluginOpenSchedulerMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginOpenSchedulerMode {
+    Create,
+}
+
+/// Validates an incoming `host.openScheduler` request and enforces the
+/// `host.scheduler` permission. This is the whole first-version scheduler Host
+/// API gate: the request can only ever ask for the UI to open.
+pub fn ensure_open_scheduler_request(
+    plugin: &super::InstalledPlugin,
+    params: &serde_json::Value,
+) -> Result<PluginOpenSchedulerRequest, String> {
+    ensure_permission(plugin, Some(PLUGIN_HOST_SCHEDULER_PERMISSION))?;
+    let request: PluginOpenSchedulerRequest = serde_json::from_value(params.clone())
+        .map_err(|error| format!("'{PLUGIN_HOST_OPEN_SCHEDULER_METHOD}' has an invalid payload: {error}"))?;
+    let identity = |value: &str, label: &str| -> Result<(), String> {
+        if value.trim().is_empty() || value.len() > 256 || value.chars().any(|c| c.is_control() || c.is_whitespace()) {
+            Err(format!("'{PLUGIN_HOST_OPEN_SCHEDULER_METHOD}' {label} is invalid"))
+        } else {
+            Ok(())
+        }
+    };
+    identity(&request.provider_id, "providerId")?;
+    identity(&request.trigger_id, "triggerId")?;
+    if let Some(connection_id) = &request.connection_id {
+        identity(connection_id, "connectionId")?;
+    }
+    Ok(request)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        plugin_connect_deadline, plugin_connection_action_result, plugin_connection_params, plugin_field_is_visible,
-        plugin_invoke_connection_action, validate_plugin_connection_values,
-        validate_plugin_connection_values_for_action, PluginRuntimeProxy,
+        ensure_open_scheduler_request, ensure_permission, plugin_connect_deadline, plugin_connection_action_result,
+        plugin_connection_params, plugin_field_is_visible, plugin_invoke_connection_action,
+        validate_plugin_connection_values, validate_plugin_connection_values_for_action, PluginOpenSchedulerMode,
+        PluginRuntimeProxy,
     };
     use crate::models::connection::ConnectionConfig;
-    use crate::plugins::PluginConnectionProviderContribution;
+    use crate::plugins::{InstalledPlugin, PluginConnectionProviderContribution, PluginManifest};
+
+    /// `host.scheduler` (first version) only ever gates `dbx.host.openScheduler`
+    /// — opening the scheduler UI with a pre-filled create form. The gate reads
+    /// the manifest permission list like every other Host API permission.
+    #[test]
+    fn scheduler_permission_gate_follows_the_declared_manifest_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "sample.scheduler",
+            "name": "Sample Scheduler",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "permissions": ["host.scheduler"]
+        }))
+        .unwrap();
+        let plugin = InstalledPlugin::new(manifest, dir.path().to_path_buf(), "0.6.14");
+        assert!(ensure_permission(&plugin, Some("host.scheduler")).is_ok());
+        assert!(ensure_permission(&plugin, Some("host.data:read")).is_err());
+        assert!(ensure_permission(&plugin, None).is_ok(), "ungated calls need no permission");
+
+        let undeclared: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "sample.plain",
+            "name": "Sample Plain",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" }
+        }))
+        .unwrap();
+        let plugin = InstalledPlugin::new(undeclared, dir.path().to_path_buf(), "0.6.14");
+        let error = ensure_permission(&plugin, Some("host.scheduler")).unwrap_err();
+        assert!(error.contains("host.scheduler"), "{error}");
+    }
+
+    /// `host.openScheduler` is the entire first-version scheduler Host API: it
+    /// may only open the UI pre-filled for creating a task. Without the
+    /// `host.scheduler` permission the request is refused outright; with it,
+    /// any payload beyond the frozen create shape (extra fields, other modes,
+    /// blank ids) is still rejected — there is no write path.
+    #[test]
+    fn open_scheduler_gate_only_lets_the_ui_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "sample.scheduler",
+            "name": "Sample Scheduler",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "permissions": ["host.scheduler"]
+        }))
+        .unwrap();
+        let plugin = InstalledPlugin::new(manifest, dir.path().to_path_buf(), "0.6.14");
+        let request = ensure_open_scheduler_request(
+            &plugin,
+            &serde_json::json!({
+                "providerId": "io.dbx.ssh.tasks",
+                "triggerId": "io.dbx.ssh.tasks/execute",
+                "connectionId": "conn-1",
+                "mode": "create"
+            }),
+        )
+        .unwrap();
+        assert_eq!(request.provider_id, "io.dbx.ssh.tasks");
+        assert_eq!(request.mode, PluginOpenSchedulerMode::Create);
+
+        // Anything that is not the frozen open-UI shape is refused, so the
+        // gate can never be stretched into creating or editing a task.
+        for (params, expected) in [
+            (serde_json::json!({ "providerId": "p", "triggerId": "t", "mode": "enable" }), "invalid payload"),
+            (
+                serde_json::json!({ "providerId": "p", "triggerId": "t", "mode": "create", "taskId": "existing" }),
+                "invalid payload",
+            ),
+            (serde_json::json!({ "providerId": "p", "triggerId": " " , "mode": "create" }), "triggerId is invalid"),
+            (serde_json::json!({ "triggerId": "t", "mode": "create" }), "invalid payload"),
+        ] {
+            let error = ensure_open_scheduler_request(&plugin, &params).unwrap_err();
+            assert!(error.contains(expected), "{params}: {error}");
+        }
+
+        let undeclared: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "sample.plain",
+            "name": "Sample Plain",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" }
+        }))
+        .unwrap();
+        let plugin = InstalledPlugin::new(undeclared, dir.path().to_path_buf(), "0.6.14");
+        let error = ensure_open_scheduler_request(
+            &plugin,
+            &serde_json::json!({ "providerId": "p", "triggerId": "t", "mode": "create" }),
+        )
+        .unwrap_err();
+        assert!(error.contains("host.scheduler"), "gate failures name the permission: {error}");
+    }
 
     #[tokio::test]
     async fn uninstall_plugin_holds_one_update_lease_across_the_runtime_and_the_store() {

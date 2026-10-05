@@ -26,7 +26,9 @@ pub use filesystem::{
     PLUGIN_FILESYSTEM_READ_METHOD, PLUGIN_FILESYSTEM_RENAME_METHOD, PLUGIN_FILESYSTEM_WRITE_METHOD,
 };
 pub use host::{
-    ActivePluginSession, PluginConnectionActionResult, PluginConnectionHandle, PluginHost, PluginRuntimeProxy,
+    ensure_open_scheduler_request, ActivePluginSession, PluginConnectionActionResult, PluginConnectionHandle,
+    PluginHost, PluginOpenSchedulerMode, PluginOpenSchedulerRequest, PluginRuntimeProxy,
+    PLUGIN_HOST_OPEN_SCHEDULER_METHOD, PLUGIN_HOST_SCHEDULER_PERMISSION,
 };
 pub use installer::{
     PluginInstallPolicy, PluginInstallProvenance, PluginInstallResponse, PluginInstallResult, PluginInstallSource,

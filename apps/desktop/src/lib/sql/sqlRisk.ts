@@ -32,6 +32,27 @@ const EXPLAIN_OPTION_KEYWORDS = new Set(["explain", "analyze", "analyse", "verbo
 const PRIMARY_STATEMENT_KEYWORDS = new Set([...READ_KEYWORDS, ...WRITE_KEYWORDS, ...DDL_KEYWORDS, ...TRANSACTION_KEYWORDS, "with", "copy", "pragma", "use", "set"]);
 const SAFE_READ_PRAGMA_NAMES = new Set(["table_info", "table_xinfo", "index_list", "index_info", "foreign_key_list", "database_list", "compile_options", "data_version"]);
 
+/**
+ * Engines whose lexer treats `#` as a line-comment opener and a backslash as a
+ * string escape. Both rules are MySQL family features: on SQL Server `#tmp` is a
+ * temporary table, and on PostgreSQL `standard_conforming_strings` is on by
+ * default, so `'dir\'` is a complete string. Assuming the MySQL rules everywhere
+ * hides SQL from the classifier — `SELECT * FROM #tmp; DELETE FROM #tmp;` (SQL
+ * Server) and `SELECT 'dir\'; DELETE FROM users;` (PostgreSQL) would otherwise be
+ * read as one read-only statement and auto-execute unconfirmed.
+ *
+ * Mirrors `is_mysql_compatible_database` in `crates/dbx-sql-core/src/sql.rs`,
+ * which gates `supports_hash_line_comments` the same way. An unknown dialect is
+ * deliberately not treated as MySQL: keeping `#` and backslashes literal can only
+ * split more statements than before, which raises the assessed risk rather than
+ * lowering it.
+ */
+const MYSQL_LEXER_DATABASE_TYPES = new Set<string>(["mysql", "doris", "starrocks", "manticoresearch", "goldendb"]);
+
+function usesMysqlLexerRules(dialect?: DatabaseType | string): boolean {
+  return typeof dialect === "string" && MYSQL_LEXER_DATABASE_TYPES.has(dialect.trim().toLowerCase());
+}
+
 const RISK_ORDER: Record<SqlRiskLevel, number> = {
   read: 0,
   write: 1,
@@ -40,8 +61,8 @@ const RISK_ORDER: Record<SqlRiskLevel, number> = {
   unknown: 4,
 };
 
-export function splitSqlStatementsForSafety(sql: string): string[] {
-  return sqlSafetyText(sql)
+export function splitSqlStatementsForSafety(sql: string, dialect?: DatabaseType | string): string[] {
+  return sqlSafetyText(sql, dialect)
     .split(";")
     .map((statement) => statement.trim())
     .filter(Boolean);
@@ -59,7 +80,7 @@ export function classifySqlRisk(sql: string, options: SqlRiskOptions = {}): SqlR
   const searchEngineRisk = searchEngineAssessment(sql, options.dialect, { elasticsearch: classifyElasticsearchSourceRisk, solr: classifySolrSourceRisk, couchdb: classifyCouchDbSourceRisk });
   if (searchEngineRisk) return { ...searchEngineRisk, statements: [searchEngineRisk] };
 
-  const statements = splitSqlStatementsForSafety(sql).map((statement) => classifySqlStatementRisk(statement, options));
+  const statements = splitSqlStatementsForSafety(sql, options.dialect).map((statement) => classifySqlStatementRisk(statement, options));
   if (!statements.length) return { risk: "unknown", statements: [] };
   const highest = statements.reduce<SqlRiskStatementAssessment>((current, statement) => (RISK_ORDER[statement.risk] > RISK_ORDER[current.risk] ? statement : current), { risk: "read" });
   return { ...highest, statements };
@@ -154,7 +175,8 @@ export function isSqlRiskMutation(risk: SqlRiskLevel): boolean {
   return risk !== "read";
 }
 
-export function sqlSafetyText(sql: string): string {
+export function sqlSafetyText(sql: string, dialect?: DatabaseType | string): string {
+  const mysqlLexer = usesMysqlLexerRules(dialect);
   let output = "";
   let index = 0;
 
@@ -169,7 +191,7 @@ export function sqlSafetyText(sql: string): string {
       continue;
     }
 
-    if (char === "#") {
+    if (char === "#" && mysqlLexer) {
       index += 1;
       while (index < sql.length && sql[index] !== "\n" && sql[index] !== "\r") index += 1;
       output += " ";
@@ -199,14 +221,14 @@ export function sqlSafetyText(sql: string): string {
     }
 
     if (char === "'") {
-      index = readQuotedEnd(sql, index, "'", "'");
+      index = readQuotedEnd(sql, index, "'", "'", mysqlLexer);
       output += " ";
       continue;
     }
 
     if (char === '"' || char === "`" || char === "[") {
       const close = char === "[" ? "]" : char;
-      const end = readQuotedEnd(sql, index, char, close);
+      const end = readQuotedEnd(sql, index, char, close, mysqlLexer);
       output += ` ${unquoteIdentifier(sql.slice(index, end), char, close).replace(/[;]/g, " ")} `;
       index = end;
       continue;
@@ -347,10 +369,10 @@ function dollarQuoteTagAt(sql: string, index: number): string | undefined {
   return match?.[0];
 }
 
-function readQuotedEnd(sql: string, start: number, open: string, close: string): number {
+function readQuotedEnd(sql: string, start: number, open: string, close: string, backslashEscapes: boolean): number {
   let index = start + open.length;
   while (index < sql.length) {
-    if (sql[index] === "\\" && (open === "'" || open === '"')) {
+    if (backslashEscapes && sql[index] === "\\" && (open === "'" || open === '"')) {
       index += 2;
       continue;
     }

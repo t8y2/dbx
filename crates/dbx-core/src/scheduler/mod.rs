@@ -15,6 +15,7 @@ pub mod logs;
 pub mod migration;
 pub mod models;
 pub mod policy;
+pub mod providers;
 pub mod queue;
 pub mod resident;
 pub mod service;

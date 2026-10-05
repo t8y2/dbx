@@ -7,6 +7,10 @@ mod store;
 mod tests;
 
 pub use models::{BackupConfig, BackupFile, BackupRun, BackupSchedule, BackupTableTarget, Migration, RunRequest};
+// Re-exported for the scheduler builtin backup provider (ADR §8): the adapter
+// renders run-directory templates and builds legacy jobs with the same rules
+// the legacy worker uses.
+pub(crate) use models::{validate_template, Job, DEFAULT_DIRECTORY};
 pub use service::{BackupCommand, BackupService};
 pub use store::{BackupSnapshot, BackupStore};
 

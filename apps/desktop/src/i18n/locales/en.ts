@@ -4,6 +4,7 @@ import { dataDictionaryEn as dataDictionary } from "./dataDictionaryMessages";
 import { consulUiMessages } from "./consulUi";
 import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessages";
 import { meilisearchManagementEn } from "./meilisearchManagement";
+import { schedulerEn as scheduler } from "./schedulerMessages";
 import { mongodbDatabaseDumpEn as mongoDump } from "./mongodbDatabaseDump";
 
 const consul = {
@@ -11414,5 +11415,8 @@ export default {
     checking: "Checking local data security status…",
     authFailed: "Unable to check DBX authentication.",
     retry: "Retry",
+  },
+  scheduler: {
+    ...scheduler,
   },
 };

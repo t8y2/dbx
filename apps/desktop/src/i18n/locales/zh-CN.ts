@@ -4,6 +4,7 @@ import docs from "./docs/zh-CN";
 import { dataDictionaryZhCN as dataDictionary } from "./dataDictionaryMessages";
 import { consul } from "./consulZhCN";
 import { meilisearchManagementZhCN } from "./meilisearchManagement";
+import { schedulerZhCN as scheduler } from "./schedulerMessages";
 import { mongodbDatabaseDumpZhCN as mongoDump } from "./mongodbDatabaseDump";
 
 export default withEnglishFallback({
@@ -11395,5 +11396,8 @@ export default withEnglishFallback({
     checking: "正在检查本地数据安全状态…",
     authFailed: "无法检查 DBX 登录状态。",
     retry: "重试",
+  },
+  scheduler: {
+    ...scheduler,
   },
 });

@@ -2,6 +2,7 @@ import { redisGroupingZhTW as redisGrouping } from "./redisGrouping";
 import { withEnglishFallback } from "./fallback";
 import { mongodbDatabaseDumpZhTW as mongoDump } from "./mongodbDatabaseDump";
 import { meilisearchManagementZhTW } from "./meilisearchManagement";
+import { schedulerZhTW as scheduler } from "./schedulerMessages";
 import docs from "./docs/zh-TW";
 import { dataDictionaryZhTW as dataDictionary } from "./dataDictionaryMessages";
 import { consulZhTWMessages } from "./consulZhTW";
@@ -10782,5 +10783,8 @@ export default withEnglishFallback({
       settingsFollower: "設定（Follower）",
       noDetails: "此 Core 沒有複製詳細資料。",
     },
+  },
+  scheduler: {
+    ...scheduler,
   },
 });

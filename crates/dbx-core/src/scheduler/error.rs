@@ -114,10 +114,13 @@ impl From<rusqlite::Error> for TaskError {
 }
 
 /// Secret red line (ADR §10): `password` / `token` / `secret` / `private_key`
-/// values must never enter task config, payloads, logs, events or the
-/// database. `secretRef` (an opaque reference into the secret store) is
-/// explicitly allowed.
-const SECRET_KEY_MARKERS: [&str; 4] = ["password", "token", "secret", "privatekey"];
+/// / `authorization` / session-key values must never enter task config,
+/// payloads, logs, events or the database. `secretRef` (an opaque reference
+/// into the secret store) is explicitly allowed. The marker list mirrors
+/// `dbx-plugin-runtime`'s `SECRET_KEY_FRAGMENTS` (keys are normalized to
+/// lowercase alphanumerics before matching, so `private_key` and
+/// `session_key` fold into their marker).
+const SECRET_KEY_MARKERS: [&str; 6] = ["password", "token", "secret", "privatekey", "authorization", "sessionkey"];
 const SECRET_REF_KEY: &str = "secretref";
 
 fn normalizes_to_secret(key: &str) -> bool {
@@ -201,12 +204,14 @@ mod tests {
     fn secrets_are_redacted_from_nested_config() {
         let mut config = json!({
             "command": "echo hi",
-            "auth": { "password": "p", "privateKey": "k", "secretRef": "keep-me" },
+            "auth": { "password": "p", "privateKey": "k", "authorization": "Bearer x", "sessionKey": "s", "secretRef": "keep-me" },
             "items": [{ "api_token": "t", "note": "n" }]
         });
         redact_secrets(&mut config);
         assert_eq!(config["auth"]["password"], serde_json::Value::Null);
         assert_eq!(config["auth"]["privateKey"], serde_json::Value::Null);
+        assert_eq!(config["auth"]["authorization"], serde_json::Value::Null);
+        assert_eq!(config["auth"]["sessionKey"], serde_json::Value::Null);
         assert_eq!(config["auth"]["secretRef"], "keep-me");
         assert_eq!(config["items"][0]["api_token"], serde_json::Value::Null);
         assert_eq!(config["items"][0]["note"], "n");

@@ -1056,7 +1056,10 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
         }
 
         if !in_single_quote && !in_double_quote && !in_backtick {
-            if ch == '-' && next == Some('-') {
+            if ch == '-'
+                && next == Some('-')
+                && dash_dash_starts_line_comment(options.profile, next_char_at(sql, i + 2))
+            {
                 in_line_comment = true;
                 i += 2;
                 continue;
@@ -1118,11 +1121,11 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
         }
 
         match ch {
-            '\'' if !in_double_quote && !in_backtick && !is_escaped_single_quote(sql, i) => {
+            '\'' if !in_double_quote && !in_backtick && !has_odd_trailing_backslashes(&sql[start..i]) => {
                 in_single_quote = !in_single_quote;
                 i += ch.len_utf8();
             }
-            '"' if !in_single_quote && !in_backtick => {
+            '"' if !in_single_quote && !in_backtick && !has_odd_trailing_backslashes(&sql[start..i]) => {
                 in_double_quote = !in_double_quote;
                 i += ch.len_utf8();
             }
@@ -1251,10 +1254,6 @@ fn next_char_at(sql: &str, index: usize) -> Option<char> {
 
 fn next_char_len(sql: &str, index: usize) -> usize {
     next_char(sql, index).len_utf8()
-}
-
-fn is_escaped_single_quote(sql: &str, index: usize) -> bool {
-    index > 0 && sql.as_bytes().get(index - 1) == Some(&b'\\')
 }
 
 fn is_on_delimiter_line(sql: &str, range_start: usize, index: usize, options: SqlParsingOptions) -> bool {
@@ -3355,6 +3354,22 @@ mod tests {
             split_sql_statements_for_database(sql, DatabaseType::Mysql),
             vec![r#"CREATE TABLE paths (value varchar(100) COMMENT 'Windows path\\')"#, "DROP TABLE paths"]
         );
+    }
+
+    #[test]
+    fn cursor_statement_closes_mysql_string_after_escaped_backslash() {
+        let sql = "SELECT 'a\\\\';\nSELECT 2;";
+        let cursor = sql.find("SELECT 2").unwrap() + 3;
+        assert_eq!(find_statement_at_cursor_for_database(sql, cursor, DatabaseType::Mysql), "SELECT 2");
+        assert_eq!(find_statement_at_cursor_for_database(sql, 3, DatabaseType::Mysql), "SELECT 'a\\\\'");
+    }
+
+    #[test]
+    fn cursor_statement_treats_mysql_dash_dash_without_space_as_minus() {
+        let sql = "SELECT 5--1;\nSELECT 2;";
+        let cursor = sql.find("SELECT 2").unwrap() + 3;
+        assert_eq!(find_statement_at_cursor_for_database(sql, cursor, DatabaseType::Mysql), "SELECT 2");
+        assert_eq!(find_statement_at_cursor_for_database(sql, 3, DatabaseType::Mysql), "SELECT 5--1");
     }
 
     #[test]

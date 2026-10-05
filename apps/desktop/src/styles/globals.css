@@ -1572,6 +1572,8 @@ html.dbx-data-grid-native-selection-blocked [role="textbox"] * {
     @apply font-sans bg-background text-foreground;
     text-rendering: geometricPrecision;
     font-synthesis: none;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
   button,
   [role="button"],

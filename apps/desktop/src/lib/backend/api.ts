@@ -190,6 +190,22 @@ export const revealPathInFileManager = forward("revealPathInFileManager");
 export const deleteDatabaseBackupFiles = forward("deleteDatabaseBackupFiles");
 export const databaseBackupCommand = forward("databaseBackupCommand");
 export const databaseBackupBackground = forward("databaseBackupBackground");
+
+// Scheduler / Task Center (ADR §7.2)
+export const schedulerListTasks = forward("schedulerListTasks");
+export const schedulerGetTask = forward("schedulerGetTask");
+export const schedulerSaveTask = forward("schedulerSaveTask");
+export const schedulerDeleteTask = forward("schedulerDeleteTask");
+export const schedulerRunTask = forward("schedulerRunTask");
+export const schedulerCancelRun = forward("schedulerCancelRun");
+export const schedulerEnableTask = forward("schedulerEnableTask");
+export const schedulerDisableTask = forward("schedulerDisableTask");
+export const schedulerListRuns = forward("schedulerListRuns");
+export const schedulerGetRun = forward("schedulerGetRun");
+export const schedulerGetRunLogs = forward("schedulerGetRunLogs");
+export const schedulerListArtifacts = forward("schedulerListArtifacts");
+export const schedulerResidentAction = forward("schedulerResidentAction");
+export const schedulerListResidentSessions = forward("schedulerListResidentSessions");
 export const downloadDatabaseBackupFile = forward("downloadDatabaseBackupFile");
 export const prepareDatabaseBackupRestore = forward("prepareDatabaseBackupRestore");
 export const isSqliteDatabaseFile = forward("isSqliteDatabaseFile");

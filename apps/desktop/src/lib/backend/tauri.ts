@@ -4,6 +4,7 @@ import type { MongoDumpFormat, MongoDumpSourceInput, MongoDumpCatalog, MongoRest
 import type { MongoRestoreUpload, MongoSourceReadOptions } from "./mongodbDumpTypes";
 import type { UserSkillRootSettings, UserSkillsListResult, UserSkillsReadResult } from "@/types/userSkills";
 import type { DatabaseBackupCommand, DatabaseBackupBackgroundStatus } from "@/lib/backup/backgroundDatabaseBackup";
+import type { ResidentSession, SchedulerLogQuery, SchedulerResidentAction, SchedulerResidentActionResult, SchedulerRunListQuery, TaskArtifact, TaskDefinition, TaskLogPage, TaskRun } from "@/lib/backend/schedulerTypes";
 
 export function databaseBackupCommand<T = unknown>(command: DatabaseBackupCommand): Promise<T> {
   return invoke("database_backup_command", { command });
@@ -6276,4 +6277,77 @@ export * from "@/lib/backend/nacos-tauri";
 
 export async function openQueryResultTempFile(path: string): Promise<void> {
   return invoke("open_query_result_temp_file", { path });
+// ---------------------------------------------------------------------------
+// Scheduler / Task Center (ADR §7.2). All commands route through
+// SchedulerService; rejections carry the frozen machine code as a
+// `"code: message"` prefix (ADR §7.5).
+// ---------------------------------------------------------------------------
+
+export function schedulerListTasks(): Promise<TaskDefinition[]> {
+  return invoke("scheduler_list_tasks");
+}
+
+export function schedulerGetTask(id: string): Promise<TaskDefinition> {
+  return invoke("scheduler_get_task", { id });
+}
+
+/** Create-when-new, CAS-update-when-existing: echo the stored `version` or save_task rejects with `version_conflict`. */
+export function schedulerSaveTask(task: TaskDefinition): Promise<TaskDefinition> {
+  return invoke("scheduler_save_task", { task });
+}
+
+export function schedulerDeleteTask(id: string): Promise<void> {
+  return invoke("scheduler_delete_task", { id });
+}
+
+export function schedulerRunTask(id: string): Promise<TaskRun> {
+  return invoke("scheduler_run_task", { id });
+}
+
+export function schedulerCancelRun(id: string, runId: string): Promise<boolean> {
+  return invoke("scheduler_cancel_run", { id, request: { runId } });
+}
+
+export function schedulerEnableTask(id: string): Promise<TaskDefinition> {
+  return invoke("scheduler_enable_task", { id });
+}
+
+export function schedulerDisableTask(id: string): Promise<TaskDefinition> {
+  return invoke("scheduler_disable_task", { id });
+}
+
+export function schedulerListRuns(query: SchedulerRunListQuery = {}): Promise<TaskRun[]> {
+  return invoke("scheduler_list_runs", {
+    taskId: query.taskId,
+    status: query.status,
+    limit: query.limit,
+    before: query.before,
+    after: query.after,
+  });
+}
+
+export function schedulerGetRun(id: string): Promise<TaskRun> {
+  return invoke("scheduler_get_run", { id });
+}
+
+export function schedulerGetRunLogs(id: string, query: SchedulerLogQuery = {}): Promise<TaskLogPage> {
+  return invoke("scheduler_get_run_logs", {
+    id,
+    afterSeq: query.afterSeq,
+    limit: query.limit,
+    level: query.level,
+    stream: query.stream,
+  });
+}
+
+export function schedulerListArtifacts(id: string): Promise<TaskArtifact[]> {
+  return invoke("scheduler_list_artifacts", { id });
+}
+
+export function schedulerResidentAction(sessionId: string, action: SchedulerResidentAction): Promise<SchedulerResidentActionResult> {
+  return invoke("scheduler_resident_action", { sessionId, action });
+}
+
+export function schedulerListResidentSessions(): Promise<ResidentSession[]> {
+  return invoke("scheduler_list_resident_sessions");
 }

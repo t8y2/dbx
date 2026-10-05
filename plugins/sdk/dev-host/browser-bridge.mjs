@@ -128,6 +128,7 @@ function installBridge(channel) {
     },
     openWorkbench: (contributionId, context, options) => request("host.openWorkbench", { contributionId, context, forceNew: !!(options && options.forceNew) }),
     openFilesystem: (providerId, context) => request("host.openFilesystem", { providerId, context }),
+    openScheduler: (schedulerRequest) => request("host.openScheduler", schedulerRequest),
     reopenConnection: (connectionId) => request("host.reopenConnection", { connectionId }),
     copy: (text) => request("host.copy", { text }),
     storage: {

@@ -421,6 +421,42 @@ test("host.storage persists per-plugin entries behind the declared permission", 
   assert.deepEqual(persisted, { theme: null });
   if (process.platform !== "win32") assert.equal((await stat(join(allowedRoot, "data/ui-storage.json"))).mode & 0o777, 0o600);
 });
+test("host.openScheduler is gated behind host.scheduler and only opens the create form", async (t) => {
+  const { request } = await fixture(t);
+  const saved = await request("connections/save", { providerId: "example.connection", values });
+  const frame = (await request("connections/connect", { id: saved.value.id })).value.frame;
+  const document = (await request("frame-document", { frameId: frame.id })).value;
+  const call = (method, params) => request("bridge", { frameId: frame.id, channel: document.channel, method, params });
+
+  assert.equal(
+    (await call("host.openScheduler", { providerId: "io.dbx.ssh.tasks", triggerId: "io.dbx.ssh.tasks/execute", mode: "create" })).status,
+    400,
+    "the permission must gate the scheduler host api",
+  );
+
+  const { request: allowedRequest } = await fixture(t, false, {
+    pluginManifest: { ...manifest, permissions: [...manifest.permissions, "host.scheduler"] },
+  });
+  const allowedSave = await allowedRequest("connections/save", { providerId: "example.connection", values });
+  const allowedFrame = (await allowedRequest("connections/connect", { id: allowedSave.value.id })).value.frame;
+  const allowedDocument = (await allowedRequest("frame-document", { frameId: allowedFrame.id })).value;
+  const allowed = (method, params) => allowedRequest("bridge", { frameId: allowedFrame.id, channel: allowedDocument.channel, method, params });
+
+  const opened = await allowed("host.openScheduler", {
+    providerId: "io.dbx.ssh.tasks",
+    triggerId: "io.dbx.ssh.tasks/execute",
+    connectionId: "conn-1",
+    mode: "create",
+  });
+  assert.deepEqual(opened.value, {
+    mockOpenScheduler: { providerId: "io.dbx.ssh.tasks", triggerId: "io.dbx.ssh.tasks/execute", connectionId: "conn-1", mode: "create" },
+  });
+  assert.equal(
+    (await allowed("host.openScheduler", { providerId: "io.dbx.ssh.tasks", triggerId: "t", mode: "enable" })).status,
+    400,
+    "the first version only ever opens the create form",
+  );
+});
 test("loopback endpoint rejects cross-origin, forged Host, CSRF and unowned frames", async (t) => {
   const { host, request, headers } = await fixture(t);
   assert.equal((await request("connections/save", {}, { Origin: "https://evil.example" })).status, 403);

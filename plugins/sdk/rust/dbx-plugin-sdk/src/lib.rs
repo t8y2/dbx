@@ -8,6 +8,15 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod task;
+pub use task::{
+    TaskArtifact, TaskArtifactEvent, TaskEvent, TaskExecuteResult, TaskFieldOption, TaskLogEvent, TaskLogLevel,
+    TaskProgressEvent, TaskRunRef, TaskRunRequest, TaskRunTask, TaskSessionState, TaskStartResult, TaskStatusRequest,
+    TaskStatusResult, TaskStopRequest, TaskStopResult, TaskStream, TaskValidateRequest, TaskValidateResult,
+    TaskValidateTask, TASK_ARTIFACT_EVENT, TASK_EXECUTE_METHOD, TASK_LOG_EVENT, TASK_PROGRESS_EVENT, TASK_START_METHOD,
+    TASK_STATE_EVENT, TASK_STATUS_METHOD, TASK_STOP_METHOD, TASK_VALIDATE_METHOD,
+};
+
 pub const PROTOCOL_VERSION: u32 = 1;
 const MAX_JSON_BYTES: usize = 8 * 1024 * 1024;
 const MAX_BINARY_BYTES: usize = 64 * 1024 * 1024;

@@ -10,6 +10,8 @@ import {
   ArrowUpDown,
   Calendar,
   ChevronsDownUp,
+  Clipboard,
+  Copy,
   Clock,
   Database,
   Download,
@@ -41,6 +43,7 @@ import SqlLibrarySearchSnippet from "@/components/layout/SqlLibrarySearchSnippet
 import type { SavedSqlLineMatch } from "@/lib/savedSql/savedSqlSearch";
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { copyToClipboard } from "@/lib/common/clipboard";
 import * as api from "@/lib/backend/api";
 import { externalSqlFileOpenErrorMessage } from "@/lib/sql/sqlFileOpen";
 import { useSavedSqlStore, type SavedSqlFileSortMode, type SavedSqlFolderSortMode } from "@/stores/savedSqlStore";
@@ -495,6 +498,9 @@ async function openNewFolderInput(parentFolderId?: string) {
 async function openNewQueryInFolder(folder?: SavedSqlFolder) {
   const connectionId = folder?.connectionId || connectionStore.activeConnectionId || connectionStore.connections[0]?.id;
   if (!connectionId) return;
+  if (folder?.id) {
+    collapsedFolders.value = new Set([...collapsedFolders.value].filter((id) => id !== folder.id));
+  }
 
   const folderFiles = folder ? savedSqlStore.filesInFolder(folder.id) : [];
   const folderFallbackDb = folderFiles.find((f) => f.database)?.database;
@@ -518,6 +524,9 @@ async function openNewQueryInFolder(folder?: SavedSqlFolder) {
     });
     const tabId = queryStore.openSavedSql(file);
     connectionStore.activeConnectionId = queryStore.tabs.find((tab) => tab.id === tabId)?.connectionId ?? file.connectionId;
+    // New files should behave like newly-created folders: the default name is
+    // immediately editable, with the extension excluded from the selection.
+    startRenameFile(file, { restoreFocusAfterEditorMount: true });
   } catch (error) {
     toast(t("savedSql.saveFailed", { message: savedSqlErrorMessage(error, t) }), 5000);
   }
@@ -801,6 +810,26 @@ function fileTitleStyle(file: SavedSqlFile): CSSProperties | undefined {
 const renamingTarget = ref<{ type: "folder" | "file"; id: string } | null>(null);
 const renameValue = ref("");
 const renameInputRef = ref<HTMLInputElement | null>(null);
+let renameBlurTimer: number | undefined;
+
+function cancelPendingRenameBlur() {
+  if (renameBlurTimer === undefined) return;
+  window.clearTimeout(renameBlurTimer);
+  renameBlurTimer = undefined;
+}
+
+function handleRenameInputFocus() {
+  cancelPendingRenameBlur();
+}
+
+function handleRenameInputBlur() {
+  cancelPendingRenameBlur();
+  renameBlurTimer = window.setTimeout(() => {
+    renameBlurTimer = undefined;
+    void confirmRename();
+  }, 0);
+}
+
 function setRenameInputRef(el: unknown) {
   renameInputRef.value = (el as HTMLInputElement) ?? null;
 }
@@ -830,18 +859,31 @@ function startRenameFolder(folder: SavedSqlFolder) {
   });
 }
 
-function startRenameFile(file: SavedSqlFile) {
+function startRenameFile(file: SavedSqlFile, options: { restoreFocusAfterEditorMount?: boolean } = {}) {
   prepareRenameInput();
   setActiveItem(file.id, "file");
   renamingTarget.value = { type: "file", id: file.id };
   renameValue.value = file.name.replace(/\.sql$/i, "");
   nextTick(() => {
     focusSidebarRenameInput(() => renameInputRef.value ?? undefined);
+    if (options.restoreFocusAfterEditorMount) {
+      // QueryEditor requests focus on its own nextTick + animation frame when
+      // a new tab mounts. Restore the rename focus one frame later so that
+      // editor autofocus cannot immediately steal it back.
+      const restoreFocus = () => {
+        const input = renameInputRef.value;
+        input?.focus();
+        input?.select();
+      };
+      if (typeof requestAnimationFrame === "function") requestAnimationFrame(restoreFocus);
+      else setTimeout(restoreFocus, 0);
+    }
   });
 }
 
 async function confirmRename() {
   if (!renamingTarget.value) return;
+  cancelPendingRenameBlur();
   const { type, id } = renamingTarget.value;
   const name = renameValue.value.trim();
   renamingTarget.value = null;
@@ -859,6 +901,7 @@ async function confirmRename() {
 }
 
 function cancelRename() {
+  cancelPendingRenameBlur();
   renamingTarget.value = null;
   renameValue.value = "";
 }
@@ -1011,6 +1054,68 @@ function handleFolderClick(folder: SavedSqlFolder, event: MouseEvent) {
 
 const contextTarget = ref<SavedSqlFolder | SavedSqlFile | "panel" | null>(null);
 
+function pasteTargetForLibraryContext(target: SavedSqlFolder | SavedSqlFile | "panel") {
+  if (target === "panel") {
+    const connectionId = connectionStore.activeConnectionId || connectionStore.connections[0]?.id;
+    if (!connectionId) return null;
+    const activeTab = queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId);
+    const config = connectionStore.getConfig(connectionId);
+    return {
+      connectionId,
+      database: activeTab?.connectionId === connectionId && activeTab.database ? activeTab.database : config ? targetDefaultDatabase(config) || config.database || "" : "",
+    };
+  }
+
+  if ("sql" in target) {
+    return {
+      connectionId: target.connectionId,
+      catalog: target.catalog,
+      database: target.database || "",
+      schema: target.schema,
+      folderId: target.folderId,
+    };
+  }
+
+  const folderFiles = savedSqlStore.filesInFolder(target.id);
+  const activeTab = queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId);
+  const config = connectionStore.getConfig(target.connectionId);
+  return {
+    connectionId: target.connectionId,
+    database: folderFiles.find((file) => file.database)?.database || (activeTab?.connectionId === target.connectionId && activeTab.database ? activeTab.database : undefined) || (config ? targetDefaultDatabase(config) || config.database || "" : ""),
+    folderId: target.id,
+  };
+}
+
+async function copyLibraryFiles(fileIds: readonly string[]) {
+  const uniqueIds = [...new Set(fileIds)].filter((id) => !!savedSqlStore.getFile(id));
+  if (uniqueIds.length === 0) return;
+  connectionStore.treeClipboard = { kind: "saved-sql-copy", fileIds: uniqueIds };
+  try {
+    await copyToClipboard(
+      uniqueIds
+        .map((id) => savedSqlStore.getFile(id)?.name)
+        .filter(Boolean)
+        .join("\n"),
+    );
+  } catch {
+    // The internal clipboard remains available when the system clipboard is denied.
+  }
+  toast(t("savedSql.copied", { count: uniqueIds.length }), 2000);
+}
+
+async function pasteLibraryFiles(target: SavedSqlFolder | SavedSqlFile | "panel") {
+  const clipboard = connectionStore.treeClipboard;
+  const destination = pasteTargetForLibraryContext(target);
+  if (clipboard?.kind !== "saved-sql-copy" || clipboard.fileIds.length === 0 || !destination) return;
+  try {
+    const files = await savedSqlStore.copyFilesToDatabase(clipboard.fileIds, destination);
+    if (files.length > 0) toast(t("savedSql.pasted", { count: files.length }), 2000);
+    else toast(t("savedSql.nothingToPaste"), 3000);
+  } catch (error) {
+    toast(t("savedSql.pasteFailed", { message: savedSqlErrorMessage(error, t) }), 5000);
+  }
+}
+
 function isContextFile(fileId: string): boolean {
   return contextTarget.value !== null && contextTarget.value !== "panel" && "sql" in contextTarget.value && contextTarget.value.id === fileId;
 }
@@ -1084,6 +1189,12 @@ const contextMenuItems = computed<CtxMenuItem[]>(() => {
     const selectedFiles = [...new Set([...Array.from(selectedFileIds.value), ...Array.from(selectedFolderIds.value).flatMap((folderId) => allFilesInFolderBranch(folderId).map((f) => f.id))])];
     return [
       {
+        label: t("savedSql.copyFile"),
+        action: () => copyLibraryFiles(selectedFiles),
+        icon: Copy,
+        visible: selectedFiles.length > 0,
+      },
+      {
         label: t("sqlLibrary.changeTarget", { count: selectedFiles.length }),
         action: () => openChangeTarget(selectedFiles),
         icon: ArrowRightLeft,
@@ -1114,6 +1225,12 @@ const contextMenuItems = computed<CtxMenuItem[]>(() => {
     return [
       { label: t("savedSql.newFolder"), action: openNewFolderInput, icon: FolderPlus },
       { label: t("savedSql.newQuery"), action: () => openNewQueryInFolder(), icon: FilePlus },
+      {
+        label: t("savedSql.pasteFile"),
+        action: () => pasteLibraryFiles("panel"),
+        icon: Clipboard,
+        disabled: connectionStore.treeClipboard?.kind !== "saved-sql-copy",
+      },
       { label: t("sqlLibrary.importDirectory"), action: () => importDirectoryIntoLibrary(), icon: Download },
       { label: t("sqlLibrary.exportLibrary"), action: () => exportFolderContents(), icon: Upload },
       ...(hasSortOptions
@@ -1173,6 +1290,13 @@ const contextMenuItems = computed<CtxMenuItem[]>(() => {
         disabled: !hasCurrentSavedSqlExecutionTarget.value,
       },
       { label: t("sqlLibrary.changeTarget", { count: 1 }), action: () => openChangeTarget([target.id]), icon: ArrowRightLeft },
+      { label: t("savedSql.copyFile"), action: () => copyLibraryFiles([target.id]), icon: Copy },
+      {
+        label: t("savedSql.pasteFile"),
+        action: () => pasteLibraryFiles(target),
+        icon: Clipboard,
+        disabled: connectionStore.treeClipboard?.kind !== "saved-sql-copy",
+      },
       { label: t("sqlLibrary.exportFile"), action: () => exportSingleFile(target), icon: Upload },
       { label: t("sqlLibrary.moveToFolder"), icon: FolderClosed, children: folderMoveMenuItems([target.id]) },
       { label: "", separator: true },
@@ -1192,6 +1316,12 @@ const contextMenuItems = computed<CtxMenuItem[]>(() => {
   return [
     { label: t("savedSql.newSubfolder"), action: () => openNewFolderInput(target.id), icon: FolderPlus },
     { label: t("savedSql.newQuery"), action: () => openNewQueryInFolder(target), icon: FilePlus },
+    {
+      label: t("savedSql.pasteFile"),
+      action: () => pasteLibraryFiles(target),
+      icon: Clipboard,
+      disabled: connectionStore.treeClipboard?.kind !== "saved-sql-copy",
+    },
     {
       label: t("sqlLibrary.changeTarget", { count: folderFiles.length }),
       action: () => openChangeTarget(folderFiles.map((f) => f.id)),
@@ -1396,6 +1526,7 @@ onBeforeUnmount(() => {
   document.removeEventListener("mousemove", onDocumentMouseMove, true);
   document.removeEventListener("mouseup", onDocumentMouseUp, true);
   window.clearTimeout(clearSuppressTimer);
+  cancelPendingRenameBlur();
   resetDragState();
 });
 
@@ -1556,11 +1687,13 @@ function showDropInside(targetId: string) {
                     <input
                       :ref="setRenameInputRef"
                       v-model="renameValue"
+                      data-preserve-editor-focus
                       data-no-drag="true"
                       class="min-w-0 flex-1 rounded border border-primary/50 bg-transparent px-1 text-[13px] outline-none"
                       @keydown.enter.prevent="confirmRename"
                       @keydown.escape.prevent="cancelRename"
-                      @blur="confirmRename"
+                      @focus="handleRenameInputFocus"
+                      @blur="handleRenameInputBlur"
                       @mousedown.stop
                       @click.stop
                     />
@@ -1601,11 +1734,13 @@ function showDropInside(targetId: string) {
                       <input
                         :ref="setRenameInputRef"
                         v-model="renameValue"
+                        data-preserve-editor-focus
                         data-no-drag="true"
                         class="min-w-0 flex-1 rounded border border-primary/50 bg-transparent px-1 text-[13px] outline-none"
                         @keydown.enter.prevent="confirmRename"
                         @keydown.escape.prevent="cancelRename"
-                        @blur="confirmRename"
+                        @focus="handleRenameInputFocus"
+                        @blur="handleRenameInputBlur"
                         @mousedown.stop
                         @click.stop
                       />
@@ -1643,11 +1778,13 @@ function showDropInside(targetId: string) {
                     <input
                       :ref="setRenameInputRef"
                       v-model="renameValue"
+                      data-preserve-editor-focus
                       data-no-drag="true"
                       class="min-w-0 flex-1 rounded border border-primary/50 bg-transparent px-1 text-[13px] outline-none"
                       @keydown.enter.prevent="confirmRename"
                       @keydown.escape.prevent="cancelRename"
-                      @blur="confirmRename"
+                      @focus="handleRenameInputFocus"
+                      @blur="handleRenameInputBlur"
                       @mousedown.stop
                       @click.stop
                     />
@@ -1693,11 +1830,13 @@ function showDropInside(targetId: string) {
                       <input
                         :ref="setRenameInputRef"
                         v-model="renameValue"
+                        data-preserve-editor-focus
                         data-no-drag="true"
                         class="min-w-0 flex-1 rounded border border-primary/50 bg-transparent px-1 text-[13px] outline-none"
                         @keydown.enter.prevent="confirmRename"
                         @keydown.escape.prevent="cancelRename"
-                        @blur="confirmRename"
+                        @focus="handleRenameInputFocus"
+                        @blur="handleRenameInputBlur"
                         @mousedown.stop
                         @click.stop
                       />
@@ -1741,11 +1880,13 @@ function showDropInside(targetId: string) {
                       <input
                         :ref="setRenameInputRef"
                         v-model="renameValue"
+                        data-preserve-editor-focus
                         data-no-drag="true"
                         class="min-w-0 flex-1 rounded border border-primary/50 bg-transparent px-1 text-[13px] outline-none"
                         @keydown.enter.prevent="confirmRename"
                         @keydown.escape.prevent="cancelRename"
-                        @blur="confirmRename"
+                        @focus="handleRenameInputFocus"
+                        @blur="handleRenameInputBlur"
                         @mousedown.stop
                         @click.stop
                       />

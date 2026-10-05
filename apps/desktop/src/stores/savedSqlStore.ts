@@ -35,6 +35,8 @@ interface SavedSqlExecutionTargetInput {
   database: string;
   catalog?: string;
   schema?: string;
+  /** Explicit destination folder used by SQL-library paste. */
+  folderId?: string;
 }
 
 interface SavedSqlExecutionTargetUpdateOptions {
@@ -664,7 +666,8 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
       const source = await ensureFileContent(fileId);
       if (!source) continue;
       const sourceFolder = source.folderId ? folders.value.find((folder) => folder.id === source.folderId) : undefined;
-      const folderId = sourceFolder?.connectionId === normalizedTarget.connectionId ? source.folderId : undefined;
+      const requestedFolder = normalizedTarget.folderId ? folders.value.find((folder) => folder.id === normalizedTarget.folderId) : undefined;
+      const folderId = requestedFolder?.connectionId === normalizedTarget.connectionId ? requestedFolder.id : sourceFolder?.connectionId === normalizedTarget.connectionId ? source.folderId : undefined;
       const copyScope = { ...normalizedTarget, folderId };
       const name = nextSavedSqlCopyName(source.name, takenFileNames(copyScope));
       const keepSourceScope = savedSqlDatabaseScopeKey(source) === savedSqlDatabaseScopeKey(normalizedTarget);

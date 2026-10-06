@@ -217,6 +217,20 @@ pub struct PluginContributionLocalization {
     pub fields: BTreeMap<String, PluginFormFieldLocalization>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub actions: BTreeMap<String, PluginConnectionActionLocalization>,
+    /// task-provider trigger localizations, keyed by the provider-local
+    /// trigger id. `label` translates the trigger; `fields` translates its
+    /// config form exactly like the contribution-level `fields` map.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub triggers: BTreeMap<String, PluginTaskTriggerLocalization>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginTaskTriggerLocalization {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fields: BTreeMap<String, PluginFormFieldLocalization>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1379,6 +1393,23 @@ fn validate_localizations(localizations: &BTreeMap<String, PluginManifestLocaliz
                     errors.push(format!(
                         "Plugin localization '{locale}' has an invalid action entry '{contribution_id}/{action_id}'"
                     ));
+                }
+            }
+            for (trigger_id, trigger) in &contribution.triggers {
+                if !valid_identifier(trigger_id) || trigger.label.as_ref().is_some_and(|value| value.trim().is_empty()) {
+                    errors.push(format!(
+                        "Plugin localization '{locale}' has an invalid trigger entry '{contribution_id}/{trigger_id}'"
+                    ));
+                }
+                for (field_key, field) in &trigger.fields {
+                    if !valid_identifier(field_key)
+                        || field.label.as_ref().is_some_and(|value| value.trim().is_empty())
+                        || field.options.values().any(|value| value.trim().is_empty())
+                    {
+                        errors.push(format!(
+                            "Plugin localization '{locale}' has an invalid trigger field entry '{contribution_id}/{trigger_id}/{field_key}'"
+                        ));
+                    }
                 }
             }
         }

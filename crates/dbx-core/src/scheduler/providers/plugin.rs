@@ -155,15 +155,85 @@ impl TaskExecutor for PluginTaskExecutor {
             .unwrap_or(DEFAULT_TASK_TIMEOUT);
 
         let mut logger = context.logger.clone();
+
+        // Stream the plugin's fixed task events into this run's logger and
+        // progress store: command output arrives as task/log events on the
+        // host's plugin event bus, and without this pump the run log only ever
+        // contains the dispatch/finish system lines. The pump ends when the
+        // invoke settles and its receiver is dropped (aborted below).
+        let mut task_events = self.state.plugin_host.subscribe_events();
+        let pump_plugin_id = plugin_id.clone();
+        let pump_task_id = task.id.clone();
+        let pump_run_id = context.run.id.clone();
+        let mut pump_logger = logger.clone();
+        let progress = context.progress.clone();
+        let pump = tokio::spawn(async move {
+            loop {
+                match task_events.recv().await {
+                    Ok(event) if event.plugin_id == pump_plugin_id && event.method == "task/log" => {
+                        let Ok(decoded) = dbx_plugin_runtime::plugins::decode_task_event(&event.method, &event.params)
+                        else {
+                            continue;
+                        };
+                        let dbx_plugin_runtime::plugins::PluginTaskEvent::Log(log) = decoded else { continue };
+                        if log.task_id != pump_task_id || log.run_id != pump_run_id {
+                            continue;
+                        }
+                        let stream = match log.stream {
+                            dbx_plugin_runtime::plugins::PluginTaskStream::Stdout => "stdout",
+                            dbx_plugin_runtime::plugins::PluginTaskStream::Stderr => "stderr",
+                        };
+                        let level = match log.level {
+                            dbx_plugin_runtime::plugins::PluginTaskLogLevel::Debug => "debug",
+                            dbx_plugin_runtime::plugins::PluginTaskLogLevel::Info => "info",
+                            dbx_plugin_runtime::plugins::PluginTaskLogLevel::Warn => "warn",
+                            dbx_plugin_runtime::plugins::PluginTaskLogLevel::Error => "error",
+                        };
+                        let _ = pump_logger.append(level, stream, &log.message);
+                    }
+                    Ok(event) if event.plugin_id == pump_plugin_id && event.method == "task/progress" => {
+                        let Ok(decoded) = dbx_plugin_runtime::plugins::decode_task_event(&event.method, &event.params)
+                        else {
+                            continue;
+                        };
+                        let dbx_plugin_runtime::plugins::PluginTaskEvent::Progress(progress_event) = decoded else {
+                            continue;
+                        };
+                        if progress_event.task_id != pump_task_id || progress_event.run_id != pump_run_id {
+                            continue;
+                        }
+                        // The event's `current` is a human-readable label
+                        // ("3 of 10 files"); TaskProgress.current is a count.
+                        let _ = progress
+                            .report(crate::scheduler::executor::TaskProgress {
+                                percent: Some(progress_event.percent),
+                                current: None,
+                                total: progress_event.total,
+                                label: progress_event.current,
+                            })
+                            .await;
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => return,
+                }
+            }
+        });
+
         let _ = logger.system(&format!("Dispatching task/execute to {plugin_id}/{provider_id}"));
         let result = tokio::select! {
             _ = context.cancellation.cancelled() => {
+                pump.abort();
                 let _ = logger.system("Run cancelled before the plugin answered");
                 return Err(TaskError::new(crate::scheduler::TaskErrorKind::Retryable, "timeout", "Run cancelled"));
             }
             outcome = self.state.plugin_host.execute_task(&plugin_id, &provider_id, request, Some(timeout)) => outcome,
         }
-        .map_err(|error| TaskError::invalid_config(error))?;
+        .map_err(|error| {
+            pump.abort();
+            TaskError::invalid_config(error)
+        })?;
+        pump.abort();
 
         let status_line = match (&result.message, result.success) {
             (Some(message), true) => format!("Run succeeded: {message}"),

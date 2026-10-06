@@ -298,7 +298,11 @@ impl SchedulerEngine {
                     .await;
                 } else if result.success {
                     let _ = logger.system("run finished successfully");
-                    self.finalize(&job, TaskRunStatus::Success, result.exit_code, None, result.message, false).await;
+                    // A success must not carry an error_message: the result
+                    // message already went to the run log above ("Run
+                    // succeeded: …"), and storing it in error_message made
+                    // successful runs render as red errors in the run list.
+                    self.finalize(&job, TaskRunStatus::Success, result.exit_code, None, None, false).await;
                 } else {
                     let _ = logger.system("run finished with a failure");
                     self.finalize(

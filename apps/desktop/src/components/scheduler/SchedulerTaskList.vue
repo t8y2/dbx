@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { CalendarClock, ListMusic, Pencil, Play, Plus, RefreshCw, Search, Square, Trash2 } from "@lucide/vue";
 import { defaultTimeZone, findProvider, providerSourceLabel, taskHealth, triggerSummary, type TaskHealthContext } from "@/lib/scheduler/schedulerProviders";
-import type { TaskDefinition } from "@/lib/scheduler/schedulerTypes";
+import type { TaskDefinition, TaskRunStatus } from "@/lib/scheduler/schedulerTypes";
 
 const props = defineProps<{
   tasks: readonly TaskDefinition[];
@@ -87,6 +87,12 @@ function formatDateTime(value?: string | null): string {
   return new Intl.DateTimeFormat(locale.value, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
 }
 
+function lastRunTextClass(status: TaskRunStatus): string {
+  if (status === "success") return "text-emerald-600 dark:text-emerald-400";
+  if (status === "failed" || status === "timeout") return "text-destructive";
+  return "";
+}
+
 function timeZoneSuffix(task: TaskDefinition): string {
   const trigger = task.trigger;
   if (trigger.type === "cron" || trigger.type === "once") return trigger.timeZone || defaultTimeZone();
@@ -132,7 +138,7 @@ function timeZoneSuffix(task: TaskDefinition): string {
             <span v-if="timeZoneSuffix(task)">{{ timeZoneSuffix(task) }}</span>
             <span>{{ connectionLabel(task) }}</span>
             <span>{{ t("scheduler.taskList.columns.nextRun") }}: {{ formatDateTime(task.nextRunAt) }}</span>
-            <span>{{ t("scheduler.taskList.columns.lastRun") }}: {{ task.lastRunStatus ? t(`scheduler.runs.status.${task.lastRunStatus}`) : t("scheduler.taskList.noRunsYet") }}</span>
+            <span :class="task.lastRunStatus && lastRunTextClass(task.lastRunStatus)">{{ t("scheduler.taskList.columns.lastRun") }}: {{ task.lastRunStatus ? t(`scheduler.runs.status.${task.lastRunStatus}`) : t("scheduler.taskList.noRunsYet") }}</span>
           </div>
           <p v-if="healthOf(task) !== 'healthy'" class="mt-1 text-xs text-amber-600 dark:text-amber-400">{{ healthHint(task) }}</p>
         </div>

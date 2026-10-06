@@ -126,7 +126,7 @@ function formatSize(size?: number | null): string {
             <div class="h-full rounded-full bg-primary transition-[width] duration-300" :style="{ width: `${Math.min(100, Math.max(0, run.progressPercent))}%` }" />
           </div>
         </div>
-        <p v-if="run.errorMessage" class="text-xs text-destructive sm:col-span-2 lg:col-span-3" data-scheduler-run-error>
+        <p v-if="run.errorMessage && run.status !== 'success'" class="text-xs text-destructive sm:col-span-2 lg:col-span-3" data-scheduler-run-error>
           <span v-if="run.errorCode" class="font-mono">{{ run.errorCode }}: </span>{{ run.errorMessage }}
         </p>
       </div>

@@ -85,8 +85,9 @@ function activeRun(run: TaskRun): boolean {
         <div class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
           <span>{{ t("scheduler.runs.columns.started") }}: {{ formatDateTime(run.startedAt || run.createdAt) }}</span>
           <span>{{ t("scheduler.runs.columns.duration") }}: {{ runDuration(run.startedAt, run.completedAt) || t("scheduler.time.notAvailable") }}</span>
-          <span v-if="run.errorCode" class="text-destructive">{{ run.errorCode }}</span>
-          <span v-else-if="run.errorMessage" class="max-w-md truncate text-destructive">{{ run.errorMessage }}</span>
+          <!-- Older success runs carried their result message in error_message; never render a success as red. -->
+          <span v-if="run.errorCode && run.status !== 'success'" class="text-destructive">{{ run.errorCode }}</span>
+          <span v-else-if="run.errorMessage && run.status !== 'success'" class="max-w-md truncate text-destructive">{{ run.errorMessage }}</span>
         </div>
       </button>
     </div>

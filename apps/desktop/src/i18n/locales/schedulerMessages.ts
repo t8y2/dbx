@@ -21,6 +21,8 @@ export const schedulerEn = {
     emptyHint: "Create a task from an installed plugin provider or the builtin database backup.",
     columns: {
       name: "Task",
+      nextRun: "Next run",
+      lastRun: "Last run",
     },
     noRunsYet: "Never run",
   },
@@ -185,7 +187,10 @@ export const schedulerEn = {
     title: "Resident sessions",
     empty: "No active resident sessions",
     emptyHint: "Tasks whose provider action is resident appear here while a session exists.",
-    columns: {},
+    columns: {
+      heartbeat: "Heartbeat",
+      restarts: "Restarts",
+    },
     state: {
       stopped: "Stopped",
       starting: "Starting",
@@ -228,6 +233,8 @@ export const schedulerZhCN = {
     emptyHint: "可以从已安装插件的 Task Provider 或内置数据库备份创建任务。",
     columns: {
       name: "任务",
+      nextRun: "下次执行",
+      lastRun: "上次执行",
     },
     noRunsYet: "从未执行",
   },
@@ -392,7 +399,10 @@ export const schedulerZhCN = {
     title: "常驻会话",
     empty: "暂无常驻会话",
     emptyHint: "提供方动作为常驻的任务，在会话存在期间会显示在这里。",
-    columns: {},
+    columns: {
+      heartbeat: "心跳",
+      restarts: "重启次数",
+    },
     state: {
       stopped: "已停止",
       starting: "启动中",
@@ -435,6 +445,8 @@ export const schedulerZhTW = {
     emptyHint: "可以從已安裝外掛的 Task Provider 或內建資料庫備份建立任務。",
     columns: {
       name: "任務",
+      nextRun: "下次執行",
+      lastRun: "上次執行",
     },
     noRunsYet: "從未執行",
   },
@@ -599,7 +611,10 @@ export const schedulerZhTW = {
     title: "常駐會話",
     empty: "尚無常駐會話",
     emptyHint: "提供方動作為常駐的任務，在會話存在期間會顯示在這裡。",
-    columns: {},
+    columns: {
+      heartbeat: "心跳",
+      restarts: "重启次数",
+    },
     state: {
       stopped: "已停止",
       starting: "啟動中",

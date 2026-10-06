@@ -3877,30 +3877,6 @@ function finishOrContinueLoadAllRun(requestedOffset: number | undefined, request
   return true;
 }
 
-// Continues an explicit "load all" run chunk by chunk until the server runs
-// out of rows (a chunk returns fewer rows than requested) or an exact known
-// total has been reached. Returns true when another chunk was dispatched.
-// The per-request result-row cap bounds each chunk, never the run (#10752).
-function finishOrContinueLoadAllRun(requestedOffset: number | undefined, requestedLimit: number | undefined): boolean {
-  if (!loadAllRowsLoopActive) return false;
-  const nextSegment = canFetchNextInfiniteScrollSegment.value
-    ? dataGridLoadAllNextSegment({
-        loadedRowCount: props.result.rows.length,
-        requestedOffset: requestedOffset ?? props.result.rows.length,
-        requestedLimit: requestedLimit ?? pageSize.value,
-        totalRowCount: totalRowCountIsExact.value ? displayedTotalRowCount.value : undefined,
-      })
-    : null;
-  if (!nextSegment) {
-    loadAllRowsLoopActive = false;
-    infiniteScrollAllLoaded = true;
-    selectAndRevealLastLoadedRow();
-    return false;
-  }
-  startLoadAllRows(nextSegment);
-  return true;
-}
-
 function confirmLoadAllRows() {
   const pending = pendingLoadAllRows.value;
   if (!pending) return;

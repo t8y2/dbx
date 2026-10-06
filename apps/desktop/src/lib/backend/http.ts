@@ -5497,6 +5497,8 @@ export async function deletePluginUiStorage(_pluginId: string, _key: string): Pr
 
 export async function openQueryResultTempFile(_path: string): Promise<void> {
   throw new Error("Opening query results requires the desktop app");
+}
+
 // ---------------------------------------------------------------------------
 // Scheduler / Task Center (ADR §7.1). Signatures mirror the Tauri transport
 // in `tauri.ts`; errors surface as BackendErrorException with the machine

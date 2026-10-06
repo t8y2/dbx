@@ -6333,6 +6333,8 @@ export * from "@/lib/backend/nacos-tauri";
 
 export async function openQueryResultTempFile(path: string): Promise<void> {
   return invoke("open_query_result_temp_file", { path });
+}
+
 // ---------------------------------------------------------------------------
 // Scheduler / Task Center (ADR §7.2). All commands route through
 // SchedulerService; rejections carry the frozen machine code as a

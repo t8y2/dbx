@@ -46,7 +46,17 @@ const editingTask = ref<TaskDefinition | null>(null);
 const pendingDelete = ref<TaskDefinition | null>(null);
 const selectedRunId = ref("");
 
-const providers = computed<SchedulerTaskProviderDescriptor[]>(() => [...builtinTaskProviders({ databaseBackup: t("scheduler.taskProviders.databaseBackup"), cloudSync: t("scheduler.taskProviders.cloudSync") }), ...discoverTaskProviders(plugins.value)]);
+const providers = computed<SchedulerTaskProviderDescriptor[]>(() => [
+  ...builtinTaskProviders({
+    databaseBackup: t("scheduler.taskProviders.databaseBackup"),
+    cloudSync: t("scheduler.taskProviders.cloudSync"),
+    fieldEndpoint: t("scheduler.taskProviders.fieldEndpoint"),
+    fieldUsername: t("scheduler.taskProviders.fieldUsername"),
+    fieldRemotePath: t("scheduler.taskProviders.fieldRemotePath"),
+    fieldSecrets: t("scheduler.taskProviders.fieldSecrets"),
+  }),
+  ...discoverTaskProviders(plugins.value),
+]);
 
 const connections = computed(() => connectionStore.connections);
 

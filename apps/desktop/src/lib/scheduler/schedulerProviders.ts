@@ -62,7 +62,7 @@ function normalizeCapabilities(raw: unknown): SchedulerTaskProviderDescriptor["c
  * plugins installed. Both are offered in the create dialog: the editors fill
  * the provider settings section.
  */
-export function builtinTaskProviders(labels: { databaseBackup: string; cloudSync: string }): SchedulerTaskProviderDescriptor[] {
+export function builtinTaskProviders(labels: { databaseBackup: string; cloudSync: string; fieldEndpoint: string; fieldUsername: string; fieldRemotePath: string; fieldSecrets: string }): SchedulerTaskProviderDescriptor[] {
   return [
     {
       providerId: "dbx.database-backup",
@@ -79,7 +79,20 @@ export function builtinTaskProviders(labels: { databaseBackup: string; cloudSync
       pluginId: "dbx",
       connectionProviders: [],
       capabilities: ["run", "cancel", "logs"],
-      triggers: [{ id: "upload", label: labels.cloudSync, mode: "run", risk: "low", fields: [] }],
+      triggers: [
+        {
+          id: "upload",
+          label: labels.cloudSync,
+          mode: "run",
+          risk: "low",
+          fields: [
+            { key: "webdavEndpoint", label: labels.fieldEndpoint, type: "text", required: true, placeholder: "https://dav.example.com/dbx/" },
+            { key: "webdavUsername", label: labels.fieldUsername, type: "text" },
+            { key: "webdavRemotePath", label: labels.fieldRemotePath, type: "text", placeholder: "DBX/sync/snapshot.json" },
+            { key: "includeSecrets", label: labels.fieldSecrets, type: "boolean" },
+          ],
+        },
+      ],
       builtin: true,
     },
   ];

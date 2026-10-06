@@ -33,10 +33,20 @@ pub const CLOUD_SYNC_TRIGGER_ID: &str = "upload";
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct CloudSyncTaskConfig {
-    #[serde(default = "default_webdav")]
-    pub webdav: WebDavConfig,
+    /// Flat form fields (they must round-trip through the plugin form system,
+    /// which persists top-level keys only). The run builds the WebDavConfig
+    /// from them; the password never lives here (ADR §10).
+    #[serde(default)]
+    pub webdav_endpoint: String,
+    #[serde(default)]
+    pub webdav_username: Option<String>,
+    #[serde(default)]
+    pub webdav_remote_path: Option<String>,
     pub include_secrets: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Accepted for forward compatibility; the selection is taken from the
+    /// saved WebDAV backup selection at run time so the task follows what the
+    /// user configured in settings.
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub selection: Option<crate::persistence::cloud_sync::SyncSelection>,
     /// Editor settings blob synced along with the snapshot, as the renderer
     /// passes them today.
@@ -44,13 +54,16 @@ pub struct CloudSyncTaskConfig {
     pub editor_settings: Option<serde_json::Value>,
 }
 
-fn default_webdav() -> WebDavConfig {
-    WebDavConfig { endpoint: String::new(), username: None, password: None, remote_path: None }
-}
-
 impl Default for CloudSyncTaskConfig {
     fn default() -> Self {
-        Self { webdav: default_webdav(), include_secrets: false, selection: None, editor_settings: None }
+        Self {
+            webdav_endpoint: String::new(),
+            webdav_username: None,
+            webdav_remote_path: None,
+            include_secrets: false,
+            selection: None,
+            editor_settings: None,
+        }
     }
 }
 
@@ -77,7 +90,12 @@ impl CloudSyncTaskExecutor {
         config: &CloudSyncTaskConfig,
         include_secrets: bool,
     ) -> Result<crate::persistence::cloud_sync::WebDavSyncSummary, String> {
-        let mut webdav = config.webdav.clone();
+        let mut webdav = WebDavConfig {
+            endpoint: config.webdav_endpoint.clone(),
+            username: config.webdav_username.clone(),
+            password: None,
+            remote_path: config.webdav_remote_path.clone(),
+        };
         // The password lives in the secret store; resolve it here exactly like
         // the Tauri command does (never from the task config — ADR §10).
         crate::persistence::cloud_sync::resolve_webdav_password(&self.state.storage, &mut webdav).await?;
@@ -113,7 +131,7 @@ impl TaskExecutor for CloudSyncTaskExecutor {
             )));
         }
         let config = CloudSyncTaskConfig::from_task(task)?;
-        if config.webdav.endpoint.trim().is_empty() {
+        if config.webdav_endpoint.trim().is_empty() {
             return Err(TaskError::invalid_config("The cloud-sync task needs a WebDAV endpoint."));
         }
         Ok(())
@@ -123,7 +141,7 @@ impl TaskExecutor for CloudSyncTaskExecutor {
         let task = context.task.clone();
         let config = CloudSyncTaskConfig::from_task(&task)?;
         let mut logger = context.logger.clone();
-        let _ = logger.system(&format!("Uploading snapshot to {}", config.webdav.endpoint));
+        let _ = logger.system(&format!("Uploading snapshot to {}", config.webdav_endpoint));
 
         let outcome = tokio::select! {
             _ = context.cancellation.cancelled() => {

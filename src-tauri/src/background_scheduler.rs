@@ -80,10 +80,18 @@ fn worker_mode(args: &[std::ffi::OsString], process_role: Option<&str>) -> Worke
 }
 
 /// `scheduler.background.enabled` (ADR §12): whether the desktop app spawns
-/// and supervises the background scheduler worker. Defaults to false so an
-/// unflagged install behaves exactly as before.
+/// and supervises the background scheduler worker.
+///
+/// Defaults to **on**: the task center enqueues runs into the scheduler
+/// database and nothing in the UI process claims them (the UI owns no task
+/// lifecycle, ADR §1), so a flag-off install would leave every run queued
+/// forever — the exact "always queued" symptom. The env var remains as an
+/// explicit opt-out for installs that must not run scheduled work.
 fn env_enabled(value: Option<&str>) -> bool {
-    value.is_some_and(|value| matches!(value.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+    match value.map(|value| value.trim().to_lowercase()) {
+        None => true,
+        Some(value) => !matches!(value.as_str(), "0" | "false" | "no" | "off" | ""),
+    }
 }
 
 pub fn background_enabled() -> bool {
@@ -587,15 +595,18 @@ mod tests {
     }
 
     #[test]
-    fn feature_flags_accept_only_truthy_values() {
+    fn feature_flags_default_on_with_explicit_opt_out() {
+        // Unset → on: the task center needs the worker, or runs queue forever.
+        assert!(env_enabled(None));
         assert!(env_enabled(Some("1")));
         assert!(env_enabled(Some(" true ")));
         assert!(env_enabled(Some("YES")));
         assert!(env_enabled(Some("on")));
+        assert!(env_enabled(Some("anything-else")));
+        // Explicit opt-out only.
         assert!(!env_enabled(Some("0")));
         assert!(!env_enabled(Some("false")));
         assert!(!env_enabled(Some("")));
-        assert!(!env_enabled(None));
     }
 
     #[test]
@@ -640,12 +651,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn background_scheduler_stays_idle_and_shutdown_safe_with_the_flag_off() {
-        // Test processes do not set DBX_SCHEDULER_BACKGROUND_ENABLED, so the
-        // flag-off path must spawn nothing and stay shutdown-idempotent.
+    async fn background_scheduler_start_is_shutdown_safe_and_idempotent() {
+        // Tests may run with the flag either way (CI sometimes exports it);
+        // start() must stay shutdown-idempotent in both.
+        std::env::remove_var(BACKGROUND_FLAG_ENV);
         let scheduler = BackgroundScheduler::new(forgetful_tempdir().await);
         scheduler.start().await;
-        assert!(scheduler.supervisor.lock().await.is_none(), "flag off must spawn nothing");
         scheduler.shutdown().await;
         assert!(scheduler.supervisor.lock().await.is_none());
         scheduler.shutdown().await; // idempotent

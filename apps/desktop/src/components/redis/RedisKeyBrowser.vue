@@ -182,7 +182,10 @@ const keyMetadataEpoch = ref(0);
 /** Bumped only when a TTL refresh changes membership in the no-expiry projection. */
 const noExpiryProjectionEpoch = ref(0);
 const selectionAnchorRowId = ref<string | null>(null);
-const dragSelection = ref<{ startRaw: string; baseChecked: Set<string>; active: boolean; startX: number; startY: number } | null>(null);
+const dragSelection = ref<{ startRaw: string; baseChecked: Set<string>; active: boolean; lastEndRaw?: string; startX: number; startY: number } | null>(null);
+// A click fires after pointerup on the same gesture; an active rubber-band drag
+// must not fall through to opening the row it started (or ended) on.
+const suppressNextRowClick = ref(false);
 const selectedGroupLeafCounts = shallowRef<Map<string, number>>(new Map());
 const deletingKeys = ref(false);
 const showBatchExpiryDialog = ref(false);
@@ -770,22 +773,40 @@ function dragSelectionRows(startRaw: string, endRaw: string, baseChecked: Readon
 
 function onKeyPointerDown(node: RedisKeyTreeNode, event: PointerEvent) {
   if (event.button !== 0 || selectionBusy.value || node.kind !== "leaf" || (event.target as HTMLElement | null)?.closest("input,button")) return;
+  suppressNextRowClick.value = false;
   dragSelection.value = { startRaw: node.keyRaw, baseChecked: new Set(checkedKeys.value), active: false, startX: event.clientX, startY: event.clientY };
 }
 
 function onKeyPointerMove(event: PointerEvent) {
   const drag = dragSelection.value;
   if (!drag || selectionBusy.value) return;
+  // A missed pointerup (or a touch/pen takeover) leaves the drag armed; hover
+  // moves with no button pressed must not keep toggling rows.
+  if ((event.buttons & 1) === 0) {
+    if (drag.active) suppressNextRowClick.value = true;
+    dragSelection.value = null;
+    return;
+  }
   if (!drag.active && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 4) return;
   const row = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-redis-key-raw]");
   const endRaw = row?.dataset.redisKeyRaw;
   if (!endRaw) return;
   drag.active = true;
   event.preventDefault();
+  // Recomputing the range walks the full display order; skip while the pointer
+  // stays on the same row (visibleRows can hold 100k+ keys after Fetch All).
+  if (drag.lastEndRaw === endRaw) return;
+  drag.lastEndRaw = endRaw;
   dragSelectionRows(drag.startRaw, endRaw, drag.baseChecked);
 }
 
 function onKeyPointerUp() {
+  if (dragSelection.value?.active) suppressNextRowClick.value = true;
+  dragSelection.value = null;
+}
+
+function onKeyPointerCancel() {
+  if (dragSelection.value?.active) suppressNextRowClick.value = true;
   dragSelection.value = null;
 }
 
@@ -1601,6 +1622,10 @@ function toggleGroup(groupId: string) {
 }
 
 function onRowClick(node: RedisKeyTreeNode, event?: MouseEvent) {
+  if (suppressNextRowClick.value) {
+    suppressNextRowClick.value = false;
+    return;
+  }
   if (event && !selectionBusy.value && (event.shiftKey || event.ctrlKey || event.metaKey)) {
     toggleNodeCheck(node, event);
     if (node.kind === "leaf") {
@@ -3104,6 +3129,7 @@ function onCommandInputKeydown(event: KeyboardEvent) {
 onMounted(async () => {
   window.addEventListener("pointermove", onKeyPointerMove);
   window.addEventListener("pointerup", onKeyPointerUp);
+  window.addEventListener("pointercancel", onKeyPointerCancel);
   resumeRedisBrowserBackgroundWork();
   void autofocusSearchOnce();
   try {
@@ -3139,6 +3165,7 @@ onDeactivated(pauseRedisBrowserBackgroundWork);
 onUnmounted(() => {
   window.removeEventListener("pointermove", onKeyPointerMove);
   window.removeEventListener("pointerup", onKeyPointerUp);
+  window.removeEventListener("pointercancel", onKeyPointerCancel);
   pauseRedisBrowserBackgroundWork();
   if (redisInfiniteScrollFrame) cancelAnimationFrame(redisInfiniteScrollFrame);
   redisInfiniteScrollFrame = 0;

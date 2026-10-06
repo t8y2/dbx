@@ -215,7 +215,7 @@ onDeactivated(() => {
             <CustomContextMenu v-else :items="[{ label: t('redis.copyKeyName'), icon: Copy, action: () => emit('copy', item.key) }]" v-slot="{ onContextMenu }">
               <div
                 :data-redis-key-raw="item.key.key_raw"
-                class="group flex h-[30px] cursor-pointer items-center gap-1 border-b px-2 text-[13px] hover:bg-accent/40"
+                class="group flex h-[30px] cursor-pointer items-center gap-1 border-b px-2 text-[13px] hover:bg-accent/40 select-none"
                 :class="selected === item.key.key_raw ? 'bg-accent' : checked.has(item.key.key_raw) ? 'bg-primary/10' : ''"
                 :style="{ paddingLeft: `${8 + item.depth * 10}px` }"
                 @click="emit('select', item.key)"

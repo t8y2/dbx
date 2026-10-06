@@ -2630,6 +2630,8 @@ export default withEnglishFallback({
     tableOwnerUnavailable: "No disponible",
     tableInfoNoResults: "Sin resultados",
     goToColumn: "Ir a la columna",
+    pinGoToColumn: "Fijar el panel de búsqueda de columnas",
+    unpinGoToColumn: "Desfijar el panel de búsqueda de columnas",
     columnWidth: "Ancho de columna",
     columnWidthCompact: "Compacto",
     columnWidthStandard: "Estándar",

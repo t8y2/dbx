@@ -2413,6 +2413,8 @@ export default withEnglishFallback({
     tableOwnerUnavailable: "Kullanılamıyor",
     tableInfoNoResults: "Sonuç yok",
     goToColumn: "Sütuna git",
+    pinGoToColumn: "Sütun arama panelini sabitle",
+    unpinGoToColumn: "Sütun arama panelinin sabitlemesini kaldır",
     columnWidth: "Sütun Genişliği",
     columnWidthCompact: "Sıkışık",
     columnWidthStandard: "Standart",

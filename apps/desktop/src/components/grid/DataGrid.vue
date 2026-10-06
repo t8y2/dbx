@@ -2209,19 +2209,10 @@ const goToColumnOpen = ref(false);
 const goToColumnSearch = ref("");
 const goToColumnSearchInput = ref<HTMLInputElement>();
 const goToColumnListRef = ref<HTMLElement>();
-// The trigger lives inside a Tooltip so the icon keeps its hover hint, and that
-// tooltip claims the popper anchor for its own popper root. Pointing the popover at
-// the button element directly keeps the column list positioned on screen.
-const goToColumnTriggerRef = ref<HTMLElement | { $el?: HTMLElement }>();
-
-function goToColumnTriggerElement(): HTMLElement | undefined {
-  const trigger = goToColumnTriggerRef.value;
-  if (!trigger) return undefined;
-  return trigger instanceof HTMLElement ? trigger : trigger.$el;
-}
-
 const goToColumnSelectedIndex = ref(0);
 const goToColumnTooltip = computed(() => formatShortcutTooltip(t("grid.goToColumn"), settingsStore.editorSettings.shortcuts.goToColumn));
+const goToColumnPanelPinned = computed(() => settingsStore.editorSettings.goToColumnPanelPinned);
+const goToColumnPanelWidth = ref(settingsStore.editorSettings.goToColumnPanelWidth);
 const columnOrderKeys = computed(() => uniqueDataGridColumnOrderKeys(props.result.columns, props.sourceColumns));
 const resolvedColumnLayoutScopeKey = computed(
   () =>
@@ -2406,7 +2397,6 @@ function actualColumnIndex(visibleColumnIndex: number): number {
   return visibleColumnIndexes.value[visibleColumnIndex] ?? visibleColumnIndex;
 }
 function scrollToColumn(columnIndex: number) {
-  goToColumnOpen.value = false;
   goToColumnSearch.value = "";
   scrollToColumnIndex(columnIndex);
   gridRef.value?.focus();
@@ -2432,6 +2422,26 @@ function openGoToColumn(): boolean {
   if (alreadyOpen) void nextTick(focusGoToColumnSearch);
   return true;
 }
+
+function toggleGoToColumn(): boolean {
+  if (goToColumnOpen.value) {
+    goToColumnOpen.value = false;
+    return false;
+  }
+  return openGoToColumn();
+}
+
+function toggleGoToColumnPanelPinned() {
+  settingsStore.updateEditorSettings({ goToColumnPanelPinned: !goToColumnPanelPinned.value });
+}
+
+watch(
+  [() => settingsStore.editorSettings.goToColumnPanelPinned, () => props.result.columns, () => props.context],
+  ([pinned, columns]) => {
+    if (pinned && columns.length > 0 && displayableColumnIndexes.value.length > 0) goToColumnOpen.value = true;
+  },
+  { immediate: true },
+);
 
 function moveGoToColumnSelection(delta: number) {
   const count = filteredGoToColumns.value.length;
@@ -11313,6 +11323,13 @@ watch([activeTableInfoTab, ddlLoading], ([tab, loading]) => {
 });
 
 watch(
+  () => settingsStore.editorSettings.goToColumnPanelWidth,
+  (width) => {
+    goToColumnPanelWidth.value = width;
+  },
+);
+
+watch(
   () => settingsStore.editorSettings.tableInfoDrawerWidth,
   (width) => {
     if (!isResizingDdl.value) ddlWidth.value = width;
@@ -11355,19 +11372,23 @@ const contentGridStyle = computed(() => {
   const hasRightCellDetail = !cellDetailPanelIsBottom.value && showCellDetail.value && activeCellDetail.value;
   const rightPanelWidth = hasRightCellDetail ? detailPanelHeight.value : mongoJsonPreviewOpen.value ? mongoJsonPreviewWidth.value : 0;
   const hasRightPanel = hasRightCellDetail || mongoJsonPreviewOpen.value;
+  // Keep this track explicit. WebKit can resolve a nested min() track sizing
+  // function to zero when sibling tracks are currently collapsed, which
+  // leaves the panel rendered but compresses its contents to a narrow strip.
+  const columnLookupTrack = goToColumnOpen.value ? `${Math.min(goToColumnPanelWidth.value, 900)}px` : "0px";
   const tableInfoAvailableWidth = hasRightPanel ? `max(0px, calc(100% - ${rightPanelWidth}px))` : "100%";
   const tableInfoTrack = showTableInfo.value ? `minmax(0, min(${ddlWidth.value}px, ${tableInfoAvailableWidth}))` : "0px";
   const detailTrack = hasRightPanel ? `minmax(0, min(${rightPanelWidth}px, 100%))` : "0px";
 
   if (cellDetailPanelIsBottom.value && showCellDetail.value && activeCellDetail.value) {
     return {
-      gridTemplateColumns: `minmax(0, 1fr) ${tableInfoTrack}`,
+      gridTemplateColumns: `minmax(0, 1fr) ${columnLookupTrack} ${tableInfoTrack}`,
       gridTemplateRows: `minmax(${CELL_DETAIL_TABLE_MIN_VISIBLE_HEIGHT}px, 1fr) minmax(0, min(${detailPanelHeight.value}px, 70vh, ${CELL_DETAIL_PANEL_MAX_HEIGHT}px, calc(100% - ${CELL_DETAIL_TABLE_MIN_VISIBLE_HEIGHT}px)))`,
     };
   }
 
   return {
-    gridTemplateColumns: `minmax(0, 1fr) ${tableInfoTrack} ${detailTrack}`,
+    gridTemplateColumns: `minmax(0, 1fr) ${columnLookupTrack} ${tableInfoTrack} ${detailTrack}`,
     gridTemplateRows: "minmax(0, 1fr)",
   };
 });
@@ -11390,6 +11411,15 @@ const tableInfoToolbarCapability = computed<DataGridToolbarActionCapability>(() 
   visible: props.context === "results" && !props.queryMultiSource && !!props.connectionId && !!(props.tableMeta?.database || props.database) && !!props.tableMeta?.tableName && tableMetadataCapabilities.value.ddl,
   active: showTableInfo.value && activeTableInfoTab.value === "ddl",
   onTrigger: () => toggleTableInfo("ddl"),
+}));
+const goToColumnToolbarCapability = computed<DataGridToolbarActionCapability>(() => ({
+  label: t("grid.goToColumn"),
+  tooltip: goToColumnTooltip.value,
+  visible: props.result.columns.length > 0,
+  active: goToColumnOpen.value,
+  onTrigger: () => {
+    toggleGoToColumn();
+  },
 }));
 const mongoConnectionConfig = resolvedConnectionConfig;
 const canManageMongoIndexes = computed(() => resolvedDatabaseType.value === "mongodb" && !!props.connectionId && !!props.database && !!props.tableMeta?.tableName && supportsMongoIndexMutations(mongoConnectionConfig.value, props.tableMeta?.tableType));
@@ -12324,6 +12354,7 @@ watch(
 
 defineExpose({
   tableInfoToolbarCapability,
+  goToColumnToolbarCapability,
   useTransaction,
   transactionActive,
   isSaving,
@@ -12931,7 +12962,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
             data-grid-topbar-row="actions"
             :class="splitDataGridToolbar ? 'col-start-2 row-start-1' : 'ml-auto'"
             :compact-action-count="compactDataGridToolbarActionCount"
-            :navigation-visible="props.result.columns.length > 0"
+            :navigation-visible="false"
             :refresh="refreshToolbarCapability"
             :auto-refresh="autoRefreshToolbarCapability"
             :add-row="addRowToolbarCapability"
@@ -12995,57 +13026,6 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                 </TooltipTrigger>
                 <TooltipContent side="bottom">{{ t("grid.mongoJsonPreview") }}</TooltipContent>
               </Tooltip>
-            </template>
-
-            <template #navigation="{ compact }">
-              <Popover v-if="props.result.columns.length" v-model:open="goToColumnOpen">
-                <Tooltip>
-                  <TooltipTrigger as-child>
-                    <PopoverTrigger as-child>
-                      <Button ref="goToColumnTriggerRef" data-toolbar-action="navigation" variant="ghost" size="sm" :class="['data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5', compact ? 'data-grid-topbar-action-button--compact' : '', goToColumnOpen ? 'text-primary bg-primary/10' : '']">
-                        <Columns3 class="data-grid-topbar-action-icon w-3 h-3" />
-                        <span
-                          class="data-grid-topbar-action-label"
-                          :class="{
-                            'data-grid-topbar-action-label--compact': compact,
-                          }"
-                          >{{ t("grid.goToColumn") }}</span
-                        >
-                      </Button>
-                    </PopoverTrigger>
-                  </TooltipTrigger>
-                  <TooltipContent side="bottom">{{ goToColumnTooltip }}</TooltipContent>
-                </Tooltip>
-                <PopoverContent :reference="goToColumnTriggerElement()" align="end" class="w-56 p-2" @keydown="onGoToColumnKeydown">
-                  <div class="relative mb-1">
-                    <Search class="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-                    <input ref="goToColumnSearchInput" v-model="goToColumnSearch" :placeholder="t('grid.searchColumn')" class="h-8 w-full rounded-md border bg-transparent pl-7 pr-6 text-xs outline-none focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25" />
-                    <button v-if="goToColumnSearch" type="button" class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" @click="goToColumnSearch = ''">
-                      <X class="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-                  <div ref="goToColumnListRef" class="max-h-56 overflow-auto rounded border">
-                    <button
-                      v-for="(column, index) in filteredGoToColumns"
-                      :key="column.index"
-                      type="button"
-                      :class="[
-                        'grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-0.5 px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none',
-                        index === goToColumnSelectedIndex ? 'bg-accent text-accent-foreground' : '',
-                      ]"
-                      @pointerenter="goToColumnSelectedIndex = index"
-                      @click="scrollToColumn(column.index)"
-                    >
-                      <span class="min-w-0 truncate">{{ column.name }}</span>
-                      <span class="shrink-0 font-mono text-[10px] text-muted-foreground">#{{ column.index + 1 }}</span>
-                      <span v-if="column.comment" class="col-span-2 min-w-0 truncate text-[11px] leading-4 text-muted-foreground" :title="column.comment">{{ column.comment }}</span>
-                    </button>
-                    <div v-if="!filteredGoToColumns.length" class="px-2 py-3 text-center text-xs text-muted-foreground">
-                      {{ t("grid.noColumnsFound") }}
-                    </div>
-                  </div>
-                </PopoverContent>
-              </Popover>
             </template>
           </DataGridToolbar>
         </div>
@@ -13154,7 +13134,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           <span>{{ t(truncationHintKey, { count: result.rows.length }) }}</span>
         </div>
         <!-- Content area: table + side/bottom detail panes -->
-        <div class="flex-1 grid min-h-0 overflow-hidden" :style="contentGridStyle">
+        <div class="relative flex-1 grid min-h-0 overflow-hidden" :style="contentGridStyle">
           <div class="col-start-1 row-start-1 flex flex-col min-w-0 overflow-hidden relative">
             <!-- Search overlay (Ctrl+F) -->
             <DataGridSearchBar
@@ -14442,13 +14422,51 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
               </div>
             </template>
           </div>
+          <!-- Column lookup panel -->
+          <div v-if="goToColumnOpen" data-column-lookup-panel class="column-lookup-panel relative col-start-2 row-start-1 z-30 flex min-w-0 max-w-full flex-col overflow-hidden border-l bg-background shadow-lg" :style="{ width: `${goToColumnPanelWidth}px` }" @keydown="onGoToColumnKeydown">
+            <div class="flex items-center gap-2 px-3 py-1.5 border-b shrink-0 bg-muted/20 h-9">
+              <Columns3 class="w-3.5 h-3.5 text-muted-foreground" />
+              <span class="text-xs font-medium flex-1 truncate">{{ t("grid.goToColumn") }}</span>
+              <Button variant="ghost" size="icon" class="h-5 w-5" :class="{ 'bg-accent text-primary': goToColumnPanelPinned }" :title="goToColumnPanelPinned ? t('grid.unpinGoToColumn') : t('grid.pinGoToColumn')" @click="toggleGoToColumnPanelPinned">
+                <Pin class="w-3 h-3" :class="{ 'fill-current': goToColumnPanelPinned }" />
+              </Button>
+              <Button variant="ghost" size="icon" class="h-5 w-5" :title="t('common.close')" @click="goToColumnOpen = false">
+                <X class="w-3 h-3" />
+              </Button>
+            </div>
+            <div class="relative m-2 shrink-0">
+              <Search class="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+              <input ref="goToColumnSearchInput" v-model="goToColumnSearch" :placeholder="t('grid.searchColumn')" class="h-8 w-full rounded-md border bg-transparent pl-7 pr-6 text-xs outline-none focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25" />
+              <button v-if="goToColumnSearch" type="button" class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" @click="goToColumnSearch = ''">
+                <X class="h-3.5 w-3.5" />
+              </button>
+            </div>
+            <div ref="goToColumnListRef" class="mx-2 mb-2 min-h-0 flex-1 overflow-auto rounded border">
+              <button
+                v-for="(column, index) in filteredGoToColumns"
+                :key="column.index"
+                type="button"
+                :class="[
+                  'grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-0.5 px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none',
+                  index === goToColumnSelectedIndex ? 'bg-accent text-accent-foreground' : '',
+                ]"
+                @pointerenter="goToColumnSelectedIndex = index"
+                @click="scrollToColumn(column.index)"
+              >
+                <span class="min-w-0 truncate">{{ column.name }}</span>
+                <span class="shrink-0 font-mono text-[10px] text-muted-foreground">#{{ column.index + 1 }}</span>
+                <span v-if="column.comment" class="col-span-2 min-w-0 truncate text-[11px] leading-4 text-muted-foreground" :title="column.comment">{{ column.comment }}</span>
+              </button>
+              <div v-if="!filteredGoToColumns.length" class="px-2 py-3 text-center text-xs text-muted-foreground">{{ t("grid.noColumnsFound") }}</div>
+            </div>
+          </div>
           <!-- Table Info Drawer -->
           <div
             v-if="showTableInfo"
             data-native-clipboard
             data-table-info-drawer
-            class="table-info-drawer relative col-start-2 row-start-1 border-l flex flex-col bg-background min-w-0 max-w-full"
-            :class="[{ 'row-span-2': cellDetailPanelIsBottom }, { 'ddl-drawer-resizing': isResizingDdl }]"
+            class="table-info-drawer relative row-start-1 border-l flex flex-col bg-background min-w-0 max-w-full"
+            :class="['col-start-3', { 'row-span-2': cellDetailPanelIsBottom }, { 'ddl-drawer-resizing': isResizingDdl }]"
             :style="ddlDrawerStyle"
             @contextmenu="onDrawerContextMenu"
           >
@@ -14597,7 +14615,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           <div
             v-if="showCellDetail && activeCellDetail"
             class="relative flex flex-col bg-background min-w-0"
-            :class="[cellDetailPanelIsBottom ? 'col-start-1 row-start-2 border-t' : 'col-start-3 row-start-1 border-l', { 'detail-drawer-resizing': isResizingDetail }]"
+            :class="[cellDetailPanelIsBottom ? 'col-start-1 row-start-2 border-t' : 'col-start-4 row-start-1 border-l', { 'detail-drawer-resizing': isResizingDetail }]"
             :style="detailPanelStyle"
             @contextmenu="onDrawerContextMenu"
           >

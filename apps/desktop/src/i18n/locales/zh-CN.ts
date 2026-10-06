@@ -2787,6 +2787,8 @@ export default withEnglishFallback({
     tableOwnerUnavailable: "无法获取",
     tableInfoNoResults: "无匹配结果",
     goToColumn: "跳转列",
+    pinGoToColumn: "固定跳转列面板",
+    unpinGoToColumn: "取消固定跳转列面板",
     columnWidth: "列宽",
     columnWidthCompact: "紧凑",
     columnWidthStandard: "标准",

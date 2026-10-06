@@ -17,6 +17,7 @@ import { provideTabUiState } from "@/lib/tabs/tabUiState";
 import {
   Check,
   CheckSquare2,
+  Columns3,
   Columns3Cog,
   Copy,
   EyeOff,
@@ -207,6 +208,7 @@ import { isAiRedisConsoleTarget, type AiConversationBinding } from "@/lib/ai/aiC
 
 type DataGridHandle = DataGridColumnLayoutHandle & {
   tableInfoToolbarCapability: DataGridToolbarActionCapability;
+  goToColumnToolbarCapability: DataGridToolbarActionCapability;
   onToolbarRefresh: () => Promise<void> | void;
   focusSearch: (target?: Element | null) => boolean;
   focusWhere: () => boolean;
@@ -2053,6 +2055,21 @@ defineExpose({
               <div class="ml-auto flex shrink-0 items-center gap-1">
                 <template v-if="activeOutputView === 'result' && redisResultViewMode === 'grid' && activeTab.result && hasTabularResult && !activeElasticsearchJsonResponse && !showElasticsearchRawJson">
                   <DataGridColumnLayoutPopover :grid="dataGridRef" trigger-class="px-1.5" />
+                  <LightTooltip v-if="dataGridRef?.goToColumnToolbarCapability?.visible" :text="dataGridRef.goToColumnToolbarCapability.tooltip ?? dataGridRef.goToColumnToolbarCapability.label" side="bottom" nowrap>
+                    <Button
+                      data-toolbar-action="navigation"
+                      variant="ghost"
+                      size="sm"
+                      class="h-6 shrink-0 gap-1 px-1.5 text-xs"
+                      :class="{ 'bg-accent': dataGridRef.goToColumnToolbarCapability.active }"
+                      :aria-label="dataGridRef.goToColumnToolbarCapability.label"
+                      :aria-pressed="dataGridRef.goToColumnToolbarCapability.active"
+                      @click="dataGridRef.goToColumnToolbarCapability.onTrigger()"
+                    >
+                      <Columns3 class="h-3.5 w-3.5" />
+                      {{ dataGridRef.goToColumnToolbarCapability.label }}
+                    </Button>
+                  </LightTooltip>
                   <LightTooltip v-if="dataGridRef?.tableInfoToolbarCapability?.visible" :text="t('contextMenu.viewDdl')" side="bottom" nowrap>
                     <Button
                       data-query-result-ddl
@@ -2732,6 +2749,20 @@ defineExpose({
             </Button>
           </LightTooltip>
           <DataGridColumnLayoutPopover v-if="activeTab.result?.columns.length" :grid="dataGridRef" trigger-class="px-1.5" />
+          <LightTooltip v-if="dataGridRef?.goToColumnToolbarCapability?.visible" :text="dataGridRef.goToColumnToolbarCapability.tooltip ?? dataGridRef.goToColumnToolbarCapability.label" side="bottom" nowrap>
+            <Button
+              data-toolbar-action="navigation"
+              variant="ghost"
+              size="sm"
+              class="h-5 text-xs px-1.5 shrink-0"
+              :class="{ 'bg-accent': dataGridRef.goToColumnToolbarCapability.active }"
+              :aria-label="dataGridRef.goToColumnToolbarCapability.label"
+              :aria-pressed="dataGridRef.goToColumnToolbarCapability.active"
+              @click="dataGridRef.goToColumnToolbarCapability.onTrigger()"
+            >
+              <Columns3 class="h-3.5 w-3.5" /><span v-if="!dataToolbarCompact">{{ dataGridRef.goToColumnToolbarCapability.label }}</span>
+            </Button>
+          </LightTooltip>
           <Button v-if="activeTab.result && activeDataTabTableMeta && activeTab.connectionId" variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :class="{ 'bg-accent': dataGridRef?.showDdl }" :title="dataToolbarCompact ? t('grid.tableInfo') : undefined" @click="dataGridRef?.toggleDdl()"
             ><TableProperties class="h-3.5 w-3.5" /><span v-if="!dataToolbarCompact">{{ t("grid.tableInfo") }}</span></Button
           >

@@ -2701,6 +2701,8 @@ export default withEnglishFallback({
     tableOwnerUnavailable: "Tidak tersedia",
     tableInfoNoResults: "Tidak ada hasil",
     goToColumn: "Buka kolom",
+    pinGoToColumn: "Sematkan panel pencarian kolom",
+    unpinGoToColumn: "Lepas sematan panel pencarian kolom",
     columnWidth: "Lebar Kolom",
     columnWidthCompact: "Ringkas",
     columnWidthStandard: "Standar",

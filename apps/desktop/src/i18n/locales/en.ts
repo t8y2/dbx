@@ -2852,6 +2852,8 @@ export default {
     tableOwnerUnavailable: "Unavailable",
     tableInfoNoResults: "No results",
     goToColumn: "Go to column",
+    pinGoToColumn: "Pin column lookup panel",
+    unpinGoToColumn: "Unpin column lookup panel",
     columnWidth: "Column Width",
     columnWidthCompact: "Compact",
     columnWidthStandard: "Standard",

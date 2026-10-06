@@ -2562,6 +2562,8 @@ export default withEnglishFallback({
     tableOwnerUnavailable: "無法取得",
     tableInfoNoResults: "沒有相符結果",
     goToColumn: "跳轉欄",
+    pinGoToColumn: "固定跳轉欄面板",
+    unpinGoToColumn: "取消固定跳轉欄面板",
     columnWidth: "列寬",
     columnWidthCompact: "緊湊",
     columnWidthStandard: "標準",

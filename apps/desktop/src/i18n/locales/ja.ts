@@ -2562,6 +2562,8 @@ export default withEnglishFallback({
     tableOwnerUnavailable: "取得できません",
     tableInfoNoResults: "結果なし",
     goToColumn: "列へ移動",
+    pinGoToColumn: "列検索パネルを固定",
+    unpinGoToColumn: "列検索パネルの固定を解除",
     columnWidth: "列幅",
     columnWidthCompact: "コンパクト",
     columnWidthStandard: "標準",

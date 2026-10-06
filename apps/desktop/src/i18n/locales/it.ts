@@ -2555,6 +2555,8 @@ export default withEnglishFallback({
     tableOwnerUnavailable: "Non disponibile",
     tableInfoNoResults: "Nessun risultato",
     goToColumn: "Vai alla colonna",
+    pinGoToColumn: "Fissa pannello ricerca colonne",
+    unpinGoToColumn: "Sblocca pannello ricerca colonne",
     columnWidth: "Larghezza colonna",
     columnWidthCompact: "Compatto",
     columnWidthStandard: "Standard",

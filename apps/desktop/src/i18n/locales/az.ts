@@ -2420,6 +2420,8 @@ export default withEnglishFallback({
     tableOwnerUnavailable: "Əlçatan deyil",
     tableInfoNoResults: "Nəticə yoxdur",
     goToColumn: "Sütuna keç",
+    pinGoToColumn: "Sütun axtarış panelini bərkid",
+    unpinGoToColumn: "Sütun axtarış panelinin bərkidilməsini ləğv et",
     columnWidth: "Sütun eni",
     columnWidthCompact: "Yığcam",
     columnWidthStandard: "Standart",

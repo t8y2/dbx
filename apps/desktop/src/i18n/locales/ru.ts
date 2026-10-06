@@ -2736,6 +2736,8 @@ export default withEnglishFallback({
     tableOwnerUnavailable: "Недоступно",
     tableInfoNoResults: "Нет результатов",
     goToColumn: "Перейти к столбцу",
+    pinGoToColumn: "Закрепить панель поиска столбцов",
+    unpinGoToColumn: "Открепить панель поиска столбцов",
     columnWidth: "Ширина столбца",
     columnWidthCompact: "Компактная",
     columnWidthStandard: "Стандартная",

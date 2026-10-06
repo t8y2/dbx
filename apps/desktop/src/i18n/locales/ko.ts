@@ -2599,6 +2599,8 @@ export default withEnglishFallback({
     tableOwnerUnavailable: "사용할 수 없음",
     tableInfoNoResults: "결과 없음",
     goToColumn: "컬럼으로 이동",
+    pinGoToColumn: "열 검색 패널 고정",
+    unpinGoToColumn: "열 검색 패널 고정 해제",
     columnWidth: "컬럼 너비",
     columnWidthCompact: "좁게",
     columnWidthStandard: "표준",

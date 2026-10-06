@@ -5,10 +5,13 @@
 //! runs inside a `TransactionBehavior::Immediate` transaction so concurrent
 //! workers can never claim the same run.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{params, Connection, ErrorCode, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use super::artifacts::TaskArtifact;
@@ -115,6 +118,72 @@ CREATE TABLE IF NOT EXISTS scheduler_leases (
 );
 ";
 
+/// Per-process record of scheduler databases whose WAL mode and schema are
+/// already in place, keyed by database path. The desktop host rebuilds a
+/// `SchedulerStore` for every command, so the marker has to outlive the
+/// instances; tests use distinct temporary directories and are unaffected.
+fn initialized_databases() -> &'static Mutex<HashSet<PathBuf>> {
+    static PATHS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    PATHS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn is_busy(error: &rusqlite::Error) -> bool {
+    matches!(error.sqlite_error_code(), Some(ErrorCode::DatabaseBusy) | Some(ErrorCode::DatabaseLocked))
+}
+
+/// Prepares a fresh connection: WAL mode plus the frozen schema, once per
+/// database per process.
+///
+/// `PRAGMA journal_mode=WAL` is the reason this exists: unlike ordinary
+/// statements it does **not** honor `busy_timeout` — contended conversions
+/// fail immediately with "database is locked". The old code ran the pragma on
+/// every access, so the page's three concurrent startup reads raced each other
+/// (and the worker process) on the very first conversion and randomly failed.
+/// Setting WAL once, with a bounded retry around the pragma, removes that
+/// race; every later access just opens, sets the busy timeout, and proceeds.
+/// WAL then does its job for the remaining cross-process contention (worker
+/// vs UI), where `busy_timeout` applies normally.
+fn ensure_schema(dir: &Path, conn: &mut Connection) -> Result<(), TaskError> {
+    let db_path = dir.join("state.db");
+    let already_initialized = initialized_databases().lock().map(|guard| guard.contains(&db_path)).unwrap_or(false);
+    if already_initialized {
+        return Ok(());
+    }
+
+    // WAL is part of the frozen contract (ADR §3.1) and required for reliable
+    // BEGIN IMMEDIATE serialization across connections.
+    let mut attempts = 0u32;
+    loop {
+        match conn.execute_batch("PRAGMA journal_mode=WAL;") {
+            Ok(()) => break,
+            Err(error) if is_busy(&error) && attempts < 50 => {
+                attempts += 1;
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) => {
+                return Err(TaskError::unavailable(format!(
+                    "Cannot switch the scheduler database to WAL mode: {error}"
+                )))
+            }
+        }
+    }
+    // One transaction around the DDL keeps a partially-created schema from
+    // ever being observed by another process.
+    conn.execute_batch("BEGIN IMMEDIATE;")?;
+    let schema_result = conn.execute_batch(SCHEMA);
+    match schema_result {
+        Ok(()) => conn.execute_batch("COMMIT;")?,
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            return Err(TaskError::from(error));
+        }
+    }
+    if let Ok(mut guard) = initialized_databases().lock() {
+        guard.insert(db_path);
+    }
+    Ok(())
+}
+
 /// Default lease name of the single desktop worker (ADR §3.2).
 pub const SCHEDULER_LEASE: &str = "scheduler";
 
@@ -190,10 +259,7 @@ impl SchedulerStore {
                 .map_err(|error| TaskError::unavailable(format!("Cannot create scheduler directory: {error}")))?;
             let mut conn = Connection::open(dir.join("state.db"))?;
             conn.busy_timeout(std::time::Duration::from_secs(5))?;
-            // WAL is part of the frozen contract (ADR §3.1) and required for
-            // reliable BEGIN IMMEDIATE serialization across connections.
-            conn.execute_batch("PRAGMA journal_mode=WAL;")?;
-            conn.execute_batch(SCHEMA)?;
+            ensure_schema(&dir, &mut conn)?;
             action(&mut conn)
         })
         .await

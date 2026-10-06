@@ -403,3 +403,38 @@ async fn migration_marker_is_idempotent_and_rolls_back_on_failure() {
         .unwrap();
     assert!(applied, "retry after failure runs the full body");
 }
+
+// The task-center page fires its first three reads concurrently, and before
+// the one-shot `ensure_schema` every connection re-ran
+// `PRAGMA journal_mode=WAL` — a pragma that fails immediately with
+// "database is locked" on contention (busy_timeout does not apply). This race
+// made the first page open fail intermittently, so pin it: N simultaneous
+// cold-start accesses to the same fresh directory must all succeed.
+#[tokio::test]
+async fn concurrent_cold_start_accesses_all_succeed() {
+    let (dir, store) = temp_store();
+    let path = dir.path().to_path_buf();
+    let runtime = tokio::runtime::Handle::current();
+
+    let handles: Vec<_> = (0..8)
+        .map(|index| {
+            let store = store.clone();
+            let runtime = runtime.clone();
+            std::thread::spawn(move || {
+                runtime.block_on(async move {
+                    if index % 3 == 0 {
+                        store.list_tasks().await
+                    } else if index % 3 == 1 {
+                        store.list_runs(None, 10).await.map(|_| Vec::new())
+                    } else {
+                        store.list_sessions().await.map(|_| Vec::new())
+                    }
+                })
+            })
+        })
+        .collect();
+    for handle in handles {
+        let result = handle.join().expect("task thread panicked");
+        assert!(result.is_ok(), "concurrent cold-start access failed: {result:?}");
+    }
+}

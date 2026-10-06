@@ -89,7 +89,10 @@ const { toast } = useToast();
 const settingsStore = useSettingsStore();
 const toolbarItems = computed(() => settingsStore.editorSettings.toolbarItems);
 const webLogoPosition = computed(() => settingsStore.editorSettings.webLogoPosition ?? "left");
-const showToolbarUpdateEntry = computed(() => toolbarItems.value.checkUpdates || props.hasUpdateAvailable);
+// The toolbar visibility switch (外观 → 工具栏 → 检查更新) owns this entry: an available
+// update must not resurrect a button the user deliberately hid. Updates stay reachable
+// from 设置 → 更新, which always surfaces the client update status.
+const showToolbarUpdateEntry = computed(() => toolbarItems.value.checkUpdates);
 const { isMac, isDesktop, showControls, isMaximized, isFullscreen, isAlwaysOnTop, minimize, toggleMaximize, toggleAlwaysOnTop, close } = useWindowControls();
 // The always-on-top control is opt-in (外观 → 工具栏): the right side of the
 // toolbar is the most crowded strip in the app. It stays visible while the

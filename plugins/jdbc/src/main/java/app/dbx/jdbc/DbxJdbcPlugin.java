@@ -2297,27 +2297,33 @@ public final class DbxJdbcPlugin {
         if (quirks.caseInsensitiveSchemaMetadata()) {
             try (ResultSet rs = meta.getSchemas(catalog, null)) {
                 appendSchemas(result, rs, true);
-            } catch (SQLException ignored) {
+            } catch (SQLException | AbstractMethodError ignored) {
+                // Legacy/incomplete JDBC drivers (e.g. jTDS against SQL Server 2000, #11127)
+                // throw AbstractMethodError instead of a proper SQLException when their
+                // getSchemas(String, String) implementation is incomplete.
                 try (ResultSet rs = meta.getSchemas()) {
                     appendSchemas(result, rs, true);
+                } catch (AbstractMethodError ignored2) {
                 }
             }
             try (ResultSet rs = meta.getSchemas(null, null)) {
                 appendSchemas(result, rs, true);
-            } catch (SQLException ignored) {
+            } catch (SQLException | AbstractMethodError ignored) {
             }
         } else {
             try (ResultSet rs = meta.getSchemas(catalog, null)) {
                 appendSchemas(result, rs, false);
-            } catch (SQLFeatureNotSupportedException | UnsupportedOperationException ignored) {
+            } catch (SQLFeatureNotSupportedException | UnsupportedOperationException | AbstractMethodError ignored) {
+                // See the AbstractMethodError note above: same legacy-driver fallback.
                 try (ResultSet rs = meta.getSchemas()) {
                     appendSchemas(result, rs, false);
+                } catch (AbstractMethodError ignored2) {
                 }
             }
             if (result.isEmpty() && catalog != null) {
                 try (ResultSet rs = meta.getSchemas(null, null)) {
                     appendSchemas(result, rs, false);
-                } catch (SQLFeatureNotSupportedException | UnsupportedOperationException ignored) {
+                } catch (SQLFeatureNotSupportedException | UnsupportedOperationException | AbstractMethodError ignored) {
                 }
             }
         }

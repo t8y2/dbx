@@ -2993,6 +2993,39 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void listSchemasDegradesToEmptyWhenDriverRejectsSchemaMetadata() throws Exception {
+        // #11127: jTDS against SQL Server 2000 throws AbstractMethodError (not a proper
+        // SQLException) from DatabaseMetaData.getSchemas(String, String) because its
+        // implementation predates that JDBC overload. Clicking a table/database in the
+        // sidebar must degrade gracefully instead of failing the whole connection.
+        for (Throwable failure : List.of(
+            new SQLFeatureNotSupportedException("schemas not supported"),
+            new UnsupportedOperationException("unsupported"),
+            new AbstractMethodError("unsupported")
+        )) {
+            String connection = """
+                { "connection_string": "jdbc:dbx-schema-metadata:%s" }
+                """.formatted(failure.getClass().getSimpleName());
+            Driver driver = testDriver("jdbc:dbx-schema-metadata:", schemaMetadataConnection(failure));
+            DriverManager.registerDriver(driver);
+            try {
+                JsonNode response = request("listSchemas", """
+                    {
+                      "connection": %s,
+                      "database": "public"
+                    }
+                    """.formatted(connection));
+
+                assertFalse(response.has("error"), failure.getClass().getSimpleName() + ": " + response);
+                assertEquals(true, response.path("result").isArray(), failure.getClass().getSimpleName() + ": " + response);
+                assertEquals(0, response.path("result").size(), failure.getClass().getSimpleName() + ": " + response);
+            } finally {
+                closeAndDeregister(connection, driver);
+            }
+        }
+    }
+
+    @Test
     void oracleListSchemasFallsBackToJdbcSchemasWhenAllUsersIsMissing() throws Exception {
         Method method = DbxJdbcPlugin.class.getDeclaredMethod("oracleListSchemas", Connection.class);
         method.setAccessible(true);
@@ -3935,6 +3968,41 @@ final class DbxJdbcPluginTest {
             (proxy, method, args) -> {
                 if ("getPrimaryKeys".equals(method.getName()) || "getIndexInfo".equals(method.getName())) {
                     throw failure;
+                }
+                return defaultValue(method.getReturnType());
+            }
+        );
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getMetaData" -> metadata;
+                case "isClosed" -> false;
+                case "close" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static Connection schemaMetadataConnection(Throwable failure) {
+        ResultSet emptySchemas = (ResultSet) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { ResultSet.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "next" -> false;
+                case "close" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+        DatabaseMetaData metadata = (DatabaseMetaData) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { DatabaseMetaData.class },
+            (proxy, method, args) -> {
+                if ("getSchemas".equals(method.getName()) && args != null && args.length == 2) {
+                    throw failure;
+                }
+                if ("getSchemas".equals(method.getName())) {
+                    return emptySchemas;
                 }
                 return defaultValue(method.getReturnType());
             }

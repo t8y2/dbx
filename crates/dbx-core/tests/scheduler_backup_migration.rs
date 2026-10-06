@@ -303,7 +303,12 @@ fn backup_task(id: &str, config: Value) -> TaskDefinition {
         name: "Nightly backup".into(),
         provider_type: TaskProviderType::Builtin,
         provider_id: "dbx.database-backup".into(),
-        target: TaskTarget { connection_id: Some("mysql-1".into()), plugin_id: None, resource_id: None },
+        target: TaskTarget {
+            connection_id: Some("mysql-1".into()),
+            additional_connection_ids: Vec::new(),
+            plugin_id: None,
+            resource_id: None,
+        },
         trigger: TaskTrigger::Manual,
         execution: Default::default(),
         config_version: 1,

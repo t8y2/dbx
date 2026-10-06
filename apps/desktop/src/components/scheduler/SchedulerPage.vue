@@ -4,7 +4,7 @@
 // `dbx-scheduler-event` notifications, and hosts the task editor dialog. The
 // page owns no timers-as-scheduler and no task lifecycle — the background
 // worker does.
-import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -136,9 +136,40 @@ onMounted(async () => {
   });
 });
 
+// The detached worker process has no webview, so run/resident transitions that
+// happen there never reach the Tauri event channel above (they are mirrored to
+// the worker log only). While anything is in flight, poll as a fallback so the
+// run/cancel buttons settle back and statuses stop sticking at "queued".
+const ACTIVE_WORK_POLL_MS = 3000;
+let activeWorkPoll: ReturnType<typeof setInterval> | undefined;
+
+const hasActiveWork = computed(() => activeRunCount.value > 0 || residents.value.some((session) => session.state === "running" || session.state === "starting" || session.state === "stopping"));
+
+watch(
+  hasActiveWork,
+  (active) => {
+    if (active && !activeWorkPoll) {
+      activeWorkPoll = setInterval(() => {
+        void refreshRuns();
+        void refreshResidents();
+        void refreshTasks();
+      }, ACTIVE_WORK_POLL_MS);
+    }
+    if (!active && activeWorkPoll) {
+      clearInterval(activeWorkPoll);
+      activeWorkPoll = undefined;
+    }
+  },
+  { immediate: true },
+);
+
 onUnmounted(() => {
   unlisten?.();
   unlisten = undefined;
+  if (activeWorkPoll) {
+    clearInterval(activeWorkPoll);
+    activeWorkPoll = undefined;
+  }
 });
 
 // ---------------------------------------------------------------------------

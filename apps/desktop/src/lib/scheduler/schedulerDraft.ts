@@ -108,8 +108,8 @@ function configToFormValues(fields: readonly import("@/types/database").PluginFo
 }
 
 /** Run status → badge variant mapping for list rendering. */
-export function runStatusBadgeVariant(status: TaskRunStatus): "default" | "secondary" | "destructive" | "outline" {
-  if (status === "success") return "default";
+export function runStatusBadgeVariant(status: TaskRunStatus): "default" | "secondary" | "destructive" | "success" | "outline" {
+  if (status === "success") return "success";
   if (status === "failed" || status === "timeout") return "destructive";
   if (status === "running" || status === "starting" || status === "queued") return "secondary";
   return "outline";

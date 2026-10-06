@@ -23,8 +23,8 @@ const { t, locale } = useI18n();
 
 const taskNameById = computed(() => new Map(props.tasks.map((task) => [task.id, task.name])));
 
-const stateVariant: Record<ResidentSessionState, "default" | "secondary" | "destructive" | "outline"> = {
-  running: "default",
+const stateVariant: Record<ResidentSessionState, "default" | "secondary" | "destructive" | "success" | "outline"> = {
+  running: "success",
   starting: "secondary",
   stopping: "secondary",
   stopped: "outline",

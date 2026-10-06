@@ -764,6 +764,7 @@ mod tests {
             id: "io.dbx.ssh.tasks".to_string(),
             label: "SSH Tasks".to_string(),
             connection_providers: Vec::new(),
+            allow_multiple_connections: false,
             capabilities: capabilities.to_vec(),
             triggers: Vec::new(),
         }

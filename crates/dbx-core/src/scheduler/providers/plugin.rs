@@ -24,6 +24,23 @@ use super::super::{
 };
 use crate::connection::{AppState, PoolKind};
 
+/// Resolves the provider-local trigger id a plugin RPC expects.
+///
+/// The task's trigger identity is the full `<providerId>/<triggerId>` (ADR
+/// §2.2, stored in `config.__triggerId` for multi-trigger providers), while a
+/// manifest declares trigger `id`s local to the provider — `task/validate` and
+/// `task/execute` match against those. Sending the full id made every
+/// multi-trigger provider reject with "does not declare trigger". Providers
+/// that never stored a key keep the legacy fallback (trigger id = provider
+/// id).
+fn local_trigger_id(task: &TaskDefinition) -> String {
+    let stored = task.config.get("__triggerId").and_then(|value| value.as_str()).unwrap_or("");
+    if stored.is_empty() {
+        return task.provider_id.clone();
+    }
+    stored.strip_prefix(&format!("{}/", task.provider_id)).unwrap_or(stored).to_owned()
+}
+
 /// Generous default when the task declares no timeout: `task/execute` may run
 /// a long command, but an unattended run still must not hang the engine slot
 /// forever.
@@ -85,12 +102,7 @@ impl PluginTaskExecutor {
         runtime: Option<serde_json::Value>,
     ) -> Result<dbx_plugin_runtime::plugins::PluginTaskRunRequest, TaskError> {
         use dbx_plugin_runtime::plugins::{PluginTaskRunRef, PluginTaskRunRequest, PluginTaskRunTask};
-        let trigger_id = task
-            .config
-            .get("__triggerId")
-            .and_then(|value| value.as_str())
-            .map(str::to_owned)
-            .unwrap_or_else(|| task.provider_id.clone());
+        let trigger_id = local_trigger_id(task);
         Ok(PluginTaskRunRequest {
             task: PluginTaskRunTask {
                 task_id: task.id.clone(),
@@ -177,5 +189,55 @@ impl TaskExecutor for PluginTaskExecutor {
                 })
                 .collect(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::local_trigger_id;
+    use crate::scheduler::models::{TaskDefinition, TaskTarget};
+
+    fn task_with_config(provider_id: &str, config: serde_json::Value) -> TaskDefinition {
+        serde_json::from_value(serde_json::json!({
+            "id": "task-1",
+            "name": "t",
+            "providerType": "plugin",
+            "providerId": provider_id,
+            "trigger": { "type": "manual" },
+            "execution": { "mode": "run", "concurrency": "forbid", "misfire": "coalesce", "retry": { "maxAttempts": 1, "backoffSeconds": 0, "strategy": "fixed" } },
+            "target": {},
+            "configVersion": 1,
+            "config": config,
+            "enabled": false,
+            "createdAt": "2026-10-06T00:00:00Z",
+            "updatedAt": "2026-10-06T00:00:00Z",
+            "version": 1
+        }))
+        .expect("task json")
+    }
+
+    #[test]
+    fn strips_the_provider_prefix_from_the_stored_trigger_identity() {
+        let task =
+            task_with_config("io.dbx.ssh.tasks", serde_json::json!({ "__triggerId": "io.dbx.ssh.tasks/execute" }));
+        assert_eq!(local_trigger_id(&task), "execute");
+    }
+
+    #[test]
+    fn falls_back_to_the_provider_id_when_no_trigger_was_stored() {
+        let task = task_with_config("io.dbx.ssh.tasks", serde_json::json!({}));
+        assert_eq!(local_trigger_id(&task), "io.dbx.ssh.tasks");
+    }
+
+    #[test]
+    fn keeps_an_already_local_trigger_id() {
+        let task = task_with_config("io.dbx.ssh.tasks", serde_json::json!({ "__triggerId": "execute" }));
+        assert_eq!(local_trigger_id(&task), "execute");
+    }
+
+    #[test]
+    fn task_target_defaults_stay_valid() {
+        let task = task_with_config("io.dbx.ssh.tasks", serde_json::json!({}));
+        assert_eq!(task.target, TaskTarget::default());
     }
 }

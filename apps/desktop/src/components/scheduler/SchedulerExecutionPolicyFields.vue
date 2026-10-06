@@ -68,7 +68,6 @@ function setRestartWindow(value: string) {
         <div v-else class="flex h-9 items-center gap-2 rounded-md border border-border/70 px-3 text-sm">
           {{ isResident ? t("scheduler.execution.modeResident") : t("scheduler.execution.modeRun") }}
         </div>
-        <p v-if="!modeEditable" class="text-xs text-muted-foreground">{{ t("scheduler.execution.modeLocked") }}</p>
       </div>
       <div class="space-y-2">
         <Label>{{ t("scheduler.execution.timeout") }}</Label>
@@ -124,7 +123,6 @@ function setRestartWindow(value: string) {
           <Label class="text-sm">{{ t("scheduler.execution.restart") }}</Label>
           <Switch :model-value="Boolean(modelValue.restart?.enabled)" :disabled="disabled" @update:model-value="(value: boolean) => patchRestart({ enabled: value })" />
         </div>
-        <p class="text-xs text-muted-foreground">{{ t("scheduler.execution.restartHint") }}</p>
       </div>
       <template v-if="modelValue.restart?.enabled">
         <div class="space-y-2">

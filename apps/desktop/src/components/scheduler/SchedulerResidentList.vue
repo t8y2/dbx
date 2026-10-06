@@ -6,7 +6,7 @@ import { computed } from "vue";
 import { useI18n } from "vue-i18n";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Play, RotateCcw, Square } from "@lucide/vue";
+import { Play, RotateCcw, Server, Square } from "@lucide/vue";
 import type { ResidentSession, ResidentSessionState } from "@/lib/scheduler/schedulerTypes";
 
 const props = defineProps<{
@@ -40,14 +40,32 @@ function formatTime(value?: string | null): string {
   if (!value || !Number.isFinite(Date.parse(value))) return t("scheduler.time.notAvailable");
   return new Intl.DateTimeFormat(locale.value, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
 }
+
+// Only offer the actions that make sense for the current state: a running
+// session is stopped/restarted, a stopped one is started, and a transitional
+// state (starting/stopping) offers nothing until it settles.
+function canStart(session: ResidentSession): boolean {
+  return session.state === "stopped" || session.state === "crashed" || session.state === "degraded";
+}
+
+function canStop(session: ResidentSession): boolean {
+  return session.state === "running" || session.state === "starting";
+}
+
+function canRestart(session: ResidentSession): boolean {
+  return session.state === "running";
+}
 </script>
 
 <template>
   <div class="flex flex-col gap-3">
     <div class="overflow-hidden rounded-md border border-border/70">
-      <div v-if="sessions.length === 0" class="flex min-h-32 flex-col items-center justify-center gap-1 px-4 py-8 text-center text-muted-foreground" data-scheduler-resident-empty>
-        <div class="text-sm font-medium text-foreground">{{ t("scheduler.resident.empty") }}</div>
-        <p class="text-sm">{{ t("scheduler.resident.emptyHint") }}</p>
+      <div v-if="sessions.length === 0" class="flex min-h-44 flex-col items-center justify-center gap-3 px-4 py-8 text-center text-muted-foreground" data-scheduler-resident-empty>
+        <Server class="h-8 w-8 opacity-60" />
+        <div>
+          <div class="text-sm font-medium text-foreground">{{ t("scheduler.resident.empty") }}</div>
+          <p class="mt-1 text-sm">{{ t("scheduler.resident.emptyHint") }}</p>
+        </div>
       </div>
       <div v-for="session in sessions" :key="session.id" class="grid gap-3 border-b border-border/70 px-4 py-3 last:border-b-0 md:grid-cols-[minmax(0,1fr)_auto] md:items-center" :data-scheduler-resident-row="session.id" :data-scheduler-resident-state="session.state">
         <div class="min-w-0">
@@ -61,13 +79,13 @@ function formatTime(value?: string | null): string {
           </div>
         </div>
         <div class="flex items-center justify-end gap-1">
-          <Button variant="ghost" size="icon" class="h-8 w-8" :disabled="busy" :title="t('scheduler.resident.start')" data-scheduler-resident-start @click="emit('action', session, 'start')">
+          <Button v-if="canStart(session)" variant="ghost" size="icon" class="h-8 w-8" :disabled="busy" :title="t('scheduler.resident.start')" data-scheduler-resident-start @click="emit('action', session, 'start')">
             <Play class="h-4 w-4" />
           </Button>
-          <Button variant="ghost" size="icon" class="h-8 w-8" :disabled="busy" :title="t('scheduler.resident.stop')" data-scheduler-resident-stop @click="emit('action', session, 'stop')">
+          <Button v-if="canStop(session)" variant="ghost" size="icon" class="h-8 w-8" :disabled="busy" :title="t('scheduler.resident.stop')" data-scheduler-resident-stop @click="emit('action', session, 'stop')">
             <Square class="h-4 w-4" />
           </Button>
-          <Button variant="ghost" size="icon" class="h-8 w-8" :disabled="busy" :title="t('scheduler.resident.restart')" data-scheduler-resident-restart @click="emit('action', session, 'restart')">
+          <Button v-if="canRestart(session)" variant="ghost" size="icon" class="h-8 w-8" :disabled="busy" :title="t('scheduler.resident.restart')" data-scheduler-resident-restart @click="emit('action', session, 'restart')">
             <RotateCcw class="h-4 w-4" />
           </Button>
         </div>

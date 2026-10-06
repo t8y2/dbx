@@ -6,10 +6,10 @@
 // worker does.
 import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { CalendarClock, History, Server } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 import * as schedulerApi from "@/lib/scheduler/schedulerApi";
@@ -67,6 +67,8 @@ const activeRunIds = computed(() => {
   }
   return map;
 });
+
+const activeRunCount = computed(() => runs.value.filter((run) => isActiveRunStatus(run.status)).length);
 
 const runTaskFilter = ref("");
 const runStatusFilter = ref("");
@@ -235,30 +237,31 @@ function onRunCancel(run: TaskRun) {
 </script>
 
 <template>
-  <div class="flex flex-col gap-4" data-scheduler-page>
-    <div class="flex flex-wrap items-center justify-between gap-3">
-      <div class="min-w-0">
-        <h3 class="text-base font-semibold">{{ t("scheduler.title") }}</h3>
-        <p class="mt-1 text-sm text-muted-foreground">{{ t("scheduler.description") }}</p>
-      </div>
-      <Button variant="outline" size="sm" :disabled="loading" data-scheduler-refresh @click="() => void refreshAll()">
-        {{ t("scheduler.refresh") }}
-      </Button>
+  <div class="relative mx-auto flex h-full w-full max-w-6xl flex-col gap-4 overflow-hidden px-6 py-6" data-scheduler-page>
+    <div v-if="loadError" class="flex shrink-0 items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive" data-scheduler-load-error>
+      <span class="min-w-0 flex-1 break-words">{{ t("scheduler.loadFailed", { error: loadError }) }}</span>
+      <Button variant="outline" size="sm" class="h-7 shrink-0 text-xs" :disabled="loading" data-scheduler-retry @click="() => void refreshAll()">{{ t("scheduler.retry") }}</Button>
     </div>
 
-    <p v-if="loadError" class="break-words text-sm text-destructive" data-scheduler-load-error>{{ t("scheduler.loadFailed", { error: loadError }) }}</p>
-
-    <Tabs v-model="activeTab" class="gap-3">
-      <TabsList>
-        <TabsTrigger value="tasks" data-scheduler-tab-tasks>
+    <Tabs v-model="activeTab" class="min-h-0 flex-1 gap-3">
+      <TabsList class="grid h-9 w-full grid-cols-3">
+        <TabsTrigger value="tasks" class="gap-1.5 text-xs" data-scheduler-tab-tasks>
+          <CalendarClock class="size-3.5" />
           {{ t("scheduler.tabs.tasks") }}
-          <Badge v-if="tasks.length" variant="secondary" class="ml-1.5 font-normal">{{ tasks.length }}</Badge>
+          <span v-if="tasks.length" class="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-muted px-1 text-[10px] font-semibold text-muted-foreground">{{ tasks.length > 99 ? "99+" : tasks.length }}</span>
         </TabsTrigger>
-        <TabsTrigger value="runs" data-scheduler-tab-runs>{{ t("scheduler.tabs.runs") }}</TabsTrigger>
-        <TabsTrigger value="resident" data-scheduler-tab-resident>{{ t("scheduler.tabs.resident") }}</TabsTrigger>
+        <TabsTrigger value="runs" class="gap-1.5 text-xs" data-scheduler-tab-runs>
+          <History class="size-3.5" />
+          {{ t("scheduler.tabs.runs") }}
+          <span v-if="activeRunCount" class="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold text-primary-foreground" data-scheduler-active-run-count>{{ activeRunCount > 99 ? "99+" : activeRunCount }}</span>
+        </TabsTrigger>
+        <TabsTrigger value="resident" class="gap-1.5 text-xs" data-scheduler-tab-resident>
+          <Server class="size-3.5" />
+          {{ t("scheduler.tabs.resident") }}
+        </TabsTrigger>
       </TabsList>
 
-      <TabsContent value="tasks" class="mt-0">
+      <TabsContent value="tasks" class="m-0 min-h-0 flex-1 overflow-y-auto">
         <SchedulerTaskList
           v-model:search="taskSearch"
           :tasks="tasks"
@@ -274,15 +277,16 @@ function onRunCancel(run: TaskRun) {
           @cancel="(task, runId) => void cancelRun(task.id, runId)"
           @delete="requestDelete"
           @view-runs="viewRuns"
+          @reload="() => void refreshAll()"
         />
       </TabsContent>
 
-      <TabsContent value="runs" class="mt-0">
+      <TabsContent value="runs" class="m-0 min-h-0 flex-1 overflow-y-auto">
         <SchedulerRunDetail v-if="selectedRunId" :run-id="selectedRunId" @back="selectedRunId = ''" @cancel="onRunCancel" />
         <SchedulerRunList v-else v-model:task-filter="runTaskFilter" v-model:status-filter="runStatusFilter" :runs="filteredRuns" :tasks="tasks" :loading="loading" @select="(run) => (selectedRunId = run.id)" @reload="() => void refreshRuns()" />
       </TabsContent>
 
-      <TabsContent value="resident" class="mt-0">
+      <TabsContent value="resident" class="m-0 min-h-0 flex-1 overflow-y-auto">
         <SchedulerResidentList :sessions="residents" :tasks="[...tasksById.values()]" :busy="residentBusy" @action="(session, action) => void residentAction(session, action)" />
       </TabsContent>
     </Tabs>
@@ -292,7 +296,7 @@ function onRunCancel(run: TaskRun) {
     <Dialog :open="!!pendingDelete" @update:open="(value: boolean) => !value && (pendingDelete = null)">
       <DialogContent class="max-w-md">
         <DialogHeader
-          ><DialogTitle>{{ t("scheduler.actions.delete") }}</DialogTitle></DialogHeader
+          ><DialogTitle>{{ pendingDelete?.name }}</DialogTitle></DialogHeader
         >
         <p class="text-sm text-muted-foreground">{{ pendingDelete ? t("scheduler.actions.deleteConfirm", { name: pendingDelete.name }) : "" }}</p>
         <DialogFooter>

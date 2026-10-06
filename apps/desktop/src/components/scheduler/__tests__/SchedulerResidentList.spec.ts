@@ -57,14 +57,25 @@ describe("SchedulerResidentList", () => {
   it("issues start / stop / restart against the plugin session id", async () => {
     const events = { actions: [] as Array<[string, string]> };
     const container = await mountList([session()], events);
-    container.querySelector<HTMLButtonElement>("[data-scheduler-resident-start]")!.click();
+    // A running session offers stop + restart only; start is hidden.
+    expect(container.querySelector("[data-scheduler-resident-start]")).toBeNull();
     container.querySelector<HTMLButtonElement>("[data-scheduler-resident-stop]")!.click();
     container.querySelector<HTMLButtonElement>("[data-scheduler-resident-restart]")!.click();
     expect(events.actions).toEqual([
-      ["plugin-session-1", "start"],
       ["plugin-session-1", "stop"],
       ["plugin-session-1", "restart"],
     ]);
+  });
+
+  it("offers start only for sessions that are not running", async () => {
+    const events = { actions: [] as Array<[string, string]> };
+    const container = await mountList([session({ id: "s1", sessionId: "plugin-session-1", state: "crashed" }), session({ id: "s2", sessionId: "plugin-session-2", state: "starting" })], events);
+    container.querySelector<HTMLButtonElement>("[data-scheduler-resident-start]")!.click();
+    expect(events.actions).toEqual([["plugin-session-1", "start"]]);
+    // The transitional starting state only offers stop (cancel the start-up).
+    expect(container.querySelector("[data-scheduler-resident-row='s2'] [data-scheduler-resident-start]")).toBeNull();
+    expect(container.querySelector("[data-scheduler-resident-row='s2'] [data-scheduler-resident-stop]")).not.toBeNull();
+    expect(container.querySelector("[data-scheduler-resident-row='s2'] [data-scheduler-resident-restart]")).toBeNull();
   });
 
   it("shows the empty hint when no session is active", async () => {

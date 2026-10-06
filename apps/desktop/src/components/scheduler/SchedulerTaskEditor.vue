@@ -205,7 +205,7 @@ function close() {
         <DialogTitle>{{ isCreate ? t("scheduler.editor.createTitle") : t("scheduler.editor.editTitle") }}</DialogTitle>
       </DialogHeader>
 
-      <div v-if="draft" class="grid gap-6 py-1">
+      <div v-if="draft" class="grid gap-5 py-1">
         <section class="space-y-3">
           <h4 class="text-sm font-semibold">{{ t("scheduler.editor.sectionBasic") }}</h4>
           <div class="grid gap-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
@@ -215,10 +215,7 @@ function close() {
             </div>
             <div class="flex items-center gap-2 pb-1">
               <Switch :model-value="draft.enabled" @update:model-value="(value: boolean) => (draft!.enabled = value)" />
-              <div>
-                <Label class="text-xs">{{ t("scheduler.editor.enabled") }}</Label>
-                <p class="text-[11px] text-muted-foreground">{{ t("scheduler.editor.enabledHint") }}</p>
-              </div>
+              <Label class="text-xs">{{ t("scheduler.editor.enabled") }}</Label>
             </div>
           </div>
         </section>
@@ -234,7 +231,7 @@ function close() {
                   <SelectItem v-for="provider in providers" :key="provider.providerId" :value="provider.providerId">{{ provider.label }}</SelectItem>
                 </SelectContent>
               </Select>
-              <p class="text-xs text-muted-foreground">{{ providers.length === 0 ? t("scheduler.editor.noProviders") : t("scheduler.editor.providerHint") }}</p>
+              <p v-if="providers.length === 0" class="text-xs text-destructive">{{ t("scheduler.editor.noProviders") }}</p>
             </div>
             <div v-if="selectedProvider && selectedProvider.triggers.length > 0" class="space-y-2">
               <Label>{{ t("scheduler.editor.providerTrigger") }}</Label>

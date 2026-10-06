@@ -6,6 +6,7 @@ import { useI18n } from "vue-i18n";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { History, RefreshCw } from "@lucide/vue";
 import { runDuration, runStatusBadgeVariant } from "@/lib/scheduler/schedulerDraft";
 import type { TaskDefinition, TaskRun, TaskRunStatus } from "@/lib/scheduler/schedulerTypes";
 
@@ -63,12 +64,15 @@ function activeRun(run: TaskRun): boolean {
           <SelectItem v-for="status in statusOptions" :key="status" :value="status">{{ t(`scheduler.runs.status.${status}`) }}</SelectItem>
         </SelectContent>
       </Select>
-      <Button variant="outline" size="sm" class="ml-auto" :disabled="loading" data-scheduler-runs-reload @click="emit('reload')">{{ t("scheduler.refresh") }}</Button>
+      <Button variant="ghost" size="icon" class="ml-auto size-8" :disabled="loading" :title="t('scheduler.refresh')" :aria-label="t('scheduler.refresh')" data-scheduler-runs-reload @click="emit('reload')">
+        <RefreshCw class="size-3.5" :class="loading && 'animate-spin'" />
+      </Button>
     </div>
 
     <div class="overflow-hidden rounded-md border border-border/70">
-      <div v-if="runs.length === 0" class="px-4 py-8 text-center text-sm text-muted-foreground" data-scheduler-runs-empty>
-        {{ taskFilter || statusFilter ? t("scheduler.runs.emptyFiltered") : t("scheduler.runs.empty") }}
+      <div v-if="runs.length === 0" class="flex min-h-44 flex-col items-center justify-center gap-3 px-4 py-8 text-center text-muted-foreground" data-scheduler-runs-empty>
+        <History class="h-8 w-8 opacity-60" />
+        <p class="text-sm">{{ taskFilter || statusFilter ? t("scheduler.runs.emptyFiltered") : t("scheduler.runs.empty") }}</p>
       </div>
       <button v-for="run in runs" :key="run.id" type="button" class="grid w-full gap-2 border-b border-border/70 px-4 py-3 text-left transition-colors last:border-b-0 hover:bg-muted/40" :data-scheduler-run-row="run.id" @click="emit('select', run)">
         <div class="flex min-w-0 flex-wrap items-center gap-2">

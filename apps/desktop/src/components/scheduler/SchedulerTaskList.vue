@@ -8,7 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { CalendarClock, ListMusic, Pencil, Play, Plus, Square, Trash2 } from "@lucide/vue";
+import { CalendarClock, ListMusic, Pencil, Play, Plus, RefreshCw, Search, Square, Trash2 } from "@lucide/vue";
 import { defaultTimeZone, findProvider, taskHealth, triggerSummary, type TaskHealthContext } from "@/lib/scheduler/schedulerProviders";
 import type { TaskDefinition } from "@/lib/scheduler/schedulerTypes";
 
@@ -31,6 +31,7 @@ const emit = defineEmits<{
   cancel: [task: TaskDefinition, runId: string];
   delete: [task: TaskDefinition];
   "view-runs": [task: TaskDefinition];
+  reload: [];
 }>();
 
 const { t, locale } = useI18n();
@@ -91,29 +92,40 @@ function timeZoneSuffix(task: TaskDefinition): string {
 <template>
   <div class="flex flex-col gap-3">
     <div class="flex flex-wrap items-center justify-between gap-3">
-      <Input v-model="search" class="max-w-64" :placeholder="t('scheduler.taskList.columns.name')" data-scheduler-task-search />
-      <Button size="sm" data-scheduler-new-task :disabled="busy" @click="emit('create')">
-        <Plus class="mr-2 h-4 w-4" />
-        {{ t("scheduler.taskList.newTask") }}
-      </Button>
+      <div class="relative">
+        <Search class="pointer-events-none absolute left-2.5 top-2.5 size-3.5 text-muted-foreground" />
+        <Input v-model="search" class="h-8 w-64 pl-8 text-xs" :placeholder="t('scheduler.taskList.columns.name')" data-scheduler-task-search />
+      </div>
+      <div class="flex items-center gap-1.5">
+        <Button variant="ghost" size="icon" class="size-8" :disabled="busy" :title="t('scheduler.refresh')" :aria-label="t('scheduler.refresh')" data-scheduler-refresh @click="emit('reload')">
+          <RefreshCw class="size-3.5" :class="busy && 'animate-spin'" />
+        </Button>
+        <Button size="sm" data-scheduler-new-task :disabled="busy" @click="emit('create')">
+          <Plus class="mr-1.5 size-3.5" />
+          {{ t("scheduler.taskList.newTask") }}
+        </Button>
+      </div>
     </div>
 
     <div class="overflow-hidden rounded-md border border-border/70">
-      <div v-if="filteredTasks.length === 0" class="flex min-h-44 flex-col items-center justify-center gap-2 px-4 py-8 text-center text-muted-foreground">
+      <div v-if="filteredTasks.length === 0" class="flex min-h-44 flex-col items-center justify-center gap-3 px-4 py-8 text-center text-muted-foreground">
         <CalendarClock class="h-8 w-8 opacity-60" />
-        <div class="text-sm font-medium text-foreground">{{ t("scheduler.taskList.empty") }}</div>
-        <p class="text-sm">{{ t("scheduler.taskList.emptyHint") }}</p>
+        <div>
+          <div class="text-sm font-medium text-foreground">{{ t("scheduler.taskList.empty") }}</div>
+          <p class="mt-1 text-sm">{{ t("scheduler.taskList.emptyHint") }}</p>
+        </div>
       </div>
       <div v-for="task in filteredTasks" :key="task.id" class="grid gap-3 border-b border-border/70 px-4 py-3 last:border-b-0 md:grid-cols-[minmax(0,1fr)_auto] md:items-center" :data-scheduler-task-row="task.id">
         <div class="min-w-0">
           <div class="flex min-w-0 flex-wrap items-center gap-2">
             <span class="truncate text-sm font-medium">{{ task.name }}</span>
             <Badge variant="outline" class="font-normal">{{ providerLabel(task) }}</Badge>
-            <Badge :variant="healthVariant(healthOf(task))" class="font-normal" :title="healthHint(task)">{{ t(`scheduler.health.${healthOf(task)}`) }}</Badge>
+            <Badge :variant="healthVariant(healthOf(task))" class="font-normal">{{ t(`scheduler.health.${healthOf(task)}`) }}</Badge>
           </div>
           <div class="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
             <span>{{ triggerSummary(task.trigger) }}</span>
             <span v-if="timeZoneSuffix(task)">{{ timeZoneSuffix(task) }}</span>
+            <span>{{ connectionLabel(task) }}</span>
             <span>{{ t("scheduler.taskList.columns.nextRun") }}: {{ formatDateTime(task.nextRunAt) }}</span>
             <span>{{ t("scheduler.taskList.columns.lastRun") }}: {{ task.lastRunStatus ? t(`scheduler.runs.status.${task.lastRunStatus}`) : t("scheduler.taskList.noRunsYet") }}</span>
           </div>

@@ -66,7 +66,6 @@ function patchTrigger(patch: Partial<TaskTrigger>) {
       <div class="space-y-2 sm:col-span-2">
         <Label>{{ t("scheduler.trigger.timeZone") }}</Label>
         <Input :model-value="modelValue.type === 'once' ? modelValue.timeZone : ''" :disabled="disabled" :placeholder="defaultTimeZone()" data-scheduler-trigger-timezone @update:model-value="(value: unknown) => typeof value === 'string' && patchTrigger({ timeZone: value })" />
-        <p class="text-xs text-muted-foreground">{{ t("scheduler.trigger.timeZoneHint") }}</p>
       </div>
     </template>
 
@@ -74,7 +73,6 @@ function patchTrigger(patch: Partial<TaskTrigger>) {
       <div class="space-y-2">
         <Label>{{ t("scheduler.trigger.seconds") }}</Label>
         <Input type="number" min="1" :model-value="modelValue.type === 'interval' ? modelValue.seconds : 3600" :disabled="disabled" data-scheduler-trigger-interval @update:model-value="(value: unknown) => patchTrigger({ seconds: Math.max(1, Number(value) || 1) })" />
-        <p class="text-xs text-muted-foreground">{{ t("scheduler.trigger.secondsHint") }}</p>
       </div>
     </template>
 
@@ -87,7 +85,6 @@ function patchTrigger(patch: Partial<TaskTrigger>) {
       <div class="space-y-2">
         <Label>{{ t("scheduler.trigger.timeZone") }}</Label>
         <Input :model-value="modelValue.type === 'cron' ? modelValue.timeZone : ''" :disabled="disabled" :placeholder="defaultTimeZone()" data-scheduler-trigger-timezone @update:model-value="(value: unknown) => typeof value === 'string' && patchTrigger({ timeZone: value })" />
-        <p class="text-xs text-muted-foreground">{{ t("scheduler.trigger.timeZoneHint") }}</p>
       </div>
     </template>
   </div>

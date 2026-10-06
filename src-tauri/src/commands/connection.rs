@@ -1163,7 +1163,7 @@ pub async fn load_connections(state: State<'_, Arc<AppState>>) -> Result<Vec<Con
     load_connection_configs(state.inner()).await
 }
 
-async fn load_connection_configs(state: &AppState) -> Result<Vec<ConnectionConfig>, String> {
+pub(crate) async fn load_connection_configs(state: &AppState) -> Result<Vec<ConnectionConfig>, String> {
     let configs: Vec<ConnectionConfig> =
         state.storage.load_connections().await?.into_iter().map(|config| config.canonicalized()).collect();
     let sync = sync_connection_configs(state, &configs).await;

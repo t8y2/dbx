@@ -505,6 +505,13 @@ pub fn run_if_requested() -> bool {
                 dir.join("plugins"),
                 env!("CARGO_PKG_VERSION"),
             ));
+            // The connection-config cache is normally filled by the UI
+            // process's load_connections; the worker must hydrate it itself or
+            // every task connection lookup fails with "config not found".
+            let loaded = crate::commands::connection::load_connection_configs(&state).await;
+            if let Err(error) = loaded {
+                log::warn!("[scheduler-worker] cannot load connection configs: {error}");
+            }
             let store = SchedulerStore::new(&dir);
 
             let registry = Arc::new(TaskExecutorRegistry::new());

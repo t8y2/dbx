@@ -387,6 +387,11 @@ pub fn run_if_requested() -> bool {
                 dir.join("plugins"),
                 env!("CARGO_PKG_VERSION"),
             ));
+            // Same as the scheduler worker: hydrate the connection-config
+            // cache so backup runs can resolve their connections.
+            if let Err(error) = crate::commands::connection::load_connection_configs(&state).await {
+                log::warn!("[backup-worker] cannot load connection configs: {error}");
+            }
             let stop = CancellationToken::new();
             let drain = CancellationToken::new();
             let service = BackupService::new(state.clone(), &dir, None);

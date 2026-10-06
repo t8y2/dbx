@@ -2754,7 +2754,12 @@ function scrollCursorIntoView() {
 }
 
 function beginExecutionViewportTracking() {
-  executionViewportOwnership.beginExecution();
+  // Snapshot visibility while the viewport still has its pre-execution size:
+  // once the results pane opens it shrinks the editor, and a cursor that was
+  // visible before execution must not be scrolled away by the shrink (#10480).
+  const currentView = view.value;
+  const cursorVisible = currentView ? isQueryEditorPositionVisible(currentView.state.selection.main.head, currentView.visibleRanges, currentView.viewport) : false;
+  executionViewportOwnership.beginExecution(cursorVisible);
 }
 
 function recordExecutionViewportInteraction() {

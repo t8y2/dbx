@@ -9,6 +9,10 @@ describe("QueryEditor execution routing", () => {
     expect(queryEditorSource).toContain("createQueryEditorExecutionShortcutBindings(shortcuts.executeSql");
     expect(queryEditorSource).not.toContain("forceCurrent");
   });
+
+  it("snapshots pre-execution cursor visibility when execution viewport tracking starts", () => {
+    expect(queryEditorSource).toContain("beginExecution(cursorVisible)");
+  });
 });
 
 describe("QueryEditor execution viewport ownership", () => {
@@ -16,6 +20,28 @@ describe("QueryEditor execution viewport ownership", () => {
     const ownership = createQueryEditorExecutionViewportOwnership();
 
     ownership.beginExecution();
+
+    expect(ownership.consumeCompletionPreservation()).toBe(false);
+  });
+
+  it("preserves the viewport when the cursor was visible before execution (#10480)", () => {
+    const ownership = createQueryEditorExecutionViewportOwnership();
+
+    // Cmd+Enter path: no gutter request, no user interaction, but the cursor
+    // was comfortably visible in the pre-execution viewport. The results pane
+    // then shrinks the editor — that shrink must not scroll the cursor away.
+    ownership.beginExecution(true);
+
+    expect(ownership.consumeCompletionPreservation()).toBe(true);
+    expect(ownership.consumeCompletionPreservation()).toBe(false);
+  });
+
+  it("still centers the cursor when it was off-screen before execution", () => {
+    const ownership = createQueryEditorExecutionViewportOwnership();
+
+    // #5281 contract: a cursor that was already out of sight before execution
+    // gets centered once the results pane has taken its space.
+    ownership.beginExecution(false);
 
     expect(ownership.consumeCompletionPreservation()).toBe(false);
   });

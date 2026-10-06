@@ -1013,7 +1013,6 @@ export interface EditorSettings {
   tableInfoDrawerPinned: boolean;
   tableInfoDrawerWidth: number;
   goToColumnPanelPinned: boolean;
-  goToColumnPanelWidth: number;
   cellDetailDrawerWidth: number;
   cellDetailPanelLayout: CellDetailPanelLayout;
   cellDetailJsonFormatted: boolean;
@@ -1332,7 +1331,6 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   tableInfoDrawerPinned: false,
   tableInfoDrawerWidth: 320,
   goToColumnPanelPinned: false,
-  goToColumnPanelWidth: 280,
   cellDetailDrawerWidth: 380,
   cellDetailPanelLayout: "bottom",
   cellDetailJsonFormatted: false,
@@ -1959,7 +1957,6 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     tableInfoDrawerPinned: settings.tableInfoDrawerPinned === true,
     tableInfoDrawerWidth: normalizeDrawerWidth(settings.tableInfoDrawerWidth, 240, DEFAULT_EDITOR_SETTINGS.tableInfoDrawerWidth),
     goToColumnPanelPinned: settings.goToColumnPanelPinned === true,
-    goToColumnPanelWidth: normalizeDrawerWidth(settings.goToColumnPanelWidth, 220, DEFAULT_EDITOR_SETTINGS.goToColumnPanelWidth),
     cellDetailDrawerWidth: normalizeDrawerWidth(settings.cellDetailDrawerWidth, 260, DEFAULT_EDITOR_SETTINGS.cellDetailDrawerWidth),
     cellDetailPanelLayout: normalizeCellDetailPanelLayout(settings.cellDetailPanelLayout),
     cellDetailJsonFormatted: typeof settings.cellDetailJsonFormatted === "boolean" ? settings.cellDetailJsonFormatted : DEFAULT_EDITOR_SETTINGS.cellDetailJsonFormatted,
@@ -2831,7 +2828,6 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.tableInfoDrawerPinned !== undefined) editorSettings.value.tableInfoDrawerPinned = partial.tableInfoDrawerPinned === true;
     if (partial.tableInfoDrawerWidth !== undefined) editorSettings.value.tableInfoDrawerWidth = normalizeDrawerWidth(partial.tableInfoDrawerWidth, 240, DEFAULT_EDITOR_SETTINGS.tableInfoDrawerWidth);
     if (partial.goToColumnPanelPinned !== undefined) editorSettings.value.goToColumnPanelPinned = partial.goToColumnPanelPinned === true;
-    if (partial.goToColumnPanelWidth !== undefined) editorSettings.value.goToColumnPanelWidth = normalizeDrawerWidth(partial.goToColumnPanelWidth, 220, DEFAULT_EDITOR_SETTINGS.goToColumnPanelWidth);
     if (partial.cellDetailDrawerWidth !== undefined) editorSettings.value.cellDetailDrawerWidth = normalizeDrawerWidth(partial.cellDetailDrawerWidth, 260, DEFAULT_EDITOR_SETTINGS.cellDetailDrawerWidth);
     if (partial.cellDetailPanelLayout !== undefined) editorSettings.value.cellDetailPanelLayout = normalizeCellDetailPanelLayout(partial.cellDetailPanelLayout);
     if (partial.cellDetailJsonFormatted !== undefined) editorSettings.value.cellDetailJsonFormatted = partial.cellDetailJsonFormatted === true;

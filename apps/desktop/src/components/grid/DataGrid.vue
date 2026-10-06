@@ -2212,7 +2212,7 @@ const goToColumnListRef = ref<HTMLElement>();
 const goToColumnSelectedIndex = ref(0);
 const goToColumnTooltip = computed(() => formatShortcutTooltip(t("grid.goToColumn"), settingsStore.editorSettings.shortcuts.goToColumn));
 const goToColumnPanelPinned = computed(() => settingsStore.editorSettings.goToColumnPanelPinned);
-const goToColumnPanelWidth = ref(settingsStore.editorSettings.goToColumnPanelWidth);
+const GO_TO_COLUMN_PANEL_WIDTH = 280;
 const columnOrderKeys = computed(() => uniqueDataGridColumnOrderKeys(props.result.columns, props.sourceColumns));
 const resolvedColumnLayoutScopeKey = computed(
   () =>
@@ -11323,13 +11323,6 @@ watch([activeTableInfoTab, ddlLoading], ([tab, loading]) => {
 });
 
 watch(
-  () => settingsStore.editorSettings.goToColumnPanelWidth,
-  (width) => {
-    goToColumnPanelWidth.value = width;
-  },
-);
-
-watch(
   () => settingsStore.editorSettings.tableInfoDrawerWidth,
   (width) => {
     if (!isResizingDdl.value) ddlWidth.value = width;
@@ -11375,8 +11368,9 @@ const contentGridStyle = computed(() => {
   // Keep this track explicit. WebKit can resolve a nested min() track sizing
   // function to zero when sibling tracks are currently collapsed, which
   // leaves the panel rendered but compresses its contents to a narrow strip.
-  const columnLookupTrack = goToColumnOpen.value ? `${Math.min(goToColumnPanelWidth.value, 900)}px` : "0px";
-  const tableInfoAvailableWidth = hasRightPanel ? `max(0px, calc(100% - ${rightPanelWidth}px))` : "100%";
+  const columnLookupWidthPx = goToColumnOpen.value ? GO_TO_COLUMN_PANEL_WIDTH : 0;
+  const columnLookupTrack = goToColumnOpen.value ? `${columnLookupWidthPx}px` : "0px";
+  const tableInfoAvailableWidth = `max(0px, calc(100% - ${rightPanelWidth + columnLookupWidthPx}px))`;
   const tableInfoTrack = showTableInfo.value ? `minmax(0, min(${ddlWidth.value}px, ${tableInfoAvailableWidth}))` : "0px";
   const detailTrack = hasRightPanel ? `minmax(0, min(${rightPanelWidth}px, 100%))` : "0px";
 
@@ -12962,7 +12956,6 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
             data-grid-topbar-row="actions"
             :class="splitDataGridToolbar ? 'col-start-2 row-start-1' : 'ml-auto'"
             :compact-action-count="compactDataGridToolbarActionCount"
-            :navigation-visible="false"
             :refresh="refreshToolbarCapability"
             :auto-refresh="autoRefreshToolbarCapability"
             :add-row="addRowToolbarCapability"
@@ -14423,7 +14416,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
             </template>
           </div>
           <!-- Column lookup panel -->
-          <div v-if="goToColumnOpen" data-column-lookup-panel class="column-lookup-panel relative col-start-2 row-start-1 z-30 flex min-w-0 max-w-full flex-col overflow-hidden border-l bg-background shadow-lg" :style="{ width: `${goToColumnPanelWidth}px` }" @keydown="onGoToColumnKeydown">
+          <div v-if="goToColumnOpen" data-column-lookup-panel class="column-lookup-panel relative col-start-2 row-start-1 z-30 flex min-w-0 max-w-full flex-col overflow-hidden border-l bg-background shadow-lg" @keydown="onGoToColumnKeydown">
             <div class="flex items-center gap-2 px-3 py-1.5 border-b shrink-0 bg-muted/20 h-9">
               <Columns3 class="w-3.5 h-3.5 text-muted-foreground" />
               <span class="text-xs font-medium flex-1 truncate">{{ t("grid.goToColumn") }}</span>

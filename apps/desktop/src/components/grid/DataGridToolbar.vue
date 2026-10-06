@@ -30,7 +30,6 @@ import {
 const props = defineProps<{
   compact?: boolean;
   compactActionCount?: number;
-  navigationVisible?: boolean;
   refresh: DataGridToolbarActionCapability;
   autoRefresh?: DataGridToolbarAutoRefreshCapability;
   addRow?: DataGridToolbarAddRowCapability;
@@ -62,7 +61,6 @@ const visibleActionOrder = computed<DataGridToolbarActionKey[]>(() => {
   const visibility: Record<DataGridToolbarActionKey, boolean> = {
     refresh: isDataGridToolbarCapabilityVisible(props.refresh),
     autoRefresh: isDataGridToolbarCapabilityVisible(props.autoRefresh),
-    navigation: props.navigationVisible === true,
     copyData: isDataGridToolbarCapabilityVisible(props.copyData),
     addRow: isDataGridToolbarCapabilityVisible(props.addRow),
     deleteRow: isDataGridToolbarCapabilityVisible(props.deleteRow),
@@ -139,8 +137,6 @@ function actionLabelClass(action: DataGridToolbarActionKey) {
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
-
-    <slot name="navigation" :compact="actionIsCompact('navigation')" />
 
     <div v-if="isDataGridToolbarCapabilityVisible(copyData)" class="flex h-5 shrink-0 items-stretch overflow-hidden rounded-md border border-border">
       <Tooltip>

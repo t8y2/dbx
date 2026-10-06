@@ -4,7 +4,7 @@ const DATA_GRID_COMPACT_TOPBAR_VIEWPORT_RATIO = 0.75;
 const DATA_GRID_TOOLBAR_ACTION_COLLAPSE_STEP = 40;
 export const DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH = DATA_GRID_COMPACT_TOPBAR_MAX_WIDTH;
 
-export const DATA_GRID_TOOLBAR_ACTION_COLLAPSE_ORDER = ["refresh", "autoRefresh", "navigation", "copyData", "addRow", "deleteRow", "exportData", "transpose", "tableInfo", "layerPreview", "preview", "save", "rollback"] as const;
+export const DATA_GRID_TOOLBAR_ACTION_COLLAPSE_ORDER = ["refresh", "autoRefresh", "copyData", "addRow", "deleteRow", "exportData", "transpose", "tableInfo", "layerPreview", "preview", "save", "rollback"] as const;
 
 export type DataGridToolbarActionKey = (typeof DATA_GRID_TOOLBAR_ACTION_COLLAPSE_ORDER)[number];
 

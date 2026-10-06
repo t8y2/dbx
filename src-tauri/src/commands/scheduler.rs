@@ -87,19 +87,22 @@ pub async fn scheduler_save_task(
 ) -> Result<TaskDefinition, String> {
     task.next_run_at = None;
     let svc = service(&state);
-    let saved = if task.id.trim().is_empty() {
+    // A client may generate the id before saving; treat "unknown id at version
+    // 1" as a create instead of rejecting with task_not_found — the
+    // create-when-new contract (the web route already behaves this way).
+    let exists = !task.id.trim().is_empty() && svc.get_task(&task.id).await.is_ok();
+    let saved = if !exists && task.version <= 1 {
         svc.create_task(task).await.map_err(scheduler_error)?
-    } else {
-        if svc.get_task(&task.id).await.map_err(scheduler_error).is_err() {
-            return Err(TaskError::new(
-                TaskErrorKind::NonRetryable,
-                "task_not_found",
-                format!("Task {} not found", task.id),
-            )
-            .to_string());
-        }
+    } else if exists {
         let expected_version = task.version;
         svc.update_task(task, expected_version).await.map_err(scheduler_error)?
+    } else {
+        return Err(TaskError::new(
+            TaskErrorKind::NonRetryable,
+            "task_not_found",
+            format!("Task {} not found", task.id),
+        )
+        .to_string());
     };
     emit_task_changed(&app, &saved.id);
     Ok(saved)

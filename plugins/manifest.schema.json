@@ -351,6 +351,10 @@
           "uniqueItems": true,
           "items": { "$ref": "#/$defs/identifier" }
         },
+        "allow_multiple_connections": {
+          "type": "boolean",
+          "description": "Whether one task may bind several connections at once (e.g. an SSH run-everywhere task). Defaults to false."
+        },
         "capabilities": {
           "type": "array",
           "uniqueItems": true,

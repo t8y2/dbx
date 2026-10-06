@@ -16,12 +16,18 @@ interface ContributionLike {
   id?: unknown;
   label?: unknown;
   connection_providers?: unknown;
+  allow_multiple_connections?: unknown;
   capabilities?: unknown;
   triggers?: unknown;
 }
 
 function isTaskProviderContribution(contribution: ContributionLike): boolean {
   return contribution.type === "task-provider" && typeof contribution.id === "string" && typeof (contribution as { label?: unknown }).label === "string";
+}
+
+/** Manifests keep snake_case on the wire (`allow_multiple_connections`). */
+function allowsMultipleConnections(raw: unknown): boolean {
+  return raw === true;
 }
 
 function normalizeTriggers(raw: unknown): SchedulerTaskTriggerContribution[] {
@@ -92,6 +98,7 @@ export function discoverTaskProviders(plugins: readonly InstalledPlugin[] | unde
         // Contributions keep the manifest's snake_case on the wire, like every
         // other plugin contribution (`database_type`, `filesystem_provider`).
         connectionProviders: Array.isArray(candidate.connection_providers) ? candidate.connection_providers.filter((id): id is string => typeof id === "string") : [],
+        allowMultipleConnections: allowsMultipleConnections(candidate.allow_multiple_connections),
         capabilities: normalizeCapabilities(candidate.capabilities),
         triggers: normalizeTriggers(candidate.triggers),
       });

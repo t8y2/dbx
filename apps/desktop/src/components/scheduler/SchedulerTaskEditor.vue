@@ -5,7 +5,7 @@
 // from per-provider branches.
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { AlertTriangle, Loader2 } from "@lucide/vue";
+import { AlertTriangle, Check, Loader2 } from "@lucide/vue";
 import { uuid } from "@/lib/common/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -86,6 +86,32 @@ function storedOrFullTriggerId(): string | undefined {
 }
 
 const requiresConnection = computed(() => (selectedProvider.value?.connectionProviders.length ?? 0) > 0);
+
+/** Providers declaring `allow_multiple_connections` get a multi-select list. */
+const allowsMultipleConnections = computed(() => Boolean(selectedProvider.value?.allowMultipleConnections));
+
+/** All bound connections: the primary id first, then the additional ids. */
+const boundConnectionIds = computed(() => {
+  const primary = draft.value?.target?.connectionId;
+  const additional = draft.value?.target?.additionalConnectionIds ?? [];
+  return [...(primary ? [primary] : []), ...additional];
+});
+
+function setBoundConnectionIds(ids: string[]) {
+  if (!draft.value) return;
+  const [primary, ...additional] = ids;
+  draft.value.target = {
+    ...draft.value.target,
+    connectionId: primary ?? "",
+    // Never persist the additional list for single-connection providers.
+    additionalConnectionIds: allowsMultipleConnections.value && additional.length > 0 ? additional : [],
+  };
+}
+
+function toggleBoundConnection(id: string) {
+  const current = boundConnectionIds.value;
+  setBoundConnectionIds(current.includes(id) ? current.filter((bound) => bound !== id) : [...current, id]);
+}
 
 const risk = computed(() => selectedTrigger.value?.risk ?? "low");
 
@@ -210,7 +236,11 @@ async function save() {
     draft.value.config = configFromFormValues(configFields.value, formValues.value, draft.value.config);
     draft.value.config = withStoredTriggerId(draft.value.config, selectedProvider.value, selectedTrigger.value);
     draft.value.updatedAt = new Date().toISOString();
-    const saved = isCreate.value ? await schedulerApi.createTask(draft.value) : await schedulerApi.saveTask(draft.value);
+    // Creation must not carry the draft's client-generated id: the save
+    // command treats a non-empty id as an update, and a fresh id is not in
+    // the store yet — that failed every first save with "task_not_found".
+    // Let the backend allocate the id (and version) on create.
+    const saved = isCreate.value ? await schedulerApi.createTask({ ...draft.value, id: "" }) : await schedulerApi.saveTask(draft.value);
     toast(t("scheduler.editor.saved"), 2500);
     emit("saved", saved);
     emit("update:open", false);
@@ -278,8 +308,12 @@ function close() {
           </div>
         </div>
         <div class="space-y-2" data-scheduler-editor-connection>
-          <Label>{{ t("scheduler.editor.connection") }}</Label>
+          <div class="flex items-center justify-between">
+            <Label>{{ allowsMultipleConnections ? t("scheduler.editor.connections") : t("scheduler.editor.connection") }}</Label>
+            <span v-if="allowsMultipleConnections" class="text-[11px] text-muted-foreground">{{ t("scheduler.editor.connectionsHint") }}</span>
+          </div>
           <ConnectionTreeSelect
+            v-if="!allowsMultipleConnections"
             :model-value="draft.target?.connectionId || ''"
             :connections="providerConnections"
             :layout="connectionStore.sidebarLayout"
@@ -288,7 +322,22 @@ function close() {
             :empty-text="t('grid.noSearchResults')"
             @update:model-value="(value: string) => (draft!.target = { ...draft!.target, connectionId: value })"
           />
-          <p v-if="requiresConnection && !draft.target?.connectionId" class="text-xs text-destructive">{{ t("scheduler.editor.connectionRequired") }}</p>
+          <div v-else class="flex max-h-40 flex-wrap gap-1.5 overflow-y-auto rounded-md border border-border/70 p-2" data-scheduler-editor-connection-multi>
+            <button
+              v-for="connection in providerConnections"
+              :key="connection.id"
+              type="button"
+              class="flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition-colors"
+              :class="boundConnectionIds.includes(connection.id) ? 'border-primary bg-primary/10 text-foreground' : 'border-border/70 text-muted-foreground hover:bg-muted/50'"
+              :data-scheduler-editor-connection-option="connection.id"
+              @click="toggleBoundConnection(connection.id)"
+            >
+              <Check v-if="boundConnectionIds.includes(connection.id)" class="h-3 w-3 text-primary" />
+              {{ connection.name }}
+            </button>
+            <p v-if="providerConnections.length === 0" class="px-1 py-1 text-xs text-muted-foreground">{{ t("scheduler.editor.noConnectionsForProvider") }}</p>
+          </div>
+          <p v-if="requiresConnection && boundConnectionIds.length === 0" class="text-xs text-destructive">{{ t("scheduler.editor.connectionRequired") }}</p>
         </div>
         <div v-if="risk === 'medium'" class="flex items-start gap-2 rounded-md bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
           <AlertTriangle class="mt-0.5 h-3.5 w-3.5 shrink-0" />

@@ -366,6 +366,7 @@ pub(crate) fn backup_schedule_to_task(schedule: &BackupSchedule) -> Result<TaskD
         provider_id: DATABASE_BACKUP_PROVIDER_ID.to_owned(),
         target: TaskTarget {
             connection_id: Some(schedule.config.connection_id.clone()),
+            additional_connection_ids: Vec::new(),
             plugin_id: None,
             resource_id: None,
         },

@@ -15,6 +15,8 @@ export type TaskProviderType = "builtin" | "plugin";
 /** ADR §2.3. */
 export interface TaskTarget {
   connectionId?: string | null;
+  /** Extra connections for providers declaring `allowMultipleConnections`. */
+  additionalConnectionIds?: string[];
   pluginId?: string | null;
   resourceId?: string | null;
 }
@@ -225,6 +227,8 @@ export interface SchedulerTaskProviderDescriptor {
   /** Host plugin id that declares the provider (manifest id). */
   pluginId: string;
   connectionProviders: string[];
+  /** One task may bind several connections (e.g. an SSH run-everywhere task). */
+  allowMultipleConnections?: boolean;
   capabilities: PluginTaskCapability[];
   triggers: SchedulerTaskTriggerContribution[];
   /** Host builtin (dbx.database-backup); not offered in the create dialog. */

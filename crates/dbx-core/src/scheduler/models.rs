@@ -27,6 +27,11 @@ pub enum TaskProviderType {
 pub struct TaskTarget {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_id: Option<String>,
+    /// Extra connections for providers declaring `allow_multiple_connections`.
+    /// The first connection stays in `connection_id` so single-connection
+    /// consumers never need to know about this field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_connection_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

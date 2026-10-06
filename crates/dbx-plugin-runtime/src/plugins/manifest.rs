@@ -1003,6 +1003,10 @@ pub struct PluginTaskProviderContribution {
     /// stored with the task config.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connection_providers: Vec<String>,
+    /// Whether one task may bind several connections at once (e.g. an SSH
+    /// "run everywhere" task). Defaults to `false`: one task, one connection.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_multiple_connections: bool,
     /// What the provider supports. `task/execute` requires `run`,
     /// `task/start` requires `resident`, `task/stop` requires `cancel` (or
     /// `resident`), and `task/log` / `task/progress` / `task/artifact` events

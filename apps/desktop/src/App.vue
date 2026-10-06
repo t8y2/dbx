@@ -4742,7 +4742,7 @@ onUnmounted(() => {
                 </DialogContent>
               </Dialog>
               <div
-                v-show="!driverStoreActive && !pluginCenterActive && !settingsStore.settingsPageActive"
+                v-show="!driverStoreActive && !pluginCenterActive && !schedulerActive && !settingsStore.settingsPageActive"
                 class="flex min-h-0 min-w-0 flex-1"
                 :class="activeTab?.mode === 'plugin-workbench' && isVerticalTabPlacement ? (settingsStore.editorSettings.tabPlacement === 'right' ? 'flex-row-reverse' : 'flex-row') : 'flex-col'"
               >

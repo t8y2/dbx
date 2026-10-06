@@ -84,42 +84,42 @@ export function schedulerErrorCode(error: unknown): SchedulerErrorCode | undefin
 // ---------------------------------------------------------------------------
 
 export function listTasks(): Promise<TaskDefinition[]> {
-  return schedulerRequest("schedulerListTasks", {}, () => web("GET", "/api/scheduler/tasks"));
+  return schedulerRequest("scheduler_list_tasks", {}, () => web("GET", "/api/scheduler/tasks"));
 }
 
 export function getTask(id: string): Promise<TaskDefinition> {
-  return schedulerRequest("schedulerGetTask", { id }, () => web("GET", `/api/scheduler/tasks/${encodeURIComponent(id)}`));
+  return schedulerRequest("scheduler_get_task", { id }, () => web("GET", `/api/scheduler/tasks/${encodeURIComponent(id)}`));
 }
 
 /** Save is a CAS on `task.version`; a stale version rejects with `version_conflict`. */
 export function saveTask(task: TaskDefinition): Promise<TaskDefinition> {
-  return schedulerRequest("schedulerSaveTask", { task }, () => web("PUT", `/api/scheduler/tasks/${encodeURIComponent(task.id)}`, task));
+  return schedulerRequest("scheduler_save_task", { task }, () => web("PUT", `/api/scheduler/tasks/${encodeURIComponent(task.id)}`, task));
 }
 
 /** Create variant: both go through the frozen `schedulerSaveTask` command on desktop. */
 export function createTask(task: Omit<TaskDefinition, "id" | "version"> & { id?: string; version?: number }): Promise<TaskDefinition> {
   const payload = { ...task, version: task.version ?? 1, configVersion: task.configVersion ?? 1 } as TaskDefinition;
-  return schedulerRequest("schedulerSaveTask", { task: payload }, () => web("POST", "/api/scheduler/tasks", payload));
+  return schedulerRequest("scheduler_save_task", { task: payload }, () => web("POST", "/api/scheduler/tasks", payload));
 }
 
 export function deleteTask(id: string): Promise<void> {
-  return schedulerRequest("schedulerDeleteTask", { id }, () => web("DELETE", `/api/scheduler/tasks/${encodeURIComponent(id)}`)).then(() => undefined);
+  return schedulerRequest("scheduler_delete_task", { id }, () => web("DELETE", `/api/scheduler/tasks/${encodeURIComponent(id)}`)).then(() => undefined);
 }
 
 export function runTask(id: string): Promise<TaskRun> {
-  return schedulerRequest("schedulerRunTask", { id }, () => web("POST", `/api/scheduler/tasks/${encodeURIComponent(id)}/run`, {}));
+  return schedulerRequest("scheduler_run_task", { id }, () => web("POST", `/api/scheduler/tasks/${encodeURIComponent(id)}/run`, {}));
 }
 
 export function cancelRun(taskId: string, runId: string): Promise<void> {
-  return schedulerRequest("schedulerCancelRun", { taskId, runId }, () => web("POST", `/api/scheduler/tasks/${encodeURIComponent(taskId)}/cancel`, { runId })).then(() => undefined);
+  return schedulerRequest("scheduler_cancel_run", { taskId, runId }, () => web("POST", `/api/scheduler/tasks/${encodeURIComponent(taskId)}/cancel`, { runId })).then(() => undefined);
 }
 
 export function enableTask(id: string): Promise<TaskDefinition | void> {
-  return schedulerRequest("schedulerEnableTask", { id }, () => web("POST", `/api/scheduler/tasks/${encodeURIComponent(id)}/enable`, {}));
+  return schedulerRequest("scheduler_enable_task", { id }, () => web("POST", `/api/scheduler/tasks/${encodeURIComponent(id)}/enable`, {}));
 }
 
 export function disableTask(id: string): Promise<TaskDefinition | void> {
-  return schedulerRequest("schedulerDisableTask", { id }, () => web("POST", `/api/scheduler/tasks/${encodeURIComponent(id)}/disable`, {}));
+  return schedulerRequest("scheduler_disable_task", { id }, () => web("POST", `/api/scheduler/tasks/${encodeURIComponent(id)}/disable`, {}));
 }
 
 // ---------------------------------------------------------------------------
@@ -142,11 +142,11 @@ function runFilterQuery(filter: SchedulerRunFilter = {}): string {
 }
 
 export function listRuns(filter: SchedulerRunFilter = {}): Promise<TaskRun[]> {
-  return schedulerRequest("schedulerListRuns", { taskId: filter.taskId, status: filter.status, limit: filter.limit }, () => web("GET", `/api/scheduler/runs${runFilterQuery(filter)}`));
+  return schedulerRequest("scheduler_list_runs", { taskId: filter.taskId, status: filter.status, limit: filter.limit }, () => web("GET", `/api/scheduler/runs${runFilterQuery(filter)}`));
 }
 
 export function getRun(runId: string): Promise<TaskRun> {
-  return schedulerRequest("schedulerGetRun", { runId }, () => web("GET", `/api/scheduler/runs/${encodeURIComponent(runId)}`));
+  return schedulerRequest("scheduler_get_run", { runId }, () => web("GET", `/api/scheduler/runs/${encodeURIComponent(runId)}`));
 }
 
 export interface SchedulerLogQuery {
@@ -168,11 +168,11 @@ export function getRunLogs(runId: string, query: SchedulerLogQuery = {}): Promis
   if (query.limit !== undefined) params.set("limit", String(query.limit));
   if (query.level) params.set("level", query.level);
   if (query.stream) params.set("stream", query.stream);
-  return schedulerRequest("schedulerGetRunLogs", { runId, afterSeq: query.afterSeq ?? 0, limit: query.limit, level: query.level, stream: query.stream }, () => web("GET", `/api/scheduler/runs/${encodeURIComponent(runId)}/logs${logQuery(params)}`));
+  return schedulerRequest("scheduler_get_run_logs", { runId, afterSeq: query.afterSeq ?? 0, limit: query.limit, level: query.level, stream: query.stream }, () => web("GET", `/api/scheduler/runs/${encodeURIComponent(runId)}/logs${logQuery(params)}`));
 }
 
 export function listArtifacts(runId: string): Promise<TaskArtifact[]> {
-  return schedulerRequest("schedulerListArtifacts", { runId }, () => web("GET", `/api/scheduler/runs/${encodeURIComponent(runId)}/artifacts`));
+  return schedulerRequest("scheduler_list_artifacts", { runId }, () => web("GET", `/api/scheduler/runs/${encodeURIComponent(runId)}/artifacts`));
 }
 
 // ---------------------------------------------------------------------------
@@ -188,13 +188,13 @@ export function listArtifacts(runId: string): Promise<TaskArtifact[]> {
 export async function listResidentSessions(): Promise<ResidentSession[]> {
   if (!isTauriRuntime(globalThis)) return (await web("GET", "/api/scheduler/resident")) as ResidentSession[];
   try {
-    return await tauriScheduler<ResidentSession[]>("schedulerListResident", {});
+    return await tauriScheduler<ResidentSession[]>("scheduler_list_resident_sessions", {});
   } catch (listError) {
     if (schedulerErrorCode(listError) === undefined) {
       // Unknown-command rejections carry no scheduler machine code — retry
       // through the action command before giving up.
       try {
-        return await tauriScheduler<ResidentSession[]>("schedulerResidentAction", { action: "list" });
+        return await tauriScheduler<ResidentSession[]>("scheduler_resident_action", { action: "list" });
       } catch {
         throw listError;
       }
@@ -206,5 +206,5 @@ export async function listResidentSessions(): Promise<ResidentSession[]> {
 export type SchedulerResidentAction = "start" | "stop" | "restart";
 
 export function residentAction(sessionId: string, action: SchedulerResidentAction): Promise<ResidentSession | void> {
-  return schedulerRequest("schedulerResidentAction", { sessionId, action }, () => web("POST", `/api/scheduler/resident/${encodeURIComponent(sessionId)}/${action}`, {}));
+  return schedulerRequest("scheduler_resident_action", { sessionId, action }, () => web("POST", `/api/scheduler/resident/${encodeURIComponent(sessionId)}/${action}`, {}));
 }

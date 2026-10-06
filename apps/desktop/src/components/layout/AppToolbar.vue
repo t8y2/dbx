@@ -2,7 +2,34 @@
 import { computed, ref, onMounted, onBeforeUnmount, h, nextTick, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronsRight, DatabaseZap, FilePlus2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, LogOut, CloudDownload, Package, PlugZap, FileDown, FolderTree, Pin, PinOff, CalendarClock, Waypoints, RefreshCw } from "@lucide/vue";
+import {
+  ChevronsRight,
+  DatabaseZap,
+  FilePlus2,
+  Moon,
+  Sun,
+  SunMoon,
+  History,
+  Bot,
+  ArrowLeftRight,
+  FileCode,
+  BookMarked,
+  GitCompareArrows,
+  TableProperties,
+  Settings,
+  LogOut,
+  CloudDownload,
+  Package,
+  PlugZap,
+  ListChecks,
+  FileDown,
+  FolderTree,
+  Pin,
+  PinOff,
+  CalendarClock,
+  Waypoints,
+  RefreshCw,
+} from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import LightDropdown, { type LightDropdownItem } from "@/components/ui/LightDropdown.vue";
@@ -42,6 +69,7 @@ const props = defineProps<{
   showSqlFilePanel: boolean;
   showDriverStore: boolean;
   showPluginCenter: boolean;
+  showSchedulerPage: boolean;
   showSettingsPage: boolean;
   checkingUpdates: boolean;
   updateVersion?: string;
@@ -72,6 +100,7 @@ const emit = defineEmits<{
   "open-settings": [];
   "open-driver-store": [];
   "open-plugin-center": [];
+  "open-scheduler-page": [];
   "check-updates": [];
   "open-transfer": [];
   "open-sql-file": [];
@@ -482,6 +511,9 @@ function buildToolbarMenuItems(includeVisiblePrimaryItems: boolean): ToolbarMenu
   if (includeVisiblePrimaryItems || !toolbarItems.value.pluginCenter) {
     items.push({ value: "plugin-center", label: t("toolbar.pluginCenter"), icon: PlugZap, action: () => emit("open-plugin-center"), disabled: false });
   }
+  if (includeVisiblePrimaryItems || !toolbarItems.value.scheduler) {
+    items.push({ value: "scheduler", label: t("scheduler.title"), icon: ListChecks, action: () => emit("open-scheduler-page"), disabled: false });
+  }
   if (toolbarItems.value.sqlFile) {
     items.push({
       value: "sql-file",
@@ -627,6 +659,11 @@ const toolbarStyle = computed(() => {
         </Button>
         <PluginShortcutToolbar v-if="showPluginCenterShortcuts" dropdown-only :menu-anchor="pluginCenterGroup" @layout-change="scheduleToolbarLayout" />
       </div>
+
+      <Button v-if="toolbarItems.scheduler" variant="ghost" size="sm" :class="[toolbarTextButtonClass, { 'bg-accent': showSchedulerPage }]" @click="emit('open-scheduler-page')">
+        <ListChecks class="h-3.5 w-3.5" />
+        <span :class="toolbarTextLabelClass">{{ t("scheduler.title") }}</span>
+      </Button>
 
       <LightDropdown
         v-if="showMoreDropdown"

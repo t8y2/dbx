@@ -59,6 +59,7 @@ import {
   RotateCcw,
   RotateCw,
   Search,
+  ListChecks,
   Server,
   Settings,
   Ungroup,
@@ -108,7 +109,7 @@ const props = defineProps<{
   /** A detached tab is being dragged over this bar — highlight it as the drop target. */
   detachedDropTarget?: boolean;
   /** App-level special pages appended after the tabs. */
-  specialPageTabs?: { settingsOpen: boolean; settingsActive: boolean; driverStoreOpen: boolean; driverStoreActive: boolean; pluginCenterOpen: boolean; pluginCenterActive: boolean; driverUpdateCount: number };
+  specialPageTabs?: { settingsOpen: boolean; settingsActive: boolean; driverStoreOpen: boolean; driverStoreActive: boolean; pluginCenterOpen: boolean; pluginCenterActive: boolean; schedulerOpen: boolean; schedulerActive: boolean; driverUpdateCount: number };
 }>();
 
 const emit = defineEmits<{
@@ -124,6 +125,8 @@ const emit = defineEmits<{
   "close-driver-store": [];
   "activate-plugin-center": [];
   "close-plugin-center": [];
+  "activate-scheduler": [];
+  "close-scheduler": [];
 }>();
 
 const { t } = useI18n();
@@ -150,7 +153,7 @@ const isClassicLayout = computed(() => settingsStore.editorSettings.appLayout ==
 // Special pages append to the focused group's strip only: one instance at a
 // time, in the pane the user is working in (v0.6.2 kept them in the single strip).
 const showSpecialPageTabs = computed(() => {
-  if (!props.specialPageTabs || !(props.specialPageTabs.settingsOpen || props.specialPageTabs.driverStoreOpen || props.specialPageTabs.pluginCenterOpen)) return false;
+  if (!props.specialPageTabs || !(props.specialPageTabs.settingsOpen || props.specialPageTabs.driverStoreOpen || props.specialPageTabs.pluginCenterOpen || props.specialPageTabs.schedulerOpen)) return false;
   // With no regular query tabs there is no focus event to establish the
   // focused group. Render the special-page tab in the sole (main) group so
   // opening Plugin Center or Driver Manager by itself still creates a tab.
@@ -158,7 +161,7 @@ const showSpecialPageTabs = computed(() => {
   const isEmptyWorkspaceMainGroup = queryStore.tabs.length === 0 && props.groupId === queryStore.groups[0]?.id;
   return isFocusedGroup || isEmptyWorkspaceMainGroup;
 });
-const specialPageActive = computed(() => !!(props.specialPageTabs?.settingsActive || props.specialPageTabs?.driverStoreActive || props.specialPageTabs?.pluginCenterActive));
+const specialPageActive = computed(() => !!(props.specialPageTabs?.settingsActive || props.specialPageTabs?.driverStoreActive || props.specialPageTabs?.pluginCenterActive || props.specialPageTabs?.schedulerActive));
 
 function isTabActive(tab: QueryTab): boolean {
   return !specialPageActive.value && tab.id === props.activeTabId;
@@ -222,14 +225,21 @@ function toggleCompactTabTitle() {
   compactTabTitle.value = !compactTabTitle.value;
 }
 
-function getSpecialPageTabMenuItems(surface: "settings" | "driverStore" | "pluginCenter"): ContextMenuItem[] {
-  const closeCurrent = surface === "settings" ? () => emit("close-settings") : surface === "driverStore" ? () => emit("close-driver-store") : () => emit("close-plugin-center");
+function getSpecialPageTabMenuItems(surface: "settings" | "driverStore" | "pluginCenter" | "scheduler"): ContextMenuItem[] {
+  const closeCurrent = surface === "settings" ? () => emit("close-settings") : surface === "driverStore" ? () => emit("close-driver-store") : surface === "scheduler" ? () => emit("close-scheduler") : () => emit("close-plugin-center");
   const otherOpen =
-    surface === "settings" ? props.specialPageTabs?.driverStoreOpen || props.specialPageTabs?.pluginCenterOpen : surface === "driverStore" ? props.specialPageTabs?.settingsOpen || props.specialPageTabs?.pluginCenterOpen : props.specialPageTabs?.settingsOpen || props.specialPageTabs?.driverStoreOpen;
+    surface === "settings"
+      ? props.specialPageTabs?.driverStoreOpen || props.specialPageTabs?.pluginCenterOpen || props.specialPageTabs?.schedulerOpen
+      : surface === "driverStore"
+        ? props.specialPageTabs?.settingsOpen || props.specialPageTabs?.pluginCenterOpen || props.specialPageTabs?.schedulerOpen
+        : surface === "scheduler"
+          ? props.specialPageTabs?.settingsOpen || props.specialPageTabs?.driverStoreOpen || props.specialPageTabs?.pluginCenterOpen
+          : props.specialPageTabs?.settingsOpen || props.specialPageTabs?.driverStoreOpen || props.specialPageTabs?.schedulerOpen;
   const closeOthers = () => {
     if (surface !== "settings") emit("close-settings");
     if (surface !== "driverStore") emit("close-driver-store");
     if (surface !== "pluginCenter") emit("close-plugin-center");
+    if (surface !== "scheduler") emit("close-scheduler");
   };
   return [
     { label: compactTabTitle.value ? t("contextMenu.fullTabTitle") : t("contextMenu.compactTabTitle"), action: toggleCompactTabTitle, icon: compactTabTitle.value ? Maximize2 : Minimize2 },
@@ -1585,6 +1595,7 @@ watch(
     props.tabs.map((tab) => `${tab.id}:${tab.pinned ? "1" : "0"}:${tab.title}:${tab.mode}`).join("|"),
     props.specialPageTabs?.settingsOpen,
     props.specialPageTabs?.driverStoreOpen,
+    props.specialPageTabs?.schedulerOpen,
     settingsStore.editorSettings.tabLayout,
     settingsStore.editorSettings.tabGroupMode,
     settingsStore.editorSettings.tabMaxWidth,
@@ -1620,7 +1631,7 @@ watch(
   { flush: "post" },
 );
 
-watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?.driverStoreActive, () => props.specialPageTabs?.pluginCenterActive, () => settingsStore.editorSettings.tabPlacement, () => props.tabBarCollapsed], () => {
+watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?.driverStoreActive, () => props.specialPageTabs?.pluginCenterActive, () => props.specialPageTabs?.schedulerActive, () => settingsStore.editorSettings.tabPlacement, () => props.tabBarCollapsed], () => {
   nextTick(() => {
     updateScrollButtons();
     if (showSpecialPageTabs.value && specialPageActive.value) {
@@ -1891,6 +1902,36 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                         </div>
                       </TooltipTrigger>
                       <TooltipContent :side="tabTooltipSide">{{ t("toolbar.pluginCenter") }}</TooltipContent>
+                    </Tooltip>
+                  </CustomContextMenu>
+                  <CustomContextMenu v-if="specialPageTabs?.schedulerOpen" :items="getSpecialPageTabMenuItems('scheduler')" v-slot="{ onContextMenu }">
+                    <Tooltip :open="openTabTooltipId === 'special:scheduler'" @update:open="updateTabTooltipOpen('special:scheduler', $event)">
+                      <TooltipTrigger as-child>
+                        <div
+                          data-scheduler-page-tab
+                          class="app-tab-pill group flex shrink-0 cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap select-none"
+                          :class="specialPageTabClass(!!specialPageTabs?.schedulerActive)"
+                          :style="specialPageTabStyle(!!specialPageTabs?.schedulerActive)"
+                          :data-active-tab="specialPageTabs?.schedulerActive"
+                          :aria-label="t('scheduler.title')"
+                          :aria-pressed="!!specialPageTabs?.schedulerActive"
+                          role="button"
+                          tabindex="0"
+                          @mouseleave="closeTabTooltip('special:scheduler')"
+                          @click="emit('activate-scheduler')"
+                          @keydown.enter.self.prevent="emit('activate-scheduler')"
+                          @keydown.space.self.prevent="emit('activate-scheduler')"
+                          @contextmenu="onContextMenu"
+                          @mousedown.middle.prevent="emit('close-scheduler')"
+                        >
+                          <ListChecks class="h-3.5 w-3.5 shrink-0 text-violet-600 dark:text-violet-400" />
+                          <span v-if="!isTabBarCollapsed" class="min-w-0 flex-1 truncate">{{ t("scheduler.title") }}</span>
+                          <button v-if="!isTabBarCollapsed" class="shrink-0 rounded p-0.5 hover:bg-muted-foreground/20" :aria-label="t('common.close')" :title="t('common.close')" @click.stop="emit('close-scheduler')">
+                            <X class="h-3 w-3" />
+                          </button>
+                        </div>
+                      </TooltipTrigger>
+                      <TooltipContent :side="tabTooltipSide">{{ t("scheduler.title") }}</TooltipContent>
                     </Tooltip>
                   </CustomContextMenu>
                   <CustomContextMenu v-if="specialPageTabs?.settingsOpen" :items="getSpecialPageTabMenuItems('settings')" v-slot="{ onContextMenu }">

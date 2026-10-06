@@ -1,4 +1,7 @@
 // @vitest-environment happy-dom
+// The scheduler task center's primary entry lives on the app toolbar (plan §0
+// "独立一级入口「计划任务」"). These specs pin the button's visibility switch and
+// its emit so the entry cannot silently regress the way it did before.
 import { createApp, nextTick, type Component } from "vue";
 import { createPinia } from "pinia";
 import { createI18n } from "vue-i18n";
@@ -50,6 +53,7 @@ vi.mock("@/components/layout/ToolbarUpdateIcon.vue", () => ({
 }));
 
 import AppToolbar from "../AppToolbar.vue";
+import { useSettingsStore } from "@/stores/settingsStore";
 
 const defaultToolbarProps = {
   isDark: false,
@@ -80,14 +84,21 @@ const defaultToolbarProps = {
 };
 
 let pinia: ReturnType<typeof createPinia>;
+const mountedHosts: Array<{ app: ReturnType<typeof createApp>; host: HTMLElement }> = [];
 
-function mount(props: Record<string, unknown>, onLogout?: () => void) {
+// AppToolbar reads toolbar visibility from the settings store, not from props.
+function setToolbarItems(items: Record<string, boolean>) {
+  const settingsStore = useSettingsStore(pinia);
+  settingsStore.editorSettings.toolbarItems = { ...defaultSettingsToolbarItems(), ...items } as typeof settingsStore.editorSettings.toolbarItems;
+}
+
+function mount(props: Record<string, unknown>, onOpenSchedulerPage?: () => void) {
   const host = document.createElement("div");
   document.body.appendChild(host);
-  const app = createApp(AppToolbar, {
+  const app = createApp(AppToolbar as Component, {
     ...defaultToolbarProps,
     ...props,
-    onLogout,
+    onOpenSchedulerPage,
   });
   app.use(pinia);
   app.use(
@@ -98,58 +109,89 @@ function mount(props: Record<string, unknown>, onLogout?: () => void) {
       fallbackWarn: false,
       messages: {
         en: {
-          auth: { logout: "Log out" },
-          settings: { title: "Settings" },
-          toolbar: { theme: "Theme" },
-          updates: { check: "Check for updates" },
+          toolbar: { pluginCenter: "Plugin Center" },
+          scheduler: { title: "Scheduled Tasks" },
+          common: { more: "More" },
+          transfer: { dataTransfer: "Data Transfer" },
+          sqlFile: { title: "SQL File" },
+          diff: { title: "Schema Diff" },
+          dataCompare: { title: "Data Compare" },
+          databaseBackup: { title: "Database Backups" },
+          settings: { openMcpSettings: "MCP Settings" },
         },
       },
     }),
   );
   app.mount(host);
-  return {
-    host,
-    unmount: () => {
-      app.unmount();
-      host.remove();
-    },
-  };
+  mountedHosts.push({ app, host });
+  return host;
 }
 
-describe("AppToolbar web logout", () => {
-  beforeEach(() => {
-    pinia = createPinia();
+beforeEach(() => {
+  pinia = createPinia();
+  vi.spyOn(window.localStorage.__proto__, "getItem").mockReturnValue(null);
+});
+
+afterEach(() => {
+  for (const { app, host } of mountedHosts.splice(0)) {
+    app.unmount();
+    host.remove();
+  }
+  vi.restoreAllMocks();
+});
+
+function schedulerButton(host: HTMLElement): HTMLButtonElement | null {
+  return [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("Scheduled Tasks")) ?? null;
+}
+
+describe("AppToolbar scheduler entry", () => {
+  it("renders the scheduler toolbar button by default and emits open-scheduler-page on click", async () => {
+    setToolbarItems({ scheduler: true });
+    const onOpenSchedulerPage = vi.fn();
+    const host = mount({}, onOpenSchedulerPage);
+    await nextTick();
+
+    const button = schedulerButton(host);
+    expect(button).not.toBeNull();
+    button!.click();
+    expect(onOpenSchedulerPage).toHaveBeenCalledExactlyOnceWith();
   });
 
-  afterEach(() => {
-    document.body.innerHTML = "";
+  it("hides the scheduler button when toolbarItems.scheduler is off", async () => {
+    setToolbarItems({ scheduler: false });
+    const host = mount({});
+    await nextTick();
+
+    expect(schedulerButton(host)).toBeNull();
   });
 
-  it("renders logout button when showLogout is true and emits logout on click", async () => {
-    let logoutEmitted = false;
-    const { host, unmount } = mount({ showLogout: true }, () => {
-      logoutEmitted = true;
-    });
-
+  it("marks the button active while the scheduler page is the active surface", async () => {
+    setToolbarItems({ scheduler: true });
+    const host = mount({ showSchedulerPage: true });
     await nextTick();
-    const logoutBtn = host.querySelector('button[aria-label="Log out"]');
-    expect(logoutBtn).not.toBeNull();
 
-    logoutBtn?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    expect(logoutEmitted).toBe(true);
-
-    unmount();
-  });
-
-  it("does not render logout button when showLogout is false or undefined", async () => {
-    const { host, unmount } = mount({ showLogout: false });
-    await nextTick();
-    expect(host.querySelector('button[aria-label="Log out"]')).toBeNull();
-    unmount();
-
-    const { host: host2, unmount: unmount2 } = mount({});
-    await nextTick();
-    expect(host2.querySelector('button[aria-label="Log out"]')).toBeNull();
-    unmount2();
+    expect(schedulerButton(host)!.className).toContain("bg-accent");
   });
 });
+
+function defaultSettingsToolbarItems() {
+  return {
+    immediateSync: false,
+    dataTransfer: true,
+    driverManager: true,
+    pluginCenter: true,
+    scheduler: true,
+    sqlFile: true,
+    schemaDiff: true,
+    dataCompare: true,
+    checkUpdates: true,
+    sqlLibrary: true,
+    sqlFileTree: true,
+    history: true,
+    ai: true,
+    theme: true,
+    github: true,
+    alwaysOnTop: false,
+    exclusiveRightSidebarPanels: true,
+  };
+}

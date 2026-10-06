@@ -237,6 +237,23 @@ test("recognises toArray and pretty in find chains and keeps count restricted", 
   assert.deepEqual(labels("db.characters.find({}).sort({ name: 1 }).toArray()."), expectedChainMethods);
 });
 
+test("matches cursor chains across nested parentheses in arguments", () => {
+  const expectedChainMethods = ["limit", "sort", "skip", "explain", "collation", "toArray", "pretty"];
+  assert.deepEqual(labels("db.characters.find({}).sort({ x: Math.max(1, 2) })."), expectedChainMethods);
+  assert.deepEqual(labels("db.characters.find({ ratio: Math.min(a, b) }).limit(Math.max(1, 5))."), expectedChainMethods);
+});
+
+test("keeps cursor method completion anchored to a dot in the chain", () => {
+  // A completed call without a trailing dot is not a method-dot position.
+  assert.equal(labels("db.characters.find()").includes("limit"), false);
+  assert.equal(labels("db.characters.find({});").includes("limit"), false);
+  assert.equal(labels("db.characters.find() show col").includes("limit"), false);
+});
+
+test("completes field refs inside compound $group _id arrays", () => {
+  assert.ok(labels('db.users.aggregate([{ $group: { _id: [ "$', { fields }).includes("$name"));
+});
+
 test("stops offering root snippets after terminal cursor methods count and explain", () => {
   // Nothing can follow count() or explain(); these positions must yield mode "none" rather than root db.* snippets.
   assert.equal(getMongoCompletionContext("db.users.find({}).count().", "db.users.find({}).count().".length).mode, "none");
@@ -2510,18 +2527,12 @@ test("completes $switch branches array elements and fields", () => {
   assert.ok(branchAfterCase.includes("then"));
 
   // Context mode verification
-  const branchCtx = getMongoCompletionContext(
-    "db.users.aggregate([{ $project: { d: { $switch: { branches: [ { ",
-    "db.users.aggregate([{ $project: { d: { $switch: { branches: [ { ".length
-  );
+  const branchCtx = getMongoCompletionContext("db.users.aggregate([{ $project: { d: { $switch: { branches: [ { ", "db.users.aggregate([{ $project: { d: { $switch: { branches: [ { ".length);
   assert.equal(branchCtx.mode, "operatorField");
   assert.equal(branchCtx.operator, "switchBranch");
 
   // In value position of case:, fieldRef mode is used
-  const caseValCtx = getMongoCompletionContext(
-    "db.users.aggregate([{ $project: { d: { $switch: { branches: [ { case: ",
-    "db.users.aggregate([{ $project: { d: { $switch: { branches: [ { case: ".length
-  );
+  const caseValCtx = getMongoCompletionContext("db.users.aggregate([{ $project: { d: { $switch: { branches: [ { case: ", "db.users.aggregate([{ $project: { d: { $switch: { branches: [ { case: ".length);
   assert.equal(caseValCtx.mode, "fieldRef");
 });
 
@@ -2574,4 +2585,3 @@ test("completes expression operator sub-keys and enums in $group", () => {
   assert.ok(groupAccumRegexOpt.includes("i"));
   assert.ok(groupAccumRegexOpt.includes("m"));
 });
-

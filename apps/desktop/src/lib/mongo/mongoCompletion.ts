@@ -1043,7 +1043,11 @@ function collectInnermostObjectKeys(text: string, cursor: number, stack: MongoCo
 function isExpressionArray(scan: MongoCallScan): boolean {
   const inner = innermost(scan);
   if (inner?.kind !== "array") return false;
-  if (inner.key === "branches") return false;
+  if (inner.key === "branches") {
+    // Only `$switch.branches` is a case list; any other `branches` array is a plain expression array.
+    const parent = scan.stack[scan.stack.length - 2];
+    if (parent?.kind === "object" && parent.key === "$switch") return false;
+  }
   if (inner.key?.startsWith("$")) return true;
   for (let i = scan.stack.length - 1; i >= 0; i--) {
     const container = scan.stack[i];
@@ -1609,6 +1613,7 @@ function classifyGroup(scan: MongoCallScan, bodyIndex: number): MongoCursorClass
   // One level in: `_id: { … }` builds a compound key, anything else is an accumulator.
   if (depth === 1) {
     const inner = innermost(scan);
+    if (inner?.kind === "array" && isExpressionArray(scan)) return classifyExpressionCursor(scan);
     if (inner?.kind !== "object") return { mode: "none" };
     if (scan.inValue) return { mode: "fieldRef" };
     if (inner.key === "_id") return { mode: "expression" };
@@ -2228,7 +2233,8 @@ function matchCursorMethodDot(beforeCursor: string): { find: boolean; countable:
     } else if (!validMethods.includes(methodName)) {
       return null;
     } else {
-      isCountable = false; // sort/limit/etc makes it no longer a pure find() that count() can easily attach to, but actually count() can attach after sort. Wait, the original code had: countable: /^\s*\.\s*[\w$-]*$/.test(chain). So if any methods were chained before the current dot, it's not countable.
+      // Any method chained between find() and the cursor breaks the bare find() count() parses on.
+      isCountable = false;
     }
 
     if (methodCloseParen === -1) {
@@ -2247,10 +2253,7 @@ function matchCursorMethodDot(beforeCursor: string): { find: boolean; countable:
     return { find: false, countable: false };
   }
 
-  // Countable if there was no method call after find() before this dot.
-  // wait, our loop updates pos to methodCloseParen + 1 if there's a valid method.
-  // So if we ever found a method call, it's not countable? The original code said:
-  // return { find: true, countable: /^\s*\.\s*[\w$-]*$/.test(chain) };
+  // Countable only while no method call has been walked since find().
   return { find: true, countable: isCountable };
 }
 

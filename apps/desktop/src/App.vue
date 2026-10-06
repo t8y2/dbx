@@ -97,7 +97,7 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { openQueryResultArchiveFile } from "@/lib/query/queryResultArchiveFile";
 import { activeTabExternalSqlFileTarget, rememberExternalSqlFileTarget, resolveExternalSqlFileTarget, resolveExternalSqlFileTargetForActiveTab, unassociatedExternalSqlFileTarget, type ExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
 import { defaultSavedQueryFileName, externalSqlFileOpenErrorMessage, externalSqlEditorMaxBytes, isSqlFilePath, queryEditorOpenFileAccept, queryEditorOpenFileFilters, readBrowserSqlFile, sqlFileTitleFromPath } from "@/lib/sql/sqlFileOpen";
-import type { ConnectionConfig, DatabaseType, ObjectBrowserFilter, ObjectSourceKind, QueryTab, TabOutputView, TreeNode } from "@/types/database";
+import type { ConnectionConfig, DatabaseType, ObjectBrowserFilter, ObjectSourceKind, QueryTab, TableInfoTab, TabOutputView, TreeNode } from "@/types/database";
 import { OPEN_PLUGIN_SETTINGS, type PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 import { parsePluginInstallDeepLink } from "@/lib/plugins/pluginInstallDeepLink";
 import { createFrontendPluginRegistry } from "@/lib/plugins/frontendPlugin";
@@ -107,6 +107,7 @@ import { parseAiConfigDeepLink, type AiConfigDeepLinkDraft } from "@/lib/ai/aiCo
 import { activeDesktopAiRuns, blockingDesktopAiRunsForQuit } from "@/lib/ai/desktopAiRunRegistry";
 import type { GlobalNavigationEntry, GlobalNavigationKind, GlobalNavigationSurface } from "@/lib/navigation/navigationEntry";
 import { navigationEntryKey } from "@/lib/navigation/navigationEntry";
+import { canRestoreQueryNavigationEntry, captureSourceNavigationIdentity, matchesNavigationDataTab, navigationSourceTarget, navigationTableTarget, type SourceNavigationIdentity } from "@/lib/navigation/navigationRestoreTargets";
 import { restoreGlobalNavigationEntry } from "@/lib/navigation/globalNavigationExecutor";
 
 import {
@@ -172,7 +173,7 @@ import { objectBrowserTablesToAiTreeNodes } from "@/lib/ai/objectBrowserToAiTarg
 import { aiTargetFromTab, type AiConversationBinding } from "@/lib/ai/aiConversationBinding";
 import type { AiExternalContextRequest } from "@/lib/ai/aiExternalContext";
 import { isSchemaAware, isSingleDatabase, supportsConnectionQueryActions, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
-import { codeMirrorSqlDialect, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { canFormatSqlForDatabaseType, formatSqlForEditing, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
 import { formatSqlSnapshotForSave } from "@/lib/sql/sqlFormatOnSave";
 import { detectAndFormatStructured } from "@/lib/sql/autoFormat";
@@ -1738,6 +1739,8 @@ watch(
   },
 );
 
+const sourceNavigationIdentity = new Map<string, SourceNavigationIdentity>();
+
 function currentGlobalNavigationEntry(): GlobalNavigationEntry | null {
   let surface: GlobalNavigationSurface | null = null;
   if (showSettingsPage.value) surface = "settings";
@@ -1746,7 +1749,26 @@ function currentGlobalNavigationEntry(): GlobalNavigationEntry | null {
   else if (queryStore.activeTabId) surface = "query";
   if (!surface) return null;
   const tab = surface === "query" ? activeTab.value : undefined;
-  const kind: GlobalNavigationKind = surface !== "query" ? "special" : tab?.sourceView || tab?.objectSource ? "objectSource" : tab?.ddlViewer ? "ddl" : tab?.mode === "data" ? "data" : tab?.mode === "structure" ? "structure" : "query";
+  if (surface === "query" && !tab) return null;
+  // Keep the request identity for read-only sources, which never receive objectSource.
+  for (const id of sourceNavigationIdentity.keys()) {
+    if (!queryStore.tabs.some((item) => item.id === id)) sourceNavigationIdentity.delete(id);
+  }
+  const sourceIdentity = tab ? captureSourceNavigationIdentity(tab, sourceNavigationIdentity.get(tab.id)) : undefined;
+  if (tab && sourceIdentity) sourceNavigationIdentity.set(tab.id, sourceIdentity);
+  if (tab?.sourceView && !tab.ddlViewer && !sourceIdentity) return null;
+  const kind: GlobalNavigationKind =
+    surface !== "query"
+      ? "special"
+      : tab?.ddlViewer
+        ? "ddl"
+        : tab?.sourceView || tab?.objectSource
+          ? "objectSource"
+          : tab?.mode === "data" || (tab?.mode === "mongo" && tab.tableMeta?.tableName && connectionStore.getConfig(tab.connectionId)?.db_type === "mongodb")
+            ? "data"
+            : tab?.mode === "structure"
+              ? "structure"
+              : "query";
   const entry: GlobalNavigationEntry = {
     id: "",
     surface,
@@ -1756,14 +1778,16 @@ function currentGlobalNavigationEntry(): GlobalNavigationEntry | null {
     mode: tab?.mode,
     tableInfoTab: tab?.tableInfoTab,
     sourceView: tab?.sourceView,
+    initialEditing: sourceIdentity?.initialEditing,
     connectionId: tab?.connectionId,
-    database: tab?.database,
-    catalog: tab?.catalog,
-    schema: tab?.schema,
+    database: tab?.tableMeta?.database ?? tab?.database,
+    catalog: tab?.tableMeta?.catalog ?? tab?.catalog,
+    schema: tab?.objectSource?.schema ?? tab?.tableMeta?.schema ?? tab?.schema,
     tableName: tab?.tableMeta?.tableName ?? tab?.structureTableName ?? tab?.ddlViewer?.tableName,
-    objectName: tab?.objectSource?.name ?? tab?.ddlViewer?.tableName,
-    objectType: tab?.objectSource?.objectType ?? tab?.ddlViewer?.objectType,
-    objectSignature: tab?.objectSource?.signature,
+    tableType: tab?.tableMeta?.tableType,
+    objectName: sourceIdentity?.name ?? tab?.ddlViewer?.tableName,
+    objectType: sourceIdentity?.objectType ?? tab?.ddlViewer?.objectType,
+    objectSignature: sourceIdentity?.signature,
   };
   entry.id = navigationEntryKey(entry);
   return entry;
@@ -1783,6 +1807,8 @@ watch(
       activeTab.value?.database,
       activeTab.value?.catalog,
       activeTab.value?.schema,
+      activeTab.value?.sourceLoad,
+      activeTab.value?.sourceLoad?.initialEditing,
       activeTab.value?.objectSource?.name,
       activeTab.value?.objectSource?.objectType,
       activeTab.value?.objectSource?.signature,
@@ -1792,10 +1818,11 @@ watch(
       activeTab.value?.tableMeta?.catalog,
       activeTab.value?.tableMeta?.database,
       activeTab.value?.tableMeta?.tableName,
+      activeTab.value?.tableMeta?.tableType,
     ] as const,
   () => {
     const entry = currentGlobalNavigationEntry();
-    if (entry) navigationStore.record(entry);
+    navigationStore.record(entry);
   },
   { immediate: true },
 );
@@ -3824,34 +3851,131 @@ function activateAdjacentTab(direction: -1 | 1): boolean {
   return activateTabByIndex(nextIndex);
 }
 
-async function navigateGlobal(direction: -1 | 1): Promise<boolean> {
-  const previousHistory = navigationStore.snapshot();
-  const entry = navigationStore.move(direction, (candidate) => {
-    if (candidate.surface === "query") return Boolean(candidate.tabId && queryStore.tabs.some((tab) => tab.id === candidate.tabId));
-    if (candidate.surface === "settings") return settingsPageTabOpen.value;
-    if (candidate.surface === "driverStore") return driverStoreTabOpen.value;
-    if (candidate.surface === "pluginCenter") return pluginCenterTabOpen.value;
-    return false;
-  });
-  if (!entry) return false;
+function isGlobalNavigationEntryAvailable(candidate: GlobalNavigationEntry): boolean {
+  if (candidate.surface === "query") {
+    if (candidate.kind === "objectSource") return navigationSourceTarget(candidate) !== null;
+    if (candidate.kind === "data" || candidate.kind === "structure") return navigationTableTarget(candidate) !== null;
+    return Boolean(candidate.tabId && queryStore.tabs.some((tab) => tab.id === candidate.tabId));
+  }
+  if (candidate.surface === "settings") return settingsPageTabOpen.value;
+  if (candidate.surface === "driverStore") return driverStoreTabOpen.value;
+  if (candidate.surface === "pluginCenter") return pluginCenterTabOpen.value;
+  return false;
+}
 
-  const restoreSerial = navigationStore.beginRestore();
+function canRestoreGlobalNavigationEntry(entry: GlobalNavigationEntry): boolean {
+  return canRestoreQueryNavigationEntry(entry, queryStore.tabs, activeTab.value, settingsStore.editorSettings.dataTabReuseMode);
+}
+
+// Decide synchronously while the keyboard event is still dispatching. Waiting
+// for I/O before preventDefault cannot stop the event's native action.
+function navigateGlobal(direction: -1 | 1): boolean {
+  if (navigationStore.restoring) return false;
+  const candidate = navigationStore.peek(direction, isGlobalNavigationEntryAvailable);
+  if (!candidate || !canRestoreGlobalNavigationEntry(candidate)) return false;
+  const previousHistory = navigationStore.snapshot();
+  const entry = navigationStore.move(direction, isGlobalNavigationEntryAvailable);
+  if (!entry) return false;
+  const restoreSerial = navigationStore.beginRestore(entry, previousHistory);
+  void completeGlobalNavigation(entry, previousHistory, restoreSerial);
+  return true;
+}
+
+async function completeGlobalNavigation(entry: GlobalNavigationEntry, previousHistory: ReturnType<typeof navigationStore.snapshot>, restoreSerial: number): Promise<boolean> {
+  const isCurrent = () => navigationStore.isCurrentRestore(restoreSerial);
+  const accept = () => {
+    const actual = currentGlobalNavigationEntry();
+    return actual !== null && navigationStore.acceptRestore(restoreSerial, actual);
+  };
   try {
     const restored = await restoreGlobalNavigationEntry(entry, {
-      activateQueryTab,
-      activateSettings: activateSettingsPage,
-      activateDriverStore: () => openDriverStorePage(),
-      activatePluginCenter: () => openPluginCenterPage(),
+      restoreQuery: (target) => restoreQueryNavigationEntry(target, isCurrent, accept),
+      activateSettings: () => {
+        activateSettingsPage();
+        accept();
+      },
+      activateDriverStore: () => {
+        openDriverStorePage();
+        accept();
+      },
+      activatePluginCenter: () => {
+        openPluginCenterPage();
+        accept();
+      },
     });
+    if (!isCurrent()) return false;
     if (!restored) {
       navigationStore.restoreSnapshot(previousHistory);
       return false;
     }
     await nextTick();
-    return navigationStore.isCurrentRestore(restoreSerial);
+    return isCurrent();
+  } catch (error) {
+    if (isCurrent()) navigationStore.restoreSnapshot(previousHistory);
+    console.error("[DBX] Navigation restore failed", error);
+    return false;
   } finally {
     navigationStore.endRestore(restoreSerial);
   }
+}
+
+async function restoreQueryNavigationEntry(entry: GlobalNavigationEntry, isCurrent: () => boolean = () => true, accept: () => boolean = () => true): Promise<boolean> {
+  const activate = (id: string) => isCurrent() && activateQueryTab(id) && accept();
+  if (!isCurrent()) return false;
+  const existingTab = entry.tabId ? queryStore.tabs.find((tab) => tab.id === entry.tabId) : undefined;
+  if (entry.kind === "objectSource" && entry.connectionId && entry.database && entry.objectName && entry.objectType) {
+    if (existingTab && existingTab.sourceView) return activate(existingTab.id);
+    const target = navigationSourceTarget(entry);
+    if (!target) return false;
+    return activate(queryStore.openObjectSourceTabPending(target));
+  }
+  if (entry.kind === "data" && entry.connectionId && entry.database && entry.tableName) {
+    const matching = existingTab && matchesNavigationDataTab(existingTab, entry) ? existingTab : queryStore.tabs.find((tab) => matchesNavigationDataTab(tab, entry));
+    if (matching) {
+      matching.tableInfoTab = entry.tableInfoTab as TableInfoTab | undefined;
+      return activate(matching.id);
+    }
+    if (!canRestoreGlobalNavigationEntry(entry)) return false;
+    const target = navigationTableTarget(entry);
+    if (!target) return false;
+    // Selection completes navigation; database I/O may continue in that tab.
+    // Never infer the target from activeTabId after an asynchronous operation.
+    return new Promise<boolean>((resolve) => {
+      void openObjectBrowserTableTarget(target, {
+        isCurrent,
+        onOpened: (tabId) => {
+          if (!isCurrent()) {
+            resolve(false);
+            return;
+          }
+          const tab = queryStore.tabs.find((item) => item.id === tabId);
+          // Opening canonicalizes legacy database-as-schema identities (MySQL).
+          const schema = connectionObjectTreeNodeSchema(connectionStore.getConfig(target.connectionId), target.database, target.schema);
+          if (!tab || !matchesNavigationDataTab(tab, { ...entry, schema })) {
+            resolve(false);
+            return;
+          }
+          tab.tableInfoTab = entry.tableInfoTab as TableInfoTab | undefined;
+          resolve(activate(tabId));
+        },
+      }).then(
+        () => resolve(false),
+        (error) => {
+          console.error("[DBX] Navigation target loading failed", error);
+          resolve(false);
+        },
+      );
+    });
+  }
+  if (entry.kind === "structure" && entry.connectionId && entry.database && entry.tableName) {
+    return activate(queryStore.openTableStructure(entry.connectionId, entry.database, entry.schema, entry.tableName, entry.tableInfoTab as TableInfoTab | undefined, undefined, entry.catalog));
+  }
+  if (existingTab) {
+    existingTab.tableInfoTab = entry.tableInfoTab as TableInfoTab | undefined;
+    existingTab.sourceView = entry.sourceView;
+    return activate(existingTab.id);
+  }
+  return false;
 }
 
 const tabSwitcherTabs = computed(() => tabSwitcherOrder(queryStore.tabs, queryStore.recentTabIds));
@@ -4148,14 +4272,7 @@ async function handleKeydown(e: KeyboardEvent) {
     }
     return;
   }
-  if (
-    handleTabHistoryNavigationShortcut(e, shortcuts, (direction) => {
-      const available = direction < 0 ? navigationStore.canGoBack : navigationStore.canGoForward;
-      if (!available) return false;
-      void navigateGlobal(direction);
-      return true;
-    })
-  ) {
+  if (handleTabHistoryNavigationShortcut(e, shortcuts, navigateGlobal)) {
     e.preventDefault();
     e.stopPropagation();
     return;

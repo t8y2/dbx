@@ -1,3 +1,5 @@
+import type { ObjectSourceKind } from "@/types/database";
+
 export type GlobalNavigationSurface = "query" | "settings" | "driverStore" | "pluginCenter";
 export type GlobalNavigationKind = "query" | "data" | "ddl" | "structure" | "objectSource" | "special";
 
@@ -10,18 +12,20 @@ export interface GlobalNavigationEntry {
   mode?: string;
   tableInfoTab?: string;
   sourceView?: boolean;
+  initialEditing?: boolean;
   connectionId?: string;
   database?: string;
   catalog?: string;
   schema?: string;
   tableName?: string;
+  tableType?: string;
   objectName?: string;
-  objectType?: string;
+  objectType?: ObjectSourceKind;
   objectSignature?: string;
 }
 
 export function navigationEntryKey(entry: GlobalNavigationEntry): string {
-  return [
+  return JSON.stringify([
     entry.surface,
     entry.kind ?? "",
     entry.tabId ?? "",
@@ -36,5 +40,7 @@ export function navigationEntryKey(entry: GlobalNavigationEntry): string {
     entry.mode ?? "",
     entry.tableInfoTab ?? "",
     entry.sourceView ? "source" : "",
-  ].join("|");
+    entry.initialEditing ?? true,
+    entry.tableType ?? "",
+  ]);
 }

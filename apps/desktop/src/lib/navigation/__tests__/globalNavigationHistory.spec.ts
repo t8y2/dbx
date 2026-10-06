@@ -30,4 +30,11 @@ describe("global navigation history", () => {
     const back = moveGlobalNavigation(history, -1, (item) => item.id !== "closed");
     expect(back?.entry.id).toBe("a");
   });
+  it("coalesces an asynchronous source identity resolution into the same visit", () => {
+    let history = recordGlobalNavigation(createGlobalNavigationHistory(), entry("previous"));
+    history = recordGlobalNavigation(history, { id: "pending", surface: "query", kind: "objectSource", tabId: "source", objectType: "PROCEDURE" });
+    history = recordGlobalNavigation(history, { id: "loaded", surface: "query", kind: "objectSource", tabId: "source", objectType: "FUNCTION" });
+    expect(history.entries.map((item) => item.id)).toEqual(["previous", "loaded"]);
+    expect(moveGlobalNavigation(history, -1, () => true)?.entry.id).toBe("previous");
+  });
 });

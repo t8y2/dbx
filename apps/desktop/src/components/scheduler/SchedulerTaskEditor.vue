@@ -5,7 +5,7 @@
 // from per-provider branches.
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { AlertTriangle, Check, Loader2 } from "@lucide/vue";
+import { AlertTriangle, Check, Loader2, Search } from "@lucide/vue";
 import { uuid } from "@/lib/common/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -50,6 +50,7 @@ const formValues = ref<SchedulerFormValues>({});
 const saving = ref(false);
 const versionConflict = ref(false);
 const highRiskAcknowledged = ref(false);
+const connectionSearch = ref("");
 
 const isCreate = computed(() => !props.task);
 
@@ -64,16 +65,28 @@ const configFields = computed(() => selectedTrigger.value?.fields ?? []);
 const selectableProviders = computed(() => (isCreate.value ? props.providers.filter((provider) => !provider.builtin) : props.providers));
 
 /**
- * Narrow the connection list to the types the selected provider declares. A
- * plugin's `connection_providers` entries may be plugin connection ids rather
- * than database types; when nothing matches they are not db_types, and the
- * list stays unfiltered instead of hiding every connection.
+ * Narrow the connection list to what the selected provider declares. A
+ * plugin's `connection_providers` entry may be:
+ * - a plugin connection provider id → matches `plugin_connection_provider`
+ *   (or its connection type via `plugin_connection_type`, e.g. the SSH
+ *   provider declaring `io.dbx.ssh.connection`);
+ * - a database type → matches `db_type`.
+ * When nothing matches at all the declared entries are not db_types the UI
+ * can see, and the list stays unfiltered instead of hiding every connection.
  */
 const providerConnections = computed(() => {
   const declared = selectedProvider.value?.connectionProviders ?? [];
   if (declared.length === 0) return props.connections;
-  const matched = props.connections.filter((connection) => connection.db_type && declared.includes(connection.db_type));
+  const matches = (connection: ConnectionConfig) =>
+    (connection.plugin_connection_provider && declared.includes(connection.plugin_connection_provider)) || (connection.plugin_connection_type && declared.includes(connection.plugin_connection_type)) || (connection.db_type && declared.includes(connection.db_type));
+  const matched = props.connections.filter(matches);
   return matched.length > 0 ? matched : props.connections;
+});
+
+const searchedProviderConnections = computed(() => {
+  const query = connectionSearch.value.trim().toLocaleLowerCase();
+  if (!query) return providerConnections.value;
+  return providerConnections.value.filter((connection) => connection.name.toLocaleLowerCase().includes(query));
 });
 
 function storedOrFullTriggerId(): string | undefined {
@@ -169,16 +182,17 @@ function selectProvider(providerId: string) {
   const provider = findProvider(props.providers, providerId);
   draft.value.providerId = providerId;
   draft.value.providerType = provider?.builtin ? "builtin" : "plugin";
-  const previousConnectionId = draft.value.target?.connectionId ?? "";
-  const matchedConnections = (() => {
-    const declared = provider?.connectionProviders ?? [];
-    if (declared.length === 0) return props.connections;
-    const matched = props.connections.filter((connection) => connection.db_type && declared.includes(connection.db_type));
-    return matched.length > 0 ? matched : props.connections;
-  })();
-  // Keep the connection only when the new provider still accepts its type.
-  const connectionId = matchedConnections.some((connection) => connection.id === previousConnectionId) ? previousConnectionId : "";
-  draft.value.target = { connectionId, pluginId: provider?.builtin ? null : (provider?.pluginId ?? null), resourceId: null };
+  const previousIds = [draft.value.target?.connectionId, ...(draft.value.target?.additionalConnectionIds ?? [])].filter((id): id is string => Boolean(id));
+  const declared = provider?.connectionProviders ?? [];
+  const accepts = (connectionId: string) => {
+    if (declared.length === 0) return true;
+    const connection = props.connections.find((candidate) => candidate.id === connectionId);
+    if (!connection) return false;
+    return (connection.plugin_connection_provider && declared.includes(connection.plugin_connection_provider)) || (connection.plugin_connection_type && declared.includes(connection.plugin_connection_type)) || (connection.db_type && declared.includes(connection.db_type));
+  };
+  const kept = previousIds.filter(accepts);
+  const [primary, ...additional] = kept;
+  draft.value.target = { connectionId: primary ?? "", additionalConnectionIds: additional, pluginId: provider?.builtin ? null : (provider?.pluginId ?? null), resourceId: null };
   const trigger = provider?.triggers[0];
   applyTrigger(trigger);
 }
@@ -322,20 +336,27 @@ function close() {
             :empty-text="t('grid.noSearchResults')"
             @update:model-value="(value: string) => (draft!.target = { ...draft!.target, connectionId: value })"
           />
-          <div v-else class="flex max-h-40 flex-wrap gap-1.5 overflow-y-auto rounded-md border border-border/70 p-2" data-scheduler-editor-connection-multi>
-            <button
-              v-for="connection in providerConnections"
-              :key="connection.id"
-              type="button"
-              class="flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition-colors"
-              :class="boundConnectionIds.includes(connection.id) ? 'border-primary bg-primary/10 text-foreground' : 'border-border/70 text-muted-foreground hover:bg-muted/50'"
-              :data-scheduler-editor-connection-option="connection.id"
-              @click="toggleBoundConnection(connection.id)"
-            >
-              <Check v-if="boundConnectionIds.includes(connection.id)" class="h-3 w-3 text-primary" />
-              {{ connection.name }}
-            </button>
-            <p v-if="providerConnections.length === 0" class="px-1 py-1 text-xs text-muted-foreground">{{ t("scheduler.editor.noConnectionsForProvider") }}</p>
+          <div v-else class="space-y-2" data-scheduler-editor-connection-multi>
+            <div class="relative">
+              <Search class="pointer-events-none absolute left-2.5 top-2.5 size-3.5 text-muted-foreground" />
+              <Input v-model="connectionSearch" class="h-8 w-full pl-8 text-xs" :placeholder="t('editor.searchConnection')" data-scheduler-editor-connection-search />
+            </div>
+            <div class="flex max-h-40 flex-wrap gap-1.5 overflow-y-auto rounded-md border border-border/70 p-2">
+              <button
+                v-for="connection in searchedProviderConnections"
+                :key="connection.id"
+                type="button"
+                class="flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition-colors"
+                :class="boundConnectionIds.includes(connection.id) ? 'border-primary bg-primary/10 text-foreground' : 'border-border/70 text-muted-foreground hover:bg-muted/50'"
+                :data-scheduler-editor-connection-option="connection.id"
+                @click="toggleBoundConnection(connection.id)"
+              >
+                <Check v-if="boundConnectionIds.includes(connection.id)" class="h-3 w-3 text-primary" />
+                {{ connection.name }}
+              </button>
+              <p v-if="searchedProviderConnections.length === 0" class="px-1 py-1 text-xs text-muted-foreground">{{ t("grid.noSearchResults") }}</p>
+            </div>
+            <p v-if="boundConnectionIds.length > 0" class="text-xs text-muted-foreground">{{ t("scheduler.editor.connectionsSelected", { count: boundConnectionIds.length }) }}</p>
           </div>
           <p v-if="requiresConnection && boundConnectionIds.length === 0" class="text-xs text-destructive">{{ t("scheduler.editor.connectionRequired") }}</p>
         </div>

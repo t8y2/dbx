@@ -35,6 +35,7 @@ const providers: SchedulerTaskProviderDescriptor[] = [
     label: "SSH Tasks",
     pluginId: "io.dbx.ssh",
     connectionProviders: ["io.dbx.ssh.connection"],
+    allowMultipleConnections: true,
     capabilities: ["run", "cancel", "logs"],
     triggers: [{ id: "execute", label: "Execute Command", mode: "run", risk: "high", fields: [{ key: "command", label: "Command", type: "textarea", required: true }] }],
   },
@@ -51,6 +52,8 @@ const providers: SchedulerTaskProviderDescriptor[] = [
 const connections = [
   { id: "conn-prod", name: "prod-web-01", db_type: "mysql", host: "h", port: 3306, username: "u", password: "p" },
   { id: "conn-backup", name: "backup-host", db_type: "postgres", host: "h", port: 5432, username: "u", password: "p" },
+  { id: "conn-ssh-1", name: "ssh-host-1", host: "h", port: 22, username: "u", password: "p", plugin_id: "io.dbx.ssh", plugin_connection_provider: "io.dbx.ssh.connection", plugin_connection_type: "ssh" },
+  { id: "conn-ssh-2", name: "ssh-host-2", host: "h", port: 22, username: "u", password: "p", plugin_id: "io.dbx.ssh", plugin_connection_provider: "io.dbx.ssh.connection", plugin_connection_type: "ssh" },
 ] as const;
 
 function cronTask(): TaskDefinition {
@@ -177,5 +180,37 @@ describe("SchedulerTaskEditor", () => {
     const container = await mountEditor({ open: true, task: null, providers: [] });
     expect(container.querySelector("[data-scheduler-editor-provider]")).toBeTruthy();
     expect(container.querySelector<HTMLButtonElement>("[data-scheduler-editor-save]")!.disabled).toBe(true);
+  });
+
+  it("narrows connections to the provider's declared plugin connections and supports multi-select", async () => {
+    const task = { ...cronTask(), providerId: "io.dbx.ssh.tasks", config: { __triggerId: "io.dbx.ssh.tasks/execute", command: "uptime" } } as unknown as TaskDefinition;
+    const container = await mountEditor({ open: true, task });
+    await flush();
+
+    // Only SSH plugin connections remain; the mysql/postgres rows are hidden.
+    const options = [...container.querySelectorAll<HTMLElement>("[data-scheduler-editor-connection-option]")].map((option) => option.dataset.schedulerEditorConnectionOption);
+    expect(options).toEqual(["conn-ssh-1", "conn-ssh-2"]);
+
+    // The provider declares allow_multiple_connections → chips toggle.
+    container.querySelector<HTMLElement>('[data-scheduler-editor-connection-option="conn-ssh-1"]')!.click();
+    await flush();
+    container.querySelector<HTMLElement>('[data-scheduler-editor-connection-option="conn-ssh-2"]')!.click();
+    await flush();
+    expect(container.querySelectorAll('[data-scheduler-editor-connection-option][class*="border-primary"]')).toHaveLength(2);
+
+    // Search narrows the chips.
+    const search = container.querySelector<HTMLInputElement>("[data-scheduler-editor-connection-search]")!;
+    search.value = "ssh-host-2";
+    search.dispatchEvent(new Event("input"));
+    await flush();
+    expect([...container.querySelectorAll("[data-scheduler-editor-connection-option]")]).toHaveLength(1);
+  });
+
+  it("keeps the single-connection tree picker for providers without the multi flag", async () => {
+    const task = { ...cronTask(), providerId: "io.dbx.files.tasks", config: { __triggerId: "io.dbx.files.tasks/sync" } } as unknown as TaskDefinition;
+    const container = await mountEditor({ open: true, task });
+    await flush();
+    // No declaration → unfiltered single-select picker, no chip board.
+    expect(container.querySelector("[data-scheduler-editor-connection-multi]")).toBeNull();
   });
 });

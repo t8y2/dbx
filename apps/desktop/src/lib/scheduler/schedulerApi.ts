@@ -111,7 +111,7 @@ export function runTask(id: string): Promise<TaskRun> {
 }
 
 export function cancelRun(taskId: string, runId: string): Promise<void> {
-  return schedulerRequest("scheduler_cancel_run", { taskId, runId }, () => web("POST", `/api/scheduler/tasks/${encodeURIComponent(taskId)}/cancel`, { runId })).then(() => undefined);
+  return schedulerRequest("scheduler_cancel_run", { id: taskId, request: { runId } }, () => web("POST", `/api/scheduler/tasks/${encodeURIComponent(taskId)}/cancel`, { runId })).then(() => undefined);
 }
 
 export function enableTask(id: string): Promise<TaskDefinition | void> {
@@ -146,7 +146,7 @@ export function listRuns(filter: SchedulerRunFilter = {}): Promise<TaskRun[]> {
 }
 
 export function getRun(runId: string): Promise<TaskRun> {
-  return schedulerRequest("scheduler_get_run", { runId }, () => web("GET", `/api/scheduler/runs/${encodeURIComponent(runId)}`));
+  return schedulerRequest("scheduler_get_run", { id: runId }, () => web("GET", `/api/scheduler/runs/${encodeURIComponent(runId)}`));
 }
 
 export interface SchedulerLogQuery {
@@ -168,11 +168,11 @@ export function getRunLogs(runId: string, query: SchedulerLogQuery = {}): Promis
   if (query.limit !== undefined) params.set("limit", String(query.limit));
   if (query.level) params.set("level", query.level);
   if (query.stream) params.set("stream", query.stream);
-  return schedulerRequest("scheduler_get_run_logs", { runId, afterSeq: query.afterSeq ?? 0, limit: query.limit, level: query.level, stream: query.stream }, () => web("GET", `/api/scheduler/runs/${encodeURIComponent(runId)}/logs${logQuery(params)}`));
+  return schedulerRequest("scheduler_get_run_logs", { id: runId, afterSeq: query.afterSeq ?? 0, limit: query.limit, level: query.level, stream: query.stream }, () => web("GET", `/api/scheduler/runs/${encodeURIComponent(runId)}/logs${logQuery(params)}`));
 }
 
 export function listArtifacts(runId: string): Promise<TaskArtifact[]> {
-  return schedulerRequest("scheduler_list_artifacts", { runId }, () => web("GET", `/api/scheduler/runs/${encodeURIComponent(runId)}/artifacts`));
+  return schedulerRequest("scheduler_list_artifacts", { id: runId }, () => web("GET", `/api/scheduler/runs/${encodeURIComponent(runId)}/artifacts`));
 }
 
 // ---------------------------------------------------------------------------
@@ -180,27 +180,12 @@ export function listArtifacts(runId: string): Promise<TaskArtifact[]> {
 // ---------------------------------------------------------------------------
 
 /**
- * Active session list. The frozen desktop command roster (ADR §7.2) has no
- * dedicated list command, so prefer the natural counterpart of the frozen web
- * route and fall back to `schedulerResidentAction { action: "list" }` when the
- * backend exposes listing through the action command instead.
+ * Active session list. Desktop uses the dedicated list command; the web
+ * transport goes through the frozen GET route.
  */
 export async function listResidentSessions(): Promise<ResidentSession[]> {
   if (!isTauriRuntime(globalThis)) return (await web("GET", "/api/scheduler/resident")) as ResidentSession[];
-  try {
-    return await tauriScheduler<ResidentSession[]>("scheduler_list_resident_sessions", {});
-  } catch (listError) {
-    if (schedulerErrorCode(listError) === undefined) {
-      // Unknown-command rejections carry no scheduler machine code — retry
-      // through the action command before giving up.
-      try {
-        return await tauriScheduler<ResidentSession[]>("scheduler_resident_action", { action: "list" });
-      } catch {
-        throw listError;
-      }
-    }
-    throw listError;
-  }
+  return tauriScheduler<ResidentSession[]>("scheduler_list_resident_sessions", {});
 }
 
 export type SchedulerResidentAction = "start" | "stop" | "restart";

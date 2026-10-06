@@ -172,13 +172,15 @@ test("mongoDatabasesToQueryResult preserves metadata and bounds rows", () => {
   assert.throws(() => mongoDatabasesToQueryResult([{ ok: 1 }], 0, 10), /databases array/);
 });
 
-test("runCommand support does not accept arbitrary Mongo shell JavaScript", () => {
-  assert.deepEqual(
-    splitMongoCommands(`for (let i = 0; i < 2; i += 1) {
+test("splitMongoCommands supports evaluating Mongo shell JavaScript", () => {
+  const commands = splitMongoCommands(`for (let i = 0; i < 2; i += 1) {
   db.items.insertOne({ index: i });
-}`),
-    [],
-  );
+}`);
+  assert.equal(commands.length, 2);
+  assert.equal(commands[0].command.kind, "insert");
+  assert.equal(commands[0].text, 'db.items.insertOne({"index":0})');
+  assert.equal(commands[1].command.kind, "insert");
+  assert.equal(commands[1].text, 'db.items.insertOne({"index":1})');
 });
 
 test("splitMongoCommands keeps runCommand after a database switch", () => {

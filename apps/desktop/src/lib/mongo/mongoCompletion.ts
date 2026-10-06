@@ -1043,6 +1043,7 @@ function collectInnermostObjectKeys(text: string, cursor: number, stack: MongoCo
 function isExpressionArray(scan: MongoCallScan): boolean {
   const inner = innermost(scan);
   if (inner?.kind !== "array") return false;
+  if (inner.key === "branches") return false;
   if (inner.key?.startsWith("$")) return true;
   for (let i = scan.stack.length - 1; i >= 0; i--) {
     const container = scan.stack[i];
@@ -1050,6 +1051,49 @@ function isExpressionArray(scan: MongoCallScan): boolean {
     if (container.kind !== "array") break;
   }
   return false;
+}
+
+const EXPRESSION_OPERATOR_VALUE_ENUMS: Record<string, Record<string, string>> = {
+  $regexMatch: { options: "$options" },
+  $regexFind: { options: "$options" },
+  $regexFindAll: { options: "$options" },
+  $dateToParts: { iso8601: "boolean" },
+};
+
+function isSwitchBranch(scan: MongoCallScan): boolean {
+  const n = scan.stack.length;
+  if (n < 3) return false;
+  const inner = scan.stack[n - 1];
+  const parent = scan.stack[n - 2];
+  const grandParent = scan.stack[n - 3];
+  return inner?.kind === "object" && parent?.kind === "array" && parent.key === "branches" && grandParent?.kind === "object" && grandParent.key === "$switch";
+}
+
+function classifyExpressionCursor(scan: MongoCallScan, rootKey?: string): MongoCursorClass {
+  if (isSwitchBranch(scan)) {
+    if (scan.inValue) return { mode: "fieldRef" };
+    return { mode: "operatorField", operator: "switchBranch" };
+  }
+
+  if (isExpressionArray(scan)) return { mode: "fieldRef" };
+
+  const inner = innermost(scan);
+  if (!inner) return { mode: "none" };
+
+  if (scan.inValue) {
+    const parentOp = inner.key ?? "";
+    const enumKey = EXPRESSION_OPERATOR_VALUE_ENUMS[parentOp]?.[scan.valueKey ?? ""];
+    if (enumKey) return { mode: "enumValue", enumKey };
+    return { mode: "fieldRef" };
+  }
+
+  if (inner.kind !== "object") return { mode: "none" };
+
+  if (inner.key && inner.key !== rootKey && (inner.key in OPERATOR_SUB_KEYS || inner.key.startsWith("$"))) {
+    return { mode: "operatorField", operator: inner.key };
+  }
+
+  return { mode: "expression" };
 }
 
 function collectScopeVariables(scan: MongoCallScan): string[] {
@@ -1172,10 +1216,7 @@ function classifyFilter(scan: MongoCallScan, rootIndex: number): MongoCursorClas
   // Under `$expr` the vocabulary is aggregation expressions.
   const exprIndex = findContainerIndex(scan, rootIndex, "$expr");
   if (exprIndex >= 0) {
-    if (isExpressionArray(scan)) return { mode: "fieldRef" };
-    if (scan.inValue) return { mode: "fieldRef" };
-    if (inner.kind === "object") return { mode: "expression" };
-    return { mode: "none" };
+    return classifyExpressionCursor(scan, "$expr");
   }
 
   if (inner.kind === "array") {
@@ -1352,13 +1393,14 @@ const OPTION_COLLECTION_KEYS: Record<string, ReadonlySet<string>> = {
 };
 
 /** Option keys whose value is a filter document. */
-const FILTER_OPTION_KEYS = new Set(["partialFilterExpression", "validator"]);
+const FILTER_OPTION_KEYS = new Set(["partialFilterExpression", "validator", "filter", "query", "updates", "deletes"]);
 
 /** Option keys whose value is a document with its own fixed keys, and the value sets inside it. */
 const SUB_DOCUMENT_OPTION_KEYS: Record<string, Record<string, string>> = {
   collation: { locale: "locale", caseFirst: "caseFirst", alternate: "alternate", maxVariable: "maxVariable", strength: "strength" },
   timeseries: { granularity: "granularity" },
   clusteredIndex: {},
+  roles: { role: "builtInRole" },
 };
 
 function classifyMethodOptions(method: string, scan: MongoCallScan): MongoCursorClass {
@@ -1405,8 +1447,15 @@ function classifyCollation(scan: MongoCallScan, rootIndex: number): MongoCursorC
 /** A one-level document with a fixed key set (`OPERATOR_SUB_KEYS[operator]`) and, for some keys, a fixed value set. */
 function classifySubDocument(scan: MongoCallScan, rootIndex: number, operator: string, valueEnums: Record<string, string>): MongoCursorClass {
   const inner = innermost(scan);
-  if (!inner || inner.kind !== "object" || innerDepth(scan, rootIndex) !== 0) return { mode: "none" };
+  const depth = innerDepth(scan, rootIndex);
+  if (!inner || inner.kind !== "object") return { mode: "none" };
+
+  // Allow depth 0 (direct object) or depth 1 (array of objects)
+  if (depth > 1) return { mode: "none" };
+  if (depth === 1 && scan.stack[scan.stack.length - 2]?.kind !== "array") return { mode: "none" };
+
   if (scan.inValue) {
+    if (operator === "roles" && scan.valueKey === "db") return { mode: "database" };
     const enumKey = valueEnums[scan.valueKey ?? ""];
     return enumKey ? { mode: "enumValue", enumKey } : { mode: "none" };
   }
@@ -1540,43 +1589,45 @@ function stageStringValueMode(stage: string): MongoCompletionMode {
 
 function classifyStageBody(stage: string, scan: MongoCallScan, bodyIndex: number): MongoCursorClass {
   if (stage === "$match") return { ...classifyFilter(scan, bodyIndex), stage };
-  if (stage === "$group") return { mode: classifyGroup(scan, bodyIndex), stage };
+  if (stage === "$group") return { ...classifyGroup(scan, bodyIndex), stage };
   if (stage === "$sort") return { ...classifyKeyMap(scan, bodyIndex, "sort"), stage };
   if (stage === "$unset") return { mode: innermost(scan)?.kind === "array" ? "fieldPath" : "none", stage };
   if (OPTION_STAGES.has(stage)) return classifyStageOptions(stage, scan, bodyIndex);
   // `$project`-shaped stages and anything unmodelled: keys are field names, values are expressions.
-  return { mode: classifyProjection(scan, bodyIndex), stage };
+  return { ...classifyProjection(scan, bodyIndex), stage };
 }
 
-function classifyGroup(scan: MongoCallScan, bodyIndex: number): MongoCompletionMode {
+function classifyGroup(scan: MongoCallScan, bodyIndex: number): MongoCursorClass {
   const depth = innerDepth(scan, bodyIndex);
-  if (depth < 0) return "none";
+  if (depth < 0) return { mode: "none" };
 
   if (depth === 0) {
-    // `{ $group: { _id: … , total: … } }` — keys are output names, `_id` is required.
-    if (!scan.inValue) return "field";
-    return scan.valueKey === "_id" ? "fieldRef" : "none";
+    if (scan.inValue) return { mode: "fieldRef" };
+    return { mode: innermost(scan)?.kind === "object" ? "field" : "none" };
   }
 
-  if (scan.inValue) return "fieldRef";
-
-  const inner = innermost(scan);
-  if (isExpressionArray(scan)) return "fieldRef";
-  if (inner?.kind !== "object") return "none";
   // One level in: `_id: { … }` builds a compound key, anything else is an accumulator.
-  if (depth === 1) return inner.key === "_id" ? "expression" : "accumulator";
-  return "expression";
+  if (depth === 1) {
+    const inner = innermost(scan);
+    if (inner?.kind !== "object") return { mode: "none" };
+    if (scan.inValue) return { mode: "fieldRef" };
+    if (inner.key === "_id") return { mode: "expression" };
+    return { mode: "accumulator" };
+  }
+
+  return classifyExpressionCursor(scan);
 }
 
-function classifyProjection(scan: MongoCallScan, bodyIndex: number): MongoCompletionMode {
+function classifyProjection(scan: MongoCallScan, bodyIndex: number): MongoCursorClass {
   const depth = innerDepth(scan, bodyIndex);
-  if (depth < 0) return "none";
-  if (scan.inValue) return "fieldRef";
+  if (depth < 0) return { mode: "none" };
 
-  const inner = innermost(scan);
-  if (isExpressionArray(scan)) return "fieldRef";
-  if (inner?.kind !== "object") return "none";
-  return depth === 0 ? "field" : "expression";
+  if (depth === 0) {
+    if (scan.inValue) return { mode: "fieldRef" };
+    return { mode: innermost(scan)?.kind === "object" ? "field" : "none" };
+  }
+
+  return classifyExpressionCursor(scan);
 }
 
 function classifyStageOptions(stage: string, scan: MongoCallScan, bodyIndex: number): MongoCursorClass {
@@ -1628,9 +1679,7 @@ function classifyStageOptions(stage: string, scan: MongoCallScan, bodyIndex: num
         if (!scan.inValue) return { mode: "windowOperator", stage };
         return { mode: "fieldRef", stage };
       }
-      if (scan.inValue) return { mode: "fieldRef", stage };
-      if (isExpressionArray(scan)) return { mode: "fieldRef", stage };
-      return { mode: innermost(scan)?.kind === "object" ? "expression" : "none", stage };
+      return { ...classifyExpressionCursor(scan), stage };
     }
 
     if (stage === "$fill") {
@@ -1662,9 +1711,7 @@ function classifyStageOptions(stage: string, scan: MongoCallScan, bodyIndex: num
     if (innermost(scan)?.kind === "array") return { mode: "fieldPath", stage };
   }
 
-  if (scan.inValue) return { mode: "fieldRef", stage };
-  if (isExpressionArray(scan)) return { mode: "fieldRef", stage };
-  return { mode: innermost(scan)?.kind === "object" ? "expression" : "none", stage };
+  return { ...classifyExpressionCursor(scan), stage };
 }
 
 /* ------------------------------------------------------------------ *
@@ -2148,20 +2195,63 @@ function matchCursorMethodDot(beforeCursor: string): { find: boolean; countable:
   const chain = beforeCursor.slice(closeParen + 1);
   if (!/\.\s*[\w$-]*$/.test(chain)) return null;
 
+  let pos = closeParen + 1;
+  let isCountable = true;
+  let isTerminal = false;
   const isFind = lastMatch[1] === "find";
-  if (/\.\s*(?:count|explain)\s*\([^()]*\)/.test(chain)) {
+  const validMethods = isFind ? ["sort", "skip", "limit", "collation", "toArray", "pretty", "hint", "batchSize", "maxTimeMS", "comment"] : ["toArray", "pretty"];
+
+  while (pos < beforeCursor.length) {
+    const nextDot = beforeCursor.indexOf(".", pos);
+    if (nextDot === -1) break;
+
+    const afterDot = beforeCursor.slice(nextDot + 1);
+    const methodMatch = afterDot.match(/^\s*([\w$]+)\s*\(/);
+
+    // If there's no next method call but there is a dot, we are typing the next method name.
+    if (!methodMatch) {
+      if (/^\s*[\w$-]*$/.test(afterDot)) {
+        // Typing the method.
+        break;
+      } else {
+        // Something else, invalid chain.
+        return null;
+      }
+    }
+
+    const methodName = methodMatch[1];
+    const methodOpenParen = nextDot + 1 + methodMatch[0].length - 1;
+    const methodCloseParen = findMatchingParen(beforeCursor, methodOpenParen);
+
+    if (methodName === "count" || methodName === "explain") {
+      isTerminal = true;
+    } else if (!validMethods.includes(methodName)) {
+      return null;
+    } else {
+      isCountable = false; // sort/limit/etc makes it no longer a pure find() that count() can easily attach to, but actually count() can attach after sort. Wait, the original code had: countable: /^\s*\.\s*[\w$-]*$/.test(chain). So if any methods were chained before the current dot, it's not countable.
+    }
+
+    if (methodCloseParen === -1) {
+      // Incomplete method arguments, so we aren't typing a method dot
+      return null;
+    }
+
+    pos = methodCloseParen + 1;
+  }
+
+  if (isTerminal) {
     return { find: isFind, countable: false, terminal: true };
   }
 
-  if (isFind) {
-    if (!/^(?:\s*\.\s*(?:sort|skip|limit|collation|toArray|pretty)\s*\([^()]*\))*\s*\.\s*[\w$-]*$/.test(chain)) return null;
-    return { find: true, countable: /^\s*\.\s*[\w$-]*$/.test(chain) };
+  if (!isFind) {
+    return { find: false, countable: false };
   }
 
-  if (!/^(?:\s*\.\s*(?:toArray|pretty)\s*\([^()]*\))*\s*\.\s*[\w$-]*$/.test(chain)) {
-    return { find: false, countable: false, terminal: true };
-  }
-  return { find: false, countable: false };
+  // Countable if there was no method call after find() before this dot.
+  // wait, our loop updates pos to methodCloseParen + 1 if there's a valid method.
+  // So if we ever found a method call, it's not countable? The original code said:
+  // return { find: true, countable: /^\s*\.\s*[\w$-]*$/.test(chain) };
+  return { find: true, countable: isCountable };
 }
 
 /**

@@ -1,3 +1,4 @@
+import { evaluateMongoScript } from "./mongoScriptEval";
 import type { QueryResult } from "@/types/database";
 import { isMongoExtendedJsonId, mongoDocumentGridValue, mongoDocumentIdForGrid } from "@/lib/mongo/mongoDocumentValues";
 import {
@@ -1077,12 +1078,36 @@ export function splitMongoCommands(input: string): ParsedMongoCommand[] {
 
 export function splitMongoCommandRanges(input: string): ParsedMongoCommandRange[] {
   const commands: ParsedMongoCommandRange[] = [];
+  let allParsed = true;
   for (const segment of splitMongoCommandTextRanges(input)) {
     const parsed = parseMongoCommand(segment.text);
-    if (!parsed) return [];
+    if (!parsed) {
+      allParsed = false;
+      break;
+    }
     commands.push({ from: segment.from, to: segment.to, ...parsed });
   }
-  return commands;
+
+  if (allParsed && commands.length > 0) {
+    return commands;
+  }
+
+  // Fallback to JS script evaluation
+  const scriptResult = evaluateMongoScript(input);
+  if (scriptResult && scriptResult.commands.length > 0) {
+    const evalCommands: ParsedMongoCommandRange[] = [];
+    for (const cmdStr of scriptResult.commands) {
+      const parsed = parseMongoCommand(cmdStr);
+      if (parsed) {
+        evalCommands.push({ from: 0, to: input.length, ...parsed });
+      }
+    }
+    if (evalCommands.length > 0) {
+      return evalCommands;
+    }
+  }
+
+  return [];
 }
 
 export function evaluateMongoWriteSafety(command: MongoWriteCommand, options: MongoAggregateSafetyOptions): { allowed: boolean; reason?: string } {

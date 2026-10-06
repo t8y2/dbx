@@ -58,11 +58,10 @@ const selectedProvider = computed(() => findProvider(props.providers, draft.valu
 const selectedTrigger = computed(() => findTrigger(selectedProvider.value, storedOrFullTriggerId()));
 const configFields = computed(() => selectedTrigger.value?.fields ?? []);
 
-// The create dialog offers plugin providers only: the builtin backup provider
-// is created from the backup settings during the migration window (plan
-// §41–45). Editing keeps the full list so migrated backup tasks still resolve
-// their (locked) provider.
-const selectableProviders = computed(() => (isCreate.value ? props.providers.filter((provider) => !provider.builtin) : props.providers));
+// Builtin providers (database backup / configuration sync) and plugin
+// providers are both creatable from the task center; editing keeps the full
+// list so existing tasks always resolve their (locked) provider.
+const selectableProviders = computed(() => props.providers);
 
 /**
  * Narrow the connection list to what the selected provider declares. A

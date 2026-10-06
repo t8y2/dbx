@@ -55,23 +55,31 @@ function normalizeCapabilities(raw: unknown): SchedulerTaskProviderDescriptor["c
 }
 
 /**
- * The builtin database-backup provider (ADR §8), described structurally —
- * provider id + supported connection types + the single run trigger — the same
- * shape a plugin contribution produces. Migration moves every legacy backup
- * schedule onto this provider id, so the task center must recognize it even
- * with no plugins installed. It is excluded from the create dialog: new backup
- * schedules are still created in the backup settings during the migration
- * window (plan §41–45).
+ * Builtin providers (ADR §8 shape), described structurally — provider id +
+ * supported connection types + one trigger each — the same shape a plugin
+ * contribution produces. Migration moves every legacy backup schedule onto
+ * `dbx.database-backup`, so the task center must recognize it even with no
+ * plugins installed. Both are offered in the create dialog: the editors fill
+ * the provider settings section.
  */
-export function builtinTaskProviders(label: string): SchedulerTaskProviderDescriptor[] {
+export function builtinTaskProviders(labels: { databaseBackup: string; cloudSync: string }): SchedulerTaskProviderDescriptor[] {
   return [
     {
       providerId: "dbx.database-backup",
-      label,
+      label: labels.databaseBackup,
       pluginId: "dbx",
       connectionProviders: [...CONSISTENT_BACKUP_DATABASE_TYPES],
       capabilities: ["run", "cancel", "logs", "progress", "artifacts"],
-      triggers: [{ id: "backup", label, mode: "run", risk: "low", fields: [] }],
+      triggers: [{ id: "backup", label: labels.databaseBackup, mode: "run", risk: "low", fields: [] }],
+      builtin: true,
+    },
+    {
+      providerId: "dbx.cloud-sync",
+      label: labels.cloudSync,
+      pluginId: "dbx",
+      connectionProviders: [],
+      capabilities: ["run", "cancel", "logs"],
+      triggers: [{ id: "upload", label: labels.cloudSync, mode: "run", risk: "low", fields: [] }],
       builtin: true,
     },
   ];
@@ -218,6 +226,7 @@ export function triggerSummary(trigger: TaskTrigger): string {
   }
 }
 
-export function providerTypeLabel(providerType: TaskProviderType): string {
-  return providerType === "builtin" ? "Builtin" : "Plugin";
+/** The "source" prefix shown before a provider name ("内置 · 数据库备份"). */
+export function providerSourceLabel(providerType: TaskProviderType, labels: { builtin: string; plugin: string }): string {
+  return providerType === "builtin" ? labels.builtin : labels.plugin;
 }

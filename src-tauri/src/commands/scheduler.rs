@@ -34,6 +34,10 @@ fn service(state: &Arc<AppState>) -> SchedulerService {
     registry.register_run(DATABASE_BACKUP_PROVIDER_ID, Arc::new(DatabaseBackupTaskExecutor::new(backup)));
     // Same as the worker: one executor serves every plugin task provider.
     registry.register_run("plugin", Arc::new(dbx_core::scheduler::providers::PluginTaskExecutor::new(state.clone())));
+    registry.register_run(
+        dbx_core::scheduler::providers::CLOUD_SYNC_PROVIDER_ID,
+        Arc::new(dbx_core::scheduler::providers::CloudSyncTaskExecutor::new(state.clone())),
+    );
     SchedulerService::new(SchedulerStore::new(state.storage.data_dir()), registry)
 }
 

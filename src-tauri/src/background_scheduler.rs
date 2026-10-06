@@ -509,6 +509,10 @@ pub fn run_if_requested() -> bool {
                 "plugin",
                 Arc::new(dbx_core::scheduler::providers::PluginTaskExecutor::new(state.clone())),
             );
+            registry.register_run(
+                dbx_core::scheduler::providers::CLOUD_SYNC_PROVIDER_ID,
+                Arc::new(dbx_core::scheduler::providers::CloudSyncTaskExecutor::new(state.clone())),
+            );
 
             run_legacy_migration_if_enabled(store.clone(), &dir, generic_enabled()).await;
 

@@ -6,6 +6,7 @@ export const schedulerEn = {
   title: "Scheduled Tasks",
   taskProviders: {
     databaseBackup: "Database backup",
+    cloudSync: "Configuration sync",
   },
   tabs: {
     tasks: "Tasks",
@@ -15,6 +16,10 @@ export const schedulerEn = {
   refresh: "Refresh",
   loadFailed: "Failed to load scheduler data: {error}",
   retry: "Retry",
+  providerSource: {
+    builtin: "Built-in",
+    plugin: "Plugin",
+  },
   taskList: {
     newTask: "New task",
     empty: "No tasks yet",
@@ -218,6 +223,7 @@ export const schedulerZhCN = {
   title: "计划任务",
   taskProviders: {
     databaseBackup: "数据库备份",
+    cloudSync: "配置同步",
   },
   tabs: {
     tasks: "任务",
@@ -227,6 +233,10 @@ export const schedulerZhCN = {
   refresh: "刷新",
   loadFailed: "读取计划任务数据失败：{error}",
   retry: "重试",
+  providerSource: {
+    builtin: "内置",
+    plugin: "插件",
+  },
   taskList: {
     newTask: "新建任务",
     empty: "暂无任务",
@@ -430,6 +440,7 @@ export const schedulerZhTW = {
   title: "排程任務",
   taskProviders: {
     databaseBackup: "資料庫備份",
+    cloudSync: "配置同步",
   },
   tabs: {
     tasks: "任務",
@@ -439,6 +450,10 @@ export const schedulerZhTW = {
   refresh: "重新整理",
   loadFailed: "讀取排程任務資料失敗：{error}",
   retry: "重試",
+  providerSource: {
+    builtin: "內建",
+    plugin: "外掛",
+  },
   taskList: {
     newTask: "新增任務",
     empty: "尚無任務",

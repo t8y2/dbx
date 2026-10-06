@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { CalendarClock, ListMusic, Pencil, Play, Plus, RefreshCw, Search, Square, Trash2 } from "@lucide/vue";
-import { defaultTimeZone, findProvider, taskHealth, triggerSummary, type TaskHealthContext } from "@/lib/scheduler/schedulerProviders";
+import { defaultTimeZone, findProvider, providerSourceLabel, taskHealth, triggerSummary, type TaskHealthContext } from "@/lib/scheduler/schedulerProviders";
 import type { TaskDefinition } from "@/lib/scheduler/schedulerTypes";
 
 const props = defineProps<{
@@ -49,7 +49,12 @@ function activeRunId(task: TaskDefinition): string | undefined {
 }
 
 function providerLabel(task: TaskDefinition): string {
-  return findProvider(props.healthContext.providers, task.providerId)?.label ?? task.providerId;
+  const provider = findProvider(props.healthContext.providers, task.providerId);
+  const name = provider?.label ?? task.providerId;
+  // "内置 · 数据库备份" / "插件 · SSH Tasks": the source is part of the name,
+  // not a separate column — one string, no jargon.
+  const source = providerSourceLabel(task.providerType, { builtin: t("scheduler.providerSource.builtin"), plugin: t("scheduler.providerSource.plugin") });
+  return `${source} · ${name}`;
 }
 
 function connectionLabel(task: TaskDefinition): string {

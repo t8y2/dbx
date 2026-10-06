@@ -136,7 +136,18 @@ impl TaskExecutorRegistry {
     }
 
     pub fn task_executor(&self, provider_id: &str) -> Option<Arc<dyn TaskExecutor>> {
-        self.run_executors.read().expect("executor registry poisoned").get(provider_id).cloned()
+        let guard = self.run_executors.read().expect("executor registry poisoned");
+        if let Some(executor) = guard.get(provider_id).cloned() {
+            return Some(executor);
+        }
+        // Plugin providers are served by the shared executor registered under
+        // the "plugin" key: every `io.dbx.*.tasks` provider id routes there
+        // and the executor itself resolves the owning plugin from the task's
+        // target. Builtin ids never collide (they contain no "plugin" key).
+        if guard.contains_key("plugin") {
+            return guard.get("plugin").cloned();
+        }
+        None
     }
 
     pub fn resident_executor(&self, provider_id: &str) -> Option<Arc<dyn ResidentExecutor>> {

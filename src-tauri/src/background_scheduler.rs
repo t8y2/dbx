@@ -503,6 +503,12 @@ pub fn run_if_requested() -> bool {
             let registry = Arc::new(TaskExecutorRegistry::new());
             let backup = BackupService::new(state.clone(), &dir, None);
             registry.register_run(DATABASE_BACKUP_PROVIDER_ID, Arc::new(DatabaseBackupTaskExecutor::new(backup)));
+            // One executor routes every plugin task provider over the frozen
+            // task/* RPC contract; provider ids decide the plugin (ADR §22).
+            registry.register_run(
+                "plugin",
+                Arc::new(dbx_core::scheduler::providers::PluginTaskExecutor::new(state.clone())),
+            );
 
             run_legacy_migration_if_enabled(store.clone(), &dir, generic_enabled()).await;
 

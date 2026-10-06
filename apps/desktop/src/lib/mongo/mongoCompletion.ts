@@ -1043,6 +1043,7 @@ function collectInnermostObjectKeys(text: string, cursor: number, stack: MongoCo
 function isExpressionArray(scan: MongoCallScan): boolean {
   const inner = innermost(scan);
   if (inner?.kind !== "array") return false;
+  if (inner.key === "branches") return false;
   if (inner.key?.startsWith("$")) return true;
   for (let i = scan.stack.length - 1; i >= 0; i--) {
     const container = scan.stack[i];
@@ -1050,6 +1051,49 @@ function isExpressionArray(scan: MongoCallScan): boolean {
     if (container.kind !== "array") break;
   }
   return false;
+}
+
+const EXPRESSION_OPERATOR_VALUE_ENUMS: Record<string, Record<string, string>> = {
+  $regexMatch: { options: "$options" },
+  $regexFind: { options: "$options" },
+  $regexFindAll: { options: "$options" },
+  $dateToParts: { iso8601: "boolean" },
+};
+
+function isSwitchBranch(scan: MongoCallScan): boolean {
+  const n = scan.stack.length;
+  if (n < 3) return false;
+  const inner = scan.stack[n - 1];
+  const parent = scan.stack[n - 2];
+  const grandParent = scan.stack[n - 3];
+  return inner?.kind === "object" && parent?.kind === "array" && parent.key === "branches" && grandParent?.kind === "object" && grandParent.key === "$switch";
+}
+
+function classifyExpressionCursor(scan: MongoCallScan, rootKey?: string): MongoCursorClass {
+  if (isSwitchBranch(scan)) {
+    if (scan.inValue) return { mode: "fieldRef" };
+    return { mode: "operatorField", operator: "switchBranch" };
+  }
+
+  if (isExpressionArray(scan)) return { mode: "fieldRef" };
+
+  const inner = innermost(scan);
+  if (!inner) return { mode: "none" };
+
+  if (scan.inValue) {
+    const parentOp = inner.key ?? "";
+    const enumKey = EXPRESSION_OPERATOR_VALUE_ENUMS[parentOp]?.[scan.valueKey ?? ""];
+    if (enumKey) return { mode: "enumValue", enumKey };
+    return { mode: "fieldRef" };
+  }
+
+  if (inner.kind !== "object") return { mode: "none" };
+
+  if (inner.key && inner.key !== rootKey && (inner.key in OPERATOR_SUB_KEYS || inner.key.startsWith("$"))) {
+    return { mode: "operatorField", operator: inner.key };
+  }
+
+  return { mode: "expression" };
 }
 
 function collectScopeVariables(scan: MongoCallScan): string[] {
@@ -1172,10 +1216,7 @@ function classifyFilter(scan: MongoCallScan, rootIndex: number): MongoCursorClas
   // Under `$expr` the vocabulary is aggregation expressions.
   const exprIndex = findContainerIndex(scan, rootIndex, "$expr");
   if (exprIndex >= 0) {
-    if (isExpressionArray(scan)) return { mode: "fieldRef" };
-    if (scan.inValue) return { mode: "fieldRef" };
-    if (inner.kind === "object") return { mode: "expression" };
-    return { mode: "none" };
+    return classifyExpressionCursor(scan, "$expr");
   }
 
   if (inner.kind === "array") {
@@ -1559,40 +1600,34 @@ function classifyStageBody(stage: string, scan: MongoCallScan, bodyIndex: number
 function classifyGroup(scan: MongoCallScan, bodyIndex: number): MongoCursorClass {
   const depth = innerDepth(scan, bodyIndex);
   if (depth < 0) return { mode: "none" };
-  if (scan.inValue) return { mode: "fieldRef" };
 
-  const inner = innermost(scan);
-  if (isExpressionArray(scan)) return { mode: "fieldRef" };
-  if (inner?.kind !== "object") return { mode: "none" };
+  if (depth === 0) {
+    if (scan.inValue) return { mode: "fieldRef" };
+    return { mode: innermost(scan)?.kind === "object" ? "field" : "none" };
+  }
 
-  if (depth === 0) return { mode: "field" };
   // One level in: `_id: { … }` builds a compound key, anything else is an accumulator.
   if (depth === 1) {
+    const inner = innermost(scan);
+    if (inner?.kind !== "object") return { mode: "none" };
+    if (scan.inValue) return { mode: "fieldRef" };
     if (inner.key === "_id") return { mode: "expression" };
     return { mode: "accumulator" };
   }
 
-  if (inner.key?.startsWith("$")) {
-    return { mode: "operatorField", operator: inner.key };
-  }
-
-  return { mode: "expression" };
+  return classifyExpressionCursor(scan);
 }
 
 function classifyProjection(scan: MongoCallScan, bodyIndex: number): MongoCursorClass {
   const depth = innerDepth(scan, bodyIndex);
   if (depth < 0) return { mode: "none" };
-  if (scan.inValue) return { mode: "fieldRef" };
 
-  const inner = innermost(scan);
-  if (isExpressionArray(scan)) return { mode: "fieldRef" };
-  if (inner?.kind !== "object") return { mode: "none" };
-
-  if (depth > 0 && inner.key?.startsWith("$")) {
-    return { mode: "operatorField", operator: inner.key };
+  if (depth === 0) {
+    if (scan.inValue) return { mode: "fieldRef" };
+    return { mode: innermost(scan)?.kind === "object" ? "field" : "none" };
   }
 
-  return { mode: depth === 0 ? "field" : "expression" };
+  return classifyExpressionCursor(scan);
 }
 
 function classifyStageOptions(stage: string, scan: MongoCallScan, bodyIndex: number): MongoCursorClass {
@@ -1644,9 +1679,7 @@ function classifyStageOptions(stage: string, scan: MongoCallScan, bodyIndex: num
         if (!scan.inValue) return { mode: "windowOperator", stage };
         return { mode: "fieldRef", stage };
       }
-      if (scan.inValue) return { mode: "fieldRef", stage };
-      if (isExpressionArray(scan)) return { mode: "fieldRef", stage };
-      return { mode: innermost(scan)?.kind === "object" ? "expression" : "none", stage };
+      return { ...classifyExpressionCursor(scan), stage };
     }
 
     if (stage === "$fill") {
@@ -1678,9 +1711,7 @@ function classifyStageOptions(stage: string, scan: MongoCallScan, bodyIndex: num
     if (innermost(scan)?.kind === "array") return { mode: "fieldPath", stage };
   }
 
-  if (scan.inValue) return { mode: "fieldRef", stage };
-  if (isExpressionArray(scan)) return { mode: "fieldRef", stage };
-  return { mode: innermost(scan)?.kind === "object" ? "expression" : "none", stage };
+  return { ...classifyExpressionCursor(scan), stage };
 }
 
 /* ------------------------------------------------------------------ *

@@ -490,6 +490,96 @@ export const OPERATOR_SUB_KEYS: Record<string, MongoOperatorSpec[]> = {
     ["value", "Value or expression to fill with", "value: ${}"],
     ["method", "Fill method", 'method: "${linear}"'],
   ]),
+  $dateToString: specs([
+    ["date", "Date to format", 'date: "$${field}"'],
+    ["format", "Format specification string", 'format: "${%Y-%m-%d}"'],
+    ["timezone", "Timezone for formatting", 'timezone: "${UTC}"'],
+    ["onNull", "Value to return if date is null or missing", "onNull: ${}"],
+  ]),
+  $dateFromParts: specs([
+    ["year", "Calendar year", "year: ${}"],
+    ["month", "Month of year (1-12)", "month: ${}"],
+    ["day", "Day of month (1-31)", "day: ${}"],
+    ["hour", "Hour of day (0-23)", "hour: ${}"],
+    ["minute", "Minute of hour (0-59)", "minute: ${}"],
+    ["second", "Second of minute (0-59)", "second: ${}"],
+    ["millisecond", "Millisecond of second (0-999)", "millisecond: ${}"],
+    ["timezone", "Timezone for formatting", 'timezone: "${UTC}"'],
+    ["isoWeekYear", "ISO week-numbering year", "isoWeekYear: ${}"],
+    ["isoWeek", "ISO week number (1-53)", "isoWeek: ${}"],
+    ["isoDayOfWeek", "Day of week (1-7, Monday is 1)", "isoDayOfWeek: ${}"],
+  ]),
+  $dateToParts: specs([
+    ["date", "Date to convert to parts", 'date: "$${field}"'],
+    ["timezone", "Timezone for calculation", 'timezone: "${UTC}"'],
+    ["iso8601", "Whether to return ISO week date parts", "iso8601: true"],
+  ]),
+  $trim: specs([
+    ["input", "String to trim", 'input: "$${field}"'],
+    ["chars", "Characters to trim", 'chars: "${ }"'],
+  ]),
+  $ltrim: specs([
+    ["input", "String to trim", 'input: "$${field}"'],
+    ["chars", "Characters to trim", 'chars: "${ }"'],
+  ]),
+  $rtrim: specs([
+    ["input", "String to trim", 'input: "$${field}"'],
+    ["chars", "Characters to trim", 'chars: "${ }"'],
+  ]),
+  $replaceOne: specs([
+    ["input", "String to search in", 'input: "$${field}"'],
+    ["find", "String or regex to search for", 'find: "${find}"'],
+    ["replacement", "String to replace with", 'replacement: "${replacement}"'],
+  ]),
+  $replaceAll: specs([
+    ["input", "String to search in", 'input: "$${field}"'],
+    ["find", "String or regex to search for", 'find: "${find}"'],
+    ["replacement", "String to replace with", 'replacement: "${replacement}"'],
+  ]),
+  $regexMatch: specs([
+    ["input", "String to evaluate", 'input: "$${field}"'],
+    ["regex", "Regular expression to match", 'regex: "${pattern}"'],
+    ["options", "Regular expression options", 'options: "${i}"'],
+  ]),
+  $regexFind: specs([
+    ["input", "String to evaluate", 'input: "$${field}"'],
+    ["regex", "Regular expression to match", 'regex: "${pattern}"'],
+    ["options", "Regular expression options", 'options: "${i}"'],
+  ]),
+  $regexFindAll: specs([
+    ["input", "String to evaluate", 'input: "$${field}"'],
+    ["regex", "Regular expression to match", 'regex: "${pattern}"'],
+    ["options", "Regular expression options", 'options: "${i}"'],
+  ]),
+  $filter: specs([
+    ["input", "Array expression to filter", 'input: "$${field}"'],
+    ["as", "Variable name for each element", 'as: "${item}"'],
+    ["cond", "Boolean expression for each element", "cond: ${}"],
+    ["limit", "Maximum number of elements to return", "limit: ${}"],
+  ]),
+  $map: specs([
+    ["input", "Array expression to transform", 'input: "$${field}"'],
+    ["as", "Variable name for each element", 'as: "${item}"'],
+    ["in", "Expression applied to each element", "in: ${}"],
+  ]),
+  $reduce: specs([
+    ["input", "Array expression to reduce", 'input: "$${field}"'],
+    ["initialValue", "Initial value of the accumulator", "initialValue: ${}"],
+    ["in", "Expression applied to each element", "in: ${}"],
+  ]),
+  $cond: specs([
+    ["if", "Condition to evaluate", "if: ${}"],
+    ["then", "Result if condition is true", "then: ${}"],
+    ["else", "Result if condition is false", "else: ${}"],
+  ]),
+  $switch: specs([
+    ["branches", "Array of case-then branch documents", "branches: [{ case: ${}, then: ${} }]"],
+    ["default", "Default expression if no branch matches", "default: ${}"],
+  ]),
+  switchBranch: specs([
+    ["case", "Condition expression to evaluate", "case: ${}"],
+    ["then", "Result expression when case is true", "then: ${}"],
+  ]),
 };
 
 const BSON_TYPE_ALIASES: Spec[] = [

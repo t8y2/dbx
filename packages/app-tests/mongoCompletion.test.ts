@@ -1554,6 +1554,7 @@ test("every suggested sub-document key and enumerated value parses in the positi
     $reduce: (body) => `db.users.aggregate([{ $project: { d: { $reduce: { ${body} } } } }])`,
     $cond: (body) => `db.users.aggregate([{ $project: { d: { $cond: { ${body} } } } }])`,
     $switch: (body) => `db.users.aggregate([{ $project: { d: { $switch: { ${body} } } } }])`,
+    switchBranch: (body) => `db.users.aggregate([{ $project: { d: { $switch: { branches: [ { ${body} } ] } } } }])`,
   };
   for (const [operator, keys] of Object.entries(OPERATOR_SUB_KEYS)) {
     const build = keyCommands[operator];
@@ -2433,3 +2434,144 @@ test("preserves auto-trigger and completion for getCollection and getSiblingDB d
   assert.equal(getMongoCompletionContext(siblingGetCollectionDot, siblingGetCollectionDot.length).mode, "method");
   assert.equal(shouldAutoOpenMongoCompletion(siblingGetCollectionDot, siblingGetCollectionDot.length), true);
 });
+
+test("completes expression operator sub-document keys and enum values", () => {
+  // Sub-keys for $dateToString
+  const dateToStringKeys = labels("db.users.aggregate([{ $project: { d: { $dateToString: { ");
+  assert.ok(dateToStringKeys.includes("date"));
+  assert.ok(dateToStringKeys.includes("format"));
+  assert.ok(dateToStringKeys.includes("timezone"));
+  assert.ok(dateToStringKeys.includes("onNull"));
+
+  // Sub-keys for $dateFromParts
+  const dateFromPartsKeys = labels("db.users.aggregate([{ $project: { d: { $dateFromParts: { ");
+  assert.ok(dateFromPartsKeys.includes("year"));
+  assert.ok(dateFromPartsKeys.includes("month"));
+  assert.ok(dateFromPartsKeys.includes("day"));
+  assert.ok(dateFromPartsKeys.includes("timezone"));
+
+  // Sub-keys for $filter
+  const filterKeys = labels("db.users.aggregate([{ $project: { d: { $filter: { ");
+  assert.ok(filterKeys.includes("input"));
+  assert.ok(filterKeys.includes("as"));
+  assert.ok(filterKeys.includes("cond"));
+  assert.ok(filterKeys.includes("limit"));
+
+  // Sub-keys for $cond
+  const condKeys = labels("db.users.aggregate([{ $project: { d: { $cond: { ");
+  assert.ok(condKeys.includes("if"));
+  assert.ok(condKeys.includes("then"));
+  assert.ok(condKeys.includes("else"));
+
+  // Sub-keys for $switch
+  const switchKeys = labels("db.users.aggregate([{ $project: { d: { $switch: { ");
+  assert.ok(switchKeys.includes("branches"));
+  assert.ok(switchKeys.includes("default"));
+
+  // Sub-keys for $regexMatch
+  const regexMatchKeys = labels("db.users.aggregate([{ $project: { d: { $regexMatch: { ");
+  assert.ok(regexMatchKeys.includes("input"));
+  assert.ok(regexMatchKeys.includes("regex"));
+  assert.ok(regexMatchKeys.includes("options"));
+
+  // Enum values for options ($regexMatch, $regexFind, $regexFindAll)
+  const regexOptions = labels("db.users.aggregate([{ $project: { d: { $regexMatch: { options: ");
+  assert.ok(regexOptions.includes("i"));
+  assert.ok(regexOptions.includes("m"));
+  assert.ok(regexOptions.includes("x"));
+  assert.ok(regexOptions.includes("s"));
+  assert.ok(regexOptions.includes("u"));
+
+  const regexOptionsQuoted = labels('db.users.aggregate([{ $project: { d: { $regexMatch: { options: "');
+  assert.ok(regexOptionsQuoted.includes("i"));
+
+  // Enum values for iso8601 ($dateToParts)
+  const dateToPartsIso = labels("db.users.aggregate([{ $project: { d: { $dateToParts: { iso8601: ");
+  assert.ok(dateToPartsIso.includes("true"));
+  assert.ok(dateToPartsIso.includes("false"));
+
+  // Used key deduplication inside operator sub-documents
+  const dedupedKeys = labels("db.users.aggregate([{ $project: { d: { $dateToString: { date: '$created', ");
+  assert.equal(dedupedKeys.includes("date"), false, "already specified key must not be re-suggested");
+  assert.ok(dedupedKeys.includes("format"));
+  assert.ok(dedupedKeys.includes("timezone"));
+  assert.ok(dedupedKeys.includes("onNull"));
+});
+
+test("completes $switch branches array elements and fields", () => {
+  // Empty branch object inside branches array suggests switchBranch keys: case and then
+  const branchKeys = labels("db.users.aggregate([{ $project: { d: { $switch: { branches: [ { ");
+  assert.ok(branchKeys.includes("case"));
+  assert.ok(branchKeys.includes("then"));
+
+  // After specifying case, used key deduplication leaves then
+  const branchAfterCase = labels("db.users.aggregate([{ $project: { d: { $switch: { branches: [ { case: 1, ");
+  assert.equal(branchAfterCase.includes("case"), false);
+  assert.ok(branchAfterCase.includes("then"));
+
+  // Context mode verification
+  const branchCtx = getMongoCompletionContext(
+    "db.users.aggregate([{ $project: { d: { $switch: { branches: [ { ",
+    "db.users.aggregate([{ $project: { d: { $switch: { branches: [ { ".length
+  );
+  assert.equal(branchCtx.mode, "operatorField");
+  assert.equal(branchCtx.operator, "switchBranch");
+
+  // In value position of case:, fieldRef mode is used
+  const caseValCtx = getMongoCompletionContext(
+    "db.users.aggregate([{ $project: { d: { $switch: { branches: [ { case: ",
+    "db.users.aggregate([{ $project: { d: { $switch: { branches: [ { case: ".length
+  );
+  assert.equal(caseValCtx.mode, "fieldRef");
+});
+
+test("completes expression operator sub-keys and enums inside $expr in find() and $match", () => {
+  // find() with $expr -> $dateToString keys
+  const findExprDate = labels("db.users.find({ $expr: { $dateToString: { ");
+  assert.ok(findExprDate.includes("date"));
+  assert.ok(findExprDate.includes("format"));
+  assert.ok(findExprDate.includes("timezone"));
+  assert.ok(findExprDate.includes("onNull"));
+
+  // find() with $expr -> $regexMatch options enum
+  const findExprRegexOptions = labels("db.users.find({ $expr: { $regexMatch: { options: ");
+  assert.ok(findExprRegexOptions.includes("i"));
+  assert.ok(findExprRegexOptions.includes("m"));
+
+  // find() with $expr -> $dateToParts iso8601 enum
+  const findExprDatePartsIso = labels("db.users.find({ $expr: { $dateToParts: { iso8601: ");
+  assert.ok(findExprDatePartsIso.includes("true"));
+  assert.ok(findExprDatePartsIso.includes("false"));
+
+  // find() with $expr -> $switch branches
+  const findExprSwitchBranch = labels("db.users.find({ $expr: { $switch: { branches: [ { ");
+  assert.ok(findExprSwitchBranch.includes("case"));
+  assert.ok(findExprSwitchBranch.includes("then"));
+
+  // $match with $expr -> $dateToString keys
+  const matchExprDate = labels("db.users.aggregate([{ $match: { $expr: { $dateToString: { ");
+  assert.ok(matchExprDate.includes("date"));
+  assert.ok(matchExprDate.includes("format"));
+
+  // $match with $expr -> $regexMatch options enum
+  const matchExprRegexOptions = labels("db.users.aggregate([{ $match: { $expr: { $regexMatch: { options: ");
+  assert.ok(matchExprRegexOptions.includes("i"));
+  assert.ok(matchExprRegexOptions.includes("m"));
+});
+
+test("completes expression operator sub-keys and enums in $group", () => {
+  // $group _id compound key with $dateToString
+  const groupIdDate = labels("db.users.aggregate([{ $group: { _id: { day: { $dateToString: { ");
+  assert.ok(groupIdDate.includes("date"));
+  assert.ok(groupIdDate.includes("format"));
+
+  // $group accumulator with expression sub-keys and enums
+  const groupAccumDate = labels("db.users.aggregate([{ $group: { total: { $sum: { $dateToString: { ");
+  assert.ok(groupAccumDate.includes("date"));
+  assert.ok(groupAccumDate.includes("format"));
+
+  const groupAccumRegexOpt = labels("db.users.aggregate([{ $group: { total: { $sum: { $regexMatch: { options: ");
+  assert.ok(groupAccumRegexOpt.includes("i"));
+  assert.ok(groupAccumRegexOpt.includes("m"));
+});
+

@@ -334,6 +334,7 @@ import {
   type SettingsSearchEntry,
   type ToolbarVisibilityItem,
 } from "@/lib/settings/settingsSearch";
+import { findSettingsSearchHighlightTarget } from "@/lib/settings/settingsSearchHighlight";
 import { LOCALE_OPTIONS } from "@/lib/app/localeOptions";
 import { DEFAULT_WEB_DAV_AUTO_UPLOAD_INTERVAL_MINUTES, DEFAULT_WEB_DAV_REMOTE_PATH, normalizedWebDavAutoUploadInterval, readSyncMethod, writeWebDavAutoUploadFields, writeWebDavBackupSelection, writeSyncMethod, type SyncMethod } from "@/lib/webdav/webdavAutoUploadConfig";
 import { apiUrl, webPath } from "@/lib/common/webPath";
@@ -3405,23 +3406,6 @@ function onSettingsCategoryClick(category: SettingsCategory) {
 
 function applySettingsSearchRoute(result: SettingsSearchEntry) {
   if (result.route?.syncMethodTab) syncMethodTab.value = result.route.syncMethodTab;
-}
-
-function normalizeSettingsSearchText(value: string | null | undefined): string {
-  return value?.replace(/\s+/g, " ").trim() ?? "";
-}
-
-function findSettingsSearchHighlightTarget(searchRoot: HTMLElement, title: string): HTMLElement {
-  const titleElement = Array.from(searchRoot.querySelectorAll<HTMLElement>("label, h3, h4")).find((element) => normalizeSettingsSearchText(element.textContent) === title);
-  if (!titleElement) return searchRoot;
-
-  let candidate = titleElement.parentElement;
-  while (candidate && candidate !== searchRoot) {
-    if (candidate.classList.contains("rounded-md") && candidate.classList.contains("border")) return candidate;
-    if (candidate.querySelector("input, button, [role='combobox'], textarea")) return candidate;
-    candidate = candidate.parentElement;
-  }
-  return titleElement;
 }
 
 async function revealSettingsSearchTarget(result: SettingsSearchEntry) {
@@ -7539,45 +7523,6 @@ onUnmounted(() => {
 
               <Separator />
 
-              <div data-settings-search-id="welcome-page-settings" :class="['settings-appearance-group', settingsSearchTargetClass('welcome-page-settings')]">
-                <div class="flex items-center gap-1">
-                  <Label>{{ t("settings.welcomePage") }}</Label>
-                  <HelpTooltip :label="t('settings.welcomePage')" trigger-class="[&_svg]:h-3 [&_svg]:w-3" content-class="max-w-72">
-                    <p>{{ t("settings.welcomePageDescription") }}</p>
-                  </HelpTooltip>
-                </div>
-                <div class="settings-appearance-choice-grid">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    class="settings-choice-card h-auto min-w-0 justify-start overflow-hidden whitespace-normal border p-3"
-                    :class="editWelcomePageMode === 'intro' ? 'dbx-choice-selected' : ''"
-                    :aria-pressed="editWelcomePageMode === 'intro'"
-                    @click="editWelcomePageMode = 'intro'"
-                  >
-                    <div class="w-full min-w-0 text-left">
-                      <div class="text-sm font-medium">{{ t("settings.welcomePageIntro") }}</div>
-                      <div class="break-words whitespace-normal text-xs text-muted-foreground">{{ t("settings.welcomePageIntroDescription") }}</div>
-                    </div>
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    class="settings-choice-card h-auto min-w-0 justify-start overflow-hidden whitespace-normal border p-3"
-                    :class="editWelcomePageMode === 'workspace' ? 'dbx-choice-selected' : ''"
-                    :aria-pressed="editWelcomePageMode === 'workspace'"
-                    @click="editWelcomePageMode = 'workspace'"
-                  >
-                    <div class="w-full min-w-0 text-left">
-                      <div class="text-sm font-medium">{{ t("settings.welcomePageWorkspace") }}</div>
-                      <div class="break-words whitespace-normal text-xs text-muted-foreground">{{ t("settings.welcomePageWorkspaceDescription") }}</div>
-                    </div>
-                  </Button>
-                </div>
-              </div>
-
-              <Separator />
-
               <div class="settings-appearance-group">
                 <Label>{{ t("settings.appLayout") }}</Label>
                 <div class="settings-appearance-choice-grid">
@@ -7735,6 +7680,45 @@ onUnmounted(() => {
                   </p>
                 </div>
                 <Switch id="quit-on-close" v-model="editQuitOnClose" />
+              </div>
+
+              <Separator />
+
+              <div data-settings-search-id="welcome-page-settings" :class="['settings-appearance-group', settingsSearchTargetClass('welcome-page-settings')]">
+                <div class="flex items-center gap-1">
+                  <Label>{{ t("settings.welcomePage") }}</Label>
+                  <HelpTooltip :label="t('settings.welcomePage')" trigger-class="[&_svg]:h-3 [&_svg]:w-3" content-class="max-w-72">
+                    <p>{{ t("settings.welcomePageDescription") }}</p>
+                  </HelpTooltip>
+                </div>
+                <div class="settings-appearance-choice-grid">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    class="settings-choice-card h-auto min-w-0 justify-start overflow-hidden whitespace-normal border p-3"
+                    :class="editWelcomePageMode === 'intro' ? 'dbx-choice-selected' : ''"
+                    :aria-pressed="editWelcomePageMode === 'intro'"
+                    @click="editWelcomePageMode = 'intro'"
+                  >
+                    <div class="w-full min-w-0 text-left">
+                      <div class="text-sm font-medium">{{ t("settings.welcomePageIntro") }}</div>
+                      <div class="break-words whitespace-normal text-xs text-muted-foreground">{{ t("settings.welcomePageIntroDescription") }}</div>
+                    </div>
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    class="settings-choice-card h-auto min-w-0 justify-start overflow-hidden whitespace-normal border p-3"
+                    :class="editWelcomePageMode === 'workspace' ? 'dbx-choice-selected' : ''"
+                    :aria-pressed="editWelcomePageMode === 'workspace'"
+                    @click="editWelcomePageMode = 'workspace'"
+                  >
+                    <div class="w-full min-w-0 text-left">
+                      <div class="text-sm font-medium">{{ t("settings.welcomePageWorkspace") }}</div>
+                      <div class="break-words whitespace-normal text-xs text-muted-foreground">{{ t("settings.welcomePageWorkspaceDescription") }}</div>
+                    </div>
+                  </Button>
+                </div>
               </div>
 
               <div class="settings-appearance-group" data-icon-theme-settings>

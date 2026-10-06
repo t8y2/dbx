@@ -1,8 +1,10 @@
 <script setup lang="ts">
+import { computed } from "vue";
 import { useI18n } from "vue-i18n";
 import { ArrowRight, Code2, Database, DatabaseZap, Download, FilePlus2, History, Plus, Search, Settings2, ShieldCheck, Sparkles, Table2 } from "@lucide/vue";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import AppLogo from "@/components/icons/AppLogo.vue";
+import LightDropdown from "@/components/ui/LightDropdown.vue";
 import TruncatedTextTooltip from "@/components/ui/TruncatedTextTooltip.vue";
 import { connectionDriverLabel, connectionIconType, connectionRedactedNameLabel, connectionRedactedOptionSubtitle } from "@/lib/connection/connectionPresentation";
 import type { WelcomePageMode } from "@/stores/settingsStore";
@@ -32,14 +34,27 @@ const emit = defineEmits<{
   "new-connection": [];
   "new-query": [];
   "show-history": [];
-  "import-config": [];
+  "import-config": [source: ImportSource];
   "open-github": [];
   "open-mcp-guide": [];
   "open-website": [];
   "open-settings": [];
 }>();
 
+type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip";
+
 const { t } = useI18n();
+
+const importSourceItems = computed(() => [
+  { value: "dbx", label: t("sidebar.importDbx") },
+  { value: "navicat", label: t("sidebar.importNavicat") },
+  { value: "dbeaver", label: t("sidebar.importDbeaver") },
+  { value: "datagrip", label: t("sidebar.importDatagrip") },
+]);
+
+function selectImportSource(source: string) {
+  emit("import-config", source as ImportSource);
+}
 
 function welcomeConnectionSubtitle(connection: ConnectionConfig): string {
   return connectionRedactedOptionSubtitle(connection) || connectionDriverLabel(connection);
@@ -53,7 +68,7 @@ function welcomeConnectionSubtitle(connection: ConnectionConfig): string {
         <div class="welcome-intro-glow pointer-events-none absolute -right-24 -top-24 h-64 w-64 rounded-full bg-primary/15 blur-3xl" />
         <div class="relative max-w-2xl">
           <div class="flex items-center gap-3">
-            <div class="flex h-11 w-11 items-center justify-center rounded-xl border bg-background/80 p-2 shadow-sm"><AppLogo class="h-full w-full object-contain" /></div>
+            <div class="flex h-11 w-11 items-center justify-center rounded-xl border bg-background/80 p-0.5 shadow-sm"><AppLogo class="h-full w-full object-contain" /></div>
             <div class="text-xs font-medium uppercase tracking-[0.24em] text-muted-foreground">{{ t("welcome.introEyebrow") }}</div>
           </div>
           <h1 class="mt-7 text-3xl font-semibold tracking-tight sm:text-4xl">{{ t("welcome.introTitle") }}</h1>
@@ -62,7 +77,24 @@ function welcomeConnectionSubtitle(connection: ConnectionConfig): string {
             <button type="button" class="inline-flex h-9 items-center gap-2 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground shadow-sm transition-colors hover:bg-primary/90" @click="emit('new-connection')">
               <Plus class="h-4 w-4" /> {{ t("welcome.introNewConnection") }} <ArrowRight class="h-3.5 w-3.5" />
             </button>
-            <button type="button" class="inline-flex h-9 items-center gap-2 rounded-md border bg-background/70 px-4 text-sm font-medium transition-colors hover:bg-muted" @click="emit('import-config')"><Download class="h-4 w-4" /> {{ t("welcome.introImport") }}</button>
+            <LightDropdown
+              model-value=""
+              :items="importSourceItems"
+              :aria-label="t('welcome.introImport')"
+              :trigger-title="t('welcome.introImport')"
+              :trigger-icon="Download"
+              :trigger-label="t('welcome.introImport')"
+              trigger-class="inline-flex h-9 items-center gap-2 rounded-md border bg-background/70 px-4 text-sm font-medium transition-colors hover:bg-muted"
+              trigger-icon-class="h-4 w-4"
+              item-icon-class="h-4 w-4"
+              content-class="w-56"
+              :show-trigger-label="true"
+              :show-chevron="true"
+              :highlight-selected="false"
+              check-position="none"
+              align="start"
+              @update:model-value="selectImportSource"
+            />
           </div>
         </div>
       </div>
@@ -163,7 +195,7 @@ function welcomeConnectionSubtitle(connection: ConnectionConfig): string {
             <button class="flex min-w-0 items-center gap-2 overflow-hidden rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50" @click="emit('show-history')">
               <History class="h-4 w-4 shrink-0" /> <span class="min-w-0 truncate">{{ t("history.title") }}</span>
             </button>
-            <button class="flex min-w-0 items-center gap-2 overflow-hidden rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50" @click="emit('import-config')">
+            <button class="flex min-w-0 items-center gap-2 overflow-hidden rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50" @click="emit('import-config', 'dbx')">
               <Download class="h-4 w-4 shrink-0" /> <span class="min-w-0 truncate">{{ t("sidebar.import") }}</span>
             </button>
             <div class="mt-2 min-w-0 overflow-hidden rounded-md bg-muted/30 px-3 py-2 text-xs leading-5 text-muted-foreground">

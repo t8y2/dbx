@@ -2153,6 +2153,7 @@ dependencies = [
  "font-kit",
  "futures",
  "grep",
+ "gtk",
  "ignore",
  "libloading 0.8.9",
  "log",

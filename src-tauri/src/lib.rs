@@ -1906,6 +1906,7 @@ pub fn run() {
             commands::app_settings::mark_frontend_ready,
             commands::app_settings::request_app_close_from_window_controls,
             commands::window_controls::set_macos_traffic_light_position,
+            commands::window_controls::get_linux_window_control_icons,
             commands::app_settings::set_driver_store_dir,
             commands::app_settings::set_plugin_store_dir,
             commands::app_settings::set_agent_store_dir,

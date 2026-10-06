@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { macTrafficLightInsetPaddingForScale, macTrafficLightPositionForScale, shouldDrawDesktopWindowFrame, shouldReserveMacTrafficLightInset, shouldShowWindowControls } from "@/composables/useWindowControls";
+import { macTrafficLightInsetPaddingForScale, macTrafficLightPositionForScale, shouldDrawDesktopWindowFrame, shouldDrawLinuxFloatingFrame, shouldReserveMacTrafficLightInset, shouldShowWindowControls } from "@/composables/useWindowControls";
 
 describe("window controls", () => {
   it("shows custom controls for non-macOS desktop windows", () => {
@@ -19,6 +19,14 @@ describe("window controls", () => {
     expect(shouldDrawDesktopWindowFrame(false, true, true)).toBe(false);
     expect(shouldDrawDesktopWindowFrame(true, true, false)).toBe(false);
     expect(shouldDrawDesktopWindowFrame(false, false, false)).toBe(false);
+  });
+
+  it("draws the floating shadow/rounded frame only for restored Linux desktop windows", () => {
+    expect(shouldDrawLinuxFloatingFrame(true, true, false, false)).toBe(true);
+    expect(shouldDrawLinuxFloatingFrame(true, true, true, false)).toBe(false);
+    expect(shouldDrawLinuxFloatingFrame(true, true, false, true)).toBe(false);
+    expect(shouldDrawLinuxFloatingFrame(false, true, false, false)).toBe(false);
+    expect(shouldDrawLinuxFloatingFrame(true, false, false, false)).toBe(false);
   });
 
   it("reserves traffic light inset only for non-fullscreen macOS desktop windows", () => {

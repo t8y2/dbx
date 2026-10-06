@@ -165,3 +165,41 @@ mod tests {
         assert!(validate_macos_traffic_light_position(16.0, 18.0, 0.0).is_err());
     }
 }
+
+#[derive(serde::Serialize)]
+pub struct LinuxWindowControlIcons {
+    minimize: String,
+    maximize: String,
+    restore: String,
+    close: String,
+}
+
+/// Reads the window-control glyphs from the active GTK icon theme (Adwaita, Yaru, ...)
+/// so the custom Linux controls look like the system's. Returns `None` when any glyph
+/// is missing, in which case the frontend falls back to its bundled icons.
+/// Sync command: GTK must be used from the main thread.
+#[tauri::command]
+pub fn get_linux_window_control_icons() -> Option<LinuxWindowControlIcons> {
+    #[cfg(target_os = "linux")]
+    {
+        use gtk::prelude::*;
+
+        let theme = gtk::IconTheme::default()?;
+        let load = |name: &str| -> Option<String> {
+            let info = theme.lookup_icon(name, 16, gtk::IconLookupFlags::FORCE_SVG)?;
+            let svg = std::fs::read_to_string(info.filename()?).ok()?;
+            // Anything beyond a small glyph is not a window-control icon.
+            (svg.len() < 16 * 1024 && svg.contains("<svg")).then_some(svg)
+        };
+        Some(LinuxWindowControlIcons {
+            minimize: load("window-minimize-symbolic")?,
+            maximize: load("window-maximize-symbolic")?,
+            restore: load("window-restore-symbolic")?,
+            close: load("window-close-symbolic")?,
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}

@@ -42,6 +42,14 @@ export function shouldDrawDesktopWindowFrame(isMac: boolean, isDesktop = true, i
   return isDesktop && !isMac && !isWindows;
 }
 
+// Wayland compositors (mutter, kwin) draw neither shadow nor rounded corners for
+// undecorated windows, so on Linux the transparent window (tauri.linux.conf.json)
+// paints its own: a transparent margin that carries the shadow, and a rounded shell.
+// Maximized/fullscreen windows must fill the screen, so the floating frame is dropped.
+export function shouldDrawLinuxFloatingFrame(isLinux: boolean, isDesktop: boolean, isMaximized: boolean, isFullscreen: boolean): boolean {
+  return isDesktop && isLinux && !isMaximized && !isFullscreen;
+}
+
 export function useWindowControls() {
   const isMaximized = ref(false);
   const isFullscreen = ref(false);

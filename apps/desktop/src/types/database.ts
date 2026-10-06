@@ -444,6 +444,27 @@ export interface PluginConnectionAction {
   timeout_ms?: number;
 }
 
+export interface PluginTaskTriggerContribution {
+  id: string;
+  label: string;
+  mode: "run" | "resident";
+  risk?: "low" | "medium" | "high";
+  fields: PluginFormField[];
+}
+
+export interface PluginTaskProviderContribution {
+  type: "task-provider";
+  id: string;
+  label: string;
+  description?: string;
+  /** Connection providers (declared by the same manifest) a task may bind to. */
+  connection_providers?: string[];
+  /** One task may bind several connections at once (e.g. an SSH run-everywhere task). */
+  allow_multiple_connections?: boolean;
+  capabilities?: string[];
+  triggers: PluginTaskTriggerContribution[];
+}
+
 export interface PluginConnectionProviderContribution {
   type: "connection-provider";
   id: string;
@@ -650,7 +671,16 @@ export interface PluginMcpContribution {
  */
 export type PluginUiContribution = PluginWorkbenchContribution | PluginResultViewContribution;
 
-export type PluginContribution = PluginConnectionProviderContribution | PluginWorkbenchContribution | PluginFilesystemProviderContribution | PluginContextMenuContribution | PluginResultViewContribution | PluginCommandContribution | PluginMenusContribution | PluginMcpContribution;
+export type PluginContribution =
+  | PluginConnectionProviderContribution
+  | PluginTaskProviderContribution
+  | PluginWorkbenchContribution
+  | PluginFilesystemProviderContribution
+  | PluginContextMenuContribution
+  | PluginResultViewContribution
+  | PluginCommandContribution
+  | PluginMenusContribution
+  | PluginMcpContribution;
 
 export interface PluginEngines {
   dbx: string;
@@ -685,6 +715,8 @@ export interface PluginContributionLocalization {
   description?: string;
   fields?: Record<string, PluginFormFieldLocalization>;
   actions?: Record<string, { label?: string; description?: string }>;
+  /** task-provider triggers, keyed by the provider-local trigger id. */
+  triggers?: Record<string, { label?: string; fields?: Record<string, PluginFormFieldLocalization> }>;
 }
 
 export interface PluginManifestLocalization {

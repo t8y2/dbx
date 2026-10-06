@@ -24,7 +24,7 @@ import SchedulerRunList from "./SchedulerRunList.vue";
 import SchedulerTaskEditor from "./SchedulerTaskEditor.vue";
 import SchedulerTaskList from "./SchedulerTaskList.vue";
 
-const { t } = useI18n();
+const { t, locale } = useI18n();
 const { toast } = useToast();
 const connectionStore = useConnectionStore();
 
@@ -121,7 +121,12 @@ async function refreshAll() {
 
 onMounted(async () => {
   try {
-    plugins.value = await import("@/lib/backend/api").then((module) => module.listPlugins());
+    // The registry applies the manifest's `localizations` for the active
+    // locale, so plugin provider/trigger/field labels read in the UI language.
+    const { createFrontendPluginRegistry } = await import("@/lib/plugins/frontendPlugin");
+    plugins.value = createFrontendPluginRegistry(await import("@/lib/backend/api").then((module) => module.listPlugins()), locale.value)
+      .listPlugins()
+      .map((definition) => definition.plugin);
   } catch (reason) {
     console.warn("[scheduler] plugin discovery failed", reason);
   }

@@ -22,6 +22,7 @@ import WelcomeScreen from "@/components/layout/WelcomeScreen.vue";
 import type { ConfigTab } from "@/components/connection/ConnectionDialog.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
+import { useNavigationStore } from "@/stores/navigationStore";
 import { useSqlExecutionDangerStore } from "@/stores/sqlExecutionDangerStore";
 import type { MultiDbExecutionContext } from "@/composables/useMultiDbExecution";
 import type { MultiDbExecutionTarget } from "@/types/sqlExecution";
@@ -104,6 +105,9 @@ import { parseConnectionDeepLink, parseConnectionDeepLinkUpdate, type Connection
 import { resolveConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLinkUpdate";
 import { parseAiConfigDeepLink, type AiConfigDeepLinkDraft } from "@/lib/ai/aiConfigDeepLink";
 import { activeDesktopAiRuns, blockingDesktopAiRunsForQuit } from "@/lib/ai/desktopAiRunRegistry";
+import type { GlobalNavigationEntry, GlobalNavigationKind, GlobalNavigationSurface } from "@/lib/navigation/navigationEntry";
+import { navigationEntryKey } from "@/lib/navigation/navigationEntry";
+import { restoreGlobalNavigationEntry } from "@/lib/navigation/globalNavigationExecutor";
 
 import {
   isBrowserReloadShortcut,
@@ -138,7 +142,6 @@ import {
   switchToTabIndexFromShortcut,
   tabSwitcherDirectionFromShortcut,
 } from "@/lib/editor/keyboardShortcuts";
-import { createTabNavigationHistory, moveInTabNavigationHistory, recordTabVisit } from "@/lib/tabs/tabNavigationHistory";
 import { canSaveSqlTab } from "@/lib/tabs/sqlTabSaveTarget";
 import { initialTabSwitcherSelection, moveTabSwitcherSelection, tabSwitcherOrder } from "@/lib/tabs/tabSwitcher";
 import { createTabSwitcherKeyboardController } from "@/lib/tabs/tabSwitcherKeyboard";
@@ -227,6 +230,7 @@ const { t, locale: appLocale } = useI18n();
 const startupProps = defineProps<{ startupAuthentication?: StartupAuthentication }>();
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
+const navigationStore = useNavigationStore();
 const settingsStore = useSettingsStore();
 const { active: appBackgroundActive, backgroundObjectUrl: appBackgroundObjectUrl, backgroundImageStyle: appBackgroundImageStyle } = useBackgroundImage(settingsStore);
 const { uiFontFamilyPreview } = useUiFontFamilyPreview();
@@ -537,8 +541,6 @@ function updatePluginAiRecommendations(tabId: string, update: PluginAiRecommenda
 const mountedPluginWorkbenchTabs = computed(() => queryStore.tabs.filter((tab) => tab.mode === "plugin-workbench" && tab.pluginWorkbench));
 type PluginWorkbenchTabHandle = { refresh: () => Promise<unknown> };
 const pluginWorkbenchTabRefs = new Map<string, PluginWorkbenchTabHandle>();
-const tabNavigationHistory = ref(createTabNavigationHistory());
-let pendingTabHistoryNavigationId: string | null = null;
 let detachedEventUnlisteners: Array<() => void> = [];
 let floatingEventUnlisteners: Array<() => void> = [];
 let detachedCloseInProgress = false;
@@ -1724,15 +1726,6 @@ watch(
         }),
       );
     }
-    if (id) {
-      if (pendingTabHistoryNavigationId === id) pendingTabHistoryNavigationId = null;
-      else {
-        pendingTabHistoryNavigationId = null;
-        tabNavigationHistory.value = recordTabVisit(tabNavigationHistory.value, id);
-      }
-    } else {
-      pendingTabHistoryNavigationId = null;
-    }
     if (id) newQueryContextSource.value = "tab";
     if (id) activateQuerySurface();
     else if (previousId) activateOpenSpecialPageFallback();
@@ -1743,6 +1736,68 @@ watch(
     cursorPos.value = selection?.head ?? 0;
     if (id) queryStore.reloadEvictedTab(id);
   },
+);
+
+function currentGlobalNavigationEntry(): GlobalNavigationEntry | null {
+  let surface: GlobalNavigationSurface | null = null;
+  if (showSettingsPage.value) surface = "settings";
+  else if (showDriverStore.value) surface = "driverStore";
+  else if (showPluginCenter.value) surface = "pluginCenter";
+  else if (queryStore.activeTabId) surface = "query";
+  if (!surface) return null;
+  const tab = surface === "query" ? activeTab.value : undefined;
+  const kind: GlobalNavigationKind = surface !== "query" ? "special" : tab?.sourceView || tab?.objectSource ? "objectSource" : tab?.ddlViewer ? "ddl" : tab?.mode === "data" ? "data" : tab?.mode === "structure" ? "structure" : "query";
+  const entry: GlobalNavigationEntry = {
+    id: "",
+    surface,
+    kind,
+    tabId: tab?.id,
+    title: tab?.title,
+    mode: tab?.mode,
+    tableInfoTab: tab?.tableInfoTab,
+    sourceView: tab?.sourceView,
+    connectionId: tab?.connectionId,
+    database: tab?.database,
+    catalog: tab?.catalog,
+    schema: tab?.schema,
+    tableName: tab?.tableMeta?.tableName ?? tab?.structureTableName ?? tab?.ddlViewer?.tableName,
+    objectName: tab?.objectSource?.name ?? tab?.ddlViewer?.tableName,
+    objectType: tab?.objectSource?.objectType ?? tab?.ddlViewer?.objectType,
+    objectSignature: tab?.objectSource?.signature,
+  };
+  entry.id = navigationEntryKey(entry);
+  return entry;
+}
+
+watch(
+  () =>
+    [
+      queryStore.activeTabId,
+      showSettingsPage.value,
+      showDriverStore.value,
+      showPluginCenter.value,
+      activeTab.value?.mode,
+      activeTab.value?.tableInfoTab,
+      activeTab.value?.sourceView,
+      activeTab.value?.connectionId,
+      activeTab.value?.database,
+      activeTab.value?.catalog,
+      activeTab.value?.schema,
+      activeTab.value?.objectSource?.name,
+      activeTab.value?.objectSource?.objectType,
+      activeTab.value?.objectSource?.signature,
+      activeTab.value?.ddlViewer?.tableName,
+      activeTab.value?.structureTableName,
+      activeTab.value?.tableMeta?.schema,
+      activeTab.value?.tableMeta?.catalog,
+      activeTab.value?.tableMeta?.database,
+      activeTab.value?.tableMeta?.tableName,
+    ] as const,
+  () => {
+    const entry = currentGlobalNavigationEntry();
+    if (entry) navigationStore.record(entry);
+  },
+  { immediate: true },
 );
 
 watch(
@@ -3769,18 +3824,34 @@ function activateAdjacentTab(direction: -1 | 1): boolean {
   return activateTabByIndex(nextIndex);
 }
 
-function activateTabFromHistory(direction: -1 | 1): boolean {
-  const move = moveInTabNavigationHistory(tabNavigationHistory.value, direction, new Set(queryStore.tabs.map((tab) => tab.id)), queryStore.activeTabId);
-  if (!move) return false;
+async function navigateGlobal(direction: -1 | 1): Promise<boolean> {
+  const previousHistory = navigationStore.snapshot();
+  const entry = navigationStore.move(direction, (candidate) => {
+    if (candidate.surface === "query") return Boolean(candidate.tabId && queryStore.tabs.some((tab) => tab.id === candidate.tabId));
+    if (candidate.surface === "settings") return settingsPageTabOpen.value;
+    if (candidate.surface === "driverStore") return driverStoreTabOpen.value;
+    if (candidate.surface === "pluginCenter") return pluginCenterTabOpen.value;
+    return false;
+  });
+  if (!entry) return false;
 
-  const previousHistory = tabNavigationHistory.value;
-  tabNavigationHistory.value = move.history;
-  pendingTabHistoryNavigationId = move.tabId;
-  if (activateQueryTab(move.tabId)) return true;
-
-  tabNavigationHistory.value = previousHistory;
-  pendingTabHistoryNavigationId = null;
-  return false;
+  const restoreSerial = navigationStore.beginRestore();
+  try {
+    const restored = await restoreGlobalNavigationEntry(entry, {
+      activateQueryTab,
+      activateSettings: activateSettingsPage,
+      activateDriverStore: () => openDriverStorePage(),
+      activatePluginCenter: () => openPluginCenterPage(),
+    });
+    if (!restored) {
+      navigationStore.restoreSnapshot(previousHistory);
+      return false;
+    }
+    await nextTick();
+    return navigationStore.isCurrentRestore(restoreSerial);
+  } finally {
+    navigationStore.endRestore(restoreSerial);
+  }
 }
 
 const tabSwitcherTabs = computed(() => tabSwitcherOrder(queryStore.tabs, queryStore.recentTabIds));
@@ -4077,7 +4148,14 @@ async function handleKeydown(e: KeyboardEvent) {
     }
     return;
   }
-  if (handleTabHistoryNavigationShortcut(e, shortcuts, activateTabFromHistory)) {
+  if (
+    handleTabHistoryNavigationShortcut(e, shortcuts, (direction) => {
+      const available = direction < 0 ? navigationStore.canGoBack : navigationStore.canGoForward;
+      if (!available) return false;
+      void navigateGlobal(direction);
+      return true;
+    })
+  ) {
     e.preventDefault();
     e.stopPropagation();
     return;

@@ -13,7 +13,7 @@ import RedisGroupHeader from "./RedisGroupHeader.vue";
 import { createRedisKeyViewYield } from "@/lib/redis/redisKeyViewScheduler";
 
 const props = defineProps<{ keys: readonly RedisKeyInfo[]; config: RedisKeyGrouping; separator: string; scope: string; structureRevision: number; selected: string | null; checked: ReadonlySet<string>; busy: boolean; metadataEpoch: number; treeAllowed?: boolean }>();
-const emit = defineEmits<{ select: [RedisKeyInfo]; check: [RedisKeyInfo, MouseEvent]; delete: [RedisKeyInfo, MouseEvent]; copy: [RedisKeyInfo]; scroll: [Event]; resize: []; requestList: [] }>();
+const emit = defineEmits<{ select: [RedisKeyInfo]; check: [RedisKeyInfo, MouseEvent]; pointerdown: [RedisKeyInfo, PointerEvent]; delete: [RedisKeyInfo, MouseEvent]; copy: [RedisKeyInfo]; scroll: [Event]; resize: []; requestList: [] }>();
 const { t } = useI18n();
 const expanded = shallowRef(new Set<string>());
 const working = ref(false);
@@ -94,6 +94,7 @@ function firstUnobscuredRowIndex() {
 }
 defineExpose({
   getScrollElement: () => scroller.value?.$el as HTMLElement | undefined,
+  getKeyRawsInDisplayOrder: () => source.filter((row): row is Extract<RedisGroupedRow, { kind: "key" }> => row.kind === "key").map((row) => row.key.key_raw),
   getViewportAnchor: () => {
     const rowIndex = firstUnobscuredRowIndex();
     const row = source[rowIndex];
@@ -213,10 +214,12 @@ onDeactivated(() => {
             />
             <CustomContextMenu v-else :items="[{ label: t('redis.copyKeyName'), icon: Copy, action: () => emit('copy', item.key) }]" v-slot="{ onContextMenu }">
               <div
+                :data-redis-key-raw="item.key.key_raw"
                 class="group flex h-[30px] cursor-pointer items-center gap-1 border-b px-2 text-[13px] hover:bg-accent/40"
                 :class="selected === item.key.key_raw ? 'bg-accent' : checked.has(item.key.key_raw) ? 'bg-primary/10' : ''"
                 :style="{ paddingLeft: `${8 + item.depth * 10}px` }"
                 @click="emit('select', item.key)"
+                @pointerdown="emit('pointerdown', item.key, $event)"
                 @contextmenu="onContextMenu"
               >
                 <input type="checkbox" :checked="checked.has(item.key.key_raw)" :disabled="busy" :aria-label="item.key.key_display" @click.stop="emit('check', item.key, $event)" />

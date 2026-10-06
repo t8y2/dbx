@@ -182,6 +182,7 @@ const keyMetadataEpoch = ref(0);
 /** Bumped only when a TTL refresh changes membership in the no-expiry projection. */
 const noExpiryProjectionEpoch = ref(0);
 const selectionAnchorRowId = ref<string | null>(null);
+const dragSelection = ref<{ startRaw: string; baseChecked: Set<string>; active: boolean; startX: number; startY: number } | null>(null);
 const selectedGroupLeafCounts = shallowRef<Map<string, number>>(new Map());
 const deletingKeys = ref(false);
 const showBatchExpiryDialog = ref(false);
@@ -744,6 +745,48 @@ function setKeysChecked(keyRaws: Iterable<string>, checked: boolean) {
   // Always recompute parent counts from the full leaf set so parent/child never drift.
   selectedGroupLeafCounts.value = groupLeafCountsFromChecked(nextChecked);
   selectionEpoch.value++;
+}
+
+function dragSelectionRows(startRaw: string, endRaw: string, baseChecked: ReadonlySet<string>) {
+  const groupedDisplayKeys = customGrouping.value.enabled ? groupedKeyListRef.value?.getKeyRawsInDisplayOrder?.() : undefined;
+  const keys = groupedDisplayKeys?.length ? groupedDisplayKeys : visibleRows.value.flatMap((row) => (row.node.kind === "leaf" ? [row.node.keyRaw] : []));
+  const start = keys.indexOf(startRaw);
+  const end = keys.indexOf(endRaw);
+  if (start < 0 || end < 0) return;
+  const range = new Set(keys.slice(Math.min(start, end), Math.max(start, end) + 1));
+  // Keep earlier batches selected, while letting the current drag range shrink
+  // or expand as the pointer moves back and forth. Each row is toggled against
+  // the selection snapshot, so mixed ranges add unselected rows and remove
+  // selected rows in the same gesture.
+  const next = new Set(baseChecked);
+  for (const keyRaw of range) {
+    if (baseChecked.has(keyRaw)) next.delete(keyRaw);
+    else next.add(keyRaw);
+  }
+  checkedKeys.value = next;
+  selectedGroupLeafCounts.value = groupLeafCountsFromChecked(next);
+  selectionEpoch.value++;
+}
+
+function onKeyPointerDown(node: RedisKeyTreeNode, event: PointerEvent) {
+  if (event.button !== 0 || selectionBusy.value || node.kind !== "leaf" || (event.target as HTMLElement | null)?.closest("input,button")) return;
+  dragSelection.value = { startRaw: node.keyRaw, baseChecked: new Set(checkedKeys.value), active: false, startX: event.clientX, startY: event.clientY };
+}
+
+function onKeyPointerMove(event: PointerEvent) {
+  const drag = dragSelection.value;
+  if (!drag || selectionBusy.value) return;
+  if (!drag.active && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 4) return;
+  const row = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-redis-key-raw]");
+  const endRaw = row?.dataset.redisKeyRaw;
+  if (!endRaw) return;
+  drag.active = true;
+  event.preventDefault();
+  dragSelectionRows(drag.startRaw, endRaw, drag.baseChecked);
+}
+
+function onKeyPointerUp() {
+  dragSelection.value = null;
 }
 
 function nodeKeyRaws(node: RedisKeyTreeNode): string[] {
@@ -3059,6 +3102,8 @@ function onCommandInputKeydown(event: KeyboardEvent) {
 }
 
 onMounted(async () => {
+  window.addEventListener("pointermove", onKeyPointerMove);
+  window.addEventListener("pointerup", onKeyPointerUp);
   resumeRedisBrowserBackgroundWork();
   void autofocusSearchOnce();
   try {
@@ -3092,6 +3137,8 @@ onActivated(async () => {
 onDeactivated(pauseRedisBrowserBackgroundWork);
 
 onUnmounted(() => {
+  window.removeEventListener("pointermove", onKeyPointerMove);
+  window.removeEventListener("pointerup", onKeyPointerUp);
   pauseRedisBrowserBackgroundWork();
   if (redisInfiniteScrollFrame) cancelAnimationFrame(redisInfiniteScrollFrame);
   redisInfiniteScrollFrame = 0;
@@ -3429,6 +3476,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
             @scroll="onRedisKeyScroll"
             @resize="maybeAutoLoadMoreRedisKeys"
             @select="(key) => onRowClick(redisKeyToFlatTreeRow(key, db).node)"
+            @pointerdown="(key, event) => onKeyPointerDown(redisKeyToFlatTreeRow(key, db).node, event)"
             @check="(key, event) => toggleNodeCheck(redisKeyToFlatTreeRow(key, db).node, event)"
             @copy="(key) => copyRedisKeyName(key.key_display)"
             @delete="(key, event) => requestKeyDelete(redisKeyToFlatTreeRow(key, db).node, event)"
@@ -3457,6 +3505,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
             <template #default="{ item: row }">
               <CustomContextMenu :items="redisKeyContextMenuItems(row.node)" v-slot="{ onContextMenu, isOpen }">
                 <div
+                  :data-redis-key-raw="row.node.kind === 'leaf' ? row.node.keyRaw : undefined"
                   class="flex items-center gap-2 border-b px-1.5 text-[13px] cursor-pointer select-none group"
                   :class="[
                     isOpen || (row.node.kind === 'leaf' && selectedKeyRaw === row.node.keyRaw) ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/40',
@@ -3464,6 +3513,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                   ]"
                   :style="{ height: '30px' }"
                   @click="onRowClick(row.node, $event)"
+                  @pointerdown="onKeyPointerDown(row.node, $event)"
                   @contextmenu="(event) => onRedisRowContextMenu(event, row.node, onContextMenu)"
                 >
                   <div class="min-w-0 flex flex-1 items-center gap-1 overflow-hidden" :style="{ paddingLeft: `${4 + row.depth * 10}px` }">

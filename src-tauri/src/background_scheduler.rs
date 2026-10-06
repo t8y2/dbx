@@ -497,7 +497,14 @@ pub fn run_if_requested() -> bool {
             let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
             dbx_core::sql_dialect::dialect_loader::register_core_dialects();
             let storage = Storage::open_unmigrated(&dir.join("dbx.db")).await?;
-            let state = Arc::new(AppState::new_with_plugin_dir(storage, dir.join("plugins")));
+            // Pass this crate's version explicitly: the no-version constructor
+            // falls back to dbx-core's own CARGO_PKG_VERSION (0.1.0), which
+            // fails every plugin engine requirement ("requires DBX >=0.6.x").
+            let state = Arc::new(AppState::new_with_plugin_dir_and_app_version(
+                storage,
+                dir.join("plugins"),
+                env!("CARGO_PKG_VERSION"),
+            ));
             let store = SchedulerStore::new(&dir);
 
             let registry = Arc::new(TaskExecutorRegistry::new());

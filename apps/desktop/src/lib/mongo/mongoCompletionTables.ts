@@ -56,6 +56,7 @@ export const FIELD_QUERY_OPERATORS: MongoOperatorSpec[] = specs([
   ["$exists", "Matches documents that have the field", "$exists: true"],
   ["$type", "Matches documents by BSON type", '$type: "${string}"'],
   ["$regex", "Matches a regular expression", '$regex: "${pattern}"'],
+  ["$options", "Regular expression options", '$options: "${i}"'],
   ["$mod", "Matches values by modulo division", "$mod: [${divisor}, ${remainder}]"],
   ["$all", "Matches arrays containing all the values", "$all: [${}]"],
   ["$elemMatch", "Matches arrays with an element matching all criteria", "$elemMatch: { ${} }"],
@@ -329,6 +330,11 @@ export const EXPRESSION_OPERATORS: MongoOperatorSpec[] = specs([
   ["$isoWeek", "ISO week number of a date", '$isoWeek: "$${field}"'],
   ["$isoWeekYear", "ISO week-numbering year of a date", '$isoWeekYear: "$${field}"'],
   ["$isoDayOfWeek", "ISO day of the week of a date", '$isoDayOfWeek: "$${field}"'],
+  // Bitwise
+  ["$bitAnd", "Returns the bitwise AND of an array of numbers", "$bitAnd: [${}]"],
+  ["$bitOr", "Returns the bitwise OR of an array of numbers", "$bitOr: [${}]"],
+  ["$bitXor", "Returns the bitwise XOR of an array of numbers", "$bitXor: [${}]"],
+  ["$bitNot", "Returns the bitwise NOT of a number", "$bitNot: ${}"],
   // Types and misc
   ["$type", "Returns the BSON type of a value", "$type: ${}"],
   ["$convert", "Converts a value to a given type", '$convert: { input: ${}, to: "${string}" }'],
@@ -426,6 +432,10 @@ const JSON_SCHEMA_KEYWORDS: Spec[] = [
  * object of the update operator.
  */
 export const OPERATOR_SUB_KEYS: Record<string, MongoOperatorSpec[]> = {
+  roles: specs([
+    ["role", "Name of the role", 'role: "${read}"'],
+    ["db", "Database on which the role is granted", 'db: "${admin}"'],
+  ]),
   $text: specs([
     ["$search", "Words or phrases to search for", '$search: "${text}"'],
     ["$language", "Language for stemming and stop words", '$language: "${en}"'],
@@ -509,6 +519,24 @@ const BSON_TYPE_ALIASES: Spec[] = [
  * gets a well-formed literal; numbers do not.
  */
 export const ENUM_VALUES: Record<string, MongoOperatorSpec[]> = {
+  builtInRole: specs([
+    ["read", "Provides reading data on all non-system collections", '"read"'],
+    ["readWrite", "Provides all the privileges of the read role plus ability to modify data", '"readWrite"'],
+    ["dbAdmin", "Provides administrative tasks such as schema-related tasks", '"dbAdmin"'],
+    ["dbOwner", "Provides all privileges of readWrite, dbAdmin, and userAdmin", '"dbOwner"'],
+    ["userAdmin", "Provides ability to create and modify roles and users on the current database", '"userAdmin"'],
+    ["clusterAdmin", "Provides highest cluster-level administrative privileges", '"clusterAdmin"'],
+    ["clusterManager", "Provides management and monitoring actions", '"clusterManager"'],
+    ["clusterMonitor", "Provides read-only access to monitoring tools", '"clusterMonitor"'],
+    ["hostManager", "Provides ability to monitor and manage servers", '"hostManager"'],
+    ["backup", "Provides privileges needed to back up data", '"backup"'],
+    ["restore", "Provides privileges needed to restore data", '"restore"'],
+    ["readAnyDatabase", "Provides the same privileges as read on all databases except local and config", '"readAnyDatabase"'],
+    ["readWriteAnyDatabase", "Provides the same privileges as readWrite on all databases except local and config", '"readWriteAnyDatabase"'],
+    ["userAdminAnyDatabase", "Provides the same privileges as userAdmin on all databases except local and config", '"userAdminAnyDatabase"'],
+    ["dbAdminAnyDatabase", "Provides the same privileges as dbAdmin on all databases except local and config", '"dbAdminAnyDatabase"'],
+    ["root", "Provides access to the operations and all the resources of the readWriteAnyDatabase, dbAdminAnyDatabase, userAdminAnyDatabase, clusterAdmin, restore, and backup combined", '"root"'],
+  ]),
   $type: specs(BSON_TYPE_ALIASES),
   bsonType: specs(BSON_TYPE_ALIASES),
   $options: specs([

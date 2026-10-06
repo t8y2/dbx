@@ -426,7 +426,7 @@ test("offers whole-filter operators at the top level and field operators under a
   assert.ok(under.includes("$oid"));
   assert.equal(under.includes("$or"), false, "$or is not valid under a field");
   assert.equal(under.includes("$and"), false);
-  assert.deepEqual(labels("db.users.find({ _id: { $o", { fields }), ["$oid"]);
+  assert.deepEqual(labels("db.users.find({ _id: { $o", { fields }), ["$options", "$oid"]);
 
   // Fields lead when nothing has been typed yet.
   const bare = labels("db.users.find({ ", { fields });
@@ -1537,6 +1537,23 @@ test("every suggested sub-document key and enumerated value parses in the positi
     clusteredIndex: (body) => `db.createCollection("x", { clusteredIndex: { ${body} } })`,
     range: (body) => `db.users.aggregate([{ $densify: { field: "t", range: { ${body} } } }])`,
     fillOutput: (body) => `db.users.aggregate([{ $fill: { output: { score: { ${body} } } } }])`,
+    roles: (body) => `db.createUser({ user: "x", pwd: "y", roles: [ { ${body} } ] })`,
+    $dateToString: (body) => `db.users.aggregate([{ $project: { d: { $dateToString: { ${body} } } } }])`,
+    $dateFromParts: (body) => `db.users.aggregate([{ $project: { d: { $dateFromParts: { ${body} } } } }])`,
+    $dateToParts: (body) => `db.users.aggregate([{ $project: { d: { $dateToParts: { ${body} } } } }])`,
+    $trim: (body) => `db.users.aggregate([{ $project: { d: { $trim: { ${body} } } } }])`,
+    $ltrim: (body) => `db.users.aggregate([{ $project: { d: { $ltrim: { ${body} } } } }])`,
+    $rtrim: (body) => `db.users.aggregate([{ $project: { d: { $rtrim: { ${body} } } } }])`,
+    $replaceOne: (body) => `db.users.aggregate([{ $project: { d: { $replaceOne: { ${body} } } } }])`,
+    $replaceAll: (body) => `db.users.aggregate([{ $project: { d: { $replaceAll: { ${body} } } } }])`,
+    $regexMatch: (body) => `db.users.aggregate([{ $project: { d: { $regexMatch: { ${body} } } } }])`,
+    $regexFind: (body) => `db.users.aggregate([{ $project: { d: { $regexFind: { ${body} } } } }])`,
+    $regexFindAll: (body) => `db.users.aggregate([{ $project: { d: { $regexFindAll: { ${body} } } } }])`,
+    $filter: (body) => `db.users.aggregate([{ $project: { d: { $filter: { ${body} } } } }])`,
+    $map: (body) => `db.users.aggregate([{ $project: { d: { $map: { ${body} } } } }])`,
+    $reduce: (body) => `db.users.aggregate([{ $project: { d: { $reduce: { ${body} } } } }])`,
+    $cond: (body) => `db.users.aggregate([{ $project: { d: { $cond: { ${body} } } } }])`,
+    $switch: (body) => `db.users.aggregate([{ $project: { d: { $switch: { ${body} } } } }])`,
   };
   for (const [operator, keys] of Object.entries(OPERATOR_SUB_KEYS)) {
     const build = keyCommands[operator];
@@ -1572,6 +1589,7 @@ test("every suggested sub-document key and enumerated value parses in the positi
     locale: (value) => `db.users.find({}).collation({ locale: ${value} })`,
     whenMatched: (value) => `db.users.aggregate([{ $merge: { into: "out", whenMatched: ${value} } }])`,
     whenNotMatched: (value) => `db.users.aggregate([{ $merge: { into: "out", whenNotMatched: ${value} } }])`,
+    builtInRole: (value) => `db.createUser({ user: "x", pwd: "y", roles: [ { role: ${value} } ] })`,
   };
   for (const [enumKey, values] of Object.entries(ENUM_VALUES)) {
     const build = valueCommands[enumKey];

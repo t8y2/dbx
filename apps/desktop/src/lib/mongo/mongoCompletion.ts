@@ -1352,13 +1352,14 @@ const OPTION_COLLECTION_KEYS: Record<string, ReadonlySet<string>> = {
 };
 
 /** Option keys whose value is a filter document. */
-const FILTER_OPTION_KEYS = new Set(["partialFilterExpression", "validator"]);
+const FILTER_OPTION_KEYS = new Set(["partialFilterExpression", "validator", "filter", "query", "updates", "deletes"]);
 
 /** Option keys whose value is a document with its own fixed keys, and the value sets inside it. */
 const SUB_DOCUMENT_OPTION_KEYS: Record<string, Record<string, string>> = {
   collation: { locale: "locale", caseFirst: "caseFirst", alternate: "alternate", maxVariable: "maxVariable", strength: "strength" },
   timeseries: { granularity: "granularity" },
   clusteredIndex: {},
+  roles: { role: "builtInRole" },
 };
 
 function classifyMethodOptions(method: string, scan: MongoCallScan): MongoCursorClass {
@@ -1405,8 +1406,15 @@ function classifyCollation(scan: MongoCallScan, rootIndex: number): MongoCursorC
 /** A one-level document with a fixed key set (`OPERATOR_SUB_KEYS[operator]`) and, for some keys, a fixed value set. */
 function classifySubDocument(scan: MongoCallScan, rootIndex: number, operator: string, valueEnums: Record<string, string>): MongoCursorClass {
   const inner = innermost(scan);
-  if (!inner || inner.kind !== "object" || innerDepth(scan, rootIndex) !== 0) return { mode: "none" };
+  const depth = innerDepth(scan, rootIndex);
+  if (!inner || inner.kind !== "object") return { mode: "none" };
+
+  // Allow depth 0 (direct object) or depth 1 (array of objects)
+  if (depth > 1) return { mode: "none" };
+  if (depth === 1 && scan.stack[scan.stack.length - 2]?.kind !== "array") return { mode: "none" };
+
   if (scan.inValue) {
+    if (operator === "roles" && scan.valueKey === "db") return { mode: "database" };
     const enumKey = valueEnums[scan.valueKey ?? ""];
     return enumKey ? { mode: "enumValue", enumKey } : { mode: "none" };
   }
@@ -1540,43 +1548,51 @@ function stageStringValueMode(stage: string): MongoCompletionMode {
 
 function classifyStageBody(stage: string, scan: MongoCallScan, bodyIndex: number): MongoCursorClass {
   if (stage === "$match") return { ...classifyFilter(scan, bodyIndex), stage };
-  if (stage === "$group") return { mode: classifyGroup(scan, bodyIndex), stage };
+  if (stage === "$group") return { ...classifyGroup(scan, bodyIndex), stage };
   if (stage === "$sort") return { ...classifyKeyMap(scan, bodyIndex, "sort"), stage };
   if (stage === "$unset") return { mode: innermost(scan)?.kind === "array" ? "fieldPath" : "none", stage };
   if (OPTION_STAGES.has(stage)) return classifyStageOptions(stage, scan, bodyIndex);
   // `$project`-shaped stages and anything unmodelled: keys are field names, values are expressions.
-  return { mode: classifyProjection(scan, bodyIndex), stage };
+  return { ...classifyProjection(scan, bodyIndex), stage };
 }
 
-function classifyGroup(scan: MongoCallScan, bodyIndex: number): MongoCompletionMode {
+function classifyGroup(scan: MongoCallScan, bodyIndex: number): MongoCursorClass {
   const depth = innerDepth(scan, bodyIndex);
-  if (depth < 0) return "none";
+  if (depth < 0) return { mode: "none" };
+  if (scan.inValue) return { mode: "fieldRef" };
 
-  if (depth === 0) {
-    // `{ $group: { _id: … , total: … } }` — keys are output names, `_id` is required.
-    if (!scan.inValue) return "field";
-    return scan.valueKey === "_id" ? "fieldRef" : "none";
+  const inner = innermost(scan);
+  if (isExpressionArray(scan)) return { mode: "fieldRef" };
+  if (inner?.kind !== "object") return { mode: "none" };
+
+  if (depth === 0) return { mode: "field" };
+  // One level in: `_id: { … }` builds a compound key, anything else is an accumulator.
+  if (depth === 1) {
+    if (inner.key === "_id") return { mode: "expression" };
+    return { mode: "accumulator" };
   }
 
-  if (scan.inValue) return "fieldRef";
+  if (inner.key?.startsWith("$")) {
+    return { mode: "operatorField", operator: inner.key };
+  }
 
-  const inner = innermost(scan);
-  if (isExpressionArray(scan)) return "fieldRef";
-  if (inner?.kind !== "object") return "none";
-  // One level in: `_id: { … }` builds a compound key, anything else is an accumulator.
-  if (depth === 1) return inner.key === "_id" ? "expression" : "accumulator";
-  return "expression";
+  return { mode: "expression" };
 }
 
-function classifyProjection(scan: MongoCallScan, bodyIndex: number): MongoCompletionMode {
+function classifyProjection(scan: MongoCallScan, bodyIndex: number): MongoCursorClass {
   const depth = innerDepth(scan, bodyIndex);
-  if (depth < 0) return "none";
-  if (scan.inValue) return "fieldRef";
+  if (depth < 0) return { mode: "none" };
+  if (scan.inValue) return { mode: "fieldRef" };
 
   const inner = innermost(scan);
-  if (isExpressionArray(scan)) return "fieldRef";
-  if (inner?.kind !== "object") return "none";
-  return depth === 0 ? "field" : "expression";
+  if (isExpressionArray(scan)) return { mode: "fieldRef" };
+  if (inner?.kind !== "object") return { mode: "none" };
+
+  if (depth > 0 && inner.key?.startsWith("$")) {
+    return { mode: "operatorField", operator: inner.key };
+  }
+
+  return { mode: depth === 0 ? "field" : "expression" };
 }
 
 function classifyStageOptions(stage: string, scan: MongoCallScan, bodyIndex: number): MongoCursorClass {
@@ -2148,20 +2164,63 @@ function matchCursorMethodDot(beforeCursor: string): { find: boolean; countable:
   const chain = beforeCursor.slice(closeParen + 1);
   if (!/\.\s*[\w$-]*$/.test(chain)) return null;
 
+  let pos = closeParen + 1;
+  let isCountable = true;
+  let isTerminal = false;
   const isFind = lastMatch[1] === "find";
-  if (/\.\s*(?:count|explain)\s*\([^()]*\)/.test(chain)) {
+  const validMethods = isFind ? ["sort", "skip", "limit", "collation", "toArray", "pretty", "hint", "batchSize", "maxTimeMS", "comment"] : ["toArray", "pretty"];
+
+  while (pos < beforeCursor.length) {
+    const nextDot = beforeCursor.indexOf(".", pos);
+    if (nextDot === -1) break;
+
+    const afterDot = beforeCursor.slice(nextDot + 1);
+    const methodMatch = afterDot.match(/^\s*([\w$]+)\s*\(/);
+
+    // If there's no next method call but there is a dot, we are typing the next method name.
+    if (!methodMatch) {
+      if (/^\s*[\w$-]*$/.test(afterDot)) {
+        // Typing the method.
+        break;
+      } else {
+        // Something else, invalid chain.
+        return null;
+      }
+    }
+
+    const methodName = methodMatch[1];
+    const methodOpenParen = nextDot + 1 + methodMatch[0].length - 1;
+    const methodCloseParen = findMatchingParen(beforeCursor, methodOpenParen);
+
+    if (methodName === "count" || methodName === "explain") {
+      isTerminal = true;
+    } else if (!validMethods.includes(methodName)) {
+      return null;
+    } else {
+      isCountable = false; // sort/limit/etc makes it no longer a pure find() that count() can easily attach to, but actually count() can attach after sort. Wait, the original code had: countable: /^\s*\.\s*[\w$-]*$/.test(chain). So if any methods were chained before the current dot, it's not countable.
+    }
+
+    if (methodCloseParen === -1) {
+      // Incomplete method arguments, so we aren't typing a method dot
+      return null;
+    }
+
+    pos = methodCloseParen + 1;
+  }
+
+  if (isTerminal) {
     return { find: isFind, countable: false, terminal: true };
   }
 
-  if (isFind) {
-    if (!/^(?:\s*\.\s*(?:sort|skip|limit|collation|toArray|pretty)\s*\([^()]*\))*\s*\.\s*[\w$-]*$/.test(chain)) return null;
-    return { find: true, countable: /^\s*\.\s*[\w$-]*$/.test(chain) };
+  if (!isFind) {
+    return { find: false, countable: false };
   }
 
-  if (!/^(?:\s*\.\s*(?:toArray|pretty)\s*\([^()]*\))*\s*\.\s*[\w$-]*$/.test(chain)) {
-    return { find: false, countable: false, terminal: true };
-  }
-  return { find: false, countable: false };
+  // Countable if there was no method call after find() before this dot.
+  // wait, our loop updates pos to methodCloseParen + 1 if there's a valid method.
+  // So if we ever found a method call, it's not countable? The original code said:
+  // return { find: true, countable: /^\s*\.\s*[\w$-]*$/.test(chain) };
+  return { find: true, countable: isCountable };
 }
 
 /**

@@ -4,6 +4,9 @@
 
 export const schedulerEn = {
   title: "Scheduled Tasks",
+  taskProviders: {
+    databaseBackup: "Database backup",
+  },
   tabs: {
     tasks: "Tasks",
     runs: "Run history",
@@ -44,9 +47,6 @@ export const schedulerEn = {
   editor: {
     createTitle: "New scheduled task",
     editTitle: "Edit scheduled task",
-    sectionBasic: "Basics",
-    sectionProvider: "Provider",
-    sectionConnection: "Connection",
     sectionConfig: "Provider settings",
     sectionTrigger: "Trigger",
     sectionExecution: "Execution policy",
@@ -79,7 +79,7 @@ export const schedulerEn = {
     saved: "Task saved",
   },
   trigger: {
-    type: "Trigger type",
+    type: "Trigger",
     manual: "Manual",
     once: "Once",
     interval: "Interval",
@@ -207,6 +207,9 @@ export const schedulerEn = {
 
 export const schedulerZhCN = {
   title: "计划任务",
+  taskProviders: {
+    databaseBackup: "数据库备份",
+  },
   tabs: {
     tasks: "任务",
     runs: "运行记录",
@@ -247,9 +250,6 @@ export const schedulerZhCN = {
   editor: {
     createTitle: "新建计划任务",
     editTitle: "编辑计划任务",
-    sectionBasic: "基本信息",
-    sectionProvider: "任务提供方",
-    sectionConnection: "连接",
     sectionConfig: "提供方配置",
     sectionTrigger: "触发方式",
     sectionExecution: "执行策略",
@@ -282,7 +282,7 @@ export const schedulerZhCN = {
     saved: "任务已保存",
   },
   trigger: {
-    type: "触发类型",
+    type: "触发方式",
     manual: "手动",
     once: "定时一次",
     interval: "固定间隔",
@@ -410,6 +410,9 @@ export const schedulerZhCN = {
 
 export const schedulerZhTW = {
   title: "排程任務",
+  taskProviders: {
+    databaseBackup: "資料庫備份",
+  },
   tabs: {
     tasks: "任務",
     runs: "執行紀錄",
@@ -450,9 +453,6 @@ export const schedulerZhTW = {
   editor: {
     createTitle: "新增排程任務",
     editTitle: "編輯排程任務",
-    sectionBasic: "基本資訊",
-    sectionProvider: "任務提供方",
-    sectionConnection: "連線",
     sectionConfig: "提供方設定",
     sectionTrigger: "觸發方式",
     sectionExecution: "執行策略",
@@ -485,7 +485,7 @@ export const schedulerZhTW = {
     saved: "任務已儲存",
   },
   trigger: {
-    type: "觸發類型",
+    type: "觸發方式",
     manual: "手動",
     once: "定時一次",
     interval: "固定間隔",

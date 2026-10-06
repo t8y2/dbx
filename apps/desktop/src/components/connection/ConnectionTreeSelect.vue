@@ -13,7 +13,7 @@ import type { ConnectionConfig, SidebarLayout } from "@/types/database";
 const props = withDefaults(
   defineProps<{
     modelValue: string;
-    connections: ConnectionConfig[];
+    connections: readonly ConnectionConfig[];
     layout: SidebarLayout;
     placeholder: string;
     searchPlaceholder: string;

@@ -23,14 +23,17 @@ import type { SchedulerTaskProviderDescriptor, SchedulerTaskTriggerContribution,
 import SchedulerExecutionPolicyFields from "./SchedulerExecutionPolicyFields.vue";
 import SchedulerTaskFormRenderer from "./SchedulerTaskFormRenderer.vue";
 import SchedulerTriggerFields from "./SchedulerTriggerFields.vue";
+import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
+import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
+import type { ConnectionConfig } from "@/types/database";
 
 const props = defineProps<{
   open: boolean;
   /** Null = create. */
   task: TaskDefinition | null;
   providers: readonly SchedulerTaskProviderDescriptor[];
-  connections: ReadonlyArray<{ id: string; name: string }>;
+  connections: readonly ConnectionConfig[];
 }>();
 
 const emit = defineEmits<{
@@ -40,6 +43,7 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const { toast } = useToast();
+const connectionStore = useConnectionStore();
 
 const draft = ref<TaskDefinition | null>(null);
 const formValues = ref<SchedulerFormValues>({});
@@ -52,6 +56,25 @@ const isCreate = computed(() => !props.task);
 const selectedProvider = computed(() => findProvider(props.providers, draft.value?.providerId));
 const selectedTrigger = computed(() => findTrigger(selectedProvider.value, storedOrFullTriggerId()));
 const configFields = computed(() => selectedTrigger.value?.fields ?? []);
+
+// The create dialog offers plugin providers only: the builtin backup provider
+// is created from the backup settings during the migration window (plan
+// §41–45). Editing keeps the full list so migrated backup tasks still resolve
+// their (locked) provider.
+const selectableProviders = computed(() => (isCreate.value ? props.providers.filter((provider) => !provider.builtin) : props.providers));
+
+/**
+ * Narrow the connection list to the types the selected provider declares. A
+ * plugin's `connection_providers` entries may be plugin connection ids rather
+ * than database types; when nothing matches they are not db_types, and the
+ * list stays unfiltered instead of hiding every connection.
+ */
+const providerConnections = computed(() => {
+  const declared = selectedProvider.value?.connectionProviders ?? [];
+  if (declared.length === 0) return props.connections;
+  const matched = props.connections.filter((connection) => connection.db_type && declared.includes(connection.db_type));
+  return matched.length > 0 ? matched : props.connections;
+});
 
 function storedOrFullTriggerId(): string | undefined {
   const stored = draft.value?.config?.["__triggerId"];
@@ -119,8 +142,17 @@ function selectProvider(providerId: string) {
   if (!draft.value) return;
   const provider = findProvider(props.providers, providerId);
   draft.value.providerId = providerId;
-  draft.value.providerType = "plugin";
-  draft.value.target = { connectionId: draft.value.target?.connectionId ?? "", pluginId: provider?.pluginId ?? null, resourceId: null };
+  draft.value.providerType = provider?.builtin ? "builtin" : "plugin";
+  const previousConnectionId = draft.value.target?.connectionId ?? "";
+  const matchedConnections = (() => {
+    const declared = provider?.connectionProviders ?? [];
+    if (declared.length === 0) return props.connections;
+    const matched = props.connections.filter((connection) => connection.db_type && declared.includes(connection.db_type));
+    return matched.length > 0 ? matched : props.connections;
+  })();
+  // Keep the connection only when the new provider still accepts its type.
+  const connectionId = matchedConnections.some((connection) => connection.id === previousConnectionId) ? previousConnectionId : "";
+  draft.value.target = { connectionId, pluginId: provider?.builtin ? null : (provider?.pluginId ?? null), resourceId: null };
   const trigger = provider?.triggers[0];
   applyTrigger(trigger);
 }
@@ -206,77 +238,70 @@ function close() {
       </DialogHeader>
 
       <div v-if="draft" class="grid gap-5 py-1">
-        <section class="space-y-3">
-          <h4 class="text-sm font-semibold">{{ t("scheduler.editor.sectionBasic") }}</h4>
-          <div class="grid gap-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
-            <div class="space-y-2">
-              <Label>{{ t("scheduler.editor.name") }}</Label>
-              <Input v-model="draft.name" data-scheduler-editor-name />
-            </div>
-            <div class="flex items-center gap-2 pb-1">
-              <Switch :model-value="draft.enabled" @update:model-value="(value: boolean) => (draft!.enabled = value)" />
-              <Label class="text-xs">{{ t("scheduler.editor.enabled") }}</Label>
-            </div>
-          </div>
-        </section>
-
-        <section class="space-y-3">
-          <h4 class="text-sm font-semibold">{{ t("scheduler.editor.sectionProvider") }}</h4>
-          <div class="grid gap-4 sm:grid-cols-2">
-            <div class="space-y-2">
-              <Label>{{ t("scheduler.editor.provider") }}</Label>
-              <Select :model-value="draft.providerId || undefined" :disabled="!isCreate || providers.length === 0" @update:model-value="(value: unknown) => typeof value === 'string' && selectProvider(value)">
-                <SelectTrigger data-scheduler-editor-provider><SelectValue :placeholder="t('scheduler.editor.provider')" /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem v-for="provider in providers" :key="provider.providerId" :value="provider.providerId">{{ provider.label }}</SelectItem>
-                </SelectContent>
-              </Select>
-              <p v-if="providers.length === 0" class="text-xs text-destructive">{{ t("scheduler.editor.noProviders") }}</p>
-            </div>
-            <div v-if="selectedProvider && selectedProvider.triggers.length > 0" class="space-y-2">
-              <Label>{{ t("scheduler.editor.providerTrigger") }}</Label>
-              <Select :model-value="selectedTrigger ? fullTriggerId(selectedProvider.providerId, selectedTrigger) : undefined" :disabled="!isCreate || selectedProvider.triggers.length < 2" @update:model-value="(value: unknown) => typeof value === 'string' && selectTrigger(value)">
-                <SelectTrigger data-scheduler-editor-trigger><SelectValue :placeholder="t('scheduler.editor.providerTrigger')" /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem v-for="trigger in selectedProvider.triggers" :key="trigger.id" :value="fullTriggerId(selectedProvider.providerId, trigger)">
-                    <span class="flex items-center gap-2">
-                      {{ trigger.label }}
-                      <Badge v-if="trigger.mode === 'resident'" variant="outline" class="font-normal">resident</Badge>
-                      <Badge v-if="trigger.risk === 'high' || trigger.risk === 'medium'" variant="destructive" class="font-normal">{{ trigger.risk }}</Badge>
-                    </span>
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-              <p v-if="!isCreate" class="text-xs text-muted-foreground">{{ t("scheduler.editor.providerLockedHint") }}</p>
-            </div>
-          </div>
-          <div v-if="risk === 'medium'" class="flex items-start gap-2 rounded-md bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
-            <AlertTriangle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            {{ t("scheduler.editor.risk.medium") }}
-          </div>
-          <label v-if="risk === 'high'" class="flex cursor-pointer items-start gap-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive" data-scheduler-editor-risk-high>
-            <input v-model="highRiskAcknowledged" type="checkbox" class="mt-0.5 h-4 w-4 rounded border-border accent-primary" data-scheduler-editor-risk-ack />
-            <span>
-              <AlertTriangle class="mr-1 inline h-3.5 w-3.5" />
-              {{ t("scheduler.editor.risk.high") }}
-              <strong class="ml-1">{{ t("scheduler.editor.risk.highConfirm") }}</strong>
-            </span>
-          </label>
-        </section>
-
-        <section class="space-y-3">
-          <h4 class="text-sm font-semibold">{{ t("scheduler.editor.sectionConnection") }}</h4>
+        <div class="grid gap-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
           <div class="space-y-2">
-            <Label>{{ t("scheduler.editor.connection") }}</Label>
-            <Select :model-value="draft.target?.connectionId || undefined" @update:model-value="(value: unknown) => (draft!.target = { ...draft!.target, connectionId: typeof value === 'string' ? value : '' })">
-              <SelectTrigger data-scheduler-editor-connection><SelectValue :placeholder="t('scheduler.editor.connectionAny')" /></SelectTrigger>
+            <Label>{{ t("scheduler.editor.name") }}</Label>
+            <Input v-model="draft.name" data-scheduler-editor-name />
+          </div>
+          <div class="flex items-center gap-2 pb-1">
+            <Switch :model-value="draft.enabled" @update:model-value="(value: boolean) => (draft!.enabled = value)" />
+            <Label class="text-xs">{{ t("scheduler.editor.enabled") }}</Label>
+          </div>
+        </div>
+
+        <div class="grid gap-4 sm:grid-cols-2">
+          <div class="space-y-2">
+            <Label>{{ t("scheduler.editor.provider") }}</Label>
+            <Select :model-value="draft.providerId || undefined" :disabled="!isCreate || selectableProviders.length === 0" @update:model-value="(value: unknown) => typeof value === 'string' && selectProvider(value)">
+              <SelectTrigger data-scheduler-editor-provider><SelectValue :placeholder="t('scheduler.editor.provider')" /></SelectTrigger>
               <SelectContent>
-                <SelectItem v-for="connection in connections" :key="connection.id" :value="connection.id">{{ connection.name }}</SelectItem>
+                <SelectItem v-for="provider in selectableProviders" :key="provider.providerId" :value="provider.providerId">{{ provider.label }}</SelectItem>
               </SelectContent>
             </Select>
-            <p v-if="requiresConnection && !draft.target?.connectionId" class="text-xs text-destructive">{{ t("scheduler.editor.connectionRequired") }}</p>
+            <p v-if="selectableProviders.length === 0" class="text-xs text-destructive">{{ t("scheduler.editor.noProviders") }}</p>
           </div>
-        </section>
+          <div v-if="selectedProvider && selectedProvider.triggers.length > 0" class="space-y-2">
+            <Label>{{ t("scheduler.editor.providerTrigger") }}</Label>
+            <Select :model-value="selectedTrigger ? fullTriggerId(selectedProvider.providerId, selectedTrigger) : undefined" :disabled="!isCreate || selectedProvider.triggers.length < 2" @update:model-value="(value: unknown) => typeof value === 'string' && selectTrigger(value)">
+              <SelectTrigger data-scheduler-editor-trigger><SelectValue :placeholder="t('scheduler.editor.providerTrigger')" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem v-for="trigger in selectedProvider.triggers" :key="trigger.id" :value="fullTriggerId(selectedProvider.providerId, trigger)">
+                  <span class="flex items-center gap-2">
+                    {{ trigger.label }}
+                    <Badge v-if="trigger.mode === 'resident'" variant="outline" class="font-normal">resident</Badge>
+                    <Badge v-if="trigger.risk === 'high' || trigger.risk === 'medium'" variant="destructive" class="font-normal">{{ trigger.risk }}</Badge>
+                  </span>
+                </SelectItem>
+              </SelectContent>
+            </Select>
+            <p v-if="!isCreate" class="text-xs text-muted-foreground">{{ t("scheduler.editor.providerLockedHint") }}</p>
+          </div>
+        </div>
+        <div class="space-y-2" data-scheduler-editor-connection>
+          <Label>{{ t("scheduler.editor.connection") }}</Label>
+          <ConnectionTreeSelect
+            :model-value="draft.target?.connectionId || ''"
+            :connections="providerConnections"
+            :layout="connectionStore.sidebarLayout"
+            :placeholder="t('scheduler.editor.connectionAny')"
+            :search-placeholder="t('editor.searchConnection')"
+            :empty-text="t('grid.noSearchResults')"
+            @update:model-value="(value: string) => (draft!.target = { ...draft!.target, connectionId: value })"
+          />
+          <p v-if="requiresConnection && !draft.target?.connectionId" class="text-xs text-destructive">{{ t("scheduler.editor.connectionRequired") }}</p>
+        </div>
+        <div v-if="risk === 'medium'" class="flex items-start gap-2 rounded-md bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+          <AlertTriangle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          {{ t("scheduler.editor.risk.medium") }}
+        </div>
+        <label v-if="risk === 'high'" class="flex cursor-pointer items-start gap-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive" data-scheduler-editor-risk-high>
+          <input v-model="highRiskAcknowledged" type="checkbox" class="mt-0.5 h-4 w-4 rounded border-border accent-primary" data-scheduler-editor-risk-ack />
+          <span>
+            <AlertTriangle class="mr-1 inline h-3.5 w-3.5" />
+            {{ t("scheduler.editor.risk.high") }}
+            <strong class="ml-1">{{ t("scheduler.editor.risk.highConfirm") }}</strong>
+          </span>
+        </label>
 
         <section v-if="configFields.length > 0" class="space-y-3">
           <h4 class="text-sm font-semibold">{{ t("scheduler.editor.sectionConfig") }}</h4>

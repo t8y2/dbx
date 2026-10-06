@@ -14,7 +14,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 import * as schedulerApi from "@/lib/scheduler/schedulerApi";
 import { subscribeSchedulerEvents } from "@/lib/scheduler/schedulerEvents";
-import { discoverTaskProviders } from "@/lib/scheduler/schedulerProviders";
+import { builtinTaskProviders, discoverTaskProviders } from "@/lib/scheduler/schedulerProviders";
 import { isActiveRunStatus } from "@/lib/scheduler/schedulerDraft";
 import type { InstalledPlugin } from "@/types/database";
 import type { ResidentSession, SchedulerTaskProviderDescriptor, TaskDefinition, TaskRun } from "@/lib/scheduler/schedulerTypes";
@@ -46,9 +46,9 @@ const editingTask = ref<TaskDefinition | null>(null);
 const pendingDelete = ref<TaskDefinition | null>(null);
 const selectedRunId = ref("");
 
-const providers = computed<SchedulerTaskProviderDescriptor[]>(() => discoverTaskProviders(plugins.value));
+const providers = computed<SchedulerTaskProviderDescriptor[]>(() => [...builtinTaskProviders(t("scheduler.taskProviders.databaseBackup")), ...discoverTaskProviders(plugins.value)]);
 
-const connections = computed(() => connectionStore.connections.map((connection) => ({ id: connection.id, name: connection.name })));
+const connections = computed(() => connectionStore.connections);
 
 const connectionNames = computed(() => new Map(connections.value.map((connection) => [connection.id, connection.name])));
 

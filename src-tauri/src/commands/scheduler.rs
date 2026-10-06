@@ -7,7 +7,9 @@
 use std::sync::Arc;
 
 use dbx_core::connection::AppState;
+use dbx_core::scheduled_backup::BackupService;
 use dbx_core::scheduler::{
+    providers::{DatabaseBackupTaskExecutor, DATABASE_BACKUP_PROVIDER_ID},
     ResidentSession, SchedulerService, SchedulerStore, TaskArtifact, TaskDefinition, TaskError, TaskErrorKind,
     TaskExecutorRegistry, TaskLogPage, TaskLogQuery, TaskRun,
 };
@@ -22,11 +24,15 @@ const LOG_MAX_LIMIT: u64 = 5000;
 const RUN_DEFAULT_LIMIT: u32 = 100;
 const RUN_MAX_LIMIT: u32 = 1000;
 
-/// Builds the service per call. The desktop host registers real executors in
-/// the background worker (A8); until then an empty registry reports
-/// `provider_not_found` during validation.
-fn service(state: &AppState) -> SchedulerService {
-    SchedulerService::new(SchedulerStore::new(state.storage.data_dir()), Arc::new(TaskExecutorRegistry::new()))
+/// Builds the service per call. The builtin database-backup executor is
+/// registered here as well as in the background worker: without it the UI
+/// process rejects every migrated backup task with `provider_not_found`
+/// (validate/run), even though the worker could run it just fine.
+fn service(state: &Arc<AppState>) -> SchedulerService {
+    let registry = Arc::new(TaskExecutorRegistry::new());
+    let backup = BackupService::new(state.clone(), state.storage.data_dir(), None);
+    registry.register_run(DATABASE_BACKUP_PROVIDER_ID, Arc::new(DatabaseBackupTaskExecutor::new(backup)));
+    SchedulerService::new(SchedulerStore::new(state.storage.data_dir()), registry)
 }
 
 /// Test seam: build a service against an explicit data dir and registry.

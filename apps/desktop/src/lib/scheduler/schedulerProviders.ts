@@ -8,6 +8,7 @@
 // ---------------------------------------------------------------------------
 
 import type { InstalledPlugin, PluginFormField } from "@/types/database";
+import { CONSISTENT_BACKUP_DATABASE_TYPES } from "@/lib/backup/scheduledDatabaseBackup";
 import type { SchedulerTaskProviderDescriptor, SchedulerTaskTriggerContribution, TaskDefinition, TaskHealth, TaskProviderType, TaskTrigger } from "./schedulerTypes";
 
 interface ContributionLike {
@@ -45,6 +46,29 @@ function normalizeCapabilities(raw: unknown): SchedulerTaskProviderDescriptor["c
   if (!Array.isArray(raw)) return [];
   const known = ["run", "resident", "cancel", "logs", "progress", "artifacts"] as const;
   return raw.filter((item): item is (typeof known)[number] => typeof item === "string" && (known as readonly string[]).includes(item));
+}
+
+/**
+ * The builtin database-backup provider (ADR §8), described structurally —
+ * provider id + supported connection types + the single run trigger — the same
+ * shape a plugin contribution produces. Migration moves every legacy backup
+ * schedule onto this provider id, so the task center must recognize it even
+ * with no plugins installed. It is excluded from the create dialog: new backup
+ * schedules are still created in the backup settings during the migration
+ * window (plan §41–45).
+ */
+export function builtinTaskProviders(label: string): SchedulerTaskProviderDescriptor[] {
+  return [
+    {
+      providerId: "dbx.database-backup",
+      label,
+      pluginId: "dbx",
+      connectionProviders: [...CONSISTENT_BACKUP_DATABASE_TYPES],
+      capabilities: ["run", "cancel", "logs", "progress", "artifacts"],
+      triggers: [{ id: "backup", label, mode: "run", risk: "low", fields: [] }],
+      builtin: true,
+    },
+  ];
 }
 
 /**

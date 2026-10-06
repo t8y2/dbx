@@ -227,6 +227,8 @@ export interface SchedulerTaskProviderDescriptor {
   connectionProviders: string[];
   capabilities: PluginTaskCapability[];
   triggers: SchedulerTaskTriggerContribution[];
+  /** Host builtin (dbx.database-backup); not offered in the create dialog. */
+  builtin?: boolean;
 }
 
 // ---------------------------------------------------------------------------

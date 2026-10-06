@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 
 import { createApp, nextTick, type App } from "vue";
+import { createPinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "../../../i18n";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -48,9 +49,9 @@ const providers: SchedulerTaskProviderDescriptor[] = [
 ];
 
 const connections = [
-  { id: "conn-prod", name: "prod-web-01" },
-  { id: "conn-backup", name: "backup-host" },
-];
+  { id: "conn-prod", name: "prod-web-01", db_type: "mysql", host: "h", port: 3306, username: "u", password: "p" },
+  { id: "conn-backup", name: "backup-host", db_type: "postgres", host: "h", port: 5432, username: "u", password: "p" },
+] as const;
 
 function cronTask(): TaskDefinition {
   const now = new Date().toISOString();
@@ -85,6 +86,7 @@ async function mountEditor(props: Record<string, unknown>) {
     ...props,
   });
   mountedApps.push(app);
+  app.use(createPinia());
   app.use(i18n);
   app.mount(container);
   await nextTick();

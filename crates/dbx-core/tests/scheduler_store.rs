@@ -412,8 +412,7 @@ async fn migration_marker_is_idempotent_and_rolls_back_on_failure() {
 // cold-start accesses to the same fresh directory must all succeed.
 #[tokio::test]
 async fn concurrent_cold_start_accesses_all_succeed() {
-    let (dir, store) = temp_store();
-    let path = dir.path().to_path_buf();
+    let (_dir, store) = temp_store();
     let runtime = tokio::runtime::Handle::current();
 
     let handles: Vec<_> = (0..8)

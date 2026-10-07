@@ -13,6 +13,8 @@
 
 验证：`cargo test -p dbx-core` 全绿；`cargo test -p dbx --lib` 444 过 + 2 个既有环境失败（基线）；调度器 vitest 10 文件 63 用例全绿；`vue-tsc --noEmit` 干净。
 
+6. **P2 处置（后台 agent 波次，均已复跑验证）**：「runs 游标上限」经核查 web 路由自首次提交即与桌面端对齐（`RUN_SCAN_LIMIT=1000`），真实缺口只是测试，已补钳制钉住测试（ee76702f5）；「hourly Interval 文件名时间戳 UTC」确认为迁移回退——hourly 映射为 interval 触发器时丢弃 legacy 行时区，`resolve_time_zone` 按 触发器 zone → 保留的 legacy schedule 行 zone → UTC 三级解析修复（87dc5ee0c）。
+
 ## 一、总体进度（对照 docs/scheduler/README.md 的波次计划）——全部波次已完成
 
 | 阶段 | 状态 | 落点 |

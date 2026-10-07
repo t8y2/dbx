@@ -416,8 +416,8 @@ mod tests {
     use crate::state::WebState;
     use axum::http::StatusCode;
     use dbx_core::scheduler::{
-        TaskErrorKind, TaskExecutionPolicy, TaskLogEntry, TaskLogger, TaskProviderType, TaskRunStatus, TaskTarget,
-        TaskTrigger,
+        TaskErrorKind, TaskExecutionPolicy, TaskLogEntry, TaskLogger, TaskProviderType, TaskRunStatus, TaskRunTrigger,
+        TaskTarget, TaskTrigger,
     };
     use std::path::Path;
 
@@ -836,6 +836,46 @@ mod tests {
         .await
         .unwrap();
         assert!(empty.is_empty());
+    }
+
+    // -- Run limit clamping (desktop parity: default 100, scan cap 1000) --
+
+    #[tokio::test]
+    async fn runs_limit_defaults_to_100_and_clamps_oversized_requests_to_the_scan_cap() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = test_state(directory.path()).await;
+        let task = create_task_via_api(&state, "clamp").await;
+
+        // Seed one run past the scan cap so a clamped page is distinguishable
+        // from a store that simply ran out. The raw store enqueue bypasses the
+        // run_now concurrency guard; each run finishes immediately to stay
+        // under MAX_PENDING_RUNS.
+        let store = dbx_core::scheduler::SchedulerStore::new(directory.path());
+        for _ in 0..=RUN_SCAN_LIMIT {
+            let run = store.enqueue_run(task.id.clone(), TaskRunTrigger::Manual, 1, chrono::Utc::now()).await.unwrap();
+            store.finish_run(run.id, TaskRunStatus::Skipped, None, None, None).await.unwrap();
+        }
+
+        let query = |limit: Option<u32>| {
+            let state = state.clone();
+            let task_id = task.id.clone();
+            async move {
+                list_runs(
+                    State(state),
+                    Query(ListRunsQuery { task_id: Some(task_id), status: None, limit, before: None, after: None }),
+                )
+                .await
+                .unwrap()
+                .0
+            }
+        };
+
+        // limit=5000 clamps down to the 1000 scan cap instead of echoing it.
+        assert_eq!(query(Some(5000)).await.len(), RUN_SCAN_LIMIT as usize);
+        // No limit serves the 100-run default page.
+        assert_eq!(query(None).await.len(), RUN_DEFAULT_LIMIT as usize);
+        // limit=0 clamps up to a single row rather than an empty page.
+        assert_eq!(query(Some(0)).await.len(), 1);
     }
 
     // -- Logs pagination (ADR §7.3) --------------------------------------

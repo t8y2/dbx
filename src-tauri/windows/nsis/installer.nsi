@@ -95,6 +95,7 @@ Var UpdateMode
 Var NoShortcutMode
 Var WixMode
 Var OldMainBinaryName
+Var DbxElevated
 
 Name "${PRODUCTNAME}"
 BrandingText "${COPYRIGHT}"
@@ -409,6 +410,7 @@ FunctionEnd
 
 ; 5. Choose install directory page
 !define MUI_PAGE_CUSTOMFUNCTION_PRE SkipIfPassive
+!define MUI_PAGE_CUSTOMFUNCTION_LEAVE DbxEnsureInstallAccess
 !insertmacro MUI_PAGE_DIRECTORY
 
 ; 6. Start menu shortcut page
@@ -510,7 +512,99 @@ LangString dbxWin7InstallerRequired ${LANG_SIMPCHINESE} "此安装包不支持 W
 LangString dbxWin7InstallerRequired ${LANG_TRADCHINESE} "此安裝套件不支援 Windows 7 或 Windows Server 2012 R2。$\r$\n$\r$\n請改用 Windows 7 / Server 2012 R2 專用套件。$\r$\n$\r$\n是否立即開啟下載網址？"
 FileErrorText "$(dbxFileWriteError)" "$(dbxFileWriteErrorNoIgnore)"
 
+LangString dbxElevationFailed ${LANG_ENGLISH} "Administrator permission is required to install DBX in this folder. Permission was denied or the elevated installer could not be started."
+LangString dbxElevationFailed ${LANG_SIMPCHINESE} "安装到此目录需要管理员权限。授权已被拒绝，或无法启动提权后的安装程序。"
+LangString dbxElevationFailed ${LANG_TRADCHINESE} "安裝到此目錄需要系統管理員權限。授權已被拒絕，或無法啟動提升權限後的安裝程式。"
+LangString dbxElevationUserMismatch ${LANG_ENGLISH} "Please approve elevation using the same Windows account that started this installer, so DBX keeps its installation and shortcuts in the correct user profile."
+LangString dbxElevationUserMismatch ${LANG_SIMPCHINESE} "请使用启动安装程序的同一个 Windows 账户授权提权，以确保 DBX 的安装信息和快捷方式保留在正确的用户配置中。"
+LangString dbxElevationUserMismatch ${LANG_TRADCHINESE} "請使用啟動安裝程式的同一個 Windows 帳戶授權提升權限，以確保 DBX 的安裝資訊和捷徑保留在正確的使用者設定中。"
+
+; Probe without truncating the old executable. Only ACCESS_DENIED requests UAC;
+; sharing violations still go through CheckIfAppIsRunning and normal retry UI.
+Function DbxEnsureInstallAccess
+  Push $0
+  Push $1
+  Push $2
+  Push $3
+  ${If} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
+    System::Call 'kernel32::CreateFileW(w "$INSTDIR\${MAINBINARYNAME}.exe", i 0x40000000, i 7, p 0, i 3, i 0, p 0) p .r0 ?e'
+    Pop $1
+    ${If} $0 != -1
+      System::Call 'kernel32::CloseHandle(p r0)'
+    ${ElseIf} $1 = 5
+      Goto dbx_elevate
+    ${EndIf}
+  ${EndIf}
+
+  ; For a new destination, test the nearest existing parent directory.
+  StrCpy $2 $INSTDIR
+  dbx_find_parent:
+    ${IfNot} ${FileExists} "$2\*.*"
+      ${GetParent} "$2" $3
+      ${If} $3 == ""
+      ${OrIf} $3 == $2
+        Goto dbx_access_done
+      ${EndIf}
+      StrCpy $2 $3
+      Goto dbx_find_parent
+    ${EndIf}
+  System::Call 'kernel32::GetTempFileNameW(w r2, w "dbx", i 0, w .r3) i .r0 ?e'
+  Pop $1
+  ${If} $0 != 0
+    Delete "$3"
+  ${ElseIf} $1 = 5
+    Goto dbx_elevate
+  ${EndIf}
+  Goto dbx_access_done
+
+  dbx_elevate:
+    ; Never loop when elevation has already been attempted or cannot help.
+    System::Call 'shell32::IsUserAnAdmin() i .r0'
+    ${If} $0 != 0
+    ${OrIf} $DbxElevated = 1
+      Goto dbx_access_done
+    ${EndIf}
+    ${GetParameters} $2
+    StrCpy $3 $PROFILE
+    ; /D must be last and unquoted (NSIS consumes the rest of the command).
+    ; Internal flags precede /ARGS so application arguments stay intact.
+    ClearErrors
+    ExecShell "runas" "$EXEPATH" '/DBX_ELEVATED /DBX_PROFILE="$3" /DBX_LANG=$LANGUAGE $2 /D=$INSTDIR'
+    ${If} ${Errors}
+      MessageBox MB_OK|MB_ICONSTOP "$(dbxElevationFailed)" /SD IDOK
+      SetErrorLevel 740
+      Pop $3
+      Pop $2
+      Pop $1
+      Pop $0
+      Abort
+    ${EndIf}
+    SetErrorLevel 0
+    Quit
+
+  dbx_access_done:
+    Pop $3
+    Pop $2
+    Pop $1
+    Pop $0
+FunctionEnd
+
 Function .onInit
+  ${GetOptions} $CMDLINE "/DBX_ELEVATED" $DbxElevated
+  ${IfNot} ${Errors}
+    StrCpy $DbxElevated 1
+    ${GetOptions} $CMDLINE "/DBX_LANG=" $0
+    StrCpy $LANGUAGE $0
+    ; currentUser installs must not migrate registry entries to an account
+    ; entered in the UAC credential dialog.
+    ${GetOptions} $CMDLINE "/DBX_PROFILE=" $0
+    ${If} $0 != $PROFILE
+      MessageBox MB_OK|MB_ICONSTOP "$(dbxElevationUserMismatch)" /SD IDOK
+      SetErrorLevel 740
+      Quit
+    ${EndIf}
+  ${EndIf}
+
   ${GetOptions} $CMDLINE "/P" $PassiveMode
   ${IfNot} ${Errors}
     StrCpy $PassiveMode 1
@@ -527,7 +621,9 @@ Function .onInit
   ${EndIf}
 
   !if "${DISPLAYLANGUAGESELECTOR}" == "true"
-    !insertmacro MUI_LANGDLL_DISPLAY
+    ${If} $DbxElevated <> 1
+      !insertmacro MUI_LANGDLL_DISPLAY
+    ${EndIf}
   !endif
 
   ; Tauri renders fixedRuntime (and skip) as an empty install mode in NSIS;
@@ -580,6 +676,8 @@ Function .onInit
   !if "${INSTALLMODE}" == "both"
     !insertmacro MULTIUSER_INIT
   !endif
+  ; Updaters skip the directory page. Check before any uninstall or extraction.
+  Call DbxEnsureInstallAccess
 FunctionEnd
 
 

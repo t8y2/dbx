@@ -14,6 +14,7 @@
 验证：`cargo test -p dbx-core` 全绿；`cargo test -p dbx --lib` 444 过 + 2 个既有环境失败（基线）；调度器 vitest 10 文件 63 用例全绿；`vue-tsc --noEmit` 干净。
 
 6. **P2 处置（后台 agent 波次，均已复跑验证）**：「runs 游标上限」经核查 web 路由自首次提交即与桌面端对齐（`RUN_SCAN_LIMIT=1000`），真实缺口只是测试，已补钳制钉住测试（ee76702f5）；「hourly Interval 文件名时间戳 UTC」确认为迁移回退——hourly 映射为 interval 触发器时丢弃 legacy 行时区，`resolve_time_zone` 按 触发器 zone → 保留的 legacy schedule 行 zone → UTC 三级解析修复（87dc5ee0c）。
+7. **P2 处置（第二波）**：「Web 错误码 detail 载体」审计确认为真实缺口——顶层 `code` 恒为目录码 `DBX-LEGACY-0001`（违约 ADR §7.5），且 `schedulerErrorCode` 对实际服务的 body 形状失配、web 通道 `version_conflict` 特判静默失效；修复为 `AppError` 可选 `errorCode` 仅在设置时注入（其他路由逐字节不变，v1 可选字段规则钉住测试）（3452f7c5d）。遗留：`schedulerApi.ts` 归一化器可再加 JSON.parse 兜底。「OS 开机注册未接线」以官方 `tauri-plugin-autostart`（纯 Rust 侧）接线：默认关断、对账式幂等、注册失败吞掉不阻塞启动、标志入 `DesktopSettings` 并排除出云同步（设备本地）（a914f887d）。
 
 ## 一、总体进度（对照 docs/scheduler/README.md 的波次计划）——全部波次已完成
 

@@ -9,7 +9,7 @@ import { uuid } from "@/lib/common/utils";
 import { defaultTimeZone, withStoredTriggerId } from "./schedulerProviders";
 import type { SchedulerFormValues } from "./schedulerForm";
 import { configFromFormValues, defaultFormValues } from "./schedulerForm";
-import type { SchedulerTaskProviderDescriptor, SchedulerTaskTriggerContribution, TaskDefinition, TaskExecutionPolicy, TaskExecutionMode, TaskRunStatus, TaskTrigger, TaskTriggerType } from "./schedulerTypes";
+import type { SchedulerTaskProviderDescriptor, SchedulerTaskTriggerContribution, TaskDefinition, TaskExecutionPolicy, TaskExecutionMode, TaskRun, TaskRunStatus, TaskTrigger, TaskTriggerType } from "./schedulerTypes";
 
 export const TASK_TRIGGER_TYPES: readonly TaskTriggerType[] = ["manual", "once", "interval", "cron", "startup"];
 
@@ -119,6 +119,57 @@ export const ACTIVE_RUN_STATUSES: readonly TaskRunStatus[] = ["queued", "startin
 
 export function isActiveRunStatus(status: TaskRunStatus): boolean {
   return ACTIVE_RUN_STATUSES.includes(status);
+}
+
+/**
+ * A queued/starting run older than this is not "worker still spinning up" —
+ * it means nobody claims runs (worker disabled, crashed past its restart
+ * budget, or killed). The worker claims runs within one poll interval, so the
+ * threshold keeps the banner away from normal startup jitter.
+ */
+export const STALE_QUEUED_RUN_MS = 20_000;
+
+/** Whether any run has sat in a pre-running state longer than {@link STALE_QUEUED_RUN_MS}. */
+export function hasStaleQueuedRun(runs: readonly Pick<TaskRun, "status" | "createdAt">[], now = Date.now()): boolean {
+  return runs.some((run) => {
+    if (run.status !== "queued" && run.status !== "starting") return false;
+    const created = Date.parse(run.createdAt);
+    return Number.isFinite(created) && now - created > STALE_QUEUED_RUN_MS;
+  });
+}
+
+/**
+ * Banner decision: only warn when the transport reported a worker at all —
+ * the web runtime serves its engine in-process and has no detached worker to
+ * check, and a failed status fetch must not nag.
+ */
+export function workerNeedsAttention(status: { enabled: boolean; workerAlive: boolean } | null, staleQueued: boolean): boolean {
+  if (!status || !staleQueued) return false;
+  return !status.enabled || !status.workerAlive;
+}
+
+// ---------------------------------------------------------------------------
+// Session-scoped high-risk acknowledgement memory. Module state on purpose:
+// it survives dialog reopenings and route changes within one app run but
+// never an app restart, so every fresh session still confirms a `risk: high`
+// trigger once before saving it.
+// ---------------------------------------------------------------------------
+
+const highRiskAcknowledgements = new Set<string>();
+
+/** Whether this task's high-risk confirmation is already settled this session. */
+export function isHighRiskAcknowledged(taskId: string): boolean {
+  return highRiskAcknowledgements.has(taskId);
+}
+
+/** Records a confirmation; keyed by the saved (backend-assigned) task id. */
+export function rememberHighRiskAcknowledgement(taskId: string): void {
+  if (taskId.trim()) highRiskAcknowledgements.add(taskId);
+}
+
+/** Test seam: an app restart is the real reset; this stands in for it in specs. */
+export function resetHighRiskAcknowledgementsForTests(): void {
+  highRiskAcknowledgements.clear();
 }
 
 /** Duration string between two RFC3339 instants, empty when incomplete. */

@@ -20,6 +20,10 @@ export const schedulerEn = {
   refresh: "Refresh",
   loadFailed: "Failed to load scheduler data: {error}",
   retry: "Retry",
+  workerBanner: {
+    disabled: "The background scheduler worker is disabled (DBX_SCHEDULER_BACKGROUND_ENABLED=0): runs stay queued. Set it to 1 or unset it and restart the app to execute tasks.",
+    notRunning: "The background scheduler worker is not running: queued runs will not execute. Restarting the app restarts the worker.",
+  },
   providerSource: {
     builtin: "Built-in",
     plugin: "Plugin",
@@ -241,6 +245,10 @@ export const schedulerZhCN = {
   refresh: "刷新",
   loadFailed: "读取计划任务数据失败：{error}",
   retry: "重试",
+  workerBanner: {
+    disabled: "后台调度 worker 已停用（DBX_SCHEDULER_BACKGROUND_ENABLED=0）：任务会一直保持排队。将该变量设为 1 或删除后重启应用即可恢复执行。",
+    notRunning: "后台调度 worker 未运行：排队中的任务不会被执行。重启应用即可重新拉起 worker。",
+  },
   providerSource: {
     builtin: "内置",
     plugin: "插件",
@@ -462,6 +470,10 @@ export const schedulerZhTW = {
   refresh: "重新整理",
   loadFailed: "讀取排程任務資料失敗：{error}",
   retry: "重試",
+  workerBanner: {
+    disabled: "背景排程 worker 已停用（DBX_SCHEDULER_BACKGROUND_ENABLED=0）：任務會一直保持排隊。將該變數設為 1 或刪除後重新啟動應用程式即可恢復執行。",
+    notRunning: "背景排程 worker 未執行：排隊中的任務不會被執行。重新啟動應用程式即可重新拉起 worker。",
+  },
   providerSource: {
     builtin: "內建",
     plugin: "外掛",

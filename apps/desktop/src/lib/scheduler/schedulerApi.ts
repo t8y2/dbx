@@ -11,7 +11,7 @@
 
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { apiUrl } from "@/lib/common/webPath";
-import type { ResidentSession, TaskArtifact, TaskDefinition, TaskLogsPage, TaskRun, SchedulerErrorCode } from "./schedulerTypes";
+import type { ResidentSession, TaskArtifact, TaskDefinition, TaskLogsPage, TaskRun, SchedulerErrorCode, SchedulerWorkerStatus } from "./schedulerTypes";
 
 async function tauriScheduler<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   const { invoke } = await import("@tauri-apps/api/core");
@@ -192,4 +192,17 @@ export type SchedulerResidentAction = "start" | "stop" | "restart";
 
 export function residentAction(sessionId: string, action: SchedulerResidentAction): Promise<ResidentSession | void> {
   return schedulerRequest("scheduler_resident_action", { sessionId, action }, () => web("POST", `/api/scheduler/resident/${encodeURIComponent(sessionId)}/${action}`, {}));
+}
+
+// ---------------------------------------------------------------------------
+// Background worker liveness (desktop-only; feeds the queued-run banner)
+// ---------------------------------------------------------------------------
+
+/**
+ * Worker liveness snapshot. The web runtime has no detached worker (its
+ * engine runs in-process), so it reports `null` and callers skip the banner.
+ */
+export async function workerStatus(): Promise<SchedulerWorkerStatus | null> {
+  if (!isTauriRuntime(globalThis)) return null;
+  return tauriScheduler<SchedulerWorkerStatus>("scheduler_worker_status", {});
 }

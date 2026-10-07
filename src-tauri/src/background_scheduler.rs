@@ -33,6 +33,7 @@ use dbx_core::{
     },
     storage::Storage,
 };
+use serde::Serialize;
 use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -264,6 +265,19 @@ impl Default for RestartPolicy {
     }
 }
 
+/// UI banner input for the scheduler page: distinguishes an explicit env
+/// opt-out from a worker that should be running but is not (crashed past its
+/// restart budget, or still starting).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SchedulerWorkerStatus {
+    /// `scheduler.background.enabled` (ADR §12); `false` only via explicit opt-out.
+    pub enabled: bool,
+    /// A worker process answers the pid file (liveness probe only — it says
+    /// nothing about the engine's lease state).
+    pub worker_alive: bool,
+}
+
 /// `None` means the restart budget is exhausted — stop restarting.
 fn restart_backoff(consecutive_failures: u32, policy: &RestartPolicy) -> Option<Duration> {
     if consecutive_failures > policy.max_consecutive_failures {
@@ -346,6 +360,20 @@ pub struct BackgroundScheduler {
 impl BackgroundScheduler {
     pub fn new(data_dir: PathBuf) -> Self {
         Self { data_dir, stop: CancellationToken::new(), supervisor: tokio::sync::Mutex::new(None) }
+    }
+
+    /// Liveness snapshot for the "stuck queued" banner: a queued run with no
+    /// live worker would otherwise sit in the list forever with no
+    /// explanation. The pid file covers both this generation and a detached
+    /// worker left over from a previous app run.
+    pub fn worker_status(&self) -> SchedulerWorkerStatus {
+        let enabled = background_enabled();
+        let worker_alive = std::fs::read_to_string(worker_pid_path(&self.data_dir))
+            .ok()
+            .and_then(|content| content.trim().parse::<u32>().ok())
+            .map(process_alive)
+            .unwrap_or(false);
+        SchedulerWorkerStatus { enabled, worker_alive }
     }
 
     /// Spawns and supervises the worker child when
@@ -684,6 +712,24 @@ mod tests {
         scheduler.shutdown().await;
         assert!(scheduler.supervisor.lock().await.is_none());
         scheduler.shutdown().await; // idempotent
+    }
+
+    #[tokio::test]
+    async fn worker_status_reports_enabled_and_pid_liveness() {
+        std::env::remove_var(BACKGROUND_FLAG_ENV);
+        let directory = tempfile::tempdir().unwrap();
+        let scheduler = BackgroundScheduler::new(directory.path().to_path_buf());
+        // No pid file: nothing runs.
+        assert_eq!(scheduler.worker_status(), SchedulerWorkerStatus { enabled: true, worker_alive: false });
+        // A live pid (ours) counts, a recycled one does not.
+        std::fs::create_dir_all(scheduler_dir(directory.path())).unwrap();
+        std::fs::write(worker_pid_path(directory.path()), std::process::id().to_string()).unwrap();
+        assert!(scheduler.worker_status().worker_alive);
+        std::fs::write(worker_pid_path(directory.path()), "99999999").unwrap();
+        assert!(!scheduler.worker_status().worker_alive);
+        // Garbage content degrades to "not alive", not a crash.
+        std::fs::write(worker_pid_path(directory.path()), "not-a-pid").unwrap();
+        assert!(!scheduler.worker_status().worker_alive);
     }
 
     async fn forgetful_tempdir() -> PathBuf {

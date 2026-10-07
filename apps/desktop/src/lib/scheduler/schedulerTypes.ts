@@ -192,6 +192,17 @@ export type SchedulerErrorCode =
   | "timeout"
   | "connection_missing";
 
+/**
+ * Desktop background worker liveness (the `--scheduler-worker` child). The
+ * web transport serves its engine in-process and reports no worker.
+ */
+export interface SchedulerWorkerStatus {
+  /** `scheduler.background.enabled` — `false` only via explicit env opt-out. */
+  enabled: boolean;
+  /** A worker process answers the pid file. */
+  workerAlive: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Plugin task-provider contribution (ADR §6.1). The contribution reuses the
 // existing manifest form field system (`PluginFormField` from @/types/database)

@@ -330,6 +330,16 @@ pub async fn scheduler_list_resident_sessions(state: State<'_, Arc<AppState>>) -
     service(&state).list_resident_sessions().await.map_err(scheduler_error)
 }
 
+/// Worker liveness for the queued-run banner (desktop-only concept: the web
+/// transport serves its engine in-process and has no pid file). Reads the
+/// pid file + env flag; cheap enough to poll every few seconds.
+#[tauri::command]
+pub async fn scheduler_worker_status(
+    worker: State<'_, crate::background_scheduler::BackgroundScheduler>,
+) -> Result<crate::background_scheduler::SchedulerWorkerStatus, String> {
+    Ok(worker.worker_status())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

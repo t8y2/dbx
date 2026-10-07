@@ -9,15 +9,15 @@ import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { CalendarClock, History, Server } from "@lucide/vue";
+import { CalendarClock, History, Server, TriangleAlert } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 import * as schedulerApi from "@/lib/scheduler/schedulerApi";
 import { subscribeSchedulerEvents } from "@/lib/scheduler/schedulerEvents";
 import { builtinTaskProviders, discoverTaskProviders } from "@/lib/scheduler/schedulerProviders";
-import { isActiveRunStatus } from "@/lib/scheduler/schedulerDraft";
+import { hasStaleQueuedRun, isActiveRunStatus, workerNeedsAttention } from "@/lib/scheduler/schedulerDraft";
 import type { InstalledPlugin } from "@/types/database";
-import type { ResidentSession, SchedulerTaskProviderDescriptor, TaskDefinition, TaskRun } from "@/lib/scheduler/schedulerTypes";
+import type { ResidentSession, SchedulerTaskProviderDescriptor, SchedulerWorkerStatus, TaskDefinition, TaskRun } from "@/lib/scheduler/schedulerTypes";
 import SchedulerResidentList from "./SchedulerResidentList.vue";
 import SchedulerRunDetail from "./SchedulerRunDetail.vue";
 import SchedulerRunList from "./SchedulerRunList.vue";
@@ -150,6 +150,23 @@ let activeWorkPoll: ReturnType<typeof setInterval> | undefined;
 
 const hasActiveWork = computed(() => activeRunCount.value > 0 || residents.value.some((session) => session.state === "running" || session.state === "starting" || session.state === "stopping"));
 
+// A run stuck pre-running past the claim window means nobody is claiming
+// runs; surface the worker state instead of leaving "queued" unexplained.
+const workerStatus = ref<SchedulerWorkerStatus | null>(null);
+
+const staleQueued = computed(() => hasStaleQueuedRun(runs.value));
+
+const workerDown = computed(() => workerNeedsAttention(workerStatus.value, staleQueued.value));
+
+async function refreshWorkerStatus() {
+  try {
+    workerStatus.value = await schedulerApi.workerStatus();
+  } catch (reason) {
+    console.warn("[scheduler] worker status failed", reason);
+    workerStatus.value = null;
+  }
+}
+
 watch(
   hasActiveWork,
   (active) => {
@@ -158,6 +175,7 @@ watch(
         void refreshRuns();
         void refreshResidents();
         void refreshTasks();
+        if (staleQueued.value) void refreshWorkerStatus();
       }, ACTIVE_WORK_POLL_MS);
     }
     if (!active && activeWorkPoll) {
@@ -167,6 +185,12 @@ watch(
   },
   { immediate: true },
 );
+
+// Check immediately when a run crosses the stale threshold, not just on the
+// next 3s poll tick.
+watch(staleQueued, (stale) => {
+  if (stale) void refreshWorkerStatus();
+});
 
 onUnmounted(() => {
   unlisten?.();
@@ -287,6 +311,13 @@ function onRunCancel(run: TaskRun) {
     <div v-if="loadError" class="flex shrink-0 items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive" data-scheduler-load-error>
       <span class="min-w-0 flex-1 break-words">{{ t("scheduler.loadFailed", { error: loadError }) }}</span>
       <Button variant="outline" size="sm" class="h-7 shrink-0 text-xs" :disabled="loading" data-scheduler-retry @click="() => void refreshAll()">{{ t("scheduler.retry") }}</Button>
+    </div>
+
+    <div v-if="workerDown" class="flex shrink-0 items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300" data-scheduler-worker-banner>
+      <TriangleAlert class="size-3.5 shrink-0" />
+      <span class="min-w-0 flex-1 break-words">
+        {{ workerStatus?.enabled === false ? t("scheduler.workerBanner.disabled") : t("scheduler.workerBanner.notRunning") }}
+      </span>
     </div>
 
     <Tabs v-model="activeTab" class="min-h-0 flex-1 gap-3">

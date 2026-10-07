@@ -15,6 +15,7 @@
 
 6. **P2 处置（后台 agent 波次，均已复跑验证）**：「runs 游标上限」经核查 web 路由自首次提交即与桌面端对齐（`RUN_SCAN_LIMIT=1000`），真实缺口只是测试，已补钳制钉住测试（ee76702f5）；「hourly Interval 文件名时间戳 UTC」确认为迁移回退——hourly 映射为 interval 触发器时丢弃 legacy 行时区，`resolve_time_zone` 按 触发器 zone → 保留的 legacy schedule 行 zone → UTC 三级解析修复（87dc5ee0c）。
 7. **P2 处置（第二波）**：「Web 错误码 detail 载体」审计确认为真实缺口——顶层 `code` 恒为目录码 `DBX-LEGACY-0001`（违约 ADR §7.5），且 `schedulerErrorCode` 对实际服务的 body 形状失配、web 通道 `version_conflict` 特判静默失效；修复为 `AppError` 可选 `errorCode` 仅在设置时注入（其他路由逐字节不变，v1 可选字段规则钉住测试）（3452f7c5d）。遗留：`schedulerApi.ts` 归一化器可再加 JSON.parse 兜底。「OS 开机注册未接线」以官方 `tauri-plugin-autostart`（纯 Rust 侧）接线：默认关断、对账式幂等、注册失败吞掉不阻塞启动、标志入 `DesktopSettings` 并排除出云同步（设备本地）（a914f887d）。
+8. **P2 处置（第三波）**：`schedulerErrorCode` 已补 JSON body 回退（errorCode 优先 → §7.5 机器码形态的 code → detail 前缀；目录码不外泄、坏 JSON 原样 undefined，274c0a4cb），C 项遗留闭环。「一级侧边栏入口未接」调查结论为**非缺口**：AppSidebar 是纯连接树面板，无工具页槽位系设计使然，工具栏按钮即计划 §0 所指的「一级入口」（有 3 个 spec 钉住）；若未来仍要侧边栏入口，最小方案 = AppSidebar 新增 `open-scheduler-page` emit 透传到 `App.vue` 的 `openSchedulerPage`（未实施，需 UI 评审），建议把 P2 项改写为「侧边栏底部入口（低优先级）」。剩余两项维持开放：resident start=run_now 语义（需 owner 决策，不建议 agent 猜语义）、worker 跨进程事件只进 worker.log（已有 3 秒活动轮询兜底，影响仅限事件新鲜度）。
 
 ## 一、总体进度（对照 docs/scheduler/README.md 的波次计划）——全部波次已完成
 

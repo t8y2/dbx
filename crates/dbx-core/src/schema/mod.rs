@@ -10130,7 +10130,7 @@ pub fn postgres_object_source_sql(
     kind: &db::ObjectSourceKind,
     signature: Option<&str>,
 ) -> String {
-    postgres_object_source_sql_inner(schema, name, kind, signature, true, false, true)
+    postgres_object_source_sql_inner(schema, name, kind, signature, true, false, true, true)
 }
 
 fn postgres_trigger_object_source_sql(schema: &str, name: &str, relation_name: Option<&str>) -> String {
@@ -10156,8 +10156,9 @@ fn opengauss_object_source_sql(
     name: &str,
     kind: &db::ObjectSourceKind,
     signature: Option<&str>,
+    has_proc_prokind: bool,
 ) -> String {
-    postgres_object_source_sql_inner(schema, name, kind, signature, true, true, false)
+    postgres_object_source_sql_inner(schema, name, kind, signature, true, true, false, has_proc_prokind)
 }
 
 fn opengauss_sequence_object_source_sql(schema: &str, name: &str, include_cache: bool) -> String {
@@ -10213,8 +10214,14 @@ fn postgres_function_object_source_sql_with_legacy_signature(
     name: &str,
     kind: &db::ObjectSourceKind,
     signature: Option<&str>,
+    has_proc_prokind: bool,
 ) -> String {
     let prokind = if matches!(kind, db::ObjectSourceKind::Procedure) { "p" } else { "f" };
+    let kind_filter = if has_proc_prokind {
+        format!(" AND p.prokind = '{}'", prokind)
+    } else {
+        " AND NOT p.proisagg AND NOT p.proiswindow".to_string()
+    };
     let signature_filter = signature
         .map(|value| format!(" AND pg_get_function_arguments(p.oid) = {}", sql_string(value)))
         .unwrap_or_default();
@@ -10222,11 +10229,11 @@ fn postgres_function_object_source_sql_with_legacy_signature(
         "SELECT pg_get_functiondef(p.oid) \
          FROM pg_proc p \
          JOIN pg_namespace n ON n.oid = p.pronamespace \
-         WHERE n.nspname = {} AND p.proname = {} AND p.prokind = '{}'{} \
+         WHERE n.nspname = {} AND p.proname = {}{}{} \
          ORDER BY p.oid LIMIT 1",
         sql_string(schema),
         sql_string(name),
-        prokind,
+        kind_filter,
         signature_filter
     )
 }
@@ -10285,6 +10292,7 @@ fn postgres_object_source_sql_inner(
     include_relispopulated: bool,
     unwrap_opengauss_record: bool,
     isolate_view_search_path: bool,
+    has_proc_prokind: bool,
 ) -> String {
     match kind {
         db::ObjectSourceKind::View | db::ObjectSourceKind::MaterializedView => {
@@ -10338,15 +10346,26 @@ fn postgres_object_source_sql_inner(
             let signature_filter = signature
                 .map(|value| format!(" AND pg_get_function_identity_arguments(p.oid) = {}", sql_string(value)))
                 .unwrap_or_default();
+            // PostgreSQL 10 renamed the routine-kind columns to prokind; older
+            // servers (and some Gauss-family kernels) only have proisagg and
+            // proiswindow, so a hardcoded prokind reference fails before the
+            // query even runs (#11161). Probe the catalog and pick the filter.
+            let kind_filter = if has_proc_prokind {
+                format!(" AND p.prokind = '{}'", prokind)
+            } else {
+                // Procedures were introduced together with prokind, so on legacy
+                // servers the legacy filter only ever matches plain functions.
+                " AND NOT p.proisagg AND NOT p.proiswindow".to_string()
+            };
             format!(
                 "SELECT {source_expression} \
                  FROM pg_proc p \
                  JOIN pg_namespace n ON n.oid = p.pronamespace \
-                 WHERE n.nspname = {} AND p.proname = {} AND p.prokind = '{}'{} \
+                 WHERE n.nspname = {} AND p.proname = {}{}{} \
                  ORDER BY p.oid LIMIT 1",
                 sql_string(schema),
                 sql_string(name),
-                prokind,
+                kind_filter,
                 signature_filter
             )
         }
@@ -11452,6 +11471,29 @@ fn postgres_view_source_uses_isolated_search_path(database_type: Option<&Databas
     database_type == Some(&DatabaseType::Postgres)
 }
 
+/// `pg_proc.prokind` exists from PostgreSQL 10 onwards; legacy servers filter
+/// routines with `proisagg`/`proiswindow` instead. Probe the catalog so the
+/// object-source query matches the server regardless of the locale it reports
+/// errors in (#11161 — the old error-message gate missed localized servers).
+fn postgres_proc_has_prokind_catalog_sql() -> &'static str {
+    "SELECT EXISTS ( \
+       SELECT 1 \
+       FROM pg_catalog.pg_attribute \
+       WHERE attrelid = 'pg_catalog.pg_proc'::regclass \
+         AND attname = 'prokind' \
+         AND NOT attisdropped \
+     )"
+}
+
+async fn postgres_object_source_has_proc_prokind(pool: &deadpool_postgres::Pool) -> bool {
+    match db::postgres::execute_query(pool, postgres_proc_has_prokind_catalog_sql()).await {
+        Ok(result) => result.rows.first().and_then(|row| row.first()).and_then(|value| value.as_bool()).unwrap_or(true),
+        // If even the probe fails (permissions, proxies), stay on the modern
+        // query and let the existing missing-prokind fallback handle legacy servers.
+        Err(_) => true,
+    }
+}
+
 async fn postgres_object_source(
     pool: &deadpool_postgres::Pool,
     schema: &str,
@@ -11462,14 +11504,19 @@ async fn postgres_object_source(
     unwrap_opengauss_record: bool,
     isolate_view_search_path: bool,
 ) -> Result<String, String> {
+    let has_proc_prokind = if matches!(object_type, db::ObjectSourceKind::Procedure | db::ObjectSourceKind::Function) {
+        postgres_object_source_has_proc_prokind(pool).await
+    } else {
+        true
+    };
     let sql = if matches!(object_type, db::ObjectSourceKind::Trigger) {
         postgres_trigger_object_source_sql(schema, name, relation_name)
     } else if unwrap_opengauss_record {
-        opengauss_object_source_sql(schema, name, object_type, signature)
+        opengauss_object_source_sql(schema, name, object_type, signature, has_proc_prokind)
     } else if isolate_view_search_path {
-        postgres_object_source_sql(schema, name, object_type, signature)
+        postgres_object_source_sql_inner(schema, name, object_type, signature, true, false, true, has_proc_prokind)
     } else {
-        postgres_object_source_sql_inner(schema, name, object_type, signature, true, false, false)
+        postgres_object_source_sql_inner(schema, name, object_type, signature, true, false, false, has_proc_prokind)
     };
     match db::postgres::execute_query(pool, &sql).await.and_then(first_string_cell) {
         Ok(source) => Ok(source),
@@ -11485,6 +11532,7 @@ async fn postgres_object_source(
                 false,
                 false,
                 isolate_view_search_path,
+                has_proc_prokind,
             );
             db::postgres::execute_query(pool, &fallback_sql)
                 .await
@@ -11533,8 +11581,13 @@ async fn postgres_object_source(
                 && signature.is_some()
                 && matches!(object_type, db::ObjectSourceKind::Procedure | db::ObjectSourceKind::Function) =>
         {
-            let fallback_sql =
-                postgres_function_object_source_sql_with_legacy_signature(schema, name, object_type, signature);
+            let fallback_sql = postgres_function_object_source_sql_with_legacy_signature(
+                schema,
+                name,
+                object_type,
+                signature,
+                has_proc_prokind,
+            );
             db::postgres::execute_query(pool, &fallback_sql)
                 .await
                 .and_then(first_string_cell)
@@ -11559,12 +11612,28 @@ fn postgres_missing_prokind_error(err: &str) -> bool {
         return false;
     }
 
-    // PostgreSQL localizes the undefined-column message (for example, Chinese
-    // servers report "字段 p.prokind 不存在"). Keep the column context so an
-    // unrelated relation named `prokind` cannot trigger this compatibility path.
+    // PostgreSQL localizes the undefined-column message in 20+ server message
+    // languages (English "column p.prokind does not exist", Chinese
+    // "字段 p.prokind 不存在", Indonesian "kolom p.prokind belum ada", …), so a
+    // per-language dictionary can never be complete. Two signals are language
+    // independent: the SQLSTATE class, and dbx's own driver position marker —
+    // the native postgres driver appends `DBX_SQL_ERROR_POSITION:` to every
+    // positioned server error, and an error naming `p.prokind` from this
+    // generated query is always the missing-column case (#11161). The exact
+    // phrases below just cover the common locales without the marker.
     lower.contains("sqlstate 42703")
+        || lower.contains("dbx_sql_error_position")
         || (lower.contains("does not exist") && lower.contains("column"))
-        || (err.contains("不存在") && (err.contains("字段") || err.contains("列 p.prokind")))
+        || (err.contains("不存在") && (err.contains("字段") || err.contains("列 p.prokind") || err.contains("欄位")))
+        || lower.contains("belum ada")
+        || lower.contains("no existe la columna")
+        || lower.contains("non esiste")
+        || lower.contains("não existe")
+        || lower.contains("n'existe pas")
+        || lower.contains("existiert nicht")
+        || lower.contains("は存在しません")
+        || lower.contains("존재하지 않")
+        || lower.contains("не существует")
 }
 
 fn opengauss_sequence_cache_metadata_error(err: &str) -> bool {
@@ -11709,11 +11778,13 @@ mod object_source_tests {
                 "recalc_score",
                 &ObjectSourceKind::Procedure,
                 Some("i_id numeric DEFAULT 0, OUT o_code integer"),
+                true,
             ),
             "SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'recalc_score' AND p.prokind = 'p' AND pg_get_function_arguments(p.oid) = 'i_id numeric DEFAULT 0, OUT o_code integer' ORDER BY p.oid LIMIT 1"
         );
 
-        let opengauss_view_sql = opengauss_object_source_sql("public", "active_users", &ObjectSourceKind::View, None);
+        let opengauss_view_sql =
+            opengauss_object_source_sql("public", "active_users", &ObjectSourceKind::View, None, true);
         assert!(!opengauss_view_sql.contains("set_config('search_path'"));
 
         let compatible_view_sql = postgres_object_source_sql_inner(
@@ -11724,6 +11795,7 @@ mod object_source_tests {
             true,
             false,
             false,
+            true,
         );
         assert!(!compatible_view_sql.contains("set_config('search_path'"));
     }
@@ -11758,6 +11830,7 @@ mod object_source_tests {
             false,
             false,
             true,
+            true,
         );
 
         assert!(sql.contains("CREATE MATERIALIZED VIEW"));
@@ -11765,6 +11838,75 @@ mod object_source_tests {
         assert!(sql.contains("pg_catalog.set_config('search_path', '', true)"));
         assert!(sql.contains("path_guard.applied IS NOT NULL"));
         assert!(!sql.contains("relispopulated"));
+    }
+
+    #[test]
+    fn postgres_routine_source_matches_server_prokind_capability() {
+        let modern = postgres_object_source_sql_inner(
+            "public",
+            "recalc_score",
+            &ObjectSourceKind::Function,
+            None,
+            true,
+            false,
+            true,
+            true,
+        );
+        assert!(modern.contains("p.prokind = 'f'"));
+        assert!(!modern.contains("proisagg"));
+
+        // PostgreSQL 9.6 and older have no pg_proc.prokind (#11161): the query
+        // must filter with the legacy columns instead, otherwise the server
+        // rejects it with "column p.prokind does not exist" before it runs.
+        let legacy = postgres_object_source_sql_inner(
+            "public",
+            "recalc_score",
+            &ObjectSourceKind::Function,
+            None,
+            true,
+            false,
+            true,
+            false,
+        );
+        assert!(legacy.contains("NOT p.proisagg AND NOT p.proiswindow"));
+        assert!(!legacy.contains("prokind"));
+
+        let legacy_procedure = postgres_object_source_sql_inner(
+            "public",
+            "refresh_cache",
+            &ObjectSourceKind::Procedure,
+            Some("integer"),
+            true,
+            false,
+            true,
+            false,
+        );
+        assert!(legacy_procedure.contains("NOT p.proisagg AND NOT p.proiswindow"));
+        assert!(legacy_procedure.contains("pg_get_function_identity_arguments(p.oid) = 'integer'"));
+        assert!(!legacy_procedure.contains("prokind"));
+    }
+
+    #[test]
+    fn missing_prokind_gate_matches_localized_undefined_column_errors() {
+        // The exact strings from #11161: PostgreSQL reports undefined-column
+        // errors in the server's language, so the gate cannot rely on the
+        // English wording alone.
+        assert!(postgres_missing_prokind_error(
+            "ERROR:  kolom p.prokind belum ada\nHINT:  Perhaps you meant to reference the column \"p.probin\".\nDBX_SQL_ERROR_POSITION:162"
+        ));
+        assert!(postgres_missing_prokind_error(
+            "ERROR:  column p.prokind does not exist\nHINT:  Perhaps you meant to reference the column \"p.probin\"."
+        ));
+        assert!(postgres_missing_prokind_error("ERROR:  字段 p.prokind 不存在"));
+        assert!(postgres_missing_prokind_error("ERROR:  欄位 p.prokind 不存在"));
+        assert!(postgres_missing_prokind_error("ERROR:  column p.prokind does not exist (SQLSTATE 42703)"));
+        assert!(postgres_missing_prokind_error(
+            "ERROR:  la colonne p.prokind n'existe pas\nDBX_SQL_ERROR_POSITION:100"
+        ));
+        // An unrelated error that merely mentions the identifier must not
+        // trigger the legacy fallback.
+        assert!(!postgres_missing_prokind_error("ERROR:  relation \"p.prokind\" already exists"));
+        assert!(!postgres_missing_prokind_error("connection refused"));
     }
 
     #[test]
@@ -11780,7 +11922,7 @@ mod object_source_tests {
     #[test]
     fn builds_opengauss_routine_source_sql_from_record_definition() {
         assert_eq!(
-            opengauss_object_source_sql("public", "recalc_score", &ObjectSourceKind::Function, None),
+            opengauss_object_source_sql("public", "recalc_score", &ObjectSourceKind::Function, None, true),
             "SELECT (pg_get_functiondef(p.oid)).definition FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'recalc_score' AND p.prokind = 'f' ORDER BY p.oid LIMIT 1"
         );
         assert_eq!(
@@ -11789,6 +11931,7 @@ mod object_source_tests {
                 "refresh_cache",
                 &ObjectSourceKind::Procedure,
                 Some("integer"),
+                true,
             ),
             "SELECT (pg_get_functiondef(p.oid)).definition FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'refresh_cache' AND p.prokind = 'p' AND pg_get_function_identity_arguments(p.oid) = 'integer' ORDER BY p.oid LIMIT 1"
         );
@@ -11835,7 +11978,7 @@ mod object_source_tests {
 
     #[test]
     fn builds_opengauss_sequence_source_without_pg_sequence_catalog() {
-        let sql = opengauss_object_source_sql("public", "order_id_seq", &ObjectSourceKind::Sequence, None);
+        let sql = opengauss_object_source_sql("public", "order_id_seq", &ObjectSourceKind::Sequence, None, true);
 
         assert!(sql.contains("information_schema.sequences"));
         assert!(sql.contains("s.sequence_schema = n.nspname"));

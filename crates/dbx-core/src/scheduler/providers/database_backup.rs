@@ -150,6 +150,24 @@ impl DatabaseBackupTaskExecutor {
         }
         self.service.delete_runs(ids).await
     }
+
+    /// Resolves the time zone used for filename/directory stamps: cron and
+    /// once triggers carry the IANA zone (ADR §1.11); zone-less triggers —
+    /// interval (the migrated hourly schedules), manual, startup — fall back
+    /// to the preserved legacy schedule row's saved zone, which is what the
+    /// legacy worker stamped filenames with (`BackupStore::insert_job`), and
+    /// stay on UTC when no legacy row exists so fresh interval tasks keep the
+    /// previous naming.
+    async fn resolve_time_zone(&self, task: &TaskDefinition) -> String {
+        let default_zone = task_time_zone(task);
+        if default_zone != "UTC" {
+            return default_zone;
+        }
+        let legacy_zone = self.service.store.snapshot().await.ok().and_then(|snapshot| {
+            snapshot.schedules.iter().find(|schedule| schedule.id == task.id).map(|schedule| schedule.time_zone.clone())
+        });
+        legacy_zone.unwrap_or(default_zone)
+    }
 }
 
 #[async_trait]
@@ -166,7 +184,7 @@ impl TaskExecutor for DatabaseBackupTaskExecutor {
     async fn execute(&self, context: TaskExecutionContext) -> Result<TaskExecutionResult, TaskError> {
         let config = Self::parse_config(&context.task)?;
         let run_id = context.run.id.clone();
-        let time_zone = task_time_zone(&context.task);
+        let time_zone = self.resolve_time_zone(&context.task).await;
         let manual = matches!(context.run.trigger, TaskRunTrigger::Manual);
         // The legacy run record keeps the old UI (history, progress, cancel,
         // export tracker) fully working while the scheduler drives execution.
@@ -583,5 +601,38 @@ mod tests {
         assert_eq!(config.retention_count, 7);
         assert_eq!(config.run_directory_pattern.as_deref(), Some("dbx/{date}"));
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn task_time_zone_follows_the_trigger_zone_and_defaults_to_utc() {
+        let cron = backup_schedule_to_task(&schedule("daily", "02:30", 0, "Asia/Shanghai")).unwrap();
+        assert_eq!(task_time_zone(&cron), "Asia/Shanghai");
+        // Interval triggers carry no zone: the trigger-level default stays UTC
+        // and the executor resolves the preserved legacy zone separately.
+        let hourly = backup_schedule_to_task(&schedule("hourly", "02:30", 0, "Asia/Shanghai")).unwrap();
+        assert_eq!(task_time_zone(&hourly), "UTC");
+    }
+
+    #[tokio::test]
+    async fn hourly_interval_stamps_names_with_the_saved_legacy_zone() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("dbx.db")).await.unwrap();
+        let service = BackupService::new(Arc::new(crate::connection::AppState::new(storage)), dir.path(), None);
+        let legacy = schedule("hourly", "02:30", 0, "Asia/Shanghai");
+        service.store.save_schedule(legacy.clone()).await.unwrap();
+        let executor = DatabaseBackupTaskExecutor::new(service.clone());
+        let task = backup_schedule_to_task(&legacy).unwrap();
+        // The migrated hourly (interval) schedule keeps the zone the legacy
+        // worker stamped filenames with.
+        assert_eq!(executor.resolve_time_zone(&task).await, "Asia/Shanghai");
+
+        // A fresh interval task without a preserved legacy row stays on UTC.
+        let mut fresh = task.clone();
+        fresh.id = "fresh-hourly".into();
+        assert_eq!(executor.resolve_time_zone(&fresh).await, "UTC");
+
+        // Cron and once triggers keep their own zone without a legacy lookup.
+        let daily = backup_schedule_to_task(&schedule("daily", "02:30", 0, "America/Los_Angeles")).unwrap();
+        assert_eq!(executor.resolve_time_zone(&daily).await, "America/Los_Angeles");
     }
 }

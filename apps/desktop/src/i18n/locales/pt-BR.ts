@@ -6751,6 +6751,8 @@ export default withEnglishFallback({
     serverVersion: "Versão do Servidor",
     info: "Informações",
     connType: "Tipo de conexão",
+    allConnectionTypes: "Todos os tipos",
+    unsupportedCompareConnection: "Esta conexão não está disponível ou não oferece suporte à comparação. Selecione outra conexão.",
     connName: "Nome da conexão",
     host: "Host",
     port: "Porta",

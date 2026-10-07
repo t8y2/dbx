@@ -6750,6 +6750,8 @@ export default withEnglishFallback({
     serverVersion: "Versione Server",
     info: "Info",
     connType: "Tipo connessione",
+    allConnectionTypes: "Tutti i tipi",
+    unsupportedCompareConnection: "Questa connessione non è disponibile o non supporta il confronto. Seleziona un'altra connessione.",
     connName: "Nome connessione",
     host: "Host",
     port: "Porta",

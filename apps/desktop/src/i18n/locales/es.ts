@@ -6967,6 +6967,8 @@ export default withEnglishFallback({
     serverVersion: "Versión del servidor",
     info: "Información",
     connType: "Tipo de conexión",
+    allConnectionTypes: "Todos los tipos",
+    unsupportedCompareConnection: "Esta conexión no está disponible o no admite comparaciones. Selecciona otra conexión.",
     connName: "Nombre de conexión",
     host: "Host",
     addHost: "Añadir Host",

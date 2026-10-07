@@ -6561,6 +6561,8 @@ export default withEnglishFallback({
     serverVersion: "서버 버전",
     info: "정보",
     connType: "연결 유형",
+    allConnectionTypes: "모든 유형",
+    unsupportedCompareConnection: "이 연결은 사용할 수 없거나 비교를 지원하지 않습니다. 다른 연결을 선택하세요.",
     connName: "연결 이름",
     host: "호스트",
     port: "포트",

@@ -6781,6 +6781,8 @@ export default withEnglishFallback({
     restore: "復元",
     info: "情報",
     connType: "接続タイプ",
+    allConnectionTypes: "すべてのタイプ",
+    unsupportedCompareConnection: "この接続は利用できないか、比較に対応していません。別の接続を選択してください。",
     connName: "接続名",
     host: "ホスト",
     port: "ポート",

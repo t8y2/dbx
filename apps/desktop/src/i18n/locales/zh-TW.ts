@@ -6085,6 +6085,8 @@ export default withEnglishFallback({
     serverVersion: "伺服器版本",
     info: "資訊",
     connType: "連線類型",
+    allConnectionTypes: "全部類型",
+    unsupportedCompareConnection: "此連線無法使用或不支援比較，請重新選擇連線。",
     connName: "連線名稱",
     port: "連接埠",
     saveConfigPrompt: "請輸入配置名稱：",

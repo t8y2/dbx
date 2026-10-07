@@ -6,7 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect.vue";
-import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
+import CompareConnectionSelect from "@/components/diff/CompareConnectionSelect.vue";
+import { supportsDatabaseCompare } from "@/lib/database/databaseCompareCapabilities";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 import { databaseOptionsForConnection, fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
@@ -129,7 +130,34 @@ let configSaveTimer: ReturnType<typeof setTimeout> | undefined;
 let componentUnmounted = false;
 let shownSessionError = "";
 
-const sqlConnections = computed(() => store.connections.filter((connection) => !["redis", "mongodb", "elasticsearch", "easysearch", "meilisearch", "solr", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos", "salesforce"].includes(connection.db_type)));
+const compareConnections = computed(() => store.connections.filter((connection) => supportsDatabaseCompare(connection, "data")));
+// Swapping copies the loaded lists and suppresses their reload watchers. Wait
+// until all namespace/table requests settle so no unfinished list is stranded.
+const pendingMetadataRequests = ref(0);
+// Invalidate metadata responses when the user switches either endpoint, even
+// when they switch back before the previous request finishes.
+const metadataGenerations = { source: 0, target: 0 };
+watch(
+  [sourceConnectionId, sourceDatabase, sourceSchema],
+  () => {
+    metadataGenerations.source += 1;
+  },
+  { flush: "sync" },
+);
+watch(
+  [targetConnectionId, targetDatabase, targetSchema],
+  () => {
+    metadataGenerations.target += 1;
+  },
+  { flush: "sync" },
+);
+
+function metadataRequestIsCurrent(side: "source" | "target"): () => boolean {
+  const generation = metadataGenerations[side];
+  const connectionId = side === "source" ? sourceConnectionId.value : targetConnectionId.value;
+  return () => generation === metadataGenerations[side] && supportsDatabaseCompare(store.getConfig(connectionId), "data");
+}
+
 const selectedSourceTableNames = computed(() => sourceTables.value.filter((table) => selectedSourceTables.value.has(table)));
 const isBatchCompare = computed(() => selectedSourceTableNames.value.length > 1);
 // Bridge the shared TableMultiSelect `string[]` v-model with the Set-based selection store.
@@ -195,7 +223,19 @@ const singleTableNeedsKeyColumns = computed(() => {
   if (!isTableColumnsKnown(row.table)) return false;
   return row.columns.length === 0;
 });
-const canCompare = computed(() => sourceConnectionId.value && sourceDatabase.value && sourceSchema.value && selectedSourceTableNames.value.length > 0 && targetConnectionId.value && targetDatabase.value && targetSchema.value && !singleTableNeedsKeyColumns.value);
+const canCompare = computed(
+  () =>
+    supportsDatabaseCompare(store.getConfig(sourceConnectionId.value), "data") &&
+    supportsDatabaseCompare(store.getConfig(targetConnectionId.value), "data") &&
+    sourceConnectionId.value &&
+    sourceDatabase.value &&
+    sourceSchema.value &&
+    selectedSourceTableNames.value.length > 0 &&
+    targetConnectionId.value &&
+    targetDatabase.value &&
+    targetSchema.value &&
+    !singleTableNeedsKeyColumns.value,
+);
 const detailPreviewLimitNumber = computed(() => Number(detailPreviewLimit.value) || PREVIEW_LIMIT_OPTIONS[1]);
 
 const sameTableCount = computed(() => batchResults.value.filter((item) => item.status === "same").length);
@@ -299,7 +339,7 @@ async function fetchTableColumns(table: string): Promise<CompareKeyColumnOption[
   const connectionId = sourceConnectionId.value;
   const database = sourceDatabase.value;
   const schema = sourceSchema.value;
-  if (!connectionId || !database || !schema || !table) return [];
+  if (!connectionId || !database || !schema || !table || !supportsDatabaseCompare(store.getConfig(connectionId), "data")) return [];
   const generation = columnMetadataGeneration;
   loadingColumnTables.value = [...loadingColumnTables.value, table];
   try {
@@ -503,15 +543,24 @@ async function applyDataCompareConfig(config: DataCompareConfig): Promise<void> 
   shownSessionError = "";
   try {
     sourceConnectionId.value = config.sourceConnectionId;
-    if (!config.sourceConnectionId) return;
-    await loadDatabases(config.sourceConnectionId, "source");
-    if (generation !== initializingPrefillGeneration) return;
-    if (config.sourceDatabase) sourceDatabase.value = config.sourceDatabase;
-    if (config.sourceDatabase) await loadSchemas("source", config.sourceSchema);
-    if (generation !== initializingPrefillGeneration) return;
-
     targetConnectionId.value = config.targetConnectionId;
-    if (config.targetConnectionId) {
+    sourceDatabase.value = targetDatabase.value = "";
+    sourceSchema.value = targetSchema.value = "";
+    sourceDatabases.value = targetDatabases.value = [];
+    sourceSchemas.value = targetSchemas.value = [];
+    sourceTables.value = targetTables.value = [];
+    sourceTable.value = targetTable.value = "";
+    resetSelectedSourceTables([]);
+    resetTableColumnMetadata();
+    if (supportsDatabaseCompare(store.getConfig(config.sourceConnectionId), "data")) {
+      await loadDatabases(config.sourceConnectionId, "source");
+      if (generation !== initializingPrefillGeneration) return;
+      if (config.sourceDatabase) sourceDatabase.value = config.sourceDatabase;
+      if (config.sourceDatabase) await loadSchemas("source", config.sourceSchema);
+      if (generation !== initializingPrefillGeneration) return;
+    }
+
+    if (supportsDatabaseCompare(store.getConfig(config.targetConnectionId), "data")) {
       await loadDatabases(config.targetConnectionId, "target");
       if (generation !== initializingPrefillGeneration) return;
       if (config.targetDatabase) targetDatabase.value = config.targetDatabase;
@@ -591,7 +640,9 @@ function applyDataCompareSession(session: DataCompareSession | undefined): void 
 }
 
 function swapSourceTarget() {
-  if (executionLocked.value) return;
+  if (comparing.value || executionLocked.value || initializingPrefill || pendingMetadataRequests.value > 0) return;
+  const generation = ++initializingPrefillGeneration;
+  initializingPrefill = true;
   const previousSelectedTables = [...selectedSourceTableNames.value];
   const nextSingleTarget = previousSelectedTables.length === 1 ? (previousSelectedTables[0] ?? "") : "";
   const nextSourceSelection = previousSelectedTables.length <= 1 ? [targetTable.value].filter(Boolean) : previousSelectedTables;
@@ -620,7 +671,15 @@ function swapSourceTarget() {
   targetTable.value = nextSingleTarget;
 
   sourceTable.value = selectedSourceTableNames.value.length === 1 ? selectedSourceTableNames.value[0] : "";
+  keyColumnOverrides.value = {};
+  resetTableColumnMetadata();
   clearResult();
+  void nextTick(() => {
+    if (generation !== initializingPrefillGeneration) return;
+    initializingPrefill = false;
+    if (dataCompareConfigId.value && !suppressConfigSave) updateDataCompareConfig(dataCompareConfigId.value, dataCompareConfigSnapshot());
+    void prefetchSelectedTableColumns(selectedSourceTableNames.value);
+  });
 }
 
 async function resolveSchema(connectionId: string, database: string, preferredSchema = ""): Promise<string> {
@@ -636,78 +695,101 @@ async function resolveSchema(connectionId: string, database: string, preferredSc
 async function loadSchemas(side: "source" | "target", preferredSchema = "") {
   const connectionId = side === "source" ? sourceConnectionId.value : targetConnectionId.value;
   const database = side === "source" ? sourceDatabase.value : targetDatabase.value;
-  if (!connectionId || !database) return;
-  const config = store.getConfig(connectionId);
-  if (!isSchemaAware(config?.db_type)) {
-    if (side === "source") {
-      sourceSchemas.value = [];
-      sourceSchema.value = database;
-    } else {
-      targetSchemas.value = [];
-      targetSchema.value = database;
+  if (!connectionId || !database || !supportsDatabaseCompare(store.getConfig(connectionId), "data")) return;
+  pendingMetadataRequests.value += 1;
+  try {
+    const isCurrent = metadataRequestIsCurrent(side);
+    const config = store.getConfig(connectionId);
+    if (!isSchemaAware(config?.db_type)) {
+      if (side === "source") {
+        sourceSchemas.value = [];
+        sourceSchema.value = database;
+      } else {
+        targetSchemas.value = [];
+        targetSchema.value = database;
+      }
+      await loadTables(side);
+      return;
     }
-    await loadTables(side);
-    return;
-  }
 
-  const schemas = await api.listSchemas(connectionId, database);
-  const schema = preferredSchema && schemas.includes(preferredSchema) ? preferredSchema : schemas.includes("public") ? "public" : (schemas[0] ?? "");
-  if (side === "source") {
-    sourceSchemas.value = schemas;
-    sourceSchema.value = schema;
-  } else {
-    targetSchemas.value = schemas;
-    targetSchema.value = schema;
+    const schemas = await api.listSchemas(connectionId, database);
+    if (!isCurrent()) return;
+    const schema = preferredSchema && schemas.includes(preferredSchema) ? preferredSchema : schemas.includes("public") ? "public" : (schemas[0] ?? "");
+    if (side === "source") {
+      sourceSchemas.value = schemas;
+      sourceSchema.value = schema;
+    } else {
+      targetSchemas.value = schemas;
+      targetSchema.value = schema;
+    }
+  } finally {
+    pendingMetadataRequests.value -= 1;
   }
 }
 
 async function loadDatabases(connectionId: string, side: "source" | "target") {
-  if (!connectionId) return;
-  await store.ensureConnected(connectionId);
-  const config = store.getConfig(connectionId);
-  const names = config
-    ? await fetchNamespaceOptionsForConnection(connectionId, config)
-    : databaseOptionsForConnection(
-        (await api.listDatabases(connectionId)).map((database) => database.name),
-        config,
-      );
-  if (side === "source") {
-    sourceDatabases.value = names;
-    sourceDatabase.value = names.length === 1 ? names[0] : "";
-    sourceSchemas.value = [];
-    sourceSchema.value = "";
-    sourceTables.value = [];
-    sourceTable.value = "";
-    resetSelectedSourceTables([]);
-  } else {
-    targetDatabases.value = names;
-    targetDatabase.value = names.length === 1 ? names[0] : "";
-    targetSchemas.value = [];
-    targetSchema.value = "";
-    targetTables.value = [];
-    targetTable.value = "";
+  if (!connectionId || !supportsDatabaseCompare(store.getConfig(connectionId), "data")) return;
+  pendingMetadataRequests.value += 1;
+  try {
+    const isCurrent = metadataRequestIsCurrent(side);
+    await store.ensureConnected(connectionId);
+    if (!isCurrent()) return;
+    const config = store.getConfig(connectionId);
+    const names = config
+      ? await fetchNamespaceOptionsForConnection(connectionId, config)
+      : databaseOptionsForConnection(
+          (await api.listDatabases(connectionId)).map((database) => database.name),
+          config,
+        );
+    if (!isCurrent()) return;
+    if (side === "source") {
+      sourceDatabases.value = names;
+      sourceDatabase.value = names.length === 1 ? names[0] : "";
+      sourceSchemas.value = [];
+      sourceSchema.value = "";
+      sourceTables.value = [];
+      sourceTable.value = "";
+      resetSelectedSourceTables([]);
+    } else {
+      targetDatabases.value = names;
+      targetDatabase.value = names.length === 1 ? names[0] : "";
+      targetSchemas.value = [];
+      targetSchema.value = "";
+      targetTables.value = [];
+      targetTable.value = "";
+    }
+  } finally {
+    pendingMetadataRequests.value -= 1;
   }
 }
 
 async function loadTables(side: "source" | "target") {
   const connectionId = side === "source" ? sourceConnectionId.value : targetConnectionId.value;
   const database = side === "source" ? sourceDatabase.value : targetDatabase.value;
-  if (!connectionId || !database) return;
-  const schema = side === "source" ? sourceSchema.value || (await resolveSchema(connectionId, database, props.prefillSchema)) : targetSchema.value || (await resolveSchema(connectionId, database));
-  const tables = (await api.listTables(connectionId, database, schema)).filter((table) => table.table_type !== "VIEW" && table.table_type !== "MATERIALIZED_VIEW").map((table) => table.name);
+  if (!connectionId || !database || !supportsDatabaseCompare(store.getConfig(connectionId), "data")) return;
+  pendingMetadataRequests.value += 1;
+  try {
+    const isCurrent = metadataRequestIsCurrent(side);
+    const schema = side === "source" ? sourceSchema.value || (await resolveSchema(connectionId, database, props.prefillSchema)) : targetSchema.value || (await resolveSchema(connectionId, database));
+    if (!isCurrent()) return;
+    const tables = (await api.listTables(connectionId, database, schema)).filter((table) => table.table_type !== "VIEW" && table.table_type !== "MATERIALIZED_VIEW").map((table) => table.name);
+    if (!isCurrent()) return;
 
-  if (side === "source") {
-    const preferredSelection = props.prefillTable && tables.includes(props.prefillTable) ? [props.prefillTable] : [...selectedSourceTables.value].filter((table) => tables.includes(table));
-    sourceSchema.value = schema;
-    sourceTables.value = tables;
-    resetSelectedSourceTables(preferredSelection);
-    sourceTable.value = preferredSelection.length === 1 ? preferredSelection[0] : "";
-  } else {
-    targetSchema.value = schema;
-    targetTables.value = tables;
-    const singleSourceTable = selectedSourceTableNames.value.length === 1 ? selectedSourceTableNames.value[0] : "";
-    const preferred = targetTable.value && tables.includes(targetTable.value) ? targetTable.value : singleSourceTable && tables.includes(singleSourceTable) ? singleSourceTable : "";
-    targetTable.value = preferred;
+    if (side === "source") {
+      const preferredSelection = props.prefillTable && tables.includes(props.prefillTable) ? [props.prefillTable] : [...selectedSourceTables.value].filter((table) => tables.includes(table));
+      sourceSchema.value = schema;
+      sourceTables.value = tables;
+      resetSelectedSourceTables(preferredSelection);
+      sourceTable.value = preferredSelection.length === 1 ? preferredSelection[0] : "";
+    } else {
+      targetSchema.value = schema;
+      targetTables.value = tables;
+      const singleSourceTable = selectedSourceTableNames.value.length === 1 ? selectedSourceTableNames.value[0] : "";
+      const preferred = targetTable.value && tables.includes(targetTable.value) ? targetTable.value : singleSourceTable && tables.includes(singleSourceTable) ? singleSourceTable : "";
+      targetTable.value = preferred;
+    }
+  } finally {
+    pendingMetadataRequests.value -= 1;
   }
 }
 
@@ -1035,6 +1117,7 @@ function formatModifiedSummary(row: SelectableDataCompareModifiedRow): string {
 watch(sourceConnectionId, (id) => {
   if (initializingPrefill) return;
   clearResult();
+  sourceDatabases.value = [];
   sourceDatabase.value = "";
   sourceSchema.value = "";
   sourceSchemas.value = [];
@@ -1048,6 +1131,7 @@ watch(sourceConnectionId, (id) => {
 watch(targetConnectionId, (id) => {
   if (initializingPrefill) return;
   clearResult();
+  targetDatabases.value = [];
   targetDatabase.value = "";
   targetSchema.value = "";
   targetSchemas.value = [];
@@ -1158,6 +1242,13 @@ watch(
       suppressConfigSave = true;
       try {
         sourceConnectionId.value = props.prefillConnectionId;
+        if (!supportsDatabaseCompare(store.getConfig(props.prefillConnectionId), "data")) {
+          sourceDatabase.value = sourceSchema.value = sourceTable.value = "";
+          sourceDatabases.value = sourceSchemas.value = sourceTables.value = [];
+          resetSelectedSourceTables([]);
+          resetTableColumnMetadata();
+          return;
+        }
         await loadDatabases(props.prefillConnectionId, "source");
         if (props.prefillDatabase) sourceDatabase.value = props.prefillDatabase;
         if (props.prefillDatabase) await loadSchemas("source", props.prefillSchema);
@@ -1231,17 +1322,7 @@ onBeforeUnmount(() => {
                 <span class="inline-flex h-5 w-5 items-center justify-center rounded-full bg-blue-500/15 text-[11px] font-semibold">S</span>
                 {{ t("diff.source") }}
               </div>
-              <ConnectionTreeSelect
-                v-model="sourceConnectionId"
-                :disabled="comparing || executionLocked"
-                :connections="sqlConnections"
-                :layout="store.sidebarLayout"
-                :placeholder="t('diff.selectConnection')"
-                :search-placeholder="t('diff.searchConnection')"
-                :empty-text="t('common.noResults')"
-                trigger-class="dbx-diff-connection-trigger h-8 w-full max-w-none justify-between gap-1.5 rounded-md border border-input bg-transparent px-2.5 text-xs shadow-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 dark:hover:bg-input/50"
-                list-class="w-[var(--reka-popover-trigger-width)]"
-              />
+              <CompareConnectionSelect v-model="sourceConnectionId" :disabled="comparing || executionLocked" :connections="compareConnections" :layout="store.sidebarLayout" />
               <SearchableSelect
                 v-model="sourceDatabase"
                 :options="sourceDatabases"
@@ -1277,7 +1358,7 @@ onBeforeUnmount(() => {
             </div>
 
             <div class="flex items-center pt-6">
-              <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('diff.swap')" :disabled="comparing || executionLocked" @click="swapSourceTarget">
+              <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('diff.swap')" :disabled="comparing || executionLocked || pendingMetadataRequests > 0" @click="swapSourceTarget">
                 <ArrowLeftRight class="w-3.5 h-3.5" />
               </Button>
             </div>
@@ -1287,17 +1368,7 @@ onBeforeUnmount(() => {
                 <span class="inline-flex h-5 w-5 items-center justify-center rounded-full bg-emerald-500/15 text-[11px] font-semibold">T</span>
                 {{ t("diff.target") }}
               </div>
-              <ConnectionTreeSelect
-                v-model="targetConnectionId"
-                :disabled="comparing || executionLocked"
-                :connections="sqlConnections"
-                :layout="store.sidebarLayout"
-                :placeholder="t('diff.selectConnection')"
-                :search-placeholder="t('diff.searchConnection')"
-                :empty-text="t('common.noResults')"
-                trigger-class="dbx-diff-connection-trigger h-8 w-full max-w-none justify-between gap-1.5 rounded-md border border-input bg-transparent px-2.5 text-xs shadow-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 dark:hover:bg-input/50"
-                list-class="w-[var(--reka-popover-trigger-width)]"
-              />
+              <CompareConnectionSelect v-model="targetConnectionId" :disabled="comparing || executionLocked" :connections="compareConnections" :layout="store.sidebarLayout" />
               <SearchableSelect
                 v-model="targetDatabase"
                 :options="targetDatabases"

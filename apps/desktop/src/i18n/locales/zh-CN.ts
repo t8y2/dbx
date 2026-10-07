@@ -7587,6 +7587,8 @@ export default withEnglishFallback({
     close: "关闭",
     info: "信息",
     connType: "连接类型",
+    allConnectionTypes: "全部类型",
+    unsupportedCompareConnection: "该连接不可用或不支持比较，请重新选择连接。",
     connName: "连接名称",
     host: "主机",
     addHost: "添加主机",

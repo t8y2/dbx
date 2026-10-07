@@ -7997,6 +7997,8 @@ export default withEnglishFallback({
     serverVersion: "Версия сервера",
     info: "Информация",
     connType: "Тип подключения",
+    allConnectionTypes: "Все типы",
+    unsupportedCompareConnection: "Это подключение недоступно или не поддерживает сравнение. Выберите другое подключение.",
     connName: "Имя подключения",
     host: "Хост",
     addHost: "Добавить хост",

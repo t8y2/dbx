@@ -7674,6 +7674,8 @@ export default {
     serverVersion: "Server Version",
     info: "Info",
     connType: "Connection type",
+    allConnectionTypes: "All types",
+    unsupportedCompareConnection: "This connection is unavailable or does not support comparison. Please select another connection.",
     connName: "Connection name",
     host: "Host",
     addHost: "Add Host",

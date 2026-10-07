@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { discoverTaskProviders, findProvider, findTrigger, splitTriggerId, taskHealth, triggerId, triggerSummary, withStoredTriggerId } from "./schedulerProviders";
+import { discoverTaskProviders, findProvider, findTrigger, splitTriggerId, taskHealth, triggerId, triggerSummary, withStoredTriggerId, type TriggerSummaryTranslator } from "./schedulerProviders";
 import type { InstalledPlugin } from "@/types/database";
 import type { SchedulerTaskProviderDescriptor } from "./schedulerTypes";
 
@@ -129,14 +129,28 @@ describe("withStoredTriggerId", () => {
 });
 
 describe("triggerSummary", () => {
-  it("renders cron with its persisted timezone", () => {
-    expect(triggerSummary({ type: "cron", expression: "0 2 * * *", timeZone: "America/Los_Angeles" })).toBe("Cron 0 2 * * * · America/Los_Angeles");
+  /** Minimal translator standing in for the component's `t`. */
+  const t: TriggerSummaryTranslator = (key, named) => {
+    const messages: Record<string, string> = {
+      "scheduler.triggerSummary.manual": "手动",
+      "scheduler.triggerSummary.startup": "启动时",
+      "scheduler.triggerSummary.everyMinutes": `每 ${named?.minutes} 分钟`,
+      "scheduler.triggerSummary.everySeconds": `每 ${named?.seconds} 秒`,
+      "scheduler.triggerSummary.once": `定时一次 · ${named?.at}`,
+      "scheduler.triggerSummary.cron": `Cron ${named?.expression}`,
+    };
+    return messages[key] ?? key;
+  };
+
+  it("renders cron without the timezone (the list renders it separately)", () => {
+    expect(triggerSummary({ type: "cron", expression: "0 2 * * *", timeZone: "America/Los_Angeles" }, t)).toBe("Cron 0 2 * * *");
   });
 
   it("renders once, interval and manual forms", () => {
-    expect(triggerSummary({ type: "once", at: "2026-10-05T09:00", timeZone: "UTC" })).toContain("Once");
-    expect(triggerSummary({ type: "interval", seconds: 3600 })).toBe("Every 60 min");
-    expect(triggerSummary({ type: "manual" })).toBe("Manual");
-    expect(triggerSummary({ type: "startup" })).toBe("Startup");
+    expect(triggerSummary({ type: "once", at: "2026-10-05T09:00", timeZone: "UTC" }, t)).toBe("定时一次 · 2026-10-05T09:00");
+    expect(triggerSummary({ type: "interval", seconds: 3600 }, t)).toBe("每 60 分钟");
+    expect(triggerSummary({ type: "interval", seconds: 45 }, t)).toBe("每 45 秒");
+    expect(triggerSummary({ type: "manual" }, t)).toBe("手动");
+    expect(triggerSummary({ type: "startup" }, t)).toBe("启动时");
   });
 });

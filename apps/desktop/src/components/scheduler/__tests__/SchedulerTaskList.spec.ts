@@ -82,7 +82,9 @@ describe("SchedulerTaskList", () => {
     const container = await mountList([task()]);
     expect(container.querySelector("[data-scheduler-task-row='task-1']")).toBeTruthy();
     expect(container.textContent).toContain("Files Tasks");
-    expect(container.textContent).toContain("Cron 0 2 * * * · Asia/Shanghai");
+    // The summary carries the expression; the timezone renders as its own suffix span.
+    expect(container.textContent).toContain("Cron 0 2 * * *");
+    expect(container.textContent).toContain("Asia/Shanghai");
     expect(container.textContent).toContain("2026");
   });
 

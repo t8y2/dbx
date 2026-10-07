@@ -314,8 +314,8 @@ function close() {
                 <SelectItem v-for="trigger in selectedProvider.triggers" :key="trigger.id" :value="fullTriggerId(selectedProvider.providerId, trigger)">
                   <span class="flex items-center gap-2">
                     {{ trigger.label }}
-                    <Badge v-if="trigger.mode === 'resident'" variant="outline" class="font-normal">resident</Badge>
-                    <Badge v-if="trigger.risk === 'high' || trigger.risk === 'medium'" variant="destructive" class="font-normal">{{ trigger.risk }}</Badge>
+                    <Badge v-if="trigger.mode === 'resident'" variant="outline" class="font-normal" aria-hidden="true">{{ t("scheduler.trigger.badges.resident") }}</Badge>
+                    <Badge v-if="trigger.risk === 'high' || trigger.risk === 'medium'" variant="destructive" class="font-normal" aria-hidden="true">{{ t(`scheduler.trigger.badges.${trigger.risk}`) }}</Badge>
                   </span>
                 </SelectItem>
               </SelectContent>

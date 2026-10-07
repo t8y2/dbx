@@ -134,7 +134,7 @@ function timeZoneSuffix(task: TaskDefinition): string {
             <Badge :variant="healthVariant(healthOf(task))" class="font-normal">{{ t(`scheduler.health.${healthOf(task)}`) }}</Badge>
           </div>
           <div class="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-            <span>{{ triggerSummary(task.trigger) }}</span>
+            <span>{{ triggerSummary(task.trigger, t) }}</span>
             <span v-if="timeZoneSuffix(task)">{{ timeZoneSuffix(task) }}</span>
             <span>{{ connectionLabel(task) }}</span>
             <span>{{ t("scheduler.taskList.columns.nextRun") }}: {{ formatDateTime(task.nextRunAt) }}</span>

@@ -221,21 +221,28 @@ export function defaultTimeZone(): string {
   }
 }
 
-/** Compact display form of a trigger for list rows ("Cron 0 2 * * * · Asia/Shanghai"). */
-export function triggerSummary(trigger: TaskTrigger): string {
+/** Translator slice used by {@link triggerSummary}; pass the component's `t`. */
+export type TriggerSummaryTranslator = (key: string, named?: Record<string, unknown>) => string;
+
+/**
+ * Compact display form of a trigger for list rows ("Cron 0 2 * * *"). The
+ * IANA time zone is rendered by the list's own suffix span for cron/once —
+ * the summary must not repeat it.
+ */
+export function triggerSummary(trigger: TaskTrigger, t: TriggerSummaryTranslator): string {
   switch (trigger.type) {
     case "manual":
-      return "Manual";
+      return t("scheduler.triggerSummary.manual");
     case "startup":
-      return "Startup";
+      return t("scheduler.triggerSummary.startup");
     case "interval": {
       const minutes = trigger.seconds / 60;
-      return Number.isInteger(minutes) && minutes > 0 ? `Every ${minutes} min` : `Every ${trigger.seconds} s`;
+      return Number.isInteger(minutes) && minutes > 0 ? t("scheduler.triggerSummary.everyMinutes", { minutes }) : t("scheduler.triggerSummary.everySeconds", { seconds: trigger.seconds });
     }
     case "once":
-      return `Once · ${trigger.at}${trigger.timeZone ? ` · ${trigger.timeZone}` : ""}`;
+      return t("scheduler.triggerSummary.once", { at: trigger.at });
     case "cron":
-      return `Cron ${trigger.expression}${trigger.timeZone ? ` · ${trigger.timeZone}` : ""}`;
+      return t("scheduler.triggerSummary.cron", { expression: trigger.expression });
   }
 }
 

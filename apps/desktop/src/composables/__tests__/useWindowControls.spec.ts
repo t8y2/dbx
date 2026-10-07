@@ -21,12 +21,18 @@ describe("window controls", () => {
     expect(shouldDrawDesktopWindowFrame(false, false, false)).toBe(false);
   });
 
-  it("draws the floating shadow/rounded frame only for restored Linux desktop windows", () => {
-    expect(shouldDrawLinuxFloatingFrame(true, true, false, false)).toBe(true);
-    expect(shouldDrawLinuxFloatingFrame(true, true, true, false)).toBe(false);
-    expect(shouldDrawLinuxFloatingFrame(true, true, false, true)).toBe(false);
-    expect(shouldDrawLinuxFloatingFrame(false, true, false, false)).toBe(false);
-    expect(shouldDrawLinuxFloatingFrame(true, false, false, false)).toBe(false);
+  it.each([
+    ["restored Linux main window with a compositor", {}, true],
+    ["maximized window", { isMaximized: true }, false],
+    ["fullscreen window", { isFullscreen: true }, false],
+    ["non-Linux platform", { isLinux: false }, false],
+    ["web runtime", { isDesktop: false }, false],
+    ["detached or plugin window (not created transparent)", { isMainWindow: false }, false],
+    ["no compositing manager", { compositing: false }, false],
+    ["login or setup page", { showingAuthPage: true }, false],
+  ])("floating Linux frame: %s", (_name, override, expected) => {
+    const base = { isLinux: true, isDesktop: true, isMainWindow: true, compositing: true, showingAuthPage: false, isMaximized: false, isFullscreen: false };
+    expect(shouldDrawLinuxFloatingFrame({ ...base, ...override })).toBe(expected);
   });
 
   it("reserves traffic light inset only for non-fullscreen macOS desktop windows", () => {

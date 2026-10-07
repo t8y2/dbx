@@ -32,7 +32,7 @@ const themeIcons = ref<Record<keyof LinuxWindowControlIcons, string> | null>(nul
 const maximizeMask = computed(() => (props.isMaximized ? themeIcons.value?.restore : themeIcons.value?.maximize));
 
 function svgMask(svg: string): string {
-  return `url("data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(svg)))}")`;
+  return `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
 }
 
 onMounted(async () => {
@@ -50,7 +50,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div v-if="isLinux" class="flex items-center gap-1.5 ml-1 mr-1">
+  <div v-if="isLinux" class="flex items-center gap-[13px] ml-1 mr-1">
     <button type="button" class="dbx-gnome-window-button" @click="emit('minimize')">
       <span v-if="themeIcons" class="dbx-gnome-window-glyph" :style="{ maskImage: themeIcons.minimize, WebkitMaskImage: themeIcons.minimize }" />
       <svg v-else viewBox="0 0 16 16" class="size-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M4 11.5h8" /></svg>

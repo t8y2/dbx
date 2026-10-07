@@ -156,6 +156,7 @@ pub async fn set_macos_traffic_light_position(
 #[cfg(test)]
 mod tests {
     use super::validate_macos_traffic_light_position;
+    use serde_json::Value;
 
     #[test]
     fn validates_macos_traffic_light_position_inputs() {
@@ -163,6 +164,27 @@ mod tests {
         assert!(validate_macos_traffic_light_position(f64::NAN, 18.0, 1.0).is_err());
         assert!(validate_macos_traffic_light_position(16.0, f64::INFINITY, 1.0).is_err());
         assert!(validate_macos_traffic_light_position(16.0, 18.0, 0.0).is_err());
+    }
+
+    // platform config arrays replace the base array wholesale, so the Linux window object
+    // is a copy of the base one; keep them from drifting apart.
+    #[test]
+    fn linux_main_window_config_mirrors_the_base_window() {
+        let base: Value = serde_json::from_str(include_str!("../../tauri.conf.json")).unwrap();
+        let linux: Value = serde_json::from_str(include_str!("../../tauri.linux.conf.json")).unwrap();
+        let mut base_window = base["app"]["windows"][0].clone();
+        let mut linux_window = linux["app"]["windows"][0].clone();
+
+        // macOS-only keys in the base, and the Linux-only overrides.
+        for key in ["titleBarStyle", "trafficLightPosition"] {
+            base_window.as_object_mut().unwrap().remove(key);
+        }
+        assert_eq!(linux_window["create"], Value::Bool(false));
+        assert_eq!(linux_window["transparent"], Value::Bool(true));
+        for key in ["create", "transparent"] {
+            linux_window.as_object_mut().unwrap().remove(key);
+        }
+        assert_eq!(linux_window, base_window);
     }
 }
 

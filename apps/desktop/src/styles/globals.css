@@ -1619,36 +1619,25 @@ html.dbx-data-grid-native-selection-blocked [role="textbox"] * {
   background: var(--dbx-window-top-border);
 }
 
-/* Linux (Wayland/GNOME): the window is transparent and undecorated, so the shell
- * draws its own rounded corners and shadow inside a transparent margin. The margin
- * also acts as the resize grip area. Toggled from App.vue; dropped when maximized. */
-/* index.html paints html/body/#root opaque for the startup splash; !important is
- * needed to out-rank that inline sheet (including its html.dark variants). */
-html.dbx-linux-floating,
-html.dbx-linux-floating body,
-html.dbx-linux-floating #root {
-  background: transparent !important;
-}
-
-/* App.vue's root is position:fixed, so the margin must be its padding, not #root's. */
+/* Linux floating frame: the transparent margin, rounded corners and shadow are drawn on
+ * #root from index.html so they exist before the bundle loads. Here: the app root fills
+ * that frame instead of the viewport. */
 html.dbx-linux-floating .dbx-app-root {
-  box-sizing: border-box;
-  padding: 20px;
+  width: 100%;
+  height: 100%;
 }
 
 html.dbx-linux-floating [data-app-shell] {
   width: 100%;
   height: 100%;
-  border-radius: 12px;
-  box-shadow:
-    0 0 0 1px rgb(0 0 0 / 0.14),
-    0 3px 12px rgb(0 0 0 / 0.16);
 }
 
-html.dark.dbx-linux-floating [data-app-shell] {
-  box-shadow:
-    0 0 0 1px rgb(255 255 255 / 0.10),
-    0 3px 12px rgb(0 0 0 / 0.45);
+/* Full-viewport dialog layers are portaled to <body>; keep them inside the shell so they
+ * do not paint over the transparent margin and square off the rounded corners. */
+html.dbx-linux-floating [data-slot="dialog-overlay"],
+html.dbx-linux-floating [data-slot="dialog-positioner"] {
+  inset: 20px;
+  border-radius: 12px;
 }
 
 html.dbx-linux-floating .dbx-desktop-window-frame::before {

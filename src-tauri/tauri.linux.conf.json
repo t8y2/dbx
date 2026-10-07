@@ -12,7 +12,8 @@
         "visible": false,
         "transparent": true,
         "hiddenTitle": true,
-        "acceptFirstMouse": true
+        "acceptFirstMouse": true,
+        "create": false
       }
     ]
   }

@@ -42,12 +42,25 @@ export function shouldDrawDesktopWindowFrame(isMac: boolean, isDesktop = true, i
   return isDesktop && !isMac && !isWindows;
 }
 
-// Wayland compositors (mutter, kwin) draw neither shadow nor rounded corners for
-// undecorated windows, so on Linux the transparent window (tauri.linux.conf.json)
-// paints its own: a transparent margin that carries the shadow, and a rounded shell.
-// Maximized/fullscreen windows must fill the screen, so the floating frame is dropped.
-export function shouldDrawLinuxFloatingFrame(isLinux: boolean, isDesktop: boolean, isMaximized: boolean, isFullscreen: boolean): boolean {
-  return isDesktop && isLinux && !isMaximized && !isFullscreen;
+export interface LinuxFloatingFrameState {
+  isLinux: boolean;
+  isDesktop: boolean;
+  /** Only the main window is created transparent; detached-tab and plugin windows are opaque. */
+  isMainWindow: boolean;
+  /** The main window is only transparent when a compositing manager is running. */
+  compositing: boolean;
+  /** Login/setup pages paint the whole window themselves. */
+  showingAuthPage: boolean;
+  isMaximized: boolean;
+  isFullscreen: boolean;
+}
+
+// Compositors draw neither shadow nor rounded corners for undecorated windows, so on Linux
+// the transparent main window (see create_linux_main_window) paints its own: a transparent
+// margin that carries the shadow, and a rounded shell. Maximized/fullscreen windows must fill
+// the screen, so the floating frame is dropped there.
+export function shouldDrawLinuxFloatingFrame(state: LinuxFloatingFrameState): boolean {
+  return state.isDesktop && state.isLinux && state.isMainWindow && state.compositing && !state.showingAuthPage && !state.isMaximized && !state.isFullscreen;
 }
 
 export function useWindowControls() {

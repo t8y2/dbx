@@ -364,12 +364,12 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
 
   function normalizeCompleteLocalResult(
     result: QueryResult,
-    targetCols: readonly string[] = columns.value,
+    targetCols?: readonly string[],
   ): { columns: string[]; columnTypes: string[]; columnComments: Array<string | undefined>; rows: CellValue[][]; mongoCopyDocuments?: unknown[]; spatialColumns?: QueryResult["spatial_columns"]; spatialValues?: QueryResult["spatial_values"] } {
     const editorSettings = useSettingsStore().editorSettings;
-    const isSubset = targetCols.length !== result.columns.length || !targetCols.every((col, i) => col === result.columns[i]);
+    const isSubset = targetCols !== undefined && (targetCols.length !== result.columns.length || !targetCols.every((col, i) => col === result.columns[i]));
     if (databaseType.value === "mongodb" || isSubset) {
-      const projected = projectResultColumns(result, targetCols);
+      const projected = projectResultColumns(result, targetCols ?? columns.value);
       const rows = editorSettings.exportRowLimitEnabled ? projected.rows.slice(0, editorSettings.exportRowLimit) : projected.rows;
       return {
         columns: projected.columns,

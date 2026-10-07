@@ -3,6 +3,16 @@
 > 本文档是会话交接的状态快照。接力会话从这里继续，所有上下文以本文 + `docs/scheduler/` + `docs/adr/scheduler-task-contract.md` 为准。
 > 上一版快照（2026-10-05，Windows 会话）的内容已全部落实，历史细节见 git 历史与 `docs/scheduler-integration-report.md`。
 
+## 〇、2026-10-07 会话增补（已提交：d59da28c6..e392b8d95，共 5 笔）
+
+1. **多连接执行补全（原「已知未解决 #3」）**：`PluginTaskExecutor` 此前只消费 `target.connectionId`，`additionalConnectionIds` 无人读取（多选 chip 存了但执行端静默忽略）。现由宿主遍历：`dispatch_targets`（主连接在前、去重、`allow_multiple_connections` 门控）+ 每连接一次 `task/execute` + `combine_results` 聚合（单连接逐字透传；批次给失败连接点名、首个非零 exit code 胜出、artifacts 拼接）。dispatch 级错误（传输/连接打不开）快速中止批次并 abort 事件泵；provider 报告的失败不中断其余连接。`validate` 现在打开全部绑定连接。插件契约未动（`task/execute` 仍是单 `connectionId`），**无需重打包 .dbxp**。
+2. **worker 卡排队提示（原 #4）**：新增 `BackgroundScheduler::worker_status()` + Tauri 命令 `scheduler_worker_status`（pid 文件存活 + env 开关，web 通道返回 null）。前端在「存在排队/启动中超 20 秒的运行」且 worker 不健康时显示琥珀横幅（`scheduler.workerBanner.*` 三语言），判定纯函数在 `schedulerDraft.ts`（`hasStaleQueuedRun` / `workerNeedsAttention`）。
+3. **高风险确认会话级记忆（原 #5）**：保存成功的高风险任务按 id 记入模块级 Set（`isHighRiskAcknowledged` / `rememberHighRiskAcknowledgement`），本次应用运行内再次编辑不再重勾；重启即复位，安全语义保留。
+4. **i18n 收尾（接上一会话的未提交改动）**：trigger 摘要与 resident/风险徽标走 `t()`（`scheduler.triggerSummary.*` / `scheduler.trigger.badges.*`），时区后缀由列表行单独渲染。
+5. **磁盘注意**：本会话两次撞 ENOSPC（926G 盘 100% 满）；已删 `host/target/debug/incremental` 与 `ssh/backend/target/debug/incremental` 解困（可再生）。用户盘仍 ~99% 满，接力会话构建前先 `df -h`。
+
+验证：`cargo test -p dbx-core` 全绿；`cargo test -p dbx --lib` 444 过 + 2 个既有环境失败（基线）；调度器 vitest 10 文件 63 用例全绿；`vue-tsc --noEmit` 干净。
+
 ## 一、总体进度（对照 docs/scheduler/README.md 的波次计划）——全部波次已完成
 
 | 阶段 | 状态 | 落点 |

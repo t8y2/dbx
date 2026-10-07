@@ -98,6 +98,29 @@ export function builtinTaskProviders(labels: { databaseBackup: string; cloudSync
   ];
 }
 
+/** The per-plugin shape the frontend plugin registry hands back. */
+export interface LocalizedPluginDefinition {
+  plugin: InstalledPlugin;
+  /**
+   * The locale-localized contribution copies the registry assembled —
+   * `definition.plugin.manifest.contributions` still carries the raw
+   * manifest and would render every label in the manifest's source language.
+   */
+  contributions: InstalledPlugin["manifest"]["contributions"];
+}
+
+/**
+ * Reattaches the registry's localized contributions to the plugin copy so
+ * discovery (labels, trigger labels and form fields) reads the active
+ * locale instead of the raw manifest.
+ */
+export function withLocalizedContributions(definitions: readonly LocalizedPluginDefinition[]): InstalledPlugin[] {
+  return definitions.map((definition) => ({
+    ...definition.plugin,
+    manifest: { ...definition.plugin.manifest, contributions: definition.contributions ?? definition.plugin.manifest.contributions },
+  }));
+}
+
 /**
  * Reads every installed plugin manifest and returns the task providers it
  * declares. Unreadable contributions are skipped: a malformed third-party

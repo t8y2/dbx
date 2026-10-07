@@ -14,7 +14,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 import * as schedulerApi from "@/lib/scheduler/schedulerApi";
 import { subscribeSchedulerEvents } from "@/lib/scheduler/schedulerEvents";
-import { builtinTaskProviders, discoverTaskProviders } from "@/lib/scheduler/schedulerProviders";
+import { builtinTaskProviders, discoverTaskProviders, withLocalizedContributions } from "@/lib/scheduler/schedulerProviders";
 import { hasStaleQueuedRun, isActiveRunStatus, workerNeedsAttention } from "@/lib/scheduler/schedulerDraft";
 import type { InstalledPlugin } from "@/types/database";
 import type { ResidentSession, SchedulerTaskProviderDescriptor, SchedulerWorkerStatus, TaskDefinition, TaskRun } from "@/lib/scheduler/schedulerTypes";
@@ -113,23 +113,29 @@ async function refreshResidents() {
   }
 }
 
-async function refreshAll() {
-  loading.value = true;
-  await Promise.all([refreshTasks(), refreshRuns(), refreshResidents()]);
-  loading.value = false;
-}
-
-onMounted(async () => {
+async function refreshPlugins() {
   try {
     // The registry applies the manifest's `localizations` for the active
     // locale, so plugin provider/trigger/field labels read in the UI language.
+    // `definition.plugin.manifest` still holds the raw copy — discovery must
+    // consume the registry's localized contributions instead.
     const { createFrontendPluginRegistry } = await import("@/lib/plugins/frontendPlugin");
-    plugins.value = createFrontendPluginRegistry(await import("@/lib/backend/api").then((module) => module.listPlugins()), locale.value)
-      .listPlugins()
-      .map((definition) => definition.plugin);
+    plugins.value = withLocalizedContributions(createFrontendPluginRegistry(await import("@/lib/backend/api").then((module) => module.listPlugins()), locale.value).listPlugins());
   } catch (reason) {
     console.warn("[scheduler] plugin discovery failed", reason);
   }
+}
+
+async function refreshAll() {
+  loading.value = true;
+  await Promise.all([refreshPlugins(), refreshTasks(), refreshRuns(), refreshResidents()]);
+  loading.value = false;
+}
+
+// Switching the UI language must re-render plugin labels and form fields.
+watch(locale, () => void refreshPlugins());
+
+onMounted(async () => {
   await refreshAll();
   unlisten = await subscribeSchedulerEvents((event) => {
     // Notifications are hints; state is rebuilt from the API.

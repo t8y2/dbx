@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { discoverTaskProviders, findProvider, findTrigger, splitTriggerId, taskHealth, triggerId, triggerSummary, withStoredTriggerId, type TriggerSummaryTranslator } from "./schedulerProviders";
+import { discoverTaskProviders, findProvider, findTrigger, splitTriggerId, taskHealth, triggerId, triggerSummary, withLocalizedContributions, withStoredTriggerId, type TriggerSummaryTranslator } from "./schedulerProviders";
 import type { InstalledPlugin } from "@/types/database";
 import type { SchedulerTaskProviderDescriptor } from "./schedulerTypes";
 
@@ -49,6 +49,33 @@ describe("discoverTaskProviders", () => {
 
   it("returns nothing for undefined plugin lists (discovery must not hardcode providers)", () => {
     expect(discoverTaskProviders(undefined)).toEqual([]);
+  });
+});
+
+describe("withLocalizedContributions", () => {
+  it("feeds discovery from the registry's localized copies, not the raw manifest", () => {
+    const rawPlugin = pluginWithContributions("io.dbx.ssh", [sshProviderContribution]);
+    const localizedContribution = {
+      type: "task-provider" as const,
+      id: "io.dbx.ssh.tasks",
+      label: "SSH 计划任务",
+      triggers: [{ id: "execute", label: "执行命令", mode: "run" as const, fields: [{ key: "command", label: "命令", type: "textarea" as const, required: true }] }],
+    };
+    // What the page used to do: keep only `definition.plugin`, whose manifest
+    // still carries the raw English copy.
+    const plugins = withLocalizedContributions([{ plugin: rawPlugin, contributions: [localizedContribution] }]);
+    const providers = discoverTaskProviders(plugins);
+    expect(providers[0]!.label).toBe("SSH 计划任务");
+    expect(providers[0]!.triggers[0]!.label).toBe("执行命令");
+    expect(providers[0]!.triggers[0]!.fields?.[0]!.label).toBe("命令");
+    // Non-contribution manifest fields pass through untouched.
+    expect(plugins[0]!.manifest.id).toBe("io.dbx.ssh");
+  });
+
+  it("falls back to the raw manifest contributions when the registry shipped none", () => {
+    const rawPlugin = pluginWithContributions("io.dbx.ssh", [sshProviderContribution]);
+    const plugins = withLocalizedContributions([{ plugin: rawPlugin, contributions: undefined as never }]);
+    expect(discoverTaskProviders(plugins)[0]!.label).toBe("SSH Tasks");
   });
 });
 

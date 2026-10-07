@@ -214,6 +214,9 @@ impl TaskDefinition {
         if let Some(connection) = &self.target.connection_id {
             bounded_text(connection, 256, "Connection ID")?;
         }
+        for connection in &self.target.additional_connection_ids {
+            bounded_text(connection, 256, "Connection ID")?;
+        }
         self.trigger.validate()?;
         if let Some(config) = self.config.as_object() {
             if config.contains_key("configVersion") {

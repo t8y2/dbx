@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use super::super::{
     artifacts::TaskArtifact,
     executor::{TaskExecutionContext, TaskExecutionResult, TaskExecutor},
-    models::{TaskDefinition, TaskProviderType},
+    models::{TaskDefinition, TaskProviderType, TaskTarget},
     TaskError,
 };
 use crate::connection::{AppState, PoolKind};
@@ -39,6 +39,99 @@ fn local_trigger_id(task: &TaskDefinition) -> String {
         return task.provider_id.clone();
     }
     stored.strip_prefix(&format!("{}/", task.provider_id)).unwrap_or(stored).to_owned()
+}
+
+/// One dispatch slot per run: the primary connection first, then the extra
+/// ids of a provider that declares `allow_multiple_connections`. The plugin
+/// contract hands one `connectionId` per `task/execute`, so the host — not
+/// the plugin — walks the list. `None` marks a connection-less provider; it
+/// still gets exactly one dispatch. Empty ids and duplicates collapse away.
+fn dispatch_targets(target: &TaskTarget, allows_multiple_connections: bool) -> Vec<Option<String>> {
+    let mut slots: Vec<Option<String>> = Vec::new();
+    if let Some(primary) = target.connection_id.as_deref().filter(|id| !id.trim().is_empty()) {
+        slots.push(Some(primary.to_owned()));
+    }
+    if allows_multiple_connections {
+        for id in &target.additional_connection_ids {
+            let listed = slots.iter().any(|slot| slot.as_deref() == Some(id.as_str()));
+            if !id.trim().is_empty() && !listed {
+                slots.push(Some(id.clone()));
+            }
+        }
+    }
+    if slots.is_empty() {
+        slots.push(None);
+    }
+    slots
+}
+
+/// Folds per-connection `task/execute` outcomes into the single run result the
+/// engine consumes. One connection passes through untouched; a batch names
+/// every failed connection in the summary. Dispatch errors (transport,
+/// missing connection) abort the batch in `execute` before this runs — only
+/// provider-reported failures (`success: false`) continue a batch.
+fn combine_results(
+    results: Vec<(Option<String>, dbx_plugin_runtime::plugins::PluginTaskExecuteResult)>,
+) -> TaskExecutionResult {
+    fn to_artifacts(artifacts: Vec<dbx_plugin_runtime::plugins::PluginTaskArtifact>) -> Vec<TaskArtifact> {
+        artifacts
+            .into_iter()
+            .map(|artifact| TaskArtifact {
+                name: artifact.name,
+                uri: artifact.uri,
+                content_type: None,
+                size: artifact.size,
+                checksum: None,
+            })
+            .collect()
+    }
+    if results.len() <= 1 {
+        let (_, result) = results.into_iter().next().unwrap_or_else(|| {
+            (
+                None,
+                dbx_plugin_runtime::plugins::PluginTaskExecuteResult {
+                    success: false,
+                    exit_code: None,
+                    message: None,
+                    artifacts: Vec::new(),
+                },
+            )
+        });
+        return TaskExecutionResult {
+            success: result.success,
+            exit_code: result.exit_code,
+            message: result.message,
+            artifacts: to_artifacts(result.artifacts),
+        };
+    }
+    let total = results.len();
+    let succeeded = results.iter().filter(|(_, result)| result.success).count();
+    let success = succeeded == total;
+    // The first non-zero exit code wins; a clean batch keeps the last code.
+    let exit_code = results
+        .iter()
+        .find_map(|(_, result)| result.exit_code.filter(|code| *code != 0))
+        .or_else(|| results.iter().rev().find_map(|(_, result)| result.exit_code));
+    let message = if success {
+        Some(format!("All {total} connections succeeded"))
+    } else {
+        let mut parts = vec![format!("{succeeded}/{total} connections succeeded")];
+        for (connection, result) in &results {
+            if result.success {
+                continue;
+            }
+            let label = connection.clone().unwrap_or_else(|| "connection".to_owned());
+            let detail: String = result.message.as_deref().unwrap_or("failed").chars().take(200).collect();
+            parts.push(format!("{label}: {detail}"));
+        }
+        Some(parts.join("; "))
+    };
+    TaskExecutionResult {
+        success,
+        exit_code,
+        message,
+        artifacts: results.into_iter().flat_map(|(_, result)| to_artifacts(result.artifacts)).collect(),
+    }
 }
 
 /// Generous default when the task declares no timeout: `task/execute` may run
@@ -73,11 +166,11 @@ impl PluginTaskExecutor {
         Ok((plugin_id, task.provider_id.clone()))
     }
 
-    async fn ensure_connection(&self, task: &TaskDefinition) -> Result<Option<serde_json::Value>, TaskError> {
-        let Some(connection_id) = task.target.connection_id.clone().filter(|id| !id.is_empty()) else {
+    async fn ensure_connection(&self, connection_id: Option<&str>) -> Result<Option<serde_json::Value>, TaskError> {
+        let Some(connection_id) = connection_id.filter(|id| !id.trim().is_empty()) else {
             return Ok(None);
         };
-        self.state.get_or_create_pool(&connection_id, None).await.map_err(|error| {
+        self.state.get_or_create_pool(connection_id, None).await.map_err(|error| {
             TaskError::connection_missing(format!("Cannot open connection {connection_id}: {error}"))
         })?;
         let lifecycle = self
@@ -99,6 +192,8 @@ impl PluginTaskExecutor {
     fn run_request(
         task: &TaskDefinition,
         context: &TaskExecutionContext,
+        connection_id: Option<String>,
+        config: serde_json::Value,
         runtime: Option<serde_json::Value>,
     ) -> Result<dbx_plugin_runtime::plugins::PluginTaskRunRequest, TaskError> {
         use dbx_plugin_runtime::plugins::{PluginTaskRunRef, PluginTaskRunRequest, PluginTaskRunTask};
@@ -108,10 +203,9 @@ impl PluginTaskExecutor {
                 task_id: task.id.clone(),
                 run_id: context.run.id.clone(),
                 trigger_id,
-                connection_id: task.target.connection_id.clone(),
+                connection_id,
                 config_version: task.config_version.max(1) as u32,
-                config: serde_json::to_value(&task.config)
-                    .map_err(|error| TaskError::invalid_config(error.to_string()))?,
+                config,
             },
             run: PluginTaskRunRef { run_id: context.run.id.clone(), attempt: context.run.attempt.max(1) as u64 },
             connection: None,
@@ -132,29 +226,41 @@ impl TaskExecutor for PluginTaskExecutor {
         let (plugin_id, provider_id) = Self::split_provider(task)?;
         // resolve_task_provider rejects uninstalled / incompatible plugins and
         // undeclared providers, which is exactly the validate contract.
-        self.state
+        let contribution = self
+            .state
             .plugin_host
             .resolve_task_provider(&plugin_id, &provider_id)
             .map_err(|error| TaskError::provider_not_found(error))?;
-        // Optionally ask the provider itself (task/validate) — failures there
-        // are config problems, surfaced with their own message.
-        let _ = self.ensure_connection(task).await?;
+        // Every bound connection must open, not just the primary one.
+        for connection_id in dispatch_targets(&task.target, contribution.allow_multiple_connections) {
+            self.ensure_connection(connection_id.as_deref()).await?;
+        }
         Ok(())
     }
 
     async fn execute(&self, context: TaskExecutionContext) -> Result<TaskExecutionResult, TaskError> {
         let task = context.task.clone();
         let (plugin_id, provider_id) = Self::split_provider(&task)?;
-        let runtime = self.ensure_connection(&task).await?;
-        let request = Self::run_request(&task, &context, runtime)?;
+        let mut logger = context.logger.clone();
+        let contribution = self.state.plugin_host.resolve_task_provider(&plugin_id, &provider_id).ok();
+        let allows_multiple = contribution.as_ref().map(|entry| entry.allow_multiple_connections).unwrap_or(false);
+        let slots = dispatch_targets(&task.target, allows_multiple);
+        if contribution.is_some() && !allows_multiple && !task.target.additional_connection_ids.is_empty() {
+            let _ = logger.system(&format!(
+                "Ignoring {} additional connection(s): the provider allows a single connection",
+                task.target.additional_connection_ids.len()
+            ));
+        }
         let timeout = task
             .execution
             .timeout_seconds
             .filter(|seconds| *seconds > 0)
             .map(|seconds| Duration::from_secs(seconds))
             .unwrap_or(DEFAULT_TASK_TIMEOUT);
-
-        let mut logger = context.logger.clone();
+        // Serialize once: a config that cannot serialize must fail before the
+        // event pump below is spawned (its `?` could not abort the pump).
+        let config =
+            serde_json::to_value(&task.config).map_err(|error| TaskError::invalid_config(error.to_string()))?;
 
         // Stream the plugin's fixed task events into this run's logger and
         // progress store: command output arrives as task/log events on the
@@ -220,21 +326,51 @@ impl TaskExecutor for PluginTaskExecutor {
             }
         });
 
-        let _ = logger.system(&format!("Dispatching task/execute to {plugin_id}/{provider_id}"));
-        let result = tokio::select! {
-            _ = context.cancellation.cancelled() => {
-                pump.abort();
-                let _ = logger.system("Run cancelled before the plugin answered");
-                return Err(TaskError::new(crate::scheduler::TaskErrorKind::Retryable, "timeout", "Run cancelled"));
+        // Walk every bound connection; the plugin answers one connection per
+        // dispatch, so a multi-connection run is N dispatches under one run id.
+        // A transport-level error aborts the remaining connections, a
+        // provider-reported failure does not (combine_results names it).
+        let total_slots = slots.len();
+        let mut results = Vec::with_capacity(total_slots);
+        for (index, connection_id) in slots.into_iter().enumerate() {
+            // Every fallible step from here must abort the pump first: the
+            // pump only ends when `execute` returns or aborts it.
+            let runtime = match self.ensure_connection(connection_id.as_deref()).await {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    pump.abort();
+                    return Err(error);
+                }
+            };
+            let request = Self::run_request(&task, &context, connection_id.clone(), config.clone(), runtime)?;
+            let dispatch_line = match (&connection_id, total_slots > 1) {
+                (Some(id), true) => {
+                    format!(
+                        "Dispatching task/execute to {plugin_id}/{provider_id} (connection {}/{}: {id})",
+                        index + 1,
+                        total_slots
+                    )
+                }
+                _ => format!("Dispatching task/execute to {plugin_id}/{provider_id}"),
+            };
+            let _ = logger.system(&dispatch_line);
+            let outcome = tokio::select! {
+                _ = context.cancellation.cancelled() => {
+                    pump.abort();
+                    let _ = logger.system("Run cancelled before the plugin answered");
+                    return Err(TaskError::new(crate::scheduler::TaskErrorKind::Retryable, "timeout", "Run cancelled"));
+                }
+                outcome = self.state.plugin_host.execute_task(&plugin_id, &provider_id, request, Some(timeout)) => outcome,
             }
-            outcome = self.state.plugin_host.execute_task(&plugin_id, &provider_id, request, Some(timeout)) => outcome,
+            .map_err(|error| {
+                pump.abort();
+                TaskError::invalid_config(error)
+            })?;
+            results.push((connection_id, outcome));
         }
-        .map_err(|error| {
-            pump.abort();
-            TaskError::invalid_config(error)
-        })?;
         pump.abort();
 
+        let result = combine_results(results);
         let status_line = match (&result.message, result.success) {
             (Some(message), true) => format!("Run succeeded: {message}"),
             (Some(message), false) => format!("Run failed: {message}"),
@@ -243,29 +379,15 @@ impl TaskExecutor for PluginTaskExecutor {
         };
         let _ = logger.append(if result.success { "info" } else { "error" }, "stdout", &status_line);
 
-        Ok(TaskExecutionResult {
-            success: result.success,
-            exit_code: result.exit_code,
-            message: result.message,
-            artifacts: result
-                .artifacts
-                .into_iter()
-                .map(|artifact| TaskArtifact {
-                    name: artifact.name,
-                    uri: artifact.uri,
-                    content_type: None,
-                    size: artifact.size,
-                    checksum: None,
-                })
-                .collect(),
-        })
+        Ok(result)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::local_trigger_id;
+    use super::{combine_results, dispatch_targets, local_trigger_id};
     use crate::scheduler::models::{TaskDefinition, TaskTarget};
+    use dbx_plugin_runtime::plugins::PluginTaskExecuteResult;
 
     fn task_with_config(provider_id: &str, config: serde_json::Value) -> TaskDefinition {
         serde_json::from_value(serde_json::json!({
@@ -284,6 +406,23 @@ mod tests {
             "version": 1
         }))
         .expect("task json")
+    }
+
+    fn target(primary: Option<&str>, additional: &[&str]) -> TaskTarget {
+        TaskTarget {
+            connection_id: primary.map(str::to_owned),
+            additional_connection_ids: additional.iter().map(|id| id.to_string()).collect(),
+            ..TaskTarget::default()
+        }
+    }
+
+    fn executed(success: bool, exit_code: Option<i32>, message: Option<&str>) -> PluginTaskExecuteResult {
+        serde_json::from_value(serde_json::json!({
+            "success": success,
+            "exitCode": exit_code,
+            "message": message,
+        }))
+        .expect("execute result json")
     }
 
     #[test]
@@ -309,5 +448,57 @@ mod tests {
     fn task_target_defaults_stay_valid() {
         let task = task_with_config("io.dbx.ssh.tasks", serde_json::json!({}));
         assert_eq!(task.target, TaskTarget::default());
+    }
+
+    #[test]
+    fn dispatch_targets_orders_primary_then_additional_without_duplicates() {
+        let slots = dispatch_targets(&target(Some("a"), &["b", "a", "", "b", "c"]), true);
+        assert_eq!(slots, vec![Some("a".into()), Some("b".into()), Some("c".into())]);
+    }
+
+    #[test]
+    fn dispatch_targets_drops_additional_ids_for_single_connection_providers() {
+        let slots = dispatch_targets(&target(Some("a"), &["b", "c"]), false);
+        assert_eq!(slots, vec![Some("a".into())]);
+    }
+
+    #[test]
+    fn dispatch_targets_keeps_one_connection_less_slot() {
+        assert_eq!(dispatch_targets(&target(None, &[]), true), vec![None]);
+        assert_eq!(dispatch_targets(&target(Some(""), &[]), false), vec![None]);
+    }
+
+    #[test]
+    fn combine_results_passes_a_single_connection_through() {
+        let combined = combine_results(vec![(Some("a".into()), executed(true, Some(0), Some("done")))]);
+        assert!(combined.success);
+        assert_eq!(combined.exit_code, Some(0));
+        assert_eq!(combined.message.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn combine_results_reports_every_failed_connection_of_a_batch() {
+        let combined = combine_results(vec![
+            (Some("a".into()), executed(true, Some(0), Some("ok"))),
+            (Some("b".into()), executed(false, Some(1), Some("command failed"))),
+            (Some("c".into()), executed(false, None, None)),
+        ]);
+        assert!(!combined.success);
+        assert_eq!(combined.exit_code, Some(1));
+        let message = combined.message.expect("batch summary");
+        assert!(message.contains("1/3 connections succeeded"), "{message}");
+        assert!(message.contains("b: command failed"), "{message}");
+        assert!(message.contains("c: failed"), "{message}");
+        assert!(!message.contains("a:"), "{message}");
+    }
+
+    #[test]
+    fn combine_results_reports_a_fully_successful_batch() {
+        let combined = combine_results(vec![
+            (Some("a".into()), executed(true, Some(0), None)),
+            (Some("b".into()), executed(true, Some(0), Some("done"))),
+        ]);
+        assert!(combined.success);
+        assert_eq!(combined.message.as_deref(), Some("All 2 connections succeeded"));
     }
 }

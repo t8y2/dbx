@@ -18,6 +18,25 @@ describe("schedulerErrorCode", () => {
     expect(schedulerErrorCode(new Error(`500: {"code":"provider_unavailable","message":"sidecar down"}`))).toBe("provider_unavailable");
   });
 
+  // The scheduler web routes (commit 3452f7c5d) serve error envelopes with a
+  // top-level machine `errorCode` field; `webRequest` rejects with the raw
+  // body text, so the normalizer must parse the served shape.
+  it("reads errorCode from the served error-envelope shape", () => {
+    expect(schedulerErrorCode(new Error(`{"version":1,"code":"DBX-LEGACY-0001","errorCode":"version_conflict","detail":"version_conflict: stale"}`))).toBe("version_conflict");
+  });
+
+  it("falls back to the detail's machine-code prefix when errorCode is absent", () => {
+    expect(schedulerErrorCode(new Error(`{"version":1,"code":"DBX-LEGACY-0001","detail":"run_already_active: another run"}`))).toBe("run_already_active");
+  });
+
+  it("does not leak the DBX-LEGACY-* directory code as a machine code", () => {
+    expect(schedulerErrorCode(new Error(`{"version":1,"code":"DBX-LEGACY-0001","detail":"stale"}`))).toBeUndefined();
+  });
+
+  it("returns undefined for malformed JSON bodies", () => {
+    expect(schedulerErrorCode(new Error(`{"version":1,"code":"DBX-LEGACY-0001"`))).toBeUndefined();
+  });
+
   it("returns undefined for unrelated errors", () => {
     expect(schedulerErrorCode(new Error("boom"))).toBeUndefined();
     expect(schedulerErrorCode("plain string")).toBeUndefined();

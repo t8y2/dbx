@@ -69,6 +69,34 @@ const SCHEDULER_ERROR_CODES: readonly SchedulerErrorCode[] = [
   "connection_missing",
 ];
 
+function isSchedulerErrorCode(value: string): value is SchedulerErrorCode {
+  return (SCHEDULER_ERROR_CODES as readonly string[]).includes(value);
+}
+
+/**
+ * JSON fallback for the web transport. Non-2xx bodies are served as
+ * `{"version":1,"code":"DBX-LEGACY-…","errorCode":"<machine>","detail":"…"}`
+ * (commit 3452f7c5d), so the raw text starts with `{"version":1` and the
+ * string rules above miss it. The machine code lives in `errorCode` (when
+ * present), in `code` only if it is itself an ADR §7.5 code (the DBX-LEGACY-*
+ * directory code must not leak as a machine code), or as the `<code>:`
+ * prefix of `detail`. Any parse failure degrades to undefined.
+ */
+function jsonBodyErrorCode(text: string): SchedulerErrorCode | undefined {
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (typeof body !== "object" || body === null) return undefined;
+  const record = body as Record<string, unknown>;
+  if (typeof record.errorCode === "string" && isSchedulerErrorCode(record.errorCode)) return record.errorCode;
+  if (typeof record.code === "string" && isSchedulerErrorCode(record.code)) return record.code;
+  const detail = typeof record.detail === "string" ? record.detail : "";
+  return SCHEDULER_ERROR_CODES.find((code) => detail.startsWith(`${code}:`));
+}
+
 /** Extracts the ADR §7.5 machine code from a backend rejection, if present. */
 export function schedulerErrorCode(error: unknown): SchedulerErrorCode | undefined {
   const structured = error instanceof Error && error.name === "BackendErrorException" ? (error as { backendError?: { code?: unknown } }).backendError?.code : undefined;
@@ -76,7 +104,7 @@ export function schedulerErrorCode(error: unknown): SchedulerErrorCode | undefin
   for (const code of SCHEDULER_ERROR_CODES) {
     if (text === code || text.startsWith(`${code}:`) || text.startsWith(`${code} `) || text.includes(`"${code}"`) || text.includes(`'${code}'`)) return code;
   }
-  return undefined;
+  return jsonBodyErrorCode(text);
 }
 
 // ---------------------------------------------------------------------------

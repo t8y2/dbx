@@ -16,7 +16,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch";
 import * as schedulerApi from "@/lib/scheduler/schedulerApi";
 import { schedulerErrorCode } from "@/lib/scheduler/schedulerApi";
-import { defaultExecutionPolicy, defaultTaskName, defaultTrigger, draftFormValues, modeForTrigger } from "@/lib/scheduler/schedulerDraft";
+import { defaultExecutionPolicy, defaultTaskName, defaultTrigger, draftFormValues, isHighRiskAcknowledged, modeForTrigger, rememberHighRiskAcknowledgement } from "@/lib/scheduler/schedulerDraft";
 import { findProvider, findTrigger, triggerId as fullTriggerId, withStoredTriggerId } from "@/lib/scheduler/schedulerProviders";
 import { configFromFormValues, validateFormFields, type SchedulerFormValues } from "@/lib/scheduler/schedulerForm";
 import type { SchedulerTaskProviderDescriptor, SchedulerTaskTriggerContribution, TaskDefinition } from "@/lib/scheduler/schedulerTypes";
@@ -132,7 +132,9 @@ watch(
   ([open]) => {
     if (!open) return;
     versionConflict.value = false;
-    highRiskAcknowledged.value = false;
+    // A saved high-risk task stays acknowledged for the session; only a fresh
+    // app run confirms again.
+    highRiskAcknowledged.value = props.task ? isHighRiskAcknowledged(props.task.id) : false;
     if (props.task) {
       draft.value = structuredCloneDraft(props.task);
       const provider = findProvider(props.providers, props.task.providerId);
@@ -254,6 +256,7 @@ async function save() {
     // the store yet — that failed every first save with "task_not_found".
     // Let the backend allocate the id (and version) on create.
     const saved = isCreate.value ? await schedulerApi.createTask({ ...draft.value, id: "" }) : await schedulerApi.saveTask(draft.value);
+    if (risk.value === "high") rememberHighRiskAcknowledgement(saved.id);
     toast(t("scheduler.editor.saved"), 2500);
     emit("saved", saved);
     emit("update:open", false);

@@ -25,6 +25,7 @@ vi.mock("@/composables/useToast", () => ({
 }));
 
 import SchedulerTaskEditor from "../SchedulerTaskEditor.vue";
+import { resetHighRiskAcknowledgementsForTests } from "@/lib/scheduler/schedulerDraft";
 import type { SchedulerTaskProviderDescriptor, TaskDefinition } from "@/lib/scheduler/schedulerTypes";
 
 const mountedApps: App[] = [];
@@ -109,6 +110,8 @@ beforeEach(() => {
   mocks.saveTask.mockReset();
   mocks.createTask.mockReset();
   mocks.toast.mockReset();
+  // Session memory would leak an acknowledgement across specs otherwise.
+  resetHighRiskAcknowledgementsForTests();
 });
 
 afterEach(() => {
@@ -127,6 +130,25 @@ describe("SchedulerTaskEditor", () => {
     ack.dispatchEvent(new Event("change"));
     await flush();
     expect(container.querySelector<HTMLButtonElement>("[data-scheduler-editor-save]")!.disabled).toBe(false);
+  });
+
+  it("keeps a saved high-risk task acknowledged for the rest of the session", async () => {
+    mocks.saveTask.mockResolvedValue(cronTask());
+    const container = await mountEditor({ open: true, task: cronTask() });
+    const ack = container.querySelector<HTMLInputElement>("[data-scheduler-editor-risk-ack]")!;
+    ack.checked = true;
+    ack.dispatchEvent(new Event("change"));
+    await flush();
+    container.querySelector<HTMLButtonElement>("[data-scheduler-editor-save]")!.click();
+    await flush();
+    expect(mocks.saveTask).toHaveBeenCalledTimes(1);
+
+    // Reopening the same task does not ask for the confirmation again — the
+    // hint stays, the box comes back pre-checked and save is enabled.
+    const reopened = await mountEditor({ open: true, task: cronTask() });
+    expect(reopened.querySelector("[data-scheduler-editor-risk-high]")).toBeTruthy();
+    expect(reopened.querySelector<HTMLInputElement>("[data-scheduler-editor-risk-ack]")!.checked).toBe(true);
+    expect(reopened.querySelector<HTMLButtonElement>("[data-scheduler-editor-save]")!.disabled).toBe(false);
   });
 
   it("persists an edited cron timezone on save", async () => {

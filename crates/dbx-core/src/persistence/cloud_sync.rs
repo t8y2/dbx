@@ -69,6 +69,9 @@ const DESKTOP_DEVICE_LOCAL_SETTINGS: &[&str] = &[
     "agent_store_dir",
     "custom_ai_skill_root_enabled",
     "custom_ai_skill_root",
+    // An OS login-item registration only exists on the machine that made it;
+    // syncing the flag would silently register DBX on every other device.
+    "launch_at_login",
 ];
 const NON_SYNCABLE_DESKTOP_SETTINGS: &[&str] = &["debug_logging_enabled"];
 const NON_SYNCABLE_EDITOR_SETTINGS: &[&str] = &[

@@ -8129,6 +8129,8 @@ export default withEnglishFallback({
     showTrayIconDescription: "关闭后不显示图标，但关闭窗口仍会像之前一样隐藏到后台。",
     quitOnClose: "关闭窗口时退出程序",
     quitOnCloseDescription: "开启后，点击窗口关闭按钮将彻底退出 DBX，而不是隐藏到系统托盘。",
+    launchAtLogin: "开机自动启动",
+    launchAtLoginDescription: "将 DBX 注册为系统登录项，开机自动启动，重启后后台计划任务仍会继续运行。",
     closeActionPromptTitle: "关闭窗口",
     closeActionPromptDescription: "请选择点击关闭按钮时的行为。之后可在「设置 → 外观」中修改。",
     closeActionQuit: "退出程序",

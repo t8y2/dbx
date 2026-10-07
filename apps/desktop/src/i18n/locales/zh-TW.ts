@@ -6564,6 +6564,8 @@ export default withEnglishFallback({
     showTrayIconDescription: "關閉後不顯示圖示，但關閉視窗仍會像之前一樣隱藏到後台。",
     quitOnClose: "關閉視窗時退出程式",
     quitOnCloseDescription: "開啟後，點擊視窗關閉按鈕將徹底退出 DBX，而不是隱藏到系統匣。",
+    launchAtLogin: "開機自動啟動",
+    launchAtLoginDescription: "將 DBX 註冊為系統登入項目，開機自動啟動，重新開機後背景排程任務仍會繼續執行。",
     closeActionPromptTitle: "關閉視窗",
     closeActionPromptDescription: "請選擇點擊關閉按鈕時的行為。之後可在「設定 → 外觀」中修改。",
     closeActionQuit: "退出程式",

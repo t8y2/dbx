@@ -827,6 +827,12 @@ describe("normalizeDesktopSettings", () => {
     expect(normalizeDesktopSettings({ duckdb_worker_max_processes: 32 }).duckdb_worker_max_processes).toBe(16);
     expect(normalizeDesktopSettings({ duckdb_worker_max_processes: 3.6 }).duckdb_worker_max_processes).toBe(4);
   });
+
+  it("defaults launch at login to disabled and preserves an opted-in value", () => {
+    expect(normalizeDesktopSettings({}).launch_at_login).toBe(false);
+    expect(normalizeDesktopSettings({ launch_at_login: undefined }).launch_at_login).toBe(false);
+    expect(normalizeDesktopSettings({ launch_at_login: true }).launch_at_login).toBe(true);
+  });
 });
 
 describe("normalizeMcpGlobalPolicy", () => {

@@ -80,6 +80,8 @@ export interface DesktopSettings {
   custom_ai_skill_root_enabled?: boolean | null;
   custom_ai_skill_root?: string | null;
   sidebar_table_page_size?: number | null;
+  /** Register the app as an OS login item (launch at login); default off. */
+  launch_at_login: boolean;
 }
 
 export interface McpGlobalPolicy {
@@ -160,6 +162,7 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   custom_ai_skill_root_enabled: false,
   custom_ai_skill_root: null,
   sidebar_table_page_size: DEFAULT_SIDEBAR_TABLE_PAGE_SIZE,
+  launch_at_login: false,
 };
 
 export const DEFAULT_MCP_GLOBAL_POLICY: McpGlobalPolicy = {
@@ -265,6 +268,7 @@ export function normalizeDesktopSettings(settings: Partial<DesktopSettings> | nu
     custom_ai_skill_root_enabled: settings?.custom_ai_skill_root_enabled ?? DEFAULT_DESKTOP_SETTINGS.custom_ai_skill_root_enabled,
     custom_ai_skill_root: settings?.custom_ai_skill_root?.trim() || DEFAULT_DESKTOP_SETTINGS.custom_ai_skill_root,
     sidebar_table_page_size: sidebarTablePageSize,
+    launch_at_login: settings?.launch_at_login ?? DEFAULT_DESKTOP_SETTINGS.launch_at_login,
   };
 }
 

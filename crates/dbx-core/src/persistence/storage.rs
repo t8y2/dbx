@@ -447,6 +447,11 @@ pub struct DesktopSettings {
     pub custom_ai_skill_root: Option<String>,
     #[serde(default = "default_sidebar_table_page_size")]
     pub sidebar_table_page_size: usize,
+    /// Register the app as an OS login item so the background scheduler keeps
+    /// enabled tasks running after a reboot. Off by default: registration only
+    /// happens after the user opts in.
+    #[serde(default)]
+    pub launch_at_login: bool,
 }
 
 /// Appearance preferences are kept separately from device-specific desktop
@@ -971,6 +976,7 @@ impl Default for DesktopSettings {
             custom_ai_skill_root_enabled: false,
             custom_ai_skill_root: None,
             sidebar_table_page_size: default_sidebar_table_page_size(),
+            launch_at_login: false,
         }
     }
 }
@@ -4838,6 +4844,7 @@ impl Storage {
             "sidebar_table_page_size".to_string(),
             serde_json::Value::Number(serde_json::Number::from(desktop_settings.sidebar_table_page_size)),
         );
+        settings.insert("launch_at_login".to_string(), serde_json::Value::Bool(desktop_settings.launch_at_login));
         self.save_app_settings_json(&settings).await
     }
 
@@ -4917,6 +4924,10 @@ impl Storage {
                 .and_then(|value| value.as_u64())
                 .map(|value| value as usize)
                 .unwrap_or_else(|| DesktopSettings::default().sidebar_table_page_size),
+            launch_at_login: settings
+                .get("launch_at_login")
+                .and_then(|value| value.as_bool())
+                .unwrap_or_else(|| DesktopSettings::default().launch_at_login),
         })
     }
 
@@ -12293,6 +12304,7 @@ mod tests {
                 custom_ai_skill_root_enabled: DesktopSettings::default().custom_ai_skill_root_enabled,
                 custom_ai_skill_root: None,
                 sidebar_table_page_size: DesktopSettings::default().sidebar_table_page_size,
+                launch_at_login: DesktopSettings::default().launch_at_login,
             })
             .await
             .unwrap();
@@ -12316,6 +12328,7 @@ mod tests {
                 custom_ai_skill_root_enabled: DesktopSettings::default().custom_ai_skill_root_enabled,
                 custom_ai_skill_root: None,
                 sidebar_table_page_size: DesktopSettings::default().sidebar_table_page_size,
+                launch_at_login: DesktopSettings::default().launch_at_login,
             }
         );
     }

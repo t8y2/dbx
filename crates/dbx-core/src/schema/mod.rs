@@ -10209,6 +10209,10 @@ fn opengauss_sequence_object_source_sql(schema: &str, name: &str, include_cache:
 /// includes `DEFAULT` clauses) then always misses for routines with default
 /// parameters. This mirrors the signature filter but uses the same legacy
 /// formatter so it matches what the list query actually produced.
+/// Routine filter for pre-11 catalogs without `pg_proc.prokind` (they have no
+/// procedures either, so this matches plain functions only).
+const POSTGRES_LEGACY_ROUTINE_FILTER: &str = " AND NOT p.proisagg AND NOT p.proiswindow";
+
 fn postgres_function_object_source_sql_with_legacy_signature(
     schema: &str,
     name: &str,
@@ -10220,7 +10224,7 @@ fn postgres_function_object_source_sql_with_legacy_signature(
     let kind_filter = if has_proc_prokind {
         format!(" AND p.prokind = '{}'", prokind)
     } else {
-        " AND NOT p.proisagg AND NOT p.proiswindow".to_string()
+        POSTGRES_LEGACY_ROUTINE_FILTER.to_string()
     };
     let signature_filter = signature
         .map(|value| format!(" AND pg_get_function_arguments(p.oid) = {}", sql_string(value)))
@@ -10249,7 +10253,7 @@ fn postgres_function_object_source_sql_without_prokind(
         "SELECT {source_expression} \
          FROM pg_proc p \
          JOIN pg_namespace n ON n.oid = p.pronamespace \
-         WHERE n.nspname = {} AND p.proname = {} AND NOT p.proisagg AND NOT p.proiswindow \
+         WHERE n.nspname = {} AND p.proname = {}{POSTGRES_LEGACY_ROUTINE_FILTER} \
          ORDER BY p.oid LIMIT 1",
         sql_string(schema),
         sql_string(name)
@@ -10346,7 +10350,7 @@ fn postgres_object_source_sql_inner(
             let signature_filter = signature
                 .map(|value| format!(" AND pg_get_function_identity_arguments(p.oid) = {}", sql_string(value)))
                 .unwrap_or_default();
-            // PostgreSQL 10 renamed the routine-kind columns to prokind; older
+            // PostgreSQL 11 renamed the routine-kind columns to prokind; older
             // servers (and some Gauss-family kernels) only have proisagg and
             // proiswindow, so a hardcoded prokind reference fails before the
             // query even runs (#11161). Probe the catalog and pick the filter.
@@ -10355,7 +10359,7 @@ fn postgres_object_source_sql_inner(
             } else {
                 // Procedures were introduced together with prokind, so on legacy
                 // servers the legacy filter only ever matches plain functions.
-                " AND NOT p.proisagg AND NOT p.proiswindow".to_string()
+                POSTGRES_LEGACY_ROUTINE_FILTER.to_string()
             };
             format!(
                 "SELECT {source_expression} \
@@ -11471,7 +11475,7 @@ fn postgres_view_source_uses_isolated_search_path(database_type: Option<&Databas
     database_type == Some(&DatabaseType::Postgres)
 }
 
-/// `pg_proc.prokind` exists from PostgreSQL 10 onwards; legacy servers filter
+/// `pg_proc.prokind` exists from PostgreSQL 11 onwards; legacy servers filter
 /// routines with `proisagg`/`proiswindow` instead. Probe the catalog so the
 /// object-source query matches the server regardless of the locale it reports
 /// errors in (#11161 — the old error-message gate missed localized servers).
@@ -11855,7 +11859,7 @@ mod object_source_tests {
         assert!(modern.contains("p.prokind = 'f'"));
         assert!(!modern.contains("proisagg"));
 
-        // PostgreSQL 9.6 and older have no pg_proc.prokind (#11161): the query
+        // PostgreSQL 10 and older have no pg_proc.prokind (#11161): the query
         // must filter with the legacy columns instead, otherwise the server
         // rejects it with "column p.prokind does not exist" before it runs.
         let legacy = postgres_object_source_sql_inner(

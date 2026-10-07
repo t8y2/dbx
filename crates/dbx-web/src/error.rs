@@ -9,6 +9,11 @@ pub struct AppError {
     pub message: String,
     pub status: StatusCode,
     pub error: Box<BackendError>,
+    /// Additive machine-code carrier (ADR §7.5 scheduler contract): served as
+    /// a top-level `errorCode` body field when set, on top of the frozen v1
+    /// envelope (docs/backend-error-handling.md — new optional fields keep v1).
+    /// `None` for every non-scheduler route, so their body is unchanged.
+    pub error_code: Option<String>,
 }
 
 impl fmt::Display for AppError {
@@ -36,17 +41,35 @@ impl AppError {
 
     fn with_status(message: String, status: StatusCode) -> Self {
         let error = BackendError::from_legacy_string(&message);
-        Self { message, status, error: Box::new(error) }
+        Self { message, status, error: Box::new(error), error_code: None }
     }
 
     pub fn from_backend_error(error: BackendError) -> Self {
-        Self { message: error.code().to_string(), status: StatusCode::INTERNAL_SERVER_ERROR, error: Box::new(error) }
+        Self {
+            message: error.code().to_string(),
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            error: Box::new(error),
+            error_code: None,
+        }
     }
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        (self.status, Json(*self.error)).into_response()
+        match self.error_code {
+            // Frozen v1 envelope, unchanged for every non-scheduler route.
+            None => (self.status, Json(*self.error)).into_response(),
+            // Scheduler ADR §7.5: the machine code joins the body as an
+            // additive top-level field so web clients can branch on it
+            // without re-parsing the `<code>: <message>` detail prefix.
+            Some(code) => {
+                let mut body = serde_json::to_value(&*self.error).unwrap_or_default();
+                if let serde_json::Value::Object(fields) = &mut body {
+                    fields.insert("errorCode".to_owned(), serde_json::Value::String(code));
+                }
+                (self.status, Json(body)).into_response()
+            }
+        }
     }
 }
 
@@ -106,6 +129,8 @@ mod tests {
         assert_eq!(payload["code"], "DBX-LEGACY-0001");
         assert_eq!(payload["messageKey"], "backendErrors.legacy");
         assert_eq!(payload["detail"], "database failed");
+        // Non-scheduler routes never grow the additive scheduler carrier.
+        assert!(payload.get("errorCode").is_none());
     }
 
     #[tokio::test]

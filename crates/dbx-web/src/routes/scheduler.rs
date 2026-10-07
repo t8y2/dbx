@@ -1,8 +1,11 @@
 //! Scheduler HTTP API (ADR §7.1): every handler goes through
 //! [`SchedulerService`] — nothing here touches the scheduler SQLite store.
 //! Error codes map to the frozen HTTP statuses (ADR §7.5) and are kept
-//! recoverable as the `<code>: <message>` prefix of the shared `AppError`
-//! envelope detail, mirroring the Desktop `Err(String)` convention.
+//! recoverable twice on the web: as the `<code>: <message>` prefix of the
+//! shared `AppError` envelope detail (mirroring the Desktop `Err(String)`
+//! convention) and as the additive top-level `errorCode` body field (ADR
+//! §7.5: the web JSON body carries the machine code; optional v1 envelope
+//! field per the shared backend-error contract).
 
 use std::sync::Arc;
 
@@ -85,13 +88,16 @@ pub(crate) fn status_for_code(code: &str) -> axum::http::StatusCode {
 
 /// Converts a scheduler error into the shared `AppError` envelope with the
 /// frozen status. The machine code is preserved as the `<code>: <message>`
-/// prefix of the detail so clients can branch on it (Desktop parity, §7.5).
+/// prefix of the detail (Desktop parity, §7.5) and as the additive top-level
+/// `errorCode` body field (§7.5: the web JSON body carries the machine code),
+/// so clients can branch on it without parsing the detail prefix.
 pub(crate) fn scheduler_error(error: TaskError) -> AppError {
     let message = error.to_string();
     AppError {
         message: message.clone(),
         status: status_for_code(&error.code),
         error: Box::new(dbx_core::backend_error::BackendError::from_legacy_backend(&message)),
+        error_code: Some(error.code),
     }
 }
 
@@ -553,6 +559,8 @@ mod tests {
         let body: serde_json::Value = missing.json().await.unwrap();
         assert_eq!(body["code"], "DBX-LEGACY-0001");
         assert_eq!(body["detail"], "task_not_found: Task missing not found");
+        // ADR §7.5: the served body also carries the machine code itself.
+        assert_eq!(body["errorCode"], "task_not_found");
 
         // Optimistic locking through the wire: stale version → 409.
         let mut stale = created.clone();
@@ -593,7 +601,38 @@ mod tests {
             let mapped = scheduler_error(error);
             assert_eq!(mapped.status, expected, "code {code} must map to {expected}");
             assert!(mapped.message.starts_with(&format!("{code}: ")), "machine code must prefix the detail");
+            assert_eq!(mapped.error_code.as_deref(), Some(code), "machine code must ride the additive carrier");
         }
+    }
+
+    // -- Served body keeps BOTH the machine code and the human detail -----
+    //
+    // ADR §7.5 web contract: the JSON body carries the machine code (additive
+    // top-level `errorCode` field; the envelope `code` stays the generic v1
+    // catalog identity) AND the human detail behind the desktop-style
+    // `<code>: <message>` prefix. The raw body text must stay extractable by
+    // the web normalizer (`schedulerApi.schedulerErrorCode`), which matches
+    // the machine code as a quoted JSON string value.
+
+    #[tokio::test]
+    async fn served_error_body_keeps_the_machine_code_and_the_detail() {
+        let response = scheduler_error(TaskError::version_conflict("stored version 3, got 2")).into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        // Machine code: additive carrier, quoted in the raw text.
+        assert_eq!(payload["errorCode"], "version_conflict");
+        // Human detail: desktop-style `<code>: <message>` prefix preserved.
+        assert_eq!(payload["detail"], "version_conflict: stored version 3, got 2");
+        // Frozen v1 envelope identity is untouched.
+        assert_eq!(payload["version"], 1);
+        assert_eq!(payload["code"], "DBX-LEGACY-0001");
+
+        // The web normalizer extracts the code from the raw body text as
+        // served (quoted-substring rule), so the transport drops nothing.
+        let raw = String::from_utf8_lossy(&bytes);
+        assert!(raw.contains("\"version_conflict\""), "body must quote the machine code: {raw}");
     }
 
     #[tokio::test]

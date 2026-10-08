@@ -64,6 +64,74 @@ pub struct IndexDiff {
     pub changes: Vec<String>,
 }
 
+/// A complete constraint for schema comparison. Drivers expose one row per column pair.
+/// Keep the scalar fields for display and compatibility with saved single-column diffs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaForeignKeyInfo {
+    #[serde(flatten)]
+    pub info: ForeignKeyInfo,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub column_pairs: Vec<(String, String)>,
+}
+
+impl std::ops::Deref for SchemaForeignKeyInfo {
+    type Target = ForeignKeyInfo;
+
+    fn deref(&self) -> &Self::Target {
+        &self.info
+    }
+}
+
+impl From<ForeignKeyInfo> for SchemaForeignKeyInfo {
+    fn from(info: ForeignKeyInfo) -> Self {
+        Self { info, column_pairs: Vec::new() }
+    }
+}
+
+impl SchemaForeignKeyInfo {
+    fn columns(&self) -> Vec<&str> {
+        if self.column_pairs.is_empty() {
+            vec![&self.column]
+        } else {
+            self.column_pairs.iter().map(|(column, _)| column.as_str()).collect()
+        }
+    }
+
+    fn ref_columns(&self) -> Vec<&str> {
+        if self.column_pairs.is_empty() {
+            vec![&self.ref_column]
+        } else {
+            self.column_pairs.iter().map(|(_, column)| column.as_str()).collect()
+        }
+    }
+}
+
+/// Called separately for each table and namespace. The driver supplies each constraint's
+/// pairs in ordinal order; independent constraints may be interleaved. Never sort the
+/// two column lists separately, or parse the display strings as identifiers.
+fn group_foreign_keys(rows: &[ForeignKeyInfo]) -> Vec<SchemaForeignKeyInfo> {
+    let mut constraints: Vec<SchemaForeignKeyInfo> = Vec::new();
+    let mut positions = HashMap::new();
+    for row in rows {
+        // JDBC may omit FK_NAME. An empty name does not identify a constraint:
+        // preserve each row instead of inventing a compound key across references.
+        if row.name.is_empty() {
+            constraints.push(row.clone().into());
+            continue;
+        }
+        let position = *positions.entry(row.name.as_str()).or_insert_with(|| {
+            constraints.push(row.clone().into());
+            constraints.len() - 1
+        });
+        constraints[position].column_pairs.push((row.column.clone(), row.ref_column.clone()));
+    }
+    for constraint in &mut constraints {
+        constraint.info.column = constraint.columns().join(", ");
+        constraint.info.ref_column = constraint.ref_columns().join(", ");
+    }
+    constraints
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ForeignKeyDiff {
@@ -71,9 +139,9 @@ pub struct ForeignKeyDiff {
     pub diff_type: String,
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub source: Option<ForeignKeyInfo>,
+    pub source: Option<SchemaForeignKeyInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub target: Option<ForeignKeyInfo>,
+    pub target: Option<SchemaForeignKeyInfo>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub changes: Vec<String>,
 }
@@ -2402,27 +2470,21 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
                     .collect()
             }),
             foreign_keys: source_detail.map(|detail| {
-                detail
+                let rows = detail
                     .foreign_keys
                     .iter()
                     .map(|fk| {
-                        let fk = normalize_mapped_foreign_key(
+                        normalize_mapped_foreign_key(
                             fk,
                             &source_table_name_set,
                             &target_table_name_set,
                             &table_pairs,
                             &options.table_mappings,
                             options.ignore_table_name_case,
-                        );
-                        ForeignKeyDiff {
-                            diff_type: "added".to_string(),
-                            name: fk.name.clone(),
-                            source: Some(fk),
-                            target: None,
-                            changes: vec![],
-                        }
+                        )
                     })
-                    .collect()
+                    .collect::<Vec<_>>();
+                diff_foreign_keys(&rows, &[])
             }),
             triggers: source_detail.and_then(|detail| {
                 if detail.triggers.is_empty() {
@@ -2485,19 +2547,7 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
                     })
                     .collect()
             }),
-            foreign_keys: target_detail.map(|detail| {
-                detail
-                    .foreign_keys
-                    .iter()
-                    .map(|foreign_key| ForeignKeyDiff {
-                        diff_type: "removed".to_string(),
-                        name: foreign_key.name.clone(),
-                        source: None,
-                        target: Some(foreign_key.clone()),
-                        changes: vec![],
-                    })
-                    .collect()
-            }),
+            foreign_keys: target_detail.map(|detail| diff_foreign_keys(&[], &detail.foreign_keys)),
             triggers: target_detail.map(|detail| {
                 detail
                     .triggers
@@ -3768,12 +3818,32 @@ fn diff_foreign_keys_with_options(
     ignore_table_name_case: bool,
     ignore_column_name_case: bool,
 ) -> Vec<ForeignKeyDiff> {
+    let source = group_foreign_keys(source);
+    let target = group_foreign_keys(target);
     let mut diffs = Vec::new();
-    let target_map: HashMap<&str, &ForeignKeyInfo> = target.iter().map(|fk| (fk.name.as_str(), fk)).collect();
-    let source_map: HashMap<&str, &ForeignKeyInfo> = source.iter().map(|fk| (fk.name.as_str(), fk)).collect();
+    let target_map: HashMap<&str, usize> = target
+        .iter()
+        .enumerate()
+        .filter(|(_, fk)| !fk.name.is_empty())
+        .map(|(index, fk)| (fk.name.as_str(), index))
+        .collect();
+    let mut matched = vec![false; target.len()];
 
-    for source_fk in source {
-        let Some(target_fk) = target_map.get(source_fk.name.as_str()) else {
+    for source_fk in &source {
+        let target_index = if source_fk.name.is_empty() {
+            // Unnamed rows have no reliable constraint identity. Match equal records
+            // one-to-one, irrespective of order; keep unmatched rows as added/removed.
+            target.iter().enumerate().find_map(|(index, target_fk)| {
+                (!matched[index]
+                    && target_fk.name.is_empty()
+                    && foreign_key_changes(source_fk, target_fk, ignore_table_name_case, ignore_column_name_case)
+                        .is_empty())
+                .then_some(index)
+            })
+        } else {
+            target_map.get(source_fk.name.as_str()).copied()
+        };
+        let Some(target_index) = target_index else {
             diffs.push(ForeignKeyDiff {
                 diff_type: "added".to_string(),
                 name: source_fk.name.clone(),
@@ -3783,55 +3853,22 @@ fn diff_foreign_keys_with_options(
             });
             continue;
         };
-
-        let mut changes = Vec::new();
-        if !identifiers_equal(&source_fk.column, &target_fk.column, ignore_column_name_case) {
-            changes.push(format!("column: {} → {}", target_fk.column, source_fk.column));
-        }
-        if !identifiers_equal(&source_fk.ref_table, &target_fk.ref_table, ignore_table_name_case) {
-            changes.push(format!("ref table: {} → {}", target_fk.ref_table, source_fk.ref_table));
-        }
-        if source_fk.ref_schema != target_fk.ref_schema {
-            changes.push(format!(
-                "ref schema: {} → {}",
-                target_fk.ref_schema.as_deref().unwrap_or(""),
-                source_fk.ref_schema.as_deref().unwrap_or("")
-            ));
-        }
-        if !identifiers_equal(&source_fk.ref_column, &target_fk.ref_column, ignore_column_name_case) {
-            changes.push(format!("ref column: {} → {}", target_fk.ref_column, source_fk.ref_column));
-        }
-        let source_on_delete = normalized_foreign_key_action(source_fk.on_delete.as_deref());
-        let target_on_delete = normalized_foreign_key_action(target_fk.on_delete.as_deref());
-        if source_on_delete != target_on_delete {
-            changes.push(format!(
-                "delete: {} → {}",
-                target_on_delete.as_deref().unwrap_or(""),
-                source_on_delete.as_deref().unwrap_or("")
-            ));
-        }
-        let source_on_update = normalized_foreign_key_action(source_fk.on_update.as_deref());
-        let target_on_update = normalized_foreign_key_action(target_fk.on_update.as_deref());
-        if source_on_update != target_on_update {
-            changes.push(format!(
-                "update: {} → {}",
-                target_on_update.as_deref().unwrap_or(""),
-                source_on_update.as_deref().unwrap_or("")
-            ));
-        }
+        matched[target_index] = true;
+        let target_fk = &target[target_index];
+        let changes = foreign_key_changes(source_fk, target_fk, ignore_table_name_case, ignore_column_name_case);
         if !changes.is_empty() {
             diffs.push(ForeignKeyDiff {
                 diff_type: "modified".to_string(),
                 name: source_fk.name.clone(),
                 source: Some(source_fk.clone()),
-                target: Some((*target_fk).clone()),
+                target: Some(target_fk.clone()),
                 changes,
             });
         }
     }
 
-    for target_fk in target {
-        if !source_map.contains_key(target_fk.name.as_str()) {
+    for (index, target_fk) in target.iter().enumerate() {
+        if !matched[index] {
             diffs.push(ForeignKeyDiff {
                 diff_type: "removed".to_string(),
                 name: target_fk.name.clone(),
@@ -3843,6 +3880,62 @@ fn diff_foreign_keys_with_options(
     }
 
     diffs
+}
+
+fn foreign_key_changes(
+    source_fk: &SchemaForeignKeyInfo,
+    target_fk: &SchemaForeignKeyInfo,
+    ignore_table_name_case: bool,
+    ignore_column_name_case: bool,
+) -> Vec<String> {
+    let mut changes = Vec::new();
+    if source_fk.columns().len() != target_fk.columns().len()
+        || !source_fk
+            .columns()
+            .iter()
+            .zip(target_fk.columns())
+            .all(|(source, target)| identifiers_equal(source, target, ignore_column_name_case))
+    {
+        changes.push(format!("column: {} → {}", target_fk.column, source_fk.column));
+    }
+    if !identifiers_equal(&source_fk.ref_table, &target_fk.ref_table, ignore_table_name_case) {
+        changes.push(format!("ref table: {} → {}", target_fk.ref_table, source_fk.ref_table));
+    }
+    if source_fk.ref_schema != target_fk.ref_schema {
+        changes.push(format!(
+            "ref schema: {} → {}",
+            target_fk.ref_schema.as_deref().unwrap_or(""),
+            source_fk.ref_schema.as_deref().unwrap_or("")
+        ));
+    }
+    if source_fk.ref_columns().len() != target_fk.ref_columns().len()
+        || !source_fk
+            .ref_columns()
+            .iter()
+            .zip(target_fk.ref_columns())
+            .all(|(source, target)| identifiers_equal(source, target, ignore_column_name_case))
+    {
+        changes.push(format!("ref column: {} → {}", target_fk.ref_column, source_fk.ref_column));
+    }
+    let source_on_delete = normalized_foreign_key_action(source_fk.on_delete.as_deref());
+    let target_on_delete = normalized_foreign_key_action(target_fk.on_delete.as_deref());
+    if source_on_delete != target_on_delete {
+        changes.push(format!(
+            "delete: {} → {}",
+            target_on_delete.as_deref().unwrap_or(""),
+            source_on_delete.as_deref().unwrap_or("")
+        ));
+    }
+    let source_on_update = normalized_foreign_key_action(source_fk.on_update.as_deref());
+    let target_on_update = normalized_foreign_key_action(target_fk.on_update.as_deref());
+    if source_on_update != target_on_update {
+        changes.push(format!(
+            "update: {} → {}",
+            target_on_update.as_deref().unwrap_or(""),
+            source_on_update.as_deref().unwrap_or("")
+        ));
+    }
+    changes
 }
 
 pub fn diff_triggers(source: &[TriggerInfo], target: &[TriggerInfo]) -> Vec<TriggerDiff> {
@@ -4588,13 +4681,18 @@ fn drop_foreign_key_sql(table_name: &str, fk_name: &str, db_type: DatabaseType, 
     }
 }
 
-fn add_foreign_key_sql(table_name: &str, fk: &ForeignKeyInfo, db_type: DatabaseType, schema: Option<&str>) -> String {
+fn add_foreign_key_sql(
+    table_name: &str,
+    fk: &SchemaForeignKeyInfo,
+    db_type: DatabaseType,
+    schema: Option<&str>,
+) -> String {
     add_foreign_key_sql_with_reference_separator(table_name, fk, db_type, schema, " ")
 }
 
 fn add_foreign_key_sql_with_reference_separator(
     table_name: &str,
-    fk: &ForeignKeyInfo,
+    fk: &SchemaForeignKeyInfo,
     db_type: DatabaseType,
     schema: Option<&str>,
     reference_separator: &str,
@@ -4623,8 +4721,8 @@ fn add_foreign_key_sql_with_reference_separator(
     format!(
         "ALTER TABLE {table} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {ref_table}{reference_separator}({}){on_delete}{on_update};",
         quote_id(&fk.name, db_type),
-        quote_id(&fk.column, db_type),
-        quote_id(&fk.ref_column, db_type)
+        fk.columns().iter().map(|column| quote_id(column, db_type)).collect::<Vec<_>>().join(", "),
+        fk.ref_columns().iter().map(|column| quote_id(column, db_type)).collect::<Vec<_>>().join(", ")
     )
 }
 
@@ -5634,9 +5732,9 @@ fn generate_create_table_sql(
             col_defs.push(format!(
                 "CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}({}){}{}",
                 quote_id(&fk.name, db_type),
-                quote_id(&fk.column, db_type),
+                fk.columns().iter().map(|column| quote_id(column, db_type)).collect::<Vec<_>>().join(", "),
                 ref_table,
-                quote_id(&fk.ref_column, db_type),
+                fk.ref_columns().iter().map(|column| quote_id(column, db_type)).collect::<Vec<_>>().join(", "),
                 on_delete,
                 on_update
             ));
@@ -8286,7 +8384,7 @@ mod tests {
             on_update: Some("RESTRICT".into()),
             on_delete: Some("SET NULL".into()),
         };
-        let fk_sql = add_foreign_key_sql("events", &fk, DatabaseType::SqlServer, Some("dbo"));
+        let fk_sql = add_foreign_key_sql("events", &fk.into(), DatabaseType::SqlServer, Some("dbo"));
         assert!(fk_sql.contains("ON DELETE SET NULL ON UPDATE NO ACTION"), "FK actions: {fk_sql}");
         assert!(!fk_sql.contains("RESTRICT"), "SQL Server does not accept RESTRICT: {fk_sql}");
     }
@@ -9541,15 +9639,18 @@ mod tests {
             foreign_keys: Some(vec![ForeignKeyDiff {
                 diff_type: "modified".to_string(),
                 name: "orders_user_id_fk".to_string(),
-                source: Some(foreign_key(ForeignKeyInfo {
-                    name: "orders_user_id_fk".to_string(),
-                    column: String::new(),
-                    ref_schema: None,
-                    ref_table: "users".to_string(),
-                    ref_column: String::new(),
-                    on_update: None,
-                    on_delete: None,
-                })),
+                source: Some(
+                    foreign_key(ForeignKeyInfo {
+                        name: "orders_user_id_fk".to_string(),
+                        column: String::new(),
+                        ref_schema: None,
+                        ref_table: "users".to_string(),
+                        ref_column: String::new(),
+                        on_update: None,
+                        on_delete: None,
+                    })
+                    .into(),
+                ),
                 target: None,
                 changes: Vec::new(),
             }]),
@@ -12724,15 +12825,18 @@ mod tests {
             foreign_keys: Some(vec![ForeignKeyDiff {
                 diff_type: "modified".into(),
                 name: "orders_user_fk".into(),
-                source: Some(foreign_key(ForeignKeyInfo {
-                    name: "orders_user_fk".into(),
-                    column: "user_id".into(),
-                    ref_schema: Some("identity".into()),
-                    ref_table: "users".into(),
-                    ref_column: "id".into(),
-                    on_update: Some("CASCADE".into()),
-                    on_delete: Some("SET NULL".into()),
-                })),
+                source: Some(
+                    foreign_key(ForeignKeyInfo {
+                        name: "orders_user_fk".into(),
+                        column: "user_id".into(),
+                        ref_schema: Some("identity".into()),
+                        ref_table: "users".into(),
+                        ref_column: "id".into(),
+                        on_update: Some("CASCADE".into()),
+                        on_delete: Some("SET NULL".into()),
+                    })
+                    .into(),
+                ),
                 target: None,
                 changes: vec![],
             }]),
@@ -13002,24 +13106,30 @@ mod tests {
             foreign_keys: Some(vec![ForeignKeyDiff {
                 diff_type: "modified".to_string(),
                 name: "fk_ref".into(),
-                source: Some(foreign_key(ForeignKeyInfo {
-                    name: "fk_ref".into(),
-                    column: "id".into(),
-                    ref_schema: None,
-                    ref_table: "users".into(),
-                    ref_column: "id".into(),
-                    on_update: None,
-                    on_delete: Some("CASCADE".into()),
-                })),
-                target: Some(foreign_key(ForeignKeyInfo {
-                    name: "fk_ref".into(),
-                    column: "id".into(),
-                    ref_schema: None,
-                    ref_table: "users".into(),
-                    ref_column: "id".into(),
-                    on_update: None,
-                    on_delete: Some("SET NULL".into()),
-                })),
+                source: Some(
+                    foreign_key(ForeignKeyInfo {
+                        name: "fk_ref".into(),
+                        column: "id".into(),
+                        ref_schema: None,
+                        ref_table: "users".into(),
+                        ref_column: "id".into(),
+                        on_update: None,
+                        on_delete: Some("CASCADE".into()),
+                    })
+                    .into(),
+                ),
+                target: Some(
+                    foreign_key(ForeignKeyInfo {
+                        name: "fk_ref".into(),
+                        column: "id".into(),
+                        ref_schema: None,
+                        ref_table: "users".into(),
+                        ref_column: "id".into(),
+                        on_update: None,
+                        on_delete: Some("SET NULL".into()),
+                    })
+                    .into(),
+                ),
                 changes: vec!["delete: SET NULL → CASCADE".into()],
             }]),
             triggers: None,
@@ -13734,15 +13844,18 @@ mod tests {
         let fks = vec![ForeignKeyDiff {
             diff_type: "added".into(),
             name: "fk_user".into(),
-            source: Some(ForeignKeyInfo {
-                name: "fk_user".into(),
-                column: "user_id".into(),
-                ref_schema: None,
-                ref_table: "users".into(),
-                ref_column: "id".into(),
-                on_update: None,
-                on_delete: Some("CASCADE".into()),
-            }),
+            source: Some(
+                ForeignKeyInfo {
+                    name: "fk_user".into(),
+                    column: "user_id".into(),
+                    ref_schema: None,
+                    ref_table: "users".into(),
+                    ref_column: "id".into(),
+                    on_update: None,
+                    on_delete: Some("CASCADE".into()),
+                }
+                .into(),
+            ),
             target: None,
             changes: vec![],
         }];
@@ -14830,15 +14943,18 @@ mod tests {
             foreign_keys: Some(vec![ForeignKeyDiff {
                 diff_type: "added".into(),
                 name: format!("fk_{name}"),
-                source: Some(ForeignKeyInfo {
-                    name: format!("fk_{name}"),
-                    column: "parent_id".into(),
-                    ref_schema: None,
-                    ref_table: parent.into(),
-                    ref_column: "id".into(),
-                    on_update: None,
-                    on_delete: None,
-                }),
+                source: Some(
+                    ForeignKeyInfo {
+                        name: format!("fk_{name}"),
+                        column: "parent_id".into(),
+                        ref_schema: None,
+                        ref_table: parent.into(),
+                        ref_column: "id".into(),
+                        on_update: None,
+                        on_delete: None,
+                    }
+                    .into(),
+                ),
                 target: None,
                 changes: Vec::new(),
             }]),
@@ -14855,15 +14971,18 @@ mod tests {
                 diff_type: "removed".into(),
                 name: format!("fk_{name}"),
                 source: None,
-                target: Some(ForeignKeyInfo {
-                    name: format!("fk_{name}"),
-                    column: "parent_id".into(),
-                    ref_schema: None,
-                    ref_table: parent.into(),
-                    ref_column: "id".into(),
-                    on_update: None,
-                    on_delete: None,
-                }),
+                target: Some(
+                    ForeignKeyInfo {
+                        name: format!("fk_{name}"),
+                        column: "parent_id".into(),
+                        ref_schema: None,
+                        ref_table: parent.into(),
+                        ref_column: "id".into(),
+                        on_update: None,
+                        on_delete: None,
+                    }
+                    .into(),
+                ),
                 changes: Vec::new(),
             }]),
             target_ddl: Some(format!("CREATE TABLE `{name}` (`id` int NOT NULL, `parent_id` int)")),
@@ -14953,15 +15072,18 @@ mod tests {
             foreign_keys: Some(vec![ForeignKeyDiff {
                 diff_type: "added".into(),
                 name: "fk_aaa_child_mod9761".into(),
-                source: Some(ForeignKeyInfo {
-                    name: "fk_aaa_child_mod9761".into(),
-                    column: "parent_id".into(),
-                    ref_schema: None,
-                    ref_table: "zzz_parent9761".into(),
-                    ref_column: "id".into(),
-                    on_update: None,
-                    on_delete: None,
-                }),
+                source: Some(
+                    ForeignKeyInfo {
+                        name: "fk_aaa_child_mod9761".into(),
+                        column: "parent_id".into(),
+                        ref_schema: None,
+                        ref_table: "zzz_parent9761".into(),
+                        ref_column: "id".into(),
+                        on_update: None,
+                        on_delete: None,
+                    }
+                    .into(),
+                ),
                 target: None,
                 changes: Vec::new(),
             }]),
@@ -14988,15 +15110,18 @@ mod tests {
                 diff_type: "removed".into(),
                 name: "fk_aaa_child_mod9761".into(),
                 source: None,
-                target: Some(ForeignKeyInfo {
-                    name: "fk_aaa_child_mod9761".into(),
-                    column: "parent_id".into(),
-                    ref_schema: None,
-                    ref_table: "zzz_parent9761".into(),
-                    ref_column: "id".into(),
-                    on_update: None,
-                    on_delete: None,
-                }),
+                target: Some(
+                    ForeignKeyInfo {
+                        name: "fk_aaa_child_mod9761".into(),
+                        column: "parent_id".into(),
+                        ref_schema: None,
+                        ref_table: "zzz_parent9761".into(),
+                        ref_column: "id".into(),
+                        on_update: None,
+                        on_delete: None,
+                    }
+                    .into(),
+                ),
                 changes: Vec::new(),
             }]),
             ..Default::default()

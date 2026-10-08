@@ -3958,6 +3958,17 @@ const firebirdCharset = computed({
     form.value.url_params = setUrlParam(form.value.url_params, "charSet", value === "default" ? "" : value);
   },
 });
+const FIREBIRD_DATA_CHARSET_OPTIONS = ["GBK", "GB18030", "BIG5"];
+const firebirdDataCharsetItems = computed(() => {
+  const current = getUrlParam(form.value.url_params, "dataCharset");
+  return current && !FIREBIRD_DATA_CHARSET_OPTIONS.includes(current) ? [current, ...FIREBIRD_DATA_CHARSET_OPTIONS] : FIREBIRD_DATA_CHARSET_OPTIONS;
+});
+const firebirdDataCharset = computed({
+  get: () => getUrlParam(form.value.url_params, "dataCharset") || "default",
+  set: (value: string) => {
+    form.value.url_params = setUrlParam(form.value.url_params, "dataCharset", value === "default" ? "" : value);
+  },
+});
 const redisTlsInsecure = computed({
   get: () => getUrlParam(form.value.url_params, "insecure").toLowerCase() === "true",
   set: (value: boolean) => {
@@ -9395,6 +9406,20 @@ function openExternalUrl(url: string) {
                         <p class="text-xs leading-5 text-muted-foreground">
                           {{ t("connection.firebirdCharsetHint") }}
                         </p>
+                      </div>
+                    </div>
+
+                    <div v-if="form.db_type === 'firebird'" class="grid grid-cols-4 items-start gap-4">
+                      <Label :class="connectionLabelTopClass">{{ t("connection.firebirdDataCharset") }}</Label>
+                      <div class="col-span-3 space-y-1.5">
+                        <Select v-model="firebirdDataCharset">
+                          <SelectTrigger class="h-9"><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="default">{{ t("common.default") }}</SelectItem>
+                            <SelectItem v-for="charset in firebirdDataCharsetItems" :key="charset" :value="charset">{{ charset }}</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.firebirdDataCharsetHint") }}</p>
                       </div>
                     </div>
 

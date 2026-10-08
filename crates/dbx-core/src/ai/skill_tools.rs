@@ -342,9 +342,9 @@ fn format_skill(skill: &ResolvedSkill) -> String {
     if listing.truncated || catalogue_omitted_for_budget {
         // A capped listing must say so, or the model reads a partial file list
         // as the whole skill.
-        output.push_str(&format!(
-            "(the file list is truncated; use `read_skill_file` only for paths referenced by the instructions)\n"
-        ));
+        output.push_str(
+            "(the file list is truncated; use `read_skill_file` only for paths referenced by the instructions)\n",
+        );
     }
     output.push_str(
         "\nFollow this skill's instructions. Use `read_skill_file` with one of these relative paths when \

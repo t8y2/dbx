@@ -8,9 +8,13 @@ Use `dbx --help` as the authoritative reference for the installed CLI version.
 dbx doctor --json
 dbx capabilities --json
 dbx connections list --json
+dbx connections get <id-or-name> --json
+dbx connections add --file connection.json --json
+dbx connections update <id-or-name> --file changes.json --json
+dbx connections remove <id-or-name> --yes --json
 ```
 
-`doctor` reports connection storage and Desktop bridge health. `capabilities` identifies direct-query and bridge-required database types. Connection listings omit secrets.
+`doctor` reports connection storage and Desktop bridge health. `capabilities` identifies direct-query and bridge-required database types. Connection listings and details omit secrets. Configuration mutations require an explicit user request and a writable global MCP policy; write flags cannot override it. JSON files must be owner-only on Unix; `--file -` accepts non-terminal stdin. Never put credentials in command arguments. Updates preserve omitted fields and credentials: `{"password":""}` clears the saved password, and null clears `database` or `driver_profile`. Removal requires confirmation and cannot be undone by the CLI.
 
 ## Schema Inspection
 

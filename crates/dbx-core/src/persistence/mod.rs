@@ -1,5 +1,6 @@
 pub mod cloud_sync;
 pub mod config;
+pub mod connection_management;
 pub mod history;
 pub mod saved_sql;
 pub mod secret_codec;

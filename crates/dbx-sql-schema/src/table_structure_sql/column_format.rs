@@ -76,6 +76,13 @@ pub(super) fn column_definition(dialect: StructureDialect, column: &EditableStru
     if mysql_generated_clause.is_none() && !default_value.is_empty() {
         parts.push(format!("DEFAULT {}", format_default_for_sql(dialect, &column.data_type, &default_value)));
     }
+    // Oracle's column grammar is `col type [DEFAULT expr] [NOT NULL]`, so NOT NULL is skipped
+    // above and appended here, after DEFAULT, matching `build_create_table_sql` (t8y2/dbx#9477).
+    // Without it `ADD (...)` silently created a nullable column (t8y2/dbx#11234). A primary key
+    // column stays without it because the follow-up `ADD PRIMARY KEY` already enforces NOT NULL.
+    if dialect == StructureDialect::Oracle && !column.is_nullable && !column.is_primary_key {
+        parts.push("NOT NULL".to_string());
+    }
     if mysql_generated_clause.is_none() {
         if let Some(on_update) = column.extra.as_ref().and_then(|e| e.on_update_current_timestamp).filter(|v| *v) {
             if on_update && dialect == StructureDialect::Mysql {

@@ -1437,6 +1437,40 @@ fn oracle_create_table_places_default_before_not_null() {
 }
 
 #[test]
+fn oracle_add_column_keeps_not_null_after_default() {
+    // `ADD (...)` used to drop NOT NULL entirely for Oracle, so a column the user marked
+    // not nullable was created nullable without any error (t8y2/dbx#11234).
+    let cases = [
+        (
+            "QTY",
+            "NUMBER(18,2)",
+            false,
+            "0",
+            "ALTER TABLE \"HR\".\"orders\" ADD (\"QTY\" NUMBER(18,2) DEFAULT 0 NOT NULL);",
+        ),
+        ("CODE", "VARCHAR2(20)", false, "", "ALTER TABLE \"HR\".\"orders\" ADD (\"CODE\" VARCHAR2(20) NOT NULL);"),
+        ("NOTE", "VARCHAR2(20)", true, "", "ALTER TABLE \"HR\".\"orders\" ADD (\"NOTE\" VARCHAR2(20));"),
+    ];
+
+    for (name, data_type, is_nullable, default_value, expected) in cases {
+        let mut col = column(name);
+        col.data_type = data_type.to_string();
+        col.is_nullable = is_nullable;
+        col.default_value = default_value.to_string();
+
+        let result = build_table_structure_change_sql(structure_change_options(
+            DatabaseType::Oracle,
+            Some("HR"),
+            "orders",
+            vec![col],
+        ));
+
+        assert_eq!(result.warnings, Vec::<String>::new(), "{name}");
+        assert_eq!(result.statements, vec![expected], "{name}");
+    }
+}
+
+#[test]
 fn oracle_create_table_preserves_character_length_units() {
     let mut byte_col = column("BYTE_COL");
     byte_col.data_type = "VARCHAR2(12 BYTE)".to_string();

@@ -134,6 +134,32 @@ fn combine_results(
     }
 }
 
+/// Connection ids a task's config references through the host-reserved
+/// `options_action: "host/connections"` marker: that marker means the
+/// select's options ARE host connections, so a non-empty config value names
+/// one (or a plugin-reserved alias like the files tasks' `local`). The
+/// executor must open every referenced connection before dispatch — the task
+/// target alone misses config-level sides (e.g. a copy's destination).
+fn config_connection_keys(
+    contribution: Option<&dbx_plugin_runtime::plugins::PluginTaskProviderContribution>,
+    trigger_id: &str,
+) -> Vec<String> {
+    let Some(contribution) = contribution else { return Vec::new() };
+    contribution
+        .triggers
+        .iter()
+        .find(|trigger| trigger.id == trigger_id)
+        .map(|trigger| {
+            trigger
+                .fields
+                .iter()
+                .filter(|field| field.options_action.as_deref() == Some("host/connections"))
+                .map(|field| field.key.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Generous default when the task declares no timeout: `task/execute` may run
 /// a long command, but an unattended run still must not hang the engine slot
 /// forever.
@@ -252,6 +278,16 @@ impl TaskExecutor for PluginTaskExecutor {
         for connection_id in dispatch_targets(&task.target, contribution.allow_multiple_connections) {
             self.ensure_connection(connection_id.as_deref()).await?;
         }
+        // Config-referenced sides too (the files tasks' source/destination
+        // select fields): a dead destination should fail at save, not at run.
+        for key in config_connection_keys(Some(&contribution), &local_trigger_id(task)) {
+            let Some(connection_id) =
+                task.config.get(&key).and_then(serde_json::Value::as_str).filter(|id| !id.trim().is_empty())
+            else {
+                continue;
+            };
+            self.ensure_connection(Some(connection_id)).await?;
+        }
         Ok(())
     }
 
@@ -278,6 +314,17 @@ impl TaskExecutor for PluginTaskExecutor {
         // event pump below is spawned (its `?` could not abort the pump).
         let config =
             serde_json::to_value(&task.config).map_err(|error| TaskError::invalid_config(error.to_string()))?;
+        // Config-level sides (e.g. a copy's destination connection) never
+        // appear in the dispatch slots: open them here so the plugin's engine
+        // holds every binding the task references. Stored ids open their pool,
+        // plugin-reserved aliases pass through, and both reuse pools.
+        for key in config_connection_keys(contribution.as_ref(), &local_trigger_id(&task)) {
+            let Some(id) = task.config.get(&key).and_then(serde_json::Value::as_str).filter(|id| !id.trim().is_empty())
+            else {
+                continue;
+            };
+            self.ensure_connection(Some(id)).await?;
+        }
 
         // Stream the plugin's fixed task events into this run's logger and
         // progress store: command output arrives as task/log events on the
@@ -402,9 +449,9 @@ impl TaskExecutor for PluginTaskExecutor {
 
 #[cfg(test)]
 mod tests {
-    use super::{combine_results, dispatch_targets, local_trigger_id, PluginTaskExecutor};
+    use super::{combine_results, config_connection_keys, dispatch_targets, local_trigger_id, PluginTaskExecutor};
     use crate::scheduler::models::{TaskDefinition, TaskTarget};
-    use dbx_plugin_runtime::plugins::PluginTaskExecuteResult;
+    use dbx_plugin_runtime::plugins::{PluginTaskExecuteResult, PluginTaskProviderContribution};
     use std::sync::Arc;
 
     fn task_with_config(provider_id: &str, config: serde_json::Value) -> TaskDefinition {
@@ -480,6 +527,42 @@ mod tests {
         assert!(executor.ensure_connection(Some("local")).await.unwrap().is_none());
         assert!(executor.ensure_connection(None).await.unwrap().is_none());
         assert!(executor.ensure_connection(Some("   ")).await.unwrap().is_none());
+    }
+
+    fn files_like_provider() -> PluginTaskProviderContribution {
+        serde_json::from_value(serde_json::json!({
+            "id": "io.dbx.files.tasks",
+            "label": "Files Tasks",
+            "connection_providers": [],
+            "allow_multiple_connections": true,
+            "capabilities": ["run"],
+            "triggers": [{
+                "id": "copy",
+                "label": "Copy",
+                "mode": "run",
+                "fields": [
+                    { "key": "source_connection_id", "label": "Source", "type": "text", "options_action": "host/connections" },
+                    { "key": "source_path", "label": "Source path", "type": "text" },
+                    { "key": "destination_connection_id", "label": "Destination", "type": "text", "options_action": "host/connections" }
+                ]
+            }]
+        }))
+        .expect("files-like provider json")
+    }
+
+    #[test]
+    fn config_connection_keys_follow_the_host_connections_marker() {
+        // The marker names exactly the fields whose value is a host connection
+        // id (or a plugin-reserved alias); other fields never open pools.
+        assert_eq!(
+            config_connection_keys(Some(&files_like_provider()), "copy"),
+            vec!["source_connection_id".to_string(), "destination_connection_id".to_string()]
+        );
+        // A different trigger of the same provider has no marker fields here.
+        assert!(config_connection_keys(Some(&files_like_provider()), "sync").is_empty());
+        // An unresolved provider (uninstalled plugin) contributes nothing: the
+        // dispatch itself fails with the provider error right after.
+        assert!(config_connection_keys(None, "copy").is_empty());
     }
 
     #[test]

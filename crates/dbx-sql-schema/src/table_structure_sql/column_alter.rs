@@ -11,9 +11,14 @@ use super::util::{
     clean, format_default_for_sql, is_protected_manticore_id_column, normalize_default, original_comment,
     original_default, qualified_table, quote_ident, quote_string,
 };
+use super::validation::mysql_literal_default_error;
 use crate::table_structure_sql::ColumnExtra;
 
 const SINGLE_COLUMN_ADD_PREVIEW_ID_PREFIX: &str = "ddl-preview:";
+
+fn single_column_literal_default_error(options: &SingleColumnAlterSqlOptions) -> Option<String> {
+    mysql_literal_default_error(options.database_type, options.driver_profile.as_deref(), false, &options.column)
+}
 
 pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> TableStructureSqlResult {
     let capabilities = capabilities_for(options.database_type, options.driver_profile.as_deref());
@@ -61,6 +66,10 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
             warnings.push("Column type cannot be empty.".to_string());
             return TableStructureSqlResult { statements, warnings };
         }
+        if let Some(warning) = single_column_literal_default_error(&options) {
+            warnings.push(warning);
+            return TableStructureSqlResult { statements, warnings };
+        }
         if !capabilities.comment && !clean(&options.column.comment).is_empty() {
             warnings.push(format!(
                 "Column comments are not supported for {database_label} from this editor; the comment for \"{}\" was ignored.",
@@ -90,6 +99,10 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
 
     if !has_existing_column_attribute_change(&options.column) && !has_column_extra_change(&options.column) {
         warnings.push("No changes detected for this column.".to_string());
+        return TableStructureSqlResult { statements, warnings };
+    }
+    if let Some(warning) = single_column_literal_default_error(&options) {
+        warnings.push(warning);
         return TableStructureSqlResult { statements, warnings };
     }
 

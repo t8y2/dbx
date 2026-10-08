@@ -14,7 +14,9 @@ use super::types::{TableStructureSqlOptions, TableStructureSqlResult};
 use super::util::{
     clean, format_default_for_sql, normalize_default, qualified_new_table, quote_ident, quote_new_ident, quote_string,
 };
-use super::validation::{validate_columns, validate_concurrent_index_scope, validate_dameng_identity};
+use super::validation::{
+    validate_columns, validate_concurrent_index_scope, validate_dameng_identity, validate_mysql_literal_defaults,
+};
 use crate::models::connection::DatabaseType;
 
 fn is_sqlite_integer_family_type(data_type: &str) -> bool {
@@ -64,6 +66,7 @@ pub(super) fn build_create_table_sql_with_partition_clause(
     }
     validate_columns(&active_columns, &mut warnings);
     validate_dameng_identity(&options, &active_columns, &mut warnings);
+    validate_mysql_literal_defaults(&options, &active_columns, &mut warnings);
     transwarp::validate_create_options(&options, &active_columns, &mut warnings);
     if !warnings.is_empty() {
         return TableStructureSqlResult { statements: Vec::new(), warnings };

@@ -6832,9 +6832,11 @@ fn mysql_text_default_is_quoted() {
     col.data_type = "text".to_string();
     col.default_value = "default value".to_string();
 
+    // MariaDB accepts a literal default on TEXT; MySQL refuses it (see
+    // `mysql_literal_default_on_blob_text_json_geometry_is_refused`).
     let result = build_create_table_sql(TableStructureSqlOptions {
         database_type: Some(DatabaseType::Mysql),
-        driver_profile: None,
+        driver_profile: Some("mariadb".to_string()),
         schema: None,
         table_name: "products".to_string(),
         columns: vec![col],
@@ -9440,4 +9442,89 @@ fn create_partitioned_table_is_supported_for_kingbase() {
 
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     assert!(result.statements[0].ends_with(") PARTITION BY LIST (\"region\");"), "{}", result.statements[0]);
+}
+
+#[test]
+fn mysql_literal_default_on_blob_text_json_geometry_is_refused() {
+    // (data type, default, driver profile, expected DEFAULT clause; None means refused)
+    let cases: &[(&str, &str, Option<&str>, Option<&str>)] = &[
+        ("text", "''", None, None),
+        ("TEXT", "x", None, None),
+        ("mediumtext", "''", None, None),
+        ("longtext", "a(b)", None, None),
+        ("blob", "abc", None, None),
+        ("json", "{}", None, None),
+        ("geometry", "x", None, None),
+        ("text", "('')", None, Some("DEFAULT ('')")),
+        ("json", "(json_object())", None, Some("DEFAULT (json_object())")),
+        ("text", "''", Some("mariadb"), Some("DEFAULT ''")),
+        ("text", "", None, Some("`note` text NOT NULL")),
+        ("text", "NULL", None, Some("`note` text NOT NULL")),
+        ("varchar(255)", "''", None, Some("DEFAULT ''")),
+        ("char(10)", "abc", None, Some("DEFAULT 'abc'")),
+    ];
+    for (data_type, default_value, driver_profile, expected) in cases {
+        let mut note = column("note");
+        note.data_type = data_type.to_string();
+        note.is_nullable = false;
+        note.default_value = default_value.to_string();
+        let mut options = structure_change_options(DatabaseType::Mysql, None, "t", vec![note.clone()]);
+        options.driver_profile = driver_profile.map(str::to_string);
+        let added = build_table_structure_change_sql(options.clone());
+        let created = build_create_table_sql(options);
+        note.id = "ddl-preview:new:note".to_string();
+        let single = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+            database_type: Some(DatabaseType::Mysql),
+            driver_profile: driver_profile.map(str::to_string),
+            schema: None,
+            table_name: "t".to_string(),
+            column: note,
+        });
+        let case = format!("{data_type} DEFAULT {default_value:?} ({driver_profile:?})");
+        match expected {
+            None => {
+                let warning = format!(
+                    "MySQL does not allow a literal default on {} column \"note\". Remove the default, or on MySQL 8.0.13 or later use an expression default such as ('').",
+                    data_type.to_ascii_lowercase()
+                );
+                assert_eq!(added.warnings, vec![warning.clone()], "{case}");
+                assert_eq!(created.warnings, vec![warning.clone()], "{case}");
+                assert!(created.statements.is_empty(), "{case}: {:?}", created.statements);
+                assert_eq!(single.warnings, vec![warning], "{case}");
+                assert!(single.statements.is_empty(), "{case}: {:?}", single.statements);
+            }
+            Some(clause) => {
+                for result in [&added, &created, &single] {
+                    assert!(result.warnings.is_empty(), "{case}: {:?}", result.warnings);
+                    assert_eq!(result.statements.len(), 1, "{case}: {:?}", result.statements);
+                    assert!(result.statements[0].contains(clause), "{case}: {}", result.statements[0]);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn mysql_literal_default_check_only_covers_defaults_the_draft_emits() {
+    // MySQL 8.0.13+ reports an expression default on TEXT this way. Leaving it
+    // unchanged must not block an unrelated edit to the column.
+    let mut kept = existing_pk_column("note", "text", false, false);
+    kept.original.as_mut().unwrap().column_default = Some("_utf8mb4\\'\\'".to_string());
+    kept.default_value = "_utf8mb4\\'\\'".to_string();
+    kept.is_nullable = true;
+    let result = build_table_structure_change_sql(structure_change_options(DatabaseType::Mysql, None, "t", vec![kept]));
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+
+    // Turning a VARCHAR with a literal default into TEXT would carry the
+    // literal into the MODIFY statement.
+    let mut retyped = existing_pk_column("note", "varchar(255)", false, false);
+    retyped.original.as_mut().unwrap().column_default = Some("".to_string());
+    retyped.data_type = "text".to_string();
+    retyped.default_value = "''".to_string();
+    let result =
+        build_table_structure_change_sql(structure_change_options(DatabaseType::Mysql, None, "t", vec![retyped]));
+    assert_eq!(
+        result.warnings,
+        vec!["MySQL does not allow a literal default on text column \"note\". Remove the default, or on MySQL 8.0.13 or later use an expression default such as ('').".to_string()]
+    );
 }

@@ -449,8 +449,17 @@ export interface PluginFormField {
   /** Plugin method returning `{ options: [{ value, label }] }` for dynamic
    * select rendering; the host calls it with `{ locale }` (the current DBX UI
    * locale) so plugins can localize the labels. Falls back to the declared
-   * type when unavailable. */
+   * type when unavailable. When the fetch fails or returns nothing, declared
+   * static `options` still render (static first, dynamic after, deduped by
+   * value). */
   options_action?: string;
+  /**
+   * Render section this field belongs to (task triggers only). The scheduler
+   * config form aggregates tagged fields under the trigger's declared
+   * `groups` sections, in declaration order; untagged fields keep the
+   * leading plain section. Connection dialogs ignore the attribute.
+   */
+  group?: string;
   /** Host API 1.1: offer a local-file action on this field. */
   picker?: PluginFormFieldPicker;
   binding?: PluginFormFieldBinding;
@@ -486,12 +495,23 @@ export interface PluginConnectionAction {
   timeout_ms?: number;
 }
 
+/** One named render section of a task trigger's config form; declaration
+ * order is the render order. Labels localize under
+ * `localizations.<locale>…triggers.<id>.groups.<id>.label`. */
+export interface PluginFormFieldGroup {
+  id: string;
+  label: string;
+}
+
 export interface PluginTaskTriggerContribution {
   id: string;
   label: string;
   mode: "run" | "resident";
   risk?: "low" | "medium" | "high";
   fields: PluginFormField[];
+  /** Named render sections for the scheduler config form (scheduler hosts
+   * only); fields tagged `group: <id>` aggregate under their section. */
+  groups?: PluginFormFieldGroup[];
 }
 
 export interface PluginTaskProviderContribution {
@@ -759,7 +779,7 @@ export interface PluginContributionLocalization {
   fields?: Record<string, PluginFormFieldLocalization>;
   actions?: Record<string, { label?: string; description?: string }>;
   /** task-provider triggers, keyed by the provider-local trigger id. */
-  triggers?: Record<string, { label?: string; fields?: Record<string, PluginFormFieldLocalization> }>;
+  triggers?: Record<string, { label?: string; fields?: Record<string, PluginFormFieldLocalization>; groups?: Record<string, { label?: string }> }>;
 }
 
 export interface PluginManifestLocalization {

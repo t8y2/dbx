@@ -43,6 +43,9 @@ function normalizeTriggers(raw: unknown): SchedulerTaskTriggerContribution[] {
       mode: trigger.mode === "resident" ? "resident" : "run",
       risk: trigger.risk === "medium" || trigger.risk === "high" ? trigger.risk : "low",
       fields: Array.isArray(trigger.fields) ? (trigger.fields as PluginFormField[]) : [],
+      // Group sections ride through untouched: ids and labels were already
+      // localized by the frontend plugin registry (frontendPlugin).
+      groups: Array.isArray(trigger.groups) ? trigger.groups.filter((group): group is NonNullable<typeof group> => Boolean(group) && typeof group.id === "string" && typeof group.label === "string") : undefined,
     });
   }
   return triggers;

@@ -18,7 +18,7 @@ import * as schedulerApi from "@/lib/scheduler/schedulerApi";
 import { schedulerErrorCode } from "@/lib/scheduler/schedulerApi";
 import { defaultExecutionPolicy, defaultTaskName, defaultTrigger, draftFormValues, isHighRiskAcknowledged, modeForTrigger, rememberHighRiskAcknowledgement } from "@/lib/scheduler/schedulerDraft";
 import { findProvider, findTrigger, triggerId as fullTriggerId, withStoredTriggerId } from "@/lib/scheduler/schedulerProviders";
-import { configFromFormValues, validateFormFields, type SchedulerFormValues } from "@/lib/scheduler/schedulerForm";
+import { configFromFormValues, formOwnedConnectionKey, validateFormFields, type SchedulerFormValues } from "@/lib/scheduler/schedulerForm";
 import type { SchedulerTaskProviderDescriptor, SchedulerTaskTriggerContribution, TaskDefinition } from "@/lib/scheduler/schedulerTypes";
 import SchedulerExecutionPolicyFields from "./SchedulerExecutionPolicyFields.vue";
 import SchedulerTaskFormRenderer from "./SchedulerTaskFormRenderer.vue";
@@ -57,6 +57,7 @@ const isCreate = computed(() => !props.task);
 const selectedProvider = computed(() => findProvider(props.providers, draft.value?.providerId));
 const selectedTrigger = computed(() => findTrigger(selectedProvider.value, storedOrFullTriggerId()));
 const configFields = computed(() => selectedTrigger.value?.fields ?? []);
+const configGroups = computed(() => selectedTrigger.value?.groups ?? []);
 
 // Builtin providers (database backup / configuration sync) and plugin
 // providers are both creatable from the task center; editing keeps the full
@@ -97,7 +98,16 @@ function storedOrFullTriggerId(): string | undefined {
   return undefined;
 }
 
-const requiresConnection = computed(() => (selectedProvider.value?.connectionProviders.length ?? 0) > 0);
+const requiresConnection = computed(() => !formConnectionKey.value && (selectedProvider.value?.connectionProviders.length ?? 0) > 0);
+
+/**
+ * A trigger whose config requires its own `host/connections` field manages
+ * connections in the form (e.g. files tasks' source/destination selects) —
+ * the separate binding section collapses and `target.connectionId` derives
+ * from that field on save, keeping the plugin envelope's connection id the
+ * source side its fallback semantics expect.
+ */
+const formConnectionKey = computed(() => (selectedTrigger.value ? formOwnedConnectionKey(selectedTrigger.value.fields ?? []) : undefined));
 
 /** Providers declaring `allow_multiple_connections` get a multi-select list. */
 const allowsMultipleConnections = computed(() => Boolean(selectedProvider.value?.allowMultipleConnections));
@@ -249,6 +259,13 @@ async function save() {
   versionConflict.value = false;
   try {
     draft.value.config = configFromFormValues(configFields.value, formValues.value, draft.value.config);
+    if (formConnectionKey.value) {
+      const derived = formValues.value?.[formConnectionKey.value];
+      draft.value.target = {
+        ...draft.value.target,
+        connectionId: typeof derived === "string" && derived.trim() ? derived.trim() : draft.value.target?.connectionId || "",
+      };
+    }
     draft.value.config = withStoredTriggerId(draft.value.config, selectedProvider.value, selectedTrigger.value);
     draft.value.updatedAt = new Date().toISOString();
     // Creation must not carry the draft's client-generated id: the save
@@ -323,7 +340,7 @@ function close() {
             <p v-if="!isCreate" class="text-xs text-muted-foreground">{{ t("scheduler.editor.providerLockedHint") }}</p>
           </div>
         </div>
-        <div class="space-y-2" data-scheduler-editor-connection>
+        <div v-if="!formConnectionKey" class="space-y-2" data-scheduler-editor-connection>
           <div class="flex items-center justify-between">
             <Label>{{ allowsMultipleConnections ? t("scheduler.editor.connections") : t("scheduler.editor.connection") }}</Label>
             <span v-if="allowsMultipleConnections" class="text-[11px] text-muted-foreground">{{ t("scheduler.editor.connectionsHint") }}</span>
@@ -377,7 +394,7 @@ function close() {
 
         <section v-if="configFields.length > 0" class="space-y-3">
           <h4 class="text-sm font-semibold">{{ t("scheduler.editor.sectionConfig") }}</h4>
-          <SchedulerTaskFormRenderer :fields="configFields" :model-value="formValues" :connections="providerConnections" :plugin-id="selectedProvider?.pluginId" :task-connection-id="draft.target?.connectionId || ''" @update:model-value="updateFormValues" />
+          <SchedulerTaskFormRenderer :fields="configFields" :groups="configGroups" :model-value="formValues" :connections="providerConnections" :plugin-id="selectedProvider?.pluginId" :task-connection-id="draft.target?.connectionId || ''" @update:model-value="updateFormValues" />
         </section>
 
         <section class="space-y-3">

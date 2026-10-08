@@ -231,6 +231,18 @@ pub struct PluginTaskTriggerLocalization {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub fields: BTreeMap<String, PluginFormFieldLocalization>,
+    /// Per-group label translations, keyed by the group id declared on the
+    /// trigger's `groups` list. Group ids are stable identifiers; only the
+    /// label localizes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub groups: BTreeMap<String, PluginTaskTriggerGroupLocalization>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginTaskTriggerGroupLocalization {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -371,10 +383,29 @@ pub struct PluginFormFieldDefinition {
     /// invoked as usual; the prefix keeps the two namespaces from colliding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options_action: Option<String>,
+    /// Optional render section this field belongs to. Task-trigger fields
+    /// only: the scheduler config form aggregates fields by `group` into
+    /// titled sections (declared by the trigger's `groups` list, in
+    /// declaration order); fields without `group` render in the leading
+    /// plain section. Connection dialogs ignore the attribute. Documented in
+    /// `plugins/README.md` ("Form field groups").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_when: Option<PluginFieldCondition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub required_when: Option<PluginFieldCondition>,
+}
+
+/// One named render section of a task trigger's config form (see
+/// [`PluginFormFieldDefinition::group`]). Declaration order is the render
+/// order; labels localize under
+/// `localizations.<locale>…triggers.<id>.groups.<id>.label`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginFormFieldGroup {
+    pub id: String,
+    pub label: String,
 }
 
 /// A `visible_when` / `required_when` expression.
@@ -1157,6 +1188,12 @@ pub struct PluginTaskTriggerContribution {
     /// field system — there is no second form DSL.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<PluginFormFieldDefinition>,
+    /// Named render sections of the config form (scheduler hosts only).
+    /// Fields tagged `group: <id>` aggregate under their section in
+    /// declaration order; untagged fields keep the leading plain section.
+    /// Optional and forward/backward compatible.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<PluginFormFieldGroup>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1477,6 +1514,13 @@ fn validate_localizations(localizations: &BTreeMap<String, PluginManifestLocaliz
                         ));
                     }
                 }
+                for (group_id, group) in &trigger.groups {
+                    if !valid_identifier(group_id) || group.label.as_ref().is_some_and(|value| value.trim().is_empty()) {
+                        errors.push(format!(
+                            "Plugin localization '{locale}' has an invalid trigger group entry '{contribution_id}/{trigger_id}/{group_id}'"
+                        ));
+                    }
+                }
             }
         }
     }
@@ -1705,6 +1749,7 @@ fn validate_contributions(
                         ));
                     }
                     validate_form_fields(&trigger.fields, index, errors);
+                    validate_trigger_groups(trigger, id, index, errors);
                 }
                 if !has_backend {
                     errors.push(format!("Task provider '{id}' requires a backend entrypoint"));
@@ -2264,9 +2309,25 @@ fn validate_form_fields(fields: &[PluginFormFieldDefinition], contribution_index
                 }
             }
         } else if !field.options.is_empty() {
-            errors.push(format!(
-                "Contribution at index {contribution_index} field {field_index} only supports options for select or radio fields"
-            ));
+            // A dynamic `options_action` select may also declare static
+            // options (rendered ahead of the fetched ones, deduped by value
+            // — e.g. the files tasks' reserved `local` side). The same
+            // shape rules apply; without `options_action` the declared
+            // options would be dead weight on a free-text input.
+            if field.options_action.is_none() {
+                errors.push(format!(
+                    "Contribution at index {contribution_index} field {field_index} only supports options for select or radio fields"
+                ));
+            } else {
+                let mut seen_values = HashSet::new();
+                for option in &field.options {
+                    if option.label.trim().is_empty() || !seen_values.insert(&option.value) {
+                        errors.push(format!(
+                            "Contribution at index {contribution_index} field {field_index} has invalid or duplicate choice options"
+                        ));
+                    }
+                }
+            }
         }
 
         if field.binding == Some(PluginFormFieldBinding::Port) && field.field_type != PluginFormFieldType::Number {
@@ -2326,6 +2387,50 @@ fn validate_form_fields(fields: &[PluginFormFieldDefinition], contribution_index
 fn validate_optional_reference(value: Option<&str>, label: &str, contribution_id: &str, errors: &mut Vec<String>) {
     if value.is_some_and(|value| !valid_identifier(value)) {
         errors.push(format!("Connection provider '{contribution_id}' has an invalid {label} reference"));
+    }
+}
+
+/// Task-trigger `groups` + field `group` references (see
+/// [`PluginFormFieldGroup`]). Strict like every other `validate_*`: group ids
+/// must be valid and unique, and every tagged field must name a declared
+/// group — a dangling reference would silently strand the field outside its
+/// intended section.
+fn validate_trigger_groups(
+    trigger: &PluginTaskTriggerContribution,
+    provider_id: &str,
+    contribution_index: usize,
+    errors: &mut Vec<String>,
+) {
+    if trigger.groups.is_empty() && trigger.fields.iter().all(|field| field.group.is_none()) {
+        return;
+    }
+    let mut seen_groups = HashSet::new();
+    for (group_index, group) in trigger.groups.iter().enumerate() {
+        if !valid_identifier(&group.id) || !seen_groups.insert(group.id.as_str()) {
+            errors.push(format!(
+                "Contribution at index {contribution_index} task provider '{provider_id}' trigger '{}' group {group_index} has an invalid or duplicate id",
+                trigger.id
+            ));
+        }
+        validate_required_text(
+            &group.label,
+            &format!(
+                "Contribution at index {contribution_index} task provider '{provider_id}' trigger '{}' group '{}' label",
+                trigger.id, group.id
+            ),
+            errors,
+        );
+    }
+    for (field_index, field) in trigger.fields.iter().enumerate() {
+        let Some(group) = field.group.as_deref() else {
+            continue;
+        };
+        if !seen_groups.contains(group) {
+            errors.push(format!(
+                "Contribution at index {contribution_index} task provider '{provider_id}' trigger '{}' field {field_index} references undeclared group '{group}'",
+                trigger.id
+            ));
+        }
     }
 }
 
@@ -3387,6 +3492,257 @@ mod tests {
         assert!(
             errors.iter().any(|error| error.contains("choice options cannot be empty")),
             "select fields must follow the shared form rules: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn trigger_groups_parse_and_validate_strictly() {
+        let groups_json = serde_json::json!([
+            { "id": "source", "label": "Source" },
+            { "id": "target", "label": "Target" }
+        ]);
+        let field_json = |group: serde_json::Value| {
+            serde_json::json!({
+                "type": "task-provider",
+                "id": "sample.tasks",
+                "label": "Tasks",
+                "capabilities": ["run", "cancel"],
+                "triggers": [{
+                    "id": "copy",
+                    "label": "Copy",
+                    "mode": "run",
+                    "groups": groups_json,
+                    "fields": [
+                        { "key": "mode", "label": "Mode", "type": "select", "default": "file", "options": [{ "label": "File", "value": "file" }] },
+                        { "key": "source_connection_id", "label": "Source", "type": "text", "group": group },
+                        { "key": "destination_connection_id", "label": "Target", "type": "text" }
+                    ]
+                }]
+            })
+        };
+
+        // Declared groups parse and a tagged field passes validation.
+        let provider: PluginContribution = serde_json::from_value(field_json(serde_json::json!("source"))).unwrap();
+        let PluginContribution::TaskProvider(parsed) = &provider else { unreachable!() };
+        let trigger = parsed.trigger("copy").unwrap();
+        assert_eq!(trigger.groups.len(), 2);
+        assert_eq!(trigger.groups[0].id, "source");
+        assert_eq!(trigger.groups[0].label, "Source");
+        let mut errors = Vec::new();
+        validate_contributions(std::slice::from_ref(&provider), true, false, std::env::temp_dir().as_path(), &mut errors);
+        assert!(errors.is_empty(), "declared group references must pass: {errors:?}");
+
+        // An undeclared group reference is rejected (the field would strand
+        // outside its intended section).
+        let provider: PluginContribution = serde_json::from_value(field_json(serde_json::json!("missing"))).unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(std::slice::from_ref(&provider), true, false, std::env::temp_dir().as_path(), &mut errors);
+        assert!(
+            errors.iter().any(|error| error.contains("references undeclared group 'missing'")),
+            "dangling group references must be rejected: {errors:?}"
+        );
+
+        // Duplicate group ids are rejected.
+        let provider: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "task-provider",
+            "id": "sample.tasks",
+            "label": "Tasks",
+            "triggers": [{
+                "id": "copy",
+                "label": "Copy",
+                "mode": "run",
+                "groups": [
+                    { "id": "source", "label": "Source" },
+                    { "id": "source", "label": "Source again" }
+                ],
+                "fields": [{ "key": "p", "label": "P", "type": "text", "group": "source" }]
+            }]
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(std::slice::from_ref(&provider), true, false, std::env::temp_dir().as_path(), &mut errors);
+        assert!(
+            errors.iter().any(|error| error.contains("invalid or duplicate id")),
+            "duplicate group ids must be rejected: {errors:?}"
+        );
+
+        // A field tagged `group` without any declared groups is rejected too.
+        let provider: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "task-provider",
+            "id": "sample.tasks",
+            "label": "Tasks",
+            "triggers": [{
+                "id": "copy",
+                "label": "Copy",
+                "mode": "run",
+                "fields": [{ "key": "p", "label": "P", "type": "text", "group": "source" }]
+            }]
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(std::slice::from_ref(&provider), true, false, std::env::temp_dir().as_path(), &mut errors);
+        assert!(
+            errors.iter().any(|error| error.contains("references undeclared group 'source'")),
+            "group tags without a groups declaration must be rejected: {errors:?}"
+        );
+
+        // Unknown fields inside a group declaration reject (deny_unknown_fields).
+        assert!(serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "task-provider",
+            "id": "sample.tasks",
+            "label": "Tasks",
+            "triggers": [{
+                "id": "copy",
+                "label": "Copy",
+                "mode": "run",
+                "groups": [{ "id": "source", "label": "Source", "order": 1 }]
+            }]
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn trigger_group_localizations_validate() {
+        use super::{PluginManifestLocalization, PluginTaskTriggerGroupLocalization};
+        let mut localizations = std::collections::BTreeMap::new();
+        let mut triggers = std::collections::BTreeMap::new();
+        let mut groups = std::collections::BTreeMap::new();
+        groups.insert(
+            "source".to_string(),
+            PluginTaskTriggerGroupLocalization { label: Some("Quelle".to_string()) },
+        );
+        triggers.insert(
+            "copy".to_string(),
+            super::PluginTaskTriggerLocalization {
+                label: Some("Copy".to_string()),
+                fields: std::collections::BTreeMap::new(),
+                groups,
+            },
+        );
+        let mut contributions = std::collections::BTreeMap::new();
+        contributions.insert(
+            "sample.tasks".to_string(),
+            super::PluginContributionLocalization {
+                triggers,
+                ..Default::default()
+            },
+        );
+        localizations.insert(
+            "de-DE".to_string(),
+            PluginManifestLocalization {
+                contributions,
+                ..Default::default()
+            },
+        );
+        let mut errors = Vec::new();
+        super::validate_localizations(&localizations, &mut errors);
+        assert!(errors.is_empty(), "valid group localizations must pass: {errors:?}");
+
+        let mut localizations = std::collections::BTreeMap::new();
+        let mut triggers = std::collections::BTreeMap::new();
+        let mut groups = std::collections::BTreeMap::new();
+        groups.insert(
+            "not an identifier".to_string(),
+            PluginTaskTriggerGroupLocalization { label: Some("Quelle".to_string()) },
+        );
+        triggers.insert(
+            "copy".to_string(),
+            super::PluginTaskTriggerLocalization {
+                label: None,
+                fields: std::collections::BTreeMap::new(),
+                groups,
+            },
+        );
+        let mut contributions = std::collections::BTreeMap::new();
+        contributions.insert(
+            "sample.tasks".to_string(),
+            super::PluginContributionLocalization {
+                triggers,
+                ..Default::default()
+            },
+        );
+        localizations.insert(
+            "de-DE".to_string(),
+            PluginManifestLocalization {
+                contributions,
+                ..Default::default()
+            },
+        );
+        let mut errors = Vec::new();
+        super::validate_localizations(&localizations, &mut errors);
+        assert!(
+            errors.iter().any(|error| error.contains("invalid trigger group entry")),
+            "invalid group localization ids must be rejected: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn static_options_merge_requires_options_action() {
+        let dir = tempfile::tempdir().unwrap();
+        let field_json = |options_action: serde_json::Value| {
+            serde_json::json!({
+                "type": "task-provider",
+                "id": "sample.tasks",
+                "label": "Tasks",
+                "capabilities": ["run", "cancel"],
+                "triggers": [{
+                    "id": "copy",
+                    "label": "Copy",
+                    "mode": "run",
+                    "fields": [{
+                        "key": "source_connection_id",
+                        "label": "Source",
+                        "type": "text",
+                        "options": [{ "value": "local", "label": "Local path" }],
+                        "options_action": options_action
+                    }]
+                }]
+            })
+        };
+
+        // A text field may declare static options alongside `options_action`
+        // (the reserved-value pattern, e.g. files tasks' `local` side).
+        let provider: PluginContribution = serde_json::from_value(field_json(serde_json::json!("host/connections"))).unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(std::slice::from_ref(&provider), true, false, dir.path(), &mut errors);
+        assert!(errors.is_empty(), "static+dynamic options must pass: {errors:?}");
+
+        // Without `options_action` the options are dead weight and stay rejected.
+        let provider: PluginContribution = serde_json::from_value(field_json(serde_json::json!(null))).unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(std::slice::from_ref(&provider), true, false, dir.path(), &mut errors);
+        assert!(
+            errors.iter().any(|error| error.contains("only supports options for select or radio fields")),
+            "options without options_action must stay rejected: {errors:?}"
+        );
+
+        // The same shape rules (non-empty labels, unique values) apply.
+        let provider: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "task-provider",
+            "id": "sample.tasks",
+            "label": "Tasks",
+            "triggers": [{
+                "id": "copy",
+                "label": "Copy",
+                "mode": "run",
+                "fields": [{
+                    "key": "source_connection_id",
+                    "label": "Source",
+                    "type": "text",
+                    "options_action": "host/connections",
+                    "options": [
+                        { "value": "local", "label": "Local path" },
+                        { "value": "local", "label": "Local again" }
+                    ]
+                }]
+            }]
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(std::slice::from_ref(&provider), true, false, dir.path(), &mut errors);
+        assert!(
+            errors.iter().any(|error| error.contains("invalid or duplicate choice options")),
+            "duplicate static option values must be rejected: {errors:?}"
         );
     }
 

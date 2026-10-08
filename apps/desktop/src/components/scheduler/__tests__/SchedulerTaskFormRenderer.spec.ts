@@ -4,7 +4,7 @@ import { createApp, nextTick, type App } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "../../../i18n";
 import SchedulerTaskFormRenderer from "../SchedulerTaskFormRenderer.vue";
-import type { ConnectionConfig, PluginFormField } from "@/types/database";
+import type { ConnectionConfig, PluginFormField, PluginFormFieldGroup } from "@/types/database";
 
 const mocks = vi.hoisted(() => ({
   invokePlugin: vi.fn(),
@@ -29,6 +29,11 @@ async function mountRenderer(fields: PluginFormField[], initial: Record<string, 
   await new Promise((resolve) => setTimeout(resolve, 0));
   await nextTick();
   return { container, values: initial };
+}
+
+/** mountRenderer + a groups prop, typed for the group-rendering suite. */
+async function mountGroupedRenderer(fields: PluginFormField[], groups: PluginFormFieldGroup[], initial: Record<string, unknown> = {}, extra: Record<string, unknown> = {}) {
+  return mountRenderer(fields, initial, { ...extra, groups });
 }
 
 async function openSelect(trigger: HTMLElement) {
@@ -244,6 +249,161 @@ describe("SchedulerTaskFormRenderer", () => {
       button!.click();
       await nextTick();
       expect(document.body.querySelector("[data-plugin-path-picker]")).toBeNull();
+    });
+  });
+
+  describe("static + dynamic option merge (options_action with declared options)", () => {
+    const localField: PluginFormField = {
+      key: "source_connection_id",
+      label: "Source connection id",
+      type: "text",
+      binding: "config",
+      options_action: "host/connections",
+      empty_label: "(follow task connection)",
+      options: [{ value: "local", label: "Local path" }],
+    };
+
+    const connections = [{ id: "conn-1", name: "Production DB" }] as ConnectionConfig[];
+
+    it("renders static options ahead of the fetched ones, deduped by value", async () => {
+      const { container } = await mountRenderer([localField], {}, { connections });
+      const trigger = container.querySelector<HTMLButtonElement>('button[role="combobox"]');
+      expect(trigger).not.toBeNull();
+      await openSelect(trigger!);
+      const labels = selectOptionLabels();
+      // Optional field: the empty entry leads; the declared static option
+      // precedes the host-resolved connections.
+      expect(labels[0]).toBe("(follow task connection)");
+      expect(labels.indexOf("Local path")).toBeGreaterThan(-1);
+      expect(labels.indexOf("Local path")).toBeLessThan(labels.indexOf("Production DB"));
+      expect(labels.filter((label) => label === "Local path")).toHaveLength(1);
+    });
+
+    it("still renders the static options when the dynamic fetch fails or resolves empty", async () => {
+      // host/unknown resolves to no host options — the declared static
+      // options keep the select alive instead of degrading to a text input.
+      const { container } = await mountRenderer([{ ...localField, options_action: "host/unknown" }], {}, { connections });
+      expect(container.querySelector('button[role="combobox"]')).not.toBeNull();
+      await openSelect(container.querySelector<HTMLButtonElement>('button[role="combobox"]')!);
+      expect(selectOptionLabels()).toContain("Local path");
+    });
+
+    it("keeps the text-input fallback when neither static nor dynamic options exist", async () => {
+      const { container } = await mountRenderer([{ ...localField, options: undefined }], {}, { connections: [] });
+      expect(container.querySelector('button[role="combobox"]')).toBeNull();
+      expect(container.querySelector("input#scheduler-field-source_connection_id")).not.toBeNull();
+    });
+
+    it("selecting the static option stores its value", async () => {
+      const values: Record<string, unknown> = {};
+      const { container } = await mountRenderer([localField], values, { connections: [] });
+      // No connections saved: the select still offers the reserved local value.
+      const trigger = container.querySelector<HTMLButtonElement>('button[role="combobox"]');
+      trigger!.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+      await nextTick();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await nextTick();
+      const localOption = [...document.body.querySelectorAll<HTMLElement>('[role="option"]')].find((option) => option.textContent?.trim() === "Local path");
+      expect(localOption).toBeTruthy();
+      localOption!.focus();
+      localOption!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      await nextTick();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(values.source_connection_id).toBe("local");
+    });
+  });
+
+  describe("form field groups (trigger groups)", () => {
+    const groupFields: PluginFormField[] = [
+      {
+        key: "mode",
+        label: "What to copy",
+        type: "select",
+        options: [
+          { label: "File", value: "file" },
+          { label: "Directory", value: "directory" },
+        ],
+        default: "directory",
+      },
+      { key: "source_connection_id", label: "Source connection", type: "text", group: "source" },
+      { key: "source_path", label: "Source path", type: "text", group: "source" },
+      { key: "destination_connection_id", label: "Destination connection", type: "text", group: "target" },
+      { key: "destination_path", label: "Destination path", type: "text", group: "target" },
+      { key: "recursive", label: "Recursive", type: "boolean", group: "source", visible_when: { field: "mode", one_of: ["directory"] } },
+      { key: "dry_run", label: "Dry run", type: "boolean" },
+    ];
+    const groups: PluginFormFieldGroup[] = [
+      { id: "source", label: "Source" },
+      { id: "target", label: "Target" },
+    ];
+
+    it("renders ungrouped fields in a leading plain section, then declared groups in order", async () => {
+      const { container } = await mountGroupedRenderer(groupFields, groups, {});
+      const sections = [...container.querySelectorAll("section")];
+      expect(sections).toHaveLength(2);
+      const sectionTitles = sections.map((section) => section.querySelector("div")?.textContent?.trim());
+      expect(sectionTitles).toEqual(["Source", "Target"]);
+      // Plain fields (mode, dry_run) live outside every section.
+      const outside = [...container.querySelectorAll(":scope > div > div, :scope > div")].filter((node) => node.closest("section") === null);
+      const outsideLabels = outside.flatMap((node) => [...node.querySelectorAll("label")].map((label) => label.textContent?.trim() ?? "")).filter(Boolean);
+      expect(outsideLabels.some((label) => label.startsWith("What to copy"))).toBe(true);
+      expect(outsideLabels.some((label) => label.startsWith("Dry run"))).toBe(true);
+      // Group membership: source fields inside the first section, in
+      // declaration order; target fields in the second.
+      const sourceLabels = [...sections[0]!.querySelectorAll("label")].map((label) => label.textContent?.trim() ?? "");
+      expect(sourceLabels.map((label) => label.split("*")[0])).toEqual(["Source connection", "Source path", "Recursive"]);
+      const targetLabels = [...sections[1]!.querySelectorAll("label")].map((label) => label.textContent?.trim() ?? "");
+      expect(targetLabels.map((label) => label.split("*")[0])).toEqual(["Destination connection", "Destination path"]);
+    });
+
+    it("marks the flow between group sections with an arrow separator", async () => {
+      const { container } = await mountGroupedRenderer(groupFields, groups, {});
+      // The separator rides between the two sections (outside them), a
+      // decorative right-arrow inside an aria-hidden wrapper.
+      expect(container.querySelector('div[aria-hidden="true"] svg')).not.toBeNull();
+      // No groups declared → no separator, flat rendering (pre-group shape).
+      const { container: flat } = await mountRenderer(groupFields, {});
+      expect(flat.querySelector("section")).toBeNull();
+      expect(labelTexts(flat)).toHaveLength(groupFields.length);
+    });
+
+    it("hides a whole group section when visible_when hides every member", async () => {
+      const { container } = await mountGroupedRenderer(groupFields, groups, { mode: "file" });
+      const sections = [...container.querySelectorAll("section")];
+      // `recursive` was the only field still visible in the source group's
+      // tail; with mode=file the source section keeps its two unconditioned
+      // fields, so assert the conditional one is gone instead.
+      const labels = sections.flatMap((section) => [...section.querySelectorAll("label")].map((label) => label.textContent?.trim() ?? ""));
+      expect(labels.some((label) => label.startsWith("Recursive"))).toBe(false);
+
+      // A group whose every member is hidden does not render at all.
+      const onlyConditional = [{ key: "extra", label: "Extra", type: "text", group: "source", visible_when: { field: "mode", one_of: ["file"] } }] satisfies PluginFormField[];
+      const { container: container2 } = await mountGroupedRenderer(onlyConditional, groups, { mode: "directory" });
+      expect(container2.querySelectorAll("section")).toHaveLength(0);
+      expect(container2.textContent).not.toContain("Extra");
+    });
+
+    it("keeps every field rendered when a defensively-unknown group id slips through", async () => {
+      const stray: PluginFormField[] = [{ key: "p", label: "Stray path", type: "text", group: "nowhere" }];
+      const { container } = await mountGroupedRenderer(stray, groups, {});
+      expect(container.querySelectorAll("section")).toHaveLength(0);
+      expect(container.querySelector("input#scheduler-field-p")).not.toBeNull();
+    });
+
+    it("drops the heading of a group reduced to a single visible field", async () => {
+      // A one-field group's title repeats what the field label already says
+      // (feedback: 分组文案雷同) — the box stays, the heading goes, and no
+      // flow divider introduces a heading-less section.
+      const fields: PluginFormField[] = [
+        { key: "note", label: "Note", type: "text" },
+        { key: "lonely", label: "Lonely field", type: "text", group: "solo" },
+      ];
+      const { container } = await mountGroupedRenderer(fields, [{ id: "solo", label: "Lonely group" }], {});
+      const section = container.querySelector("section");
+      expect(section).not.toBeNull();
+      expect(section!.textContent).not.toContain("Lonely group");
+      expect(section!.querySelector("input#scheduler-field-lonely")).not.toBeNull();
+      expect(container.querySelector('div[aria-hidden="true"] svg')).toBeNull();
     });
   });
 });

@@ -7,7 +7,7 @@
 // "normalize" them here: these strings round-trip through scheduler SQLite.
 // ---------------------------------------------------------------------------
 
-import type { PluginFormField } from "@/types/database";
+import type { PluginFormField, PluginFormFieldGroup } from "@/types/database";
 
 /** ADR §2.2 kebab-case. */
 export type TaskProviderType = "builtin" | "plugin";
@@ -220,6 +220,9 @@ export interface SchedulerTaskTriggerContribution {
   mode: PluginTaskMode;
   risk?: PluginTaskRisk;
   fields?: PluginFormField[];
+  /** Named render sections of the config form; fields tagged `group: <id>`
+   * aggregate under their section, in declaration order. */
+  groups?: PluginFormFieldGroup[];
 }
 
 export interface SchedulerTaskProviderContribution {

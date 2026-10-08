@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { configFromFormValues, defaultFormValues, formValuesFromConfig, validateFormFields, visibleFormFields } from "./schedulerForm";
+import { configFromFormValues, defaultFormValues, formOwnedConnectionKey, formValuesFromConfig, validateFormFields, visibleFormFields } from "./schedulerForm";
 import type { PluginFormField } from "@/types/database";
 
 const fields: PluginFormField[] = [
@@ -81,5 +81,21 @@ describe("formValuesFromConfig", () => {
   it("tolerates a missing config", () => {
     const values = formValuesFromConfig(fields, undefined);
     expect(values.mode).toBe("safe");
+  });
+});
+
+describe("formOwnedConnectionKey", () => {
+  const connectionFields = [
+    { key: "source_connection_id", label: "Source connection", type: "text", required: true, options_action: "host/connections" },
+    { key: "destination_connection_id", label: "Destination connection", type: "text", options_action: "host/connections" },
+  ] as PluginFormField[];
+
+  it("marks the first required host/connections field as the form-owned connection", () => {
+    expect(formOwnedConnectionKey(connectionFields)).toBe("source_connection_id");
+  });
+
+  it("stays undefined when the host field is optional or absent", () => {
+    expect(formOwnedConnectionKey([connectionFields[1]!])).toBeUndefined();
+    expect(formOwnedConnectionKey([{ key: "path", label: "Path", type: "text" } as PluginFormField])).toBeUndefined();
   });
 });

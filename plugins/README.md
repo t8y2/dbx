@@ -282,9 +282,11 @@ A `text` field may declare `options_action` to be rendered as a select instead o
 - **`host/…` is a reserved namespace the host serves from its own state — no RPC reaches the plugin** (the same self-service idea as `picker`). The only defined action today is `host/connections`, which lists the user's saved connections matching the provider; the select's options are connection names with connection ids as values. Use it for fields that reference another saved connection and are allowed to stay empty (empty = follow the task's primary connection).
 - **Any other value is a sidecar method** (e.g. `sudo/profiles/options`). The host invokes it with `{ locale }` (the current DBX UI locale, so labels arrive localized) and expects `{ "options": [{ "value": string, "label": string }] }`.
 
+A dynamic select may also declare **static `options`** alongside `options_action` (a shape other field types reject). The host renders the declared options first, the fetched options after, deduplicated by value with the first occurrence winning. This is how a field carries a **reserved value that exists without any saved connection** — the files tasks declare `{ "value": "local", "label": "Local path" }` next to `options_action: "host/connections"`, so a side can be a plain local path even with zero saved storage connections. With no declared and no fetched options the field falls back to the declared text input as before. The same merge applies wherever a dynamic select renders (scheduler task form and connection dialogs).
+
 A dynamic select whose value may stay empty (empty = follow the task's primary connection or the field's declared fallback) always offers one **empty entry**. Its label comes from the field's optional `empty_label` string; when the field does not declare it, the host falls back to the field's `placeholder`, and finally to its own default wording — so manifests that predate `empty_label` and named the semantics in `placeholder` keep rendering as before. Localize the label per field with `localizations.<locale>…contributions.<id>.fields.<key>.empty_label` (task triggers accept the same key under `triggers.<id>.fields.<key>`), exactly like `placeholder`. The empty entry never persists a value: picking it (or clearing the select) stores nothing, and the saved config omits the key.
 
-In both cases the host keeps a stored value visible even when it disappears from the option list, and falls back to the declared text input when the plugin id is missing, the call fails, or the result is empty. The `host/` prefix exists so a plugin method can never collide with a host action; do not declare `host/…` values you expect the plugin to serve. (This is the form-field counterpart of the command contribution's [declarative launch options](#declarative-launch-options-options_action).)
+In both cases the host keeps a stored value visible even when it disappears from the option list, and falls back to the declared text input when the plugin id is missing, the call fails, and no static options are declared. The `host/` prefix exists so a plugin method can never collide with a host action; do not declare `host/…` values you expect the plugin to serve. (This is the form-field counterpart of the command contribution's [declarative launch options](#declarative-launch-options-options_action).)
 
 #### Conditional fields
 
@@ -314,6 +316,34 @@ A field may declare `visible_when` and `required_when`. A leaf clause matches wh
 - Conditions cascade: while the field a clause reads is itself hidden, the clause does not count. A hidden container's stored default therefore cannot surface a grandchild field, and a hidden operand of `not` keeps the field dormant instead of lighting it up.
 - DBX evaluates the same conditions for the dialog and for save/test/connect validation, so a manifest can never produce a form DBX itself rejects.
 - Composite conditions were added after the single-clause contract; keep `engines.dbx` at or above the DBX release that ships them if the form relies on them.
+
+#### Form field groups (`group` on fields, `groups` on task triggers)
+
+A task trigger may declare named render sections and tag its fields with one:
+
+```json
+{
+  "id": "copy",
+  "label": "Copy",
+  "mode": "run",
+  "groups": [
+    { "id": "source", "label": "Source" },
+    { "id": "target", "label": "Target" }
+  ],
+  "fields": [
+    { "key": "mode", "label": "What to copy", "type": "select", "options": [] },
+    { "key": "source_connection_id", "label": "Source connection id", "type": "text", "group": "source" },
+    { "key": "source_path", "label": "Source path", "type": "text", "group": "source" },
+    { "key": "destination_connection_id", "label": "Destination connection id", "type": "text", "group": "target" },
+    { "key": "destination_path", "label": "Destination path", "type": "text", "group": "target" }
+  ]
+}
+```
+
+- **Declaration order is render order.** The scheduler task form keeps untagged fields in a leading plain section (where mode-like selectors belong), then renders each declared group as a titled section, with a flow marker between consecutive groups (source → target). Group fields keep their manifest order inside the section.
+- **`visible_when` stays field-level.** A group whose fields are all hidden by their conditions does not render at all.
+- Validation is strict: group ids must be valid and unique, and every `group` tag must name a group declared on the same trigger. Group labels localize under `localizations.<locale>…contributions.<id>.triggers.<triggerId>.groups.<groupId>.label`.
+- The attribute is **consumed by the scheduler task form only**; connection dialogs ignore `group` (a connection-provider field declaring it simply renders ungrouped). Untagged triggers render exactly as before the attribute existed, so the shape is optional and backward compatible in both directions.
 
 Lifecycle methods receive:
 

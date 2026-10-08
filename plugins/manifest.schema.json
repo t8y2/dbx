@@ -194,7 +194,20 @@
       "additionalProperties": false,
       "properties": {
         "label": { "type": "string", "minLength": 1 },
-        "fields": { "type": "object", "propertyNames": { "$ref": "#/$defs/identifier" }, "additionalProperties": { "$ref": "#/$defs/formFieldLocalization" } }
+        "fields": { "type": "object", "propertyNames": { "$ref": "#/$defs/identifier" }, "additionalProperties": { "$ref": "#/$defs/formFieldLocalization" } },
+        "groups": {
+          "description": "Per-group label translations keyed by the group id declared on the trigger's `groups` list.",
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/identifier" },
+          "additionalProperties": { "$ref": "#/$defs/groupLocalization" }
+        }
+      }
+    },
+    "groupLocalization": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "label": { "type": "string", "minLength": 1 }
       }
     },
     "manifestLocalization": {
@@ -284,10 +297,14 @@
         "required": { "type": "boolean" },
         "default": { "type": ["string", "number", "boolean", "null"] },
         "options": { "type": "array", "items": { "$ref": "#/$defs/selectOption" } },
+        "group": {
+          "description": "Render section this field belongs to (task triggers only; consumed by the scheduler task form, connection dialogs ignore it). Must name a group declared on the same trigger's `groups` list; untagged fields keep the leading plain section.",
+          "$ref": "#/$defs/identifier"
+        },
         "binding": { "enum": ["config", "secret", "name", "host", "port", "username", "password", "database"] },
         "picker": { "$ref": "#/$defs/fieldPicker" },
         "options_action": {
-          "description": "Renders the text field as a dynamic select. `host/…` names the host-reserved self-service namespace (no plugin RPC; `host/connections` lists the saved connections a provider accepts); any other value is a sidecar method invoked with `{ locale }` and returning `{ options: [{ value, label }] }`.",
+          "description": "Renders the text field as a dynamic select. `host/…` names the host-reserved self-service namespace (no plugin RPC; `host/connections` lists the saved connections a provider accepts); any other value is a sidecar method invoked with `{ locale }` and returning `{ options: [{ value, label }] }`. Declared static `options` render ahead of the fetched ones, deduplicated by value (first occurrence wins).",
           "type": "string",
           "minLength": 1
         },
@@ -298,7 +315,11 @@
         {
           "if": { "properties": { "type": { "enum": ["select", "radio"] } }, "required": ["type"] },
           "then": { "required": ["options"], "properties": { "options": { "minItems": 1 } } },
-          "else": { "not": { "required": ["options"] } }
+          "else": {
+            "if": { "required": ["options_action"] },
+            "then": {},
+            "else": { "not": { "required": ["options"] } }
+          }
         },
         {
           "if": { "properties": { "binding": { "const": "port" } }, "required": ["binding"] },
@@ -420,7 +441,21 @@
         "label": { "type": "string", "minLength": 1 },
         "mode": { "enum": ["run", "resident"] },
         "risk": { "enum": ["low", "medium", "high"] },
+        "groups": {
+          "description": "Named render sections of the config form (scheduler task form only). Declaration order is the render order; fields tagged `group: <id>` aggregate under their section, untagged fields keep the leading plain section.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/formFieldGroup" }
+        },
         "fields": { "type": "array", "items": { "$ref": "#/$defs/formField" } }
+      }
+    },
+    "formFieldGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "label": { "type": "string", "minLength": 1 }
       }
     },
     "contextMenuContribution": {

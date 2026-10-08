@@ -438,6 +438,12 @@ Risk UI 策略：Low 无额外提示；Medium 保存时提示；High 创建/修�
 
 **空选项的声明式契约 `empty_label`（additive，2026-10）**：允许留空的 `options_action` select 由宿主提供一个空选项，文案取字段新可选属性 `empty_label`（Rust `PluginFormFieldDefinition` / TS `PluginFormField` / `manifest.schema.json` / `plugins/README.md` 四处同名，本地化键同位于 `localizations.<locale>…fields.<key>.empty_label`）；未声明回退 `placeholder`（既有 files 声明继续可用），再回退宿主 i18n 默认文案（scheduler 三语言）。空值哨兵 `__dbx_empty__` 保持渲染器模块私有常量（reka-ui 禁止 `SelectItem value=""`；宿主内无其它可复用惯例），仅存在于下拉项 value，永不落入保存的 config（映射回 undefined）。
 
+**表单分组 `group` / `groups`（additive，2026-10，调度器表单消费）**：触发器贡献新增可选 `groups: [{id, label}]`（声明顺序即渲染顺序），字段新增可选 `group: "<组id>"`（Rust `PluginFormFieldDefinition.group` + `PluginTaskTriggerContribution.groups` / TS `PluginFormFieldGroup` / schema `formFieldGroup` 四处同名；本地化键 `localizations.<locale>…triggers.<id>.groups.<id>.label`）。调度器表单渲染为：未分组字段保持在最前方的普通区域（copy 的「复制对象」模式下拉留在那里），已声明组按声明顺序渲染为带标题小节，相邻组之间以 lucide 右箭头分隔表达「源 → 目标」流向；组内保持 manifest 声明顺序，`visible_when` 仍在字段级生效（组内全部隐藏则整组不渲染）。校验从严：组 id 必须有效且唯一、字段 `group` 必须指向本触发器声明的组（Rust `validate_trigger_groups`）。`PluginConnectionFields`（连接对话框）不消费该属性——契约文档注明当前由调度器表单消费；无 `groups` 的触发器渲染与既往逐字节一致。
+
+**静态 + 动态选项合并（additive，2026-10，向后兼容）**：`options_action` 动态 select 允许同时声明静态 `options`（此前非 select/radio 字段声明 options 会被校验拒绝，现对声明 `options_action` 的 text 字段放行并沿用同形状规则）。渲染语义：**静态在前、动态在后、按 value 去重（先到先得）**；两者皆空才回退文本输入。这使动态 select 可携带「不需要任何已存连接就存在的保留值」——files 任务在 `host/connections` 旁声明 `{value:"local", label:"本地路径"}`。该合并在调度器表单与连接对话框（`PluginConnectionFields`）同样生效，属预期增益。
+
+**files 任务本地路径保留值 `local`（additive，2026-10，插件侧实现）**：files 的 copy/sync 触发器在 `source_connection_id` / `destination_connection_id` 上声明静态选项 `{value:"local"}`；取该保留值的一侧直接使用本机文件系统，无需预先创建存储连接。实现复用工作台双栏本地面的内置本地绑定（`__local__`，rooted fs、无策略门）：`RcloneEngine::binding` 增加注册表兜底后的 `local` 别名（真实注册 id 永远优先，宿主连接 id 为 uuid 不会撞名），`files/listDirs`（路径浏览）与 task/validate、task/execute（copy/sync 目录任务与单文件复制）全部经同一 binding 入口，无渲染器特判。「同一存储引擎实例（代理组）」约束经核实维持原状：local 绑定无代理、归 direct 组，与任何**未配置代理**的连接天然同组可互拷（rclone 单 rcd 同时寻址本地 fs 与已注册 remote）；与配置了代理的连接互拷仍被 `ensure_same_proxy_group` 以既有的可操作错误拒绝（文档如实说明，不做组间寻址扩展）。保留值 local 没有 root/lock_to_root 概念（内置绑定默认门为可写、可删、不锁根），与工作台本地栏同边界。
+
 ## 27–36. Plugin 固定 RPC / 事件
 
 遵循「固定方法 + declared capability」模式（同 `connection/*`、`filesystem/*`）。新增固定 RPC：

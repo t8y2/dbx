@@ -790,6 +790,54 @@ describe("task-provider localization", () => {
     expect(trigger.fields.find((field) => field.key === "untranslated")?.empty_label).toBe("(source connection)");
   });
 
+  it("localizes trigger group labels by group id, keeping the declared fallback otherwise", () => {
+    const plugin = installedPlugin("io.dbx.files");
+    plugin.manifest.localizations = {
+      "zh-CN": {
+        contributions: {
+          "io.dbx.files.tasks": {
+            triggers: {
+              copy: {
+                groups: {
+                  source: { label: "源" },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+    plugin.manifest.contributions = [
+      {
+        type: "task-provider",
+        id: "io.dbx.files.tasks",
+        label: "Files Tasks",
+        triggers: [
+          {
+            id: "copy",
+            label: "Copy",
+            mode: "run",
+            groups: [
+              { id: "source", label: "Source" },
+              { id: "target", label: "Target" },
+            ],
+            fields: [{ key: "source_path", label: "Source path", type: "text", binding: "config", group: "source" }],
+          },
+        ],
+      } as unknown as PluginContribution,
+    ];
+
+    const definition = createFrontendPluginRegistry([plugin], "zh-CN").listPlugins()[0]!;
+    const trigger = (definition.contributions[0] as PluginTaskProviderContribution).triggers[0]!;
+    expect(trigger.groups).toEqual([
+      { id: "source", label: "源" },
+      // Groups the localization does not cover keep the manifest original.
+      { id: "target", label: "Target" },
+    ]);
+    // Triggers without groups stay group-less (no phantom empty list).
+    expect(trigger.groups).toHaveLength(2);
+  });
+
   it("keeps the English manifest originals for an unknown locale", () => {
     const plugin = installedPlugin("io.dbx.ssh");
     plugin.manifest.localizations = {

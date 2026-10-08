@@ -44,9 +44,20 @@ const providers: SchedulerTaskProviderDescriptor[] = [
     providerId: "io.dbx.files.tasks",
     label: "Files Tasks",
     pluginId: "io.dbx.files",
-    connectionProviders: [],
+    connectionProviders: ["io.dbx.files.connection"],
+    allowMultipleConnections: false,
     capabilities: ["run"],
-    triggers: [{ id: "sync", label: "Sync Directory", mode: "run", fields: [] }],
+    triggers: [
+      {
+        id: "sync",
+        label: "Sync Directory",
+        mode: "run",
+        fields: [
+          { key: "source_connection_id", label: "Source connection", type: "text", required: true, options_action: "host/connections" },
+          { key: "source_path", label: "Source path", type: "text", required: true },
+        ],
+      },
+    ],
   },
 ];
 
@@ -55,6 +66,7 @@ const connections = [
   { id: "conn-backup", name: "backup-host", db_type: "postgres", host: "h", port: 5432, username: "u", password: "p" },
   { id: "conn-ssh-1", name: "ssh-host-1", host: "h", port: 22, username: "u", password: "p", plugin_id: "io.dbx.ssh", plugin_connection_provider: "io.dbx.ssh.connection", plugin_connection_type: "ssh" },
   { id: "conn-ssh-2", name: "ssh-host-2", host: "h", port: 22, username: "u", password: "p", plugin_id: "io.dbx.ssh", plugin_connection_provider: "io.dbx.ssh.connection", plugin_connection_type: "ssh" },
+  { id: "conn-files-1", name: "nas-storage", host: "h", port: 22, username: "u", password: "p", plugin_id: "io.dbx.files", plugin_connection_provider: "io.dbx.files.connection", plugin_connection_type: "files" },
 ] as const;
 
 function cronTask(): TaskDefinition {
@@ -76,6 +88,19 @@ function cronTask(): TaskDefinition {
     lastRunAt: null,
     lastRunStatus: null,
     version: 7,
+  };
+}
+
+/** Files task: its sync trigger requires its own host/connections field. */
+function filesTask(): TaskDefinition {
+  const now = new Date().toISOString();
+  return {
+    ...cronTask(),
+    id: "files-task-1",
+    name: "目录同步",
+    providerId: "io.dbx.files.tasks",
+    target: { connectionId: "conn-files-1" },
+    config: { __triggerId: "io.dbx.files.tasks/sync", sourceConnectionId: "conn-files-1", sourcePath: "/data" },
   };
 }
 
@@ -130,6 +155,18 @@ describe("SchedulerTaskEditor", () => {
     ack.dispatchEvent(new Event("change"));
     await flush();
     expect(container.querySelector<HTMLButtonElement>("[data-scheduler-editor-save]")!.disabled).toBe(false);
+  });
+
+  it("collapses the connection binding into a form that manages its own connections", async () => {
+    // The files sync trigger requires its own host/connections select — the
+    // 源/目标 selects in the config form ARE the connection binding, so the
+    // editor's separate section would be redundant copy of the same choice.
+    const formManaged = await mountEditor({ open: true, task: filesTask() });
+    expect(formManaged.querySelector("[data-scheduler-editor-connection]")).toBeNull();
+
+    // Plain providers keep the binding section.
+    const plain = await mountEditor({ open: true, task: cronTask() });
+    expect(plain.querySelector("[data-scheduler-editor-connection]")).not.toBeNull();
   });
 
   it("keeps a saved high-risk task acknowledged for the rest of the session", async () => {

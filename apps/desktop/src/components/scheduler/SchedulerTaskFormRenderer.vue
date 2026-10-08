@@ -5,7 +5,7 @@
 // dialogs render — never a scheduler-specific dialect.
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { FolderOpen } from "@lucide/vue";
+import { ArrowRight, FolderOpen } from "@lucide/vue";
 import { Input } from "@/components/ui/input";
 import PasswordInput from "@/components/ui/PasswordInput.vue";
 import PasswordTextarea from "@/components/ui/PasswordTextarea.vue";
@@ -17,7 +17,7 @@ import { useToast } from "@/composables/useToast";
 import { invokePlugin } from "@/lib/backend/api";
 import { pickPluginFieldFile } from "@/lib/plugins/pluginFieldPicker";
 import { configFromFormValues, formFieldRequired, visibleFormFields, type SchedulerFormValues } from "@/lib/scheduler/schedulerForm";
-import type { ConnectionConfig, PluginFormField, PluginFormFieldOption, PluginFormFieldValue } from "@/types/database";
+import type { ConnectionConfig, PluginFormField, PluginFormFieldGroup, PluginFormFieldOption, PluginFormFieldValue } from "@/types/database";
 import PluginPathPickerDialog from "@/components/plugins/PluginPathPickerDialog.vue";
 
 const props = defineProps<{
@@ -38,6 +38,13 @@ const props = defineProps<{
    * first, then the task connection.
    */
   taskConnectionId?: string;
+  /**
+   * Named render sections declared by the trigger (`groups`). Fields tagged
+   * `group: <id>` aggregate under their section in declaration order;
+   * untagged fields keep the leading plain section. Without groups the form
+   * renders exactly as before the attribute existed.
+   */
+  groups?: readonly PluginFormFieldGroup[];
 }>();
 
 const emit = defineEmits<{
@@ -48,6 +55,42 @@ const { t, locale } = useI18n();
 const { toast } = useToast();
 
 const shownFields = computed(() => visibleFormFields(props.fields, props.modelValue));
+
+// ---------------------------------------------------------------------------
+// Group sections (`groups` + field `group`)
+// ---------------------------------------------------------------------------
+
+// Untagged fields keep the leading plain section (declaration order); tagged
+// fields aggregate under their declared section in declaration order. An
+// empty group (every field hidden by visible_when) does not render. Without
+// any group tags the whole form collapses into one plain section — byte-for-
+// byte the pre-`group` rendering.
+interface FormFieldSection {
+  key: string;
+  label?: string;
+  fields: PluginFormField[];
+}
+
+const shownSections = computed<FormFieldSection[]>(() => {
+  const visible = shownFields.value;
+  const declared = (props.groups ?? []).filter((group) => group && typeof group.id === "string" && typeof group.label === "string");
+  if (declared.length === 0 || !visible.some((field) => typeof field.group === "string" && declared.some((group) => group.id === field.group))) {
+    return visible.length > 0 ? [{ key: "plain", fields: [...visible] }] : [];
+  }
+  const sections: FormFieldSection[] = [{ key: "plain", fields: [] }];
+  const byGroup = new Map<string, PluginFormField[]>(declared.map((group) => [group.id, []]));
+  for (const field of visible) {
+    const target = typeof field.group === "string" ? byGroup.get(field.group) : undefined;
+    // A defensively-unknown group id (unvalidated manifest handed straight to
+    // the component) keeps the field in the plain section instead of dropping it.
+    (target ?? sections[0]!.fields).push(field);
+  }
+  for (const group of declared) {
+    const fields = byGroup.get(group.id)!;
+    if (fields.length > 0) sections.push({ key: group.id, label: group.label, fields });
+  }
+  return sections.filter((section) => section.fields.length > 0);
+});
 
 function fieldValue(field: PluginFormField): PluginFormFieldValue {
   const raw = props.modelValue[field.key];
@@ -230,13 +273,24 @@ function emptyOptionLabel(field: PluginFormField): string {
 
 function selectOptionsFor(field: PluginFormField): PluginFormFieldOption[] | null {
   if (!field.options_action) return null;
-  const options = dynamicOptions.value[field.key];
-  if (!options || options.length === 0) return null;
-  const merged = [...options];
+  // Static options (declared in the manifest) lead, fetched options follow,
+  // deduped by value with the first occurrence winning. This lets a dynamic
+  // select carry a reserved value that exists without any saved connection —
+  // e.g. the files tasks' `local` side. With neither source the field falls
+  // back to the declared text input.
+  const merged: PluginFormFieldOption[] = [];
+  const seen = new Set<string>();
+  for (const option of [...(field.options ?? []), ...(dynamicOptions.value[field.key] ?? [])]) {
+    const value = String(option.value);
+    if (seen.has(value)) continue;
+    seen.add(value);
+    merged.push(option);
+  }
+  if (merged.length === 0) return null;
   // Keep a stored value visible even when its connection disappeared so the
   // form does not silently look "unset" on reopen.
   const current = fieldValue(field);
-  if (current !== undefined && current !== "" && !merged.some((option) => String(option.value) === String(current))) {
+  if (current !== undefined && current !== "" && !seen.has(String(current))) {
     merged.unshift({ value: String(current), label: String(current) });
   }
   // Optional fields always keep an empty entry (empty = follow the task /
@@ -261,54 +315,121 @@ function isSecretTextarea(field: PluginFormField): boolean {
 
 <template>
   <div class="space-y-4">
-    <div v-for="field in shownFields" :key="field.key" class="space-y-1.5">
-      <Label :for="fieldId(field)" class="text-xs">
-        {{ field.label }}
-        <span v-if="formFieldRequired(fields, modelValue, field)" class="text-destructive">*</span>
-      </Label>
-      <template v-if="field.type === 'text' && selectOptionsFor(field)">
-        <Select :model-value="String(fieldValue(field) ?? '')" :disabled="disabled" @update:model-value="(value: unknown) => updateSelectField(field, value)">
-          <SelectTrigger :id="fieldId(field)" class="h-8 text-xs"><SelectValue :placeholder="field.placeholder" /></SelectTrigger>
-          <SelectContent>
-            <SelectItem v-for="option in selectOptionsFor(field)!" :key="String(option.value)" :value="String(option.value)">{{ option.label }}</SelectItem>
-          </SelectContent>
-        </Select>
-      </template>
-      <template v-else-if="field.type === 'text' || field.type === 'number'">
-        <div v-if="field.picker" class="flex items-center gap-1.5">
-          <Input :id="fieldId(field)" type="text" :model-value="fieldInputValue(field)" :placeholder="field.placeholder" :disabled="disabled" class="min-w-0 flex-1" @update:model-value="updateTextField(field, $event)" />
-          <Button variant="outline" size="sm" class="h-8 shrink-0 gap-1.5 text-xs" :disabled="disabled || (field.picker.source === 'plugin' && !pluginPickerConnectionId(field))" :data-scheduler-picker-plugin="field.picker.source === 'plugin' ? 'true' : undefined" @click="runPicker(field)">
-            <FolderOpen class="size-3.5" aria-hidden="true" />
-            {{ field.picker.kind === "directory" ? t("connection.pluginFieldSelectDirectory") : t("connection.pluginFieldSelectFile") }}
-          </Button>
-        </div>
-        <Input v-else :id="fieldId(field)" :type="field.type === 'number' ? 'number' : 'text'" :model-value="fieldInputValue(field)" :placeholder="field.placeholder" :disabled="disabled" @update:model-value="updateTextField(field, $event)" />
-      </template>
-      <PasswordInput v-else-if="field.type === 'password'" :id="fieldId(field)" :model-value="String(fieldValue(field) ?? '')" :placeholder="field.placeholder" :disabled="disabled" @update:model-value="updateField(field, $event)" />
-      <PasswordTextarea v-else-if="isSecretTextarea(field)" :id="fieldId(field)" :model-value="String(fieldValue(field) ?? '')" :placeholder="field.placeholder" :disabled="disabled" @update:model-value="updateField(field, $event)" />
-      <textarea
-        v-else-if="field.type === 'textarea'"
-        :id="fieldId(field)"
-        :value="String(fieldValue(field) ?? '')"
-        :placeholder="field.placeholder"
-        :disabled="disabled"
-        class="min-h-20 w-full resize-y rounded-md border border-input bg-transparent px-2.5 py-2 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50"
-        @input="updateField(field, ($event.target as HTMLTextAreaElement).value)"
-      />
-      <Select v-else-if="field.type === 'select'" :model-value="String(fieldValue(field) ?? '')" :disabled="disabled" @update:model-value="(value: unknown) => updateField(field, (value ?? undefined) as PluginFormFieldValue)">
-        <SelectTrigger :id="fieldId(field)" class="h-8 text-xs"><SelectValue :placeholder="field.placeholder" /></SelectTrigger>
-        <SelectContent>
-          <SelectItem v-for="option in field.options || []" :key="option.value" :value="option.value">{{ option.label }}</SelectItem>
-        </SelectContent>
-      </Select>
-      <div v-else-if="field.type === 'boolean'" class="flex h-8 items-center">
-        <Switch :id="fieldId(field)" :model-value="Boolean(fieldValue(field))" :disabled="disabled" size="sm" @update:model-value="(value: boolean) => updateField(field, value)" />
+    <template v-for="(section, sectionIndex) in shownSections" :key="section.key">
+      <!-- Source → target flow marker between consecutive titled sections.
+       -->
+      <div v-if="section.label && section.fields.length > 1 && sectionIndex > 0" class="flex items-center gap-2" aria-hidden="true">
+        <span class="h-px flex-1 bg-border" />
+        <ArrowRight class="size-3.5 text-muted-foreground" />
+        <span class="h-px flex-1 bg-border" />
       </div>
-      <div v-if="field.description" class="text-[11px] leading-5 text-muted-foreground">{{ field.description }}</div>
-      <p v-if="field.picker?.source === 'plugin' && !pluginPickerConnectionId(field)" class="text-[11px] leading-5 text-muted-foreground" :data-scheduler-picker-needs-connection="field.key">
-        {{ t("pluginPathPicker.needsConnectionShort") }}
-      </p>
-    </div>
+      <section v-if="section.label" class="space-y-3 rounded-md border border-border/60 p-3">
+        <!-- A group reduced to one visible field needs no heading: the field
+         label already says everything, and a near-identical title reads as
+         redundant copy (ADR feedback: 分组文案雷同). -->
+        <div v-if="section.fields.length > 1" class="text-xs font-medium text-muted-foreground">{{ section.label }}</div>
+        <div class="space-y-4">
+          <div v-for="field in section.fields" :key="field.key" class="space-y-1.5">
+            <Label :for="fieldId(field)" class="text-xs">
+              {{ field.label }}
+              <span v-if="formFieldRequired(fields, modelValue, field)" class="text-destructive">*</span>
+            </Label>
+            <template v-if="field.type === 'text' && selectOptionsFor(field)">
+              <Select :model-value="String(fieldValue(field) ?? '')" :disabled="disabled" @update:model-value="(value: unknown) => updateSelectField(field, value)">
+                <SelectTrigger :id="fieldId(field)" class="h-8 text-xs"><SelectValue :placeholder="field.placeholder" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem v-for="option in selectOptionsFor(field)!" :key="String(option.value)" :value="String(option.value)">{{ option.label }}</SelectItem>
+                </SelectContent>
+              </Select>
+            </template>
+            <template v-else-if="field.type === 'text' || field.type === 'number'">
+              <div v-if="field.picker" class="flex items-center gap-1.5">
+                <Input :id="fieldId(field)" type="text" :model-value="fieldInputValue(field)" :placeholder="field.placeholder" :disabled="disabled" class="min-w-0 flex-1" @update:model-value="updateTextField(field, $event)" />
+                <Button variant="outline" size="sm" class="h-8 shrink-0 gap-1.5 text-xs" :disabled="disabled || (field.picker.source === 'plugin' && !pluginPickerConnectionId(field))" :data-scheduler-picker-plugin="field.picker.source === 'plugin' ? 'true' : undefined" @click="runPicker(field)">
+                  <FolderOpen class="size-3.5" aria-hidden="true" />
+                  {{ field.picker.kind === "directory" ? t("connection.pluginFieldSelectDirectory") : t("connection.pluginFieldSelectFile") }}
+                </Button>
+              </div>
+              <Input v-else :id="fieldId(field)" :type="field.type === 'number' ? 'number' : 'text'" :model-value="fieldInputValue(field)" :placeholder="field.placeholder" :disabled="disabled" @update:model-value="updateTextField(field, $event)" />
+            </template>
+            <PasswordInput v-else-if="field.type === 'password'" :id="fieldId(field)" :model-value="String(fieldValue(field) ?? '')" :placeholder="field.placeholder" :disabled="disabled" @update:model-value="updateField(field, $event)" />
+            <PasswordTextarea v-else-if="isSecretTextarea(field)" :id="fieldId(field)" :model-value="String(fieldValue(field) ?? '')" :placeholder="field.placeholder" :disabled="disabled" @update:model-value="updateField(field, $event)" />
+            <textarea
+              v-else-if="field.type === 'textarea'"
+              :id="fieldId(field)"
+              :value="String(fieldValue(field) ?? '')"
+              :placeholder="field.placeholder"
+              :disabled="disabled"
+              class="min-h-20 w-full resize-y rounded-md border border-input bg-transparent px-2.5 py-2 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50"
+              @input="updateField(field, ($event.target as HTMLTextAreaElement).value)"
+            />
+            <Select v-else-if="field.type === 'select'" :model-value="String(fieldValue(field) ?? '')" :disabled="disabled" @update:model-value="(value: unknown) => updateField(field, (value ?? undefined) as PluginFormFieldValue)">
+              <SelectTrigger :id="fieldId(field)" class="h-8 text-xs"><SelectValue :placeholder="field.placeholder" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem v-for="option in field.options || []" :key="option.value" :value="option.value">{{ option.label }}</SelectItem>
+              </SelectContent>
+            </Select>
+            <div v-else-if="field.type === 'boolean'" class="flex h-8 items-center">
+              <Switch :id="fieldId(field)" :model-value="Boolean(fieldValue(field))" :disabled="disabled" size="sm" @update:model-value="(value: boolean) => updateField(field, value)" />
+            </div>
+            <div v-if="field.description" class="text-[11px] leading-5 text-muted-foreground">{{ field.description }}</div>
+            <p v-if="field.picker?.source === 'plugin' && !pluginPickerConnectionId(field)" class="text-[11px] leading-5 text-muted-foreground" :data-scheduler-picker-needs-connection="field.key">
+              {{ t("pluginPathPicker.needsConnectionShort") }}
+            </p>
+          </div>
+        </div>
+      </section>
+      <template v-else>
+        <div v-for="field in section.fields" :key="field.key" class="space-y-1.5">
+          <Label :for="fieldId(field)" class="text-xs">
+            {{ field.label }}
+            <span v-if="formFieldRequired(fields, modelValue, field)" class="text-destructive">*</span>
+          </Label>
+          <template v-if="field.type === 'text' && selectOptionsFor(field)">
+            <Select :model-value="String(fieldValue(field) ?? '')" :disabled="disabled" @update:model-value="(value: unknown) => updateSelectField(field, value)">
+              <SelectTrigger :id="fieldId(field)" class="h-8 text-xs"><SelectValue :placeholder="field.placeholder" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem v-for="option in selectOptionsFor(field)!" :key="String(option.value)" :value="String(option.value)">{{ option.label }}</SelectItem>
+              </SelectContent>
+            </Select>
+          </template>
+          <template v-else-if="field.type === 'text' || field.type === 'number'">
+            <div v-if="field.picker" class="flex items-center gap-1.5">
+              <Input :id="fieldId(field)" type="text" :model-value="fieldInputValue(field)" :placeholder="field.placeholder" :disabled="disabled" class="min-w-0 flex-1" @update:model-value="updateTextField(field, $event)" />
+              <Button variant="outline" size="sm" class="h-8 shrink-0 gap-1.5 text-xs" :disabled="disabled || (field.picker.source === 'plugin' && !pluginPickerConnectionId(field))" :data-scheduler-picker-plugin="field.picker.source === 'plugin' ? 'true' : undefined" @click="runPicker(field)">
+                <FolderOpen class="size-3.5" aria-hidden="true" />
+                {{ field.picker.kind === "directory" ? t("connection.pluginFieldSelectDirectory") : t("connection.pluginFieldSelectFile") }}
+              </Button>
+            </div>
+            <Input v-else :id="fieldId(field)" :type="field.type === 'number' ? 'number' : 'text'" :model-value="fieldInputValue(field)" :placeholder="field.placeholder" :disabled="disabled" @update:model-value="updateTextField(field, $event)" />
+          </template>
+          <PasswordInput v-else-if="field.type === 'password'" :id="fieldId(field)" :model-value="String(fieldValue(field) ?? '')" :placeholder="field.placeholder" :disabled="disabled" @update:model-value="updateField(field, $event)" />
+          <PasswordTextarea v-else-if="isSecretTextarea(field)" :id="fieldId(field)" :model-value="String(fieldValue(field) ?? '')" :placeholder="field.placeholder" :disabled="disabled" @update:model-value="updateField(field, $event)" />
+          <textarea
+            v-else-if="field.type === 'textarea'"
+            :id="fieldId(field)"
+            :value="String(fieldValue(field) ?? '')"
+            :placeholder="field.placeholder"
+            :disabled="disabled"
+            class="min-h-20 w-full resize-y rounded-md border border-input bg-transparent px-2.5 py-2 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50"
+            @input="updateField(field, ($event.target as HTMLTextAreaElement).value)"
+          />
+          <Select v-else-if="field.type === 'select'" :model-value="String(fieldValue(field) ?? '')" :disabled="disabled" @update:model-value="(value: unknown) => updateField(field, (value ?? undefined) as PluginFormFieldValue)">
+            <SelectTrigger :id="fieldId(field)" class="h-8 text-xs"><SelectValue :placeholder="field.placeholder" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem v-for="option in field.options || []" :key="option.value" :value="option.value">{{ option.label }}</SelectItem>
+            </SelectContent>
+          </Select>
+          <div v-else-if="field.type === 'boolean'" class="flex h-8 items-center">
+            <Switch :id="fieldId(field)" :model-value="Boolean(fieldValue(field))" :disabled="disabled" size="sm" @update:model-value="(value: boolean) => updateField(field, value)" />
+          </div>
+          <div v-if="field.description" class="text-[11px] leading-5 text-muted-foreground">{{ field.description }}</div>
+          <p v-if="field.picker?.source === 'plugin' && !pluginPickerConnectionId(field)" class="text-[11px] leading-5 text-muted-foreground" :data-scheduler-picker-needs-connection="field.key">
+            {{ t("pluginPathPicker.needsConnectionShort") }}
+          </p>
+        </div>
+      </template>
+    </template>
     <p v-if="shownFields.length === 0" class="text-xs text-muted-foreground">{{ t("scheduler.editor.noConfigFields") }}</p>
     <PluginPathPickerDialog
       v-if="pluginPathPickerField"

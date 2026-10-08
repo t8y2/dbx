@@ -106,3 +106,16 @@ export function validateFormFields(fields: readonly PluginFormField[], values: S
 export function triggerConfigFields(trigger: SchedulerTaskTriggerContribution | undefined): PluginFormField[] {
   return trigger?.fields ?? [];
 }
+
+/**
+ * Key of the first field that pulls its options from the host-reserved
+ * `host/connections` action **and is required** — the marker of a trigger
+ * whose config form manages connections itself (e.g. files tasks' source
+ * select). When present, the editor's separate connection binding collapses
+ * into that field and the task's target connection derives from its value;
+ * the marker must be a required field, or the "leave empty to follow the
+ * task connection" fallback would lose the only place to bind one.
+ */
+export function formOwnedConnectionKey(fields: readonly PluginFormField[]): string | undefined {
+  return fields.find((field) => field.options_action === "host/connections" && field.required)?.key;
+}

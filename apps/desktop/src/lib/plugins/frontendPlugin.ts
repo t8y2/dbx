@@ -399,6 +399,12 @@ function localizeContribution(contribution: PluginContribution, localization: Pl
         ...trigger,
         label: localizedRequiredText(trigger.label, triggerLocalization?.label),
         fields: trigger.fields.map((field) => localizeField(field, fieldLocalization(field.key))),
+        // Group sections localize by the group id declared on the trigger's
+        // `groups` list; the fallback keeps the manifest's source label.
+        groups: trigger.groups?.map((group) => ({
+          ...group,
+          label: localizedRequiredText(group.label, triggerLocalization?.groups?.[group.id]?.label),
+        })),
       };
     });
   } else if (localized.type === "workbench" || localized.type === "command" || localized.type === "result-view") {

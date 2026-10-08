@@ -88,6 +88,7 @@ function createMongoExportState(options: {
   hasCompleteLocalResult?: UseDataGridExportOptions["hasCompleteLocalResult"];
   completeLocalResult?: UseDataGridExportOptions["completeLocalResult"];
   externalCellValue?: UseDataGridExportOptions["externalCellValue"];
+  visibleColumnIndexes?: number[];
 }) {
   const items = options.items ?? [options.item];
   const selectedRowIds = options.selectedRowIds ?? new Set<number>();
@@ -121,6 +122,7 @@ function createMongoExportState(options: {
     hasCompleteLocalResult: options.hasCompleteLocalResult,
     completeLocalResult: options.completeLocalResult,
     externalCellValue: options.externalCellValue,
+    visibleColumnIndexes: options.visibleColumnIndexes ? computed(() => options.visibleColumnIndexes) : undefined,
   };
   return useDataGridExport(state);
 }
@@ -1803,6 +1805,74 @@ describe("useDataGridExport prepared row statements", () => {
     await state.exportCsv();
 
     expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["name"], [["Visible"], ["Other"]], expect.anything(), expect.anything());
+  });
+
+  it("exports duplicate-named columns by source position from the full result", async () => {
+    setActivePinia(createPinia());
+    const state = createMongoExportState({
+      columns: ["id", "id"],
+      item: { ...row(["1", "one"]), sourceIndex: 0 },
+      mongoDocuments: [{ id: 1 }],
+      visibleColumnIndexes: [0, 1],
+      fullExportResult: async () => ({
+        columns: ["id", "id"],
+        column_types: ["int", "varchar"],
+        rows: [
+          ["1", "one"],
+          ["2", "two"],
+        ],
+        affected_rows: 2,
+        execution_time_ms: 1,
+      }),
+    });
+
+    await state.exportCsv();
+
+    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(
+      expect.any(String),
+      ["id", "id"],
+      [
+        ["1", "one"],
+        ["2", "two"],
+      ],
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it("exports duplicate-named columns by source position when the complete result is local", async () => {
+    setActivePinia(createPinia());
+    const completeLocalResult = {
+      columns: ["id", "id"],
+      column_types: ["int", "varchar"],
+      rows: [
+        ["1", "one"],
+        ["2", "two"],
+      ],
+      affected_rows: 2,
+      execution_time_ms: 1,
+    };
+    const state = createMongoExportState({
+      columns: ["id", "id"],
+      item: { ...row(["1", "one"]), sourceIndex: 0 },
+      mongoDocuments: [{ id: 1 }],
+      visibleColumnIndexes: [0, 1],
+      hasCompleteLocalResult: computed(() => true),
+      completeLocalResult: computed(() => completeLocalResult),
+    });
+
+    await state.exportCsv();
+
+    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(
+      expect.any(String),
+      ["id", "id"],
+      [
+        ["1", "one"],
+        ["2", "two"],
+      ],
+      expect.anything(),
+      expect.anything(),
+    );
   });
 
   it("passes the CSV NULL setting to the export call", async () => {

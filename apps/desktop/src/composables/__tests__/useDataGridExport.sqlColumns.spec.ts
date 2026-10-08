@@ -172,6 +172,21 @@ describe("SQL export column selection across entrypoints", () => {
     expect(mocks.toast).toHaveBeenCalledWith("grid.exportFailed", 5000);
   });
 
+  it("resolves subset type fallbacks by name instead of subset position", async () => {
+    const choices = sqlExportColumnChoices(["name"]);
+    vi.mocked(showSqlInsertModeDialog).mockResolvedValue({ insertMode: "single", selectedColumns: [choices[0]!] });
+    const state = useDataGridExport(
+      createOptions({
+        columns: computed(() => ["name"]),
+        allColumns: computed(() => ["id", "name"]),
+        allColumnTypes: computed(() => ["tsvector", "text"]),
+        tableMeta: computed(() => ({ tableName: "users", primaryKeys: [], columns: [] })),
+      }),
+    );
+    await state.exportSql({ columnIndexes: [0] });
+    expect(showSqlInsertModeDialog).toHaveBeenCalledWith({ allowSplit: false, columns: choices });
+  });
+
   it("keeps legacy omitted selection behavior", async () => {
     vi.mocked(showSqlInsertModeDialog).mockResolvedValue({ insertMode: "batch" });
     await useDataGridExport(createOptions()).exportCurrentPageSql();

@@ -365,11 +365,12 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   function normalizeCompleteLocalResult(
     result: QueryResult,
     targetCols?: readonly string[],
+    sourceIndexesParam?: readonly number[],
   ): { columns: string[]; columnTypes: string[]; columnComments: Array<string | undefined>; rows: CellValue[][]; mongoCopyDocuments?: unknown[]; spatialColumns?: QueryResult["spatial_columns"]; spatialValues?: QueryResult["spatial_values"] } {
     const editorSettings = useSettingsStore().editorSettings;
     const isSubset = targetCols !== undefined && (targetCols.length !== result.columns.length || !targetCols.every((col, i) => col === result.columns[i]));
     if (databaseType.value === "mongodb" || isSubset) {
-      const projected = projectResultColumns(result, targetCols ?? columns.value);
+      const projected = projectResultColumns(result, targetCols ?? columns.value, sourceIndexesParam);
       const rows = editorSettings.exportRowLimitEnabled ? projected.rows.slice(0, editorSettings.exportRowLimit) : projected.rows;
       return {
         columns: projected.columns,
@@ -417,6 +418,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   function projectResultColumns(
     result: QueryResult,
     targetColumns: readonly string[],
+    sourceIndexesParam?: readonly number[],
   ): {
     columns: string[];
     columnTypes: string[];
@@ -424,7 +426,9 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     spatialColumns?: QueryResult["spatial_columns"];
     spatialValues?: QueryResult["spatial_values"];
   } {
-    const sourceIndexes = targetColumns.map((column) => result.columns.indexOf(column));
+    // Name lookup resolves duplicate column names (e.g. SELECT a.id, b.id) to
+    // the first occurrence; prefer the caller's explicit source indexes.
+    const sourceIndexes = sourceIndexesParam?.length === targetColumns.length ? sourceIndexesParam.map((index) => (index >= 0 && index < result.columns.length ? index : -1)) : targetColumns.map((column) => result.columns.indexOf(column));
     const targetIndexBySource = new Map<number, number>();
     sourceIndexes.forEach((sourceIndex, targetIndex) => {
       if (sourceIndex >= 0) targetIndexBySource.set(sourceIndex, targetIndex);
@@ -477,11 +481,15 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const validColumnIndexes = hasColumnSubset ? columnIndexes.filter((index) => index >= 0 && index < columns.value.length) : columns.value.map((_, index) => index);
     const targetColumns = validColumnIndexes.map((index) => columns.value[index]!);
     const targetColumnTypes = (columnTypes.value ?? []).length === columns.value.length ? validColumnIndexes.map((index) => columnTypes.value?.[index] ?? "") : targetColumns.map(() => "");
+    const visibleSourceIndexes = visibleColumnIndexesOption?.value;
+    // Explicit source indexes are only meaningful when the grid maps visible
+    // columns to result positions; otherwise keep name-based resolution.
+    const projectionSourceIndexes = visibleSourceIndexes ? validColumnIndexes.map((targetIdx) => visibleSourceIndexes[targetIdx] ?? targetIdx) : undefined;
 
     if (useFullExport && rowIds === undefined && fullExportResult && !hasCompleteLocalResult?.value) {
       const result = await fullExportResult(onProgress);
       if (result) {
-        const projected = databaseType.value === "mongodb" || hasColumnSubset ? projectResultColumns(result, targetColumns) : undefined;
+        const projected = databaseType.value === "mongodb" || hasColumnSubset ? projectResultColumns(result, targetColumns, projectionSourceIndexes) : undefined;
         const exportedColumns = projected?.columns ?? result.columns;
         const exportedColumnTypes = projected?.columnTypes ?? result.column_types ?? [];
         const exportedRows = projected?.rows ?? result.rows;
@@ -510,7 +518,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     // client-side filters/search and unsaved edits, which would silently
     // change what the export contains.
     if (useFullExport && rowIds === undefined && hasCompleteLocalResult?.value && completeLocalResult?.value) {
-      const normalized = hasColumnSubset || databaseType.value === "mongodb" ? normalizeCompleteLocalResult(completeLocalResult.value, targetColumns) : normalizeCompleteLocalResult(completeLocalResult.value);
+      const normalized = hasColumnSubset || databaseType.value === "mongodb" ? normalizeCompleteLocalResult(completeLocalResult.value, targetColumns, projectionSourceIndexes) : normalizeCompleteLocalResult(completeLocalResult.value);
       const columnComments = buildXlsxHeaderOverrides(normalized.columns, normalized.columnComments, headerMode);
       return {
         ...applyGlobalDateTimeExportFormat(
@@ -1668,12 +1676,16 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const names = columnSubset ?? (context.value === "table-data" ? effectiveColumns(sourceColumns.value, columns.value) : fullResult ? allColumns.value : columns.value);
     const excluded = new Set((sqlExportExcludedColumns() ?? []).map(normalizeColumnName));
     const types = fullResult && context.value === "results" ? allColumnTypes.value : columnTypes.value;
+    // A subset's sourceIndex is its position within the subset; resolve the
+    // metadata-less type fallback by name against the typed column list.
+    const typeNames = fullResult && context.value === "results" ? allColumns.value : context.value === "table-data" ? effectiveColumns(sourceColumns.value, columns.value) : columns.value;
+    const typeByName = columnSubset ? new Map(typeNames.map((name, index) => [name, types?.[index]])) : undefined;
     const metadataByName = new Map((tableMeta.value?.columns ?? []).map((column) => [normalizeColumnName(column.name), column]));
     return sqlExportColumnChoices(names).filter((column) => {
       if (excluded.has(normalizeColumnName(column.name)) || usesSyntheticRowIdKey(databaseType.value, [column.name])) return false;
       const metadata = metadataByName.get(normalizeColumnName(column.name));
       if (databaseType.value === "mysql" && /\b(?:virtual|stored|persistent)\s+generated\b|\bgenerated\s+always\s+as\s*\(/i.test(metadata?.extra ?? "")) return false;
-      const columnType = (metadata?.data_type || types?.[column.sourceIndex])?.trim().replace(/^"|"$/g, "").toLowerCase();
+      const columnType = (metadata?.data_type || (columnSubset ? typeByName?.get(column.name) : types?.[column.sourceIndex]))?.trim().replace(/^"|"$/g, "").toLowerCase();
       return databaseType.value !== "postgres" || (columnType !== "tsvector" && !columnType?.endsWith(".tsvector"));
     });
   }

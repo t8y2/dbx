@@ -3327,6 +3327,7 @@ export default withEnglishFallback({
     skillsSendBlocked: "請求未送出",
     skillsGroupDefault: "預設目錄",
     skillsGroupCustom: "自訂目錄",
+    outputTruncated: "輸出已達模型上限，以上內容不完整。請點擊繼續產生。",
     skillsDuplicateName: "名稱重複",
     skillsDuplicateNameNote: "此目錄下另一個 Skill 使用了相同名稱，AI 無法區分它們。請修改其中一個 SKILL.md 的 name 欄位。",
     skillsReasonNotFound: "Skill 目錄或 SKILL.md 已不存在",

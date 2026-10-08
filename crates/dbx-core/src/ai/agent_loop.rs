@@ -52,6 +52,17 @@ fn chunk_to_events(chunk: &AiStreamChunk) -> Vec<AgentEvent> {
     if let Some(ref reasoning) = chunk.reasoning_delta {
         events.push(AgentEvent::ReasoningDelta { delta: reasoning.clone() });
     }
+    // Providers spell the same condition differently — OpenAI `length`, Anthropic
+    // `max_tokens`, Gemini `MAX_TOKENS`, the Responses API `max_output_tokens` — so
+    // compare case-insensitively: a provider wired up later must not silently miss
+    // the notice over a capital letter.
+    if let Some(reason) = chunk
+        .finish_reason
+        .as_deref()
+        .filter(|reason| matches!(reason.to_ascii_lowercase().as_str(), "length" | "max_tokens" | "max_output_tokens"))
+    {
+        events.push(AgentEvent::OutputTruncated { finish_reason: reason.to_string() });
+    }
     events
 }
 
@@ -1534,6 +1545,17 @@ Use this result to continue the original user task. Do not summarize this tool r
 }
 
 fn compact_tool_result_for_context(tool_name: &str, content: &str) -> String {
+    // Both skill tools bound their own output — a page plus a cursor — so this
+    // compactor has nothing to save here and everything to lose: it keeps only the
+    // head and the tail, and for an instructions file the middle it drops is the
+    // part that says what to do. `use_skill` needs this as much as the file reader
+    // does: its answer is a body page plus a file listing, which can still cross the
+    // budget, and compacting it would throw away the middle of the page the paging
+    // exists to deliver.
+    if matches!(tool_name, skill_tools::USE_SKILL_TOOL | skill_tools::READ_SKILL_FILE_TOOL) {
+        return content.to_string();
+    }
+
     if content.chars().count() <= MAX_TOOL_RESULT_CONTEXT_CHARS {
         return content.to_string();
     }
@@ -2179,6 +2201,7 @@ mod tests {
             session_id: "test".to_string(),
             delta: "hello".to_string(),
             reasoning_delta: None,
+            finish_reason: None,
             done: false,
         };
         let events = chunk_to_events(&chunk);
@@ -2192,6 +2215,7 @@ mod tests {
             session_id: "test".to_string(),
             delta: String::new(),
             reasoning_delta: Some("thinking...".to_string()),
+            finish_reason: None,
             done: false,
         };
         let events = chunk_to_events(&chunk);
@@ -2205,6 +2229,7 @@ mod tests {
             session_id: "test".to_string(),
             delta: "answer".to_string(),
             reasoning_delta: Some("thinking...".to_string()),
+            finish_reason: None,
             done: false,
         };
         let events = chunk_to_events(&chunk);
@@ -2215,10 +2240,28 @@ mod tests {
 
     #[test]
     fn chunk_to_events_returns_empty_for_empty_chunk() {
-        let chunk =
-            AiStreamChunk { session_id: "test".to_string(), delta: String::new(), reasoning_delta: None, done: false };
+        let chunk = AiStreamChunk {
+            session_id: "test".to_string(),
+            delta: String::new(),
+            reasoning_delta: None,
+            finish_reason: None,
+            done: false,
+        };
         let events = chunk_to_events(&chunk);
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn chunk_to_events_surfaces_output_limit_truncation() {
+        let chunk = AiStreamChunk {
+            session_id: "test".to_string(),
+            delta: String::new(),
+            reasoning_delta: None,
+            finish_reason: Some("length".to_string()),
+            done: true,
+        };
+        let events = chunk_to_events(&chunk);
+        assert!(matches!(&events[0], AgentEvent::OutputTruncated { finish_reason } if finish_reason == "length"));
     }
 
     #[test]
@@ -2227,6 +2270,7 @@ mod tests {
             session_id: "test".to_string(),
             delta: String::new(),
             reasoning_delta: Some("reasoning".to_string()),
+            finish_reason: None,
             done: false,
         };
         let events = chunk_to_events(&chunk);
@@ -2240,6 +2284,7 @@ mod tests {
             session_id: "test".to_string(),
             delta: "text only".to_string(),
             reasoning_delta: None,
+            finish_reason: None,
             done: false,
         };
         let events = chunk_to_events(&chunk);

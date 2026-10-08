@@ -649,6 +649,7 @@ export interface AiStreamChunk {
   session_id: string;
   delta: string;
   reasoning_delta?: string;
+  finish_reason?: string;
   done: boolean;
   /** Web-only explicit terminal error; Tauri reports invoke failures directly. */
   error?: string;
@@ -715,6 +716,7 @@ export type AgentEvent =
        */
       type: "response_complete";
     }
+  | { type: "output_truncated"; finish_reason: string }
   | { type: "agent_end"; input_tokens?: number; output_tokens?: number }
   | {
       type: "context_compacted";

@@ -235,6 +235,7 @@ impl<R: tauri::Runtime> AiAgentEventBatcher<R> {
 struct AiStreamChunkBatch {
     delta: String,
     reasoning: Option<String>,
+    finish_reason: Option<String>,
     last_emit: Option<std::time::Instant>,
 }
 
@@ -266,8 +267,12 @@ impl<R: tauri::Runtime> AiStreamChunkBatcher<R> {
 
     fn handle(&self, mut chunk: AiStreamChunk) {
         let mut batch = self.lock_batch();
+        if let Some(reason) = chunk.finish_reason.take() {
+            batch.finish_reason = Some(reason);
+        }
         if chunk.done {
             self.flush_locked(&mut batch);
+            chunk.finish_reason = batch.finish_reason.take();
             self.emit_chunk(chunk);
             return;
         }
@@ -300,6 +305,7 @@ impl<R: tauri::Runtime> AiStreamChunkBatcher<R> {
                 session_id: self.session_id.clone(),
                 delta: std::mem::take(&mut batch.delta),
                 reasoning_delta: batch.reasoning.take(),
+                finish_reason: None,
                 done: false,
             });
         }
@@ -646,6 +652,7 @@ mod tests {
             session_id: "session-2".to_string(),
             delta: "a".to_string(),
             reasoning_delta: None,
+            finish_reason: None,
             done: false,
         });
         // Held within the interval …
@@ -653,6 +660,7 @@ mod tests {
             session_id: "session-2".to_string(),
             delta: "b".to_string(),
             reasoning_delta: Some("r".to_string()),
+            finish_reason: None,
             done: false,
         });
         // … and flushed in order before the terminal chunk is forwarded.
@@ -660,6 +668,7 @@ mod tests {
             session_id: "session-2".to_string(),
             delta: String::new(),
             reasoning_delta: None,
+            finish_reason: None,
             done: true,
         });
 

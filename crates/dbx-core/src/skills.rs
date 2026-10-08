@@ -582,6 +582,13 @@ pub struct SkillFileListing {
     pub truncated: bool,
 }
 
+/// A bounded, character-addressed slice of a skill file.
+pub struct SkillFileChunk {
+    pub content: String,
+    pub total_chars: usize,
+    pub next_offset: Option<usize>,
+}
+
 fn is_binary_prefix(bytes: &[u8]) -> bool {
     bytes.contains(&0)
 }
@@ -684,6 +691,27 @@ pub fn read_skill_file_relative(canonical_dir: &Path, relative: &str) -> Result<
         return Err(REASON_NOT_TEXT.to_string());
     }
     String::from_utf8(bytes).map_err(|_| REASON_NOT_UTF8.to_string())
+}
+
+/// Reads a bounded slice after applying all normal containment and file checks.
+pub fn read_skill_file_relative_chunk(
+    canonical_dir: &Path,
+    relative: &str,
+    offset: usize,
+    limit: usize,
+) -> Result<SkillFileChunk, String> {
+    // A zero limit would yield an empty chunk whose cursor never advances, so a
+    // caller following `next_offset` would loop forever. Treat it as one instead of
+    // answering `not_found`, which would blame the file for an argument. The tool
+    // layer rejects 0 outright with a message the model can act on, so this only
+    // covers direct callers.
+    let limit = limit.max(1);
+    let content = read_skill_file_relative(canonical_dir, relative)?;
+    let total_chars = content.chars().count();
+    let chunk: String = content.chars().skip(offset).take(limit).collect();
+    let consumed = offset.saturating_add(chunk.chars().count());
+    let next_offset = (consumed < total_chars).then_some(consumed);
+    Ok(SkillFileChunk { content: chunk, total_chars, next_offset })
 }
 
 #[cfg(test)]
@@ -1044,6 +1072,23 @@ mod tests {
         let listing = list_skill_files(&canonical);
         assert_eq!(listing.entries.len(), SKILL_LISTING_MAX_ENTRIES);
         assert!(listing.truncated, "a capped listing must say so rather than look complete");
+    }
+
+    #[test]
+    fn read_skill_file_chunk_returns_cursor_without_splitting_utf8() {
+        let root = temp_skills_root("chunk");
+        let dir = write_skill(&root, "alpha", VALID_BODY);
+        std::fs::write(dir.join("reference.md"), "甲乙丙丁戊己").unwrap();
+        let canonical = std::fs::canonicalize(&root).unwrap();
+
+        let first = read_skill_file_relative_chunk(&canonical.join("alpha"), "reference.md", 0, 2).unwrap();
+        assert_eq!(first.content, "甲乙");
+        assert_eq!(first.total_chars, 6);
+        assert_eq!(first.next_offset, Some(2));
+
+        let last = read_skill_file_relative_chunk(&canonical.join("alpha"), "reference.md", 2, 10).unwrap();
+        assert_eq!(last.content, "丙丁戊己");
+        assert_eq!(last.next_offset, None);
     }
 
     #[test]

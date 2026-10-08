@@ -3644,6 +3644,7 @@ export default withEnglishFallback({
     skillsSendBlocked: "Запрос не отправлен",
     skillsGroupDefault: "Каталог по умолчанию",
     skillsGroupCustom: "Пользовательский каталог",
+    outputTruncated: "Вывод достиг лимита модели и неполон. Продолжите генерацию.",
     skillsDuplicateName: "Дублирующееся имя",
     skillsDuplicateNameNote: "Другой навык в этом каталоге использует то же имя, поэтому ИИ не может их различить. Измените поле name в одном из их файлов SKILL.md.",
     skillsReasonNotFound: "Папка навыка или SKILL.md больше не существует",

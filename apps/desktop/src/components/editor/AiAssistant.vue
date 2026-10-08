@@ -4219,6 +4219,14 @@ async function send() {
         if (detachedDeltaBuffer) detachedDeltaBuffer.appendReasoning(assistantIdx, event.delta);
         else appendAssistantReasoning(assistantIdx, event.delta);
       }
+      if (event.type === "output_truncated") {
+        // The provider cut the answer off at its output limit; without this the card
+        // would look like a finished reply. Appended in the user's own locale, like
+        // every other string the panel writes.
+        const notice = `\n\n[${t("ai.outputTruncated")}]`;
+        if (detachedDeltaBuffer) detachedDeltaBuffer.appendText(assistantIdx, notice);
+        else appendAssistantDelta(assistantIdx, notice);
+      }
       if (event.type === "agent_end") {
         // End the card's "思考过程" spinner at the terminal event rather than
         // waiting for send()'s finally (which can lag behind CLI teardown).

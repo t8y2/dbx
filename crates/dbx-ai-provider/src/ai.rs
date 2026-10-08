@@ -597,6 +597,11 @@ pub struct AiStreamChunk {
     pub delta: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_delta: Option<String>,
+    /// Provider termination reason observed on the final stream event.
+    /// `length` means output was cut by the provider limit, not that the model
+    /// completed a final answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
     pub done: bool,
 }
 
@@ -3857,6 +3862,7 @@ async fn stream_claude(
                                         session_id: session_id.clone(),
                                         delta: text.to_string(),
                                         reasoning_delta: None,
+                                        finish_reason: None,
                                         done: false,
                                     });
                                 }
@@ -3873,6 +3879,7 @@ async fn stream_claude(
                 session_id: session_id.clone(),
                 delta: String::new(),
                 reasoning_delta: None,
+                finish_reason: None,
                 done: true,
             });
 
@@ -3955,6 +3962,7 @@ async fn stream_openai(
                                             session_id: session_id.clone(),
                                             delta: String::new(),
                                             reasoning_delta: Some(reasoning),
+                                            finish_reason: None,
                                             done: false,
                                         });
                                     }
@@ -3964,6 +3972,7 @@ async fn stream_openai(
                                             session_id: session_id.clone(),
                                             delta: text,
                                             reasoning_delta: None,
+                                            finish_reason: None,
                                             done: false,
                                         });
                                     }
@@ -3974,6 +3983,7 @@ async fn stream_openai(
                                             session_id: session_id.clone(),
                                             delta: String::new(),
                                             reasoning_delta: Some(reasoning.to_string()),
+                                            finish_reason: None,
                                             done: false,
                                         });
                                     }
@@ -3983,11 +3993,27 @@ async fn stream_openai(
                                             session_id: session_id.clone(),
                                             delta: text,
                                             reasoning_delta: None,
+                                            finish_reason: None,
                                             done: false,
                                         });
                                     }
                                 }
                                 if finish_reason_deadline.is_none() && openai_stream_has_finish_reason(&event) {
+                                    if let Some(reason) = event["choices"].get(0).and_then(|choice| choice["finish_reason"].as_str()).filter(|reason| !reason.is_empty()) {
+                                        on_chunk(AiStreamChunk {
+                                            session_id: session_id.clone(),
+                                            delta: String::new(),
+                                            reasoning_delta: None,
+                                            finish_reason: Some(reason.to_string()),
+                                            // Not `done`: this stream is not over. Both frontends
+                                            // stop listening on the first `done` chunk, and this
+                                            // stream deliberately keeps reading for up to a second
+                                            // after the finish reason to collect the trailing usage
+                                            // chunk. The batcher holds this reason and attaches it to
+                                            // the real terminal chunk.
+                                            done: false,
+                                        });
+                                    }
                                     finish_reason_deadline =
                                         Some(tokio::time::Instant::now() + std::time::Duration::from_secs(1));
                                 }
@@ -4010,6 +4036,7 @@ async fn stream_openai(
                 session_id: session_id.clone(),
                 delta: String::new(),
                 reasoning_delta: None,
+                finish_reason: None,
                 done: true,
             });
 
@@ -4086,6 +4113,7 @@ async fn stream_responses_api(
                                         session_id: session_id.clone(),
                                         delta: text.to_string(),
                                         reasoning_delta: None,
+                                        finish_reason: None,
                                         done: false,
                                     });
                                 }
@@ -4102,6 +4130,7 @@ async fn stream_responses_api(
                 session_id: session_id.clone(),
                 delta: String::new(),
                 reasoning_delta: None,
+                finish_reason: None,
                 done: true,
             });
 
@@ -4180,6 +4209,7 @@ async fn stream_gemini(
                                         session_id: session_id.clone(),
                                         delta: text,
                                         reasoning_delta: None,
+                                        finish_reason: None,
                                         done: false,
                                     });
                                 }
@@ -4194,6 +4224,7 @@ async fn stream_gemini(
                 session_id: session_id.clone(),
                 delta: String::new(),
                 reasoning_delta: None,
+                finish_reason: None,
                 done: true,
             });
 
@@ -4221,6 +4252,8 @@ pub enum StreamToolEvent {
     ToolCallProviderPayload { index: u32, payload: serde_json::Value },
     /// A tool_use / function_call block has ended.
     ToolCallComplete { index: u32 },
+    /// Provider termination reason, retained even when no tool call was emitted.
+    FinishReason { reason: String },
 }
 
 /// Partially accumulated tool call during streaming.
@@ -4253,6 +4286,16 @@ impl StreamingToolCallAccumulator {
     pub fn process(&mut self, event: StreamToolEvent, on_chunk: &impl Fn(AiStreamChunk)) {
         match event {
             StreamToolEvent::Chunk(chunk) => on_chunk(chunk),
+            // Carries the reason on a non-terminal chunk on purpose: `done` ends the
+            // stream for the consumer, and the batcher is built to attach this reason
+            // to the terminal chunk that follows.
+            StreamToolEvent::FinishReason { reason } => on_chunk(AiStreamChunk {
+                session_id: String::new(),
+                delta: String::new(),
+                reasoning_delta: None,
+                finish_reason: Some(reason),
+                done: false,
+            }),
             StreamToolEvent::ToolCallStart { index, id, name } => {
                 // Merge with any existing entry for this index instead of
                 // overwriting it. Some OpenAI-compatible providers (e.g. GLM)
@@ -4473,6 +4516,7 @@ async fn stream_claude_with_tools(
                                                         session_id: session_id.clone(),
                                                         delta: text.to_string(),
                                                         reasoning_delta: None,
+                                                        finish_reason: None,
                                                         done: false,
                                                     }));
                                                 }
@@ -4484,6 +4528,7 @@ async fn stream_claude_with_tools(
                                                         session_id: session_id.clone(),
                                                         delta: String::new(),
                                                         reasoning_delta: Some(thinking.to_string()),
+                                                        finish_reason: None,
                                                         done: false,
                                                     }));
                                                 }
@@ -4630,6 +4675,7 @@ async fn stream_openai_with_tools(
                                             session_id: session_id.clone(),
                                             delta: String::new(),
                                             reasoning_delta: Some(reasoning),
+                                            finish_reason: None,
                                             done: false,
                                         }));
                                     }
@@ -4639,6 +4685,7 @@ async fn stream_openai_with_tools(
                                             session_id: session_id.clone(),
                                             delta: text,
                                             reasoning_delta: None,
+                                            finish_reason: None,
                                             done: false,
                                         }));
                                     }
@@ -4649,6 +4696,7 @@ async fn stream_openai_with_tools(
                                             session_id: session_id.clone(),
                                             delta: String::new(),
                                             reasoning_delta: Some(reasoning.to_string()),
+                                            finish_reason: None,
                                             done: false,
                                         }));
                                     }
@@ -4658,6 +4706,7 @@ async fn stream_openai_with_tools(
                                             session_id: session_id.clone(),
                                             delta: text,
                                             reasoning_delta: None,
+                                            finish_reason: None,
                                             done: false,
                                         }));
                                     }
@@ -4684,6 +4733,9 @@ async fn stream_openai_with_tools(
                                     }
                                 }
                                 if finish_reason_deadline.is_none() && openai_stream_has_finish_reason(&event) {
+                                    if let Some(reason) = event["choices"].get(0).and_then(|choice| choice["finish_reason"].as_str()).filter(|reason| !reason.is_empty()) {
+                                        on_event(StreamToolEvent::FinishReason { reason: reason.to_string() });
+                                    }
                                     finish_reason_deadline =
                                         Some(tokio::time::Instant::now() + std::time::Duration::from_secs(1));
                                 }
@@ -4798,6 +4850,7 @@ async fn stream_responses_with_tools(
                                         session_id: session_id.clone(),
                                         delta: text.to_string(),
                                         reasoning_delta: None,
+                                        finish_reason: None,
                                         done: false,
                                     }));
                                 }
@@ -5053,6 +5106,7 @@ async fn stream_gemini_with_tools(
                                                     session_id: session_id.clone(),
                                                     delta: text.to_string(),
                                                     reasoning_delta: None,
+                                                    finish_reason: None,
                                                     done: false,
                                                 }));
                                             }

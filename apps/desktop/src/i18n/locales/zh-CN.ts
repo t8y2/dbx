@@ -3720,6 +3720,7 @@ export default withEnglishFallback({
     skillsSendBlocked: "请求未发送",
     skillsGroupDefault: "默认目录",
     skillsGroupCustom: "自定义目录",
+    outputTruncated: "输出已达到模型上限，以上内容不完整。请点击继续生成。",
     skillsDuplicateName: "名称重复",
     skillsDuplicateNameNote: "该目录下另一个 Skill 使用了相同名称，AI 无法区分它们。请修改其中一个 SKILL.md 的 name 字段。",
     skillsReasonNotFound: "Skill 目录或 SKILL.md 已不存在",

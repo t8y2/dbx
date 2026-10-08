@@ -3405,6 +3405,7 @@ export default withEnglishFallback({
     skillsSendBlocked: "Solicitação não enviada",
     skillsGroupDefault: "Diretório padrão",
     skillsGroupCustom: "Diretório personalizado",
+    outputTruncated: "A saída atingiu o limite do modelo e está incompleta. Continue para gerar o restante.",
     skillsDuplicateName: "Nome duplicado",
     skillsDuplicateNameNote: "Outro skill neste diretório usa o mesmo nome, então a IA não consegue distingui-los. Altere o campo name em um dos arquivos SKILL.md deles.",
     skillsReasonNotFound: "A pasta da skill ou o SKILL.md não existe mais",

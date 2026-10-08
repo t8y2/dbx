@@ -46,6 +46,11 @@ const MAX_CATALOG_ENTRIES: usize = 100;
 /// Candidate descriptions exist to tell same-named skills apart, not to sell one,
 /// so they stay short in the ambiguous answer.
 const MAX_CANDIDATE_DESCRIPTION_CHARS: usize = 200;
+/// Keep one file tool result below the generic intermediate-result budget.
+pub const DEFAULT_READ_CHUNK_CHARS: usize = 10_000;
+/// How much of a skill body `use_skill` returns before handing over a cursor.
+/// A longer body is paged rather than truncated — see `format_skill`.
+const SKILL_BODY_CHUNK_CHARS: usize = 8_000;
 
 /// The two skill tools, in dispatch order.
 pub fn tool_definitions() -> Vec<ToolDefinition> {
@@ -71,12 +76,13 @@ fn use_skill_definition() -> ToolDefinition {
     ToolDefinition {
         name: USE_SKILL_TOOL.into(),
         description: format!(
-            "Load the full instructions of one user skill, by the name it is listed under in the skill \
+            "Load the instructions of one user skill, by the name it is listed under in the skill \
              listing, and get the list of files that skill ships (relative paths, each with its size and \
              [text]/[binary] kind). Skill bodies are not in the prompt: call this before answering with a \
-             skill the user selected. If the name exists in more than one source, the call returns the \
-             candidates — retry with `source` instead of guessing. {READ_IS_NOT_EXECUTION_NOTICE} Reading \
-             a script's source is informational only."
+             skill the user selected. A long body comes back in pages and the answer says how to read on. \
+             If the name exists in more than one source, the call returns the candidates — retry with \
+             `source` instead of guessing. {READ_IS_NOT_EXECUTION_NOTICE} Reading a script's source is \
+             informational only."
         )
         .into(),
         parameters: json!({
@@ -103,8 +109,8 @@ fn read_skill_file_definition() -> ToolDefinition {
             "Read one file that a skill ships, addressed by a path relative to the skill directory \
              exactly as `use_skill` listed it (for example `references/rules.md`). Only text files \
              inside that skill directory can be read; files over 1 MiB, binary files and paths that \
-             leave the skill directory are refused. {READ_IS_NOT_EXECUTION_NOTICE} Reading a script's \
-             source is informational only."
+             leave the skill directory are refused. Reads are bounded; pass the returned nextOffset to \
+             continue. {READ_IS_NOT_EXECUTION_NOTICE} Reading a script's source is informational only."
         )
         .into(),
         parameters: json!({
@@ -115,6 +121,17 @@ fn read_skill_file_definition() -> ToolDefinition {
                 "relativePath": {
                     "type": "string",
                     "description": "Path relative to the skill directory, as listed by use_skill"
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Character offset returned as nextOffset; defaults to 0"
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": DEFAULT_READ_CHUNK_CHARS,
+                    "description": "Maximum characters to return; defaults to 10000"
                 }
             },
             "required": ["skill", "relativePath"]
@@ -160,6 +177,16 @@ fn required_argument(tool_call: &ToolCall, key: &str) -> Result<String, String> 
         .ok_or_else(|| format!("`{key}` is required"))
 }
 
+fn optional_u64_argument(tool_call: &ToolCall, key: &str) -> Result<Option<u64>, String> {
+    match tool_call.arguments.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(value)) => {
+            value.as_u64().map(Some).ok_or_else(|| format!("`{key}` must be a non-negative integer"))
+        }
+        Some(_) => Err(format!("`{key}` must be a non-negative integer")),
+    }
+}
+
 /// What `use_skill` resolved: the text the model reads, plus the identity the
 /// backend actually loaded.
 ///
@@ -183,8 +210,14 @@ pub async fn execute_use_skill(tool_call: &ToolCall, state: &AppState) -> Result
 pub async fn execute_read_skill_file(tool_call: &ToolCall, state: &AppState) -> Result<String, String> {
     let target = SkillTarget::from_tool_call(tool_call)?;
     let relative = required_argument(tool_call, "relativePath")?;
+    let offset = optional_u64_argument(tool_call, "offset")?.unwrap_or(0) as usize;
+    let limit =
+        optional_u64_argument(tool_call, "limit")?.map(|value| value as usize).unwrap_or(DEFAULT_READ_CHUNK_CHARS);
+    if limit == 0 || limit > DEFAULT_READ_CHUNK_CHARS {
+        return Err(format!("`limit` must be between 1 and {DEFAULT_READ_CHUNK_CHARS}"));
+    }
     let roots = load_skill_roots(state).await;
-    run_blocking(move || read_skill_file_answer(&target, &relative, &roots)).await
+    run_blocking(move || read_skill_file_answer(&target, &relative, offset, limit, &roots)).await
 }
 
 /// Reading a skill scans directories and reads files up to 1 MiB, so it must not
@@ -231,7 +264,13 @@ fn use_skill_answer(target: &SkillTarget, roots: &SkillRoots) -> Result<UseSkill
     }
 }
 
-fn read_skill_file_answer(target: &SkillTarget, relative: &str, roots: &SkillRoots) -> Result<String, String> {
+fn read_skill_file_answer(
+    target: &SkillTarget,
+    relative: &str,
+    offset: usize,
+    limit: usize,
+    roots: &SkillRoots,
+) -> Result<String, String> {
     let skill = match skills::read_skill_by_name(&target.name, target.source.as_deref(), roots) {
         SkillLookup::Found(skill) => skill,
         // Retrying with the right skill is the model's job; a wrong or missing
@@ -240,22 +279,47 @@ fn read_skill_file_answer(target: &SkillTarget, relative: &str, roots: &SkillRoo
         SkillLookup::Ambiguous(candidates) => return Err(ambiguous_answer(&target.name, &candidates)),
         SkillLookup::NotFound => return Err(not_found_answer(&target.name, roots)),
     };
-    skills::read_skill_file_relative(&skill.dir, relative).map_err(|reason| {
+    let chunk = skills::read_skill_file_relative_chunk(&skill.dir, relative, offset, limit).map_err(|reason| {
         // The reason is a frozen word from `skills`; the OS detail behind it is
         // discarded there because it carries paths.
         log::debug!("[agent][skills] read_skill_file refused for skill '{}': {reason}", skill.name);
         read_failure_message(&reason)
-    })
+    })?;
+    let next_offset = chunk.next_offset.map_or_else(|| "none".to_string(), |value| value.to_string());
+    Ok(format!(
+        "[SKILL FILE CHUNK] path={relative} offset={offset} chars={}/{} nextOffset={next_offset}\n\n{}",
+        chunk.content.chars().count(),
+        chunk.total_chars,
+        chunk.content
+    ))
 }
 
 fn format_skill(skill: &ResolvedSkill) -> String {
     let listing = skills::list_skill_files(&skill.dir);
-    let mut output = format!(
-        "# Skill: {} [{}]\n\n{}\n\n## Files in this skill\n",
-        skill.name,
-        skill.source,
-        skill.content.trim_end()
-    );
+    let body = skill.content.trim_end();
+    let body_chars = body.chars().count();
+    let mut output = format!("# Skill: {} [{}]\n\n", skill.name, skill.source);
+    if body_chars <= SKILL_BODY_CHUNK_CHARS {
+        output.push_str(body);
+        output.push('\n');
+    } else {
+        // Page the body instead of letting it be truncated downstream. The generic
+        // intermediate-result compactor keeps only the head and the tail of an
+        // oversized tool result, and for an instructions file the head and the tail
+        // are the least useful parts — the operational steps sit in the middle that
+        // gets dropped. A bounded first page plus an explicit cursor keeps every
+        // character reachable, through the same `offset` the file reader already
+        // takes.
+        let page: String = body.chars().take(SKILL_BODY_CHUNK_CHARS).collect();
+        output.push_str(&page);
+        output.push_str(&format!(
+            "\n\n(this skill's body is {body_chars} characters; the first {SKILL_BODY_CHUNK_CHARS} are shown \
+             above. Read the rest with `read_skill_file`, passing `relativePath` \"{}\" and `offset` \
+             {SKILL_BODY_CHUNK_CHARS}; keep passing the returned nextOffset until it is absent.)\n",
+            skills::SKILL_FILE_NAME
+        ));
+    }
+    output.push_str("\n## Files in this skill\n");
     if listing.entries.is_empty() {
         output.push_str("(this skill ships no extra files)\n");
     }
@@ -469,6 +533,46 @@ mod tests {
         assert_eq!(answer.matches(" bytes) [text]").count(), skills::SKILL_LISTING_MAX_ENTRIES, "{answer}");
     }
 
+    /// A body longer than one answer must come back paged, not truncated: the
+    /// generic intermediate-result compactor keeps only the head and the tail of an
+    /// oversized result, and for an instructions file the middle it drops is the
+    /// part that says what to do.
+    #[test]
+    fn use_skill_pages_a_body_that_does_not_fit_one_answer() {
+        let root = temp_root("paged-body");
+        let dir = root.join("big");
+        std::fs::create_dir_all(&dir).unwrap();
+        // A marker at the very end: it is only reachable through the cursor, so it
+        // also proves the continuation lands in the region the first page omitted.
+        let filler = "x".repeat(SKILL_BODY_CHUNK_CHARS + 5_000);
+        let body = format!("---\nname: big-skill\ndescription: long\n---\n\n{filler}\nEND-OF-BODY\n");
+        std::fs::write(dir.join(skills::SKILL_FILE_NAME), &body).unwrap();
+        let roots = roots_of(&root, None);
+
+        let answer = use_skill_answer(&target("big-skill", None), &roots).unwrap().text;
+        assert!(!answer.contains("END-OF-BODY"), "an oversized body must not come back whole: {answer}");
+        assert!(answer.contains("Read the rest with `read_skill_file`"), "{answer}");
+        assert!(answer.contains("nextOffset"), "{answer}");
+        assert!(
+            answer.contains(&format!("`offset` {SKILL_BODY_CHUNK_CHARS}")),
+            "the answer must name the cursor to continue from: {answer}"
+        );
+        assert_no_path_leak(&answer, &[&root]);
+
+        // The cursor is in the same coordinates the file reader uses, so following it
+        // really does reach the tail.
+        let rest = read_skill_file_answer(
+            &target("big-skill", None),
+            skills::SKILL_FILE_NAME,
+            SKILL_BODY_CHUNK_CHARS,
+            DEFAULT_READ_CHUNK_CHARS,
+            &roots,
+        )
+        .unwrap();
+        assert!(rest.contains("END-OF-BODY"), "the cursor must reach the tail: {rest}");
+        assert_no_path_leak(&rest, &[&root]);
+    }
+
     #[test]
     fn use_skill_returns_candidates_instead_of_guessing_between_sources() {
         let root = temp_root("ambiguous");
@@ -536,9 +640,16 @@ mod tests {
         std::fs::write(dir.join("references").join("one.md"), "reference body").unwrap();
         let roots = roots_of(&root, None);
 
-        let content = read_skill_file_answer(&target("sql-review", None), "references/one.md", &roots).unwrap();
-        assert_eq!(content, "reference body");
-        assert!(read_skill_file_answer(&target("sql-review", None), "SKILL.md", &roots)
+        let content = read_skill_file_answer(
+            &target("sql-review", None),
+            "references/one.md",
+            0,
+            DEFAULT_READ_CHUNK_CHARS,
+            &roots,
+        )
+        .unwrap();
+        assert!(content.contains("reference body"));
+        assert!(read_skill_file_answer(&target("sql-review", None), "SKILL.md", 0, DEFAULT_READ_CHUNK_CHARS, &roots)
             .unwrap()
             .contains("name: sql-review"));
     }
@@ -554,25 +665,32 @@ mod tests {
         for escape in
             ["../outside.md", "references/../../outside.md", "..\\outside.md", "/etc/hosts", "C:\\Windows\\win.ini"]
         {
-            let error = read_skill_file_answer(&skill, escape, &roots).unwrap_err();
+            let error = read_skill_file_answer(&skill, escape, 0, DEFAULT_READ_CHUNK_CHARS, &roots).unwrap_err();
             assert!(error.contains("no such file"), "{escape:?} must be refused: {error}");
             assert!(!error.contains(escape), "an error must not echo the requested path: {error}");
         }
-        assert!(read_skill_file_answer(&skill, "references", &roots).is_err(), "a directory is not a file");
+        assert!(
+            read_skill_file_answer(&skill, "references", 0, DEFAULT_READ_CHUNK_CHARS, &roots).is_err(),
+            "a directory is not a file"
+        );
 
         std::fs::write(dir.join("with-nul.md"), b"text\0more").unwrap();
-        let error = read_skill_file_answer(&skill, "with-nul.md", &roots).unwrap_err();
+        let error = read_skill_file_answer(&skill, "with-nul.md", 0, DEFAULT_READ_CHUNK_CHARS, &roots).unwrap_err();
         assert!(error.contains("binary"), "{error}");
 
         // No NUL byte here, so this must reach the encoding check instead of
         // being mistaken for binary.
         std::fs::write(dir.join("broken.md"), [0xFFu8, 0xFE]).unwrap();
-        assert!(read_skill_file_answer(&skill, "broken.md", &roots).unwrap_err().contains("UTF-8"));
+        assert!(read_skill_file_answer(&skill, "broken.md", 0, DEFAULT_READ_CHUNK_CHARS, &roots)
+            .unwrap_err()
+            .contains("UTF-8"));
 
         let big = dir.join("big.md");
         std::fs::write(&big, "x").unwrap();
         std::fs::OpenOptions::new().write(true).open(&big).unwrap().set_len(skills::MAX_SKILL_FILE_BYTES + 1).unwrap();
-        assert!(read_skill_file_answer(&skill, "big.md", &roots).unwrap_err().contains("1 MiB"));
+        assert!(read_skill_file_answer(&skill, "big.md", 0, DEFAULT_READ_CHUNK_CHARS, &roots)
+            .unwrap_err()
+            .contains("1 MiB"));
     }
 
     /// The tool layer must hand the *canonical skill directory* to the
@@ -596,7 +714,14 @@ mod tests {
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 
         let roots = roots_of(&root, None);
-        let error = read_skill_file_answer(&target("sql-review", None), "linkdir/secret.md", &roots).unwrap_err();
+        let error = read_skill_file_answer(
+            &target("sql-review", None),
+            "linkdir/secret.md",
+            0,
+            DEFAULT_READ_CHUNK_CHARS,
+            &roots,
+        )
+        .unwrap_err();
         assert!(error.contains("no such file"), "{error}");
 
         let answer = use_skill_answer(&target("sql-review", None), &roots).unwrap().text;

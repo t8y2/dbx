@@ -3288,6 +3288,7 @@ export default withEnglishFallback({
     skillsSendBlocked: "İstek gönderilmedi",
     skillsGroupDefault: "Varsayılan dizin",
     skillsGroupCustom: "Özel dizin",
+    outputTruncated: "Çıktı model sınırına ulaştı ve eksik. Devam ederek kalanını oluşturun.",
     skillsDuplicateName: "Yinelenen ad",
     skillsDuplicateNameNote: "Bu dizindeki başka bir skill aynı adı kullanıyor, bu yüzden AI ikisini ayırt edemez. Birinin SKILL.md dosyasındaki name alanını değiştirin.",
     skillsReasonNotFound: "Skill klasörü veya SKILL.md artık mevcut değil",

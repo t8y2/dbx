@@ -822,19 +822,16 @@ export function DriversClient({ initialCatalog, initialRegistry }: { initialCata
                               </div>
                             </td>
                             <td className="px-5 py-3 max-[760px]:col-span-2 max-[760px]:px-0 max-[760px]:pt-0">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <LandingSelect
-                                  value={selectedAgent.platformKey}
-                                  options={group.options.map((option) => ({ value: option.platformKey, label: option.platformLabel }))}
-                                  onChange={(platformKey) => {
-                                    nativePlatformTouchedRef.current.add(group.key);
-                                    setSelectedNativePlatforms((current) => ({ ...current, [group.key]: platformKey }));
-                                  }}
-                                  ariaLabel={`${group.label}: ${t.platform}`}
-                                  className="min-w-[190px] max-[760px]:w-full"
-                                />
-                                {selectedAgent.platformKey === detectedPlatform && <span className="shrink-0 rounded-[5px] border border-landing-green/35 bg-landing-green/10 px-1.5 py-0.5 text-[11px] font-[650] text-landing-green">{t.currentPlatform}</span>}
-                              </div>
+                              <LandingSelect
+                                value={selectedAgent.platformKey}
+                                options={group.options.map((option) => ({ value: option.platformKey, label: option.platformLabel }))}
+                                onChange={(platformKey) => {
+                                  nativePlatformTouchedRef.current.add(group.key);
+                                  setSelectedNativePlatforms((current) => ({ ...current, [group.key]: platformKey }));
+                                }}
+                                ariaLabel={`${group.label}: ${t.platform}`}
+                                className="min-w-[190px] max-[760px]:w-full"
+                              />
                             </td>
                             <td className="px-5 py-3 text-xs text-landing-muted max-[760px]:hidden">{group.version}</td>
                             <td className="whitespace-nowrap px-5 py-3 text-right text-xs text-landing-muted max-[760px]:hidden">{formatSize(selectedAgent.info.size)}</td>

@@ -35,6 +35,7 @@ pub struct ConnectionSummary {
     pub port: u16,
     pub database: String,
     pub group_path: Vec<String>,
+    pub note: String,
 }
 
 impl From<&ConnectionConfig> for ConnectionSummary {
@@ -51,6 +52,7 @@ impl From<&ConnectionConfig> for ConnectionSummary {
             port: config.port,
             database: config.database.clone().unwrap_or_default(),
             group_path: Vec::new(),
+            note: config.note.clone(),
         }
     }
 }
@@ -2965,6 +2967,15 @@ mod tests {
             None,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn connection_summary_preserves_notes() {
+        let mut config = mutation_test_connection();
+        for note in ["", "Application database | staging\nRead-only queries"] {
+            config.note = note.to_string();
+            assert_eq!(ConnectionSummary::from(&config).note, note);
+        }
     }
 
     #[tokio::test]

@@ -1616,10 +1616,13 @@ fn sql_server_count_sql(statement: &str) -> Option<String> {
             || select.from.is_empty()
             || !group_by_is_empty
             || select.having.is_some()
-            || !select
-                .projection
-                .iter()
-                .all(|item| matches!(item, SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(_, _)))
+            || !select.projection.iter().all(|item| match item {
+                SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(_, _) => true,
+                SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
+                    matches!(expr, Expr::Identifier(_) | Expr::CompoundIdentifier(_))
+                }
+                _ => false,
+            })
         {
             return None;
         }
@@ -3261,6 +3264,45 @@ mod tests {
             result.sql.unwrap(),
             "SELECT COUNT(*) AS dbx_total_rows FROM WZ_CKGL_WZLLDSQ_DETAIL d LEFT JOIN WZ_CKGL_WZLLDSQ_MAIN AS m ON m.ID = d.ParentID;"
         );
+    }
+
+    #[test]
+    fn sqlserver_mixed_wildcard_count_preserves_query_predicates() {
+        for projection in
+            ["x_JtRoomCode, RoomInfo, *", "sr.x_JtRoomCode, sr.RoomInfo, sr.*", "sr.RoomInfo AS info, sr.*"]
+        {
+            let sql = format!("SELECT {projection} FROM s_room sr WHERE sr.RoomInfo LIKE N'%合肥天珺一期%' AND sr.x_JtRoomCode IS NULL ORDER BY sr.RoomInfo");
+            let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+                sql: sql.clone(),
+                query_base_sql: sql,
+                database_type: Some(DatabaseType::SqlServer),
+                pagination: QueryPagination { limit: 1000, offset: 0, session_id: None },
+                use_agent_cursor: false,
+                first_page_uses_actual_sql: false,
+            });
+            assert_eq!(plan.count_sql.as_deref(), Some("SELECT COUNT(*) AS dbx_total_rows FROM s_room sr WHERE sr.RoomInfo LIKE N'%合肥天珺一期%' AND sr.x_JtRoomCode IS NULL;"));
+            assert!(plan.sql_to_execute.starts_with("SELECT TOP (1000)"));
+        }
+    }
+
+    #[test]
+    fn sqlserver_mixed_wildcard_count_rejects_semantic_modifiers_and_expressions() {
+        for sql in [
+            "SELECT DISTINCT id, * FROM rooms",
+            "SELECT TOP 10 id, * FROM rooms",
+            "SELECT COUNT(*), * FROM rooms",
+            "SELECT id + 1, * FROM rooms",
+            "SELECT id, * FROM rooms GROUP BY id",
+        ] {
+            assert!(
+                !build_count_query_sql(CountQuerySqlOptions {
+                    original_sql: sql.to_string(),
+                    database_type: Some(DatabaseType::SqlServer),
+                })
+                .ok,
+                "must not rewrite {sql}"
+            );
+        }
     }
 
     #[test]

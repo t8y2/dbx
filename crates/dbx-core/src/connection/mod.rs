@@ -3839,22 +3839,25 @@ impl AppState {
         if path.len() > 4_096 || path.chars().any(char::is_control) {
             return Err("Path browse received an invalid path".to_string());
         }
-        let connection = self
-            .storage
-            .load_connections()
-            .await?
-            .into_iter()
-            .find(|config| config.id == connection_id)
-            .ok_or_else(|| format!("Connection '{connection_id}' was not found"))?;
-        if connection.db_type != DatabaseType::Plugin || connection.plugin_id.as_deref() != Some(plugin_id) {
-            return Err(format!("Connection '{connection_id}' is not owned by plugin '{plugin_id}'"));
+        // A stored connection resolves server-side (ownership checked, pool
+        // opened, secrets hydrated); an id the host does not know is a
+        // plugin-reserved alias (e.g. the files tasks' `local` side) and is
+        // forwarded as-is — the plugin is the authority on its own sides, its
+        // binding either synthesizes the connection or rejects the id, and no
+        // host state is consulted or leaked either way.
+        if let Some(connection) =
+            self.storage.load_connections().await?.into_iter().find(|config| config.id == connection_id)
+        {
+            if connection.db_type != DatabaseType::Plugin || connection.plugin_id.as_deref() != Some(plugin_id) {
+                return Err(format!("Connection '{connection_id}' is not owned by plugin '{plugin_id}'"));
+            }
+            // Opens (or reuses) the plugin connection server-side: hydrates the
+            // stored config and drives the plugin's connection/connect, so the
+            // browse call below can address the open session by id alone.
+            self.get_or_create_pool(connection_id, None)
+                .await
+                .map_err(|error| format!("Cannot open connection {connection_id}: {error}"))?;
         }
-        // Opens (or reuses) the plugin connection server-side: hydrates the
-        // stored config and drives the plugin's connection/connect, so the
-        // browse call below can address the open session by id alone.
-        self.get_or_create_pool(connection_id, None)
-            .await
-            .map_err(|error| format!("Cannot open connection {connection_id}: {error}"))?;
         let params = serde_json::json!({
             "connectionId": connection_id,
             "path": path,
@@ -8308,6 +8311,41 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         (AppState::new(storage), dir)
+    }
+
+    #[tokio::test]
+    async fn path_browse_forwards_unknown_connection_ids_to_the_plugin_as_reserved_aliases() {
+        let (state, dir) = test_app_state().await;
+        // `local` matches no stored connection: the id must reach the plugin
+        // layer (its engine synthesizes the reserved local side) instead of
+        // dying in the host resolver as "Connection 'local' was not found".
+        let error = state
+            .invoke_plugin_path_browse("io.dbx.files", "files/listDirs", "local", "/data", None)
+            .await
+            .unwrap_err();
+        assert!(!error.contains("was not found"), "alias must not die in the host resolver: {error}");
+
+        // The frozen task namespace stays guarded either way.
+        let error =
+            state.invoke_plugin_path_browse("io.dbx.files", "task/execute", "local", "/data", None).await.unwrap_err();
+        assert!(error.contains("task/*"), "{error}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn path_browse_rejects_stored_connections_owned_by_other_plugins() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.id = "conn-mysql".to_owned();
+        config.name = "mysql-1".to_owned();
+        state.storage.save_connections(&[config]).await.unwrap();
+
+        let error = state
+            .invoke_plugin_path_browse("io.dbx.files", "files/listDirs", "conn-mysql", "/data", None)
+            .await
+            .unwrap_err();
+        assert!(error.contains("is not owned by plugin"), "{error}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

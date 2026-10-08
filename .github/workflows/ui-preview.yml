@@ -109,6 +109,8 @@ jobs:
 
       # the frontend, from the PR, for both lanes
       - uses: pnpm/action-setup@v6
+        with:
+          version: 10.27.0
       - uses: actions/setup-node@v4
         with:
           node-version: 22

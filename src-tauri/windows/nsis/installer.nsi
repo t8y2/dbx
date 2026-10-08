@@ -96,6 +96,10 @@ Var NoShortcutMode
 Var WixMode
 Var OldMainBinaryName
 Var DbxElevated
+Var DbxIsAdmin
+Var DbxElevationStatus
+Var DbxFileProbeError
+Var DbxDirectoryProbeError
 
 Name "${PRODUCTNAME}"
 BrandingText "${COPYRIGHT}"
@@ -499,18 +503,18 @@ FunctionEnd
   !include "{{this}}"
 {{/each}}
 
-; Keep the standard write-error actions while explaining how to upgrade legacy
-; installations restored from Program Files without changing the install mode.
-LangString dbxFileWriteError ${LANG_ENGLISH} "Error opening file for writing:$\r$\n$\r$\n$0$\r$\n$\r$\nIf you are upgrading DBX installed under Program Files, abort this installation, right-click the installer, and select Run as administrator.$\r$\n$\r$\nClick Abort to stop the installation,$\r$\nRetry to try again, or$\r$\nIgnore to skip this file."
-LangString dbxFileWriteErrorNoIgnore ${LANG_ENGLISH} "Error opening file for writing:$\r$\n$\r$\n$0$\r$\n$\r$\nIf you are upgrading DBX installed under Program Files, cancel this installation, right-click the installer, and select Run as administrator.$\r$\n$\r$\nClick Retry to try again, or$\r$\nCancel to stop the installation."
-LangString dbxFileWriteError ${LANG_SIMPCHINESE} "无法打开要写入的文件：$\r$\n$\r$\n$0$\r$\n$\r$\n如果正在升级安装于 Program Files 的 DBX，请中止本次安装，然后右键单击安装程序并选择“以管理员身份运行”。$\r$\n$\r$\n单击“中止”停止安装，$\r$\n单击“重试”再次尝试，或$\r$\n单击“忽略”跳过此文件。"
-LangString dbxFileWriteErrorNoIgnore ${LANG_SIMPCHINESE} "无法打开要写入的文件：$\r$\n$\r$\n$0$\r$\n$\r$\n如果正在升级安装于 Program Files 的 DBX，请取消本次安装，然后右键单击安装程序并选择“以管理员身份运行”。$\r$\n$\r$\n单击“重试”再次尝试，或$\r$\n单击“取消”停止安装。"
-LangString dbxFileWriteError ${LANG_TRADCHINESE} "無法開啟要寫入的檔案：$\r$\n$\r$\n$0$\r$\n$\r$\n如果正在升級安裝於 Program Files 的 DBX，請中止本次安裝，然後以滑鼠右鍵按一下安裝程式並選擇「以系統管理員身分執行」。$\r$\n$\r$\n按一下「中止」以停止安裝，$\r$\n按一下「重試」以再次嘗試，或$\r$\n按一下「忽略」以略過此檔案。"
-LangString dbxFileWriteErrorNoIgnore ${LANG_TRADCHINESE} "無法開啟要寫入的檔案：$\r$\n$\r$\n$0$\r$\n$\r$\n如果正在升級安裝於 Program Files 的 DBX，請取消本次安裝，然後以滑鼠右鍵按一下安裝程式並選擇「以系統管理員身分執行」。$\r$\n$\r$\n按一下「重試」以再次嘗試，或$\r$\n按一下「取消」以停止安裝。"
+; Required application files must never be skipped after a write failure.
+AllowSkipFiles off
+LangString dbxInstallDiagnostics ${LANG_ENGLISH} "Installer: $EXEPATH$\r$\nVersion: ${VERSION}$\r$\nDestination: $INSTDIR$\r$\nAdministrator permission: $DbxIsAdmin (1=yes, 0=no)$\r$\nAutomatic elevation: $DbxElevationStatus$\r$\nAccess precheck codes (not the extraction error): file=$DbxFileProbeError, folder=$DbxDirectoryProbeError"
+LangString dbxInstallDiagnostics ${LANG_SIMPCHINESE} "安装包：$EXEPATH$\r$\n版本：${VERSION}$\r$\n安装目录：$INSTDIR$\r$\n当前管理员权限：$DbxIsAdmin（1=是，0=否）$\r$\n自动提权：$DbxElevationStatus$\r$\n权限预检查错误码（非本次写入错误）：文件=$DbxFileProbeError，目录=$DbxDirectoryProbeError"
+LangString dbxInstallDiagnostics ${LANG_TRADCHINESE} "安裝套件：$EXEPATH$\r$\n版本：${VERSION}$\r$\n安裝目錄：$INSTDIR$\r$\n目前系統管理員權限：$DbxIsAdmin（1=是，0=否）$\r$\n自動提升權限：$DbxElevationStatus$\r$\n權限預先檢查錯誤碼（非本次寫入錯誤）：檔案=$DbxFileProbeError，目錄=$DbxDirectoryProbeError"
+LangString dbxFileWriteErrorNoIgnore ${LANG_ENGLISH} "Unable to write this file:$\r$\n$0$\r$\n$\r$\n$(dbxInstallDiagnostics)$\r$\n$\r$\nClose DBX and retry. If it still fails, send a screenshot of this dialog.$\r$\nRetry tries again; Cancel stops installation. Required files cannot be skipped."
+LangString dbxFileWriteErrorNoIgnore ${LANG_SIMPCHINESE} "无法写入文件：$\r$\n$0$\r$\n$\r$\n$(dbxInstallDiagnostics)$\r$\n$\r$\n请关闭 DBX 后重试；若仍失败，请反馈此弹框截图。$\r$\n“重试”再次尝试；“取消”停止安装。必需文件不能跳过。"
+LangString dbxFileWriteErrorNoIgnore ${LANG_TRADCHINESE} "無法寫入檔案：$\r$\n$0$\r$\n$\r$\n$(dbxInstallDiagnostics)$\r$\n$\r$\n請關閉 DBX 後重試；若仍失敗，請回報此對話方塊截圖。$\r$\n「重試」再次嘗試；「取消」停止安裝。必要檔案不能略過。"
 LangString dbxWin7InstallerRequired ${LANG_ENGLISH} "This installer does not support Windows 7 or Windows Server 2012 R2.$\r$\n$\r$\nPlease use the dedicated Windows 7 / Server 2012 R2 package instead.$\r$\n$\r$\nOpen the download now?"
 LangString dbxWin7InstallerRequired ${LANG_SIMPCHINESE} "此安装包不支持 Windows 7 或 Windows Server 2012 R2。$\r$\n$\r$\n请改用 Windows 7 / Server 2012 R2 专用包。$\r$\n$\r$\n是否立即打开下载地址？"
 LangString dbxWin7InstallerRequired ${LANG_TRADCHINESE} "此安裝套件不支援 Windows 7 或 Windows Server 2012 R2。$\r$\n$\r$\n請改用 Windows 7 / Server 2012 R2 專用套件。$\r$\n$\r$\n是否立即開啟下載網址？"
-FileErrorText "$(dbxFileWriteError)" "$(dbxFileWriteErrorNoIgnore)"
+FileErrorText "$(dbxFileWriteErrorNoIgnore)" "$(dbxFileWriteErrorNoIgnore)"
 
 LangString dbxElevationFailed ${LANG_ENGLISH} "Administrator permission is required to install DBX in this folder. Permission was denied or the elevated installer could not be started."
 LangString dbxElevationFailed ${LANG_SIMPCHINESE} "安装到此目录需要管理员权限。授权已被拒绝，或无法启动提权后的安装程序。"
@@ -519,6 +523,41 @@ LangString dbxElevationUserMismatch ${LANG_ENGLISH} "Please approve elevation us
 LangString dbxElevationUserMismatch ${LANG_SIMPCHINESE} "请使用启动安装程序的同一个 Windows 账户授权提权，以确保 DBX 的安装信息和快捷方式保留在正确的用户配置中。"
 LangString dbxElevationUserMismatch ${LANG_TRADCHINESE} "請使用啟動安裝程式的同一個 Windows 帳戶授權提升權限，以確保 DBX 的安裝資訊和捷徑保留在正確的使用者設定中。"
 
+LangString dbxElevationNotChecked ${LANG_ENGLISH} "Not checked"
+LangString dbxElevationNotChecked ${LANG_SIMPCHINESE} "未检查"
+LangString dbxElevationNotChecked ${LANG_TRADCHINESE} "未檢查"
+LangString dbxElevationNotRequested ${LANG_ENGLISH} "Not requested (precheck did not detect access denied)"
+LangString dbxElevationNotRequested ${LANG_SIMPCHINESE} "未请求（预检查未检测到拒绝访问）"
+LangString dbxElevationNotRequested ${LANG_TRADCHINESE} "未請求（預先檢查未偵測到拒絕存取）"
+LangString dbxElevationAlreadyAdmin ${LANG_ENGLISH} "Already running as administrator"
+LangString dbxElevationAlreadyAdmin ${LANG_SIMPCHINESE} "启动时已有管理员权限"
+LangString dbxElevationAlreadyAdmin ${LANG_TRADCHINESE} "啟動時已有系統管理員權限"
+LangString dbxElevationSucceeded ${LANG_ENGLISH} "Attempted; now running as administrator"
+LangString dbxElevationSucceeded ${LANG_SIMPCHINESE} "已尝试，当前已有管理员权限"
+LangString dbxElevationSucceeded ${LANG_TRADCHINESE} "已嘗試，目前已有系統管理員權限"
+LangString dbxElevationUnconfirmed ${LANG_ENGLISH} "Attempted; administrator permission not obtained"
+LangString dbxElevationUnconfirmed ${LANG_SIMPCHINESE} "已尝试，但当前未获得管理员权限"
+LangString dbxElevationUnconfirmed ${LANG_TRADCHINESE} "已嘗試，但目前未取得系統管理員權限"
+LangString dbxElevationFailedStatus ${LANG_ENGLISH} "Attempted; authorization denied or launch failed"
+LangString dbxElevationFailedStatus ${LANG_SIMPCHINESE} "已尝试，授权被拒绝或启动失败"
+LangString dbxElevationFailedStatus ${LANG_TRADCHINESE} "已嘗試，授權遭拒或啟動失敗"
+
+Function DbxUpdateElevationStatus
+  System::Call 'shell32::IsUserAnAdmin() i .s'
+  Pop $DbxIsAdmin
+  ${If} $DbxElevated = 1
+    ${If} $DbxIsAdmin != 0
+      StrCpy $DbxElevationStatus "$(dbxElevationSucceeded)"
+    ${Else}
+      StrCpy $DbxElevationStatus "$(dbxElevationUnconfirmed)"
+    ${EndIf}
+  ${ElseIf} $DbxIsAdmin != 0
+    StrCpy $DbxElevationStatus "$(dbxElevationAlreadyAdmin)"
+  ${Else}
+    StrCpy $DbxElevationStatus "$(dbxElevationNotRequested)"
+  ${EndIf}
+FunctionEnd
+
 ; Probe without truncating the old executable. Only ACCESS_DENIED requests UAC;
 ; sharing violations still go through CheckIfAppIsRunning and normal retry UI.
 Function DbxEnsureInstallAccess
@@ -526,10 +565,15 @@ Function DbxEnsureInstallAccess
   Push $1
   Push $2
   Push $3
+  Call DbxUpdateElevationStatus
+  StrCpy $DbxFileProbeError "$(dbxElevationNotChecked)"
+  StrCpy $DbxDirectoryProbeError "$(dbxElevationNotChecked)"
   ${If} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
     System::Call 'kernel32::CreateFileW(w "$INSTDIR\${MAINBINARYNAME}.exe", i 0x40000000, i 7, p 0, i 3, i 0, p 0) p .r0 ?e'
     Pop $1
+    StrCpy $DbxFileProbeError $1
     ${If} $0 != -1
+      StrCpy $DbxFileProbeError 0
       System::Call 'kernel32::CloseHandle(p r0)'
     ${ElseIf} $1 = 5
       Goto dbx_elevate
@@ -550,7 +594,9 @@ Function DbxEnsureInstallAccess
     ${EndIf}
   System::Call 'kernel32::GetTempFileNameW(w r2, w "dbx", i 0, w .r3) i .r0 ?e'
   Pop $1
+  StrCpy $DbxDirectoryProbeError $1
   ${If} $0 != 0
+    StrCpy $DbxDirectoryProbeError 0
     Delete "$3"
   ${ElseIf} $1 = 5
     Goto dbx_elevate
@@ -571,7 +617,8 @@ Function DbxEnsureInstallAccess
     ClearErrors
     ExecShell "runas" "$EXEPATH" '/DBX_ELEVATED /DBX_PROFILE="$3" /DBX_LANG=$LANGUAGE $2 /D=$INSTDIR'
     ${If} ${Errors}
-      MessageBox MB_OK|MB_ICONSTOP "$(dbxElevationFailed)" /SD IDOK
+      StrCpy $DbxElevationStatus "$(dbxElevationFailedStatus)"
+      MessageBox MB_OK|MB_ICONSTOP "$(dbxElevationFailed)$\r$\n$\r$\n$(dbxInstallDiagnostics)" /SD IDOK
       SetErrorLevel 740
       Pop $3
       Pop $2
@@ -599,7 +646,10 @@ Function .onInit
     ; entered in the UAC credential dialog.
     ${GetOptions} $CMDLINE "/DBX_PROFILE=" $0
     ${If} $0 != $PROFILE
-      MessageBox MB_OK|MB_ICONSTOP "$(dbxElevationUserMismatch)" /SD IDOK
+      StrCpy $DbxFileProbeError "$(dbxElevationNotChecked)"
+      StrCpy $DbxDirectoryProbeError "$(dbxElevationNotChecked)"
+      Call DbxUpdateElevationStatus
+      MessageBox MB_OK|MB_ICONSTOP "$(dbxElevationUserMismatch)$\r$\n$\r$\n$(dbxInstallDiagnostics)" /SD IDOK
       SetErrorLevel 740
       Quit
     ${EndIf}
@@ -814,6 +864,9 @@ Section Install
   !endif
 
   !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+
+  Call DbxUpdateElevationStatus
+  DetailPrint "$(dbxInstallDiagnostics)"
 
   ; Copy main executable
   File "${MAINBINARYSRCPATH}"

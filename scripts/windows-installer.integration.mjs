@@ -79,6 +79,7 @@ SectionEnd
 !macro NSIS_HOOK_PREINSTALL
   System::Call 'shell32::IsUserAnAdmin() i .r0'
   WriteINIStr "${report}" "installer" "admin" "$0"
+  WriteINIStr "${report}" "installer" "elevation" "$DbxElevationStatus"
   WriteINIStr "${report}" "installer" "cmdline" "$CMDLINE"
   WriteINIStr "${report}" "installer" "language" "$LANGUAGE"
   WriteINIStr "${report}" "installer" "update" "$UpdateMode"
@@ -152,6 +153,7 @@ SectionEnd
   console.log(output);
   assert.match(output,/\[driver\]\r?\nadmin=0/);
   assert.match(output,/\[installer\]\r?\nadmin=1/);
+  assert.match(output,/elevation=Attempted; now running as administrator/);
   assert.match(output,/complete=1/);
   assert.match(output,/update=1/);
   assert.match(output,/passive=1/);
@@ -169,6 +171,7 @@ SectionEnd
   run('installer',['/S','/UPDATE','/NS','/R','/ARGS','"writable update argument"',`/D=${writableTarget}`]);
   await waitFor(()=>fs.existsSync(report)&&fs.readFileSync(report,'utf8').includes('version=new'));
   const writableOutput=fs.readFileSync(report,'utf8');
+  assert.match(writableOutput,/elevation=Not requested/);
   console.log(writableOutput);
   assert.match(writableOutput,/\[installer\]\r?\nadmin=0/);
   assert.doesNotMatch(writableOutput,/\/DBX_ELEVATED/);

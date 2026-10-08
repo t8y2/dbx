@@ -34,6 +34,7 @@ vi.mock("@/stores/connectionStore", () => ({
 vi.mock("@/stores/queryStore", () => ({
   useQueryStore: () => ({ openObjectSourceTabPending: mocks.openObjectSourceTabPending }),
 }));
+vi.mock("@/stores/authStore", () => ({ useAuthStore: () => ({ hasPermission: () => true }) }));
 vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => ({
     editorSettings: {

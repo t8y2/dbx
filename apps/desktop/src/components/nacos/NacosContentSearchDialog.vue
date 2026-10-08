@@ -8,6 +8,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { splitNacosContentLiteralMatches } from "@/lib/nacos/nacosAdmin";
+import { useAuthStore } from "@/stores/authStore";
 import type { NacosContentMatch, NacosContentSearchResult, NacosNamespaceScope, NacosSearchProgress } from "@/types/nacos";
 
 const props = defineProps<{
@@ -31,6 +32,7 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+const authStore = useAuthStore();
 const query = ref("");
 const scope = ref<NacosNamespaceScope>("currentNamespace");
 const submittedQuery = ref("");
@@ -131,7 +133,7 @@ function clearSearchResults() {
           <span v-if="progress?.namespace" class="truncate font-mono">{{ progress.namespace || "public" }}</span>
           <span v-if="progress?.total != null">{{ scanned }} / {{ progress.total }}</span>
           <Badge v-if="isIncomplete" variant="outline" class="border-amber-500/50 text-amber-700 dark:text-amber-300">{{ t("nacos.incompleteResult") }}</Badge>
-          <Button v-if="matches.length" type="button" size="sm" variant="outline" class="ml-auto h-7 gap-1.5 px-2.5" :disabled="loading || exporting" @click="emit('export')">
+          <Button v-if="authStore.hasPermission('export.data') && matches.length" type="button" size="sm" variant="outline" class="ml-auto h-7 gap-1.5 px-2.5" :disabled="loading || exporting" @click="emit('export')">
             <Loader2 v-if="exporting" class="h-3.5 w-3.5 animate-spin" />
             <Download v-else class="h-3.5 w-3.5" />
             {{ t("nacos.exportSearchResults") }}

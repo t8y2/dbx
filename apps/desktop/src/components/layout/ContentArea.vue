@@ -138,6 +138,7 @@ const ExplainPlanViewer = defineAsyncComponent(() => import("@/components/explai
 const QueryChart = defineAsyncComponent(() => import("@/components/chart/QueryChart.vue"));
 import { useQueryStore } from "@/stores/queryStore";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useAuthStore } from "@/stores/authStore";
 import type { ContentAreaSurfaceEmits, ContentAreaSurfaceProps } from "@/components/layout/querySurfaces";
 import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore, type DataGridRowNumberMode, type DataGridSearchMode, type ResultRunDisplayMode } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
@@ -253,6 +254,7 @@ const emit = defineEmits<ContentAreaSurfaceEmits>();
 const { t, locale } = useI18n();
 const queryStore = useQueryStore();
 const connectionStore = useConnectionStore();
+const authStore = useAuthStore();
 /** Clear a consumed editor reveal request so a later normal tab re-visit doesn't re-jump. */
 function clearEditorRevealRequest(tab: { editorRevealRequest?: unknown }): void {
   if (tab.editorRevealRequest !== undefined) {
@@ -2518,11 +2520,11 @@ defineExpose({
                   <Database class="h-4 w-4" />
                   {{ t("tableToolbox.generateData") }}
                 </DropdownMenuItem>
-                <DropdownMenuItem v-if="canOpenTableImport" class="gap-2" @click="handleTableImport">
+                <DropdownMenuItem v-if="authStore.hasPermission('import.data') && canOpenTableImport" class="gap-2" @click="handleTableImport">
                   <Download class="h-4 w-4" />
                   {{ t("tableToolbox.importData") }}
                 </DropdownMenuItem>
-                <DropdownMenuSub>
+                <DropdownMenuSub v-if="authStore.hasPermission('export.data')">
                   <DropdownMenuSubTrigger class="gap-2">
                     <Upload class="h-4 w-4" />
                     {{ t("tableToolbox.exportData") }}

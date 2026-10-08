@@ -62,6 +62,7 @@ vi.mock("@/components/common/ProductionContextBadge.vue", () => ({
 }));
 
 import EditorToolbar from "../EditorToolbar.vue";
+import { useAuthStore } from "@/stores/authStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { resolveExecutableSql, type SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
@@ -82,6 +83,7 @@ describe("EditorToolbar mount contract", () => {
     document.body.innerHTML = "";
     pinia = createPinia();
     setActivePinia(pinia);
+    useAuthStore().isAdmin = true;
     i18n = createI18n({
       legacy: false,
       locale: "en",

@@ -273,6 +273,7 @@ pub async fn test_connection(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ConnReq>,
 ) -> Result<Json<dbx_core::nacos::NacosConnectionInfo>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result =
         dbx_core::nacos::service::nacos_test_connection_core(&state.app, &req.connection_id, req.force_refresh)
             .await
@@ -284,6 +285,7 @@ pub async fn list_namespaces(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ConnReq>,
 ) -> Result<Json<Vec<dbx_core::nacos::NacosNamespaceInfo>>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::nacos::service::nacos_list_namespaces_core(&state.app, &req.connection_id)
         .await
         .map_err(AppError::from)?;
@@ -294,6 +296,7 @@ pub async fn sidebar_snapshot(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ConnReq>,
 ) -> Result<Json<dbx_core::nacos::NacosNamespaceSidebarSnapshot>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::nacos::service::nacos_sidebar_snapshot_core(&state.app, &req.connection_id)
         .await
         .map_err(AppError::from)?;
@@ -304,6 +307,7 @@ pub async fn create_namespace(
     State(state): State<Arc<WebState>>,
     Json(req): Json<NamespaceCreateReq>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     dbx_core::nacos::service::nacos_create_namespace_core(&state.app, &req.connection_id, req.req)
         .await
         .map_err(AppError::from)?;
@@ -314,6 +318,7 @@ pub async fn update_namespace(
     State(state): State<Arc<WebState>>,
     Json(req): Json<NamespaceUpdateReq>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     dbx_core::nacos::service::nacos_update_namespace_core(&state.app, &req.connection_id, req.req)
         .await
         .map_err(AppError::from)?;
@@ -324,6 +329,7 @@ pub async fn delete_namespace(
     State(state): State<Arc<WebState>>,
     Json(req): Json<NamespaceDeleteReq>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     dbx_core::nacos::service::nacos_delete_namespace_core(&state.app, &req.connection_id, req.namespace_id)
         .await
         .map_err(AppError::from)?;
@@ -334,6 +340,7 @@ pub async fn list_configs(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ConfigListReq>,
 ) -> Result<Json<dbx_core::nacos::NacosConfigList>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::nacos::service::nacos_list_configs_core(&state.app, &req.connection_id, req.query)
         .await
         .map_err(AppError::from)?;
@@ -344,6 +351,7 @@ pub async fn get_config(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ConfigKeyReq>,
 ) -> Result<Json<dbx_core::nacos::NacosConfigItem>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::nacos::service::nacos_get_config_core(&state.app, &req.connection_id, req.key)
         .await
         .map_err(AppError::from)?;
@@ -354,6 +362,7 @@ pub async fn publish_config(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ConfigPublishReq>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     dbx_core::nacos::service::nacos_publish_config_core(&state.app, &req.connection_id, req.req)
         .await
         .map_err(AppError::from)?;
@@ -364,6 +373,7 @@ pub async fn delete_config(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ConfigKeyReq>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     dbx_core::nacos::service::nacos_delete_config_core(&state.app, &req.connection_id, req.key)
         .await
         .map_err(AppError::from)?;
@@ -374,6 +384,7 @@ pub async fn list_config_history(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ConfigHistoryListReq>,
 ) -> Result<Json<dbx_core::nacos::NacosConfigHistoryList>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::nacos::service::nacos_list_config_history_core(&state.app, &req.connection_id, req.query)
         .await
         .map_err(AppError::from)?;
@@ -384,6 +395,7 @@ pub async fn get_config_history(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ConfigHistoryKeyReq>,
 ) -> Result<Json<dbx_core::nacos::NacosConfigItem>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::nacos::service::nacos_get_config_history_core(&state.app, &req.connection_id, req.key)
         .await
         .map_err(AppError::from)?;
@@ -394,6 +406,7 @@ pub async fn rollback_config(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ConfigRollbackReq>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     dbx_core::nacos::service::nacos_rollback_config_core(&state.app, &req.connection_id, req.req)
         .await
         .map_err(AppError::from)?;
@@ -404,6 +417,7 @@ pub async fn get_rnacos_console_captcha(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ConnReq>,
 ) -> Result<Json<dbx_core::nacos::NacosRNacosConsoleCaptcha>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::nacos::service::nacos_get_rnacos_console_captcha_core(&state.app, &req.connection_id)
         .await
         .map_err(AppError::from)?;
@@ -414,6 +428,7 @@ pub async fn login_rnacos_console(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RNacosConsoleLoginReq>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     dbx_core::nacos::service::nacos_login_rnacos_console_core(&state.app, &req.connection_id, req.captcha)
         .await
         .map_err(AppError::from)?;
@@ -424,6 +439,7 @@ pub async fn list_users(
     State(state): State<Arc<WebState>>,
     Json(req): Json<UserListReq>,
 ) -> Result<Json<dbx_core::nacos::NacosUserList>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::nacos::service::nacos_list_users_core(&state.app, &req.connection_id, req.query)
         .await
         .map_err(AppError::from)?;
@@ -434,6 +450,7 @@ pub async fn create_user(
     State(state): State<Arc<WebState>>,
     Json(req): Json<UserCreateReq>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     dbx_core::nacos::service::nacos_create_user_core(&state.app, &req.connection_id, req.req)
         .await
         .map_err(AppError::from)?;
@@ -444,6 +461,7 @@ pub async fn update_user(
     State(state): State<Arc<WebState>>,
     Json(req): Json<UserUpdateReq>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     dbx_core::nacos::service::nacos_update_user_core(&state.app, &req.connection_id, req.req)
         .await
         .map_err(AppError::from)?;
@@ -454,6 +472,7 @@ pub async fn delete_user(
     State(state): State<Arc<WebState>>,
     Json(req): Json<UserDeleteReq>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     dbx_core::nacos::service::nacos_delete_user_core(&state.app, &req.connection_id, req.username)
         .await
         .map_err(AppError::from)?;
@@ -464,6 +483,7 @@ pub async fn list_role_bindings(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RoleListReq>,
 ) -> Result<Json<dbx_core::nacos::NacosRoleList>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::nacos::service::nacos_list_role_bindings_core(&state.app, &req.connection_id, req.query)
         .await
         .map_err(AppError::from)?;
@@ -474,6 +494,7 @@ pub async fn assign_role(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RoleBindingReq>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     dbx_core::nacos::service::nacos_assign_role_core(&state.app, &req.connection_id, req.binding)
         .await
         .map_err(AppError::from)?;
@@ -484,6 +505,7 @@ pub async fn remove_role(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RoleBindingReq>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     dbx_core::nacos::service::nacos_remove_role_core(&state.app, &req.connection_id, req.binding)
         .await
         .map_err(AppError::from)?;
@@ -494,6 +516,7 @@ pub async fn access_snapshot(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ConnReq>,
 ) -> Result<Json<dbx_core::nacos::NacosAccessControlSnapshot>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::nacos::service::nacos_access_snapshot_core(&state.app, &req.connection_id)
         .await
         .map_err(AppError::from)?;
@@ -504,6 +527,7 @@ pub async fn start_access_operation(
     State(state): State<Arc<WebState>>,
     Json(req): Json<AccessOperationReq>,
 ) -> Result<Json<dbx_core::nacos::NacosAccessOperationResult>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::nacos::service::nacos_start_access_operation_core(&state.app, &req.connection_id, req.req)
         .await
         .map_err(AppError::from)?;
@@ -514,6 +538,7 @@ pub async fn get_access_operation(
     State(state): State<Arc<WebState>>,
     Json(req): Json<AccessOperationIdReq>,
 ) -> Result<Json<dbx_core::nacos::NacosAccessOperationResult>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result =
         dbx_core::nacos::service::nacos_get_access_operation_core(&state.app, &req.connection_id, &req.operation_id)
             .await
@@ -525,6 +550,7 @@ pub async fn retry_access_operation(
     State(state): State<Arc<WebState>>,
     Json(req): Json<AccessOperationRetryReq>,
 ) -> Result<Json<dbx_core::nacos::NacosAccessOperationResult>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::nacos::service::nacos_retry_access_operation_core(&state.app, &req.connection_id, req.retry)
         .await
         .map_err(AppError::from)?;
@@ -535,6 +561,7 @@ pub async fn undo_access_operation(
     State(state): State<Arc<WebState>>,
     Json(req): Json<AccessOperationIdReq>,
 ) -> Result<Json<dbx_core::nacos::NacosAccessOperationResult>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result =
         dbx_core::nacos::service::nacos_undo_access_operation_core(&state.app, &req.connection_id, &req.operation_id)
             .await
@@ -546,6 +573,7 @@ pub async fn list_services(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ServiceListReq>,
 ) -> Result<Json<dbx_core::nacos::NacosServiceList>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::nacos::service::nacos_list_services_core(&state.app, &req.connection_id, req.query)
         .await
         .map_err(AppError::from)?;
@@ -556,6 +584,7 @@ pub async fn list_instances(
     State(state): State<Arc<WebState>>,
     Json(req): Json<InstanceListReq>,
 ) -> Result<Json<Vec<dbx_core::nacos::NacosInstanceInfo>>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::nacos::service::nacos_list_instances_core(&state.app, &req.connection_id, req.query)
         .await
         .map_err(AppError::from)?;
@@ -566,6 +595,7 @@ pub async fn get_service(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ServiceQueryReq>,
 ) -> Result<Json<dbx_core::nacos::NacosServiceDetail>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::nacos::service::nacos_get_service_core(&state.app, &req.connection_id, req.query)
         .await
         .map_err(AppError::from)?;
@@ -576,6 +606,7 @@ pub async fn create_service(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ServiceUpsertReq>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     dbx_core::nacos::service::nacos_create_service_core(&state.app, &req.connection_id, req.req)
         .await
         .map_err(AppError::from)?;
@@ -586,6 +617,7 @@ pub async fn update_service(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ServiceUpsertReq>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     dbx_core::nacos::service::nacos_update_service_core(&state.app, &req.connection_id, req.req)
         .await
         .map_err(AppError::from)?;
@@ -596,6 +628,7 @@ pub async fn delete_service(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ServiceQueryReq>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     dbx_core::nacos::service::nacos_delete_service_core(&state.app, &req.connection_id, req.query)
         .await
         .map_err(AppError::from)?;
@@ -606,6 +639,7 @@ pub async fn update_instance(
     State(state): State<Arc<WebState>>,
     Json(req): Json<InstanceUpdateReq>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     dbx_core::nacos::service::nacos_update_instance_core(&state.app, &req.connection_id, req.req)
         .await
         .map_err(AppError::from)?;
@@ -616,6 +650,7 @@ pub async fn register_instance(
     State(state): State<Arc<WebState>>,
     Json(req): Json<InstanceRegistrationReq>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     dbx_core::nacos::service::nacos_register_instance_core(&state.app, &req.connection_id, req.req)
         .await
         .map_err(AppError::from)?;
@@ -626,6 +661,7 @@ pub async fn deregister_instance(
     State(state): State<Arc<WebState>>,
     Json(req): Json<InstanceRefReq>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     dbx_core::nacos::service::nacos_deregister_instance_core(&state.app, &req.connection_id, req.req)
         .await
         .map_err(AppError::from)?;
@@ -636,6 +672,7 @@ pub async fn get_dashboard(
     State(state): State<Arc<WebState>>,
     Json(req): Json<DashboardReq>,
 ) -> Result<Json<dbx_core::nacos::NacosDashboardSnapshot>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::nacos::service::nacos_get_dashboard_core(&state.app, &req.connection_id, req.query)
         .await
         .map_err(AppError::from)?;
@@ -646,6 +683,7 @@ pub async fn raw_request(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RawReq>,
 ) -> Result<Json<dbx_core::nacos::NacosRawResponse>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::nacos::service::nacos_raw_request_core(&state.app, &req.connection_id, req.req)
         .await
         .map_err(AppError::from)?;
@@ -656,6 +694,7 @@ pub async fn search_config_content(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ContentSearchReq>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(NACOS_SEARCH_PROGRESS_BUFFER);
     let stream = async_stream::stream! {
         let progress_tx = tx.clone();
@@ -707,6 +746,7 @@ pub async fn export_configs(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ConfigExportReq>,
 ) -> Result<Response, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let export_dir = state.data_dir.join("tmp").join("nacos_export");
     tokio::fs::create_dir_all(&export_dir).await.map_err(|error| AppError::from(error.to_string()))?;
     let archive_path = export_dir.join(format!("{}.zip", uuid::Uuid::new_v4()));
@@ -787,6 +827,10 @@ pub async fn preview_config_import(
     if !uploaded {
         return Err(AppError::from("No Nacos archive uploaded".to_string()));
     }
+    if let Err(error) = crate::access_gate::ensure_web_connection_scope(&state, &connection_id).await {
+        cleanup_nacos_import(&archive_path).await;
+        return Err(error);
+    }
 
     let preview = dbx_core::nacos::batch::nacos_preview_config_import_core(
         &state.app,
@@ -824,6 +868,7 @@ pub async fn apply_config_import(
     headers: HeaderMap,
     Json(req): Json<ConfigImportApplyReq>,
 ) -> Result<Json<dbx_core::nacos::NacosBatchReport>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let archive_path = match nacos_import_path(&state.data_dir, &req.archive_token) {
         Ok(path) => path,
         Err(error) => {
@@ -864,6 +909,8 @@ pub async fn preview_config_transfer(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ConfigTransferReq>,
 ) -> Result<Json<dbx_core::nacos::NacosBatchPreview>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.req.source_connection_id).await?;
+    crate::access_gate::ensure_web_connection_scope(&state, &req.req.target_connection_id).await?;
     dbx_core::nacos::batch::nacos_preview_config_transfer_core(&state.app, &req.req)
         .await
         .map(Json)
@@ -874,6 +921,8 @@ pub async fn apply_config_transfer(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ConfigTransferApplyReq>,
 ) -> Result<Json<dbx_core::nacos::NacosBatchReport>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.req.source_connection_id).await?;
+    crate::access_gate::ensure_web_connection_scope(&state, &req.req.target_connection_id).await?;
     dbx_core::nacos::batch::nacos_apply_config_transfer_core(&state.app, &req.req, &req.plan_hash)
         .await
         .map(Json)

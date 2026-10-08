@@ -62,6 +62,7 @@ vi.mock("@/components/common/ProductionContextBadge.vue", () => ({
 }));
 
 import EditorToolbar from "../EditorToolbar.vue";
+import { useAuthStore } from "@/stores/authStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 
 function createHost(): HTMLDivElement {
@@ -78,6 +79,7 @@ describe("EditorToolbar commit/rollback visibility", () => {
     document.body.innerHTML = "";
     pinia = createPinia();
     setActivePinia(pinia);
+    useAuthStore().isAdmin = true;
     i18n = createI18n({
       legacy: false,
       locale: "en",

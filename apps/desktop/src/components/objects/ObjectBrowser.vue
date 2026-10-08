@@ -119,6 +119,7 @@ import { buildSingleDdlExportFileContent } from "@/lib/export/ddlExport";
 import { fetchTableDataForExport } from "@/lib/table/tableDataExport";
 import { forceCsvTextForTemporalColumns } from "@/lib/dataGrid/columnFormatter";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useAuthStore } from "@/stores/authStore";
 import { treeNodePinIdentity, type PinnedTreeNodeIdentity } from "@/lib/app/pinnedItems";
 import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -210,6 +211,7 @@ const { highlight } = useSqlHighlighter();
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
+const authStore = useAuthStore();
 const refreshTooltip = computed(() => {
   const shortcut = formatShortcut(settingsStore.editorSettings.shortcuts.refreshData);
   return shortcut ? `${t("grid.refresh")} (${shortcut})` : t("grid.refresh");
@@ -3438,7 +3440,7 @@ function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       { label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
       ...(supportsAiAssistantContext(effectiveDatabaseType.value) ? [addToAiMenuItem(item)] : []),
       { label: "", separator: true },
-      exportDataSubmenu(item),
+      ...(authStore.hasPermission("export.data") ? [exportDataSubmenu(item)] : []),
       { label: "", separator: true },
       { label: t("contextMenu.copyName"), action: () => copyName(item), icon: Copy },
     ];
@@ -3482,12 +3484,10 @@ function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     { label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
     ...(supportsAiAssistantContext(effectiveDatabaseType.value) ? [addToAiMenuItem(item)] : []),
     ...(canOpenDiagram.value ? [{ label: t("diagram.open"), action: () => openDiagram(item), icon: Network }] : []),
-    ...(canOpenTableImport.value ? [{ label: t("contextMenu.importData"), action: () => openTableImport(item), icon: Download }] : []),
-    { label: t("dataCompare.title"), action: () => openDataCompare(item), icon: ArrowRightLeft },
+    ...(authStore.hasPermission("import.data") && canOpenTableImport.value ? [{ label: t("contextMenu.importData"), action: () => openTableImport(item), icon: Download }] : []),
+    ...(authStore.hasPermission("data.compare") ? [{ label: t("dataCompare.title"), action: () => openDataCompare(item), icon: ArrowRightLeft }] : []),
     { label: "", separator: true },
-    exportDataSubmenu(item),
-    { label: t("contextMenu.exportDatabase"), action: () => openDatabaseExport(item), icon: Upload },
-    { label: t("contextMenu.exportStructure"), action: () => exportStructure(item), icon: FileCode },
+    ...(authStore.hasPermission("export.data") ? [exportDataSubmenu(item), { label: t("contextMenu.exportDatabase"), action: () => openDatabaseExport(item), icon: Upload }, { label: t("contextMenu.exportStructure"), action: () => exportStructure(item), icon: FileCode }] : []),
     ...(canOpenDataDictionary.value ? [{ label: t("dataDictionary.title"), action: () => openDataDictionary(item), icon: FileText }] : []),
     { label: "", separator: true },
     { label: t("contextMenu.duplicateStructure"), action: () => requestDuplicateStructure(item), icon: CopyPlus },
@@ -3514,9 +3514,7 @@ function getViewMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     { label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
     ...(canOpenDiagram.value ? [{ label: t("diagram.open"), action: () => openDiagram(item), icon: Network }] : []),
     { label: "", separator: true },
-    exportDataSubmenu(item),
-    { label: t("contextMenu.exportDatabase"), action: () => openDatabaseExport(item), icon: Upload },
-    { label: t("contextMenu.exportStructure"), action: () => exportStructure(item), icon: FileCode },
+    ...(authStore.hasPermission("export.data") ? [exportDataSubmenu(item), { label: t("contextMenu.exportDatabase"), action: () => openDatabaseExport(item), icon: Upload }, { label: t("contextMenu.exportStructure"), action: () => exportStructure(item), icon: FileCode }] : []),
     ...(canOpenDataDictionary.value ? [{ label: t("dataDictionary.title"), action: () => openDataDictionary(item), icon: FileText }] : []),
     { label: "", separator: true },
     {

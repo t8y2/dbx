@@ -133,6 +133,7 @@ pub async fn txn(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ConsulTxnApiRequest>,
 ) -> Result<Json<dbx_core::consul::ConsulTxnResult>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "Execute Consul transaction").await?;
     Ok(Json(
         dbx_core::consul::consul_txn_core(&state.app, &req.connection_id, req.request).await.map_err(AppError::from)?,
@@ -143,6 +144,7 @@ pub async fn rename_key(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ConsulRenameApiRequest>,
 ) -> Result<Json<dbx_core::consul::ConsulTxnResult>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     Ok(Json(
         dbx_core::consul::consul_rename_key_core(
             &state.app,
@@ -161,6 +163,7 @@ pub async fn blocking_query(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ConsulBlockingApiRequest>,
 ) -> Result<Json<dbx_core::consul::ConsulBlockingResponse>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     Ok(Json(
         dbx_core::consul::consul_blocking_query_core(&state.app, &req.connection_id, req.request)
             .await
@@ -172,6 +175,7 @@ pub async fn domain_watch(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ConsulDomainWatchApiRequest>,
 ) -> Result<Json<dbx_core::consul::ConsulDomainWatchResponse>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     Ok(Json(
         dbx_core::consul::consul_domain_watch_core(&state.app, &req.connection_id, req.request)
             .await
@@ -192,6 +196,7 @@ pub async fn capabilities(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ConsulConnectionRequest>,
 ) -> Result<Json<dbx_core::consul::ConsulCapabilities>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result =
         dbx_core::consul::consul_capabilities_core(&state.app, &req.connection_id).await.map_err(AppError::from)?;
     Ok(Json(result))
@@ -218,6 +223,7 @@ pub async fn list_prefix(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ConsulListPrefixRequest>,
 ) -> Result<Json<dbx_core::agent_kv::KvListPrefixResponse>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::consul::consul_list_prefix_core(
         &state.app,
         &req.connection_id,
@@ -234,6 +240,7 @@ pub async fn list_recursive(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ConsulListRecursiveRequest>,
 ) -> Result<Json<dbx_core::consul::ConsulRecursiveListResponse>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::consul::consul_list_recursive_core(
         &state.app,
         &req.connection_id,
@@ -250,6 +257,7 @@ pub async fn search(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ConsulSearchApiRequest>,
 ) -> Result<Json<dbx_core::consul::ConsulSearchResponse>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::consul::consul_search_core(&state.app, &req.connection_id, req.request)
         .await
         .map_err(AppError::from)?;
@@ -280,6 +288,7 @@ pub async fn export_bundle(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ConsulExportApiRequest>,
 ) -> Result<Json<dbx_core::consul::ConsulKvBundle>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::consul::consul_export_bundle_core(&state.app, &req.connection_id, req.request)
         .await
         .map_err(AppError::from)?;
@@ -290,6 +299,7 @@ pub async fn import_preview(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ConsulImportApiRequest>,
 ) -> Result<Json<dbx_core::consul::ConsulImportPreview>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::consul::consul_import_preview_core(&state.app, &req.connection_id, req.request)
         .await
         .map_err(AppError::from)?;
@@ -300,6 +310,7 @@ pub async fn import_execute(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ConsulImportApiRequest>,
 ) -> Result<Json<dbx_core::consul::ConsulImportReport>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "Import Consul KV bundle").await?;
     let result = dbx_core::consul::consul_import_execute_core(&state.app, &req.connection_id, req.request)
         .await
@@ -311,6 +322,7 @@ pub async fn delete_prefix_preview(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ConsulDeletePrefixPreviewRequest>,
 ) -> Result<Json<dbx_core::consul::ConsulDeletePrefixPreview>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::consul::consul_delete_prefix_preview_core(&state.app, &req.connection_id, &req.prefix)
         .await
         .map_err(AppError::from)?;
@@ -321,6 +333,7 @@ pub async fn delete_prefix_execute(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ConsulDeletePrefixExecuteRequest>,
 ) -> Result<Json<dbx_core::consul::ConsulDeletePrefixReport>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "Delete Consul KV prefix").await?;
     let result = dbx_core::consul::consul_delete_prefix_execute_core(&state.app, &req.connection_id, req.request)
         .await

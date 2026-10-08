@@ -144,9 +144,6 @@ function closeSpecialRegularSurfaces(keep?: SpecialRegularSurface) {
   if (keep !== "settings" && props.settingsPageOpen) {
     emit("close-settings-page");
   }
-  if (keep !== "pluginCenter" && props.pluginCenterOpen) {
-    emit("close-plugin-center");
-  }
 }
 
 // Regular tabs live in editor groups now, so "close other tabs" at App level

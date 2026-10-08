@@ -352,7 +352,10 @@ pub async fn resolve_database(
 
 pub async fn ensure_scope(state: &Arc<WebState>, headers: &HeaderMap, connection_id: &str) -> Result<(), AppError> {
     if !is_mcp_request(headers) {
-        return Ok(());
+        // Web 会话（无 MCP 标头）：改用请求用户的有效 scope 判定连接可见性
+        // （T4）；MCP 全局策略不适用于 Web 会话。无用户上下文（桌面 /
+        // DBX_DISABLE_PASSWORD）时 ensure_web_connection_scope 直接放行。
+        return crate::access_gate::ensure_web_connection_scope(state, connection_id).await;
     }
     let (policy, group_paths) = load_policy_context(state).await?;
     ensure_allowed(&policy, group_paths.get(connection_id), connection_id)
@@ -386,6 +389,9 @@ pub async fn ensure_mongo_pipeline_target(
     pipeline_json: &str,
 ) -> Result<String, AppError> {
     if !is_mcp_request(headers) {
+        // Web 会话：连接可见范围守卫（T4）；读/写动词策略由 access_gate 的
+        // 路径权限映射负责。
+        crate::access_gate::ensure_web_connection_scope(state, connection_id).await?;
         return Ok(database.to_string());
     }
     let (policy, group_paths) = load_policy_context(state).await?;
@@ -415,7 +421,9 @@ async fn ensure_write_with_risk(
     dangerous: bool,
 ) -> Result<(), AppError> {
     if !is_mcp_request(headers) {
-        return Ok(());
+        // Web 会话：连接可见范围守卫（T4）；写动词权限由 access_gate 的
+        // query.write 映射负责。
+        return crate::access_gate::ensure_web_connection_scope(state, connection_id).await;
     }
     let (policy, group_paths) = load_policy_context(state).await?;
     let group_path = group_paths.get(connection_id);
@@ -459,6 +467,9 @@ pub async fn ensure_sql(
     allow_database_switch: bool,
 ) -> Result<String, AppError> {
     if !is_mcp_request(headers) {
+        // Web 会话：连接可见范围守卫（T4）；语句分类（query.read / query.write）
+        // 由各执行 handler 调用 access_gate::ensure_query_permission 负责。
+        crate::access_gate::ensure_web_connection_scope(state, connection_id).await?;
         return Ok(database.to_string());
     }
     let (policy, group_paths) = load_policy_context(state).await?;

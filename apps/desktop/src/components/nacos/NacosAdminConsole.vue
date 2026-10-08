@@ -24,6 +24,7 @@ import NacosContentReplaceDialog from "@/components/nacos/NacosContentReplaceDia
 import { useToast } from "@/composables/useToast";
 import { useNacosConfigListColumnResize, type ToggleableNacosConfigListColumnKey } from "@/composables/useNacosConfigListColumnResize";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useAuthStore } from "@/stores/authStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useI18n } from "vue-i18n";
 import * as api from "@/lib/backend/api";
@@ -139,6 +140,7 @@ const { t } = useI18n();
 const configWorkbenchId = useId();
 const settingsStore = useSettingsStore();
 const connectionStore = useConnectionStore();
+const authStore = useAuthStore();
 const queryStore = useQueryStore();
 const { isDark, themePalette } = useTheme();
 const activeTab = ref<AdminTab>(restoredUiState.activeTab ?? "configs");
@@ -2851,11 +2853,11 @@ useUpdateBlocker(() =>
           <ReplaceAll class="h-3.5 w-3.5" />
           {{ t("nacos.contentReplace") }}
         </Button>
-        <Button size="sm" variant="outline" class="h-8 gap-1.5" @click="openBatchDialog('export')">
+        <Button v-if="authStore.hasPermission('export.data')" size="sm" variant="outline" class="h-8 gap-1.5" @click="openBatchDialog('export')">
           <Archive class="h-3.5 w-3.5" />
           {{ t("nacos.batchExport") }}
         </Button>
-        <Button size="sm" variant="outline" class="h-8 gap-1.5" :disabled="readOnly" @click="openBatchDialog('import')">
+        <Button v-if="authStore.hasPermission('import.data')" size="sm" variant="outline" class="h-8 gap-1.5" :disabled="readOnly" @click="openBatchDialog('import')">
           <FileInput class="h-3.5 w-3.5" />
           {{ t("nacos.batchImport") }}
         </Button>
@@ -3133,7 +3135,7 @@ useUpdateBlocker(() =>
                     <Clipboard class="h-3.5 w-3.5" />
                     <span class="nacos-config-secondary-label">{{ t("nacos.copy") }}</span>
                   </Button>
-                  <Button size="sm" variant="outline" class="h-8 shrink-0 gap-1.5 px-2.5" :title="t('nacos.export')" :aria-label="t('nacos.export')" @click="exportConfig">
+                  <Button v-if="authStore.hasPermission('export.data')" size="sm" variant="outline" class="h-8 shrink-0 gap-1.5 px-2.5" :title="t('nacos.export')" :aria-label="t('nacos.export')" @click="exportConfig">
                     <Download class="h-3.5 w-3.5" />
                     <span class="nacos-config-secondary-label">{{ t("nacos.export") }}</span>
                   </Button>

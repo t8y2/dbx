@@ -2650,6 +2650,7 @@ dependencies = [
  "pbkdf2 0.12.2",
  "redis",
  "reqwest 0.12.28",
+ "rusqlite",
  "rust-embed",
  "rustls 0.23.43",
  "serde",

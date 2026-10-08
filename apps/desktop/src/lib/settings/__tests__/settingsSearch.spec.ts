@@ -27,6 +27,7 @@ const categoryLabels = {
   mcp: "MCP",
   updates: "Updates",
   security: "Security",
+  accessControl: "Access Control",
   about: "About",
 } satisfies Record<SettingsCategory, string>;
 
@@ -159,6 +160,7 @@ describe("settings search", () => {
 
   it("maps legacy SQL file settings navigation to the editor", () => {
     expect(resolveSettingsCategory("sqlFile")).toBe("editor");
+    expect(resolveSettingsCategory("accessControl")).toBe("accessControl");
     expect(resolveSettingsCategory()).toBe("appearance");
     expect(resolveSettingsCategory("removed-category")).toBe("appearance");
   });

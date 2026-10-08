@@ -4,73 +4,68 @@ use objc2_foundation::NSString;
 use super::WryWebView;
 
 pub(crate) fn other_mouse_down(this: &WryWebView, event: &NSEvent) {
-  unsafe {
-    if event.r#type() == NSEventType::OtherMouseDown {
-      let button_number = event.buttonNumber();
-      match button_number {
-        // back button
-        3 => {
-          let js = create_js_mouse_event(this, event, true, true);
-          this.evaluateJavaScript_completionHandler(&NSString::from_str(&js), None);
-          return;
+    unsafe {
+        if event.r#type() == NSEventType::OtherMouseDown {
+            let button_number = event.buttonNumber();
+            match button_number {
+                // back button
+                3 => {
+                    let js = create_js_mouse_event(this, event, true, true);
+                    this.evaluateJavaScript_completionHandler(&NSString::from_str(&js), None);
+                    return;
+                }
+                // forward button
+                4 => {
+                    let js = create_js_mouse_event(this, event, true, false);
+                    this.evaluateJavaScript_completionHandler(&NSString::from_str(&js), None);
+                    return;
+                }
+                _ => {}
+            }
         }
-        // forward button
-        4 => {
-          let js = create_js_mouse_event(this, event, true, false);
-          this.evaluateJavaScript_completionHandler(&NSString::from_str(&js), None);
-          return;
-        }
-        _ => {}
-      }
-    }
 
-    this.mouseDown(event);
-  }
+        this.mouseDown(event);
+    }
 }
 pub(crate) fn other_mouse_up(this: &WryWebView, event: &NSEvent) {
-  unsafe {
-    if event.r#type() == NSEventType::OtherMouseUp {
-      let button_number = event.buttonNumber();
-      match button_number {
-        // back button
-        3 => {
-          let js = create_js_mouse_event(this, event, false, true);
-          this.evaluateJavaScript_completionHandler(&NSString::from_str(&js), None);
-          return;
+    unsafe {
+        if event.r#type() == NSEventType::OtherMouseUp {
+            let button_number = event.buttonNumber();
+            match button_number {
+                // back button
+                3 => {
+                    let js = create_js_mouse_event(this, event, false, true);
+                    this.evaluateJavaScript_completionHandler(&NSString::from_str(&js), None);
+                    return;
+                }
+                // forward button
+                4 => {
+                    let js = create_js_mouse_event(this, event, false, false);
+                    this.evaluateJavaScript_completionHandler(&NSString::from_str(&js), None);
+                    return;
+                }
+                _ => {}
+            }
         }
-        // forward button
-        4 => {
-          let js = create_js_mouse_event(this, event, false, false);
-          this.evaluateJavaScript_completionHandler(&NSString::from_str(&js), None);
-          return;
-        }
-        _ => {}
-      }
-    }
 
-    this.mouseUp(event);
-  }
+        this.mouseUp(event);
+    }
 }
 
-unsafe fn create_js_mouse_event(
-  view: &NSView,
-  event: &NSEvent,
-  down: bool,
-  back_button: bool,
-) -> String {
-  let event_name = if down { "mousedown" } else { "mouseup" };
-  // js equivalent https://developer.mozilla.org/en-US/docs/Web/API/MouseEvent/button
-  let button = if back_button { 3 } else { 4 };
-  let mods_flags = event.modifierFlags();
-  let window_point = event.locationInWindow();
-  let view_point = view.convertPoint_fromView(window_point, None);
-  let x = view_point.x as u32;
-  let y = view_point.y as u32;
-  // js equivalent https://developer.mozilla.org/en-US/docs/Web/API/MouseEvent/buttons
-  let buttons = NSEvent::pressedMouseButtons();
+unsafe fn create_js_mouse_event(view: &NSView, event: &NSEvent, down: bool, back_button: bool) -> String {
+    let event_name = if down { "mousedown" } else { "mouseup" };
+    // js equivalent https://developer.mozilla.org/en-US/docs/Web/API/MouseEvent/button
+    let button = if back_button { 3 } else { 4 };
+    let mods_flags = event.modifierFlags();
+    let window_point = event.locationInWindow();
+    let view_point = view.convertPoint_fromView(window_point, None);
+    let x = view_point.x as u32;
+    let y = view_point.y as u32;
+    // js equivalent https://developer.mozilla.org/en-US/docs/Web/API/MouseEvent/buttons
+    let buttons = NSEvent::pressedMouseButtons();
 
-  format!(
-    r#"(() => {{
+    format!(
+        r#"(() => {{
         const el = document.elementFromPoint({x},{y});
         const ev = new MouseEvent('{event_name}', {{
           view: window,
@@ -106,15 +101,15 @@ unsafe fn create_js_mouse_event(
           }}
         }}
       }})()"#,
-    event_name = event_name,
-    x = x,
-    y = y,
-    detail = event.clickCount(),
-    ctrl_key = mods_flags.contains(NSEventModifierFlags::Control),
-    alt_key = mods_flags.contains(NSEventModifierFlags::Option),
-    shift_key = mods_flags.contains(NSEventModifierFlags::Shift),
-    meta_key = mods_flags.contains(NSEventModifierFlags::Command),
-    button = button,
-    buttons = buttons,
-  )
+        event_name = event_name,
+        x = x,
+        y = y,
+        detail = event.clickCount(),
+        ctrl_key = mods_flags.contains(NSEventModifierFlags::Control),
+        alt_key = mods_flags.contains(NSEventModifierFlags::Option),
+        shift_key = mods_flags.contains(NSEventModifierFlags::Shift),
+        meta_key = mods_flags.contains(NSEventModifierFlags::Command),
+        button = button,
+        buttons = buttons,
+    )
 }

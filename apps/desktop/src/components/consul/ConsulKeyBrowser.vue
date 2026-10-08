@@ -15,6 +15,7 @@ import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { kvExportFilenameStem, type KvExportScopeRequest } from "@/lib/kv/kvExportScope";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useAuthStore } from "@/stores/authStore";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { useConsulStore } from "@/stores/consulStore";
 import { isCurrentWatchEvent, nextWatchIndex } from "@/lib/consul/watchState";
@@ -24,6 +25,7 @@ const props = defineProps<{ connectionId: string }>();
 const { t } = useI18n();
 const { toast } = useToast();
 const connectionStore = useConnectionStore();
+const authStore = useAuthStore();
 const consulStore = useConsulStore();
 const browserRef = ref<InstanceType<typeof KvKeyBrowser> | null>(null);
 const fileInputRef = ref<HTMLInputElement>();
@@ -760,9 +762,9 @@ defineExpose({ focusSearch, refresh });
     >
       <template #toolbar-trailing>
         <Button variant="ghost" size="sm" class="h-9 gap-1.5 whitespace-nowrap" @click="openSearch"> <Search class="h-3.5 w-3.5" />{{ t("consul.tools.search") }} </Button>
-        <Button variant="ghost" size="sm" class="h-9 gap-1.5 whitespace-nowrap" :disabled="exporting" @click="exportOpen = true"> <Download class="h-3.5 w-3.5" />{{ t("consul.tools.exportPrefix") }} </Button>
-        <Button variant="ghost" size="sm" class="h-9 gap-1.5 whitespace-nowrap" :disabled="readOnly" @click="chooseImportFile"> <FileUp class="h-3.5 w-3.5" />{{ t("consul.tools.import") }} </Button>
-        <Button variant="ghost" size="sm" class="h-9 gap-1.5 whitespace-nowrap" @click="openMigration"> <ArrowRightLeft class="h-3.5 w-3.5" />{{ t("consul.tools.migrate") }} </Button>
+        <Button v-if="authStore.hasPermission('export.data')" variant="ghost" size="sm" class="h-9 gap-1.5 whitespace-nowrap" :disabled="exporting" @click="exportOpen = true"> <Download class="h-3.5 w-3.5" />{{ t("consul.tools.exportPrefix") }} </Button>
+        <Button v-if="authStore.hasPermission('import.data')" variant="ghost" size="sm" class="h-9 gap-1.5 whitespace-nowrap" :disabled="readOnly" @click="chooseImportFile"> <FileUp class="h-3.5 w-3.5" />{{ t("consul.tools.import") }} </Button>
+        <Button v-if="authStore.hasPermission('import.data')" variant="ghost" size="sm" class="h-9 gap-1.5 whitespace-nowrap" @click="openMigration"> <ArrowRightLeft class="h-3.5 w-3.5" />{{ t("consul.tools.migrate") }} </Button>
       </template>
     </KvKeyBrowser>
 
@@ -802,7 +804,7 @@ defineExpose({ focusSearch, refresh });
         </div>
         <div class="flex shrink-0 items-center justify-between gap-3 text-xs text-muted-foreground">
           <span>{{ t("consul.tools.searchSummary", { matched: searchMatched, scanned: searchScanned }) }}</span>
-          <Button v-if="searchResults.length" size="sm" variant="outline" class="h-8 gap-1.5" :disabled="exportingSearchResults" @click="exportSearchResults">
+          <Button v-if="authStore.hasPermission('export.data') && searchResults.length" size="sm" variant="outline" class="h-8 gap-1.5" :disabled="exportingSearchResults" @click="exportSearchResults">
             <Loader2 v-if="exportingSearchResults" class="h-3.5 w-3.5 animate-spin" />
             <Download v-else class="h-3.5 w-3.5" />
             {{ t("consul.tools.exportSearchResults") }}

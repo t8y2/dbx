@@ -245,6 +245,7 @@ import AiProviderLogo from "@/components/icons/AiProviderLogo.vue";
 import AppLogo from "@/components/icons/AppLogo.vue";
 import ChangelogPanel from "@/components/settings/ChangelogPanel.vue";
 import SettingsTransferPanel from "@/components/settings/SettingsTransferPanel.vue";
+import AccessControlPage from "@/components/admin/AccessControlPage.vue";
 import McpResourceScopePicker from "@/components/settings/McpResourceScopePicker.vue";
 import McpDatabaseScopePicker from "@/components/settings/McpDatabaseScopePicker.vue";
 import McpAuthorizationStepper from "@/components/settings/McpAuthorizationStepper.vue";
@@ -266,6 +267,7 @@ import {
 import { applyEditorSettingsDraftToRefs, type EditorSettingsDraftRefMap } from "@/lib/settings/applyEditorSettingsDraft";
 import { serializeSettingsTransfer, sortTransferCategories, transferCategoryForKey, type SettingsTransferCategoryId } from "@/lib/settings/settingsTransfer";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useAuthStore } from "@/stores/authStore";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
@@ -316,6 +318,7 @@ import { buildConnectionGroupIdPathMap, connectionGroupDestinationRows, connecti
 const { t, locale } = useI18n();
 const { toast } = useToast();
 const settingsStore = useSettingsStore();
+const authStore = useAuthStore();
 const historyRetention = useHistoryRetentionSetting();
 const mcpHistoryRetention = useHistoryRetentionSetting(loadMcpHistoryRetentionLimit, saveMcpHistoryRetentionLimit);
 const { draft: editHistoryRetentionLimit, loaded: historyRetentionLoaded, loading: historyRetentionLoading, saving: historyRetentionSaving, loadError: historyRetentionLoadError } = historyRetention;
@@ -3065,6 +3068,7 @@ const settingsCategoryNav = computed<{ value: SettingsCategory; label: string }[
   { value: "mcp" as const, label: t("settings.mcpTab") },
   { value: "updates" as const, label: t("settings.updatesTab") },
   ...(isWeb ? [{ value: "security" as const, label: t("settings.securityTab") }] : []),
+  ...(isWeb && authStore.isAdmin ? [{ value: "accessControl" as const, label: t("settings.accessControlTab") }] : []),
   { value: "about", label: t("settings.aboutTab") },
 ]);
 const settingsTabsWithApplyFooter = new Set<SettingsCategory>(["editor", "formatter", "appearance", "navigation", "data", "shortcuts", "snippets", "updates"]);
@@ -3158,6 +3162,8 @@ function settingsSearchTargetClass(targetId: string): string {
 
 function onSettingsCategoryClick(category: SettingsCategory) {
   settingsSearchOpen.value = false;
+  // Clear search query when navigating to security tab to prevent browser autofill interference with password change form.
+  if (category === "security") settingsSearchQuery.value = "";
   activeSettingsTab.value = category;
 }
 
@@ -4785,6 +4791,20 @@ onUnmounted(() => {
   cleanupTruncationObservers();
 });
 
+// Change-password failures report `{"error": code}` bodies; map known codes
+// (weak_password, ...) through the backend-error catalog before falling back.
+async function readChangePasswordError(res: Response): Promise<string | null> {
+  try {
+    const payload: unknown = await res.json();
+    const code = payload && typeof payload === "object" && typeof (payload as { error?: unknown }).error === "string" ? (payload as { error: string }).error : null;
+    if (!code) return null;
+    const translated = translateBackendError(t, code);
+    return translated !== code ? translated : null;
+  } catch {
+    return null;
+  }
+}
+
 async function changePassword() {
   if (newPassword.value !== confirmNewPassword.value) {
     passwordMessage.value = t("auth.passwordMismatch");
@@ -4812,7 +4832,7 @@ async function changePassword() {
       passwordMessage.value = t("auth.oldPasswordWrong");
       passwordError.value = true;
     } else {
-      passwordMessage.value = t("auth.changePasswordFailed");
+      passwordMessage.value = (await readChangePasswordError(res)) ?? t("auth.changePasswordFailed");
       passwordError.value = true;
     }
   } catch {
@@ -6150,7 +6170,7 @@ onUnmounted(() => {
                 data-settings-global-search
                 v-model="settingsSearchQuery"
                 type="text"
-                autocomplete="off"
+                autocomplete="new-password"
                 role="combobox"
                 :aria-label="t('settings.searchSettings')"
                 :aria-expanded="settingsSearchVisible ? 'true' : 'false'"
@@ -10849,13 +10869,17 @@ LIMIT 100;</pre
                 <p class="text-sm text-muted-foreground">
                   {{ t("auth.changePasswordDescription") }}
                 </p>
-                <PasswordInput v-model="oldPassword" :placeholder="t('auth.oldPassword')" inputClass="h-9" autocomplete="off" />
-                <PasswordInput v-model="newPassword" :placeholder="t('auth.newPassword')" inputClass="h-9" autocomplete="off" />
-                <PasswordInput v-model="confirmNewPassword" :placeholder="t('auth.confirmPassword')" inputClass="h-9" autocomplete="off" />
+                <PasswordInput v-model="oldPassword" :placeholder="t('auth.oldPassword')" inputClass="h-9" autocomplete="current-password" />
+                <PasswordInput v-model="newPassword" :placeholder="t('auth.newPassword')" inputClass="h-9" autocomplete="new-password" />
+                <PasswordInput v-model="confirmNewPassword" :placeholder="t('auth.confirmPassword')" inputClass="h-9" autocomplete="new-password" />
                 <p v-if="passwordMessage" class="text-xs" :class="passwordError ? 'text-destructive' : 'text-green-500'">
                   {{ passwordMessage }}
                 </p>
               </div>
+            </section>
+
+            <section v-else-if="activeSettingsTab === 'accessControl' && isWeb && authStore.isAdmin" class="h-full min-h-0 py-2">
+              <AccessControlPage />
             </section>
 
             <section v-else-if="activeSettingsTab === 'tunnels'" data-settings-search-id="tunnels" :class="['flex flex-col gap-5 py-2', settingsSearchTargetClass('tunnels')]">

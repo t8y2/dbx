@@ -15,6 +15,9 @@ pub struct SavedSqlFolder {
     pub order_index: i64,
     pub created_at: String,
     pub updated_at: String,
+    /// SHA-256 hash of the optional folder protection password. `None` when unprotected.
+    #[serde(default)]
+    pub password_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

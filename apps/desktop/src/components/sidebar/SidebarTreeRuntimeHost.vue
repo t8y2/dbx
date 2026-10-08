@@ -64,11 +64,16 @@ import {
   GitBranch,
   Sparkles,
   Link2,
+  KeyRound,
+  LockOpen,
+  Lock,
 } from "@lucide/vue";
 import type { ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
+import { promptConnectionGroupUnlock } from "@/lib/sidebar/connectionGroupPassword";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useAuthStore } from "@/stores/authStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
 import { useToast } from "@/composables/useToast";
@@ -371,6 +376,7 @@ import {
   deleteConnectionsWithGroup,
   showMoveToNewGroupDialog,
   moveToNewGroupName,
+  showSetGroupPasswordDialog,
   type DuplicateStructureSource,
 } from "./sidebarTreeDialogState";
 
@@ -381,6 +387,8 @@ const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 
 const settingsStore = useSettingsStore();
+
+const authStore = useAuthStore();
 
 const savedSqlStore = useSavedSqlStore();
 
@@ -851,6 +859,10 @@ async function toggle(requestId = beginNavigationRequest()) {
   const wasExpanded = !!node.isExpanded;
 
   if (node.type === "connection-group") {
+    if (!node.isExpanded) {
+      const group = connectionStore.sidebarLayout.groups.find((item) => item.id === node.id);
+      if (group?.passwordHash && !(await promptConnectionGroupUnlock(group))) return;
+    }
     node.isExpanded = !node.isExpanded;
     connectionStore.toggleConnectionGroupCollapsed(node.id);
     emitNodeToggled(node, wasExpanded);
@@ -1535,6 +1547,8 @@ function requestDeleteSelectedNode(): boolean {
     return true;
   }
   if (activeNode.value.type === "connection-group") {
+    // Locked groups cannot be deleted — unlock first.
+    if (connectionGroupPasswordLockable()) return true;
     deleteConnectionGroup();
     return true;
   }
@@ -5672,13 +5686,13 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
     if (canCopyFinalProxyPort.value) {
       items.push({ label: t("contextMenu.copyFinalProxyPort"), action: copyFinalProxyPort, icon: Network });
     }
-    if (canOpenSqlFileExecution.value) {
+    if (authStore.hasPermission("sqlfile.execute") && canOpenSqlFileExecution.value) {
       items.push({ label: t("sqlFile.title"), action: openSqlFileExecution, icon: FileCode });
     }
-    if (canExportAllDatabases.value) {
+    if (authStore.hasPermission("export.data") && canExportAllDatabases.value) {
       items.push({ label: t("contextMenu.exportAllDatabases"), action: openAllDatabasesExport, icon: Upload });
     }
-    if (canOpenScheduledBackups.value) {
+    if (authStore.hasPermission("backup.restore") && canOpenScheduledBackups.value) {
       items.push({ label: t("databaseBackup.title"), action: openScheduledBackups, icon: CalendarClock });
     }
     if (canCreateDatabase.value) {
@@ -5750,7 +5764,7 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
         icon: FolderOpen,
       });
     }
-    if (canBackupSqliteDatabase.value) {
+    if (authStore.hasPermission("backup.restore") && canBackupSqliteDatabase.value) {
       const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
       const usesSsh = (config?.transport_layers || []).some((layer) => layer.enabled !== false && layer.type === "ssh");
       items.push({
@@ -5787,7 +5801,9 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
   if (node.type === "connection-group") {
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     items.push({ label: "", separator: true });
-    items.push({ label: t("toolbar.newConnection"), action: newConnectionInGroup, icon: Plus });
+    if (authStore.hasPermission("connection.manage")) {
+      items.push({ label: t("toolbar.newConnection"), action: newConnectionInGroup, icon: Plus });
+    }
     items.push({ label: t("connectionGroup.newGroup"), action: newSubgroup, icon: FolderPlus });
     items.push({
       label: connectionGroupDisconnectMenuLabel(),
@@ -5802,17 +5818,85 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
       icon: Pencil,
       shortcut: shortcutRename,
     });
+    // Locked groups cannot have password changed or removed — unlock first.
+    if (!connectionGroupPasswordLockable()) {
+      items.push({
+        label: connectionGroupPasswordMenuLabel(),
+        action: openSetGroupPasswordDialog,
+        icon: KeyRound,
+      });
+    }
+    if (connectionGroupPasswordLockable()) {
+      items.push({
+        label: t("connectionGroup.unlockGroup"),
+        action: unlockConnectionGroupFromMenu,
+        icon: LockOpen,
+      });
+    } else if (connectionGroupPasswordUnlocked()) {
+      items.push({
+        label: t("connectionGroup.lockGroup"),
+        action: lockConnectionGroupFromMenu,
+        icon: Lock,
+      });
+    }
     items.push({ label: "", separator: true });
-    items.push({
-      label: connectionGroupDeleteMenuLabel(),
-      action: deleteConnectionGroup,
-      icon: Trash2,
-      shortcut: shortcutDelete,
-      variant: "destructive" as const,
-    });
+    // Locked groups cannot be deleted — unlock first.
+    if (!connectionGroupPasswordLockable()) {
+      items.push({
+        label: connectionGroupDeleteMenuLabel(),
+        action: deleteConnectionGroup,
+        icon: Trash2,
+        shortcut: shortcutDelete,
+        variant: "destructive" as const,
+      });
+    }
     return true;
   }
   return false;
+}
+
+function connectionGroupPasswordMenuLabel(): string {
+  const node = activeNode.value;
+  if (node?.type !== "connection-group") return "";
+  const group = connectionStore.sidebarLayout.groups.find((g) => g.id === node.id);
+  return group?.passwordHash ? t("connectionGroup.changePassword") : t("connectionGroup.setPassword");
+}
+
+function openSetGroupPasswordDialog() {
+  const node = activeNode.value;
+  if (node?.type !== "connection-group") return;
+  sidebarFormTarget.value = node;
+  showSetGroupPasswordDialog.value = true;
+}
+
+function connectionGroupPasswordLockable(): boolean {
+  const node = activeNode.value;
+  if (node?.type !== "connection-group") return false;
+  const group = connectionStore.sidebarLayout.groups.find((g) => g.id === node.id);
+  return !!group?.passwordHash && !connectionStore.isConnectionGroupUnlocked(node.id);
+}
+
+function connectionGroupPasswordUnlocked(): boolean {
+  const node = activeNode.value;
+  if (node?.type !== "connection-group") return false;
+  const group = connectionStore.sidebarLayout.groups.find((g) => g.id === node.id);
+  return !!group?.passwordHash && connectionStore.isConnectionGroupUnlocked(node.id);
+}
+
+async function unlockConnectionGroupFromMenu() {
+  const node = activeNode.value;
+  if (node?.type !== "connection-group") return;
+  const group = connectionStore.sidebarLayout.groups.find((g) => g.id === node.id);
+  if (!group?.passwordHash) return;
+  await promptConnectionGroupUnlock(group);
+}
+
+function lockConnectionGroupFromMenu() {
+  const node = activeNode.value;
+  if (node?.type !== "connection-group") return;
+  const group = connectionStore.sidebarLayout.groups.find((g) => g.id === node.id);
+  if (!group?.passwordHash) return;
+  connectionStore.lockConnectionGroup(node.id);
 }
 
 function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
@@ -5896,7 +5980,7 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     if (canCreateTable.value) {
       items.push({ label: t("contextMenu.createTable"), action: createTable, icon: Plus });
     }
-    if (canOpenTableImport.value) {
+    if (authStore.hasPermission("import.data") && canOpenTableImport.value) {
       items.push({ label: t("contextMenu.importData"), action: openTableImport, icon: Download });
     }
     if (canCreateSchema.value) {
@@ -5905,7 +5989,7 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     if (canEditSchemaComment.value) {
       items.push({ label: t("contextMenu.editSchemaComment"), action: openEditSchemaCommentDialog, icon: SquarePen });
     }
-    if (canOpenSqlFileExecution.value) {
+    if (authStore.hasPermission("sqlfile.execute") && canOpenSqlFileExecution.value) {
       items.push({ label: t("sqlFile.title"), action: openSqlFileExecution, icon: FileCode });
     }
     if (canOpenDiagram.value) {
@@ -5929,10 +6013,18 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       });
     }
     items.push({ label: "", separator: true });
-    items.push({ label: t("transfer.dataTransfer"), action: openTransfer, icon: ArrowRightLeft });
-    items.push({ label: t("diff.title"), action: openSchemaDiff, icon: ArrowRightLeft });
-    items.push({ label: t("dataCompare.title"), action: openDataCompare, icon: ArrowRightLeft });
-    items.push({ label: t("contextMenu.exportDatabase"), action: openDatabaseExport, icon: Upload });
+    if (authStore.hasPermission("transfer")) {
+      items.push({ label: t("transfer.dataTransfer"), action: openTransfer, icon: ArrowRightLeft });
+    }
+    if (authStore.hasPermission("schema.compare")) {
+      items.push({ label: t("diff.title"), action: openSchemaDiff, icon: ArrowRightLeft });
+    }
+    if (authStore.hasPermission("data.compare")) {
+      items.push({ label: t("dataCompare.title"), action: openDataCompare, icon: ArrowRightLeft });
+    }
+    if (authStore.hasPermission("export.data")) {
+      items.push({ label: t("contextMenu.exportDatabase"), action: openDatabaseExport, icon: Upload });
+    }
     if (canOpenDataDictionary.value) {
       items.push({ label: t("dataDictionary.title"), action: openDataDictionary, icon: FileText });
     }
@@ -6077,9 +6169,15 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     }
     if (node.type === "mongo-db") {
       items.push({ label: "", separator: true });
-      items.push({ label: t("transfer.dataTransfer"), action: openTransfer, icon: ArrowRightLeft });
-      items.push({ label: t("mongoDump.menuDump"), action: () => openMongoDatabaseDump("dump"), icon: Upload });
-      items.push({ label: t("mongoDump.menuRestore"), action: () => openMongoDatabaseDump("restore"), icon: Download });
+      if (authStore.hasPermission("transfer")) {
+        items.push({ label: t("transfer.dataTransfer"), action: openTransfer, icon: ArrowRightLeft });
+      }
+      if (authStore.hasPermission("export.data")) {
+        items.push({ label: t("mongoDump.menuDump"), action: () => openMongoDatabaseDump("dump"), icon: Upload });
+      }
+      if (authStore.hasPermission("backup.restore")) {
+        items.push({ label: t("mongoDump.menuRestore"), action: () => openMongoDatabaseDump("restore"), icon: Download });
+      }
     }
     if (node.type === "redis-db") {
       items.push({ label: "", separator: true });
@@ -6153,17 +6251,21 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     if (canCloneMongoCollection.value) {
       items.push({ label: t("contextMenu.cloneCollection"), action: openCloneMongoCollectionDialog, icon: CopyPlus });
     }
-    items.push({ label: t("contextMenu.importData"), action: openMongoImport, icon: Download });
-    items.push({
-      label: t("contextMenu.exportData"),
-      icon: Upload,
-      children: [
-        { label: "CSV", action: () => void exportMongoCollection("csv") },
-        { label: "NDJSON", action: () => void exportMongoCollection("ndjson") },
-        { label: "BSON dump", action: () => void exportMongoCollection("bson") },
-        { label: "BSON dump (gzip)", action: () => void exportMongoCollection("bsonGzip") },
-      ],
-    });
+    if (authStore.hasPermission("import.data")) {
+      items.push({ label: t("contextMenu.importData"), action: openMongoImport, icon: Download });
+    }
+    if (authStore.hasPermission("export.data")) {
+      items.push({
+        label: t("contextMenu.exportData"),
+        icon: Upload,
+        children: [
+          { label: "CSV", action: () => void exportMongoCollection("csv") },
+          { label: "NDJSON", action: () => void exportMongoCollection("ndjson") },
+          { label: "BSON dump", action: () => void exportMongoCollection("bson") },
+          { label: "BSON dump (gzip)", action: () => void exportMongoCollection("bsonGzip") },
+        ],
+      });
+    }
     if (canDropMongoCollection.value) {
       items.push({ label: "", separator: true });
       items.push({ label: t("contextMenu.dropCollection"), action: dropMongoCollection, icon: Trash2, shortcut: shortcutDelete, variant: "destructive" as const });
@@ -6241,7 +6343,9 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
         items.push(addToAiMenuItem(node));
       }
       items.push({ label: "", separator: true });
-      items.push(exportDataSubmenu(false));
+      if (authStore.hasPermission("export.data")) {
+        items.push(exportDataSubmenu(false));
+      }
       items.push({ label: t("contextMenu.refreshChildren"), action: refresh, icon: RefreshCw, shortcut: shortcutRefresh });
       appendPluginTableMenuItems(items, node);
       return true;
@@ -6324,16 +6428,18 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     if (canOpenDiagram.value) {
       items.push({ label: t("diagram.open"), action: openDiagram, icon: Network });
     }
-    if (canOpenTableImport.value) {
+    if (authStore.hasPermission("import.data") && canOpenTableImport.value) {
       items.push({ label: t("contextMenu.importData"), action: openTableImport, icon: Download });
     }
-    if (isTableNotView.value) {
+    if (authStore.hasPermission("data.compare") && isTableNotView.value) {
       items.push({ label: t("dataCompare.title"), action: openDataCompare, icon: ArrowRightLeft });
     }
     items.push({ label: "", separator: true });
-    items.push(exportDataSubmenu());
-    items.push({ label: t("contextMenu.exportDatabase"), action: openDatabaseExport, icon: Upload });
-    items.push({ label: t("contextMenu.exportStructure"), action: exportStructure, icon: FileCode });
+    if (authStore.hasPermission("export.data")) {
+      items.push(exportDataSubmenu());
+      items.push({ label: t("contextMenu.exportDatabase"), action: openDatabaseExport, icon: Upload });
+      items.push({ label: t("contextMenu.exportStructure"), action: exportStructure, icon: FileCode });
+    }
     if (canOpenDataDictionary.value) {
       items.push({ label: t("dataDictionary.title"), action: openDataDictionary, icon: FileText });
     }
@@ -6457,7 +6563,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       items.push({ label: t("contextMenu.compileObject"), action: compileXuguObject, icon: Wrench });
     }
     items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
-    if (!isPackageMember) {
+    if (!isPackageMember && authStore.hasPermission("schema.compare")) {
       items.push({ label: t("diff.title"), action: openSchemaDiffForRoutine, icon: ArrowRightLeft });
     }
     if (!isPackageMember && canViewDatabaseObjectDependencies(currentDatabaseType(), node)) {
@@ -6602,7 +6708,7 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
     const canLoadAllObjectGroup = node.type === "group-tables" || node.type === "group-dolt-system-tables" || node.type === "group-views" || node.type === "group-materialized-views";
     if (node.type === "group-tables" && canCreateTable.value) {
       items.push({ label: t("contextMenu.createTable"), action: createTable, icon: Plus });
-      if (canOpenTableImport.value) {
+      if (authStore.hasPermission("import.data") && canOpenTableImport.value) {
         items.push({ label: t("contextMenu.importData"), action: openTableImport, icon: Upload });
       }
       if (canPasteTreeClipboardToCurrentNode() || canTransferTreeClipboardToCurrentNode()) {

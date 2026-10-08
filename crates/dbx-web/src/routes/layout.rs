@@ -23,7 +23,15 @@ pub async fn save_sidebar_layout(
 
 pub async fn load_sidebar_layout(State(state): State<Arc<WebState>>) -> Result<Json<serde_json::Value>, AppError> {
     let layout = state.app.storage.load_sidebar_layout().await.map_err(AppError::from)?;
-    Ok(Json(layout.unwrap_or(serde_json::json!(null))))
+    let layout = layout.unwrap_or(serde_json::json!(null));
+    // T4：非 admin 用户按有效 scope 过滤——移除不可见连接条目与不再含任何
+    // 可见连接（且自身未被勾选）的分组，groups 元数据同步裁剪。桌面与
+    // DBX_DISABLE_PASSWORD（无用户上下文）维持原行为。
+    let layout = match crate::request_context::current_request_user() {
+        Some(user) if !user.is_admin => crate::access_gate::filter_sidebar_layout_for_scope(layout, &user.permissions),
+        _ => layout,
+    };
+    Ok(Json(layout))
 }
 
 #[derive(Deserialize)]

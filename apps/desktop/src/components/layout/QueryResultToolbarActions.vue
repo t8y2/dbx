@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import * as api from "@/lib/backend/api";
 import { createFrontendPluginRegistry, type PluginContributionEntry } from "@/lib/plugins/frontendPlugin";
+import { useAuthStore } from "@/stores/authStore";
 import type { InstalledPlugin, PluginResultViewContribution } from "@/types/database";
 
 type OutputView = "result" | "summary" | "explain" | "chart" | "messages" | "profile";
@@ -31,6 +32,7 @@ const emit = defineEmits<{
 }>();
 
 const { t, locale: appLocale } = useI18n();
+const authStore = useAuthStore();
 
 const installedPlugins = ref<InstalledPlugin[]>([]);
 const resultViews = computed<PluginContributionEntry<PluginResultViewContribution>[]>(() => createFrontendPluginRegistry(installedPlugins.value, appLocale.value).listResultViews());
@@ -88,7 +90,7 @@ void refreshInstalledPlugins();
       </Button>
     </LightTooltip>
 
-    <LightTooltip v-if="canExportArchive" :text="t('tabs.exportResultArchive')" :disabled="!compact" side="bottom" :delay="0" :close-delay="0" nowrap>
+    <LightTooltip v-if="authStore.hasPermission('export.data') && canExportArchive" :text="t('tabs.exportResultArchive')" :disabled="!compact" side="bottom" :delay="0" :close-delay="0" nowrap>
       <Button
         variant="ghost"
         size="sm"

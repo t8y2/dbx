@@ -341,6 +341,7 @@ pub async fn list_databases(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisConnectionRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result =
         dbx_core::redis_ops::redis_list_databases_core(&state.app, &req.connection_id).await.map_err(AppError::from)?;
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
@@ -350,6 +351,7 @@ pub async fn scan_keys(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisScanRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::redis_ops::redis_scan_keys_core(
         &state.app,
         &req.connection_id,
@@ -367,6 +369,7 @@ pub async fn scan_keys_batch(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisScanBatchRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::redis_ops::redis_scan_keys_batch_core(
         &state.app,
         &req.connection_id,
@@ -386,6 +389,7 @@ pub async fn scan_values(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisValueScanRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::redis_ops::redis_scan_values_core(
         &state.app,
         &req.connection_id,
@@ -405,6 +409,7 @@ pub async fn get_value(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisKeyRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::redis_ops::redis_get_value_in_db_core(&state.app, &req.connection_id, req.db, &req.key_raw)
         .await
         .map_err(AppError::from)?;
@@ -415,6 +420,7 @@ pub async fn get_ttl(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisKeyRequest>,
 ) -> Result<Json<i64>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let ttl = dbx_core::redis_ops::redis_get_ttl_in_db_core(&state.app, &req.connection_id, req.db, &req.key_raw)
         .await
         .map_err(AppError::from)?;
@@ -425,6 +431,7 @@ pub async fn get_stream_entries(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisStreamEntriesRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::redis_ops::redis_stream_entries_in_db_core(
         &state.app,
         &req.connection_id,
@@ -441,6 +448,7 @@ pub async fn get_stream_groups(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisKeyRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result =
         dbx_core::redis_ops::redis_stream_groups_in_db_core(&state.app, &req.connection_id, req.db, &req.key_raw)
             .await
@@ -452,6 +460,7 @@ pub async fn get_stream_consumers(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisStreamGroupRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::redis_ops::redis_stream_consumers_in_db_core(
         &state.app,
         &req.connection_id,
@@ -468,6 +477,7 @@ pub async fn get_stream_pending(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisStreamPendingRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::redis_ops::redis_stream_pending_in_db_core(
         &state.app,
         &req.connection_id,
@@ -486,6 +496,7 @@ pub async fn load_more(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisLoadMoreRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::redis_ops::redis_load_more_in_db_core(
         &state.app,
         &req.connection_id,
@@ -506,6 +517,7 @@ pub async fn set_string(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisSetStringRequest>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "SET").await?;
     dbx_core::redis_ops::redis_set_string_in_db_core(
         &state.app,
@@ -524,6 +536,7 @@ pub async fn delete_key(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisKeyRequest>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "Delete key").await?;
     dbx_core::redis_ops::redis_delete_key_in_db_core(&state.app, &req.connection_id, req.db, &req.key_raw)
         .await
@@ -535,6 +548,7 @@ pub async fn rename_key(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisRenameKeyRequest>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "RENAMENX").await?;
     dbx_core::redis_ops::redis_rename_key_in_db_core(
         &state.app,
@@ -552,6 +566,7 @@ pub async fn hash_set(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisHashRequest>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "HSET").await?;
     let value = req.value.as_deref().unwrap_or("");
     dbx_core::redis_ops::redis_hash_set_in_db_core(
@@ -572,6 +587,7 @@ pub async fn hash_del(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisHashRequest>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "HDEL").await?;
     dbx_core::redis_ops::redis_hash_del_in_db_core(&state.app, &req.connection_id, req.db, &req.key_raw, &req.field)
         .await
@@ -583,6 +599,7 @@ pub async fn hash_field_update(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisHashFieldUpdateRequest>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "Atomic hash field update").await?;
     dbx_core::redis_ops::redis_hash_field_update_in_db_core(
         &state.app,
@@ -602,6 +619,7 @@ pub async fn hash_field_set_ttl(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisHashFieldTtlRequest>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "HEXPIRE").await?;
     dbx_core::redis_ops::redis_hash_field_set_ttl_in_db_core(
         &state.app,
@@ -620,6 +638,7 @@ pub async fn hash_field_set_expire_at(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisHashFieldExpireAtRequest>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "HEXPIREAT").await?;
     dbx_core::redis_ops::redis_hash_field_set_expire_at_in_db_core(
         &state.app,
@@ -638,6 +657,7 @@ pub async fn list_push(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisListRequest>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "LPUSH").await?;
     let value = req.value.as_deref().unwrap_or("");
     dbx_core::redis_ops::redis_list_push_in_db_core(
@@ -657,6 +677,7 @@ pub async fn list_set(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisListRequest>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "LSET").await?;
     let index = req.index.unwrap_or(0);
     let value = req.value.as_deref().unwrap_or("");
@@ -670,6 +691,7 @@ pub async fn list_remove(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisListRequest>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "LREM").await?;
     let index = req.index.unwrap_or(0);
     dbx_core::redis_ops::redis_list_remove_in_db_core(&state.app, &req.connection_id, req.db, &req.key_raw, index)
@@ -682,6 +704,7 @@ pub async fn set_add(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisSetRequest>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "SADD").await?;
     dbx_core::redis_ops::redis_set_add_in_db_core(
         &state.app,
@@ -700,6 +723,7 @@ pub async fn set_remove(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisSetRequest>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "SREM").await?;
     dbx_core::redis_ops::redis_set_remove_in_db_core(&state.app, &req.connection_id, req.db, &req.key_raw, &req.member)
         .await
@@ -708,6 +732,7 @@ pub async fn set_remove(
 }
 
 pub async fn zadd(State(state): State<Arc<WebState>>, Json(req): Json<RedisZaddRequest>) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "ZADD").await?;
     dbx_core::redis_ops::redis_zadd_in_db_core(
         &state.app,
@@ -727,6 +752,7 @@ pub async fn zset_update(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisZsetUpdateRequest>,
 ) -> Result<Json<bool>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "ZADD/ZREM").await?;
     let used_acl_compatibility = dbx_core::redis_ops::redis_zset_update_in_db_core(
         &state.app,
@@ -747,6 +773,7 @@ pub async fn stream_add(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisStreamAddRequest>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "XADD").await?;
     dbx_core::redis_ops::redis_stream_add_in_db_core(
         &state.app,
@@ -766,6 +793,7 @@ pub async fn json_set(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisJsonSetRequest>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "JSON.SET").await?;
     dbx_core::redis_ops::redis_json_set_in_db_core(
         &state.app,
@@ -784,6 +812,7 @@ pub async fn check_json_module(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisDbRequest>,
 ) -> Result<Json<bool>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = dbx_core::redis_ops::redis_check_json_module_in_db_core(&state.app, &req.connection_id, req.db)
         .await
         .map_err(AppError::from)?;
@@ -794,6 +823,7 @@ pub async fn set_ttl(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisSetTtlRequest>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "EXPIRE").await?;
     dbx_core::redis_ops::redis_set_ttl_in_db_core(&state.app, &req.connection_id, req.db, &req.key_raw, req.ttl)
         .await
@@ -805,6 +835,7 @@ pub async fn set_expire_at(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisSetExpireAtRequest>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "EXPIREAT").await?;
     dbx_core::redis_ops::redis_set_expire_at_in_db_core(
         &state.app,
@@ -822,6 +853,7 @@ pub async fn set_keys_ttl(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisKeysTtlRequest>,
 ) -> Result<Json<RedisKeysExpiryResult>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "EXPIRE").await?;
     let result = dbx_core::redis_ops::redis_set_keys_ttl_in_db_core(
         &state.app,
@@ -839,6 +871,7 @@ pub async fn set_keys_expire_at(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisKeysExpireAtRequest>,
 ) -> Result<Json<RedisKeysExpiryResult>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "EXPIREAT").await?;
     let result = dbx_core::redis_ops::redis_set_keys_expire_at_in_db_core(
         &state.app,
@@ -856,6 +889,7 @@ pub async fn delete_keys(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisKeysRequest>,
 ) -> Result<Json<u64>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "Delete keys").await?;
     let result =
         dbx_core::redis_ops::redis_delete_keys_in_db_core(&state.app, &req.connection_id, req.db, &req.key_raws)
@@ -868,6 +902,7 @@ pub async fn delete_keys_by_pattern(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisKeysByPatternRequest>,
 ) -> Result<Json<u64>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "Delete keys").await?;
     let result = dbx_core::redis_ops::redis_delete_keys_by_pattern_in_db_core(
         &state.app,
@@ -884,6 +919,7 @@ pub async fn flush_db(
     State(state): State<Arc<WebState>>,
     Json(req): Json<RedisDbRequest>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "FLUSHDB").await?;
     dbx_core::redis_ops::redis_flush_db_core(&state.app, &req.connection_id, req.db).await.map_err(AppError::from)?;
     Ok(Json(()))

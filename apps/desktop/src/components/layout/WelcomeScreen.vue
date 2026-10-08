@@ -4,6 +4,7 @@ import { FilePlus2, Plus, History, Download, Database, Search, ShieldCheck, Spar
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import TruncatedTextTooltip from "@/components/ui/TruncatedTextTooltip.vue";
 import { connectionDriverLabel, connectionIconType, connectionRedactedNameLabel, connectionRedactedOptionSubtitle } from "@/lib/connection/connectionPresentation";
+import { useAuthStore } from "@/stores/authStore";
 import type { ConnectionConfig } from "@/types/database";
 
 export interface WelcomeSavedSqlHistoryItem {
@@ -35,6 +36,7 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+const authStore = useAuthStore();
 
 function welcomeConnectionSubtitle(connection: ConnectionConfig): string {
   return connectionRedactedOptionSubtitle(connection) || connectionDriverLabel(connection);
@@ -91,7 +93,7 @@ function welcomeConnectionSubtitle(connection: ConnectionConfig): string {
             <div class="text-sm font-medium">{{ t("welcome.shortcuts") }}</div>
           </div>
           <div class="grid min-w-0 gap-1 p-2">
-            <button class="flex min-w-0 items-center gap-2 overflow-hidden rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50" @click="emit('new-connection')">
+            <button v-if="authStore.hasPermission('connection.manage')" class="flex min-w-0 items-center gap-2 overflow-hidden rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50" @click="emit('new-connection')">
               <Plus class="h-4 w-4 shrink-0" /> <span class="min-w-0 truncate">{{ t("toolbar.newConnection") }}</span>
             </button>
             <button v-if="canNewQuery" class="flex min-w-0 items-center gap-2 overflow-hidden rounded-md px-3 py-2 text-left text-sm hover:bg-muted/50" @click="emit('new-query')">

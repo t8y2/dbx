@@ -25,6 +25,7 @@ vi.mock("@/stores/connectionStore", () => ({
   }),
 }));
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({}) }));
+vi.mock("@/stores/authStore", () => ({ useAuthStore: () => ({ hasPermission: () => true }) }));
 vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => ({
     editorSettings: {

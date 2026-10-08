@@ -2,15 +2,17 @@
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { ArrowDownWideNarrow, ArrowRightLeft, ChevronsDownUp, Database, Download, FilePlus, FileText, FolderCog, FolderClosed, FolderOpen, FolderPlus, Layers, Library, Loader2, LocateFixed, Pencil, Play, Search, Trash2, Upload, X } from "@lucide/vue";
+import { ArrowDownWideNarrow, ArrowRightLeft, ChevronsDownUp, Database, Download, FilePlus, FileText, FolderCog, FolderClosed, FolderOpen, FolderPlus, KeyRound, Layers, Library, Loader2, LocateFixed, Lock, LockOpen, Pencil, Play, Search, Trash2, Upload, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import CustomContextMenu, { type ContextMenuItem as CtxMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
+import SetSavedSqlFolderPasswordDialog from "@/components/connection/SetSavedSqlFolderPasswordDialog.vue";
 import HelpTooltip from "@/components/ui/tooltip/HelpTooltip.vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import { useToast } from "@/composables/useToast";
+import { useSavedSqlFolderPasswordPromptStore } from "@/stores/savedSqlFolderPasswordPromptStore";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import * as api from "@/lib/backend/api";
 import { externalSqlFileOpenErrorMessage } from "@/lib/sql/sqlFileOpen";
@@ -26,6 +28,7 @@ import { savedSqlBatchErrorMessage, savedSqlErrorMessage } from "@/lib/savedSql/
 import { savedSqlDatabaseScopeKey } from "@/lib/savedSql/savedSqlDatabaseTree";
 import { ensureSqlExtension, stripSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import { savedSqlImportTarget } from "@/lib/savedSql/savedSqlImportTarget";
+import { verifyConnectionGroupPassword } from "@/lib/sidebar/connectionGroupPassword";
 import { savedSqlExecutionTargetFromTab, type SavedSqlOpenTargetMode } from "@/lib/savedSql/savedSqlExecutionTarget";
 import { uniqueSavedSqlExportFileName, exportSavedSqlFileContent } from "@/lib/savedSql/savedSqlExport";
 import { orderedListRangeAnchorIndex, orderedListSelectionIntent } from "@/lib/selection/orderedListSelection";
@@ -38,6 +41,7 @@ import type { SavedSqlFile, SavedSqlFolder } from "@/types/database";
 const { t } = useI18n();
 const { toast } = useToast();
 const savedSqlStore = useSavedSqlStore();
+const folderPasswordPromptStore = useSavedSqlFolderPasswordPromptStore();
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
@@ -426,6 +430,12 @@ function toggleFolder(folderId: string) {
     const folder = savedSqlStore.allFolders.find((candidate) => candidate.id === folderId);
     if (folder && folderBranchMatchesQuery(folder)) return;
   }
+  // Password check: if folder is locked and not unlocked, prompt for password
+  const folder = savedSqlStore.allFolders.find((f) => f.id === folderId);
+  if (folder?.passwordHash && !savedSqlStore.isSavedSqlFolderUnlocked(folderId)) {
+    void promptSavedSqlFolderUnlock(folder);
+    return;
+  }
   const next = new Set(collapsedFolders.value);
   if (next.has(folderId)) next.delete(folderId);
   else next.add(folderId);
@@ -436,6 +446,76 @@ function isFolderExpanded(folder: SavedSqlFolder) {
   // 搜索激活时,命中的分支自动展开以便直接看到匹配文件;否则遵循折叠状态。
   if (searchQuery.value && folderBranchMatchesQuery(folder)) return true;
   return !collapsedFolders.value.has(folder.id);
+}
+
+async function promptSavedSqlFolderUnlock(folder: SavedSqlFolder): Promise<boolean> {
+  const unlocked = await folderPasswordPromptStore.requestPassword({
+    folderId: folder.id,
+    folderName: folder.name,
+    verify: (password) => verifyConnectionGroupPassword(password, folder.passwordHash!),
+  });
+  if (unlocked) {
+    savedSqlStore.unlockSavedSqlFolder(folder.id);
+    // Auto-expand after unlock
+    const next = new Set(collapsedFolders.value);
+    next.delete(folder.id);
+    collapsedFolders.value = next;
+  }
+  return unlocked;
+}
+
+const showSetFolderPasswordDialog = ref(false);
+const setPasswordDialogFolder = ref<SavedSqlFolder | null>(null);
+
+function openSetFolderPasswordDialog(folder: SavedSqlFolder) {
+  setPasswordDialogFolder.value = folder;
+  showSetFolderPasswordDialog.value = true;
+}
+
+async function applySetFolderPassword(folderId: string, passwordHash: string | null) {
+  await savedSqlStore.setSavedSqlFolderPassword(folderId, passwordHash);
+  if (passwordHash) {
+    // Lock takes effect immediately: collapse the folder so its contents stay hidden until unlocked.
+    const next = new Set(collapsedFolders.value);
+    next.add(folderId);
+    collapsedFolders.value = next;
+  }
+}
+
+function handleFolderPasswordChanged(hadPassword: boolean, removed: boolean) {
+  if (removed) {
+    toast(t("savedSql.passwordRemoved"), 3000);
+  } else {
+    toast(hadPassword ? t("savedSql.passwordChanged") : t("savedSql.passwordSet"), 3000);
+  }
+}
+
+function isFolderPasswordLockable(folder: SavedSqlFolder): boolean {
+  return !!folder.passwordHash && !savedSqlStore.isSavedSqlFolderUnlocked(folder.id);
+}
+
+function isFolderPasswordUnlocked(folder: SavedSqlFolder): boolean {
+  return !!folder.passwordHash && savedSqlStore.isSavedSqlFolderUnlocked(folder.id);
+}
+
+function lockFolderFromMenu(folder: SavedSqlFolder) {
+  savedSqlStore.lockSavedSqlFolder(folder.id);
+  // Hide contents immediately after locking so the lock state is visible.
+  const next = new Set(collapsedFolders.value);
+  next.add(folder.id);
+  collapsedFolders.value = next;
+}
+
+// Walk up the parent chain to find the nearest locked folder containing the file.
+function lockedAncestorForFile(file: SavedSqlFile): SavedSqlFolder | null {
+  let folderId = file.folderId;
+  while (folderId) {
+    const folder = savedSqlStore.allFolders.find((candidate) => candidate.id === folderId);
+    if (!folder) return null;
+    if (isFolderPasswordLockable(folder)) return folder;
+    folderId = folder.parentFolderId;
+  }
+  return null;
 }
 
 async function openNewFolderInput(parentFolderId?: string) {
@@ -866,6 +946,13 @@ async function executeBatchDelete() {
 async function moveFilesToFolder(fileIds: string[], folderId?: string) {
   const movableIds = [...new Set(fileIds)].filter((id) => savedSqlStore.getFile(id));
   if (movableIds.length === 0) return;
+  if (folderId) {
+    const target = savedSqlStore.allFolders.find((folder) => folder.id === folderId);
+    if (target && isFolderPasswordLockable(target)) {
+      const unlocked = await promptSavedSqlFolderUnlock(target);
+      if (!unlocked) return;
+    }
+  }
   try {
     await savedSqlStore.moveFilesToFolder(movableIds, folderId);
     clearSelection();
@@ -877,6 +964,12 @@ async function moveFilesToFolder(fileIds: string[], folderId?: string) {
 
 async function openFile(file: SavedSqlFile, targetMode?: SavedSqlOpenTargetMode) {
   if (suppressNextRowClick.value) return;
+  // Password gate: opening a file inside a locked folder requires unlocking first.
+  const lockedFolder = lockedAncestorForFile(file);
+  if (lockedFolder) {
+    const unlocked = await promptSavedSqlFolderUnlock(lockedFolder);
+    if (!unlocked) return;
+  }
   const loadedFile = await savedSqlStore.ensureFileContent(file.id);
   if (!loadedFile) return;
   const tabId = queryStore.openSavedSql(loadedFile, { targetMode });
@@ -1071,13 +1164,21 @@ const contextMenuItems = computed<CtxMenuItem[]>(() => {
     { label: t("sqlLibrary.exportFolder"), action: () => exportFolderContents(target), icon: Upload },
     { label: "", separator: true },
     { label: t("savedSql.renameFolder"), action: () => startRenameFolder(target), icon: Pencil },
+    // Locked folders cannot have password changed or removed — unlock first.
+    ...(isFolderPasswordLockable(target) ? [] : [{ label: target.passwordHash ? t("savedSql.changePassword") : t("savedSql.setPassword"), action: () => openSetFolderPasswordDialog(target), icon: KeyRound }]),
+    ...(isFolderPasswordLockable(target) ? [{ label: t("savedSql.unlockFolder"), action: () => void promptSavedSqlFolderUnlock(target), icon: LockOpen }] : isFolderPasswordUnlocked(target) ? [{ label: t("savedSql.lockFolder"), action: () => lockFolderFromMenu(target), icon: Lock }] : []),
     { label: "", separator: true },
-    {
-      label: t("savedSql.deleteFolder"),
-      action: () => confirmDeleteFolder(target),
-      icon: Trash2,
-      variant: "destructive",
-    },
+    // Locked folders cannot be deleted — unlock first.
+    ...(isFolderPasswordLockable(target)
+      ? []
+      : [
+          {
+            label: t("savedSql.deleteFolder"),
+            action: () => confirmDeleteFolder(target),
+            icon: Trash2,
+            variant: "destructive" as const,
+          },
+        ]),
   ];
 });
 
@@ -1493,6 +1594,9 @@ function showDropInside(targetId: string) {
                     {{ row.folder.name }}
                     <span class="ml-1 text-muted-foreground">({{ folderFileCount(row.folder.id) }})</span>
                   </span>
+                  <LightTooltip v-if="!isRenamingFolder(row.folder.id) && isFolderPasswordLockable(row.folder)" :text="t('savedSql.lockedTooltip')" side="left" :delay="0" :close-delay="0" nowrap>
+                    <Lock class="h-3 w-3 shrink-0 text-muted-foreground" />
+                  </LightTooltip>
                   <LightTooltip v-if="!isRenamingFolder(row.folder.id)" :text="t('savedSql.newSubfolder')" side="left" :delay="0" :close-delay="0" nowrap>
                     <button
                       type="button"
@@ -1716,6 +1820,8 @@ function showDropInside(targetId: string) {
         </DialogFooter>
       </DialogContent>
     </Dialog>
+
+    <SetSavedSqlFolderPasswordDialog v-model:open="showSetFolderPasswordDialog" :folder="setPasswordDialogFolder" :set-password="applySetFolderPassword" @changed="handleFolderPasswordChanged" />
   </div>
 </template>
 

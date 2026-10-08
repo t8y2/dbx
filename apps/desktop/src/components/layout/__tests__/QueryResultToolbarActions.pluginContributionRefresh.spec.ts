@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
 import { createApp, nextTick, type App } from "vue";
+import { createPinia, setActivePinia } from "pinia";
 import { createI18n } from "vue-i18n";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InstalledPlugin } from "@/types/database";
@@ -9,6 +10,7 @@ const { listPlugins } = vi.hoisted(() => ({ listPlugins: vi.fn() }));
 vi.mock("@/lib/backend/api", () => ({ listPlugins }));
 
 import QueryResultToolbarActions from "../QueryResultToolbarActions.vue";
+import { useAuthStore } from "@/stores/authStore";
 
 function installedPlugin(id: string, contributions: InstalledPlugin["manifest"]["contributions"]): InstalledPlugin {
   return {
@@ -32,6 +34,9 @@ async function flush(): Promise<void> {
 async function mountToolbar() {
   const host = document.createElement("div");
   document.body.appendChild(host);
+  const pinia = createPinia();
+  setActivePinia(pinia);
+  useAuthStore().isAdmin = true;
   const app = createApp(QueryResultToolbarActions, {
     activeView: "result",
     canShowExplain: false,
@@ -40,6 +45,7 @@ async function mountToolbar() {
     archiveExporting: false,
     hasResult: true,
   });
+  app.use(pinia);
   app.use(createI18n({ legacy: false, locale: "en", messages: { en: {} }, missingWarn: false, fallbackWarn: false }));
   app.mount(host);
   mountedApps.push({ app, host });

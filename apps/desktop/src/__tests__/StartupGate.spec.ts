@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 
 import { createApp, defineComponent, h, nextTick, type App } from "vue";
+import { createPinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -28,6 +29,15 @@ function deferred<T>() {
 }
 
 const readyStatus = { state: "not_required", needsMigration: false };
+const authenticatedCheck = {
+  required: true,
+  authenticated: true,
+  setup_required: false,
+  user: { username: "ops.user", display_name: null, is_admin: false, department_name: null, roles: [] },
+  permissions: ["query.read"],
+  must_change_password: false,
+  password_expires_in_days: 90,
+};
 let businessReady: ReturnType<typeof deferred<void>>;
 let mountedApp: App | undefined;
 let root: HTMLDivElement;
@@ -82,6 +92,17 @@ beforeEach(() => {
         ),
     }),
   }));
+  vi.doMock("@/components/auth/ChangePasswordDialog.vue", () => ({
+    __esModule: true,
+    default: defineComponent({
+      props: ["mode"],
+      emits: ["changed"],
+      setup:
+        (props, { emit }) =>
+        () =>
+          h("button", { "data-change-password": "", onClick: () => emit("changed") }, props.mode),
+    }),
+  }));
 });
 
 afterEach(() => {
@@ -95,6 +116,7 @@ afterEach(() => {
 async function mountGate(localeReady?: Promise<void>) {
   const { default: Gate } = await import("../StartupGate.vue");
   mountedApp = createApp(Gate, { localeReady });
+  mountedApp.use(createPinia());
   mountedApp.config.errorHandler = vi.fn();
   mountedApp.mount(root);
 }
@@ -123,8 +145,20 @@ describe("startup boundary", () => {
     businessReady.resolve();
     await mountGate();
     await vi.waitFor(() => expect(root.querySelector("main")).not.toBeNull());
-    expect(JSON.parse(root.querySelector("main")!.textContent!)).toEqual(authentication);
+    expect(JSON.parse(root.querySelector("main")!.textContent!)).toEqual({
+      required: true,
+      authenticated: true,
+      setup_required: false,
+      user: null,
+      permissions: [],
+      must_change_password: false,
+      password_expires_in_days: null,
+    });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    const { useAuthStore } = await import("@/stores/authStore");
+    const auth = useAuthStore();
+    expect(auth.authenticated).toBe(true);
+    expect(auth.loaded).toBe(true);
   });
 
   it.each([false, true])("does not inspect protected data until login/setup completes (setup=%s)", async (setup) => {
@@ -208,5 +242,74 @@ describe("startup boundary", () => {
     mountedApp = undefined;
     expect(signal.aborted).toBe(true);
     expect(mocks.migrationStatus).not.toHaveBeenCalled();
+  });
+
+  it("blocks the business app behind the forced change dialog until the password is replaced", async () => {
+    mocks.desktop.mockReturnValue(false);
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ ...authenticatedCheck, must_change_password: true }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => authenticatedCheck });
+    vi.stubGlobal("fetch", fetchMock);
+    businessReady.resolve();
+    await mountGate();
+    await vi.waitFor(() => expect(root.querySelector("[data-change-password]")).not.toBeNull());
+    expect(root.querySelector("[data-change-password]")!.textContent).toBe("forced");
+    expect(mocks.migrationStatus).not.toHaveBeenCalled();
+    expect(mocks.appImported).not.toHaveBeenCalled();
+
+    (root.querySelector("[data-change-password]") as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(root.querySelector("main")).not.toBeNull());
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("drops back to the login boundary and re-checks when the session expires", async () => {
+    mocks.desktop.mockReturnValue(false);
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => authenticatedCheck })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ required: true, authenticated: false, setup_required: false }) });
+    vi.stubGlobal("fetch", fetchMock);
+    businessReady.resolve();
+    await mountGate();
+    await vi.waitFor(() => expect(root.querySelector("main")).not.toBeNull());
+
+    window.dispatchEvent(new Event("dbx:auth-expired"));
+    await vi.waitFor(() => expect(root.querySelector("[data-login]")).not.toBeNull());
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const { useAuthStore } = await import("@/stores/authStore");
+    const auth = useAuthStore();
+    expect(auth.authenticated).toBe(false);
+    expect(auth.user).toBeNull();
+  });
+
+  it("switches into the forced change view on the password_change_required signal", async () => {
+    mocks.desktop.mockReturnValue(false);
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => authenticatedCheck });
+    vi.stubGlobal("fetch", fetchMock);
+    businessReady.resolve();
+    await mountGate();
+    await vi.waitFor(() => expect(root.querySelector("main")).not.toBeNull());
+
+    window.dispatchEvent(new Event("dbx:auth-force-change"));
+    await vi.waitFor(() => expect(root.querySelector("[data-change-password]")).not.toBeNull());
+    expect(root.querySelector("[data-change-password]")!.textContent).toBe("forced");
+  });
+
+  it("stops observing session events once the gate unmounts", async () => {
+    mocks.desktop.mockReturnValue(false);
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => authenticatedCheck });
+    vi.stubGlobal("fetch", fetchMock);
+    businessReady.resolve();
+    await mountGate();
+    await vi.waitFor(() => expect(root.querySelector("main")).not.toBeNull());
+    mountedApp!.unmount();
+    mountedApp = undefined;
+
+    window.dispatchEvent(new Event("dbx:auth-expired"));
+    window.dispatchEvent(new Event("dbx:auth-force-change"));
+    await nextTick();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

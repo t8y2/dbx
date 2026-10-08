@@ -86,6 +86,16 @@ const exactMessageKeys: Record<string, string> = {
   "Plugin update blocked by active operations. Please wait for them to finish.": "pluginPlatform.updateBlockedByOperations",
   [PHOENIX_DRIVER_NOT_INSTALLED_ERROR]: "connection.phoenixDriverNotInstalled",
   [PHOENIX_JDBC_PLUGIN_NOT_INSTALLED_ERROR]: "connection.phoenixDriverNotInstalled",
+
+  // Web auth failure codes (crates/dbx-web auth routes, body {"error": code}).
+  invalid_credentials: "auth.error.invalidCredentials",
+  user_disabled: "auth.error.userDisabled",
+  blacklisted: "auth.error.blacklisted",
+  ip_blacklisted: "auth.error.ipBlacklisted",
+  password_change_required: "auth.error.passwordChangeRequired",
+  weak_password: "auth.error.weakPassword",
+  already_initialized: "auth.error.alreadyInitialized",
+  rate_limited: "auth.error.rateLimited",
 };
 
 const patterns: [RegExp, string][] = [

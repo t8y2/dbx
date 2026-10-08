@@ -1,3 +1,4 @@
+pub mod access_control;
 pub mod cloud_sync;
 pub mod config;
 pub mod history;

@@ -245,7 +245,7 @@ function makeConnectionNode(config: ConnectionConfig, pinned: boolean): TreeNode
   };
 }
 
-export function buildTreeNodesFromLayout(layout: SidebarLayout, connections: ConnectionConfig[], pinnedIds: Set<string>): TreeNode[] {
+export function buildTreeNodesFromLayout(layout: SidebarLayout, connections: ConnectionConfig[], pinnedIds: Set<string>, unlockedGroupIds?: ReadonlySet<string>): TreeNode[] {
   const configMap = new Map(connections.map((connection) => [connection.id, connection]));
   const groupMap = new Map(layout.groups.map((group) => [group.id, group]));
 
@@ -260,12 +260,13 @@ export function buildTreeNodesFromLayout(layout: SidebarLayout, connections: Con
 
       const group = groupMap.get(entry.id);
       if (!group) continue;
+      const isUnlocked = !group.passwordHash || (unlockedGroupIds?.has(group.id) ?? false);
       nodes.push({
         id: group.id,
         label: group.name,
         type: "connection-group",
         pinned: pinnedIds.has(group.id),
-        isExpanded: !group.collapsed,
+        isExpanded: !group.collapsed && isUnlocked,
         children: orderPinnedTreeNodes(build(entryChildren(entry))),
       });
     }
@@ -516,9 +517,9 @@ export function reorderEntries(layout: SidebarLayout, draggedIds: string[], targ
   return nextLayout;
 }
 
-export function createGroup(layout: SidebarLayout, name: string, parentGroupId?: string | null): { layout: SidebarLayout; groupId: string } {
+export function createGroup(layout: SidebarLayout, name: string, parentGroupId?: string | null, passwordHash?: string): { layout: SidebarLayout; groupId: string } {
   const groupId = uuid();
-  const group: ConnectionGroup = { id: groupId, name, collapsed: false };
+  const group: ConnectionGroup = { id: groupId, name, collapsed: false, ...(passwordHash ? { passwordHash } : {}) };
   const order = cloneEntries(layout.order);
   const entry: SidebarOrderEntry = { type: "group", id: groupId, children: [] };
   let parentFound = false;

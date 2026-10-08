@@ -1603,6 +1603,8 @@ export interface ConnectionGroup {
   id: string;
   name: string;
   collapsed: boolean;
+  /** SHA-256 hash of the optional protection password. Absent when the group is not password-protected. */
+  passwordHash?: string;
 }
 
 export type SidebarOrderEntry = { type: "group"; id: string; children?: SidebarOrderEntry[]; connectionIds?: string[] } | { type: "connection"; id: string };
@@ -2237,6 +2239,8 @@ export interface SavedSqlFolder {
   orderIndex?: number;
   createdAt: string;
   updatedAt: string;
+  /** SHA-256 hash of the optional protection password. Absent when the folder is not password-protected. */
+  passwordHash?: string;
 }
 
 export interface SavedSqlFile {

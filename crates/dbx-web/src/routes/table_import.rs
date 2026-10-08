@@ -275,6 +275,7 @@ pub async fn execute_import(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let started_at = Instant::now();
     let mut req = body.request;
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let file_path = validated_uploaded_import_path(&state.data_dir, &req.file_path)?;
     req.file_path = file_path.to_string_lossy().to_string();
 

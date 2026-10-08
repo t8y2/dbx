@@ -7,12 +7,14 @@ import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import LightDropdown, { type LightDropdownItem } from "@/components/ui/LightDropdown.vue";
 import WindowControls from "@/components/layout/WindowControls.vue";
+import ToolbarUserMenu from "@/components/layout/ToolbarUserMenu.vue";
 import ExportProgressPopover from "@/components/export/ExportProgressPopover.vue";
 import ToolbarUpdateIcon from "@/components/layout/ToolbarUpdateIcon.vue";
 import PluginShortcutToolbar from "@/components/plugins/PluginShortcutToolbar.vue";
 import { MAC_TRAFFIC_LIGHT_X, macTrafficLightInsetPaddingForScale, shouldReserveMacTrafficLightInset, useWindowControls } from "@/composables/useWindowControls";
 import { useToast } from "@/composables/useToast";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useAuthStore } from "@/stores/authStore";
 import { isSystemAppThemeMode, type AppThemeMode } from "@/lib/app/appTheme";
 
 const GithubIcon = {
@@ -81,6 +83,7 @@ const { t } = useI18n();
 const { toast } = useToast();
 
 const settingsStore = useSettingsStore();
+const authStore = useAuthStore();
 const toolbarItems = computed(() => settingsStore.editorSettings.toolbarItems);
 const showToolbarUpdateEntry = computed(() => toolbarItems.value.checkUpdates || props.hasUpdateAvailable);
 const { isMac, isDesktop, showControls, isMaximized, isFullscreen, isAlwaysOnTop, minimize, toggleMaximize, toggleAlwaysOnTop, close } = useWindowControls();
@@ -436,7 +439,7 @@ type ToolbarMenuItem = LightDropdownItem & { action: () => void };
 function buildToolbarMenuItems(includeVisiblePrimaryItems: boolean): ToolbarMenuItem[] {
   const items: ToolbarMenuItem[] = [];
 
-  if (includeVisiblePrimaryItems || !toolbarItems.value.dataTransfer) {
+  if (authStore.hasPermission("transfer") && (includeVisiblePrimaryItems || !toolbarItems.value.dataTransfer)) {
     items.push({
       value: "transfer",
       label: t("transfer.dataTransfer"),
@@ -457,7 +460,7 @@ function buildToolbarMenuItems(includeVisiblePrimaryItems: boolean): ToolbarMenu
   if (includeVisiblePrimaryItems || !toolbarItems.value.pluginCenter) {
     items.push({ value: "plugin-center", label: t("toolbar.pluginCenter"), icon: PlugZap, action: () => emit("open-plugin-center"), disabled: false });
   }
-  if (toolbarItems.value.sqlFile) {
+  if (authStore.hasPermission("sqlfile.execute") && toolbarItems.value.sqlFile) {
     items.push({
       value: "sql-file",
       label: t("sqlFile.title"),
@@ -466,7 +469,7 @@ function buildToolbarMenuItems(includeVisiblePrimaryItems: boolean): ToolbarMenu
       disabled: !props.hasSqlFileConnections,
     });
   }
-  if (toolbarItems.value.schemaDiff) {
+  if (authStore.hasPermission("schema.compare") && toolbarItems.value.schemaDiff) {
     items.push({
       value: "schema-diff",
       label: t("diff.title"),
@@ -475,7 +478,7 @@ function buildToolbarMenuItems(includeVisiblePrimaryItems: boolean): ToolbarMenu
       disabled: !props.hasConnections,
     });
   }
-  if (toolbarItems.value.dataCompare) {
+  if (authStore.hasPermission("data.compare") && toolbarItems.value.dataCompare) {
     items.push({
       value: "data-compare",
       label: t("dataCompare.title"),
@@ -484,13 +487,15 @@ function buildToolbarMenuItems(includeVisiblePrimaryItems: boolean): ToolbarMenu
       disabled: !props.hasConnections,
     });
   }
-  items.push({
-    value: "database-backups",
-    label: t("databaseBackup.title"),
-    icon: CalendarClock,
-    action: () => emit("open-backups"),
-    disabled: false,
-  });
+  if (authStore.hasPermission("backup.restore")) {
+    items.push({
+      value: "database-backups",
+      label: t("databaseBackup.title"),
+      icon: CalendarClock,
+      action: () => emit("open-backups"),
+      disabled: false,
+    });
+  }
   items.push({
     value: "mcp-settings",
     label: t("settings.openMcpSettings"),
@@ -554,7 +559,7 @@ const toolbarStyle = computed(() => {
       </TooltipTrigger>
       <TooltipContent>{{ t("sidebar.expand") }}</TooltipContent>
     </Tooltip>
-    <Button variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('new-connection')">
+    <Button v-if="authStore.hasPermission('connection.manage')" variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('new-connection')">
       <span class="inline-flex items-center gap-1">
         <DatabaseZap class="h-3.5 w-3.5" />
         <span ref="newConnectionLabelEl" :class="toolbarTextLabelClass">{{ t("toolbar.newConnection") }}</span>
@@ -567,7 +572,7 @@ const toolbarStyle = computed(() => {
     </Button>
 
     <template v-if="!toolbarCollapsed">
-      <Button v-if="toolbarItems.dataTransfer" variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('open-transfer')" :disabled="!hasConnections">
+      <Button v-if="authStore.hasPermission('transfer') && toolbarItems.dataTransfer" variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('open-transfer')" :disabled="!hasConnections">
         <ArrowLeftRight class="h-3.5 w-3.5" />
         <span :class="toolbarTextLabelClass">{{ t("transfer.dataTransfer") }}</span>
       </Button>
@@ -585,7 +590,6 @@ const toolbarStyle = computed(() => {
         </Button>
         <PluginShortcutToolbar v-if="showPluginCenterShortcuts" dropdown-only :menu-anchor="pluginCenterGroup" @layout-change="scheduleToolbarLayout" />
       </div>
-
       <LightDropdown
         v-if="showMoreDropdown"
         model-value=""
@@ -781,6 +785,8 @@ const toolbarStyle = computed(() => {
       </TooltipTrigger>
       <TooltipContent>{{ hasMcpUpdateAvailable ? t("toolbar.mcpUpdateAvailable") : t("settings.title") }}</TooltipContent>
     </Tooltip>
+
+    <ToolbarUserMenu v-if="!isDesktop" />
 
     <WindowControls v-if="showControls" :is-maximized="isMaximized" @minimize="minimize" @toggle-maximize="toggleMaximize" @close="close" />
   </div>

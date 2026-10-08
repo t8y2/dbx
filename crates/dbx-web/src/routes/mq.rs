@@ -1574,14 +1574,14 @@ pub async fn send_message(
 #[cfg(test)]
 mod tests {
     use super::{create_exchange, delete_user, list_tenants, send_message, ConnReq, CreateExchangeReq, SendMessageReq};
-    use crate::state::{LoginRateLimit, WebState};
+    use crate::state::WebState;
     use axum::extract::State;
     use axum::http::{HeaderMap, HeaderValue};
     use axum::Json;
     use dbx_core::connection::AppState;
     use dbx_core::models::connection::ConnectionConfig;
     use dbx_core::storage::McpGlobalPolicy;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::{Mutex, RwLock};
 
@@ -1610,19 +1610,23 @@ mod tests {
             public_base_path: "/".to_string(),
             password_disabled: false,
             demo_mode: false,
+            trust_proxy: false,
             password_hash: RwLock::new(None),
-            sessions: RwLock::new(HashSet::new()),
+            sessions: RwLock::new(HashMap::new()),
             sse_channels: RwLock::new(HashMap::new()),
             transfer_progress_channels: RwLock::new(HashMap::new()),
             table_import_channels: RwLock::new(HashMap::new()),
             sql_file_executions: RwLock::new(HashMap::new()),
             managed_sql_previews: Default::default(),
             nacos_imports: RwLock::new(HashMap::new()),
-            login_rate_limit: Mutex::new(LoginRateLimit { fail_count: 0, locked_until: None }),
+            login_rate_limit: Mutex::new(HashMap::new()),
             export_files: RwLock::new(HashMap::new()),
             ssh_prompts: Arc::new(crate::ssh_prompt::SshPromptHub::new()),
             migration_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             web_mcp: Arc::new(crate::web_mcp::WebMcpRuntime::disabled()),
+            blacklist: Arc::new(crate::blacklist::BlacklistCache::empty()),
+            permission_cache: RwLock::new(HashMap::new()),
+            user_system_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         });
         (state, dir)
     }

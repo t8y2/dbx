@@ -15,6 +15,8 @@ pub async fn prepare_data_compare_from_tables(
     State(state): State<Arc<WebState>>,
     Json(options): Json<dbx_core::data_compare::DataCompareFromTablesOptions>,
 ) -> Result<Json<dbx_core::data_compare::DataCompareFromTablesPreparation>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &options.source_connection_id).await?;
+    crate::access_gate::ensure_web_connection_scope(&state, &options.target_connection_id).await?;
     dbx_core::data_compare::prepare_data_compare_from_tables(&state.app, options)
         .await
         .map(Json)
@@ -25,6 +27,8 @@ pub async fn prepare_data_compare_missing_target(
     State(state): State<Arc<WebState>>,
     Json(options): Json<dbx_core::data_compare::DataCompareMissingTargetOptions>,
 ) -> Result<Json<dbx_core::data_compare::DataCompareFromTablesPreparation>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &options.source_connection_id).await?;
+    crate::access_gate::ensure_web_connection_scope(&state, &options.target_connection_id).await?;
     dbx_core::data_compare::prepare_data_compare_missing_target(&state.app, options)
         .await
         .map(Json)

@@ -370,6 +370,7 @@ pub async fn create_database(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MongoCollectionRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "Create database").await?;
     dbx_core::mongo_ops::mongo_create_database_core(&state.app, &req.connection_id, &req.database)
         .await
@@ -510,6 +511,7 @@ pub async fn find_one(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MongoFindOneRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     let result = run_cancellable(
         &state,
         req.execution_id,
@@ -750,6 +752,7 @@ pub async fn insert_document(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MongoInsertRequest>,
 ) -> Result<Json<String>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "Insert").await?;
     let result = dbx_core::document_ops::insert_document_core(
         &state.app,
@@ -788,6 +791,7 @@ pub async fn update_document(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MongoUpdateRequest>,
 ) -> Result<Json<u64>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "Update").await?;
     let result = dbx_core::document_ops::update_document_core(
         &state.app,
@@ -955,6 +959,7 @@ pub async fn delete_document(
     State(state): State<Arc<WebState>>,
     Json(req): Json<MongoDeleteRequest>,
 ) -> Result<Json<u64>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     ensure_writable(&state.app, &req.connection_id, "Delete").await?;
     let result = dbx_core::document_ops::delete_document_core(
         &state.app,

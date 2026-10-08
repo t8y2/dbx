@@ -1,7 +1,8 @@
 import { computed, nextTick, ref } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { isDangerousSql, requiresDatabaseSelection, snapshotResultForMerge, supportsSqlTemplateParameters, useSqlExecution } from "../useSqlExecution";
+import { isDangerousSql, isPotentialWriteSql, requiresDatabaseSelection, snapshotResultForMerge, supportsSqlTemplateParameters, useSqlExecution } from "../useSqlExecution";
+import { useAuthStore } from "@/stores/authStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useHistoryStore } from "@/stores/historyStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -12,10 +13,14 @@ import * as objectMetadataCache from "@/lib/metadata/objectMetadataCache";
 import type { ConnectionConfig, QueryTab } from "@/types/database";
 import type { SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
 
+const toast = vi.hoisted(() => vi.fn());
+
 vi.mock("vue-i18n", () => ({
   createI18n: () => ({ global: { locale: { value: "en" }, setLocaleMessage: vi.fn() } }),
   useI18n: () => ({ t: (key: string) => key }),
 }));
+
+vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast }) }));
 
 vi.mock("@/lib/backend/api", () => ({
   saveEditorSettings: vi.fn(),
@@ -133,11 +138,73 @@ describe("supportsSqlTemplateParameters", () => {
   });
 });
 
+describe("isPotentialWriteSql", () => {
+  it("classifies configured write statements case-insensitively", () => {
+    for (const keyword of ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE", "GRANT", "REVOKE", "MERGE", "REPLACE"]) {
+      expect(isPotentialWriteSql(`/* leading comment */ ${keyword.toLowerCase()} target`)).toBe(true);
+    }
+  });
+
+  it("keeps read-only SQL permitted and checks every statement in a batch", () => {
+    expect(isPotentialWriteSql("-- comment\nSELECT 1")).toBe(false);
+    expect(isPotentialWriteSql("SELECT 1; UPDATE users SET active = 1")).toBe(true);
+  });
+});
+
 describe("useSqlExecution", () => {
   beforeEach(() => {
     installLocalStorage();
     setActivePinia(createPinia());
+    useAuthStore().isAdmin = true;
+    toast.mockClear();
     vi.mocked(objectMetadataCache.invalidateObjectMetadataCache).mockClear();
+  });
+
+  it("blocks write SQL before execution when query.write is missing", async () => {
+    const sql = "INSERT INTO users (id) VALUES (1)";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const executeCurrentSql = vi.spyOn(useQueryStore(), "executeCurrentSql");
+    const authStore = useAuthStore();
+    authStore.isAdmin = false;
+    authStore.permissions = ["query.read"];
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExecute();
+
+    expect(executeCurrentSql).not.toHaveBeenCalled();
+    expect(toast).toHaveBeenCalledWith("auth.noWritePermission", 5000);
+  });
+
+  it("allows read-only SQL execution when query.write is missing", async () => {
+    const sql = "SELECT 1";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const executeCurrentSql = vi.spyOn(useQueryStore(), "executeCurrentSql").mockResolvedValue(undefined);
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+    const authStore = useAuthStore();
+    authStore.isAdmin = false;
+    authStore.permissions = ["query.read"];
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExecute();
+
+    expect(executeCurrentSql).toHaveBeenCalledWith(sql, { tabId: "tab-1" });
+    expect(toast).not.toHaveBeenCalled();
   });
 
   it("invalidates object metadata after successful connection-level DDL", async () => {

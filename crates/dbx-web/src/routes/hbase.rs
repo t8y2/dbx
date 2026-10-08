@@ -72,6 +72,7 @@ pub async fn get_table_schema(
     State(state): State<Arc<WebState>>,
     Json(request): Json<HBaseTableRequest>,
 ) -> Result<Json<HBaseTableSchema>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &request.connection_id).await?;
     let result = dbx_core::hbase_ops::get_table_schema_core(
         &state.app,
         &request.connection_id,
@@ -87,6 +88,7 @@ pub async fn scan_rows(
     State(state): State<Arc<WebState>>,
     Json(request): Json<HBaseScanRequest>,
 ) -> Result<Json<HBaseScanResult>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &request.connection_id).await?;
     let result = dbx_core::hbase_ops::scan_rows_core(
         &state.app,
         &request.connection_id,
@@ -104,6 +106,7 @@ pub async fn get_row(
     State(state): State<Arc<WebState>>,
     Json(request): Json<HBaseRowRequest>,
 ) -> Result<Json<Option<HBaseRow>>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &request.connection_id).await?;
     let result = dbx_core::hbase_ops::get_row_core(
         &state.app,
         &request.connection_id,
@@ -121,6 +124,7 @@ pub async fn put_row(
     State(state): State<Arc<WebState>>,
     Json(request): Json<HBasePutRowRequest>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &request.connection_id).await?;
     ensure_writable(&state.app, &request.connection_id, "Write HBase row").await?;
     dbx_core::hbase_ops::put_row_core(
         &state.app,
@@ -138,6 +142,7 @@ pub async fn delete_row(
     State(state): State<Arc<WebState>>,
     Json(request): Json<HBaseRowRequest>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &request.connection_id).await?;
     ensure_writable(&state.app, &request.connection_id, "Delete HBase row").await?;
     dbx_core::hbase_ops::delete_row_core(
         &state.app,
@@ -156,6 +161,7 @@ pub async fn create_table(
     State(state): State<Arc<WebState>>,
     Json(request): Json<HBaseCreateTableRequest>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &request.connection_id).await?;
     ensure_writable(&state.app, &request.connection_id, "Create HBase table").await?;
     dbx_core::hbase_ops::create_table_core(
         &state.app,
@@ -173,6 +179,7 @@ pub async fn delete_table(
     State(state): State<Arc<WebState>>,
     Json(request): Json<HBaseTableRequest>,
 ) -> Result<Json<()>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &request.connection_id).await?;
     ensure_writable(&state.app, &request.connection_id, "Delete HBase table").await?;
     dbx_core::hbase_ops::delete_table_core(&state.app, &request.connection_id, &request.namespace, &request.table)
         .await

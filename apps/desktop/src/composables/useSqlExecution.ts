@@ -4,6 +4,7 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useHistoryStore } from "@/stores/historyStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useAuthStore } from "@/stores/authStore";
 import { useToast } from "@/composables/useToast";
 import { isSingleDatabase, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
 import { supportsConnectionScopedQueryExecution } from "@/lib/database/databaseFeatureSupport";
@@ -36,6 +37,7 @@ import { MULTI_SOURCE_MAX_ROWS_PER_SOURCE } from "@/lib/query/multiSourceResult"
 import { translateBackendError } from "@/i18n/backend-errors";
 
 const DANGER_RE = /^\s*(DROP|DELETE|TRUNCATE|ALTER|UPDATE|MERGE|REPLACE)\b/i;
+const WRITE_PERMISSION_RE = /^(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|MERGE|REPLACE)\b/i;
 
 interface SqlExecutionOptions {
   openInNewResultTab?: boolean;
@@ -120,6 +122,12 @@ function isDangerousMeilisearchRequest(method: "GET" | "POST" | "PUT" | "PATCH" 
   return !(pathname === "/multi-search" || /\/search$/i.test(pathname) || /\/facet-search$/i.test(pathname) || /\/similar$/i.test(pathname) || /\/documents\/fetch$/i.test(pathname));
 }
 
+export function isPotentialWriteSql(sql: string): boolean {
+  return stripSqlComments(sql)
+    .split(";")
+    .some((statement) => WRITE_PERMISSION_RE.test(statement.trim()));
+}
+
 export function isDangerousSql(sql: string, databaseType?: DatabaseType): boolean {
   if (databaseType === "elasticsearch" || databaseType === "easysearch" || databaseType === "meilisearch" || databaseType === "solr") {
     const requests = splitSqlStatementRanges(sql, databaseType)
@@ -167,6 +175,7 @@ export function useSqlExecution(deps: {
   const historyStore = useHistoryStore();
   const connectionStore = useConnectionStore();
   const settingsStore = useSettingsStore();
+  const authStore = useAuthStore();
   const productionSafetyStore = useProductionSafetyStore();
   const { toast } = useToast();
 
@@ -374,10 +383,17 @@ export function useSqlExecution(deps: {
     }
     const { sql, sourceOffset } = await resolvedExecutableSql(undefined, context);
     if (!sql.trim()) return false;
-    if (supportsSqlTemplateParameters(context.connection, sql) && prepareSqlParameterDialog(sql, sourceOffset, { tabId: context.tabId }, onReady)) {
+    const runIfPermitted = async (resolvedSql: string, resolvedSourceOffset?: number) => {
+      if (!authStore.hasPermission("query.write") && isPotentialWriteSql(resolvedSql)) {
+        toast(t("auth.noWritePermission"), 5000);
+        return;
+      }
+      await onReady(resolvedSql, resolvedSourceOffset);
+    };
+    if (supportsSqlTemplateParameters(context.connection, sql) && prepareSqlParameterDialog(sql, sourceOffset, { tabId: context.tabId }, runIfPermitted)) {
       return true;
     }
-    await onReady(sql, sourceOffset);
+    await runIfPermitted(sql, sourceOffset);
     return false;
   }
 
@@ -408,6 +424,11 @@ export function useSqlExecution(deps: {
     }
     const executionTabId = options.tabId ?? deps.activeTab.value?.id;
     if (!executionTabId || !sql || !sql.trim()) {
+      cancelEditorViewportRequest(options.editorViewportRequestId);
+      return;
+    }
+    if (!authStore.hasPermission("query.write") && isPotentialWriteSql(sql)) {
+      toast(t("auth.noWritePermission"), 5000);
       cancelEditorViewportRequest(options.editorViewportRequestId);
       return;
     }

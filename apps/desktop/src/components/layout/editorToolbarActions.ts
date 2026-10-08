@@ -68,7 +68,15 @@ export function createNoopEditorToolbarActions(): EditorToolbarActions {
   const mode = { value: "explain" } as Ref<"explain" | "autotrace">;
   const flag = { value: true } as Ref<boolean>;
   const specialPageTabs = {
-    value: { settingsOpen: false, settingsActive: false, driverStoreOpen: false, driverStoreActive: false, pluginCenterOpen: false, pluginCenterActive: false, driverUpdateCount: 0 },
+    value: {
+      settingsOpen: false,
+      settingsActive: false,
+      driverStoreOpen: false,
+      driverStoreActive: false,
+      pluginCenterOpen: false,
+      pluginCenterActive: false,
+      driverUpdateCount: 0,
+    },
   } as Ref<SpecialPageTabsState>;
   return {
     explainMode: mode,

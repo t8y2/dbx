@@ -59,6 +59,7 @@ vi.mock("@/stores/connectionStore", () => ({
 
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => queryStore }));
 vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => settingsStore }));
+vi.mock("@/stores/authStore", () => ({ useAuthStore: () => ({ hasPermission: () => true }) }));
 vi.mock("@/stores/savedSqlStore", () => ({ useSavedSqlStore: () => ({}) }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast }) }));
 vi.mock("@/composables/useSqlHighlighter", () => ({ useSqlHighlighter: () => ({ highlight: vi.fn() }) }));

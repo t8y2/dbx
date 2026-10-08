@@ -1411,6 +1411,7 @@ watch(
     props.tabs.map((tab) => `${tab.id}:${tab.pinned ? "1" : "0"}:${tab.title}:${tab.mode}`).join("|"),
     props.specialPageTabs?.settingsOpen,
     props.specialPageTabs?.driverStoreOpen,
+    props.specialPageTabs?.pluginCenterOpen,
     settingsStore.editorSettings.tabLayout,
     settingsStore.editorSettings.tabGroupMode,
     compactTabTitle.value,

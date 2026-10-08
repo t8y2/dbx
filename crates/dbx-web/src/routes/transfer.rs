@@ -79,6 +79,8 @@ pub async fn start_transfer(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let req = body.request;
     transfer::validate_transfer_request(&req).map_err(AppError::from)?;
+    crate::access_gate::ensure_web_connection_scope(&state, &req.source_connection_id).await?;
+    crate::access_gate::ensure_web_connection_scope(&state, &req.target_connection_id).await?;
 
     // Reject transfer early if the target connection is read-only
     if let Some(name) = dbx_core::query::connection_readonly_name(&state.app, &req.target_connection_id).await {
@@ -586,6 +588,8 @@ pub async fn preview_transfer_ownership(
 ) -> Result<Json<dbx_core::transfer::TransferOwnershipPreview>, AppError> {
     let req = body.request;
     transfer::validate_transfer_request(&req).map_err(AppError::from)?;
+    crate::access_gate::ensure_web_connection_scope(&state, &req.source_connection_id).await?;
+    crate::access_gate::ensure_web_connection_scope(&state, &req.target_connection_id).await?;
     let source_db_type = transfer::get_db_type(&state.app, &req.source_connection_id).await.map_err(AppError::from)?;
     let target_db_type = transfer::get_db_type(&state.app, &req.target_connection_id).await.map_err(AppError::from)?;
     let source_pool_key = transfer::ensure_transfer_pool(
@@ -650,6 +654,7 @@ pub async fn sort_tables_by_fk_dependency(
     State(state): State<Arc<WebState>>,
     Json(req): Json<SortTablesByFkRequest>,
 ) -> Result<Json<Vec<String>>, AppError> {
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
     transfer::sort_tables_by_fk_dependency(
         &state.app,
         &req.connection_id,

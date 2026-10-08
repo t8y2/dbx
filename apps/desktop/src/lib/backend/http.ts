@@ -341,13 +341,56 @@ const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   sidebar_table_page_size: 1000,
 };
 
-async function post<T>(url: string, body: unknown): Promise<T> {
+export const AUTH_EXPIRED_EVENT = "dbx:auth-expired";
+export const AUTH_FORCE_CHANGE_EVENT = "dbx:auth-force-change";
+
+function isAuthEndpoint(url: string): boolean {
+  const normalized = url.startsWith("/") ? url : `/${url}`;
+  return normalized === "/api/auth" || normalized.startsWith("/api/auth/");
+}
+
+/**
+ * Web session guards (plan §5): any non-auth API answering 401 means the
+ * session cookie expired; 403 with `password_change_required` means the
+ * account must reset its password. Both are surfaced as window events that
+ * StartupGate turns into the login / forced-change views. Auth endpoints are
+ * exempt — a failed login must not kick the user back to the login screen.
+ * Dispatching never swallows the transport error: callers still throw below.
+ */
+async function dispatchWebAuthSessionEvent(url: string, response: Response): Promise<void> {
+  if (isAuthEndpoint(url)) return;
+  if (typeof window === "undefined" || typeof window.dispatchEvent !== "function") return;
+  if (response.status === 401) {
+    window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
+    return;
+  }
+  if (response.status === 403) {
+    try {
+      const payload: unknown = await response.clone().json();
+      if (payload && typeof payload === "object" && (payload as { error?: unknown }).error === "password_change_required") {
+        window.dispatchEvent(new Event(AUTH_FORCE_CHANGE_EVENT));
+      }
+    } catch {
+      // Not JSON or unreadable — not a password_change_required signal.
+    }
+  }
+}
+
+// Exported for the session-guard spec; the primitives only ever receive
+// non-auth URLs in practice, so the exemption branch needs direct coverage.
+export { dispatchWebAuthSessionEvent };
+
+export async function post<T>(url: string, body: unknown): Promise<T> {
   const res = await fetch(apiUrl(url), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    credentials: "include",
   });
-  if (!res.ok) throw await backendResponseError(res);
+  if (!res.ok) {
+    await dispatchWebAuthSessionEvent(url, res);
+    throw await backendResponseError(res);
+  }
   if (res.status === 204) return undefined as T;
   return res.json();
 }
@@ -363,6 +406,9 @@ async function postQueryWithDiagnostics<T>(url: string, body: unknown, traceId?:
     body: serializedBody,
   });
   const headersAt = performance.now();
+  // Session guard runs before the body is consumed so the 403 branch can
+  // still clone() the response to inspect `password_change_required`.
+  if (!response.ok) await dispatchWebAuthSessionEvent(url, response);
   const responseText = await response.text();
   const bodyAt = performance.now();
   if (!response.ok) {
@@ -401,25 +447,35 @@ async function postQueryWithDiagnostics<T>(url: string, body: unknown, traceId?:
   return result;
 }
 
-async function get<T>(url: string): Promise<T> {
-  const res = await fetch(apiUrl(url));
-  if (!res.ok) throw await backendResponseError(res);
+export async function get<T>(url: string): Promise<T> {
+  const res = await fetch(apiUrl(url), { credentials: "include" });
+  if (!res.ok) {
+    await dispatchWebAuthSessionEvent(url, res);
+    throw await backendResponseError(res);
+  }
   return res.json();
 }
 
-async function del<T>(url: string): Promise<T> {
-  const res = await fetch(apiUrl(url), { method: "DELETE" });
-  if (!res.ok) throw await backendResponseError(res);
+export async function del<T>(url: string): Promise<T> {
+  const res = await fetch(apiUrl(url), { method: "DELETE", credentials: "include" });
+  if (!res.ok) {
+    await dispatchWebAuthSessionEvent(url, res);
+    throw await backendResponseError(res);
+  }
   return res.json();
 }
 
-async function put<T>(url: string, body: unknown): Promise<T> {
+export async function put<T>(url: string, body: unknown): Promise<T> {
   const res = await fetch(apiUrl(url), {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    credentials: "include",
   });
-  if (!res.ok) throw await backendResponseError(res);
+  if (!res.ok) {
+    await dispatchWebAuthSessionEvent(url, res);
+    throw await backendResponseError(res);
+  }
   return res.json();
 }
 

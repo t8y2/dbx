@@ -42,6 +42,7 @@ import ProductionContextBadge from "@/components/common/ProductionContextBadge.v
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useAuthStore } from "@/stores/authStore";
 import { catalogDatabaseOptionsKey, databaseAfterCatalogChange, normalizedQueryTabCatalog, queryCatalogSelectorVisible, selectedQueryCatalogName, useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import { useSchemaOptions } from "@/composables/useSchemaOptions";
 import { connectionIconType } from "@/lib/connection/connectionPresentation";
@@ -124,6 +125,7 @@ const { t } = useI18n();
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
+const authStore = useAuthStore();
 const { databaseOptions, loadingDatabaseOptions, loadDatabaseOptions, catalogOptions, loadingCatalogOptions, loadCatalogOptions, catalogDatabaseOptions, loadingCatalogDatabaseOptions, loadCatalogDatabaseOptions } = useDatabaseOptions();
 const { loadSchemaOptions, getSchemaOptionsForDb, isLoadingSchemas, isSchemaAware } = useSchemaOptions();
 
@@ -524,7 +526,7 @@ async function changeCatalog(selectedCatalog: string) {
 <template>
   <div ref="toolbarRootRef" class="app-editor-toolbar h-9 min-w-0 shrink-0 border-b bg-background/80 px-3 flex items-center gap-1 text-xs text-muted-foreground relative z-10 overflow-hidden" :style="toolbarStyle">
     <div ref="toolbarActionsRef" class="min-w-0 flex flex-1 items-center gap-0.5 overflow-hidden">
-      <Tooltip>
+      <Tooltip v-if="authStore.hasPermission('query.read')">
         <TooltipTrigger as-child>
           <Button
             :variant="activeTab.isExecuting ? 'destructive' : 'ghost'"
@@ -542,7 +544,7 @@ async function changeCatalog(selectedCatalog: string) {
         </TooltipTrigger>
         <TooltipContent>{{ activeTab.isExecuting ? t("toolbar.stopQuery") : executeShortcutTooltip }}</TooltipContent>
       </Tooltip>
-      <Tooltip>
+      <Tooltip v-if="authStore.hasPermission('query.read')">
         <TooltipTrigger as-child>
           <Button
             variant="ghost"
@@ -743,7 +745,7 @@ async function changeCatalog(selectedCatalog: string) {
         </TooltipTrigger>
         <TooltipContent>{{ t("toolbar.exPasteSqlInCondition") }}</TooltipContent>
       </Tooltip>
-      <Tooltip v-if="showMultiExecuteButton">
+      <Tooltip v-if="authStore.hasPermission('query.read') && showMultiExecuteButton">
         <TooltipTrigger as-child>
           <Button variant="ghost" size="icon" class="h-6 w-6 text-primary hover:bg-primary/10" :disabled="!canMultiExecute" :aria-label="t('toolbar.multiDbExecute')" @click="emit('multiExecute')">
             <CirclePlay class="h-3.5 w-3.5" />
@@ -788,7 +790,7 @@ async function changeCatalog(selectedCatalog: string) {
             <ClipboardPaste class="h-3.5 w-3.5" />
             {{ t("toolbar.exPasteSqlInCondition") }}
           </DropdownMenuItem>
-          <DropdownMenuItem :disabled="!canMultiExecute" @select="emit('multiExecute')">
+          <DropdownMenuItem v-if="authStore.hasPermission('query.read')" :disabled="!canMultiExecute" @select="emit('multiExecute')">
             <CirclePlay class="h-3.5 w-3.5" />
             {{ t("toolbar.multiDbExecute") }}
           </DropdownMenuItem>

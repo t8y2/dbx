@@ -9,6 +9,12 @@ pub struct AppError {
     pub message: String,
     pub status: StatusCode,
     pub error: Box<BackendError>,
+    /// 预序列化的稳定错误码响应（覆盖 BackendError envelope 序列化）。
+    ///
+    /// 供权限执行层（`access_gate`）输出与 `auth` 中间件同风格的
+    /// `{"error": <code>, ...}` JSON（如 `permission_denied` /
+    /// `connection_forbidden`），前端可直接按稳定错误码翻译。
+    pub raw_json: Option<Box<serde_json::Value>>,
 }
 
 impl fmt::Display for AppError {
@@ -30,22 +36,41 @@ impl AppError {
         Self::with_status(msg.into(), StatusCode::FORBIDDEN)
     }
 
+    /// 403 + 预序列化 JSON body（稳定错误码风格，见 [`AppError::raw_json`]）。
+    pub fn forbidden_json(body: serde_json::Value) -> Self {
+        let code = body.get("error").and_then(serde_json::Value::as_str).unwrap_or("forbidden").to_string();
+        Self {
+            message: code.clone(),
+            status: StatusCode::FORBIDDEN,
+            error: Box::new(BackendError::from_legacy_string(&code)),
+            raw_json: Some(Box::new(body)),
+        }
+    }
+
     pub fn not_found(msg: impl Into<String>) -> Self {
         Self::with_status(msg.into(), StatusCode::NOT_FOUND)
     }
 
     fn with_status(message: String, status: StatusCode) -> Self {
         let error = BackendError::from_legacy_string(&message);
-        Self { message, status, error: Box::new(error) }
+        Self { message, status, error: Box::new(error), raw_json: None }
     }
 
     pub fn from_backend_error(error: BackendError) -> Self {
-        Self { message: error.code().to_string(), status: StatusCode::INTERNAL_SERVER_ERROR, error: Box::new(error) }
+        Self {
+            message: error.code().to_string(),
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            error: Box::new(error),
+            raw_json: None,
+        }
     }
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        if let Some(body) = self.raw_json {
+            return (self.status, Json(*body)).into_response();
+        }
         (self.status, Json(*self.error)).into_response()
     }
 }
@@ -84,6 +109,21 @@ mod tests {
     #[test]
     fn app_error_stays_small_for_route_result_types() {
         assert!(std::mem::size_of::<AppError>() <= 64);
+    }
+
+    #[tokio::test]
+    async fn forbidden_json_renders_the_stable_error_code_shape() {
+        let response = AppError::forbidden_json(serde_json::json!({
+            "error": "permission_denied",
+            "permission": "query.write",
+        }))
+        .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["error"], "permission_denied");
+        assert_eq!(payload["permission"], "query.write");
+        assert!(payload.get("code").is_none(), "envelope fields must not leak into stable-code responses");
     }
 
     #[test]

@@ -23,6 +23,9 @@ const ConfigConnectionSelectDialog = defineAsyncComponent(() => import("@/compon
 const DatabaseSearchDialog = defineAsyncComponent(() => import("@/components/search/DatabaseSearchDialog.vue"));
 const SshHostKeyPromptDialog = defineAsyncComponent(() => import("@/components/ssh/SshHostKeyPromptDialog.vue"));
 const ConnectionPasswordPromptDialog = defineAsyncComponent(() => import("@/components/connection/ConnectionPasswordPromptDialog.vue"));
+const ConnectionGroupPasswordDialog = defineAsyncComponent(() => import("@/components/connection/ConnectionGroupPasswordDialog.vue"));
+const SetConnectionGroupPasswordDialog = defineAsyncComponent(() => import("@/components/connection/SetConnectionGroupPasswordDialog.vue"));
+const SavedSqlFolderPasswordDialog = defineAsyncComponent(() => import("@/components/connection/SavedSqlFolderPasswordDialog.vue"));
 const DatabaseExportDialog = defineAsyncComponent(() => import("@/components/export/DatabaseExportDialog.vue"));
 const DataGenerateDialog = defineAsyncComponent(() => import("@/components/generate/DataGenerateDialog.vue"));
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -395,4 +398,7 @@ watch(
   </Dialog>
   <SshHostKeyPromptDialog />
   <ConnectionPasswordPromptDialog />
+  <ConnectionGroupPasswordDialog />
+  <SetConnectionGroupPasswordDialog />
+  <SavedSqlFolderPasswordDialog />
 </template>

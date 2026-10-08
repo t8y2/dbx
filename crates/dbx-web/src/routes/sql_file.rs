@@ -266,6 +266,7 @@ pub async fn execute_sql_file(
     Json(body): Json<SqlFileExecuteWrapper>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let req = body.request;
+    crate::access_gate::ensure_web_connection_scope(&state, &req.connection_id).await?;
 
     let requested_paths = if body.file_paths.is_empty() { vec![req.file_path.clone()] } else { body.file_paths };
     let file_paths = requested_paths

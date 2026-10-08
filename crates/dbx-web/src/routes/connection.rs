@@ -795,6 +795,23 @@ pub async fn load_connections(
     remove_connection_pools_for_connection_ids(&state, &sync.connection_pool_ids_to_drop).await;
     drop_nacos_adapters_for_connection_ids(&state, &sync.nacos_adapter_ids_to_drop).await;
     drop_mq_adapters_for_connection_ids(&state, &sync.mq_adapter_ids_to_drop).await;
+    // T4：非 admin 用户按有效 scope 过滤（分组归属经 sidebar 布局解析，未分组
+    // 连接仅当 allowed_connection_ids 命中）；无 connection.manage 权限的用户
+    // 抹除敏感字段（密码 / 传输层凭据 / 插件密钥，见 redact 说明）。桌面与
+    // DBX_DISABLE_PASSWORD（无用户上下文）维持原行为。
+    let configs = match crate::request_context::current_request_user() {
+        Some(user) if !user.is_admin => {
+            let mut visible =
+                crate::access_gate::visible_connections_for_scope(&state, configs, &user.permissions).await?;
+            if !user.has_permission(dbx_core::persistence::access_control::PERMISSION_CONNECTION_MANAGE) {
+                for config in &mut visible {
+                    crate::access_gate::redact_connection_sensitive_fields(config);
+                }
+            }
+            visible
+        }
+        _ => configs,
+    };
     Ok(Json(configs))
 }
 
@@ -1754,8 +1771,14 @@ mod tests {
         std::fs::File::create(&db_path).unwrap();
         {
             let mut sessions = state.sessions.write().await;
-            sessions.insert("token-a".to_string());
-            sessions.insert("token-b".to_string());
+            sessions.insert(
+                "token-a".to_string(),
+                crate::state::UserSession { user_id: 1, username: "alice".to_string(), created_at: 0 },
+            );
+            sessions.insert(
+                "token-b".to_string(),
+                crate::state::UserSession { user_id: 2, username: "bob".to_string(), created_at: 0 },
+            );
         }
         let headers_a = cookie_headers("token-a");
 

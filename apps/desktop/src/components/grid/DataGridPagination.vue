@@ -164,6 +164,6 @@ function handlePageInputKeydown(event: KeyboardEvent) {
       </TooltipTrigger>
       <TooltipContent side="bottom">{{ t("grid.loadAllAndGoToLastRow") }}</TooltipContent>
     </Tooltip>
-    <DataGridExportMenu :items="exportMenuItems" :label="t('grid.export')" :on-select="(value) => emit('selectExport', value)" />
+    <DataGridExportMenu v-if="exportMenuItems.length" :items="exportMenuItems" :label="t('grid.export')" :on-select="(value) => emit('selectExport', value)" />
   </div>
 </template>

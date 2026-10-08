@@ -569,12 +569,14 @@ impl WebBackend {
         if self.password.is_empty() {
             return Err("DBX Web authentication is required. Set DBX_WEB_PASSWORD for MCP Web mode.".to_string());
         }
+        // Web 多用户体系：DBX_WEB_USERNAME 默认 admin（与启动引导创建的首个管理员一致）。
+        let username = std::env::var("DBX_WEB_USERNAME").unwrap_or_else(|_| "admin".to_string());
         let mut request = self.client.post(format!("{}/api/auth/login", self.base_url));
         for (name, value) in &self.headers {
             request = request.header(name, value);
         }
         let response = request
-            .json(&json!({ "password": self.password }))
+            .json(&json!({ "username": username, "password": self.password }))
             .send()
             .await
             .map_err(|error| format!("Authentication failed: {error}"))?;

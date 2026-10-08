@@ -8,3 +8,4 @@ bin/
 .gradle/
 .DS_Store
 openspec
+target-web

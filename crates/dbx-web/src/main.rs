@@ -1,13 +1,22 @@
+mod access_gate;
+#[cfg(test)]
+mod access_gate_http_tests;
+#[cfg(test)]
+mod admin_http_tests;
 mod auth;
+#[cfg(test)]
+mod auth_http_tests;
+mod blacklist;
 mod demo;
 mod error;
+mod request_context;
 mod routes;
 mod sse;
 mod ssh_prompt;
 mod state;
 mod web_mcp;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -89,12 +98,7 @@ async fn migration_gate(
     next: axum::middleware::Next,
 ) -> Response {
     let suffix = auth::middleware_api_path_suffix(request.uri().path(), &state.public_base_path);
-    let allowed = suffix.is_some_and(|path| {
-        matches!(
-            path,
-            "migration/status" | "migration/start" | "migration/retry" | "migration/cleanup-backups" | "ping"
-        ) || path.starts_with("auth/")
-    });
+    let allowed = suffix.is_some_and(|path| auth::migration_gate_exempt_path(path) || path.starts_with("auth/"));
     if !allowed && !state.migration_ready.load(Ordering::Acquire) {
         return (
             StatusCode::LOCKED,
@@ -121,6 +125,40 @@ async fn web_mcp_demo_gate(
 
 async fn storage_migration_ready(app: &Arc<AppState>) -> bool {
     app.storage.inspect_data_migration().await.map(|status| status.is_ready()).unwrap_or(false)
+}
+
+/// 启动引导：用户表为空时创建首个管理员（`admin`），使旧单口令部署无缝升级。
+///
+/// 三分支（优先级从高到低）：
+/// 1. `DBX_PASSWORD` env 存在 -> 用 env 口令的 Argon2 哈希创建；
+/// 2. `app_settings.password_hash` 存在旧哈希 -> 直接复用（旧口令仍是 admin
+///    密码，不重新哈希；旧数据保留不删）；
+/// 3. 两者都没有 -> 不创建，`setup_required = true` 走前端向导。
+///
+/// 创建的用户 `is_admin = 1`、`password_updated_at = now`、`must_change_password = 0`。
+/// 返回是否创建了 admin（用户表非空时为 `Ok(false)`，不改动任何数据）。
+async fn bootstrap_first_admin(
+    storage: &dbx_core::storage::Storage,
+    env_password: Option<&str>,
+    legacy_hash: Option<&str>,
+) -> Result<bool, String> {
+    if storage.count_users().await? > 0 {
+        return Ok(false);
+    }
+    let password_hash = if let Some(password) = env_password {
+        let salt = SaltString::generate(&mut OsRng);
+        Argon2::default()
+            .hash_password(password.as_bytes(), &salt)
+            .map_err(|_| "failed to hash DBX_PASSWORD for the bootstrap admin".to_string())?
+            .to_string()
+    } else if let Some(hash) = legacy_hash {
+        hash.to_string()
+    } else {
+        return Ok(false);
+    };
+    storage.create_user("admin", &password_hash, None, None, true).await?;
+    log::info!("Bootstrapped the first admin user from the legacy single-password configuration");
+    Ok(true)
 }
 
 fn web_agent_dir(data_dir: &std::path::Path) -> std::path::PathBuf {
@@ -444,13 +482,37 @@ async fn serve() {
         .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false);
 
+    let trust_proxy = std::env::var("DBX_TRUST_PROXY")
+        .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+
+    // 启动引导：旧单口令体系 -> 多用户体系（见 bootstrap_first_admin）。
+    let env_password = std::env::var("DBX_PASSWORD").ok().filter(|value| !value.is_empty());
+    let legacy_hash =
+        if password_disabled { None } else { app_state.storage.load_password_hash().await.unwrap_or(None) };
+    let bootstrap_created_admin =
+        bootstrap_first_admin(&app_state.storage, env_password.as_deref(), legacy_hash.as_deref()).await;
+    if let Err(error) = bootstrap_created_admin {
+        panic!("Failed to bootstrap the first admin user: {error}");
+    }
+    let user_system_ready = app_state.storage.count_users().await.unwrap_or(0) > 0;
+
     let password_hash = if password_disabled {
         None
-    } else if let Ok(pw) = std::env::var("DBX_PASSWORD") {
+    } else if let Some(pw) = env_password {
         let salt = SaltString::generate(&mut OsRng);
         Some(Argon2::default().hash_password(pw.as_bytes(), &salt).expect("Failed to hash password").to_string())
     } else {
-        app_state.storage.load_password_hash().await.unwrap_or(None)
+        legacy_hash
+    };
+
+    // 登录黑名单内存缓存（含 IP 屏蔽中间件的判定源）。
+    let blacklist = match blacklist::BlacklistCache::load(&app_state.storage).await {
+        Ok(cache) => Arc::new(cache),
+        Err(error) => {
+            log::warn!("Failed to load the login blacklist cache: {error}");
+            Arc::new(blacklist::BlacklistCache::empty())
+        }
     };
 
     let public_base_path = normalize_public_base_path(std::env::var("DBX_PUBLIC_BASE_PATH").ok());
@@ -471,19 +533,23 @@ async fn serve() {
         public_base_path: public_base_path.clone(),
         demo_mode,
         password_disabled,
+        trust_proxy,
         password_hash: RwLock::new(password_hash),
-        sessions: RwLock::new(HashSet::new()),
+        sessions: RwLock::new(HashMap::new()),
         sse_channels: RwLock::new(HashMap::new()),
         transfer_progress_channels: RwLock::new(HashMap::new()),
         table_import_channels: RwLock::new(HashMap::new()),
         sql_file_executions: RwLock::new(HashMap::new()),
         managed_sql_previews: Default::default(),
         nacos_imports: RwLock::new(HashMap::new()),
-        login_rate_limit: tokio::sync::Mutex::new(state::LoginRateLimit { fail_count: 0, locked_until: None }),
+        login_rate_limit: tokio::sync::Mutex::new(HashMap::new()),
         export_files: RwLock::new(HashMap::new()),
         ssh_prompts: Arc::new(ssh_prompt::SshPromptHub::new()),
         migration_ready: Arc::new(AtomicBool::new(migration_ready)),
         web_mcp,
+        blacklist,
+        permission_cache: RwLock::new(HashMap::new()),
+        user_system_ready: Arc::new(AtomicBool::new(user_system_ready)),
     });
 
     ssh_prompt::install_web_ssh_prompt_bridge(web_state.ssh_prompts.clone());
@@ -1346,7 +1412,22 @@ async fn serve() {
         .route("/cloud-sync/snippet/save-id", post(routes::cloud_sync::save_snippet_sync_id))
         .route("/cloud-sync/snippet/retry-legacy-cleanup", post(routes::cloud_sync::retry_snippet_legacy_cleanup))
         .route("/cloud-sync/snippet/upload", post(routes::cloud_sync::snippet_sync_upload))
-        .route("/cloud-sync/snippet/download", post(routes::cloud_sync::snippet_sync_download));
+        .route("/cloud-sync/snippet/download", post(routes::cloud_sync::snippet_sync_download))
+        // Admin
+        .route("/admin/users", get(routes::admin::list_users).post(routes::admin::create_user))
+        .route("/admin/users/{id}", put(routes::admin::update_user).delete(routes::admin::delete_user))
+        .route("/admin/users/{id}/reset-password", post(routes::admin::reset_user_password))
+        .route("/admin/departments", get(routes::admin::list_departments).post(routes::admin::create_department))
+        .route(
+            "/admin/departments/{id}",
+            put(routes::admin::update_department).delete(routes::admin::delete_department),
+        )
+        .route("/admin/roles", get(routes::admin::list_roles).post(routes::admin::create_role))
+        .route("/admin/roles/{id}", put(routes::admin::update_role).delete(routes::admin::delete_role))
+        .route("/admin/blacklist", get(routes::admin::list_blacklist).post(routes::admin::create_blacklist))
+        .route("/admin/blacklist/{id}", delete(routes::admin::delete_blacklist))
+        .route("/admin/scope-tree", get(routes::admin::scope_tree))
+        .route("/admin/clear-protection-password", post(routes::admin::clear_protection_password));
 
     // Do not expose DuckDB-only handlers from builds that omit DuckDB sidecar support.
     #[cfg(feature = "duckdb-sidecar")]
@@ -1354,6 +1435,7 @@ async fn serve() {
         api.route("/query/build-duckdb-attach-database-sql", post(routes::query::build_duckdb_attach_database_sql));
 
     let api = add_mq_routes(api)
+        .layer(middleware::from_fn_with_state(web_state.clone(), access_gate::access_gate_middleware))
         .layer(middleware::from_fn_with_state(web_state.clone(), migration_gate))
         .layer(middleware::from_fn_with_state(web_state.clone(), demo::demo_mode_gate))
         .layer(middleware::from_fn_with_state(web_state.clone(), auth::auth_middleware))
@@ -1393,6 +1475,10 @@ async fn serve() {
     };
     app = mount_static_assets(app, &public_base_path, static_source);
 
+    // IP 黑名单门：挂在全站最外层（migration_gate / auth 之前），对全部请求
+    // （含静态资源与 MCP 端点）生效。
+    app = app.layer(middleware::from_fn_with_state(web_state.clone(), blacklist::ip_blacklist_middleware));
+
     // Bind address
     let port: u16 = std::env::var("DBX_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(4224);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
@@ -1412,7 +1498,7 @@ async fn serve() {
 
     let listener = tokio::net::TcpListener::bind(addr).await.expect("Failed to bind address");
     let shutdown_state = web_state.app.clone();
-    axum::serve(listener, app)
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(async move {
             #[cfg(unix)]
             {
@@ -1433,8 +1519,8 @@ async fn serve() {
 #[cfg(test)]
 mod tests {
     use super::{
-        mount_static_assets, normalize_public_base_path, web_agent_dir_from_env, web_body_limit_bytes_from_value,
-        web_compression_predicate, StaticSource, XLSX_CONTENT_TYPE,
+        bootstrap_first_admin, mount_static_assets, normalize_public_base_path, web_agent_dir_from_env,
+        web_body_limit_bytes_from_value, web_compression_predicate, StaticSource, XLSX_CONTENT_TYPE,
     };
     use crate::routes::table_import;
     use axum::body::Body;
@@ -1444,6 +1530,58 @@ mod tests {
     use axum::routing::{get, post};
     use axum::Router;
     use tower_http::compression::predicate::Predicate;
+
+    /// 启动引导三分支：env 口令 / 旧哈希 / 无来源（不创建）。
+    #[tokio::test]
+    async fn bootstrap_first_admin_covers_the_three_source_branches() {
+        use argon2::password_hash::{rand_core::OsRng, SaltString};
+        use argon2::{Argon2, PasswordHasher, PasswordVerifier};
+
+        fn argon_hash(password: &str) -> String {
+            let salt = SaltString::generate(&mut OsRng);
+            Argon2::default().hash_password(password.as_bytes(), &salt).expect("hash").to_string()
+        }
+
+        fn verify(password: &str, hash: &str) -> bool {
+            argon2::PasswordHash::new(hash)
+                .map(|parsed| Argon2::default().verify_password(password.as_bytes(), &parsed).is_ok())
+                .unwrap_or(false)
+        }
+
+        async fn fresh_storage() -> dbx_core::storage::Storage {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.keep().join("dbx.db");
+            dbx_core::persistence::test_storage::open_unmigrated(&path).await.unwrap()
+        }
+
+        // 分支 1：DBX_PASSWORD env 口令 -> 创建 admin（Argon2 重新哈希）。
+        let storage = fresh_storage().await;
+        assert_eq!(bootstrap_first_admin(&storage, Some("env-secret-1"), None).await.unwrap(), true);
+        let admin = storage.get_user_by_username("admin").await.unwrap().expect("bootstrap admin");
+        assert!(admin.is_admin);
+        assert!(!admin.must_change_password);
+        assert!(verify("env-secret-1", &admin.password_hash));
+
+        // 分支 2：旧共享口令哈希 -> 直接复用（不重新哈希）。
+        let storage = fresh_storage().await;
+        let legacy_hash = argon_hash("legacy-shared-secret");
+        assert_eq!(bootstrap_first_admin(&storage, None, Some(&legacy_hash)).await.unwrap(), true);
+        let admin = storage.get_user_by_username("admin").await.unwrap().expect("bootstrap admin");
+        assert_eq!(admin.password_hash, legacy_hash, "legacy hash must be reused verbatim");
+        assert!(verify("legacy-shared-secret", &admin.password_hash));
+
+        // 分支 3：两者都无 -> 不创建，setup_required 由 check 端点上报。
+        let storage = fresh_storage().await;
+        assert_eq!(bootstrap_first_admin(&storage, None, None).await.unwrap(), false);
+        assert_eq!(storage.count_users().await.unwrap(), 0);
+
+        // 用户表非空 -> 幂等跳过，不动现有数据。
+        let storage = fresh_storage().await;
+        let existing_id = storage.create_user("root", &argon_hash("root-pass"), None, None, true).await.unwrap();
+        assert_eq!(bootstrap_first_admin(&storage, Some("env-secret-1"), None).await.unwrap(), false);
+        assert_eq!(storage.count_users().await.unwrap(), 1);
+        assert_eq!(storage.get_user_by_id(existing_id).await.unwrap().unwrap().username, "root");
+    }
 
     #[tokio::test]
     async fn migration_http_gate_blocks_business_until_ready_but_allows_cleanup_handler() {

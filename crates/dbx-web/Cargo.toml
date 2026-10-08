@@ -53,3 +53,5 @@ mime_guess = { version = "2", optional = true }
 [dev-dependencies]
 dbx-core = { path = "../dbx-core", default-features = false, features = ["test-support"] }
 reqwest = { version = "0.12", default-features = false, features = ["multipart"] }
+# 集成测试直接改库模拟密码过期时间（与 dbx-core 同版本，复用 bundled 特性）。
+rusqlite = { version = "0.32", default-features = false }

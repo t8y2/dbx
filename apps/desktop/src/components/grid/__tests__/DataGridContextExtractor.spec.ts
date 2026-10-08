@@ -53,6 +53,7 @@ vi.mock("@/composables/useDataGridColumnResize", async (importOriginal) => {
 });
 
 import DataGrid from "../DataGrid.vue";
+import { useAuthStore } from "@/stores/authStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 
 const RecycleScroller = defineComponent({
@@ -140,6 +141,7 @@ function mountGrid(initialResult = largeValueResult(), onReload?: () => void) {
   const onExecuteSql = vi.fn().mockResolvedValue(undefined);
   const pinia = createPinia();
   setActivePinia(pinia);
+  useAuthStore().isAdmin = true;
   const settingsStore = useSettingsStore();
   settingsStore.updateEditorSettings({ dataGridRenderMode: "canvas" });
 

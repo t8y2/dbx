@@ -4345,3 +4345,78 @@ func TestRewriteOracleOpaqueObjectExplicitColumnKeepsLinkedAlias(t *testing.T) {
 		t.Fatalf("rewriteOracleSelectSQL() = %s, want %s", sqlText, want)
 	}
 }
+
+// OCI 模式的连接串解析：oci8 前缀、TNS 别名与 thin 形式共用同一套规则。
+func TestParseOracleJDBCURLAcceptsOci8FormsAndTnsAliases(t *testing.T) {
+	cases := []struct {
+		name string
+		url  string
+		want jdbcURLInfo
+	}{
+		{
+			name: "service",
+			url:  "jdbc:oracle:oci8:@//db.example.com:1521/ORCLPDB1",
+			want: jdbcURLInfo{Kind: "service", Host: "db.example.com", Port: 1521, Database: "ORCLPDB1"},
+		},
+		{
+			name: "sid",
+			url:  "jdbc:oracle:oci8:@db.example.com:1521:ORCL",
+			want: jdbcURLInfo{Kind: "sid", Host: "db.example.com", Port: 1521, Database: "ORCL"},
+		},
+		{
+			name: "descriptor",
+			url:  "jdbc:oracle:oci8:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=h)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=x)))",
+			want: jdbcURLInfo{Kind: "descriptor", Descriptor: "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=h)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=x)))"},
+		},
+		{
+			name: "tns alias",
+			url:  "jdbc:oracle:oci8:@ORCLPDB1",
+			want: jdbcURLInfo{Kind: "tns", Database: "ORCLPDB1"},
+		},
+		{
+			name: "tns alias with admin query",
+			url:  "jdbc:oracle:oci8:@ORCLPDB1?TNS_ADMIN=C:/wallets",
+			want: jdbcURLInfo{Kind: "tns", Database: "ORCLPDB1"},
+		},
+		{
+			name: "thin form still parses",
+			url:  "jdbc:oracle:thin:@//db.example.com:1521/ORCLPDB1",
+			want: jdbcURLInfo{Kind: "service", Host: "db.example.com", Port: 1521, Database: "ORCLPDB1"},
+		},
+	}
+	for _, tc := range cases {
+		if got := parseOracleJDBCURL(tc.url); got != tc.want {
+			t.Errorf("%s: parseOracleJDBCURL(%q) = %+v, want %+v", tc.name, tc.url, got, tc.want)
+		}
+	}
+}
+
+func TestParseOracleJDBCURLRejectsUnknownSchemes(t *testing.T) {
+	for _, url := range []string{
+		"jdbc:postgresql://db/app",
+		"jdbc:mysql://db:3306/app",
+		"",
+	} {
+		if got := parseOracleJDBCURL(url); got != (jdbcURLInfo{}) {
+			t.Errorf("parseOracleJDBCURL(%q) = %+v, want the zero value", url, got)
+		}
+	}
+}
+
+func TestOracleTnsAliasName(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"ORCLPDB1", "ORCLPDB1"},
+		{"ORCLPDB1?TNS_ADMIN=C:/wallets", "ORCLPDB1"},
+		{"ORCLPDB1 ", "ORCLPDB1"},
+		{"(DESCRIPTION=(ADDRESS=...))", ""},
+		{"//host:1521/svc", ""},
+		{"host:1521:orcl", ""},
+		{"host/svc", ""},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := oracleTnsAliasName(tc.in); got != tc.want {
+			t.Errorf("oracleTnsAliasName(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

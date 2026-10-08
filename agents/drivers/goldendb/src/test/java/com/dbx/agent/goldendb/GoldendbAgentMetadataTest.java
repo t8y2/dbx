@@ -15,6 +15,9 @@ import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class GoldendbAgentMetadataTest {
     @Test
@@ -27,6 +30,46 @@ class GoldendbAgentMetadataTest {
         Assertions.assertEquals(1, columns.size());
         Assertions.assertEquals("utf8mb4", columns.get(0).getCharacter_set());
         Assertions.assertEquals("utf8mb4_bin", columns.get(0).getCollation());
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {"客户的'备注'\n第二行", " "})
+    void preservesColumnCommentsAndEmptyCommentConvention(String comment) {
+        GoldendbAgent agent = new GoldendbAgent();
+        TestSupport.setPrivateConnection(agent, columnsConnection(comment));
+
+        var columns = agent.getColumns("app", "orders");
+
+        Assertions.assertEquals(1, columns.size());
+        Assertions.assertEquals(comment == null || comment.isEmpty() ? null : comment, columns.get(0).getComment());
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {"订单的'备注'\n第二行", " "})
+    void preservesTableCommentsWithAndWithoutConstraints(String comment) {
+        GoldendbAgent agent = new GoldendbAgent();
+        Connection connection = proxy(Connection.class, (proxy, method, args) -> {
+            if ("prepareStatement".equals(method.getName())) {
+                Map<String, Object> row = new HashMap<>();
+                row.put("TABLE_NAME", "orders");
+                row.put("TABLE_TYPE", "BASE TABLE");
+                row.put("TABLE_COMMENT", comment);
+                return preparedStatement(resultSet(List.of(row)));
+            }
+            return defaultValue(method.getReturnType());
+        });
+        TestSupport.setPrivateConnection(agent, connection);
+
+        var tables = agent.listTables("app");
+        var constrained = agent.listTables("app", new MetadataListConstraints("ord", 10, null, List.of("TABLE")));
+
+        for (var result : List.of(tables, constrained)) {
+            Assertions.assertEquals(1, result.size());
+            Assertions.assertEquals("TABLE", result.get(0).getTable_type());
+            Assertions.assertEquals(comment == null || comment.isEmpty() ? null : comment, result.get(0).getComment());
+        }
     }
 
     @Test
@@ -72,11 +115,15 @@ class GoldendbAgentMetadataTest {
     }
 
     private static Connection columnsConnection() {
+        return columnsConnection("");
+    }
+
+    private static Connection columnsConnection(String comment) {
         InvocationHandler connectionHandler = (proxy, method, args) -> {
             if ("prepareStatement".equals(method.getName())) {
                 String sql = (String) args[0];
                 boolean columnsQuery = sql.contains("CHARACTER_SET_NAME");
-                return preparedStatement(columnsQuery ? columnResultSet() : emptyResultSet());
+                return preparedStatement(columnsQuery ? columnResultSet(comment) : emptyResultSet());
             }
             if ("getAutoCommit".equals(method.getName())) return true;
             if ("close".equals(method.getName())) return null;
@@ -98,14 +145,14 @@ class GoldendbAgentMetadataTest {
         return resultSet(List.of());
     }
 
-    private static ResultSet columnResultSet() {
+    private static ResultSet columnResultSet(String comment) {
         Map<String, Object> row = new HashMap<>();
         row.put("COLUMN_NAME", "name");
         row.put("COLUMN_TYPE", "varchar(64)");
         row.put("IS_NULLABLE", "YES");
         row.put("COLUMN_DEFAULT", "'guest'");
         row.put("EXTRA", "");
-        row.put("COLUMN_COMMENT", "");
+        row.put("COLUMN_COMMENT", comment);
         row.put("NUMERIC_PRECISION", null);
         row.put("NUMERIC_SCALE", null);
         row.put("CHARACTER_MAXIMUM_LENGTH", 64);

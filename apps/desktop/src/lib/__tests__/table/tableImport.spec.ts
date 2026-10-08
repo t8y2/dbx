@@ -95,6 +95,16 @@ describe("tableImport", () => {
     });
   });
 
+  it("maps headerless columns by position even when generated names match a different target", () => {
+    expect(autoMapImportColumns(["column_1", "column_2"], ["column_2", "column_1"], "position")).toEqual({ column_1: "column_2", column_2: "column_1" });
+  });
+
+  it("skips excess source columns and leaves excess target columns unmapped", () => {
+    expect(autoMapImportColumns(["column_1", "column_2", "column_3"], ["id", "name"], "position")).toEqual({ column_1: "id", column_2: "name", column_3: "" });
+    expect(autoMapImportColumns(["column_1"], ["id", "name"], "position")).toEqual({ column_1: "id" });
+    expect(autoMapImportColumns(["column_1"], [], "position")).toEqual({ column_1: "" });
+  });
+
   it("rejects empty mappings and duplicate target columns", () => {
     expect(validateImportMappings([])).toEqual({
       valid: false,

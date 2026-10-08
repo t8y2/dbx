@@ -1,12 +1,13 @@
+#[cfg(feature = "duckdb-sidecar")]
+use super::column_alter::build_duckdb_existing_column_sql;
 use super::column_alter::build_transwarp_existing_column_clause;
 use super::column_alter::{
     build_clickhouse_existing_column_sql, build_dameng_existing_column_sql, build_doris_existing_column_sql,
-    build_duckdb_existing_column_sql, build_h2_existing_column_sql, build_informix_existing_column_sql,
-    build_iris_existing_column_sql, build_mysql_existing_column_clause, build_oracle_like_existing_column_sql,
-    build_oscar_existing_column_sql, build_postgres_existing_column_sql, build_questdb_existing_column_sql,
-    build_sqlite_existing_column_sql, build_sqlserver_existing_column_sql, build_xugu_existing_column_sql,
-    dameng_drops_identity, has_column_extra_change, has_existing_column_attribute_change,
-    validate_dameng_existing_identity_change,
+    build_h2_existing_column_sql, build_informix_existing_column_sql, build_iris_existing_column_sql,
+    build_mysql_existing_column_clause, build_oracle_like_existing_column_sql, build_oscar_existing_column_sql,
+    build_postgres_existing_column_sql, build_questdb_existing_column_sql, build_sqlite_existing_column_sql,
+    build_sqlserver_existing_column_sql, build_xugu_existing_column_sql, dameng_drops_identity,
+    has_column_extra_change, has_existing_column_attribute_change, validate_dameng_existing_identity_change,
 };
 use super::column_format::{
     column_definition, has_dameng_identity, is_dameng_identity_compatible_type, is_mysql_character_data_type,
@@ -296,6 +297,7 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
                 warnings,
             )),
             StructureDialect::Sqlite => statements.extend(build_sqlite_existing_column_sql(&table, column, warnings)),
+            #[cfg(feature = "duckdb-sidecar")]
             StructureDialect::DuckDb => statements.extend(build_duckdb_existing_column_sql(&table, column)),
             StructureDialect::Questdb => statements.extend(build_questdb_existing_column_sql(&table, column)),
             _ => warnings.push(format!("Editing existing columns is not supported for {database_label} yet.")),
@@ -473,29 +475,35 @@ pub(super) fn build_primary_key_sql(
         return Vec::new();
     }
 
-    let persisted_postgres_primary_key_name = if options.database_type == Some(DatabaseType::Postgres)
-        && !change.old_ids.is_empty()
-    {
-        let mut primary_indexes =
-            options.indexes.iter().filter_map(|index| index.original.as_ref().filter(|original| original.is_primary));
-        match (primary_indexes.next(), primary_indexes.next()) {
-            (Some(primary_index), None) if !primary_index.name.is_empty() => Some(primary_index.name.as_str()),
-            _ => {
-                warnings.push(
-                        "Could not determine the existing PostgreSQL primary key constraint name. Refresh the table structure and try again."
-                            .to_string(),
-                    );
-                return Vec::new();
+    // PostgreSQL and SQL Server replace the persisted primary key by constraint name (neither
+    // engine has a dependable default naming rule), so the name must come from index metadata.
+    let persisted_primary_key_name = match options.database_type {
+        Some(DatabaseType::Postgres) | Some(DatabaseType::SqlServer) if !change.old_ids.is_empty() => {
+            let mut primary_indexes = options
+                .indexes
+                .iter()
+                .filter_map(|index| index.original.as_ref().filter(|original| original.is_primary));
+            match (primary_indexes.next(), primary_indexes.next()) {
+                (Some(primary_index), None) if !primary_index.name.is_empty() => Some(primary_index.name.as_str()),
+                _ => {
+                    let engine = if options.database_type == Some(DatabaseType::SqlServer) {
+                        "SQL Server"
+                    } else {
+                        "PostgreSQL"
+                    };
+                    warnings.push(format!(
+                        "Could not determine the existing {engine} primary key constraint name. Refresh the table structure and try again."
+                    ));
+                    return Vec::new();
+                }
             }
         }
-    } else {
-        None
+        _ => None,
     };
 
     let mut statements = Vec::new();
     if !change.old_ids.is_empty() {
-        let Some(drop_sql) = drop_primary_key_statement(dialect, table, options, persisted_postgres_primary_key_name)
-        else {
+        let Some(drop_sql) = drop_primary_key_statement(dialect, table, options, persisted_primary_key_name) else {
             warnings.push(format!(
                 "Changing primary keys is not supported for {} from this editor.",
                 database_label(options.database_type)
@@ -508,7 +516,7 @@ pub(super) fn build_primary_key_sql(
     if !change.new_names.is_empty() {
         let pk_list = change.new_names.iter().map(|name| quote_ident(dialect, name)).collect::<Vec<_>>().join(", ");
         // DM8: ADD [CONSTRAINT name] PRIMARY KEY; anonymous form matches Navicat/DBeaver/MySQL editors.
-        let constraint = persisted_postgres_primary_key_name
+        let constraint = persisted_primary_key_name
             .map(|name| format!("CONSTRAINT {} ", quote_ident(dialect, name)))
             .unwrap_or_default();
         statements.push(format!("ALTER TABLE {table} ADD {constraint}PRIMARY KEY ({pk_list});"));
@@ -526,22 +534,28 @@ pub(super) fn build_primary_key_sql(
 ///   Cluster primary keys cannot use this path (DM8 restriction) — left to the server.
 /// - Postgres: `DROP CONSTRAINT <persisted primary index name>` for PostgreSQL;
 ///   other Postgres-compatible engines retain the existing default-name behavior.
+/// - SQL Server: `DROP CONSTRAINT <persisted primary index name>`; the caller resolves the name
+///   from the index metadata (server-generated names like `PK__orders__3213E83F` have no rule).
 fn drop_primary_key_statement(
     dialect: StructureDialect,
     table: &str,
     options: &TableStructureSqlOptions,
-    persisted_postgres_primary_key_name: Option<&str>,
+    persisted_primary_key_name: Option<&str>,
 ) -> Option<String> {
     match dialect {
         StructureDialect::Postgres => {
             let fallback_name;
-            let pk_name = if let Some(name) = persisted_postgres_primary_key_name {
+            let pk_name = if let Some(name) = persisted_primary_key_name {
                 name
             } else {
                 let raw_table = options.table_name.split('.').next_back().unwrap_or(&options.table_name);
                 fallback_name = format!("{}_pkey", clean(raw_table));
                 &fallback_name
             };
+            Some(format!("ALTER TABLE {table} DROP CONSTRAINT {};", quote_ident(dialect, pk_name)))
+        }
+        StructureDialect::SqlServer => {
+            let pk_name = persisted_primary_key_name?;
             Some(format!("ALTER TABLE {table} DROP CONSTRAINT {};", quote_ident(dialect, pk_name)))
         }
         // 神通 Oscar 实测支持 `ALTER TABLE ... DROP PRIMARY KEY`（与 Dameng/MySQL 一致）。

@@ -17,12 +17,18 @@ use std::future::Future;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+#[cfg(all(test, unix))]
+mod agent_metadata_routing_tests;
 mod agent_pg_sequences;
+#[cfg(all(test, unix))]
+mod external_table_filter_tests;
 mod kingbase;
 mod mongodb_columns;
 pub mod plugin_metadata;
 #[cfg(test)]
 mod plugin_metadata_tests;
+#[cfg(test)]
+mod sqlserver_temporal_ddl_tests;
 
 macro_rules! extract_pool {
     ($pool:expr, $variant:ident) => {
@@ -684,12 +690,21 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
             return Ok(vec![db::DatabaseInfo { name, ..Default::default() }]);
         }
         try_sqlserver!(pool_handle, list_databases);
-        if let Some(client) = extract_pool!(pool_handle.as_ref(), Agent) {
+        if matches!(pool_handle.as_ref(), Some(PoolKind::Agent(_)))
+            || (pool_handle.is_none()
+                && db_config.as_ref().is_some_and(|config| {
+                    crate::database_capabilities::is_agent_type(&config.db_type)
+                        || crate::connection::sqlserver_uses_legacy_driver(config)
+                }))
+        {
             let is_mongo = db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::MongoDb);
             if is_mongo {
                 let dbs = crate::mongo_ops::mongo_list_databases_core(state, connection_id).await?;
                 return Ok(dbs.into_iter().map(|name| db::DatabaseInfo { name, ..Default::default() }).collect());
             }
+            let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, None, None).await?;
+            let metadata_pool = state.pool_handle(&pool_key).await;
+            let client = extract_pool!(metadata_pool.as_ref(), Agent).ok_or("Pool not found")?;
             let mut client = client.lock().await;
             return client.list_databases(agent_metadata_timeout(db_config.as_ref())).await;
         }
@@ -2260,8 +2275,8 @@ async fn list_tables_once(
             let driver_id = driver_id.clone();
             let config = config.clone();
             let session = session.clone();
+            let force_local_table_name_filter = table_name_filter.is_some_and(|filter| !filter.is_empty());
             if uses_presto_like_information_schema_tables(&config.db_type) {
-                let force_local_table_name_filter = table_name_filter.is_some_and(|filter| !filter.is_empty());
                 return external_driver_presto_like_tables(
                     session,
                     config.as_ref(),
@@ -2282,11 +2297,15 @@ async fn list_tables_once(
             if let Some(object_types) = object_types {
                 params["object_types"] = serde_json::json!(object_types);
             }
-            if let Some(limit) = limit {
-                params["limit"] = serde_json::json!(limit);
-            }
-            if let Some(offset) = offset {
-                params["offset"] = serde_json::json!(offset);
+            // Include/exclude name patterns are evaluated in core, so the plugin
+            // must return the full candidate list before core applies pagination.
+            if !force_local_table_name_filter {
+                if let Some(limit) = limit {
+                    params["limit"] = serde_json::json!(limit);
+                }
+                if let Some(offset) = offset {
+                    params["offset"] = serde_json::json!(offset);
+                }
             }
             return session
                 .invoke_with_timeout::<Vec<db::TableInfo>>(
@@ -2296,7 +2315,9 @@ async fn list_tables_once(
                 )
                 .await
                 .map(|tables| {
-                    let final_offset = if external_driver_paging_likely_applied(&driver_id, limit, tables.len()) {
+                    let final_offset = if !force_local_table_name_filter
+                        && external_driver_paging_likely_applied(&driver_id, limit, tables.len())
+                    {
                         Some(0)
                     } else {
                         offset
@@ -3291,6 +3312,8 @@ mod tests {
 
     fn test_connection_config(db_type: DatabaseType) -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: "test".to_string(),
             name: "test".to_string(),
@@ -4457,6 +4480,7 @@ done
             schema: None,
             source: "CREATE EVENT event_daily_sync ON SCHEDULE EVERY 1 DAY DO SELECT 1".to_string(),
             editable: None,
+            routine_parameters: None,
         });
 
         assert_eq!(source.editable, Some(false));
@@ -6491,10 +6515,18 @@ pub async fn list_object_statistics_core(
     database: &str,
     schema: &str,
 ) -> Result<Vec<db::ObjectStatistics>, String> {
-    retry_metadata_connection(state, connection_id, Some(database), || {
-        list_object_statistics_once(state, connection_id, database, schema)
-    })
-    .await
+    let metadata_session =
+        EphemeralAgentMetadataSession::open(state, connection_id, Some(database), "object-statistics").await;
+    let result = retry_metadata_connection_for_session(
+        state,
+        connection_id,
+        Some(database),
+        metadata_session.client_session_id(),
+        || list_object_statistics_once(state, connection_id, database, schema, metadata_session.client_session_id()),
+    )
+    .await;
+    metadata_session.finish(state, connection_id, Some(database)).await;
+    result
 }
 
 pub async fn list_completion_objects_core(
@@ -6931,8 +6963,10 @@ async fn list_object_statistics_once(
     connection_id: &str,
     database: &str,
     schema: &str,
+    client_session_id: Option<&str>,
 ) -> Result<Vec<db::ObjectStatistics>, String> {
-    let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
+    let pool_key =
+        state.get_or_create_metadata_pool_for_session(connection_id, Some(database), client_session_id).await?;
     let db_config = connection_config(state, connection_id).await;
     let pool_handle = state.pool_handle(&pool_key).await;
     try_sqlserver!(pool_handle, list_object_statistics, schema);
@@ -8096,6 +8130,9 @@ async fn get_columns_core_for_session_inner_with_pool(
             PoolKind::Easysearch(client) => {
                 db::easysearch_driver::get_columns(client, table).await.map(deduplicate_column_infos)
             }
+            PoolKind::CouchDb(client) => {
+                db::couchdb_driver::get_columns(client, table).await.map(deduplicate_column_infos)
+            }
             PoolKind::Meilisearch(client) => {
                 db::meilisearch_driver::get_columns(client, table).await.map(deduplicate_column_infos)
             }
@@ -8398,6 +8435,35 @@ pub async fn list_foreign_keys_core(
     .await;
     metadata_session.finish(state, connection_id, Some(database)).await;
     result
+}
+
+pub async fn list_foreign_keys_for_database_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+) -> Result<HashMap<String, Vec<db::ForeignKeyInfo>>, String> {
+    if crate::sql_dialect::parse_sqlserver_linked_schema_ref(schema).is_some() {
+        return Ok(HashMap::new());
+    }
+    retry_metadata_connection(state, connection_id, Some(database), || async {
+        let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
+        let db_config = connection_config(state, connection_id).await;
+        let pool = clone_metadata_pool(state, &pool_key).await.ok_or("Pool not found")?;
+        match &pool {
+            PoolKind::Mysql(p, mode)
+                if *mode != MysqlMode::OceanBaseOracle
+                    && !db_config.as_ref().is_some_and(db::mysql_compatible::uses_show_metadata) =>
+            {
+                db::mysql::list_foreign_keys_for_database(p, mysql_table_metadata_catalog(database, schema)).await
+            }
+            PoolKind::Mysql(_, _) => {
+                Err("Database-wide foreign-key metadata is not supported for this MySQL variant".to_string())
+            }
+            _ => Err("Database-wide foreign-key metadata requires a native MySQL connection".to_string()),
+        }
+    })
+    .await
 }
 
 async fn list_foreign_keys_core_for_session(
@@ -9114,15 +9180,34 @@ struct TableDdlOptions {
     include_postgres_access: bool,
     include_partitions: bool,
     portable_oracle: bool,
+    include_sqlserver_temporal: bool,
 }
 
 impl TableDdlOptions {
-    const SINGLE_RELATION: Self =
-        Self { include_postgres_access: false, include_partitions: false, portable_oracle: false };
-    const RELATION_EXPORT: Self =
-        Self { include_postgres_access: false, include_partitions: false, portable_oracle: true };
-    const EXPORT: Self = Self { include_postgres_access: false, include_partitions: true, portable_oracle: true };
-    const DISPLAY: Self = Self { include_postgres_access: true, include_partitions: true, portable_oracle: false };
+    const SINGLE_RELATION: Self = Self {
+        include_postgres_access: false,
+        include_partitions: false,
+        portable_oracle: false,
+        include_sqlserver_temporal: false,
+    };
+    const RELATION_EXPORT: Self = Self {
+        include_postgres_access: false,
+        include_partitions: false,
+        portable_oracle: true,
+        include_sqlserver_temporal: false,
+    };
+    const EXPORT: Self = Self {
+        include_postgres_access: false,
+        include_partitions: true,
+        portable_oracle: true,
+        include_sqlserver_temporal: false,
+    };
+    const DISPLAY: Self = Self {
+        include_postgres_access: true,
+        include_partitions: true,
+        portable_oracle: false,
+        include_sqlserver_temporal: true,
+    };
 }
 
 pub async fn get_table_ddl_core(
@@ -9390,7 +9475,8 @@ async fn get_table_ddl_once(
         }
         if let Some(client) = extract_pool!(pool_handle.as_ref(), SqlServer) {
             let mut client = lock_sqlserver_metadata_client(&client).await?;
-            return build_sqlserver_ddl(&mut client, schema, table).await;
+            return build_sqlserver_ddl_with_temporal(&mut client, schema, table, options.include_sqlserver_temporal)
+                .await;
         }
         if let Some(client) = extract_pool!(pool_handle.as_ref(), Agent) {
             if let Some(config) = db_config.as_ref().filter(|config| is_agent_postgres_metadata_fallback_config(config))
@@ -10044,7 +10130,7 @@ pub fn postgres_object_source_sql(
     kind: &db::ObjectSourceKind,
     signature: Option<&str>,
 ) -> String {
-    postgres_object_source_sql_inner(schema, name, kind, signature, true, false, true)
+    postgres_object_source_sql_inner(schema, name, kind, signature, true, false, true, true)
 }
 
 fn postgres_trigger_object_source_sql(schema: &str, name: &str, relation_name: Option<&str>) -> String {
@@ -10070,8 +10156,9 @@ fn opengauss_object_source_sql(
     name: &str,
     kind: &db::ObjectSourceKind,
     signature: Option<&str>,
+    has_proc_prokind: bool,
 ) -> String {
-    postgres_object_source_sql_inner(schema, name, kind, signature, true, true, false)
+    postgres_object_source_sql_inner(schema, name, kind, signature, true, true, false, has_proc_prokind)
 }
 
 fn opengauss_sequence_object_source_sql(schema: &str, name: &str, include_cache: bool) -> String {
@@ -10122,13 +10209,23 @@ fn opengauss_sequence_object_source_sql(schema: &str, name: &str, include_cache:
 /// includes `DEFAULT` clauses) then always misses for routines with default
 /// parameters. This mirrors the signature filter but uses the same legacy
 /// formatter so it matches what the list query actually produced.
+/// Routine filter for pre-11 catalogs without `pg_proc.prokind` (they have no
+/// procedures either, so this matches plain functions only).
+const POSTGRES_LEGACY_ROUTINE_FILTER: &str = " AND NOT p.proisagg AND NOT p.proiswindow";
+
 fn postgres_function_object_source_sql_with_legacy_signature(
     schema: &str,
     name: &str,
     kind: &db::ObjectSourceKind,
     signature: Option<&str>,
+    has_proc_prokind: bool,
 ) -> String {
     let prokind = if matches!(kind, db::ObjectSourceKind::Procedure) { "p" } else { "f" };
+    let kind_filter = if has_proc_prokind {
+        format!(" AND p.prokind = '{}'", prokind)
+    } else {
+        POSTGRES_LEGACY_ROUTINE_FILTER.to_string()
+    };
     let signature_filter = signature
         .map(|value| format!(" AND pg_get_function_arguments(p.oid) = {}", sql_string(value)))
         .unwrap_or_default();
@@ -10136,11 +10233,11 @@ fn postgres_function_object_source_sql_with_legacy_signature(
         "SELECT pg_get_functiondef(p.oid) \
          FROM pg_proc p \
          JOIN pg_namespace n ON n.oid = p.pronamespace \
-         WHERE n.nspname = {} AND p.proname = {} AND p.prokind = '{}'{} \
+         WHERE n.nspname = {} AND p.proname = {}{}{} \
          ORDER BY p.oid LIMIT 1",
         sql_string(schema),
         sql_string(name),
-        prokind,
+        kind_filter,
         signature_filter
     )
 }
@@ -10156,7 +10253,7 @@ fn postgres_function_object_source_sql_without_prokind(
         "SELECT {source_expression} \
          FROM pg_proc p \
          JOIN pg_namespace n ON n.oid = p.pronamespace \
-         WHERE n.nspname = {} AND p.proname = {} AND NOT p.proisagg AND NOT p.proiswindow \
+         WHERE n.nspname = {} AND p.proname = {}{POSTGRES_LEGACY_ROUTINE_FILTER} \
          ORDER BY p.oid LIMIT 1",
         sql_string(schema),
         sql_string(name)
@@ -10199,6 +10296,7 @@ fn postgres_object_source_sql_inner(
     include_relispopulated: bool,
     unwrap_opengauss_record: bool,
     isolate_view_search_path: bool,
+    has_proc_prokind: bool,
 ) -> String {
     match kind {
         db::ObjectSourceKind::View | db::ObjectSourceKind::MaterializedView => {
@@ -10252,15 +10350,26 @@ fn postgres_object_source_sql_inner(
             let signature_filter = signature
                 .map(|value| format!(" AND pg_get_function_identity_arguments(p.oid) = {}", sql_string(value)))
                 .unwrap_or_default();
+            // PostgreSQL 11 renamed the routine-kind columns to prokind; older
+            // servers (and some Gauss-family kernels) only have proisagg and
+            // proiswindow, so a hardcoded prokind reference fails before the
+            // query even runs (#11161). Probe the catalog and pick the filter.
+            let kind_filter = if has_proc_prokind {
+                format!(" AND p.prokind = '{}'", prokind)
+            } else {
+                // Procedures were introduced together with prokind, so on legacy
+                // servers the legacy filter only ever matches plain functions.
+                POSTGRES_LEGACY_ROUTINE_FILTER.to_string()
+            };
             format!(
                 "SELECT {source_expression} \
                  FROM pg_proc p \
                  JOIN pg_namespace n ON n.oid = p.pronamespace \
-                 WHERE n.nspname = {} AND p.proname = {} AND p.prokind = '{}'{} \
+                 WHERE n.nspname = {} AND p.proname = {}{}{} \
                  ORDER BY p.oid LIMIT 1",
                 sql_string(schema),
                 sql_string(name),
-                prokind,
+                kind_filter,
                 signature_filter
             )
         }
@@ -10757,6 +10866,7 @@ async fn get_object_source_once(
                     schema: if schema.is_empty() { None } else { Some(schema.to_string()) },
                     source,
                     editable: None,
+                    routine_parameters: None,
                 });
             }
             let result: db::ObjectSource = session
@@ -10815,6 +10925,7 @@ async fn get_object_source_once(
                             schema: if schema.is_empty() { None } else { Some(schema.to_string()) },
                             source,
                             editable: None,
+                            routine_parameters: None,
                         });
                     }
                     None => String::new(),
@@ -10940,6 +11051,7 @@ async fn get_object_source_once(
         schema: if schema.is_empty() { None } else { Some(schema.to_string()) },
         source,
         editable,
+        routine_parameters: None,
     })
 }
 
@@ -11363,6 +11475,29 @@ fn postgres_view_source_uses_isolated_search_path(database_type: Option<&Databas
     database_type == Some(&DatabaseType::Postgres)
 }
 
+/// `pg_proc.prokind` exists from PostgreSQL 11 onwards; legacy servers filter
+/// routines with `proisagg`/`proiswindow` instead. Probe the catalog so the
+/// object-source query matches the server regardless of the locale it reports
+/// errors in (#11161 — the old error-message gate missed localized servers).
+fn postgres_proc_has_prokind_catalog_sql() -> &'static str {
+    "SELECT EXISTS ( \
+       SELECT 1 \
+       FROM pg_catalog.pg_attribute \
+       WHERE attrelid = 'pg_catalog.pg_proc'::regclass \
+         AND attname = 'prokind' \
+         AND NOT attisdropped \
+     )"
+}
+
+async fn postgres_object_source_has_proc_prokind(pool: &deadpool_postgres::Pool) -> bool {
+    match db::postgres::execute_query(pool, postgres_proc_has_prokind_catalog_sql()).await {
+        Ok(result) => result.rows.first().and_then(|row| row.first()).and_then(|value| value.as_bool()).unwrap_or(true),
+        // If even the probe fails (permissions, proxies), stay on the modern
+        // query and let the existing missing-prokind fallback handle legacy servers.
+        Err(_) => true,
+    }
+}
+
 async fn postgres_object_source(
     pool: &deadpool_postgres::Pool,
     schema: &str,
@@ -11373,14 +11508,19 @@ async fn postgres_object_source(
     unwrap_opengauss_record: bool,
     isolate_view_search_path: bool,
 ) -> Result<String, String> {
+    let has_proc_prokind = if matches!(object_type, db::ObjectSourceKind::Procedure | db::ObjectSourceKind::Function) {
+        postgres_object_source_has_proc_prokind(pool).await
+    } else {
+        true
+    };
     let sql = if matches!(object_type, db::ObjectSourceKind::Trigger) {
         postgres_trigger_object_source_sql(schema, name, relation_name)
     } else if unwrap_opengauss_record {
-        opengauss_object_source_sql(schema, name, object_type, signature)
+        opengauss_object_source_sql(schema, name, object_type, signature, has_proc_prokind)
     } else if isolate_view_search_path {
-        postgres_object_source_sql(schema, name, object_type, signature)
+        postgres_object_source_sql_inner(schema, name, object_type, signature, true, false, true, has_proc_prokind)
     } else {
-        postgres_object_source_sql_inner(schema, name, object_type, signature, true, false, false)
+        postgres_object_source_sql_inner(schema, name, object_type, signature, true, false, false, has_proc_prokind)
     };
     match db::postgres::execute_query(pool, &sql).await.and_then(first_string_cell) {
         Ok(source) => Ok(source),
@@ -11396,6 +11536,7 @@ async fn postgres_object_source(
                 false,
                 false,
                 isolate_view_search_path,
+                has_proc_prokind,
             );
             db::postgres::execute_query(pool, &fallback_sql)
                 .await
@@ -11444,8 +11585,13 @@ async fn postgres_object_source(
                 && signature.is_some()
                 && matches!(object_type, db::ObjectSourceKind::Procedure | db::ObjectSourceKind::Function) =>
         {
-            let fallback_sql =
-                postgres_function_object_source_sql_with_legacy_signature(schema, name, object_type, signature);
+            let fallback_sql = postgres_function_object_source_sql_with_legacy_signature(
+                schema,
+                name,
+                object_type,
+                signature,
+                has_proc_prokind,
+            );
             db::postgres::execute_query(pool, &fallback_sql)
                 .await
                 .and_then(first_string_cell)
@@ -11470,12 +11616,28 @@ fn postgres_missing_prokind_error(err: &str) -> bool {
         return false;
     }
 
-    // PostgreSQL localizes the undefined-column message (for example, Chinese
-    // servers report "字段 p.prokind 不存在"). Keep the column context so an
-    // unrelated relation named `prokind` cannot trigger this compatibility path.
+    // PostgreSQL localizes the undefined-column message in 20+ server message
+    // languages (English "column p.prokind does not exist", Chinese
+    // "字段 p.prokind 不存在", Indonesian "kolom p.prokind belum ada", …), so a
+    // per-language dictionary can never be complete. Two signals are language
+    // independent: the SQLSTATE class, and dbx's own driver position marker —
+    // the native postgres driver appends `DBX_SQL_ERROR_POSITION:` to every
+    // positioned server error, and an error naming `p.prokind` from this
+    // generated query is always the missing-column case (#11161). The exact
+    // phrases below just cover the common locales without the marker.
     lower.contains("sqlstate 42703")
+        || lower.contains("dbx_sql_error_position")
         || (lower.contains("does not exist") && lower.contains("column"))
-        || (err.contains("不存在") && (err.contains("字段") || err.contains("列 p.prokind")))
+        || (err.contains("不存在") && (err.contains("字段") || err.contains("列 p.prokind") || err.contains("欄位")))
+        || lower.contains("belum ada")
+        || lower.contains("no existe la columna")
+        || lower.contains("non esiste")
+        || lower.contains("não existe")
+        || lower.contains("n'existe pas")
+        || lower.contains("existiert nicht")
+        || lower.contains("は存在しません")
+        || lower.contains("존재하지 않")
+        || lower.contains("не существует")
 }
 
 fn opengauss_sequence_cache_metadata_error(err: &str) -> bool {
@@ -11620,11 +11782,13 @@ mod object_source_tests {
                 "recalc_score",
                 &ObjectSourceKind::Procedure,
                 Some("i_id numeric DEFAULT 0, OUT o_code integer"),
+                true,
             ),
             "SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'recalc_score' AND p.prokind = 'p' AND pg_get_function_arguments(p.oid) = 'i_id numeric DEFAULT 0, OUT o_code integer' ORDER BY p.oid LIMIT 1"
         );
 
-        let opengauss_view_sql = opengauss_object_source_sql("public", "active_users", &ObjectSourceKind::View, None);
+        let opengauss_view_sql =
+            opengauss_object_source_sql("public", "active_users", &ObjectSourceKind::View, None, true);
         assert!(!opengauss_view_sql.contains("set_config('search_path'"));
 
         let compatible_view_sql = postgres_object_source_sql_inner(
@@ -11635,6 +11799,7 @@ mod object_source_tests {
             true,
             false,
             false,
+            true,
         );
         assert!(!compatible_view_sql.contains("set_config('search_path'"));
     }
@@ -11669,6 +11834,7 @@ mod object_source_tests {
             false,
             false,
             true,
+            true,
         );
 
         assert!(sql.contains("CREATE MATERIALIZED VIEW"));
@@ -11676,6 +11842,75 @@ mod object_source_tests {
         assert!(sql.contains("pg_catalog.set_config('search_path', '', true)"));
         assert!(sql.contains("path_guard.applied IS NOT NULL"));
         assert!(!sql.contains("relispopulated"));
+    }
+
+    #[test]
+    fn postgres_routine_source_matches_server_prokind_capability() {
+        let modern = postgres_object_source_sql_inner(
+            "public",
+            "recalc_score",
+            &ObjectSourceKind::Function,
+            None,
+            true,
+            false,
+            true,
+            true,
+        );
+        assert!(modern.contains("p.prokind = 'f'"));
+        assert!(!modern.contains("proisagg"));
+
+        // PostgreSQL 10 and older have no pg_proc.prokind (#11161): the query
+        // must filter with the legacy columns instead, otherwise the server
+        // rejects it with "column p.prokind does not exist" before it runs.
+        let legacy = postgres_object_source_sql_inner(
+            "public",
+            "recalc_score",
+            &ObjectSourceKind::Function,
+            None,
+            true,
+            false,
+            true,
+            false,
+        );
+        assert!(legacy.contains("NOT p.proisagg AND NOT p.proiswindow"));
+        assert!(!legacy.contains("prokind"));
+
+        let legacy_procedure = postgres_object_source_sql_inner(
+            "public",
+            "refresh_cache",
+            &ObjectSourceKind::Procedure,
+            Some("integer"),
+            true,
+            false,
+            true,
+            false,
+        );
+        assert!(legacy_procedure.contains("NOT p.proisagg AND NOT p.proiswindow"));
+        assert!(legacy_procedure.contains("pg_get_function_identity_arguments(p.oid) = 'integer'"));
+        assert!(!legacy_procedure.contains("prokind"));
+    }
+
+    #[test]
+    fn missing_prokind_gate_matches_localized_undefined_column_errors() {
+        // The exact strings from #11161: PostgreSQL reports undefined-column
+        // errors in the server's language, so the gate cannot rely on the
+        // English wording alone.
+        assert!(postgres_missing_prokind_error(
+            "ERROR:  kolom p.prokind belum ada\nHINT:  Perhaps you meant to reference the column \"p.probin\".\nDBX_SQL_ERROR_POSITION:162"
+        ));
+        assert!(postgres_missing_prokind_error(
+            "ERROR:  column p.prokind does not exist\nHINT:  Perhaps you meant to reference the column \"p.probin\"."
+        ));
+        assert!(postgres_missing_prokind_error("ERROR:  字段 p.prokind 不存在"));
+        assert!(postgres_missing_prokind_error("ERROR:  欄位 p.prokind 不存在"));
+        assert!(postgres_missing_prokind_error("ERROR:  column p.prokind does not exist (SQLSTATE 42703)"));
+        assert!(postgres_missing_prokind_error(
+            "ERROR:  la colonne p.prokind n'existe pas\nDBX_SQL_ERROR_POSITION:100"
+        ));
+        // An unrelated error that merely mentions the identifier must not
+        // trigger the legacy fallback.
+        assert!(!postgres_missing_prokind_error("ERROR:  relation \"p.prokind\" already exists"));
+        assert!(!postgres_missing_prokind_error("connection refused"));
     }
 
     #[test]
@@ -11691,7 +11926,7 @@ mod object_source_tests {
     #[test]
     fn builds_opengauss_routine_source_sql_from_record_definition() {
         assert_eq!(
-            opengauss_object_source_sql("public", "recalc_score", &ObjectSourceKind::Function, None),
+            opengauss_object_source_sql("public", "recalc_score", &ObjectSourceKind::Function, None, true),
             "SELECT (pg_get_functiondef(p.oid)).definition FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'recalc_score' AND p.prokind = 'f' ORDER BY p.oid LIMIT 1"
         );
         assert_eq!(
@@ -11700,6 +11935,7 @@ mod object_source_tests {
                 "refresh_cache",
                 &ObjectSourceKind::Procedure,
                 Some("integer"),
+                true,
             ),
             "SELECT (pg_get_functiondef(p.oid)).definition FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'refresh_cache' AND p.prokind = 'p' AND pg_get_function_identity_arguments(p.oid) = 'integer' ORDER BY p.oid LIMIT 1"
         );
@@ -11746,7 +11982,7 @@ mod object_source_tests {
 
     #[test]
     fn builds_opengauss_sequence_source_without_pg_sequence_catalog() {
-        let sql = opengauss_object_source_sql("public", "order_id_seq", &ObjectSourceKind::Sequence, None);
+        let sql = opengauss_object_source_sql("public", "order_id_seq", &ObjectSourceKind::Sequence, None, true);
 
         assert!(sql.contains("information_schema.sequences"));
         assert!(sql.contains("s.sequence_schema = n.nspname"));
@@ -12358,6 +12594,27 @@ mod ddl_tests {
         assert!(!ddl.contains("CREATE UNIQUE INDEX \"pk_accounts\""), "ddl: {ddl}");
         assert!(!ddl.contains("CREATE UNIQUE INDEX \"uq_accounts_code\""), "ddl: {ddl}");
         assert!(ddl.contains("CREATE UNIQUE INDEX \"idx_accounts_display_name\""), "ddl: {ddl}");
+
+        // A full catalog definition remains authoritative even if index/column
+        // metadata has a different order or omits constraint options.
+        let mut constraints = constraints;
+        constraints[0].name = "Primary\"Key".to_string();
+        constraints[0].definition =
+            "PRIMARY KEY (\"from_store_no\", \"id\", \"bh\") INCLUDE (payload) DEFERRABLE".to_string();
+        let ddl = render_postgres_table_ddl_with_constraints_and_partition_info(
+            "public",
+            "psckdmx",
+            &postgres_primary_key_columns(),
+            &[postgres_primary_index(&["bh", "from_store_no", "id"])],
+            &[],
+            &constraints,
+            &[],
+            None,
+            &db::postgres::PostgresTablePartitionInfo::default(),
+            &db::postgres::PostgresTablePartitionLocalObjects::default(),
+        );
+        assert!(ddl.contains("CONSTRAINT \"Primary\"\"Key\" PRIMARY KEY (\"from_store_no\", \"id\", \"bh\") INCLUDE (payload) DEFERRABLE"), "ddl: {ddl}");
+        assert_eq!(ddl.matches("PRIMARY KEY").count(), 1);
     }
 
     #[test]
@@ -12504,6 +12761,244 @@ mod ddl_tests {
             ddl.contains("USING btree (\"id\" ASC NULLS LAST, \"id\" DESC NULLS FIRST)"),
             "expected per-key ordering and NULLS placement, got: {ddl}"
         );
+    }
+
+    fn postgres_primary_index(keys: &[&str]) -> db::IndexInfo {
+        db::IndexInfo {
+            name: "psckdmx_pkey".to_string(),
+            columns: keys.iter().map(|key| (*key).to_string()).collect(),
+            is_unique: true,
+            is_primary: true,
+            filter: None,
+            index_type: Some("btree".to_string()),
+            included_columns: None,
+            comment: None,
+            key_is_expression: Vec::new(),
+            column_opclasses: Vec::new(),
+            key_options: Vec::new(),
+            constraint_backed: true,
+        }
+    }
+
+    fn postgres_primary_key_columns() -> Vec<db::ColumnInfo> {
+        let mut columns = vec![
+            column("id", "integer"),
+            column("bh", "character varying"),
+            column("from_store_no", "character varying"),
+        ];
+        for column in &mut columns {
+            column.is_primary_key = true;
+            column.is_nullable = false;
+        }
+        columns[0].extra = Some("serial".to_string());
+        columns[0].column_default = Some("nextval('psckdmx_id_seq'::regclass)".to_string());
+        columns
+    }
+
+    fn postgres_ddl_tree_node(oid: i64, table: &str) -> db::postgres::PostgresPartitionTreeNode {
+        db::postgres::PostgresPartitionTreeNode {
+            oid,
+            schema: "public".to_string(),
+            table: table.to_string(),
+            parent_oid: None,
+            parent_schema: None,
+            parent_table: None,
+            partition_info: db::postgres::PostgresTablePartitionInfo::default(),
+        }
+    }
+
+    // Exercise the same tree renderer used by pg_ddl_with_partitions / View DDL,
+    // including its intentionally absent full constraint definitions.
+    fn postgres_render_test_tree(
+        nodes: &[db::postgres::PostgresPartitionTreeNode],
+        columns: &HashMap<i64, Vec<db::ColumnInfo>>,
+        indexes: &HashMap<i64, Vec<db::IndexInfo>>,
+        local_objects: &HashMap<i64, db::postgres::PostgresTablePartitionLocalObjects>,
+    ) -> String {
+        let mut children = HashMap::<_, Vec<_>>::new();
+        for node in nodes {
+            if let Some(parent) = node.parent_oid {
+                children.entry(parent).or_default().push(node);
+            }
+        }
+        let mut ddl = String::new();
+        render_postgres_partition_tree_node(
+            &nodes[0],
+            &children,
+            columns,
+            indexes,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            local_objects,
+            &mut ddl,
+        );
+        ddl
+    }
+
+    #[test]
+    fn postgres_partition_tree_ddl_preserves_primary_key_order() {
+        for partition_key in [None, Some("LIST (from_store_no)")] {
+            for (keys, expected) in [
+                (["from_store_no", "bh", "id"], "PRIMARY KEY (\"from_store_no\", \"bh\", \"id\")"),
+                (["bh", "from_store_no", "id"], "PRIMARY KEY (\"bh\", \"from_store_no\", \"id\")"),
+            ] {
+                let mut root = postgres_ddl_tree_node(1, "psckdmx");
+                root.partition_info.key = partition_key.map(str::to_string);
+                let ddl = postgres_render_test_tree(
+                    &[root],
+                    &HashMap::from([(1, postgres_primary_key_columns())]),
+                    &HashMap::from([(1, vec![postgres_primary_index(&keys)])]),
+                    &HashMap::new(),
+                );
+                assert!(ddl.contains(expected), "ddl: {ddl}");
+                assert!(
+                    ddl.starts_with(concat!(
+                        "CREATE TABLE \"public\".\"psckdmx\" (\n",
+                        "  \"id\" serial NOT NULL,\n",
+                        "  \"bh\" character varying NOT NULL,\n",
+                        "  \"from_store_no\" character varying NOT NULL,\n",
+                    )),
+                    "physical columns changed: {ddl}"
+                );
+                assert!(!ddl.contains("nextval"), "serial default duplicated: {ddl}");
+                assert_eq!(ddl.contains("PARTITION BY LIST (from_store_no)"), partition_key.is_some());
+                assert_eq!(ddl.matches("PRIMARY KEY").count(), 1);
+                assert!(!ddl.contains("CREATE UNIQUE INDEX"), "primary index duplicated: {ddl}");
+            }
+        }
+    }
+
+    #[test]
+    fn postgres_partition_tree_ddl_preserves_nested_primary_key_locality() {
+        let mut root = postgres_ddl_tree_node(1, "psckdmx");
+        root.partition_info.key = Some("LIST (from_store_no)".to_string());
+        let mut child = postgres_ddl_tree_node(2, "psckdmx_store");
+        child.parent_oid = Some(1);
+        child.partition_info = db::postgres::PostgresTablePartitionInfo {
+            is_partition: true,
+            parent_schema: Some("public".to_string()),
+            parent_table: Some(root.table.clone()),
+            bound: Some("FOR VALUES IN ('store')".to_string()),
+            key: Some("HASH (bh)".to_string()),
+            ..Default::default()
+        };
+        let mut leaf = postgres_ddl_tree_node(3, "psckdmx_store_0");
+        leaf.parent_oid = Some(2);
+        leaf.partition_info = db::postgres::PostgresTablePartitionInfo {
+            is_partition: true,
+            parent_schema: Some("public".to_string()),
+            parent_table: Some(child.table.clone()),
+            bound: Some("FOR VALUES WITH (modulus 2, remainder 0)".to_string()),
+            ..Default::default()
+        };
+        let nodes = [root, child, leaf];
+        let mut columns = (1..=3).map(|oid| (oid, postgres_primary_key_columns())).collect::<HashMap<_, _>>();
+        let mut indexes = (1..=3)
+            .map(|oid| (oid, vec![postgres_primary_index(&["bh", "from_store_no", "id"])]))
+            .collect::<HashMap<_, _>>();
+        let mut local_objects = HashMap::new();
+        for local_child_key in [false, true] {
+            if local_child_key {
+                // A parent without a PK can have a partition with its own PK;
+                // the grandchild inherits that constraint.
+                for column in columns.get_mut(&1).unwrap() {
+                    column.is_primary_key = false;
+                }
+                indexes.remove(&1);
+                local_objects.insert(
+                    2,
+                    db::postgres::PostgresTablePartitionLocalObjects { has_primary_key: true, ..Default::default() },
+                );
+            }
+            let ddl = postgres_render_test_tree(&nodes, &columns, &indexes, &local_objects);
+            let statements = ddl.split("\n\n").collect::<Vec<_>>();
+            assert_eq!(statements.len(), 3, "ddl: {ddl}");
+            assert_eq!(ddl.matches("PRIMARY KEY (\"bh\", \"from_store_no\", \"id\")").count(), 1, "ddl: {ddl}");
+            assert_eq!(statements[0].contains("PRIMARY KEY"), !local_child_key);
+            assert_eq!(statements[1].contains("PRIMARY KEY"), local_child_key);
+            assert!(!statements[2].contains("PRIMARY KEY"));
+            assert!(statements[1]
+                .starts_with("CREATE TABLE \"public\".\"psckdmx_store\" PARTITION OF \"public\".\"psckdmx\""));
+            assert!(statements[1].contains("FOR VALUES IN ('store') PARTITION BY HASH (bh);"));
+            assert!(statements[2]
+                .contains("PARTITION OF \"public\".\"psckdmx_store\" FOR VALUES WITH (modulus 2, remainder 0);"));
+            assert_eq!(ddl.matches("\"id\" serial NOT NULL").count(), 1);
+
+            // View DDL can also start at a partition whose parent is outside the tree.
+            let subtree = postgres_render_test_tree(&nodes[1..], &columns, &indexes, &local_objects);
+            assert_eq!(subtree.matches("PRIMARY KEY").count(), usize::from(local_child_key));
+        }
+    }
+
+    #[test]
+    fn postgres_partition_tree_ddl_primary_key_excludes_include_and_quotes_names() {
+        let mut root = postgres_ddl_tree_node(1, "Order\"Lines");
+        root.schema = "Sales".to_string();
+        let mut columns = vec![column("Id", "integer"), column("Store\"No", "text"), column("payload", "text")];
+        columns[0].is_primary_key = true;
+        columns[1].is_primary_key = true;
+        columns[2].column_default = Some("'unchanged'::text".to_string());
+        let mut primary = postgres_primary_index(&["Store\"No", "Id"]);
+        primary.included_columns = Some(vec!["payload".to_string()]);
+        let mut unique = postgres_primary_index(&["Id", "Store\"No"]);
+        unique.name = "other_unique".to_string();
+        unique.is_primary = false;
+        unique.constraint_backed = false;
+        let ddl = postgres_render_test_tree(
+            &[root],
+            &HashMap::from([(1, columns)]),
+            &HashMap::from([(1, vec![unique, primary])]),
+            &HashMap::new(),
+        );
+        assert!(ddl.contains("PRIMARY KEY (\"Store\"\"No\", \"Id\")"), "ddl: {ddl}");
+        assert!(ddl.contains("\"payload\" text DEFAULT 'unchanged'::text"));
+        assert!(ddl.contains("CREATE UNIQUE INDEX \"other_unique\" ON \"Sales\".\"Order\"\"Lines\" USING btree (\"Id\", \"Store\"\"No\");"));
+    }
+
+    #[test]
+    fn postgres_partition_tree_ddl_primary_key_metadata_fallback() {
+        let mut unique = postgres_primary_index(&["bh", "id"]);
+        unique.is_primary = false;
+        unique.constraint_backed = false;
+        for indexes in [vec![], vec![postgres_primary_index(&[])], vec![unique.clone()]] {
+            let ddl = postgres_render_test_tree(
+                &[postgres_ddl_tree_node(1, "psckdmx")],
+                &HashMap::from([(1, postgres_primary_key_columns())]),
+                &HashMap::from([(1, indexes)]),
+                &HashMap::new(),
+            );
+            assert!(ddl.contains("PRIMARY KEY (\"id\", \"bh\", \"from_store_no\")"), "ddl: {ddl}");
+        }
+        for has_key in [false, true] {
+            let mut id = column("id", "integer");
+            id.is_primary_key = has_key;
+            for indexes in [vec![], if has_key { vec![postgres_primary_index(&["id"])] } else { vec![unique.clone()] }]
+            {
+                let ddl = postgres_render_test_tree(
+                    &[postgres_ddl_tree_node(1, "psckdmx")],
+                    &HashMap::from([(1, vec![id.clone()])]),
+                    &HashMap::from([(1, indexes)]),
+                    &HashMap::new(),
+                );
+                assert_eq!(ddl.contains("PRIMARY KEY (\"id\")"), has_key, "ddl: {ddl}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn postgres_partition_tree_ddl_propagates_metadata_errors() {
+        // No host/user is configured, so checkout fails without contacting a
+        // database. Metadata failures must not produce a successful empty DDL.
+        let manager = deadpool_postgres::Manager::new(tokio_postgres::Config::new(), tokio_postgres::NoTls);
+        let pool = deadpool_postgres::Pool::builder(manager)
+            .runtime(deadpool_postgres::Runtime::Tokio1)
+            .max_size(1)
+            .build()
+            .unwrap();
+        let error = pg_ddl_with_partitions(&pool, "public", "psckdmx").await.unwrap_err();
+        assert!(!error.is_empty());
     }
 
     #[test]
@@ -14628,7 +15123,15 @@ fn render_postgres_table_ddl_with_constraints_and_partition_info(
         .collect::<Vec<_>>();
     if !is_partition || partition_local_objects.has_primary_key {
         if primary_constraints.is_empty() {
-            let pks: Vec<&str> = columns.iter().filter(|c| c.is_primary_key).map(|c| c.name.as_str()).collect();
+            // The partition-tree / View DDL path has indexes but no full
+            // constraint definitions. Index keys preserve catalog order and
+            // already exclude INCLUDE columns; table columns are in physical
+            // order. Keep the column-based fallback for missing key metadata.
+            let pks: Vec<&str> = indexes
+                .iter()
+                .find(|index| index.is_primary && !index.columns.is_empty())
+                .map(|index| index.columns.iter().map(String::as_str).collect())
+                .unwrap_or_else(|| columns.iter().filter(|c| c.is_primary_key).map(|c| c.name.as_str()).collect());
             if !pks.is_empty() {
                 definition_lines.push(format!(
                     "  PRIMARY KEY ({})",
@@ -14834,6 +15337,19 @@ fn render_postgres_table_ddl_with_constraints_and_partition_info(
     ddl
 }
 
+fn sqlserver_temporal_period_mismatches(
+    temporal: &db::sqlserver::SqlServerTemporalTableMetadata,
+    generated_clauses: &HashMap<String, String>,
+) -> bool {
+    [(&temporal.start_column, "START"), (&temporal.end_column, "END")].into_iter().any(|(column, kind)| {
+        column.as_deref().is_some_and(|name| {
+            generated_clauses
+                .get(name)
+                .is_some_and(|clause| !clause.starts_with(&format!("GENERATED ALWAYS AS ROW {kind}")))
+        })
+    })
+}
+
 fn sqlserver_identity_clause(extra: Option<&str>) -> Option<String> {
     let extra = extra?.trim();
     let lower = extra.to_ascii_lowercase();
@@ -14868,6 +15384,15 @@ pub async fn build_sqlserver_ddl(
     schema: &str,
     table: &str,
 ) -> Result<String, String> {
+    build_sqlserver_ddl_with_temporal(client, schema, table, false).await
+}
+
+async fn build_sqlserver_ddl_with_temporal(
+    client: &mut db::sqlserver::SqlServerClient,
+    schema: &str,
+    table: &str,
+    include_temporal: bool,
+) -> Result<String, String> {
     // The computed-column definitions come from the same metadata query as the
     // columns, so the DDL path reads the richer driver record instead of the
     // flattened `ColumnInfo` (which cannot carry `AS (...) PERSISTED`).
@@ -14875,6 +15400,8 @@ pub async fn build_sqlserver_ddl(
     let indexes = db::sqlserver::list_indexes(client, schema, table).await?;
     let fkeys = db::sqlserver::list_foreign_keys(client, schema, table).await?;
     let table_comment = db::sqlserver::get_table_comment(client, schema, table).await?;
+    let temporal =
+        if include_temporal { db::sqlserver::get_temporal_table_metadata(client, schema, table).await? } else { None };
 
     let columns = metadata.iter().map(|metadata| metadata.column.clone()).collect::<Vec<_>>();
     let computed_clauses = metadata
@@ -14889,15 +15416,54 @@ pub async fn build_sqlserver_ddl(
         })
         .collect::<HashMap<_, _>>();
 
-    Ok(render_sqlserver_table_ddl_with_computed(
+    let generated_clauses = if include_temporal {
+        metadata
+            .iter()
+            .filter_map(|column| {
+                let kind = match column.generated_always_type {
+                    1 => "START",
+                    2 => "END",
+                    _ => return None,
+                };
+                Some((
+                    column.column.name.clone(),
+                    format!("GENERATED ALWAYS AS ROW {kind}{}", if column.is_hidden { " HIDDEN" } else { "" }),
+                ))
+            })
+            .collect::<HashMap<_, _>>()
+    } else {
+        HashMap::new()
+    };
+    if include_temporal && !generated_clauses.is_empty() && temporal.is_none() {
+        return Err("SQL Server temporal period metadata is unavailable".to_string());
+    }
+    if let Some(temporal) = temporal.as_ref() {
+        if sqlserver_temporal_period_mismatches(temporal, &generated_clauses) {
+            return Err(
+                "SQL Server temporal period and column metadata do not match; refresh the table definition".to_string()
+            );
+        }
+    }
+    Ok(render_sqlserver_table_ddl_details(
         schema,
         table,
         &columns,
-        &computed_clauses,
         &indexes,
         &fkeys,
         table_comment.as_deref(),
+        SqlServerDdlDetails {
+            computed_clauses: Some(&computed_clauses),
+            generated_clauses: Some(&generated_clauses),
+            temporal: temporal.as_ref(),
+        },
     ))
+}
+
+#[derive(Default)]
+struct SqlServerDdlDetails<'a> {
+    computed_clauses: Option<&'a HashMap<String, String>>,
+    generated_clauses: Option<&'a HashMap<String, String>>,
+    temporal: Option<&'a db::sqlserver::SqlServerTemporalTableMetadata>,
 }
 
 fn sqlserver_fk_action_clause(kind: &str, value: Option<&str>) -> String {
@@ -14936,16 +15502,56 @@ pub fn render_sqlserver_table_ddl_with_computed(
     fkeys: &[db::ForeignKeyInfo],
     table_comment: Option<&str>,
 ) -> String {
+    render_sqlserver_table_ddl_details(
+        schema,
+        table,
+        columns,
+        indexes,
+        fkeys,
+        table_comment,
+        SqlServerDdlDetails { computed_clauses: Some(computed_clauses), ..Default::default() },
+    )
+}
+
+fn render_sqlserver_table_ddl_details(
+    schema: &str,
+    table: &str,
+    columns: &[db::ColumnInfo],
+    indexes: &[db::IndexInfo],
+    fkeys: &[db::ForeignKeyInfo],
+    table_comment: Option<&str>,
+    details: SqlServerDdlDetails<'_>,
+) -> String {
     let table_name = format!("{}.{}", sqlserver_ident(schema), sqlserver_ident(table));
     let mut ddl = format!("CREATE TABLE {table_name} (\n");
+    if let Some(temporal) = details.temporal {
+        if let (Some(schema), Some(table)) = (&temporal.parent_schema, &temporal.parent_table) {
+            let parent = format!("{}.{}", sqlserver_ident(schema), sqlserver_ident(table)).chars().fold(
+                String::new(),
+                |mut text, character| {
+                    if character.is_control() || matches!(character, '\u{2028}' | '\u{2029}') {
+                        text.extend(character.escape_default());
+                    } else {
+                        text.push(character);
+                    }
+                    text
+                },
+            );
+            ddl.insert_str(0, &format!("-- History table for {parent}\n"));
+        }
+    }
     let col_lines: Vec<String> = columns
         .iter()
         .map(|c| {
             // A computed column can never have a default, and its `data_type`
             // is only the derived result type: rendering either would emit a
             // table that differs from the one being scripted.
-            if let Some(clause) =
-                computed_clauses.get(&c.name).map(String::as_str).map(str::trim).filter(|clause| !clause.is_empty())
+            if let Some(clause) = details
+                .computed_clauses
+                .and_then(|clauses| clauses.get(&c.name))
+                .map(String::as_str)
+                .map(str::trim)
+                .filter(|clause| !clause.is_empty())
             {
                 let mut line = format!("  {} {clause}", sqlserver_ident(&c.name));
                 if !c.is_nullable {
@@ -14956,6 +15562,9 @@ pub fn render_sqlserver_table_ddl_with_computed(
             let mut line = format!("  {} {}", sqlserver_ident(&c.name), c.data_type);
             if let Some(identity) = sqlserver_identity_clause(c.extra.as_deref()) {
                 line.push_str(&format!(" {identity}"));
+            }
+            if let Some(clause) = details.generated_clauses.and_then(|clauses| clauses.get(&c.name)) {
+                line.push_str(&format!(" {clause}"));
             }
             if !c.is_nullable {
                 line.push_str(" NOT NULL");
@@ -14997,7 +15606,34 @@ pub fn render_sqlserver_table_ddl_with_computed(
             ref_columns
         ));
     }
-    ddl.push_str("\n);\n");
+    if let Some(temporal) = details.temporal {
+        if let (Some(start), Some(end)) = (&temporal.start_column, &temporal.end_column) {
+            ddl.push_str(&format!(
+                ",\n  PERIOD FOR SYSTEM_TIME ({}, {})",
+                sqlserver_ident(start),
+                sqlserver_ident(end)
+            ));
+        }
+    }
+    ddl.push_str("\n)");
+    if let Some(temporal) = details.temporal.filter(|metadata| metadata.temporal_type == 2) {
+        if let (Some(schema), Some(table)) = (&temporal.history_schema, &temporal.history_table) {
+            ddl.push_str(&format!(
+                " WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = {}.{}",
+                sqlserver_ident(schema),
+                sqlserver_ident(table)
+            ));
+            if let (Some(period), Some(unit)) =
+                (temporal.retention_period.filter(|period| *period >= 0), temporal.retention_unit.as_deref())
+            {
+                if matches!(unit, "DAY" | "WEEK" | "MONTH" | "YEAR") {
+                    ddl.push_str(&format!(", HISTORY_RETENTION_PERIOD = {period} {unit}"));
+                }
+            }
+            ddl.push_str("))");
+        }
+    }
+    ddl.push_str(";\n");
 
     if let Some(comment) = table_comment.filter(|comment| !comment.trim().is_empty()) {
         ddl.push_str(&format!(

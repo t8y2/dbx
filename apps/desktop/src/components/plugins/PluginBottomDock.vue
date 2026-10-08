@@ -297,11 +297,26 @@ function rerunActiveCommand() {
 
 // A dock-hosted webview asking for another panel via the bridge openWorkbench: the host rebuilds the authoritative
 // context (dropping plugin-supplied reserved fields) and adds one generic panel entry.
-function onPanelOpenWorkbench(entry: (typeof entries.value)[number], _contributionId: string, childContext?: Record<string, unknown>) {
+// `options.target === "tab"` (bridge extension) routes to the main-workbench tab
+// path instead — same reuse/session-numbering semantics as tab-surface callers
+// (queryStore.openPluginWorkbench). Without the option the dock-entry behavior
+// is unchanged, so older plugins keep working.
+function onPanelOpenWorkbench(entry: (typeof entries.value)[number], _contributionId: string, childContext?: Record<string, unknown>, options?: { forceNew?: boolean; target?: "tab" }) {
   const payload = childContext && typeof childContext === "object" && !Array.isArray(childContext) ? { ...childContext } : {};
   delete payload.workbenchId;
   delete payload.restored;
   delete payload.surface;
+  if (options?.target === "tab") {
+    // Title derivation mirrors the tab-surface caller (PluginWorkbenchTab
+    // openWorkbench): per-connection sessions are titled after the connection
+    // display name, falling back to the localized workbench label and the
+    // dock entry's title — never the raw contribution id.
+    const contextConnectionId = typeof payload.connectionId === "string" ? payload.connectionId : "";
+    const connectionName = contextConnectionId ? connectionStore.getConfig(contextConnectionId)?.name : undefined;
+    const label = createFrontendPluginRegistry(plugins.value, locale.value).findWorkbench(entry.pluginId, entry.workbenchContributionId)?.contribution.label;
+    queryStore.openPluginWorkbench(entry.pluginId, entry.workbenchContributionId, { title: connectionName || label || entry.title, context: payload, forceNew: options.forceNew === true });
+    return;
+  }
   const id = addPluginDockEntry({
     pluginId: entry.pluginId,
     workbenchContributionId: entry.workbenchContributionId,
@@ -624,7 +639,7 @@ onScopeDispose(() => window.removeEventListener("blur", onPlusMenuWindowBlur));
           :contribution="workbenchContributionFor(entry)!"
           :context="entry.context"
           @close-tab="closeEntry(entry.id)"
-          @open-workbench="(_pluginId, contributionId, context) => onPanelOpenWorkbench(entry, contributionId, context)"
+          @open-workbench="(_pluginId, contributionId, context, options) => onPanelOpenWorkbench(entry, contributionId, context, options)"
         />
       </div>
     </div>

@@ -25,7 +25,7 @@ describe("AI Redis console routing", () => {
 
   it("uses the console safety path and rejects unavailable command input", () => {
     expect(classifyRedisCommandSafety("CONFIG SET requirepass secret")).toBe("blocked");
-    expect(classifyRedisCommandSafety("FLUSHDB")).toBe("confirm");
+    expect(classifyRedisCommandSafety("FLUSHDB")).toBe("blocked");
     expect(classifyRedisCommandSafety("SET issue:846 fixed")).toBe("write");
     expect(classifyRedisCommandSafety("INFO server")).toBe("allowed");
 

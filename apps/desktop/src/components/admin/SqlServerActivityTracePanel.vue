@@ -120,7 +120,7 @@ function syncHorizontalScrollbar() {
 function scrollTableHorizontally(event: WheelEvent) {
   const scroller = tableScroller.value;
   if (!scroller) return;
-  const delta = event.shiftKey ? event.deltaY : Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : 0;
+  const delta = event.shiftKey || event.altKey ? event.deltaY : Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : 0;
   if (!delta) return;
   const previousScrollLeft = scroller.scrollLeft;
   scroller.scrollLeft += delta;

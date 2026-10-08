@@ -4,7 +4,7 @@ import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMoun
 import { Compartment, StateEffect, StateField } from "@codemirror/state";
 import { ensureSyntaxTree } from "@codemirror/language";
 import { setDiagnostics } from "@codemirror/lint";
-import { Decoration, EditorView } from "@codemirror/view";
+import { Decoration, EditorView, keymap as codeMirrorKeymap } from "@codemirror/view";
 import { Archive, ArrowLeftRight, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Clipboard, Columns3, Download, ExternalLink, FileClock, FileInput, FileText, Loader2, Maximize2, Minimize2, Network, Plus, RefreshCw, ReplaceAll, Save, Search, Send, Server, Trash2, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -57,6 +57,9 @@ import { editorFontTheme, loadEditorTheme } from "@/lib/editor/editorThemes";
 import { clampEditorFontSize, createEditorWheelZoomGestureGuard, createEditorZoomCommitScheduler, fontSizeFromWheelDelta } from "@/lib/editor/editorZoom";
 import { replaceFallbackKey } from "@/lib/editor/queryEditorSearchKeymap";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { matchesShortcut } from "@/lib/editor/keyboardShortcuts";
+import { selectLineEndsDefaultShortcut, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
+import { selectLineEnds } from "@/lib/editor/selectLineEnds";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useTheme } from "@/composables/useTheme";
 import { executeWithProductionContextGuard } from "@/lib/database/productionExecutionGuard";
@@ -249,6 +252,8 @@ const configEditorFontTheme = new Compartment();
 const configEditorWordWrap = new Compartment();
 const configEditorLanguage = new Compartment();
 const configValidationHighlight = new Compartment();
+const configEditorShortcut = new Compartment();
+const selectLineEndsShortcut = () => settingsStore.editorSettings?.shortcuts?.selectLineEnds ?? selectLineEndsDefaultShortcut();
 const setConfigValidationHighlight = StateEffect.define<NacosConfigDiagnostic[]>();
 const configListRequestGuard = createNacosLatestRequestGuard();
 const configDetailRequestGuard = createNacosLatestRequestGuard();
@@ -593,6 +598,10 @@ function configValidationHighlightExtension() {
   return field;
 }
 
+watch(selectLineEndsShortcut, (shortcut) => {
+  configEditorView.value?.dispatch({ effects: configEditorShortcut.reconfigure(codeMirrorKeymap.of([{ key: shortcutToCodeMirrorKey(shortcut), preventDefault: true, run: selectLineEnds }])) });
+});
+
 async function mountConfigEditor() {
   await nextTick();
   if (!configEditorHost.value || configEditorView.value || !selectedConfig.value) return;
@@ -627,9 +636,15 @@ async function mountConfigEditor() {
       basicSetup,
       EditorState.allowMultipleSelections.of(true),
       trimmedSelectionLayer(),
+      configEditorShortcut.of(keymap.of([{ key: shortcutToCodeMirrorKey(selectLineEndsShortcut()), preventDefault: true, run: selectLineEnds }])),
       Prec.highest(keymap.of([{ key: "Mod-f", run: () => configSearchPanelRef.value?.openSearch() ?? false, preventDefault: true }, { key: replaceFallbackKey(), run: () => configSearchPanelRef.value?.openReplace() ?? false, preventDefault: true }, indentWithTab])),
       keymap.of([...defaultKeymap, ...historyKeymap]),
       EditorView.domEventHandlers({
+        keydown(event, eventView) {
+          if (!matchesShortcut(event, selectLineEndsShortcut())) return false;
+          event.preventDefault();
+          return selectLineEnds(eventView);
+        },
         wheel(event, eventView) {
           if (!configEditorWheelZoomGestureGuard.accepts(event)) return false;
           event.preventDefault();

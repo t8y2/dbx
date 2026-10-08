@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { createApp, nextTick } from "vue";
+import { createApp, nextTick, ref } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { createI18n } from "vue-i18n";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -42,8 +42,10 @@ vi.mock("@/components/icons/DatabaseIcon.vue", () => ({
 }));
 
 import EditorGroupTabBar from "../EditorGroupTabBar.vue";
+import { createNoopEditorToolbarActions, EDITOR_TOOLBAR_ACTIONS, type EditorToolbarActions } from "../editorToolbarActions";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import type { ConnectionConfig } from "@/types/database";
 
 function createHost(): HTMLDivElement {
@@ -64,6 +66,7 @@ function mountBar(
   activePinia: ReturnType<typeof createPinia>,
   onActivateTab?: (tabId: string) => void,
   specialPageTabs?: { settingsOpen: boolean; settingsActive: boolean; driverStoreOpen: boolean; driverStoreActive: boolean; pluginCenterOpen: boolean; pluginCenterActive: boolean; driverUpdateCount: number },
+  toolbarActions?: EditorToolbarActions,
 ): Mounted {
   const store = useQueryStore();
   const host = createHost();
@@ -78,6 +81,7 @@ function mountBar(
   // instance the test drives — otherwise drag validation runs against an
   // empty store and silently early-returns.
   app.use(activePinia);
+  if (toolbarActions) app.provide(EDITOR_TOOLBAR_ACTIONS, toolbarActions);
   app.use(
     createI18n({
       legacy: false,
@@ -165,6 +169,39 @@ describe("EditorGroupTabBar behavior", () => {
     vi.restoreAllMocks();
     pinia = createPinia();
     setActivePinia(pinia);
+  });
+
+  it("opens a new query through the app action for this editor group", async () => {
+    const store = useQueryStore();
+    const id = store.createTab("pg-1", "app", "users", "data", "public");
+    const actions = createNoopEditorToolbarActions();
+    actions.canNewQuery = ref(true);
+    actions.newQuery = vi.fn();
+    const { app, host } = mountBar(store.groups[0].id, [id], id, pinia, undefined, undefined, actions);
+    await settle();
+    const buttons = host.querySelectorAll<HTMLButtonElement>("[data-new-query-tab]");
+    expect(buttons).toHaveLength(1);
+    buttons[0].click();
+    expect(actions.newQuery).toHaveBeenCalledExactlyOnceWith(store.groups[0].id);
+    actions.canNewQuery.value = false;
+    await settle();
+    expect(host.querySelector("[data-new-query-tab]")).toBeNull();
+    app.unmount();
+    host.remove();
+  });
+
+  it("offers duplicate without rename on a data tab", async () => {
+    const store = useQueryStore();
+    const id = store.createTab("pg-1", "app", "users", "data", "public");
+    const { app, host } = mountBar(store.groups[0].id, [id], id, pinia);
+    await settle();
+
+    const menu = JSON.parse(host.querySelector<HTMLElement>("[data-menu-items]")!.dataset.menuItems!);
+    expect(menu).toContainEqual(expect.objectContaining({ label: "Duplicate", visible: true }));
+    expect(menu).not.toContainEqual(expect.objectContaining({ label: "Rename" }));
+
+    app.unmount();
+    host.remove();
   });
 
   it("activates a tab on plain click", async () => {
@@ -689,6 +726,29 @@ describe("EditorGroupTabBar behavior", () => {
     await settle();
 
     expect(sourcePill.style.opacity).toBe("");
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("applies --tab-max-width and data-has-max-tab-width when tabMaxWidth is configured", async () => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabMaxWidth = 240;
+    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+    const mainGroup = store.groups[0];
+    const { app, host } = mountBar(mainGroup.id, [firstId], firstId, pinia);
+    await settle();
+
+    const bar = host.querySelector<HTMLElement>(".app-tab-bar")!;
+    expect(bar.dataset.hasMaxTabWidth).toBe("true");
+    expect(bar.style.getPropertyValue("--tab-max-width")).toBe("240px");
+
+    // Setting tabMaxWidth to 0 removes the limit
+    settings.editorSettings.tabMaxWidth = 0;
+    await settle();
+    expect(bar.dataset.hasMaxTabWidth).toBe("false");
+    expect(bar.style.getPropertyValue("--tab-max-width")).toBe("");
 
     app.unmount();
     host.remove();

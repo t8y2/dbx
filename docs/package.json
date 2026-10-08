@@ -24,6 +24,7 @@
     "fumadocs-core": "^16.8.7",
     "fumadocs-mdx": "^14.3.2",
     "fumadocs-ui": "^16.8.7",
+    "fzstd": "^0.1.1",
     "lucide-react": "^0.515.0",
     "marked": "18.0.4",
     "next": "^16.3.0",

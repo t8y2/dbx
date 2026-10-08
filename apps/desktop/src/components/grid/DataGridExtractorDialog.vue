@@ -106,6 +106,7 @@ function warningText(code: DataGridExtractWarningCode, omittedColumns: string[] 
 }
 
 function schedulePreview() {
+  previewSequence += 1;
   if (previewTimer) clearTimeout(previewTimer);
   previewTimer = setTimeout(() => void refreshPreview(), 180);
 }
@@ -124,6 +125,7 @@ watch(
     draftOptions.value = normalizeDataGridExtractorOptions(props.options);
     schedulePreview();
   },
+  { immediate: true },
 );
 
 watch(
@@ -212,6 +214,18 @@ function save() {
             <label v-if="draftExtractor === 'sql-inserts'" class="flex items-center gap-2 text-sm"
               ><input type="checkbox" :checked="draftOptions.sql.includeDatabaseName" @change="updateSql('includeDatabaseName', ($event.target as HTMLInputElement).checked)" />{{ t("grid.copyExtractorIncludeDatabaseName") }}</label
             >
+            <div v-if="draftExtractor === 'sql-inserts'" class="space-y-1.5">
+              <label class="flex items-center gap-2 text-sm"><input type="checkbox" :checked="draftOptions.sql.quoteIdentifiers" @change="updateSql('quoteIdentifiers', ($event.target as HTMLInputElement).checked)" />{{ t("grid.copyExtractorQuoteIdentifiers") }}</label>
+              <Label>{{ t("grid.copyExtractorTemporalFormat") }}</Label>
+              <Select :model-value="draftOptions.sql.temporalFormat" @update:model-value="updateSql('temporalFormat', $event as DataGridExtractorOptions['sql']['temporalFormat'])">
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="native">{{ t("grid.copyExtractorTemporalNative") }}</SelectItem>
+                  <SelectItem value="string">{{ t("grid.copyExtractorTemporalString") }}</SelectItem>
+                </SelectContent>
+              </Select>
+              <p v-if="draftOptions.sql.temporalFormat === 'string'" class="text-xs text-muted-foreground">{{ t("grid.copyExtractorTemporalStringHint") }}</p>
+            </div>
             <div v-if="draftExtractor === 'sql-inserts'" class="space-y-1.5">
               <Label>{{ t("grid.copyExtractorInsertMode") }}</Label>
               <Select :model-value="draftOptions.sql.insertMode" @update:model-value="updateSql('insertMode', $event as DataGridExtractorOptions['sql']['insertMode'])">

@@ -21,6 +21,13 @@ export function formatSolrDocumentOperationPreview(options: { action: "insert" |
   return lines.join("\n");
 }
 
+export function formatCouchDbDocumentOperationPreview(options: { action: "insert" | "upsert" | "update" | "delete"; database: string; id?: unknown; document?: Record<string, unknown> }): string {
+  const lines = [`DBX COUCHDB ${options.action.toUpperCase()} DOCUMENT`, `database: ${JSON.stringify(options.database)}`];
+  if (options.id !== undefined) lines.push(`id: ${stringifyDocumentStoreValue(options.id, "couchdb")}`);
+  if (options.document) lines.push("document:", stringifyDocumentStoreValue(options.document, "couchdb", 2));
+  return lines.join("\n");
+}
+
 /**
  * Write a document body under a known identity.
  * - `put`: Elasticsearch index-by-id / Mongo update-by-id (identity via path, not body).

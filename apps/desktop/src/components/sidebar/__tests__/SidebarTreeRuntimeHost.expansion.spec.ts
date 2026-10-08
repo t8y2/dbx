@@ -126,6 +126,60 @@ describe("SidebarTreeRuntimeHost expansion", () => {
     window.removeEventListener(OBJECT_BROWSER_SEARCH_FOCUS_EVENT, focusRequested);
   });
 
+  it("toggles an expanded database closed on double-click in double-click activation mode", async () => {
+    const database: TreeNode = {
+      id: "mysql:dbx_test",
+      label: "dbx_test",
+      type: "database",
+      connectionId: "mysql",
+      database: "dbx_test",
+      isExpanded: true,
+      children: [],
+    };
+    settingsStore.editorSettings.sidebarActivation = "double";
+    settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation = true;
+
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(defineComponent({ setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: database, depth: 0 }) }));
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value?.handleRowDoubleClick(database, new MouseEvent("dblclick"));
+    await nextTick();
+
+    expect(database.isExpanded).toBe(false);
+  });
+
+  it("does not collapse an expanded database on click in single-click activation mode", async () => {
+    const database: TreeNode = {
+      id: "mysql:dbx_test",
+      label: "dbx_test",
+      type: "database",
+      connectionId: "mysql",
+      database: "dbx_test",
+      isExpanded: true,
+      children: [],
+    };
+    settingsStore.editorSettings.sidebarActivation = "single";
+    settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation = true;
+
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(defineComponent({ setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: database, depth: 0 }) }));
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value?.handleRowClick(database, 1);
+    await nextTick();
+
+    expect(database.isExpanded).toBe(true);
+  });
+
   it("reuses a Mongo collection tab by identity without replacing its state", async () => {
     const collection: TreeNode = {
       id: "mongo:app:orders",

@@ -415,6 +415,9 @@ pub fn oracle_alternate_connect_configs(config: &ConnectionConfig, err: &str) ->
             _ => vec![sid_url, legacy_service_url, descriptor_service_url, descriptor_sid_url],
         }
     };
+    // The retries travel through `oracle_jdbc_connection_string` as a stored
+    // connection string, so they must already carry the profile's protocol.
+    let candidates: Vec<String> = candidates.into_iter().map(|url| oracle_url_for_profile(config, url)).collect();
 
     let mut urls = Vec::new();
     for url in candidates {
@@ -434,6 +437,20 @@ pub fn oracle_alternate_connect_configs(config: &ConnectionConfig, err: &str) ->
         .collect()
 }
 
+/// Applies the OCI (thick) protocol to an Oracle JDBC URL when the connection
+/// selects the OCI driver profile. Thin connections keep the URL unchanged.
+///
+/// OCI reaches the same targets as thin; the TNS form additionally moves its
+/// `TNS_ADMIN` query into the agent-process environment
+/// (`crate::oracle_oci::oracle_oci_launch_env`).
+fn oracle_url_for_profile(config: &ConnectionConfig, url: String) -> String {
+    if !crate::oracle_oci::uses_oracle_oci_profile(config) {
+        return url;
+    }
+    let rewritten = crate::oracle_oci::rewrite_oracle_url_protocol(&url, true);
+    crate::oracle_oci::strip_oracle_tns_admin_query(&rewritten)
+}
+
 fn oracle_jdbc_connection_string(
     config: &ConnectionConfig,
     host: &str,
@@ -443,9 +460,12 @@ fn oracle_jdbc_connection_string(
     if let Some(connection_string) = config.connection_string.as_deref().filter(|value| !value.trim().is_empty()) {
         let connection_string = connection_string.trim();
         if host == config.host && port == config.port {
-            return Ok(connection_string.to_string());
+            return Ok(oracle_url_for_profile(config, connection_string.to_string()));
         }
-        return crate::models::connection::rewrite_jdbc_url_host(connection_string, host, port);
+        return Ok(oracle_url_for_profile(
+            config,
+            crate::models::connection::rewrite_jdbc_url_host(connection_string, host, port)?,
+        ));
     }
 
     let database = database.trim();
@@ -453,11 +473,12 @@ fn oracle_jdbc_connection_string(
         return Ok(String::new());
     }
 
-    Ok(if config.oracle_connection_type.as_deref() == Some("sid") {
+    let url = if config.oracle_connection_type.as_deref() == Some("sid") {
         oracle_sid_jdbc_url(host, port, database)
     } else {
         oracle_service_jdbc_url(host, port, database)
-    })
+    };
+    Ok(oracle_url_for_profile(config, url))
 }
 
 fn oracle_listener_error_can_retry(err: &str) -> bool {
@@ -764,6 +785,8 @@ mod tests {
 
     fn config(db_type: DatabaseType, database: Option<&str>) -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: "conn".to_string(),
             name: "Connection".to_string(),
@@ -885,6 +908,60 @@ mod tests {
 
             assert_eq!(params["database"], "ORCL");
             assert_eq!(params["connection_string"], expected_url);
+        }
+    }
+
+    #[test]
+    fn oracle_oci_profile_builds_oci8_urls_for_service_and_sid() {
+        for (mode, expected_url) in [
+            ("service_name", "jdbc:oracle:oci8:@//oracle.example.com:1521/ORCLPDB1"),
+            ("sid", "jdbc:oracle:oci8:@oracle.example.com:1521:ORCLPDB1"),
+        ] {
+            let mut cfg = config(DatabaseType::Oracle, Some("ORCLPDB1"));
+            cfg.driver_profile = Some(crate::oracle_oci::ORACLE_OCI_DRIVER_PROFILE.to_string());
+            cfg.oracle_connection_type = Some(mode.to_string());
+
+            let params = agent_connect_params(&cfg, "oracle.example.com", 1521, "ORCLPDB1").unwrap();
+
+            assert_eq!(params["connection_string"], expected_url);
+        }
+    }
+
+    #[test]
+    fn oracle_oci_profile_rewrites_tns_urls_and_strips_the_admin_query() {
+        let mut cfg = config(DatabaseType::Oracle, None);
+        cfg.driver_profile = Some(crate::oracle_oci::ORACLE_OCI_DRIVER_PROFILE.to_string());
+        cfg.connection_string = Some("jdbc:oracle:oci8:@ORCLPDB1?TNS_ADMIN=C%3A%5Coracle%5Cwallets".to_string());
+
+        // 主机与端口沿用连接自身：TNS 别名 URL 不参与主机改写（别名没有 host）。
+        let params = agent_connect_params(&cfg, &cfg.host.clone(), cfg.port, "").unwrap();
+
+        assert_eq!(params["connection_string"], "jdbc:oracle:oci8:@ORCLPDB1");
+    }
+
+    #[test]
+    fn oracle_thin_profile_keeps_the_thin_protocol() {
+        let mut cfg = config(DatabaseType::Oracle, Some("ORCLPDB1"));
+        cfg.oracle_connection_type = Some("service_name".to_string());
+
+        let params = agent_connect_params(&cfg, "oracle.example.com", 1521, "ORCLPDB1").unwrap();
+
+        assert_eq!(params["connection_string"], "jdbc:oracle:thin:@//oracle.example.com:1521/ORCLPDB1");
+    }
+
+    #[test]
+    fn oracle_oci_alternate_connect_configs_stay_on_the_oci_protocol() {
+        let mut cfg = config(DatabaseType::Oracle, Some("ORCLPDB1"));
+        cfg.driver_profile = Some(crate::oracle_oci::ORACLE_OCI_DRIVER_PROFILE.to_string());
+        cfg.oracle_connection_type = Some("service_name".to_string());
+
+        let alternates =
+            oracle_alternate_connect_configs(&cfg, "ORA-12514: listener does not currently know of service");
+
+        assert!(!alternates.is_empty());
+        for alternate in &alternates {
+            let url = alternate.connection_string.as_deref().expect("alternate url");
+            assert!(url.starts_with("jdbc:oracle:oci8:@"), "alternate url must keep the oci8 protocol: {url}");
         }
     }
 

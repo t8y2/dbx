@@ -18,14 +18,16 @@ export interface GitHubReleaseAsset {
   browser_download_url: string;
 }
 
-interface AgentRegistryArtifact {
+export interface AgentRegistryArtifact {
   url: string;
+  sha256?: string;
   size: number;
   format?: "tar_zstd";
 }
 
-interface AgentRegistryDriver {
+export interface AgentRegistryDriver {
   version?: string;
+  label?: string;
   min_app_version?: string;
   jre?: string;
   jar?: AgentRegistryArtifact;
@@ -33,7 +35,7 @@ interface AgentRegistryDriver {
 }
 
 export interface AgentRegistry {
-  jres?: Record<string, { platforms?: Record<string, AgentRegistryArtifact> }>;
+  jres?: Record<string, { version?: string; platforms?: Record<string, AgentRegistryArtifact> }>;
   drivers?: Record<string, AgentRegistryDriver>;
 }
 
@@ -92,7 +94,7 @@ const CNB_RELEASE_DOWNLOAD_PREFIX = "https://cnb.cool/dbxio.com/dbx/-/releases/d
 const MIN_APP_VERSION = "0.6.0";
 const driverVersionMap = driverVersions as Record<string, string>;
 
-const platformLabels: Record<string, string> = {
+export const platformLabels: Record<string, string> = {
   "macos-aarch64": "macOS (Apple Silicon)",
   "macos-x64": "macOS (Intel)",
   "linux-aarch64": "Linux (ARM64)",
@@ -130,6 +132,7 @@ const driverLabels: Record<string, string> = {
   neo4j: "Neo4j",
   "oceanbase-oracle": "OceanBase Oracle Mode",
   oracle: "Oracle",
+  "oracle-oci": "Oracle (OCI)",
   rabbitmq: "RabbitMQ",
   rocketmq: "Apache RocketMQ",
   saphana: "SAP HANA",
@@ -157,7 +160,7 @@ const jreVersions: Record<string, string> = {
   "21": "21",
 };
 
-function labelForDriver(key: string): string {
+export function labelForDriver(key: string): string {
   return driverLabels[key] ?? key.replace(/-/g, " ");
 }
 

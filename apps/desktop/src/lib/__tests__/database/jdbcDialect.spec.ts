@@ -431,6 +431,45 @@ describe("query execution schema", () => {
 });
 
 describe("object tree node schema", () => {
+  it.each(["APP", "OTHER", "app", "A_B", "AXB", "_SYS_EPM", "A%B"])("preserves discovered unknown JDBC schema %s without changing SQL dialect or execution context", (schema) => {
+    const connection = {
+      db_type: "jdbc" as const,
+      connection_string: "jdbc:sap://localhost:443/?currentschema=APP",
+      jdbc_driver_class: "com.sap.db.jdbc.Driver",
+    };
+    expect(inferJdbcDialect(connection)).toBeUndefined();
+    expect(effectiveDatabaseTypeForConnection(connection)).toBe("jdbc");
+    expect(connectionShouldDiscoverJdbcSchemas(connection)).toBe(true);
+    expect(connectionUsesDatabaseObjectTreeMode(connection)).toBe(true);
+    expect(connectionObjectTreeQuerySchema(connection, "catalog", schema)).toBe(schema);
+    expect(connectionObjectTreeNodeSchema(connection, "catalog", schema)).toBe(schema);
+    expect(connectionQueryExecutionSchema(connection, "catalog", schema, false)).toBeUndefined();
+  });
+
+  it.each([undefined, ""])("keeps unknown JDBC catalog fallback when schema is %s", (schema) => {
+    const connection = { db_type: "jdbc" as const, connection_string: "jdbc:example://localhost/catalog" };
+    expect(connectionObjectTreeQuerySchema(connection, "catalog", schema)).toBe("");
+    expect(connectionObjectTreeNodeSchema(connection, "catalog", schema)).toBeUndefined();
+  });
+
+  it.each([
+    { db_type: "saphana", query: "APP", node: "APP", fallbackQuery: "", fallbackNode: undefined },
+    { db_type: "mysql", query: "APP", node: undefined, fallbackQuery: "catalog", fallbackNode: undefined },
+    { db_type: "oracle", query: "APP", node: "APP", fallbackQuery: "catalog", fallbackNode: "catalog" },
+    { db_type: "jdbc", driver_profile: "mysql", query: "", node: undefined, fallbackQuery: "", fallbackNode: undefined },
+    { db_type: "jdbc", driver_profile: "oracle", query: "APP", node: "APP", fallbackQuery: "catalog", fallbackNode: "catalog" },
+    { db_type: "jdbc", driver_profile: "databend", connection_string: "jdbc:databend://localhost:8000/catalog", query: "APP", node: "APP", fallbackQuery: "catalog", fallbackNode: "catalog" },
+    { db_type: "jdbc", driver_profile: "postgres", query: "APP", node: "APP", fallbackQuery: "", fallbackNode: undefined },
+    { db_type: "jdbc", driver_profile: "phoenix", query: "APP", node: "APP", fallbackQuery: "", fallbackNode: undefined },
+  ] as const)("keeps $db_type/$driver_profile schema rules", ({ db_type, query, node, fallbackQuery, fallbackNode, ...identity }) => {
+    const connection = { db_type, ...identity };
+    expect(connectionShouldDiscoverJdbcSchemas(connection)).toBe(false);
+    expect(connectionObjectTreeQuerySchema(connection, "catalog", "APP")).toBe(query);
+    expect(connectionObjectTreeNodeSchema(connection, "catalog", "APP")).toBe(node);
+    expect(connectionObjectTreeQuerySchema(connection, "catalog")).toBe(fallbackQuery);
+    expect(connectionObjectTreeNodeSchema(connection, "catalog")).toBe(fallbackNode);
+  });
+
   it("ignores database-shaped schema metadata for MySQL tables", () => {
     expect(connectionObjectTreeNodeSchema({ db_type: "mysql" }, "app", "app")).toBeUndefined();
   });

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
+import { summarizeSelection } from "../../apps/desktop/src/lib/dataGrid/gridSelection.ts";
 import {
   applyMongoGridChangesToDocument,
   applyMongoGridChangesToDocumentBaseline,
@@ -17,6 +18,7 @@ import {
   mongoDocumentGridExternalValue,
   mongoDocumentGridInputValue,
   mongoDocumentGridValue,
+  mongoDocumentGridNumericValue,
   mongoDocumentGridColumnTypes,
   mongoDocumentIdForGrid,
   mongoDocumentRelaxedExtendedJson,
@@ -442,4 +444,32 @@ test("keeps BSON null empty in editors while preserving a copy marker", () => {
 test("restores internal Mongo collection-grid values for external output", () => {
   assert.equal(mongoDocumentGridExternalValue(MONGO_DOCUMENT_GRID_NULL), null);
   assert.equal(mongoDocumentGridExternalValue("NULL"), "NULL");
+});
+
+test("counts typed BSON scalars as numbers so a column total keeps its negative values", () => {
+  const documents = [{ charactersUsed: 2528.125 }, { charactersUsed: { $numberDecimal: "-12.5" } }, { charactersUsed: -100.5 }, { charactersUsed: { $numberInt: "-5" } }, { charactersUsed: { $numberLong: "9" } }];
+  const rows = documents.map((document) => [mongoDocumentGridValue(document.charactersUsed)]);
+  const summary = summarizeSelection({ columns: ["charactersUsed"], rows }, { numericValue: mongoDocumentGridNumericValue });
+
+  assert.equal(summary.numericCount, 5);
+  assert.equal(summary.sum, 2528.125 - 12.5 - 100.5 - 5 + 9);
+  assert.equal(summary.average, (2528.125 - 12.5 - 100.5 - 5 + 9) / 5);
+});
+
+test("keeps non-numeric Mongo cells out of a column total", () => {
+  assert.equal(mongoDocumentGridNumericValue(mongoDocumentGridValue(null)), undefined);
+  assert.equal(mongoDocumentGridNumericValue(true), undefined);
+  assert.equal(mongoDocumentGridNumericValue(""), undefined);
+  assert.equal(mongoDocumentGridNumericValue("not a number"), undefined);
+  assert.equal(mongoDocumentGridNumericValue(Number.NaN), undefined);
+  assert.equal(mongoDocumentGridNumericValue(Number.POSITIVE_INFINITY), undefined);
+  assert.equal(mongoDocumentGridNumericValue(mongoDocumentGridValue({ $date: "2026-06-10T13:59:31.287Z" })), undefined);
+  assert.equal(mongoDocumentGridNumericValue(mongoDocumentGridValue({ $oid: "6743e4bfa3f6f84bc3fff6c8" })), undefined);
+  assert.equal(mongoDocumentGridNumericValue(mongoDocumentGridValue({ nested: { amount: -12.5 } })), undefined);
+  // A BSON string that spells a shell literal is read exactly as the grid renders it.
+  assert.equal(mongoDocumentGridNumericValue(mongoDocumentGridValue('NumberLong("-7")')), -7);
+  // Reserved-namespace text is never unwrapped as a literal.
+  assert.equal(mongoDocumentGridNumericValue(mongoDocumentGridValue(MONGO_DOCUMENT_GRID_NULL)), undefined);
+  // Numeric text stored as a BSON string still counts, as it does in every other grid.
+  assert.equal(mongoDocumentGridNumericValue(mongoDocumentGridValue("-12.5")), -12.5);
 });

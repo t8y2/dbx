@@ -285,6 +285,13 @@ type connectParams struct {
 	SysDBA           bool   `json:"sysdba"`
 	URLParams        string `json:"url_params"`
 	ConnectionString string `json:"connection_string"`
+	// DriverProfile 由 DBX 下传；"oci" 走 OCI（thick）驱动，其余走内置的 thin 驱动。
+	DriverProfile string `json:"driver_profile"`
+}
+
+// usesOCIProfile 判断本次连接是否选择了 OCI（thick）驱动。
+func usesOCIProfile(params connectParams) bool {
+	return strings.EqualFold(strings.TrimSpace(params.DriverProfile), "oci")
 }
 
 type completionAssistantRequest struct {
@@ -1256,6 +1263,11 @@ func openDB(params connectParams) (*sql.DB, error) {
 }
 
 func openDBWithStringConverter(params connectParams, stringConverter converters.IStringConverter) (*sql.DB, error) {
+	if usesOCIProfile(params) {
+		// OCI 由 Oracle 客户端负责字符集转换（NLS_LANG 在进程环境里生效），
+		// go-ora 的 string converter 机制不适用于它。
+		return openOCIDB(params)
+	}
 	dsn, err := buildDSNForConnect(params)
 	if err != nil {
 		return nil, err
@@ -1278,6 +1290,10 @@ func openAndPingDB(params connectParams, timeout time.Duration) (*sql.DB, error)
 	}
 	if err := pingDB(db, timeout); err != nil {
 		db.Close()
+		if usesOCIProfile(params) {
+			// OCI 的字符集由客户端决定，重试 go-ora 的转换器没有意义。
+			return nil, err
+		}
 		stringConverter, ok := oracleStringConverterForUnsupportedCharsetError(err)
 		if !ok {
 			return nil, err
@@ -1472,23 +1488,54 @@ var (
 func parseOracleJDBCURL(value string) jdbcURLInfo {
 	value = strings.TrimSpace(value)
 	lower := strings.ToLower(value)
-	if !strings.HasPrefix(lower, "jdbc:oracle:thin:@") {
+	prefix := ""
+	for _, candidate := range []string{"jdbc:oracle:thin:@", "jdbc:oracle:oci8:@", "jdbc:oracle:oci:@"} {
+		if strings.HasPrefix(lower, candidate) {
+			prefix = candidate
+			break
+		}
+	}
+	if prefix == "" {
 		return jdbcURLInfo{}
 	}
-	descriptor := strings.TrimSpace(value[len("jdbc:oracle:thin:@"):])
+	descriptor := strings.TrimSpace(value[len(prefix):])
 	if strings.HasPrefix(descriptor, "(") {
 		return jdbcURLInfo{Kind: "descriptor", Descriptor: descriptor}
 	}
-	if match := oracleJDBCServiceRegexp.FindStringSubmatch(value); len(match) == 4 {
+	if alias := oracleTnsAliasName(descriptor); alias != "" {
+		return jdbcURLInfo{Kind: "tns", Database: alias}
+	}
+	// 下面的正则按 thin 前缀书写，统一归一后再匹配，因此 oci8 与 thin 共用一套解析。
+	normalized := "jdbc:oracle:thin:@" + descriptor
+	if match := oracleJDBCServiceRegexp.FindStringSubmatch(normalized); len(match) == 4 {
 		return jdbcURLInfo{Kind: "service", Host: match[1], Port: parsePort(match[2]), Database: match[3]}
 	}
-	if match := oracleJDBCSIDRegexp.FindStringSubmatch(value); len(match) == 4 {
+	if match := oracleJDBCSIDRegexp.FindStringSubmatch(normalized); len(match) == 4 {
 		return jdbcURLInfo{Kind: "sid", Host: match[1], Port: parsePort(match[2]), Database: match[3]}
 	}
-	if match := oracleJDBCLegacyRegexp.FindStringSubmatch(value); len(match) == 4 {
+	if match := oracleJDBCLegacyRegexp.FindStringSubmatch(normalized); len(match) == 4 {
 		return jdbcURLInfo{Kind: "service", Host: match[1], Port: parsePort(match[2]), Database: match[3]}
 	}
 	return jdbcURLInfo{}
+}
+
+// oracleTnsAliasName 返回 `@` 之后、查询串之前的 TNS 别名；不是别名时返回空串。
+//
+// 判定与前端 parseOracleTnsConnectionString 保持一致：别名不含描述符括号、
+// 网络前缀（//）以及路径/端口分隔符（: / \）。
+func oracleTnsAliasName(value string) string {
+	alias := value
+	if index := strings.IndexByte(alias, '?'); index >= 0 {
+		alias = alias[:index]
+	}
+	alias = strings.TrimSpace(alias)
+	if alias == "" || strings.HasPrefix(alias, "(") || strings.HasPrefix(alias, "//") {
+		return ""
+	}
+	if strings.ContainsAny(alias, ":/\\") {
+		return ""
+	}
+	return alias
 }
 
 func parsePort(value string) int {

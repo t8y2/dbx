@@ -12,6 +12,35 @@ pub enum IdentifierCase {
     Mixed,
 }
 
+/// Why the backend declared a connection's pools dead while nobody was using it.
+///
+/// A stable enum on purpose: the frontend only needs to tell the two cases apart, and raw
+/// driver/network error text must not leak into a background UI notification (#4339).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionLivenessFailureKind {
+    /// The keepalive probe ran and reported a dead connection.
+    ProbeFailed,
+    /// The keepalive probe exceeded its budget.
+    TimedOut,
+}
+
+/// A message on the connection-liveness channel (#4339).
+///
+/// One shape for both shells and both transports, discriminated by `kind`. The `Resync`
+/// variant exists because a broadcast subscriber can fall behind: without a way to say
+/// "you skipped messages", a dropped `Lost` would leave a sidebar claiming a dead
+/// connection is connected until the user happened to act on it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
+pub enum ConnectionLivenessMessage {
+    /// The connection has no pools left, so the sidebar must stop showing it as connected.
+    Lost { connection_id: String, failure_kind: ConnectionLivenessFailureKind },
+    /// The transport skipped messages and must re-check every connection it currently
+    /// shows as connected.
+    Resync,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DatabaseConnectionInfo {
@@ -160,6 +189,21 @@ pub struct ConnectionConfig {
     pub sysdba: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oracle_connection_type: Option<String>,
+    /// Connection-level NLS_LANG override for OCI connections. Empty keeps the
+    /// global default; a value makes this connection own a dedicated agent
+    /// process so its client charset cannot bleed into other sessions (the
+    /// variable is process-scoped for OCI).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_oci_nls_lang: Option<String>,
+    /// Connection-level `TNS_ADMIN` override for OCI (thick) connections.
+    ///
+    /// Points at the directory holding `tnsnames.ora` / `sqlnet.ora` / the
+    /// wallet, so any OCI connection can use an ADB wallet or network options
+    /// without switching to the TNS connection form. Resolved against the
+    /// global default and the TNS connection string in
+    /// `dbx_core::connection::AppState::agent_launch_env`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_oci_tns_admin: Option<String>,
     #[serde(default)]
     pub connection_string: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -424,6 +468,16 @@ pub struct SshTunnelConfig {
     /// TCP-forwarding policy; enable only for trusted JumpServer/Koko setups.
     #[serde(default, skip_serializing_if = "is_false")]
     pub allow_exec_channel_proxy: bool,
+    /// OpenSSH-style `ProxyCommand` used to reach this SSH host instead of a
+    /// direct TCP connection (e.g. `nc %h %p` or
+    /// `cloudflared access ssh --hostname %h`). Empty means a direct
+    /// connection. Resolved from `~/.ssh/config` when the host is an alias and
+    /// otherwise taken from the connection form. `%h`/`%p`/`%r`/`%%` are
+    /// expanded from the effective host, port, and user before the command
+    /// starts; the executable must be one of
+    /// `dbx_drivers::db::ssh_proxy_command::ALLOWED_PROXY_COMMAND_BINARIES`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub proxy_command: String,
     /// When non-empty, this layer references a shared tunnel profile
     /// (Settings > Tunnels). The profile's configuration replaces this
     /// layer's own fields at connect time; only `id` and `enabled` are
@@ -616,6 +670,10 @@ struct ConnectionConfigData {
     #[serde(default)]
     pub oracle_connection_type: Option<String>,
     #[serde(default)]
+    pub oracle_oci_nls_lang: Option<String>,
+    #[serde(default)]
+    pub oracle_oci_tns_admin: Option<String>,
+    #[serde(default)]
     pub connection_string: Option<String>,
     #[serde(default)]
     pub redis_connection_mode: Option<String>,
@@ -712,6 +770,8 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             client_key_path: data.client_key_path,
             sysdba: data.sysdba,
             oracle_connection_type: data.oracle_connection_type,
+            oracle_oci_nls_lang: data.oracle_oci_nls_lang,
+            oracle_oci_tns_admin: data.oracle_oci_tns_admin,
             connection_string: data.connection_string,
             redis_connection_mode: data.redis_connection_mode,
             redis_sentinel_master: data.redis_sentinel_master,
@@ -1128,6 +1188,7 @@ impl ConnectionConfig {
             DatabaseType::Elasticsearch
             | DatabaseType::Easysearch
             | DatabaseType::Solr
+            | DatabaseType::CouchDb
             | DatabaseType::Meilisearch
             | DatabaseType::Hbase
             | DatabaseType::Qdrant
@@ -1316,6 +1377,7 @@ impl ConnectionConfig {
             DatabaseType::Elasticsearch
             | DatabaseType::Easysearch
             | DatabaseType::Solr
+            | DatabaseType::CouchDb
             | DatabaseType::Meilisearch
             | DatabaseType::Hbase
             | DatabaseType::Qdrant
@@ -2436,22 +2498,71 @@ fn rewrite_mongo_uri_host(uri: &str, new_host: &str, new_port: u16) -> String {
     result
 }
 
+#[derive(Debug)]
+enum JdbcTransportEndpoint {
+    Standard { host: String, port: u16 },
+    As400(As400JdbcEndpoint),
+}
+
+#[derive(Debug)]
+struct As400JdbcEndpoint {
+    host: String,
+    port: u16,
+    host_range: std::ops::Range<usize>,
+    port_range: std::ops::Range<usize>,
+}
+
+#[derive(Debug)]
+struct As400JdbcProperty<'a> {
+    key: &'a str,
+    value: &'a str,
+    value_range: std::ops::Range<usize>,
+}
+
 pub fn parse_jdbc_host_port(url: &str) -> Option<(String, u16)> {
-    let rest = jdbc_transport_rest(url)?;
+    match parse_jdbc_transport_endpoint(url).ok()? {
+        JdbcTransportEndpoint::Standard { host, port } => Some((host, port)),
+        JdbcTransportEndpoint::As400(endpoint) => Some((endpoint.host, endpoint.port)),
+    }
+}
+
+/// Validates the endpoint syntax before a static JDBC transport tunnel is
+/// opened. In particular, jt400's implicit port-mapper flow needs two remote
+/// sockets and therefore cannot be represented by one forwarded port.
+pub fn validate_jdbc_transport_url(url: &str) -> Result<(), String> {
+    parse_jdbc_transport_endpoint(url)
+        .map(|_| ())
+        .map_err(|reason| format!("Cannot route JDBC connection string through a transport: {reason}"))
+}
+
+fn parse_jdbc_transport_endpoint(url: &str) -> Result<JdbcTransportEndpoint, String> {
+    let rest = jdbc_transport_rest(url).ok_or_else(|| "unsupported URL format".to_string())?;
+
+    if let Some(after_as400) = strip_prefix_ignore_ascii_case(rest, "as400://") {
+        return parse_as400_jdbc_endpoint(url, after_as400).map(JdbcTransportEndpoint::As400);
+    }
 
     // jdbc:oracle:thin:@host:port:SID  or  jdbc:oracle:thin:@//host:port/service
     if let Some(after) = rest.strip_prefix("oracle:") {
-        let at_pos = after.find('@')?;
+        let at_pos = after.find('@').ok_or_else(|| "unsupported URL format".to_string())?;
         let after_at = &after[at_pos + 1..];
         if after_at.trim_start().starts_with('(') {
-            let host = oracle_descriptor_value(after_at, "HOST")?;
-            let port = oracle_descriptor_value(after_at, "PORT")?;
-            return Some((host, port.parse().ok()?));
+            let host = oracle_descriptor_value(after_at, "HOST").ok_or_else(|| "unsupported URL format".to_string())?;
+            let port = oracle_descriptor_value(after_at, "PORT")
+                .and_then(|port| port.parse().ok())
+                .ok_or_else(|| "unsupported URL format".to_string())?;
+            return Ok(JdbcTransportEndpoint::Standard { host, port });
         }
         let after_at = after_at.strip_prefix("//").unwrap_or(after_at);
-        let host_port = after_at.split(&['/', ':', '?'][..]).next()?;
-        let port_str = after_at.strip_prefix(host_port)?.strip_prefix(':')?.split(&[':', '/', ';', '?'][..]).next()?;
-        return Some((host_port.to_string(), port_str.parse().ok()?));
+        let host_port =
+            after_at.split(&['/', ':', '?'][..]).next().ok_or_else(|| "unsupported URL format".to_string())?;
+        let port_str = after_at
+            .strip_prefix(host_port)
+            .and_then(|value| value.strip_prefix(':'))
+            .and_then(|value| value.split(&[':', '/', ';', '?'][..]).next())
+            .ok_or_else(|| "unsupported URL format".to_string())?;
+        let port = port_str.parse().map_err(|_| "unsupported URL format".to_string())?;
+        return Ok(JdbcTransportEndpoint::Standard { host: host_port.to_string(), port });
     }
 
     // jdbc:sqlserver://host:port;prop=val  or  jdbc:sqlserver://host\instance:port;...
@@ -2459,13 +2570,16 @@ pub fn parse_jdbc_host_port(url: &str) -> Option<(String, u16)> {
         let authority = after.split(';').next().unwrap_or(after);
         let authority = authority.split('\\').next().unwrap_or(authority);
         return match authority.rsplit_once(':') {
-            Some((h, p)) => Some((h.to_string(), p.parse().ok()?)),
-            None => Some((authority.to_string(), 1433)),
+            Some((host, port)) => port
+                .parse()
+                .map(|port| JdbcTransportEndpoint::Standard { host: host.to_string(), port })
+                .map_err(|_| "unsupported URL format".to_string()),
+            None => Ok(JdbcTransportEndpoint::Standard { host: authority.to_string(), port: 1433 }),
         };
     }
 
     // Generic: jdbc:subprotocol://[user:pass@]host:port[/path][?query]
-    let scheme_end = rest.find("://")?;
+    let scheme_end = rest.find("://").ok_or_else(|| "unsupported URL format".to_string())?;
     let after_scheme = &rest[scheme_end + 3..];
     let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
     let authority = authority.split('?').next().unwrap_or(authority);
@@ -2473,18 +2587,170 @@ pub fn parse_jdbc_host_port(url: &str) -> Option<(String, u16)> {
         Some(idx) => &authority[idx + 1..],
         None => authority,
     };
-    match host_port.rsplit_once(':') {
-        Some((h, p)) => Some((h.to_string(), p.parse().ok()?)),
-        None => None,
+    let (host, port) = host_port.rsplit_once(':').ok_or_else(|| "unsupported URL format".to_string())?;
+    let port = port.parse().map_err(|_| "unsupported URL format".to_string())?;
+    Ok(JdbcTransportEndpoint::Standard { host: host.to_string(), port })
+}
+
+fn parse_as400_jdbc_endpoint(url: &str, subname: &str) -> Result<As400JdbcEndpoint, String> {
+    let subname_offset = url.len() - subname.len();
+    let authority_end = subname.find(['/', ';']).unwrap_or(subname.len());
+    let authority = &subname[..authority_end];
+
+    let (host, host_range, authority_port) = if let Some(bracketed) = authority.strip_prefix('[') {
+        let close = bracketed
+            .find(']')
+            .map(|index| index + 1)
+            .ok_or_else(|| "AS/400 IPv6 system names must have a closing ']' before the port".to_string())?;
+        let host = &authority[1..close];
+        if !host.contains(':') {
+            return Err("AS/400 bracketed system names must contain an IPv6 address".to_string());
+        }
+        let suffix = &authority[close + 1..];
+        let authority_port = if suffix.is_empty() {
+            None
+        } else {
+            let raw_port = suffix
+                .strip_prefix(':')
+                .ok_or_else(|| "AS/400 bracketed IPv6 system names may only be followed by ':PORT'".to_string())?;
+            let start = subname_offset + close + 2;
+            Some((raw_port, start..start + raw_port.len()))
+        };
+        (host, subname_offset..subname_offset + close + 1, authority_port)
+    } else {
+        if authority.matches(':').count() > 1 {
+            return Err("AS/400 IPv6 system names must be enclosed in '[' and ']'".to_string());
+        }
+        match authority.split_once(':') {
+            Some((host, raw_port)) => {
+                let port_start = subname_offset + host.len() + 1;
+                (
+                    host,
+                    subname_offset..subname_offset + host.len(),
+                    Some((raw_port, port_start..port_start + raw_port.len())),
+                )
+            }
+            None => (authority, subname_offset..subname_offset + authority.len(), None),
+        }
+    };
+
+    if host.is_empty() || host.trim() != host || host.contains([',', '@', '\\', '"', '[', ']']) {
+        return Err(
+            "AS/400 URLs must contain one non-empty system name; multiple hosts and userinfo are not supported"
+                .to_string(),
+        );
     }
+
+    let mut port_number = None;
+    let mut alternate_server = None;
+    let mut alternate_port = None;
+    let mut client_affinities = None;
+    let mut secondary_url = None;
+    let mut proxy_server = None;
+    for property in as400_jdbc_properties(subname, subname_offset)? {
+        match property.key {
+            "portNumber" => port_number = Some((property.value, property.value_range)),
+            "clientRerouteAlternateServerName" => alternate_server = Some(property.value),
+            "clientRerouteAlternatePortNumber" => alternate_port = Some(property.value),
+            "enableClientAffinitiesList" => client_affinities = Some(property.value),
+            "secondary URL" => secondary_url = Some(property.value),
+            "proxy server" => proxy_server = Some(property.value),
+            _ => {}
+        }
+    }
+
+    if alternate_server.is_some_and(|value| !value.is_empty())
+        || alternate_port.is_some_and(|value| !value.is_empty())
+        || client_affinities == Some("1")
+    {
+        return Err(
+            "AS/400 client reroute or affinity properties can select multiple hosts and cannot be safely routed through one transport endpoint"
+                .to_string(),
+        );
+    }
+    if secondary_url.is_some_and(|value| !value.is_empty()) {
+        return Err(
+            "the AS/400 `secondary URL` property can select another endpoint and cannot be safely routed through one transport endpoint"
+                .to_string(),
+        );
+    }
+    if proxy_server.is_some_and(|value| !value.is_empty()) {
+        return Err(
+            "the AS/400 `proxy server` property changes the network endpoint and cannot be combined with a DBX transport"
+                .to_string(),
+        );
+    }
+
+    let (raw_port, port_range, source) = match (authority_port, port_number) {
+        (Some((raw_port, range)), _) => (raw_port, range, "authority port"),
+        (None, Some((raw_port, range))) => (raw_port, range, "`portNumber`"),
+        (None, None) => {
+            return Err(
+                "AS/400 URLs without an explicit `:PORT` or `;portNumber=PORT` use jt400's port mapper on port 449 and then a separately resolved database service port; specify the actual database host-server port (the secure service port when `secure=true`) so one transport endpoint can be routed"
+                    .to_string(),
+            )
+        }
+    };
+    let port = raw_port.parse::<u16>().ok().filter(|port| *port != 0).ok_or_else(|| {
+        format!("the AS/400 {source} must be an integer from 1 to 65535 (port 0 invokes jt400 port mapping)")
+    })?;
+
+    Ok(As400JdbcEndpoint { host: host.to_string(), port, host_range, port_range })
+}
+
+fn as400_jdbc_properties<'a>(subname: &'a str, subname_offset: usize) -> Result<Vec<As400JdbcProperty<'a>>, String> {
+    let mut separators = Vec::new();
+    let mut quoted = false;
+    let mut token_start = 0;
+    for (index, ch) in subname.char_indices() {
+        if ch == '"' {
+            quoted = !quoted;
+        } else if ch == ';' && !quoted && (index == 0 || subname.as_bytes()[index - 1] != b'\\') {
+            let token = &subname[token_start..index];
+            if token.contains('"') && !token.ends_with('"') {
+                return Err("AS/400 URL contains characters after a closing quote".to_string());
+            }
+            separators.push(index);
+            token_start = index + 1;
+        }
+    }
+    let final_token = &subname[token_start..];
+    if quoted || (final_token.contains('"') && !final_token.ends_with('"')) {
+        return Err("AS/400 URL contains an unterminated or malformed quoted value".to_string());
+    }
+
+    let mut properties = Vec::with_capacity(separators.len());
+    for (position, separator) in separators.iter().copied().enumerate() {
+        let token_start = separator + 1;
+        let token_end = separators.get(position + 1).copied().unwrap_or(subname.len());
+        let token = &subname[token_start..token_end];
+        let (raw_key, raw_value, raw_value_offset) = match token.find('=') {
+            Some(equal) => (&token[..equal], &token[equal + 1..], equal + 1),
+            None => (token, "", token.len()),
+        };
+        let key = trim_java_whitespace(raw_key);
+        let value = trim_java_whitespace(raw_value);
+        let leading_whitespace = raw_value.len() - trim_java_whitespace_start(raw_value).len();
+        let value_start = subname_offset + token_start + raw_value_offset + leading_whitespace;
+        properties.push(As400JdbcProperty { key, value, value_range: value_start..value_start + value.len() });
+    }
+    Ok(properties)
+}
+
+fn trim_java_whitespace(value: &str) -> &str {
+    value.trim_matches(|ch| ch <= '\u{20}')
+}
+
+fn trim_java_whitespace_start(value: &str) -> &str {
+    value.trim_start_matches(|ch| ch <= '\u{20}')
 }
 
 fn jdbc_transport_rest(url: &str) -> Option<&str> {
-    if let Some(rest) = url.strip_prefix("jdbc:").or_else(|| url.strip_prefix("JDBC:")) {
+    if let Some(rest) = strip_prefix_ignore_ascii_case(url, "jdbc:") {
         return Some(rest);
     }
 
-    let rest = url.strip_prefix("jdbcx:").or_else(|| url.strip_prefix("JDBCX:"))?;
+    let rest = strip_prefix_ignore_ascii_case(url, "jdbcx:")?;
     if let Some(scheme_end) = rest.find("://") {
         let scheme = &rest[..scheme_end];
         return Some(match scheme.rfind(':') {
@@ -2504,6 +2770,13 @@ fn jdbc_transport_rest(url: &str) -> Option<&str> {
     }
 }
 
+fn strip_prefix_ignore_ascii_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    value
+        .get(..prefix.len())
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
+        .then(|| &value[prefix.len()..])
+}
+
 pub fn rewrite_jdbc_url_host(url: &str, new_host: &str, new_port: u16) -> Result<String, String> {
     let normalized_url = url.to_ascii_uppercase();
     let normalized_rest = jdbc_transport_rest(url).map(str::to_ascii_uppercase).unwrap_or_default();
@@ -2512,10 +2785,28 @@ pub fn rewrite_jdbc_url_host(url: &str, new_host: &str, new_port: u16) -> Result
         return rewrite_oracle_descriptor_host(url, new_host, new_port);
     }
 
-    let Some((old_host, old_port)) = parse_jdbc_host_port(url) else {
-        return Err(format!(
-            "Cannot route JDBC connection string through transport endpoint {new_host}:{new_port}: unsupported URL format"
-        ));
+    let endpoint = parse_jdbc_transport_endpoint(url).map_err(|reason| {
+        format!("Cannot route JDBC connection string through transport endpoint {new_host}:{new_port}: {reason}")
+    })?;
+
+    let (old_host, old_port) = match endpoint {
+        JdbcTransportEndpoint::As400(endpoint) => {
+            let mut rewritten = url.to_string();
+            rewritten.replace_range(endpoint.port_range, &new_port.to_string());
+            rewritten.replace_range(endpoint.host_range, &bracket_ipv6(new_host));
+            return match parse_jdbc_transport_endpoint(&rewritten) {
+                Ok(JdbcTransportEndpoint::As400(rewritten_endpoint))
+                    if rewritten_endpoint.host.trim_matches(['[', ']']) == new_host.trim_matches(['[', ']'])
+                        && rewritten_endpoint.port == new_port =>
+                {
+                    Ok(rewritten)
+                }
+                _ => Err(format!(
+                    "Cannot route JDBC connection string through transport endpoint {new_host}:{new_port}: the rewritten URL does not resolve to a single local endpoint"
+                )),
+            };
+        }
+        JdbcTransportEndpoint::Standard { host, port } => (host, port),
     };
 
     if let Some(after_sqlserver) = normalized_rest.strip_prefix("SQLSERVER://") {
@@ -2794,6 +3085,8 @@ mod tests {
 
     fn mysql_config(username: &str, password: &str, database: Option<&str>) -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: "id".to_string(),
             name: "name".to_string(),
@@ -4500,6 +4793,151 @@ mod tests {
         let (h, p) = super::parse_jdbc_host_port("jdbc:mysql://db.example.com:3306/app?useSSL=false").unwrap();
         assert_eq!(h, "db.example.com");
         assert_eq!(p, 3306);
+    }
+
+    #[test]
+    fn parse_and_rewrite_as400_authority_port_preserves_properties() {
+        let url = "jdbc:as400://10.0.0.1:8471;libraries=clvmotdta,*LIBL;errors=full";
+
+        assert_eq!(super::parse_jdbc_host_port(url), Some(("10.0.0.1".to_string(), 8471)));
+        assert_eq!(
+            super::rewrite_jdbc_url_host(url, "127.0.0.1", 18471).unwrap(),
+            "jdbc:as400://127.0.0.1:18471;libraries=clvmotdta,*LIBL;errors=full"
+        );
+    }
+
+    #[test]
+    fn parse_and_rewrite_as400_port_number_preserves_schema_and_properties() {
+        let url = "jdbc:as400://ibmi.example.com/MYLIB;libraries=clvmotdta,*LIBL;portNumber=8471;errors=full";
+
+        assert_eq!(super::parse_jdbc_host_port(url), Some(("ibmi.example.com".to_string(), 8471)));
+        assert_eq!(
+            super::rewrite_jdbc_url_host(url, "127.0.0.1", 28471).unwrap(),
+            "jdbc:as400://127.0.0.1/MYLIB;libraries=clvmotdta,*LIBL;portNumber=28471;errors=full"
+        );
+
+        let quoted_schema = "jdbc:as400://ibmi.example.com/\"MY;LIB\";portNumber=8471;errors=full";
+        assert_eq!(
+            super::rewrite_jdbc_url_host(quoted_schema, "127.0.0.1", 38471).unwrap(),
+            "jdbc:as400://127.0.0.1/\"MY;LIB\";portNumber=38471;errors=full"
+        );
+
+        let duplicate_port = "jdbc:as400://ibmi.example.com;portNumber=8471;portNumber=9471;errors=full";
+        assert_eq!(super::parse_jdbc_host_port(duplicate_port), Some(("ibmi.example.com".to_string(), 9471)));
+        assert_eq!(
+            super::rewrite_jdbc_url_host(duplicate_port, "127.0.0.1", 49471).unwrap(),
+            "jdbc:as400://127.0.0.1;portNumber=8471;portNumber=49471;errors=full"
+        );
+    }
+
+    #[test]
+    fn parse_and_rewrite_secure_as400_uses_the_explicit_secure_service_port() {
+        let property_url = "jdbc:as400://ibmi.example.com;secure=true;portNumber=9471;errors=full";
+        assert_eq!(super::parse_jdbc_host_port(property_url), Some(("ibmi.example.com".to_string(), 9471)));
+        assert_eq!(
+            super::rewrite_jdbc_url_host(property_url, "127.0.0.1", 19471).unwrap(),
+            "jdbc:as400://127.0.0.1;secure=true;portNumber=19471;errors=full"
+        );
+
+        let authority_url = "jdbc:as400://ibmi.example.com:9471;secure=true;portNumber=8471";
+        assert_eq!(
+            super::rewrite_jdbc_url_host(authority_url, "127.0.0.1", 29471).unwrap(),
+            "jdbc:as400://127.0.0.1:29471;secure=true;portNumber=8471"
+        );
+    }
+
+    #[test]
+    fn parse_and_rewrite_as400_supports_bracketed_ipv6_and_uppercase_jdbc_prefixes() {
+        let jdbc_url = "JDBC:AS400://[2001:db8::10]:9471;secure=true";
+        assert_eq!(super::parse_jdbc_host_port(jdbc_url), Some(("2001:db8::10".to_string(), 9471)));
+        assert_eq!(
+            super::rewrite_jdbc_url_host(jdbc_url, "::1", 19471).unwrap(),
+            "JDBC:AS400://[::1]:19471;secure=true"
+        );
+
+        let jdbcx_url = "JDBCX:trace:AS400://[2001:db8::20];portNumber=8471;libraries=LIB1,*LIBL";
+        assert_eq!(super::parse_jdbc_host_port(jdbcx_url), Some(("2001:db8::20".to_string(), 8471)));
+        assert_eq!(
+            super::rewrite_jdbc_url_host(jdbcx_url, "127.0.0.1", 18471).unwrap(),
+            "JDBCX:trace:AS400://127.0.0.1;portNumber=18471;libraries=LIB1,*LIBL"
+        );
+
+        let mixed_case_url = "JdBc:aS400://ibmi.example.com;portNumber=8471";
+        assert_eq!(super::parse_jdbc_host_port(mixed_case_url), Some(("ibmi.example.com".to_string(), 8471)));
+    }
+
+    #[test]
+    fn as400_without_explicit_database_service_port_has_actionable_transport_error() {
+        for url in [
+            "jdbc:as400://10.0.0.1;libraries=clvmotdta,*LIBL;errors=full",
+            "jdbc:as400://10.0.0.1;secure=true;libraries=clvmotdta,*LIBL",
+            "jdbc:as400://10.0.0.1;PORTNUMBER=8471;libraries=clvmotdta,*LIBL",
+        ] {
+            assert_eq!(super::parse_jdbc_host_port(url), None);
+            let err = super::rewrite_jdbc_url_host(url, "127.0.0.1", 18471).unwrap_err();
+            assert!(err.contains("port mapper on port 449"), "{err}");
+            assert!(err.contains(":PORT"), "{err}");
+            assert!(err.contains("portNumber=PORT"), "{err}");
+
+            let validation_err = super::validate_jdbc_transport_url(url).unwrap_err();
+            assert!(validation_err.contains("port mapper on port 449"), "{validation_err}");
+        }
+    }
+
+    #[test]
+    fn as400_rejects_invalid_explicit_ports() {
+        for url in [
+            "jdbc:as400://ibmi.example.com:0;libraries=LIB1",
+            "jdbc:as400://ibmi.example.com:invalid;libraries=LIB1",
+            "jdbc:as400://ibmi.example.com:65536;libraries=LIB1",
+            "jdbc:as400://ibmi.example.com;portNumber=0;libraries=LIB1",
+            "jdbc:as400://ibmi.example.com;portNumber=invalid;libraries=LIB1",
+            "jdbc:as400://ibmi.example.com;portNumber=65536;libraries=LIB1",
+            "jdbc:as400://ibmi.example.com;portNumber=8471;portNumber",
+            "jdbc:as400://ibmi.example.com;portNumber=\u{a0}8471",
+        ] {
+            assert_eq!(super::parse_jdbc_host_port(url), None, "{url}");
+            let err = super::rewrite_jdbc_url_host(url, "127.0.0.1", 18471).unwrap_err();
+            assert!(err.contains("integer from 1 to 65535"), "{url}: {err}");
+        }
+    }
+
+    #[test]
+    fn as400_does_not_read_port_number_from_quoted_text() {
+        for url in [
+            "jdbc:as400://ibmi.example.com/\"MY;portNumber=8471;LIB\";errors=full",
+            "jdbc:as400://ibmi.example.com;libraries=\"LIB;portNumber=8471;OTHER\";errors=full",
+            "jdbc:as400://ibmi.example.com;libraries=LIB\\;portNumber=8471;errors=full",
+        ] {
+            assert_eq!(super::parse_jdbc_host_port(url), None, "{url}");
+            let err = super::rewrite_jdbc_url_host(url, "127.0.0.1", 18471).unwrap_err();
+            assert!(err.contains("port mapper on port 449"), "{url}: {err}");
+        }
+    }
+
+    #[test]
+    fn as400_rejects_multiple_or_indirect_transport_endpoints() {
+        for url in [
+            "jdbc:as400://primary.example.com,backup.example.com:8471;libraries=LIB1",
+            "jdbc:as400://primary.example.com;portNumber=8471;clientRerouteAlternateServerName=backup.example.com",
+            "jdbc:as400://primary.example.com;portNumber=8471;enableClientAffinitiesList=1",
+            "jdbc:as400://primary.example.com;portNumber=8471;secondary URL=jdbc:postgresql://other.example.com:5432/app",
+            "jdbc:as400://primary.example.com;portNumber=8471;proxy server=proxy.example.com:3470",
+            "jdbc:as400://2001:db8::10:8471;libraries=LIB1",
+            "jdbc:as400://\"primary.example.com:8471;ignored\"",
+        ] {
+            assert_eq!(super::parse_jdbc_host_port(url), None, "{url}");
+            let err = super::rewrite_jdbc_url_host(url, "127.0.0.1", 18471).unwrap_err();
+            assert!(err.contains("AS/400"), "{url}: {err}");
+        }
+    }
+
+    #[test]
+    fn jdbc_transport_validation_accepts_single_endpoints() {
+        assert!(
+            super::validate_jdbc_transport_url("jdbc:as400://ibmi.example.com;portNumber=8471;libraries=LIB1").is_ok()
+        );
+        assert!(super::validate_jdbc_transport_url("jdbc:postgresql://db.example.com:5432/app").is_ok());
     }
 
     #[test]

@@ -321,6 +321,10 @@ export function isEditSidebarConnectionShortcut(event: ShortcutLikeEvent, shortc
   return matchesShortcut(event, actionShortcut("editSidebarConnection", shortcuts));
 }
 
+export function isDisconnectSidebarConnectionShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("disconnectSidebarConnection", shortcuts));
+}
+
 export function isViewTableDdlShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("viewTableDdl", shortcuts));
 }
@@ -378,4 +382,10 @@ export function isBrowserReloadShortcut(event: ShortcutLikeEvent): boolean {
   const key = normalizeKey(event.key);
   if (key === "F5") return true;
   return key === "r" && (!!event.metaKey || !!event.ctrlKey);
+}
+
+export function isBrowserTaskManagerShortcut(event: ShortcutLikeEvent): boolean {
+  if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey) return false;
+  if (!event.shiftKey) return false;
+  return event.key === "Escape" || event.key === "Esc" || event.code === "Escape";
 }

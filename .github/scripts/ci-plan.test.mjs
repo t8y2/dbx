@@ -79,6 +79,82 @@ test("core and consumer changes do not pull unrelated foundation test groups", (
   assert.deepEqual(groups(plan(["crates/dbx-driver-postgres/src/postgres.rs"])), ["drivers", "application"]);
 });
 
+test("Win7 candidate follows the desktop package dependency graph", () => {
+  assert.equal(plan(["crates/dbx-core/src/query/mod.rs"]).windows_win7_candidate, true);
+  assert.equal(plan(["crates/dbx-drivers/src/lib.rs"]).windows_win7_candidate, true);
+  assert.equal(plan(["crates/dbx-cli/src/main.rs"]).windows_win7_candidate, false);
+});
+
+test("old Win7 Rust paths remain candidates through the dependency graph", () => {
+  for (const file of [
+    "src-tauri/src/commands/update.rs",
+    "crates/dbx-core/src/host/update.rs",
+    "crates/dbx-driver-postgres/src/postgres.rs",
+    "crates/dbx-platform/src/lib.rs",
+  ]) {
+    assert.equal(plan([file]).windows_win7_candidate, true, file);
+  }
+});
+
+test("Win7 infrastructure changes remain candidates outside the Cargo graph", () => {
+  for (const file of [
+    ".github/scripts/assert-win7-pe-compat.ps1",
+    ".github/scripts/assert-webview2-win7-loader.ps1",
+    ".github/scripts/assert-win7-installer-content.ps1",
+    ".github/scripts/assert-webview2-win7-runtime.ps1",
+    ".github/scripts/prepare-webview2-win7-loader.ps1",
+    ".github/scripts/prepare-webview2-win7-runtime.ps1",
+    ".github/workflows/ci.yml",
+    ".github/workflows/release.yml",
+    "src-tauri/tauri.webview2-win7-fixed.conf.json",
+    "src-tauri/build.rs",
+    "src-tauri/windows/nsis/installer.nsi",
+    "vendor/wry/src/lib.rs",
+    "vendor/webview2-com-sys/src/lib.rs",
+    "vendor/ctor/src/lib.rs",
+    "vendor/dirs-sys/src/lib.rs",
+    "vendor/pageant/src/lib.rs",
+  ]) {
+    assert.equal(plan([file]).windows_win7_candidate, true, file);
+  }
+});
+
+test("Win7 dependency inputs fail open", () => {
+  for (const file of ["Cargo.toml", "Cargo.lock", "src-tauri/Cargo.toml", "crates/dbx-cli/Cargo.toml"]) {
+    assert.equal(plan([file]).windows_win7_candidate, true, file);
+  }
+});
+
+test("unknown Rust changes and unknown diffs remain Win7 candidates", () => {
+  assert.equal(plan(["crates/new-engine/src/lib.rs"]).windows_win7_candidate, true);
+  assert.equal(plan(null).windows_win7_candidate, true);
+});
+
+test("unrelated CI inputs do not become Win7 candidates through full Rust coverage", () => {
+  const result = plan([".github/scripts/ci-gate.mjs"]);
+  assert.equal(result.rust_full, true);
+  assert.equal(result.windows_win7_candidate, false);
+});
+
+test("Win7 affected packages stay independent from full Rust coverage", () => {
+  const result = plan([".github/scripts/ci-gate.mjs"]);
+  assert.ok(result.affected_packages.includes("dbx"));
+  assert.deepEqual(result.windows_win7_affected_packages, []);
+});
+
+test("Win7 candidate reports each routing reason", () => {
+  assert.equal(plan([".github/scripts/assert-win7-pe-compat.ps1"]).windows_win7_reasons.infrastructure, true);
+  assert.equal(plan(["Cargo.lock"]).windows_win7_reasons.dependency_input, true);
+  assert.equal(plan(["crates/dbx-core/src/lib.rs"]).windows_win7_reasons.desktop_dependency, true);
+  assert.equal(plan(["crates/new-engine/src/lib.rs"]).windows_win7_reasons.unknown_rust, true);
+  assert.deepEqual(plan(["crates/dbx-cli/src/main.rs"]).windows_win7_reasons, {
+    infrastructure: false,
+    dependency_input: false,
+    desktop_dependency: false,
+    unknown_rust: false,
+  });
+});
+
 test("code generation and test-only dependencies participate in impact analysis", () => {
   assert.deepEqual(groups(plan(["plugins/connection-types/postgres.yaml"])), ["foundation", "drivers", "application"]);
   assert.deepEqual(groups(plan(["plugins/dialects/postgres.yaml"])), ["foundation", "drivers", "application"]);

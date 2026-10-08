@@ -2,7 +2,7 @@ import { isRedisMonitorCommand } from "./redisMonitor";
 
 export type RedisCommandSafety = "allowed" | "write" | "confirm" | "blocked";
 
-const BLOCKED_COMMANDS = new Set(["KEYS", "FLUSHALL", "SHUTDOWN", "CONFIG", "SAVE", "BGSAVE", "SLAVEOF", "REPLICAOF", "MIGRATE", "MODULE", "SCRIPT", "EVAL", "EVALSHA"]);
+const BLOCKED_COMMANDS = new Set(["KEYS", "FLUSHALL", "FLUSHDB", "SHUTDOWN", "CONFIG", "SAVE", "BGSAVE", "SLAVEOF", "REPLICAOF", "MIGRATE", "MODULE", "SCRIPT", "EVAL", "EVALSHA"]);
 
 // Explicit allowlist matching the backend's read-command classification.
 // Unknown commands fall through to "blocked" (fail-closed).
@@ -199,7 +199,6 @@ const CONFIRM_COMMANDS = new Set([
   "ZUNIONSTORE",
   "PFMERGE",
   "GEOSEARCHSTORE",
-  "FLUSHDB",
 ]);
 
 const WRITE_COMMANDS = new Set([

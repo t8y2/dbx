@@ -1240,22 +1240,32 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     return row.every((value) => value === null || (typeof value === "string" && value.trim() === ""));
   }
 
+  function appendPastedRowsAsNewRows(pastedRows: readonly (readonly (string | null)[])[], columnIndexes: readonly number[], columnNames?: readonly string[] | null): DataGridAppendPastedRowsResult {
+    return appendPastedRows(null, pastedRows, columnIndexes, columnNames);
+  }
+
   function appendPastedRowsToNewRow(targetRowId: number, pastedRows: readonly (readonly (string | null)[])[], columnIndexes: readonly number[], columnNames?: readonly string[] | null): DataGridAppendPastedRowsResult {
+    return appendPastedRows(targetRowId, pastedRows, columnIndexes, columnNames);
+  }
+
+  // A null target appends populated rows directly, without a preparatory blank
+  // row or a second undo entry. Cell/row paste still validates its blank target.
+  function appendPastedRows(targetRowId: number | null, pastedRows: readonly (readonly (string | null)[])[], columnIndexes: readonly number[], columnNames?: readonly string[] | null): DataGridAppendPastedRowsResult {
     if (!editable.value) return { ok: false, reason: "not-editable" };
     if (pastedRows.every((row) => row.every((value) => value === ""))) {
       return { ok: false, reason: "empty-paste" };
     }
 
-    const target = getRowItem(targetRowId);
-    if ((!target?.isNew && !target?.isDraft) || target.isDeleted || isSavingNewRow(target)) {
+    const target = targetRowId === null ? undefined : getRowItem(targetRowId);
+    if (targetRowId !== null && ((!target?.isNew && !target?.isDraft) || target.isDeleted || isSavingNewRow(target))) {
       return { ok: false, reason: "invalid-target" };
     }
 
-    const targetIsDraft = target.isDraft === true;
+    const targetIsDraft = target?.isDraft === true;
     if (targetIsDraft) ensureQuickEntryDraftRow();
-    const targetNewIndex = target.newIndex;
+    const targetNewIndex = target?.newIndex;
     const targetRow = targetIsDraft ? quickEntryDraftRow.value : targetNewIndex === undefined ? undefined : newRows.value[targetNewIndex];
-    if (!targetRow || !isBlankNewRow(targetRow)) return { ok: false, reason: "target-not-empty" };
+    if (targetRowId !== null && (!targetRow || !isBlankNewRow(targetRow))) return { ok: false, reason: "target-not-empty" };
 
     const pastedColumnCount = Math.max(...pastedRows.map((row) => row.length));
     if (pastedColumnCount <= 0) return { ok: false, reason: "empty-paste" };
@@ -1279,12 +1289,13 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     } else {
       columnIndexes.slice(0, pastedColumnCount).forEach((columnIndex, valueIndex) => valueTargets.push({ columnIndex, valueIndex }));
     }
+    if (valueTargets.length === 0) return { ok: false, reason: "no-matching-columns" };
     if (valueTargets.some(({ columnIndex }) => !canEditColumn(columnIndex))) return { ok: false, reason: "readonly-column" };
 
     const nextRows = newRows.value.map((row) => [...row]);
     const nextMeta = cloneNewRowMeta(newRowMeta.value);
     let reusableNewRowCount = 0;
-    if (!targetIsDraft) {
+    if (targetNewIndex !== undefined) {
       for (let rowIndex = targetNewIndex!; rowIndex < nextRows.length && reusableNewRowCount < pastedRows.length; rowIndex++) {
         if (!isBlankNewRow(nextRows[rowIndex]!)) break;
         reusableNewRowCount++;
@@ -1307,10 +1318,10 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     });
 
     pushUndoSnapshot();
-    if (targetIsDraft) {
+    if (targetIsDraft || targetRowId === null) {
       nextRows.push(...mappedRows);
       for (let i = 0; i < mappedRows.length; i++) nextMeta.push(allocateNewRowMeta(null));
-      quickEntryDraftRow.value = emptyDraftRow();
+      if (targetIsDraft) quickEntryDraftRow.value = emptyDraftRow();
     } else {
       // Reused blank rows keep their original placement; rows added beyond the
       // reusable count append at the end (preserving existing paste behavior).
@@ -2351,6 +2362,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     addRow,
     addRows,
     appendPastedRowsToNewRow,
+    appendPastedRowsAsNewRows,
     cloneRow,
     cloneRows,
     applyDeleteRows,

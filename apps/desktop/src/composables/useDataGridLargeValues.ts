@@ -487,11 +487,16 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
       }
     }
     if (requestsByColumn.size === 0) return resolved;
-    if ((options.databaseType.value !== "mysql" && options.databaseType.value !== "postgres" && options.databaseType.value !== "oracle") || !options.connectionId.value || !options.tableMeta.value?.tableName || options.tableMeta.value.primaryKeys.length === 0) {
-      throw new Error(options.translate("grid.largeValueNeedsStableKey"));
+    if (
+      (options.databaseType.value !== "mysql" && options.databaseType.value !== "postgres" && options.databaseType.value !== "oracle" && options.databaseType.value !== "db2") ||
+      !options.connectionId.value ||
+      !options.tableMeta.value?.tableName ||
+      options.tableMeta.value.primaryKeys.length === 0
+    ) {
+      throw new Error(options.translate("grid.largeValueNeedsRowIdentifier"));
     }
     const primaryKeyIndexes = options.tableMeta.value.primaryKeys.map(largeValueSourceColumnIndex);
-    if (primaryKeyIndexes.some((index) => index < 0)) throw new Error(options.translate("grid.largeValueNeedsStableKey"));
+    if (primaryKeyIndexes.some((index) => index < 0)) throw new Error(options.translate("grid.largeValueNeedsRowIdentifier"));
 
     for (const [columnIndex, requests] of requestsByColumn) {
       for (const chunk of chunkLargeValueRequests(requests)) {

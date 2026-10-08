@@ -1,13 +1,18 @@
 use std::collections::HashSet;
+use std::convert::Infallible;
 use std::sync::Arc;
 
+use async_stream::stream;
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::Json;
 use dbx_core::connection::{
     connection_configs_pool_equivalent, connection_configs_session_credentials_compatible, AppState, PoolKind,
 };
-use dbx_core::models::connection::{ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo, DatabaseType};
+use dbx_core::models::connection::{
+    ConnectionConfig, ConnectionLivenessMessage, ConnectionTestResult, DatabaseConnectionInfo, DatabaseType,
+};
 use dbx_core::nacos::config::{
     take_transient_passwords, NACOS_CONSOLE_SESSION_PASSWORD, NACOS_PRIMARY_SESSION_PASSWORD,
 };
@@ -625,6 +630,60 @@ pub async fn check_connection_health(
     Ok(Json(()))
 }
 
+/// Read-only counterpart of `check_connection_health`: reports whether the connection still
+/// has a pool, without probing, mutating, or triggering a reconnect (#4339).
+pub async fn connection_is_open(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<DisconnectRequest>,
+) -> Result<Json<bool>, AppError> {
+    Ok(Json(state.app.is_connection_open(&body.connection_id).await))
+}
+
+/// Serialise one liveness message for the SSE stream, or `None` when serialisation fails.
+fn liveness_sse_event(message: &ConnectionLivenessMessage) -> Option<Event> {
+    match serde_json::to_string(message) {
+        Ok(payload) => Some(Event::default().data(payload)),
+        // The payload is a tagged enum of plain fields, so this is unreachable in practice.
+        Err(error) => {
+            log::warn!("Connection liveness message could not be serialised: {error}");
+            None
+        }
+    }
+}
+
+/// Stream backend-confirmed liveness messages to the browser (#4339).
+///
+/// The payload is the message itself, byte-identical to what the desktop shell emits as
+/// `dbx-connection-liveness`, so the frontend parses one shape on both transports.
+pub async fn connection_liveness_events(
+    State(state): State<Arc<WebState>>,
+) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+    let mut events = state.app.subscribe_connection_liveness();
+    let stream = stream! {
+        loop {
+            match events.recv().await {
+                Ok(message) => {
+                    if let Some(event) = liveness_sse_event(&message) {
+                        yield Ok(event);
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    // The skipped messages are gone for good, so ask the client to re-check
+                    // every connection it still shows as connected. Dropping the transition
+                    // silently would leave a sidebar green indefinitely — exactly the state
+                    // this stream exists to prevent.
+                    log::warn!("Web connection liveness stream skipped {skipped} messages; requesting a resync");
+                    if let Some(event) = liveness_sse_event(&ConnectionLivenessMessage::Resync) {
+                        yield Ok(event);
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
 pub async fn prewarm_connection(
     State(state): State<Arc<WebState>>,
     Json(body): Json<PrewarmConnectionRequest>,
@@ -991,6 +1050,8 @@ mod tests {
 
     fn sqlite_config(id: &str, path: &str) -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: id.to_string(),
             name: "SQLite".to_string(),

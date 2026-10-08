@@ -39,6 +39,7 @@ watch(previewContainer, async (element) => {
       appPalette: () => themePalette.value,
       fontSize: () => settingsStore.editorSettings.fontSize,
       fontFamily: () => settingsStore.editorSettings.tableFontFamily,
+      lineWrapping: () => settingsStore.editorSettings.wordWrap,
     });
     await previewEditor.create(element, props.text, "json");
   } else if (!element && previewEditor) {
@@ -54,7 +55,7 @@ watch(
 </script>
 
 <template>
-  <div class="relative col-start-3 row-start-1 flex min-w-0 flex-col border-l bg-background" :class="{ 'detail-drawer-resizing': resizing }" :style="panelStyle" @contextmenu="emit('contextMenu', $event)">
+  <div class="relative col-start-4 row-start-1 flex min-w-0 flex-col border-l bg-background" :class="{ 'detail-drawer-resizing': resizing }" :style="panelStyle" @contextmenu="emit('contextMenu', $event)">
     <div class="absolute bottom-0 left-0 top-0 z-20 w-1.5 -translate-x-1/2 cursor-col-resize hover:bg-primary/30" @mousedown.prevent="emit('resizeStart', $event)" />
     <div class="flex h-9 shrink-0 items-center gap-2 border-b bg-muted/20 px-3">
       <Code2 class="h-3.5 w-3.5 text-muted-foreground" />

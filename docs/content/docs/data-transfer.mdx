@@ -72,6 +72,29 @@ If table creation is disabled, compatible target tables must already exist. Even
 
 <Callout type="warn">**Rebuild structure and data** replaces existing target tables and their indexes, triggers, constraints, comments, and object permissions with source structure. The original table is renamed to a backup first, then dropped after a successful transfer. If any step fails, the backup table is retained and can be manually restored.</Callout>
 
+## Structure SQL Preview
+
+Structure-only transfers do not change the target silently: DBX plans the structure statements first and shows them in a read-only confirmation dialog (syntax highlighted, copyable, wrapped) before anything runs. Cancel there and nothing is executed.
+
+Above the SQL Preview, DBX shows a **Structure transfer plan** with operation counts and an object-level list, including planned table creation, explicit skips for existing targets, rebuilds, and structured indexes, foreign keys, sequences, or comments where available. Operations come from the same planning decisions as the SQL; DBX does not parse SQL to guess what will happen.
+
+This summary describes the transfer plan, not a full source/target schema diff. It does not compare column types, defaults, or nullability, detect target-only objects, or claim that an existing target is schema-identical. For example, `SKIP table users — target already exists` means no table structure DDL is planned for that table; it does not assert that the source and target tables match.
+
+The preview covers the table-level structure operations the transfer is about to run:
+
+- `CREATE TABLE` (and the inline PostgreSQL-compatible schema, when one has to be created)
+- `COMMENT` statements
+- Deferred MySQL-family `ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY` statements
+- PostgreSQL-compatible indexes and foreign keys
+- PostgreSQL sequence statements implied by the source structure
+- plus the rebuild rename/backup and cleanup statements when rebuild is enabled.
+
+It is a preview, not a frozen script. Starting the transfer re-reads source and target metadata and re-runs the existing safety checks, so a target changed in the meantime can make execution differ from the preview — DBX re-validates the structure rather than replaying the shown statements blindly.
+
+Selected non-table objects (views, routines, triggers, standalone sequences, and similar) are still transferred, but their generated DDL is not expanded in the preview; the dialog says so explicitly.
+
+Structure and data transfers keep their current confirmation flow in this phase.
+
 ## PostgreSQL Structure and Ownership
 
 For PostgreSQL-to-PostgreSQL transfers with table creation enabled, DBX handles supported sequences, indexes, foreign keys, and selected schema-level objects and dependencies. If source owners do not exist on the target instance, DBX prompts you to:

@@ -37,6 +37,9 @@ export function coerceDataGridCellValue(options: CoerceDataGridCellValueOptions)
   const useSampledValueType = normalizeDataType(options.columnInfo?.data_type) === "";
   const numericInput = isNumericColumnType(options.columnInfo?.data_type) || (useSampledValueType && typeof oldValue === "number");
   const numericText = normalizeGroupedNumberText(value, options.columnInfo, oldValue, options.numberFormat ?? runtimeNumberFormat());
+  // Neo4j INTEGER is always signed 64-bit. Keep its input as text until the
+  // Cypher builder validates it, including values outside JavaScript's range.
+  if (options.databaseType === "neo4j" && ["integer", "long", "int"].includes(normalizeDataType(options.columnInfo?.data_type))) return numericText.trim();
   if (isBooleanInputColumn(options) || (useSampledValueType && typeof oldValue === "boolean")) {
     // MySQL exposes TINYINT(1) as an integer in the grid. Keep its numeric
     // 0/1 edits numeric while still accepting explicit TRUE/FALSE aliases.

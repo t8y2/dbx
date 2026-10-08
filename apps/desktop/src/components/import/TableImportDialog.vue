@@ -523,7 +523,8 @@ function applyAutoMapping() {
     columnMapping.value = Object.fromEntries(currentPreview.columns.map((source) => [source, source]));
     return;
   }
-  columnMapping.value = autoMapImportColumns(currentPreview.columns, targetColumnNames.value);
+  const headerless = titleRow.value === 0 && (isDelimitedFormat(sourceFormat.value) || sourceFormat.value === "excel");
+  columnMapping.value = autoMapImportColumns(currentPreview.columns, targetColumnNames.value, headerless ? "position" : "name");
 }
 
 function applySuggestedColumnDataTypes(currentPreview = preview.value) {
@@ -1559,10 +1560,10 @@ watch(rawProgressPercent, (percent) => {
 
           <div v-if="supportsImportConflictPolicy" class="space-y-1.5 rounded-md border p-3">
             <Label for="table-import-conflict-policy" class="text-xs">{{ t("tableImport.conflictPolicy") }}</Label>
-            <select id="table-import-conflict-policy" v-model="conflictPolicy" data-testid="table-import-conflict-policy" class="flex h-8 w-full rounded-md border border-input bg-background px-2 text-xs">
-              <option value="error">{{ t("tableImport.conflictError") }}</option>
-              <option value="skip">{{ t("tableImport.skipDuplicateRows") }}</option>
-              <option v-if="targetMode === 'existing'" value="updateExisting" :disabled="!canUpdateExistingRows">
+            <select id="table-import-conflict-policy" v-model="conflictPolicy" data-testid="table-import-conflict-policy" class="flex h-8 w-full rounded-md border border-input bg-background text-foreground px-2 text-xs [color-scheme:light] dark:[color-scheme:dark]">
+              <option value="error" class="bg-popover text-popover-foreground">{{ t("tableImport.conflictError") }}</option>
+              <option value="skip" class="bg-popover text-popover-foreground">{{ t("tableImport.skipDuplicateRows") }}</option>
+              <option v-if="targetMode === 'existing'" value="updateExisting" :disabled="!canUpdateExistingRows" class="bg-popover text-popover-foreground">
                 {{ t("tableImport.updateExistingRows") }}
               </option>
             </select>
@@ -1622,11 +1623,11 @@ watch(rawProgressPercent, (percent) => {
                   <select
                     v-else
                     :value="columnMapping[sourceColumn] || SKIP_VALUE"
-                    class="h-7 w-full min-w-0 rounded-md border bg-background px-2 text-xs font-mono shadow-none hover:bg-muted/30 focus-visible:ring-1 focus-visible:ring-ring/25"
+                    class="h-7 w-full min-w-0 rounded-md border border-input bg-background text-foreground px-2 text-xs font-mono shadow-none hover:bg-muted/30 focus-visible:ring-1 focus-visible:ring-ring/25 [color-scheme:light] dark:[color-scheme:dark]"
                     @change="(e) => updateMapping(sourceColumn, (e.target as HTMLSelectElement).value)"
                   >
-                    <option :value="SKIP_VALUE">{{ t("tableImport.skipColumn") }}</option>
-                    <option v-for="column in targetColumns" :key="column.name" :value="column.name">
+                    <option :value="SKIP_VALUE" class="bg-popover text-popover-foreground">{{ t("tableImport.skipColumn") }}</option>
+                    <option v-for="column in targetColumns" :key="column.name" :value="column.name" class="bg-popover text-popover-foreground">
                       {{ column.name }}
                     </option>
                   </select>

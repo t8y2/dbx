@@ -278,6 +278,9 @@ function databaseNameIsNotASchema(type: DatabaseType | undefined): boolean {
 }
 
 export function connectionObjectTreeQuerySchema(connection: JdbcDialectConnection | undefined, database: string, schema?: string): string {
+  // Unknown JDBC drivers default to a flat tree, but can discover schemas.
+  // Keep that explicit scope: an empty JDBC metadata schema is unrestricted.
+  if (schema && connection?.db_type === "jdbc" && !inferJdbcDialect(connection)) return schema;
   if (connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend") return schema || database;
   if (connectionUsesDatabaseObjectTreeMode(connection)) return "";
   const type = effectiveDatabaseTypeForConnection(connection);
@@ -325,6 +328,8 @@ export function metadataSchemaForConnection(connection: JdbcDialectConnection | 
 }
 
 export function connectionObjectTreeNodeSchema(connection: JdbcDialectConnection | undefined, database: string, schema?: string): string | undefined {
+  // Child nodes and cache identities must retain the metadata request's scope.
+  if (schema && connection?.db_type === "jdbc" && !inferJdbcDialect(connection)) return schema;
   if (connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend") return schema || database;
   if (connectionUsesDatabaseObjectTreeMode(connection)) return undefined;
   const type = effectiveDatabaseTypeForConnection(connection);

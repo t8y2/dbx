@@ -14,6 +14,34 @@ function fileWith(editor: Record<string, unknown>, overrides: Record<string, unk
 }
 
 describe("settingsTransfer", () => {
+  it("round-trips an opt-out of comment-first result names and rejects non-booleans", () => {
+    const text = serializeSettingsTransfer({ ...DEFAULT_EDITOR_SETTINGS, resultTabPreferComments: false });
+    const result = parseSettingsTransferFile(text);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.editorSettings.resultTabPreferComments).toBe(false);
+    expect(transferCategoryForKey("resultTabPreferComments")).toBe("data");
+    expect(parseSettingsTransferFile(fileWith({ resultTabPreferComments: "false" })).ok).toBe(false);
+  });
+
+  it("round-trips functionCompletionIncludeParams as an editor setting and rejects non-booleans", () => {
+    const text = serializeSettingsTransfer({ ...DEFAULT_EDITOR_SETTINGS, functionCompletionIncludeParams: false });
+    const result = parseSettingsTransferFile(text);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.editorSettings.functionCompletionIncludeParams).toBe(false);
+    expect(transferCategoryForKey("functionCompletionIncludeParams")).toBe("editor");
+    expect(parseSettingsTransferFile(fileWith({ functionCompletionIncludeParams: "false" })).ok).toBe(false);
+  });
+
+  it("round-trips the welcome page mode and rejects invalid values", () => {
+    const result = parseSettingsTransferFile(fileWith({ welcomePageMode: "workspace" }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.editorSettings.welcomePageMode).toBe("workspace");
+
+    const invalid = parseSettingsTransferFile(fileWith({ welcomePageMode: "connections" }));
+    expect(invalid.ok).toBe(false);
+    if (!invalid.ok) expect(invalid.error.detail).toContain("welcomePageMode");
+  });
+
   it("builds a dated transfer filename", () => {
     expect(buildSettingsTransferFilename(new Date(2026, 8, 6))).toBe("dbx-settings-2026-09-06.json");
   });
@@ -29,6 +57,34 @@ describe("settingsTransfer", () => {
     expect(result.value.editorSettings.snippets).toEqual(DEFAULT_EDITOR_SETTINGS.snippets);
     expect(result.value.categories).toContain("snippets");
     expect(result.value.categories).toContain("shortcuts");
+  });
+
+  it("round-trips custom model generation templates", () => {
+    const settings: EditorSettings = {
+      ...DEFAULT_EDITOR_SETTINGS,
+      modelGenerationTemplates: [{ id: "model-1", name: "GraphQL", extension: "graphql", body: "type {{class.name}} {}" }],
+    };
+    const result = parseSettingsTransferFile(serializeSettingsTransfer(settings));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.editorSettings.modelGenerationTemplates).toEqual(settings.modelGenerationTemplates);
+    expect(result.value.categories).toContain("editor");
+  });
+
+  it("rejects malformed model generation templates instead of dropping them", () => {
+    const missingBody = parseSettingsTransferFile(fileWith({ modelGenerationTemplates: [{ id: "broken", name: "Broken", extension: "ts" }] }));
+    expect(missingBody.ok).toBe(false);
+    if (!missingBody.ok) expect(missingBody.error.detail).toContain("modelGenerationTemplates");
+
+    const duplicateIds = parseSettingsTransferFile(
+      fileWith({
+        modelGenerationTemplates: [
+          { id: "same", name: "One", extension: "ts", body: "one" },
+          { id: "same", name: "Two", extension: "ts", body: "two" },
+        ],
+      }),
+    );
+    expect(duplicateIds.ok).toBe(false);
   });
 
   it("keeps connection timeout ownership out of the payload", () => {
@@ -254,12 +310,14 @@ describe("settingsTransfer", () => {
       theme: DEFAULT_EDITOR_SETTINGS.theme,
       pageSize: 200,
       snippets: [{ id: "s1", label: "L", prefix: "p", body: "SELECT 1", enabled: true }],
+      snippetTriggerKey: "space",
     } as EditorSettings;
     const result = parseSettingsTransferFile(serializeSettingsTransfer(settings));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.editorSettings.pageSize).toBe(200);
     expect(result.value.editorSettings.snippets).toEqual(settings.snippets);
+    expect(result.value.editorSettings.snippetTriggerKey).toBe("space");
   });
 
   it("round-trips table default sorting settings", () => {
@@ -329,6 +387,42 @@ describe("settingsTransfer", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.editorSettings.customThemes).toEqual([validTheme]);
+  });
+
+  it("accepts custom theme items with optional UI colors", () => {
+    const base = DEFAULT_EDITOR_SETTINGS.customThemes[0];
+    const validTheme = {
+      ...base,
+      id: "t1",
+      name: "T1",
+      colors: {
+        ...base.colors,
+        background: "#282c34",
+        foreground: "#abb2bf",
+        activeLine: "#2c313a",
+        selection: "#3e4451",
+        cursor: "#528bff",
+        gutterBackground: "#21252b",
+        lineNumber: "#4b5263",
+        matchingBracket: "#515a6b",
+      },
+    };
+    const result = parseSettingsTransferFile(fileWith({ customThemes: [validTheme] }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.editorSettings.customThemes).toEqual([validTheme]);
+  });
+
+  it("rejects custom theme items with wrong-typed optional UI colors", () => {
+    const base = DEFAULT_EDITOR_SETTINGS.customThemes[0];
+    const result = parseSettingsTransferFile(
+      fileWith({
+        customThemes: [{ ...base, id: "t1", name: "T1", colors: { ...base.colors, activeLine: 123 } }],
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.detail).toContain("customThemes");
   });
 
   it("rejects null custom theme items instead of crashing", () => {
@@ -417,5 +511,18 @@ describe("settingsTransfer", () => {
   it("maps csvNullMode into the data category", () => {
     expect(transferCategoryForKey("csvNullMode")).toBe("data");
     expect(collectTransferCategories(["csvNullMode", "csvQuoteMode"])).toEqual(["data"]);
+  });
+
+  it("round-trips zebra row background in data category", () => {
+    expect(transferCategoryForKey("dataGridZebraRowBg")).toBe("data");
+
+    const text = serializeSettingsTransfer({
+      ...DEFAULT_EDITOR_SETTINGS,
+      dataGridZebraRowBg: "#232323",
+    });
+    const result = parseSettingsTransferFile(text);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.editorSettings.dataGridZebraRowBg).toBe("#232323");
   });
 });

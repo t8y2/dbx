@@ -319,7 +319,7 @@ watch(
     is a blocking prompt, so keep it above every other layer in the app (the
     tallest today are the image preview at 80/81 and the sidebar overlays at
     100). -->
-    <DialogContent class="flex max-h-[min(36rem,calc(var(--dbx-viewport-height)-2rem))] w-full max-w-[32rem] flex-col gap-4 overflow-hidden" overlay-class="z-[200]" portal-class="z-[200]" :show-close-button="false" @interact-outside.prevent @escape-key-down.prevent>
+    <DialogContent class="flex max-h-[min(36rem,calc(var(--dbx-viewport-height)-2rem))] w-full max-w-[32rem] flex-col gap-4 overflow-hidden" overlay-class="!z-[200]" portal-class="!z-[200]" :show-close-button="false" @interact-outside.prevent @escape-key-down.prevent>
       <DialogHeader class="shrink-0">
         <DialogTitle>{{ dialogTitle }}</DialogTitle>
         <DialogDescription class="text-muted-foreground">

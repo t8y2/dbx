@@ -351,6 +351,7 @@ watch(
     :mode="dialogs.configConnectionSelectMode.value"
     :busy="dialogs.applyingImportSelection.value"
     :connections="dialogs.configConnectionSelectList.value"
+    :layout="dialogs.configConnectionSelectLayout.value"
     @update:open="dialogs.onConfigConnectionSelectOpenChange"
     @confirm="dialogs.onConfigConnectionSelectConfirm"
   />

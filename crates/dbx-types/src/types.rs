@@ -222,6 +222,37 @@ pub enum ObjectSourceKind {
     TypeBody,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum RoutineParameterMode {
+    In,
+    Out,
+    Inout,
+    Return,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RoutineParameterMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub mode: RoutineParameterMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jdbc_type: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub precision: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nullable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ordinal: Option<i32>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectSource {
     pub name: String,
@@ -230,6 +261,8 @@ pub struct ObjectSource {
     pub source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub editable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routine_parameters: Option<Vec<RoutineParameterMetadata>>,
 }
 
 /// Provenance for structured metadata fields that are optional in [`ColumnInfo`].
@@ -1078,7 +1111,8 @@ pub struct CustomTypeDetails {
 mod tests {
     use super::{
         is_opaque_aggregate_state_type, CompletionAssistantCandidate, CompletionAssistantCandidateKind, ObjectInfo,
-        ObjectSourceKind, QueryMessage, SpatialColumn, SpatialColumnBuilder, TableInfo,
+        ObjectSource, ObjectSourceKind, QueryMessage, RoutineParameterMode, SpatialColumn, SpatialColumnBuilder,
+        TableInfo,
     };
 
     #[test]
@@ -1275,6 +1309,46 @@ mod tests {
 
         assert_eq!(kind, ObjectSourceKind::Job);
         assert_eq!(serde_json::to_string(&kind).unwrap(), "\"JOB\"");
+    }
+
+    #[test]
+    fn object_source_accepts_legacy_payload_without_routine_parameters() {
+        let source: ObjectSource = serde_json::from_value(serde_json::json!({
+            "name": "legacy_proc",
+            "object_type": "PROCEDURE",
+            "schema": "APP",
+            "source": "CREATE PROCEDURE legacy_proc() BEGIN END"
+        }))
+        .unwrap();
+
+        assert!(source.routine_parameters.is_none());
+        assert!(serde_json::to_value(source).unwrap().get("routine_parameters").is_none());
+    }
+
+    #[test]
+    fn object_source_preserves_optional_jdbc_routine_parameters() {
+        let source: ObjectSource = serde_json::from_value(serde_json::json!({
+            "name": "calculate_total",
+            "object_type": "FUNCTION",
+            "schema": "APP",
+            "source": "",
+            "editable": false,
+            "routine_parameters": [{
+                "name": "RETURN",
+                "mode": "RETURN",
+                "jdbc_type": 3,
+                "type_name": "DECIMAL",
+                "precision": 12,
+                "scale": 2,
+                "ordinal": 0
+            }]
+        }))
+        .unwrap();
+
+        let parameters = source.routine_parameters.as_ref().unwrap();
+        assert_eq!(parameters[0].mode, RoutineParameterMode::Return);
+        assert_eq!(parameters[0].precision, Some(12));
+        assert_eq!(serde_json::to_value(source).unwrap()["routine_parameters"][0]["mode"], "RETURN");
     }
 
     #[test]

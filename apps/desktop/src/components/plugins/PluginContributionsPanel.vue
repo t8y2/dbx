@@ -15,6 +15,7 @@ import { useToast } from "@/composables/useToast";
 import PluginShortcutSettings from "./PluginShortcutSettings.vue";
 import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import PluginAiAccessSection from "@/components/plugins/PluginAiAccessSection.vue";
+import PluginGraphicsEngineSection from "@/components/plugins/PluginGraphicsEngineSection.vue";
 import * as api from "@/lib/backend/api";
 import { clearPluginIconCache } from "@/lib/plugins/pluginIconResolver";
 import { loadPinnedPluginIds, savePinnedPluginIds, sortPluginsPinnedFirst } from "@/lib/plugins/pluginPinning";
@@ -43,6 +44,7 @@ import { formatBytes } from "@/lib/database/serverMetrics";
 import type { PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import type { InstalledPlugin, PluginInstallResult, PluginRepository, PluginRepositoryCatalogResult, PluginTrustedKey } from "@/types/database";
 import { useI18n } from "vue-i18n";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
@@ -58,16 +60,18 @@ const emit = defineEmits<{
   pluginRuntimeReplaced: [pluginId: string];
 }>();
 
-// lucide no longer ships brand icons; mirror the inline glyph used in AppToolbar.
+// lucide no longer ships brand icons; this stroke glyph keeps the 2px outline style of
+// neighboring lucide icons instead of the heavier filled brand mark.
 const GithubIcon = defineComponent({
   props: {
     iconClass: { type: String, default: "size-3" },
   },
   render() {
-    return h("svg", { class: this.iconClass, viewBox: "0 0 24 24", fill: "currentColor" }, [
+    return h("svg", { class: this.iconClass, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round" }, [
       h("path", {
-        d: "M12 0C5.37 0 0 5.37 0 12c0 5.3 3.438 9.8 8.205 11.387.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61-.546-1.387-1.333-1.756-1.333-1.756-1.09-.745.083-.729.083-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 21.795 24 17.295 24 12 24 5.37 18.627 0 12 0z",
+        d: "M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4",
       }),
+      h("path", { d: "M9 18c-4.51 2-5-2-7-2" }),
     ]);
   },
 });
@@ -82,6 +86,15 @@ const { t, locale: appLocale } = useI18n();
 const { toast } = useToast();
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
+const settingsStore = useSettingsStore();
+
+// A reinstall must start without consent: drop any graphics-engine (unsafe-eval) grant
+// when the plugin is uninstalled, mirroring the backend's forget_plugin_permissions.
+function forgetGraphicsEngineGrant(pluginId: string) {
+  const granted = settingsStore.editorSettings.pluginGraphicsEngineIds;
+  if (!granted.includes(pluginId)) return;
+  settingsStore.updateEditorSettings({ pluginGraphicsEngineIds: granted.filter((id) => id !== pluginId) });
+}
 const activeSection = ref<"marketplace" | "installed" | "settings">("marketplace");
 const installedPlugins = ref<InstalledPlugin[]>([]);
 const trustedKeys = ref<PluginTrustedKey[]>([]);
@@ -225,18 +238,24 @@ const showCustomRepositoryTrustSettings = computed(() => customRepositories.valu
 const pluginDevelopmentDocsUrl = computed(() => `https://dbxio.com/${appLocale.value.startsWith("zh") ? "cn" : "en"}/docs/plugin-development`);
 
 function marketplaceActionClass(listing: MarketplacePluginListing): string {
-  if (listing.status === "update") return "text-blue-600 hover:bg-gray-200 dark:text-blue-400 dark:hover:bg-gray-700";
-  if (listing.status === "install") return "text-foreground hover:bg-gray-200 dark:hover:bg-gray-700";
-  return "cursor-default text-gray-600 dark:text-gray-400";
+  if (listing.status === "update") return "bg-blue-600/10 text-blue-700 hover:bg-blue-600/20 dark:bg-blue-400/10 dark:text-blue-400 dark:hover:bg-blue-400/20";
+  if (listing.status === "install") return "bg-muted text-foreground hover:bg-accent";
+  return "cursor-default bg-muted text-muted-foreground";
 }
 
-// 紧凑档（窄卡）下 "+N" 折叠标签的展开状态；只影响展示，重开面板自然复位。
-const expandedTagKeys = ref(new Set<string>());
-function toggleTagExpansion(key: string) {
-  const next = new Set(expandedTagKeys.value);
-  if (next.has(key)) next.delete(key);
-  else next.add(key);
-  expandedTagKeys.value = next;
+// Badge row budget: tags first, then permissions, then one trailing "+N" counter. The row must
+// stay single-line; everything past the limit rides in the "+N" tooltip, and when the overflow
+// hides a sensitive permission the "+N" badge itself takes the destructive variant so the risk
+// signal never leaves the card.
+const MARKETPLACE_CARD_BADGE_LIMIT = 3;
+
+type MarketplaceCardBadge = { value: string; kind: "tag" | "permission"; sensitive: boolean };
+
+function marketplaceCardBadges(listing: MarketplacePluginListing): { visible: MarketplaceCardBadge[]; hidden: MarketplaceCardBadge[]; hiddenSensitive: boolean } {
+  const badges: MarketplaceCardBadge[] = [...listing.plugin.tags.map((value) => ({ value, kind: "tag" as const, sensitive: false })), ...listing.plugin.permissions.map((value) => ({ value, kind: "permission" as const, sensitive: isSensitivePluginPermission(value) }))];
+  const visible = badges.slice(0, MARKETPLACE_CARD_BADGE_LIMIT);
+  const hidden = badges.slice(MARKETPLACE_CARD_BADGE_LIMIT);
+  return { visible, hidden, hiddenSensitive: hidden.some((badge) => badge.sensitive) };
 }
 
 // 安装/更新完成后的短促确认窗口：动作按钮上的对勾弹入几百毫秒即退场。
@@ -645,6 +664,7 @@ async function runBatchUninstall() {
       (definition) => definition.plugin.manifest.name,
       async (definition) => {
         await api.uninstallPlugin(definition.plugin.manifest.id);
+        forgetGraphicsEngineGrant(definition.plugin.manifest.id);
       },
       (definition) => definition.plugin.manifest.id,
     );
@@ -1026,6 +1046,7 @@ async function uninstallSelectedPlugin() {
   operating.value = true;
   try {
     applyInstalledPlugins(await api.uninstallPlugin(definition.plugin.manifest.id));
+    forgetGraphicsEngineGrant(definition.plugin.manifest.id);
     retireBatchFailure(definition.plugin.manifest.id);
     notifyComponentUpdatesChanged();
     window.dispatchEvent(new CustomEvent("dbx:plugins-changed"));
@@ -1156,7 +1177,7 @@ onBeforeUnmount(() => {
                   type="button"
                   class="inline-flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-background hover:text-foreground"
                   :class="marketplaceViewMode === 'grid' ? 'bg-background text-foreground shadow-sm' : ''"
-                  :aria-label="t('structure.viewGrid')"
+                  :aria-label="t('marketplace.viewGrid')"
                   :aria-pressed="marketplaceViewMode === 'grid'"
                   @click="marketplaceViewMode = 'grid'"
                 >
@@ -1166,7 +1187,7 @@ onBeforeUnmount(() => {
                   type="button"
                   class="inline-flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-background hover:text-foreground"
                   :class="marketplaceViewMode === 'list' ? 'bg-background text-foreground shadow-sm' : ''"
-                  :aria-label="t('structure.viewList')"
+                  :aria-label="t('marketplace.viewList')"
                   :aria-pressed="marketplaceViewMode === 'list'"
                   @click="marketplaceViewMode = 'list'"
                 >
@@ -1201,104 +1222,72 @@ onBeforeUnmount(() => {
             <div class="mt-1 text-xs text-muted-foreground">{{ t("pluginPlatform.noMarketplacePluginsDescription") }}</div>
           </div>
           <TransitionGroup v-else-if="marketplaceViewMode === 'grid'" name="marketplace-cards" tag="div" class="grid w-full grid-cols-[repeat(auto-fill,minmax(min(100%,19rem),1fr))] gap-3">
-            <article v-for="listing in sortedMarketplaceListings" :key="listing.key" class="group @container marketplace-card flex min-w-0 min-h-48 flex-col rounded-xl border bg-card p-4 transition-colors hover:border-primary/40">
-              <div class="mb-3 flex min-w-0 items-start gap-3">
-                <PluginIcon :plugin-id="listing.plugin.id" :icon="listing.plugin.icon" class="size-11 shrink-0 rounded-xl border bg-background p-1.5" />
+            <article v-for="listing in sortedMarketplaceListings" :key="listing.key" class="group marketplace-card flex min-w-0 min-h-48 flex-col rounded-xl border bg-card p-4 transition-colors hover:border-primary/40">
+              <div class="flex min-w-0 items-start gap-3">
+                <PluginIcon :plugin-id="listing.plugin.id" :icon="listing.plugin.icon" class="size-10 shrink-0 rounded-lg border bg-background p-1.5" />
                 <div class="min-w-0 flex-1">
                   <div class="truncate text-sm font-semibold" :title="listing.name">{{ listing.name }}</div>
-                  <div class="mt-1 flex min-w-0 items-center">
-                    <Badge variant="outline" class="h-auto min-h-5 min-w-0 max-w-full shrink px-1.5 py-0.5 text-[10px] leading-tight whitespace-normal break-all" :title="`v${listing.plugin.latestVersion}`">v{{ listing.plugin.latestVersion }}</Badge>
-                  </div>
                   <div class="mt-1 flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
                     <BadgeCheck v-if="listingRepositoryCanVerify(listing.repository)" class="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" :title="t('pluginPlatform.verified')" :aria-label="t('pluginPlatform.verified')" />
                     <span class="truncate">{{ listing.plugin.publisher }} · {{ listing.repository.name }}</span>
                   </div>
-                  <div class="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-muted-foreground">
-                    <button
-                      v-if="listing.plugin.source"
-                      type="button"
-                      class="shrink-0 rounded p-0.5 opacity-60 transition-opacity [will-change:opacity] hover:opacity-100"
-                      :title="t('pluginPlatform.sourceRepository')"
-                      :aria-label="t('pluginPlatform.sourceRepository')"
-                      @click.stop="openExternal(listing.plugin.source)"
-                    >
-                      <GithubIcon icon-class="size-3.5" />
-                    </button>
-                    <button
-                      v-if="marketplaceHomepageUrl(listing.plugin.source, listing.plugin.homepage)"
-                      type="button"
-                      class="shrink-0 rounded p-0.5 opacity-60 transition-opacity [will-change:opacity] hover:opacity-100"
-                      :title="t('pluginPlatform.pluginHomepage')"
-                      :aria-label="t('pluginPlatform.pluginHomepage')"
-                      @click.stop="openExternal(marketplaceHomepageUrl(listing.plugin.source, listing.plugin.homepage))"
-                    >
-                      <Globe class="size-3.5" />
-                    </button>
-                    <span v-if="listing.latestVersionReleasedAt" class="shrink-0 text-[10px] text-muted-foreground">{{ formatMarketplaceReleasedDate(listing.latestVersionReleasedAt, appLocale) }}</span>
-                  </div>
                 </div>
-                <button
-                  v-if="batchMode && isBatchSelectableListing(listing.status)"
-                  type="button"
-                  class="mt-0.5 inline-flex size-4 shrink-0 items-center justify-center rounded border transition-colors"
-                  :class="isListingSelected(listing) ? 'border-primary bg-primary text-primary-foreground' : 'border-muted-foreground/40 bg-background'"
-                  :aria-pressed="isListingSelected(listing)"
-                  :aria-label="listing.name"
-                  :disabled="batchRunning"
-                  @click.stop="toggleListingSelection(listing)"
-                >
-                  <Check v-if="isListingSelected(listing)" class="size-3" />
-                </button>
+                <div class="flex shrink-0 items-center gap-0.5">
+                  <button
+                    v-if="listing.plugin.source"
+                    type="button"
+                    class="rounded p-1 text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground"
+                    :title="t('pluginPlatform.sourceRepository')"
+                    :aria-label="t('pluginPlatform.sourceRepository')"
+                    @click.stop="openExternal(listing.plugin.source)"
+                  >
+                    <GithubIcon icon-class="size-3.5" />
+                  </button>
+                  <button
+                    v-if="marketplaceHomepageUrl(listing.plugin.source, listing.plugin.homepage)"
+                    type="button"
+                    class="rounded p-1 text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground"
+                    :title="t('pluginPlatform.pluginHomepage')"
+                    :aria-label="t('pluginPlatform.pluginHomepage')"
+                    @click.stop="openExternal(marketplaceHomepageUrl(listing.plugin.source, listing.plugin.homepage))"
+                  >
+                    <Globe class="size-3.5" />
+                  </button>
+                  <button
+                    v-if="batchMode && isBatchSelectableListing(listing.status)"
+                    type="button"
+                    class="ml-1 inline-flex size-4 shrink-0 items-center justify-center rounded border transition-colors"
+                    :class="isListingSelected(listing) ? 'border-primary bg-primary text-primary-foreground' : 'border-muted-foreground/40 bg-background'"
+                    :aria-pressed="isListingSelected(listing)"
+                    :aria-label="listing.name"
+                    :disabled="batchRunning"
+                    @click.stop="toggleListingSelection(listing)"
+                  >
+                    <Check v-if="isListingSelected(listing)" class="size-3" />
+                  </button>
+                </div>
               </div>
-              <div class="marketplace-tags mt-3 flex min-w-0 flex-wrap items-center gap-1.5 @max-[21rem]:mt-2.5">
-                <!-- 紧凑档（卡宽 <21rem）只露第 1 个标签 + "+N" 折叠；标准档由下方 t-extra 全显 -->
-                <Tooltip v-if="listing.plugin.tags.length" :delay-duration="500">
+              <div v-if="listing.plugin.tags.length || listing.plugin.permissions.length" class="marketplace-tags mt-3 flex min-w-0 items-center gap-1.5 overflow-hidden">
+                <!-- Single clipped badge line: tags, then permissions, then one trailing "+N" whose
+                     tooltip lists the overflow (sensitive permissions highlighted in the tooltip). -->
+                <Tooltip v-for="badge in marketplaceCardBadges(listing).visible" :key="badge.value" :delay-duration="500">
                   <TooltipTrigger as-child>
-                    <Badge variant="outline" class="h-5 min-w-0 max-w-full truncate px-1.5 text-[10px]" :title="listing.plugin.tags[0]">{{ listing.plugin.tags[0] }}</Badge>
-                  </TooltipTrigger>
-                  <TooltipContent side="bottom" class="max-w-md break-all text-[11px]">{{ listing.plugin.tags[0] }}</TooltipContent>
-                </Tooltip>
-                <span v-if="listing.plugin.tags.length > 1" class="hidden flex-wrap gap-1.5 @min-[21rem]:flex">
-                  <Tooltip v-for="tag in listing.plugin.tags.slice(1, 3)" :key="tag" :delay-duration="500">
-                    <TooltipTrigger as-child>
-                      <Badge variant="outline" class="h-5 min-w-0 max-w-full truncate px-1.5 text-[10px]" :title="tag">{{ tag }}</Badge>
-                    </TooltipTrigger>
-                    <TooltipContent side="bottom" class="max-w-md break-all text-[11px]">{{ tag }}</TooltipContent>
-                  </Tooltip>
-                </span>
-                <button
-                  v-if="listing.plugin.tags.length > 1"
-                  type="button"
-                  class="hidden h-5 items-center rounded-full border border-dashed px-1.5 text-[10px] text-muted-foreground transition-colors hover:border-muted-foreground/60 hover:text-foreground @max-[21rem]:inline-flex"
-                  :aria-expanded="expandedTagKeys.has(listing.key)"
-                  @click.stop="toggleTagExpansion(listing.key)"
-                >
-                  {{ expandedTagKeys.has(listing.key) ? t("pluginPlatform.showFewerTags") : `+${Math.min(listing.plugin.tags.length - 1, 2)}` }}
-                </button>
-                <!-- Keep each permission visible as its own wrapping badge. Sensitive permissions
-                     use the destructive variant so the risk surface remains obvious. -->
-                <Tooltip v-for="permission in listing.plugin.permissions" :key="permission" :delay-duration="300">
-                  <TooltipTrigger as-child>
-                    <Badge :variant="isSensitivePluginPermission(permission) ? 'destructive' : 'outline'" class="h-5 min-w-0 max-w-full truncate px-1.5 font-mono text-[10px]" :title="permission" :data-sensitive-permission="isSensitivePluginPermission(permission) ? permission : undefined">{{
-                      permission
+                    <Badge :variant="badge.sensitive ? 'destructive' : 'outline'" class="h-5 min-w-0 max-w-full truncate px-1.5 text-[10px]" :class="badge.kind === 'permission' ? 'font-mono' : ''" :title="badge.value" :data-sensitive-permission="badge.sensitive ? badge.value : undefined">{{
+                      badge.value
                     }}</Badge>
                   </TooltipTrigger>
-                  <TooltipContent side="bottom" class="max-w-md break-all font-mono text-[11px]">{{ permission }}</TooltipContent>
+                  <TooltipContent side="bottom" class="max-w-md break-all text-[11px]" :class="badge.kind === 'permission' ? 'font-mono' : ''">{{ badge.value }}</TooltipContent>
                 </Tooltip>
-              </div>
-              <!-- "+N" 展开区：块级兄弟节点而非标签行内联项 —— 收起时 0fr 高度、零占位；
-                   间距放在被裁剪的子元素内（pt-1.5），收起时随高度一起归零，不留幻影间隙 -->
-              <div v-if="listing.plugin.tags.length > 1" class="marketplace-tags-more" :data-open="expandedTagKeys.has(listing.key) ? 'true' : 'false'">
-                <div class="overflow-hidden">
-                  <div class="flex flex-wrap gap-1.5 pt-1.5">
-                    <Tooltip v-for="tag in listing.plugin.tags.slice(1, 3)" :key="`more-${tag}`" :delay-duration="500">
-                      <TooltipTrigger as-child>
-                        <Badge variant="outline" class="h-5 min-w-0 max-w-full truncate px-1.5 text-[10px]" :title="tag">{{ tag }}</Badge>
-                      </TooltipTrigger>
-                      <TooltipContent side="bottom" class="max-w-md break-all text-[11px]">{{ tag }}</TooltipContent>
-                    </Tooltip>
-                  </div>
-                </div>
+                <Tooltip v-if="marketplaceCardBadges(listing).hidden.length" :delay-duration="500">
+                  <TooltipTrigger as-child>
+                    <Badge :variant="marketplaceCardBadges(listing).hiddenSensitive ? 'destructive' : 'outline'" class="h-5 shrink-0 px-1.5 text-[10px]">+{{ marketplaceCardBadges(listing).hidden.length }}</Badge>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" class="max-w-md break-all text-[11px]">
+                    <div class="flex flex-col gap-0.5 font-mono">
+                      <span v-for="badge in marketplaceCardBadges(listing).hidden" :key="badge.value" :class="badge.sensitive ? 'text-destructive' : ''">{{ badge.value }}</span>
+                    </div>
+                  </TooltipContent>
+                </Tooltip>
               </div>
               <Tooltip :delay-duration="700">
                 <TooltipTrigger as-child>
@@ -1307,17 +1296,24 @@ onBeforeUnmount(() => {
                 <TooltipContent side="bottom" class="max-w-md whitespace-pre-wrap break-words">{{ listing.description || t("pluginPlatform.noDescription") }}</TooltipContent>
               </Tooltip>
               <div class="marketplace-footer mt-auto flex items-center justify-between gap-3 pt-4">
-                <div class="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">
-                  <span v-if="listing.status === 'unsupported'">{{ t("pluginPlatform.unsupportedTarget", { target: listing.target }) }}</span>
-                  <!-- In the update state the left line states both versions: the badge above shows the
-                       catalog latest version, which otherwise reads as the installed one. -->
-                  <span v-else-if="listing.installed && listing.status === 'update'">{{ t("pluginPlatform.installedVersionUpdatable", { installed: listing.installed.manifest.version, latest: listing.plugin.latestVersion }) }}</span>
-                  <span v-else-if="listing.installed">{{ t("pluginPlatform.installedVersion", { version: listing.installed.manifest.version }) }}</span>
-                  <span v-else>{{ listing.plugin.license || t("pluginPlatform.licenseUnknown") }}</span>
+                <div class="flex min-w-0 flex-1 items-baseline gap-1.5 text-[11px] text-muted-foreground">
+                  <span v-if="listing.status === 'unsupported'" class="min-w-0 truncate">{{ t("pluginPlatform.unsupportedTarget", { target: listing.target }) }}</span>
+                  <!-- Versions are stated only in this footer (no separate badge above): the update case
+                       keeps installed and catalog latest in one sentence so neither reads as the other,
+                       and the plain install state leads with the full catalog version that never shrinks
+                       while license and release date absorb the truncation. -->
+                  <span v-else-if="listing.installed && listing.status === 'update'" class="min-w-0 truncate">{{ t("pluginPlatform.installedVersionUpdatable", { installed: listing.installed.manifest.version, latest: listing.plugin.latestVersion }) }}</span>
+                  <span v-else-if="listing.installed" class="min-w-0 truncate">{{ t("pluginPlatform.installedVersion", { version: listing.installed.manifest.version }) }}</span>
+                  <template v-else>
+                    <span class="shrink-0 font-medium">v{{ listing.plugin.latestVersion }}</span>
+                    <span class="min-w-0 truncate"
+                      >{{ listing.plugin.license || t("pluginPlatform.licenseUnknown") }}<span v-if="listing.latestVersionReleasedAt"> · {{ formatMarketplaceReleasedDate(listing.latestVersionReleasedAt, appLocale) }}</span></span
+                    >
+                  </template>
                 </div>
                 <button
                   type="button"
-                  class="inline-flex h-7 items-center justify-center gap-1.5 rounded-full border-0 bg-gray-100 px-4 py-1 text-xs font-semibold transition-colors disabled:opacity-50 dark:bg-gray-800"
+                  class="inline-flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-full px-4 py-1 text-xs font-semibold transition-colors disabled:opacity-50"
                   :class="marketplaceActionClass(listing)"
                   :disabled="listing.status === 'installed' || listing.status === 'unsupported' || mutationRunning"
                   @click="installMarketplaceListing(listing)"
@@ -1345,19 +1341,18 @@ onBeforeUnmount(() => {
               </button>
               <PluginIcon :plugin-id="listing.plugin.id" :icon="listing.plugin.icon" class="size-10 shrink-0 rounded-lg border bg-background p-1.5" />
               <div class="min-w-0 flex-1">
-                <div class="truncate text-sm font-semibold" :title="listing.name">{{ listing.name }}</div>
-                <div class="mt-1 flex min-w-0 items-center">
-                  <Badge variant="outline" class="h-auto min-h-5 min-w-0 max-w-full shrink px-1.5 py-0.5 text-[10px] leading-tight whitespace-normal break-all" :title="`v${listing.plugin.latestVersion}`">v{{ listing.plugin.latestVersion }}</Badge>
-                </div>
-                <div class="mt-1 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+                <div class="flex min-w-0 items-center gap-1">
+                  <span class="truncate text-sm font-semibold" :title="listing.name">{{ listing.name }}</span>
                   <BadgeCheck v-if="listingRepositoryCanVerify(listing.repository)" class="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" :title="t('pluginPlatform.verified')" :aria-label="t('pluginPlatform.verified')" />
-                  <span class="min-w-0 truncate">{{ listing.plugin.publisher }} · {{ listing.repository.name }}</span>
                 </div>
-                <div class="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-muted-foreground">
+                <div class="mt-1 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-muted-foreground">
+                  <span class="min-w-0 truncate">{{ listing.plugin.publisher }} · {{ listing.repository.name }}</span>
+                  <span class="shrink-0">· v{{ listing.plugin.latestVersion }}</span>
+                  <span v-if="listing.latestVersionReleasedAt" class="shrink-0">· {{ formatMarketplaceReleasedDate(listing.latestVersionReleasedAt, appLocale) }}</span>
                   <button
                     v-if="listing.plugin.source"
                     type="button"
-                    class="shrink-0 rounded p-0.5 opacity-60 transition-opacity [will-change:opacity] hover:opacity-100"
+                    class="shrink-0 rounded p-0.5 text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground"
                     :title="t('pluginPlatform.sourceRepository')"
                     :aria-label="t('pluginPlatform.sourceRepository')"
                     @click.stop="openExternal(listing.plugin.source)"
@@ -1367,14 +1362,13 @@ onBeforeUnmount(() => {
                   <button
                     v-if="marketplaceHomepageUrl(listing.plugin.source, listing.plugin.homepage)"
                     type="button"
-                    class="shrink-0 rounded p-0.5 opacity-60 transition-opacity [will-change:opacity] hover:opacity-100"
+                    class="shrink-0 rounded p-0.5 text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground"
                     :title="t('pluginPlatform.pluginHomepage')"
                     :aria-label="t('pluginPlatform.pluginHomepage')"
                     @click.stop="openExternal(marketplaceHomepageUrl(listing.plugin.source, listing.plugin.homepage))"
                   >
                     <Globe class="size-3.5" />
                   </button>
-                  <span v-if="listing.latestVersionReleasedAt" class="shrink-0 text-[10px] text-muted-foreground">{{ formatMarketplaceReleasedDate(listing.latestVersionReleasedAt, appLocale) }}</span>
                 </div>
                 <Tooltip :delay-duration="700">
                   <TooltipTrigger as-child>
@@ -1383,17 +1377,18 @@ onBeforeUnmount(() => {
                   <TooltipContent side="bottom" class="max-w-md whitespace-pre-wrap break-words">{{ listing.description || t("pluginPlatform.noDescription") }}</TooltipContent>
                 </Tooltip>
               </div>
-              <div class="hidden min-w-0 max-w-52 shrink-0 flex-wrap gap-1.5 @min-[64rem]:flex">
+              <div class="hidden min-w-0 max-w-52 shrink-0 flex-wrap items-center gap-1.5 @min-[64rem]:flex">
                 <Tooltip v-for="tag in listing.plugin.tags.slice(0, 3)" :key="tag" :delay-duration="500">
                   <TooltipTrigger as-child>
                     <Badge variant="outline" class="h-5 min-w-0 max-w-full truncate px-1.5 text-[10px]" :title="tag">{{ tag }}</Badge>
                   </TooltipTrigger>
                   <TooltipContent side="bottom" class="max-w-md break-all text-[11px]">{{ tag }}</TooltipContent>
                 </Tooltip>
+                <Badge v-if="listing.plugin.tags.length > 3" variant="outline" class="h-5 shrink-0 px-1.5 text-[10px] text-muted-foreground" :title="listing.plugin.tags.slice(3).join(' · ')">+{{ listing.plugin.tags.length - 3 }}</Badge>
               </div>
               <button
                 type="button"
-                class="inline-flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-full border-0 bg-gray-100 px-4 py-1 text-xs font-semibold transition-colors disabled:opacity-50 dark:bg-gray-800"
+                class="inline-flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-full px-4 py-1 text-xs font-semibold transition-colors disabled:opacity-50"
                 :class="marketplaceActionClass(listing)"
                 :disabled="listing.status === 'installed' || listing.status === 'unsupported' || mutationRunning"
                 @click="installMarketplaceListing(listing)"
@@ -1586,6 +1581,8 @@ onBeforeUnmount(() => {
                 </div>
 
                 <PluginAiAccessSection :key="selectedDefinition.plugin.manifest.id" :plugin="selectedDefinition.plugin" />
+
+                <PluginGraphicsEngineSection :key="`graphics-${selectedDefinition.plugin.manifest.id}`" :plugin="selectedDefinition.plugin" />
 
                 <div v-if="connectionProviders.some((entry) => entry.plugin.manifest.id === selectedPluginId)" class="space-y-3">
                   <div class="flex flex-wrap gap-2">
@@ -1829,8 +1826,8 @@ onBeforeUnmount(() => {
 
 <style scoped>
 /*
- * 商店卡片的响应式补充样式。布局分级主体走 Tailwind 容器变体（卡片自身 @container，
- * 阈值 21rem），这里只放三件事：TransitionGroup 的 FLIP 过渡、"+N" 展开区、矮窗降密度。
+ * 商店卡片的补充样式。布局主体走 Tailwind 工具类，这里只放三件事：
+ * TransitionGroup 的 FLIP 过渡、完成对勾弹入、矮窗降密度。
  * 所有动效集中在 prefers-reduced-motion: no-preference 下，减弱动效的用户自动退化为静态。
  */
 @media (prefers-reduced-motion: no-preference) {
@@ -1847,10 +1844,6 @@ onBeforeUnmount(() => {
     transition: opacity 0.12s ease-out;
   }
 
-  .marketplace-tags-more {
-    transition: grid-template-rows 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-  }
-
   .marketplace-check-pop {
     animation: marketplace-check-pop 0.12s cubic-bezier(0.16, 1, 0.3, 1);
   }
@@ -1859,23 +1852,6 @@ onBeforeUnmount(() => {
 .marketplace-cards-enter-from,
 .marketplace-cards-leave-to {
   opacity: 0;
-}
-
-/* "+N" 展开区：块级兄弟节点而非标签行内联项（内联时宽度仍按内容计算，收起会占位）。
-   0fr 收起 + overflow hidden 清零子项内容贡献；标准档不参与渲染，避免与全显标签重复。 */
-.marketplace-tags-more {
-  display: none;
-  grid-template-rows: 0fr;
-}
-
-.marketplace-tags-more[data-open="true"] {
-  grid-template-rows: 1fr;
-}
-
-@container (width < 21rem) {
-  .marketplace-tags-more {
-    display: grid;
-  }
 }
 
 @keyframes marketplace-check-pop {

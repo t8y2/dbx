@@ -242,7 +242,7 @@ fn referenced_databases(
     include_read_references: bool,
 ) -> ReferencedDatabaseAssessment {
     let mut assessment = ReferencedDatabaseAssessment::default();
-    let cleaned = sql_target_safety_text(sql);
+    let cleaned = sql_target_safety_text(sql, db_type);
     let mut use_database = String::new();
     let normalized_active_database = normalize_database_name(active_database);
 
@@ -567,14 +567,75 @@ fn is_transaction_keyword(keyword: &str) -> bool {
     matches!(keyword, "begin" | "start" | "commit" | "rollback" | "abort" | "savepoint" | "release" | "end" | "declare")
 }
 
-fn sql_target_safety_text(sql: &str) -> SqlTargetSafetyText {
+fn sql_target_safety_text(sql: &str, db_type: &DatabaseType) -> SqlTargetSafetyText {
     let chars: Vec<char> = sql.chars().collect();
     let mut result = SqlTargetSafetyText { text: String::with_capacity(sql.len()), quoted_identifiers: HashMap::new() };
-    append_sql_target_safety_text(&chars, &mut result);
+    append_sql_target_safety_text(&chars, SqlScanLexerRules::for_database_type(db_type), &mut result);
     result
 }
 
-fn append_sql_target_safety_text(chars: &[char], result: &mut SqlTargetSafetyText) {
+/// Lexer rules this scan reads. Everything the scan removes is text no target can
+/// be found in, so claiming a feature the connection does not have hides writes
+/// from the production gate: `SELECT * FROM #tmp; DELETE FROM prod_db.dbo.users;`
+/// and `SELECT 'dir\'; DELETE FROM prod_db.dbo.users;` on SQL Server both lose the
+/// `DELETE` when `#` and backslashes are read as MySQL constructs. Only features
+/// the engine really has are assumed here, which can only make the gate stricter.
+#[derive(Clone, Copy)]
+struct SqlScanLexerRules {
+    /// `#` starts a line comment: a MySQL family feature. On SQL Server `#tmp` is
+    /// a temporary table, so the rest of the line is still SQL.
+    hash_line_comments: bool,
+    /// A backslash escapes the next character inside an ordinary `'...'` string.
+    backslash_escaped_quotes: bool,
+    /// `E'...'` literals escape with a backslash (PostgreSQL family).
+    postgres_escape_strings: bool,
+}
+
+impl SqlScanLexerRules {
+    fn for_database_type(db_type: &DatabaseType) -> Self {
+        let mysql_family = matches!(
+            db_type,
+            DatabaseType::Mysql
+                | DatabaseType::Doris
+                | DatabaseType::StarRocks
+                | DatabaseType::ManticoreSearch
+                | DatabaseType::Goldendb
+        );
+        let postgres_family = matches!(
+            db_type,
+            DatabaseType::Postgres
+                | DatabaseType::OpenGauss
+                | DatabaseType::Gaussdb
+                | DatabaseType::Vastbase
+                | DatabaseType::Kingbase
+                | DatabaseType::Highgo
+                | DatabaseType::Uxdb
+                | DatabaseType::Kwdb
+        );
+        Self {
+            hash_line_comments: mysql_family,
+            // Only claim the escape where the engine has it: MySQL, and
+            // PostgreSQL inside `E'...'`. Everywhere else a literal backslash can
+            // only make this scan see more text, which asks for confirmation
+            // sooner instead of hiding a write. (`ClickHouse` and Hive do escape,
+            // so they may ask once too often — the safe direction here.)
+            backslash_escaped_quotes: mysql_family,
+            postgres_escape_strings: postgres_family,
+        }
+    }
+}
+
+/// True when `prefix` ends with a PostgreSQL `E'`/`e'` introducer that starts its
+/// own token, so `DATE'2020-01-01'` and `x$e'...'` are ordinary strings.
+fn ends_with_escape_string_prefix(prefix: &[char]) -> bool {
+    let mut chars = prefix.iter().rev();
+    if !matches!(chars.next(), Some('E' | 'e')) {
+        return false;
+    }
+    !chars.next().is_some_and(|ch| ch.is_alphanumeric() || *ch == '_' || *ch == '$')
+}
+
+fn append_sql_target_safety_text(chars: &[char], rules: SqlScanLexerRules, result: &mut SqlTargetSafetyText) {
     let mut index = 0usize;
 
     while index < chars.len() {
@@ -589,7 +650,7 @@ fn append_sql_target_safety_text(chars: &[char], result: &mut SqlTargetSafetyTex
             result.text.push(' ');
             continue;
         }
-        if ch == '#' {
+        if ch == '#' && rules.hash_line_comments {
             index += 1;
             while index < chars.len() && chars[index] != '\n' && chars[index] != '\r' {
                 index += 1;
@@ -601,7 +662,7 @@ fn append_sql_target_safety_text(chars: &[char], result: &mut SqlTargetSafetyTex
             if let Some((body, close_index)) = mysql_executable_comment_body(chars, index) {
                 result.text.push(' ');
                 let body_chars: Vec<char> = body.chars().collect();
-                append_sql_target_safety_text(&body_chars, result);
+                append_sql_target_safety_text(&body_chars, rules, result);
                 result.text.push(' ');
                 index = close_index;
             } else {
@@ -624,7 +685,7 @@ fn append_sql_target_safety_text(chars: &[char], result: &mut SqlTargetSafetyTex
             continue;
         }
         if ch == '\'' {
-            index = skip_string_literal(chars, index, '\'', '\'');
+            index = skip_string_literal(chars, index, '\'', '\'', rules);
             result.text.push(' ');
             continue;
         }
@@ -684,10 +745,13 @@ fn dollar_quote_tag_at(chars: &[char], start: usize) -> Option<(String, usize)> 
     Some((tag, index - start + 1))
 }
 
-fn skip_string_literal(chars: &[char], start: usize, open: char, close: char) -> usize {
+fn skip_string_literal(chars: &[char], start: usize, open: char, close: char, rules: SqlScanLexerRules) -> usize {
+    let backslash_escapes = matches!(open, '\'' | '"')
+        && (rules.backslash_escaped_quotes
+            || (rules.postgres_escape_strings && open == '\'' && ends_with_escape_string_prefix(&chars[..start])));
     let mut index = start + 1;
     while index < chars.len() {
-        if chars[index] == '\\' && matches!(open, '\'' | '"') {
+        if backslash_escapes && chars[index] == '\\' {
             index += 2;
             continue;
         }
@@ -740,7 +804,7 @@ fn append_quoted_identifier_token(
 mod tests {
     use super::{
         is_production_database, mongo_pipeline_targets_production_database, sql_references_disallowed_database,
-        targets_production_database,
+        sql_target_safety_text, targets_production_database,
     };
     use crate::models::connection::{ConnectionConfig, DatabaseType};
     use serde::Deserialize;
@@ -758,6 +822,8 @@ mod tests {
 
     fn config() -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: "conn".to_string(),
             name: "test".to_string(),
@@ -858,6 +924,39 @@ mod tests {
             "SELECT * FROM prod_app.users; DELETE FROM staging.users WHERE id = 1"
         ));
         assert!(targets_production_database(&config(), "staging", "USE prod_app"));
+    }
+
+    #[test]
+    fn reads_sqlserver_temp_tables_as_sql_instead_of_a_comment() {
+        let config = ConnectionConfig { db_type: DatabaseType::SqlServer, ..config() };
+
+        assert!(targets_production_database(&config, "staging", "SELECT * FROM #tmp; DELETE FROM prod_app.dbo.users;"));
+    }
+
+    #[test]
+    fn reads_sqlserver_backslash_strings_as_literal_data() {
+        let config = ConnectionConfig { db_type: DatabaseType::SqlServer, ..config() };
+
+        // T-SQL escapes a quote by doubling it, so `'dir\'` ends at the second quote
+        // and the DELETE behind it still targets production.
+        assert!(targets_production_database(&config, "staging", r#"SELECT 'dir\'; DELETE FROM prod_app.dbo.users;"#));
+    }
+
+    #[test]
+    fn keeps_mysql_hash_comments_and_backslash_escapes() {
+        let mysql = config();
+
+        assert!(!targets_production_database(&mysql, "staging", "SELECT 1; # DELETE FROM prod_app.users"));
+        assert!(!targets_production_database(&mysql, "staging", r#"SELECT 'it\'s; DELETE FROM prod_app.users;'"#));
+    }
+
+    #[test]
+    fn scans_postgres_strings_by_the_dialect_lexer_rules() {
+        let plain = sql_target_safety_text(r#"SELECT 'dir\'; DELETE FROM users;"#, &DatabaseType::Postgres);
+        assert!(plain.text.contains("DELETE FROM users"), "{}", plain.text);
+
+        let escape_string = sql_target_safety_text(r#"SELECT E'it\'s; DELETE FROM users;'"#, &DatabaseType::Postgres);
+        assert!(!escape_string.text.contains("DELETE FROM users"), "{}", escape_string.text);
     }
 
     #[test]

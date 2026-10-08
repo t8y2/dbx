@@ -21,8 +21,10 @@ import type { AiExternalContextRequest } from "@/lib/ai/aiExternalContext";
 import type { AiContext, AiRequestInput } from "@/lib/ai/ai";
 import { buildAgentRequest } from "@/lib/ai/ai";
 import { AI_SELECTION_CONTEXT_MAX_CHARS } from "@/lib/ai/aiAttachments";
+import type { UserSkillsListResult } from "@/types/userSkills";
 
 const aiAssistantMountApi = vi.hoisted(() => ({
+  listUserSkills: vi.fn<() => Promise<UserSkillsListResult>>(),
   conversations: [] as Array<Record<string, unknown>>,
   runAgentStream: undefined as undefined | ((onEvent: (event: { type: string; delta?: string }) => void) => Promise<string>),
   // #10058: the request the panel actually hands to the backend, and every
@@ -164,9 +166,15 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
     },
     // The send path consults the skill catalog (metadata only — bodies are read
     // on demand by the use_skill tool); an empty catalog keeps sends skill-free.
+    //
+    // One catalog mock serves both callers. It counts (the send path and a
+    // refreshed selector both read the catalog, so a count tells them apart),
+    // then delegates to the shared mock that afterEach re-arms. A test supplies a
+    // catalog either by writing `skillCatalog` — the installed default
+    // implementation reads it back — or by driving that mock directly.
     listUserSkills: () => {
       aiAssistantMountApi.skillListCalls += 1;
-      return Promise.resolve(aiAssistantMountApi.skillCatalog);
+      return aiAssistantMountApi.listUserSkills();
     },
     readUserSkills: (ids: string[]) => {
       aiAssistantMountApi.skillReadCalls.push(ids);
@@ -207,6 +215,11 @@ afterEach(() => {
   aiAssistantMountApi.skillReadCalls = [];
   aiAssistantMountApi.skillListCalls = 0;
   aiAssistantMountApi.tauriRuntime = false;
+  // Reset the shared catalog mock, then re-arm the default implementation that
+  // reads `skillCatalog`: `mockReset()` alone leaves it returning undefined, so
+  // every test would start from a broken catalog.
+  aiAssistantMountApi.listUserSkills.mockReset();
+  aiAssistantMountApi.listUserSkills.mockImplementation(() => Promise.resolve(aiAssistantMountApi.skillCatalog));
   while (cleanups.length) cleanups.pop()?.();
 });
 
@@ -260,6 +273,114 @@ async function mountPanel(aiConfigLoaded: boolean, connection?: ConnectionConfig
 }
 
 describe("AiAssistant mount", () => {
+  function skillButton(label: string): HTMLButtonElement {
+    const button = [...document.querySelectorAll<HTMLButtonElement>("button")].find((item) => item.textContent?.trim() === label);
+    expect(button, label).toBeDefined();
+    return button!;
+  }
+
+  const skillCatalog: UserSkillsListResult = {
+    defaultRoot: {
+      status: "ok",
+      skills: [
+        { id: "d-one", name: "Default one", description: "" },
+        { id: "d-two", name: "Default two", description: "" },
+      ],
+    },
+    customRoot: { status: "ok", skills: [{ id: "c-one", name: "Custom one", description: "" }] },
+  };
+
+  it("selects all discovered skills without duplicates and keeps unavailable selections removable after refresh", async () => {
+    // happy-dom focus events can dismiss a newly teleported Reka popover.
+    const focus = vi.spyOn(HTMLElement.prototype, "focus").mockImplementation(() => {});
+    cleanups.push(() => focus.mockRestore());
+    aiAssistantMountApi.listUserSkills.mockResolvedValue(skillCatalog);
+    const { container, errors } = await mountPanel(true);
+    container.querySelector<HTMLButtonElement>(".ai-skills-selector-trigger")!.click();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(errors.map(String)).toEqual([]);
+    expect(aiAssistantMountApi.listUserSkills).toHaveBeenCalled();
+    await vi.waitFor(() => expect(document.querySelectorAll('[data-slot="popover-content"] button[aria-pressed="false"]')).toHaveLength(3));
+
+    const count = () => container.querySelector(".ai-skills-selector-count")?.textContent?.trim();
+    const selectAll = () => skillButton(i18n.global.t("ai.skillsSelectAll"));
+    const clear = () => skillButton(i18n.global.t("ai.skillsDeselectAll"));
+    expect(clear().disabled).toBe(true);
+    skillButton("Default one").click();
+    selectAll().click();
+    await vi.waitFor(() => expect(count()).toBe("3"));
+    expect(document.querySelectorAll('[data-slot="popover-content"] button[aria-pressed="true"]')).toHaveLength(3);
+    expect(selectAll().disabled).toBe(true);
+    selectAll().click();
+    expect(count()).toBe("3");
+
+    skillButton("Default one").click();
+    await vi.waitFor(() => expect(selectAll().disabled).toBe(false));
+    selectAll().click();
+    await vi.waitFor(() => expect(count()).toBe("3"));
+
+    aiAssistantMountApi.listUserSkills.mockResolvedValue({
+      defaultRoot: {
+        status: "ok",
+        skills: [
+          { id: "d-two", name: "Default two", description: "" },
+          { id: "d-three", name: "Default three", description: "" },
+        ],
+      },
+      customRoot: null,
+    });
+    skillButton(i18n.global.t("ai.skillsRefresh")).click();
+    await vi.waitFor(() => expect(selectAll().disabled).toBe(false));
+    selectAll().click();
+    await vi.waitFor(() => expect(count()).toBe("4"));
+    expect(container.textContent).toContain("c-one");
+    expect(container.textContent).toContain("d-one");
+
+    aiAssistantMountApi.listUserSkills.mockResolvedValue({ defaultRoot: { status: "missing", skills: [] }, customRoot: null });
+    skillButton(i18n.global.t("ai.skillsRefresh")).click();
+    await vi.waitFor(() => expect(document.body.textContent).toContain(i18n.global.t("ai.skillsEmpty")));
+    expect(selectAll().disabled).toBe(true);
+    expect(clear().disabled).toBe(false);
+    clear().click();
+    await vi.waitFor(() => expect(count()).toBeUndefined());
+    expect(clear().disabled).toBe(true);
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("disables select-all during loading and errors but still allows clearing selected skills and retrying", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus").mockImplementation(() => {});
+    cleanups.push(() => focus.mockRestore());
+    aiAssistantMountApi.listUserSkills.mockResolvedValue(skillCatalog);
+    const { container, errors } = await mountPanel(true);
+    container.querySelector<HTMLButtonElement>(".ai-skills-selector-trigger")!.click();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(errors.map(String)).toEqual([]);
+    const selectAll = () => skillButton(i18n.global.t("ai.skillsSelectAll"));
+    await vi.waitFor(() => expect(selectAll().disabled).toBe(false));
+    selectAll().click();
+    await vi.waitFor(() => expect(container.querySelector(".ai-skills-selector-count")?.textContent).toBe("3"));
+
+    let rejectRefresh!: (error: Error) => void;
+    aiAssistantMountApi.listUserSkills.mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          rejectRefresh = reject;
+        }),
+    );
+    skillButton(i18n.global.t("ai.skillsRefresh")).click();
+    await vi.waitFor(() => expect(selectAll().disabled).toBe(true));
+    skillButton(i18n.global.t("ai.skillsDeselectAll")).click();
+    await vi.waitFor(() => expect(container.querySelector(".ai-skills-selector-count")).toBeNull());
+    rejectRefresh(new Error("QA catalog unavailable"));
+    await vi.waitFor(() => expect(document.body.textContent).toContain(i18n.global.t("ai.skillsLoadError")));
+    expect(selectAll().disabled).toBe(true);
+    skillButton(i18n.global.t("ai.skillsRetry")).click();
+    await vi.waitFor(() => expect(selectAll().disabled).toBe(false));
+    selectAll().click();
+    await vi.waitFor(() => expect(container.querySelector(".ai-skills-selector-count")?.textContent).toBe("3"));
+    expect(errors.map(String)).toEqual([]);
+  });
+
   it("applies custom typography to restored message content and the prompt only", async () => {
     aiAssistantMountApi.conversations = [
       {

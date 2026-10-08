@@ -56,6 +56,29 @@ fn invalid_schedule_and_path_templates_are_rejected() {
     assert!(super::models::matches_pattern("PUBLIC.*", "users", "app", "public", false));
 }
 
+#[test]
+fn exact_backup_scope_preserves_literal_names_and_rejects_empty_or_foreign_scope() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = schedule(dir.path()).config;
+    let legacy = serde_json::to_value(&config).unwrap();
+    assert!(legacy.get("selectedTables").is_none());
+    assert!(serde_json::from_value::<BackupConfig>(legacy).unwrap().selected_tables.is_empty());
+    config.table_filter_mode = "selected".into();
+    assert!(config.validate().is_err());
+    config.databases = vec!["app".into()];
+    assert!(config.validate().is_err());
+    config.selected_tables =
+        vec![BackupTableTarget { database: "app".into(), schema: "a.b".into(), table: " odd*,?;客户'表 ".into() }];
+    assert!(config.validate().is_ok());
+    let roundtrip: BackupConfig = serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+    assert_eq!(roundtrip.selected_tables, config.selected_tables);
+    config.selected_tables[0].database = "other".into();
+    assert!(config.validate().unwrap_err().contains("outside"));
+    config.selected_tables[0].database = "app".into();
+    config.selected_tables[0].schema = String::new();
+    assert!(config.validate().is_err());
+}
+
 #[tokio::test]
 async fn schedule_survives_reopen_and_rejects_stale_edit() {
     let dir = tempfile::tempdir().unwrap();
@@ -438,6 +461,42 @@ async fn live_mysql_worker_scenario() {
         assert!(completed.error.as_deref().unwrap().contains("No tables matched"));
         assert!(completed.files.is_empty());
         assert!(previous.unwrap().exists());
+        execute_sql_statement(
+            &service.state,
+            "mysql",
+            &database,
+            "CREATE TABLE `odd*,name.with.dot` (id INT PRIMARY KEY, value TEXT)",
+            None,
+            None,
+        )
+        .await?;
+        execute_sql_statement(
+            &service.state,
+            "mysql",
+            &database,
+            "INSERT INTO `odd*,name.with.dot` VALUES (17, 'mysql-exact-scope-sentinel')",
+            None,
+            None,
+        )
+        .await?;
+        let mut exact = plan_with_id(dir.path(), "mysql-exact");
+        exact.config.connection_id = "mysql".into();
+        exact.config.databases = vec![database.clone()];
+        exact.config.table_filter_mode = "selected".into();
+        exact.config.selected_tables = vec![BackupTableTarget {
+            database: database.clone(),
+            schema: database.clone(),
+            table: "odd*,name.with.dot".into(),
+        }];
+        service.command(BackupCommand::Save { schedule: exact }).await?;
+        let exact_run = enqueue_and_run(&service, "mysql-exact").await;
+        assert_eq!(exact_run.status, "success", "{:?}", exact_run.error);
+        assert_eq!(exact_run.files.len(), 1);
+        let exact_sql = read_backup(&exact_run.files[0].file_path, false);
+        assert!(exact_sql.contains("mysql-exact-scope-sentinel"));
+        assert!(exact_sql.contains("odd*,name.with.dot"));
+        assert!(!exact_sql.contains("CREATE TABLE `chosen`"));
+        assert!(!exact_sql.contains("CREATE TABLE `skipped`"));
         Ok::<_, String>(())
     })
     .catch_unwind()
@@ -533,6 +592,7 @@ fn live_postgres_worker_exports_selected_tables_across_schemas() {
         service.state.storage.save_connections(std::slice::from_ref(&admin)).await.unwrap();
         service.state.configs.write().await.insert(admin.id.clone(), admin);
         let database = format!("dbx_pg_backup_{}", uuid::Uuid::new_v4().simple());
+        eprintln!("Backup source test database: {database}");
         execute_sql_statement(
             &service.state,
             admin_id,
@@ -590,6 +650,129 @@ fn live_postgres_worker_exports_selected_tables_across_schemas() {
         assert!(!sql.contains("events"), "{sql}");
         // A view inside the same schema is not part of a table-name scope.
         assert!(!sql.contains("big_orders"), "{sql}");
+
+        execute_sql_statement(
+            &service.state,
+            "postgres",
+            &database,
+            "CREATE TABLE app.\"odd*,name.with.dot\" (id integer PRIMARY KEY, note text)",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        execute_sql_statement(
+            &service.state,
+            "postgres",
+            &database,
+            "CREATE TABLE audit.\"odd*,name.with.dot\" (id integer PRIMARY KEY, note text)",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        execute_sql_statement(
+            &service.state,
+            "postgres",
+            &database,
+            "INSERT INTO app.\"odd*,name.with.dot\" VALUES (17, 'exact-scope-sentinel')",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let mut exact = plan_with_id(dir.path(), "exact");
+        exact.config.connection_id = "postgres".into();
+        exact.config.databases = vec![database.clone()];
+        exact.config.table_filter_mode = "selected".into();
+        exact.config.selected_tables = vec![BackupTableTarget {
+            database: database.clone(),
+            schema: "app".into(),
+            table: "odd*,name.with.dot".into(),
+        }];
+        service.command(BackupCommand::Save { schedule: exact.clone() }).await.unwrap();
+        let exact_run = enqueue_and_run(&service, "exact").await;
+        assert_eq!(exact_run.status, "success", "{:?}", exact_run.error);
+        assert_eq!(exact_run.files.len(), 1);
+        assert_eq!(exact_run.files[0].schema, "app");
+        let exact_sql = read_backup(&exact_run.files[0].file_path, false);
+        assert!(exact_sql.contains("odd*,name.with.dot"));
+        assert!(exact_sql.contains("exact-scope-sentinel"));
+        assert!(!exact_sql.contains("orders"));
+        assert!(!exact_sql.contains("accounts"));
+        assert!(!exact_sql.contains("audit"));
+        // Replay the real exported SQL into another disposable database.
+        let restore_database = format!("dbx_pg_backup_restore_{}", uuid::Uuid::new_v4().simple());
+        eprintln!("Backup replay test database: {restore_database}");
+        execute_sql_statement(
+            &service.state,
+            admin_id,
+            "postgres",
+            &format!("CREATE DATABASE \"{restore_database}\""),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let restore_config = live_postgres_config("postgres-restore", &restore_database);
+        service.state.storage.save_connections(std::slice::from_ref(&restore_config)).await.unwrap();
+        service.state.configs.write().await.insert(restore_config.id.clone(), restore_config);
+        // Selected-table dumps retain their source schema. Prepare the matching
+        // namespace, as a restore into an existing application database does.
+        execute_sql_statement(&service.state, "postgres-restore", &restore_database, "CREATE SCHEMA app", None, None)
+            .await
+            .unwrap();
+        for statement in
+            crate::sql::split_sql_statements_for_database(&exact_sql, crate::models::connection::DatabaseType::Postgres)
+        {
+            execute_sql_statement(&service.state, "postgres-restore", &restore_database, &statement, None, None)
+                .await
+                .unwrap();
+        }
+        let restored = execute_sql_statement(
+            &service.state,
+            "postgres-restore",
+            &restore_database,
+            "SELECT id, note FROM app.\"odd*,name.with.dot\"",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(restored.rows, vec![vec![json!(17), json!("exact-scope-sentinel")]]);
+        let absent = execute_sql_statement(
+            &service.state,
+            "postgres-restore",
+            &restore_database,
+            "SELECT to_regclass('app.orders'), to_regclass('public.accounts')",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(absent.rows, vec![vec![serde_json::Value::Null, serde_json::Value::Null]]);
+        execute_sql_statement(
+            &service.state,
+            admin_id,
+            "postgres",
+            &format!("DROP DATABASE \"{restore_database}\" WITH (FORCE)"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        exact.id = "exact-missing".into();
+        exact.config.selected_tables.push(BackupTableTarget {
+            database: database.clone(),
+            schema: "missing_schema".into(),
+            table: "not_there".into(),
+        });
+        service.command(BackupCommand::Save { schedule: exact }).await.unwrap();
+        let missing_run = enqueue_and_run(&service, "exact-missing").await;
+        assert_eq!(missing_run.status, "failed");
+        assert!(missing_run.error.as_deref().unwrap().contains("unavailable"));
+        assert!(missing_run.files.is_empty());
 
         // Patterns are case-sensitive on PostgreSQL, and a scope that matches
         // nothing must fail without leaving a partial file behind.

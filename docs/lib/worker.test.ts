@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { test } from "vitest";
+import { afterEach, test, vi } from "vitest";
 import worker, { issueRedirectPath, pluginDetailShellRequest, sanitizeReturnTo, signPayload, staticAssetCacheControl, verifySignedPayload } from "../worker";
 
 test("native installers bypass HTML routing and are served as plain text", async () => {
@@ -66,8 +66,7 @@ test("static assets receive browser cache headers without caching HTML", () => {
   assert.equal(staticAssetCacheControl("/cn/changelog.txt"), null);
 });
 
-test("plugin detail fallback maps unknown ids onto the shell route", () => {
-  const shell = pluginDetailShellRequest(new URL("https://dbxio.com/cn/plugins/io.github.t8y2.s3"), new Request("https://dbxio.com/cn/plugins/io.github.t8y2.s3"));
+test("plugin detail fallback maps unknown ids onto the shell route", () => {  const shell = pluginDetailShellRequest(new URL("https://dbxio.com/cn/plugins/io.github.t8y2.s3"), new Request("https://dbxio.com/cn/plugins/io.github.t8y2.s3"));
   assert.equal(shell?.url, "https://dbxio.com/cn/plugins/detail?id=io.github.t8y2.s3");
 
   const encoded = pluginDetailShellRequest(new URL("https://dbxio.com/en/plugins/a%20b"), new Request("https://dbxio.com/en/plugins/a%20b"));
@@ -80,4 +79,36 @@ test("plugin detail fallback maps unknown ids onto the shell route", () => {
     null,
   );
   assert.equal(pluginDetailShellRequest(new URL("https://dbxio.com/en/plugins"), new Request("https://dbxio.com/en/plugins")), null);
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+test("agent asset proxy only streams allowlisted agents-release assets", async () => {
+  const env = {};
+  const assetUrl = "https://github.com/t8y2/dbx/releases/download/agents-v0.2.130/dbx-agent-dameng-0.1.85.tar.zst";
+  const upstream = new Response("package-bytes", { headers: { "Content-Length": "13" } });
+  const fetchMock = vi.fn(async () => upstream);
+  vi.stubGlobal("fetch", fetchMock);
+
+  const proxied = await worker.fetch(new Request(`https://dbxio.com/api/agent-asset?url=${encodeURIComponent(assetUrl)}`), env);
+  assert.equal(proxied.status, 200);
+  assert.equal(proxied.headers.get("Content-Type"), "application/octet-stream");
+  assert.equal(proxied.headers.get("X-Content-Type-Options"), "nosniff");
+  assert.equal(await proxied.text(), "package-bytes");
+  assert.equal(fetchMock.mock.calls[0]?.[0], assetUrl);
+
+  assert.equal((await worker.fetch(new Request(`https://dbxio.com/api/agent-asset?url=${encodeURIComponent(assetUrl)}`, { method: "HEAD" }), env)).status, 200);
+  assert.equal((await worker.fetch(new Request(`https://dbxio.com/api/agent-asset?url=${encodeURIComponent(assetUrl)}`, { method: "POST" }), env)).status, 404);
+  for (const invalid of [
+    "https://evil.example/dbx-agent-dameng-0.1.85.tar.zst",
+    "https://github.com/t8y2/other/releases/download/agents-v0.2.130/dbx-agent-dameng-0.1.85.tar.zst",
+    "https://github.com/t8y2/dbx/releases/download/v0.6.33/DBX_0.6.33_x64-setup.exe",
+    "https://github.com/t8y2/dbx/releases/download/agents-v0.2.130/../../secret",
+    "",
+  ]) {
+    const response = await worker.fetch(new Request(`https://dbxio.com/api/agent-asset?url=${encodeURIComponent(invalid)}`), env);
+    assert.equal(response.status, 400, invalid);
+  }
 });

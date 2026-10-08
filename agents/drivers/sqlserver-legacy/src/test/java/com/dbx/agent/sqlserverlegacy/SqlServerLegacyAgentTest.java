@@ -27,6 +27,125 @@ import java.util.Locale;
 import java.util.Map;
 
 class SqlServerLegacyAgentTest {
+    private static final class ManualFixture {
+        final SqlServerLegacyAgent agent = new SqlServerLegacyAgent();
+        final java.util.concurrent.atomic.AtomicInteger count = new java.util.concurrent.atomic.AtomicInteger();
+        final java.util.concurrent.atomic.AtomicInteger begins = new java.util.concurrent.atomic.AtomicInteger();
+        final java.util.concurrent.atomic.AtomicInteger rollbacks = new java.util.concurrent.atomic.AtomicInteger();
+        final java.util.concurrent.atomic.AtomicBoolean automatic = new java.util.concurrent.atomic.AtomicBoolean(true);
+        ManualFixture() {
+            DatabaseMetaData metadata = proxy(DatabaseMetaData.class, (method, args) ->
+                method.getName().equals("supportsTransactions") ? true : defaultValue(method.getReturnType()));
+            TestSupport.setPrivateConnection(agent, proxy(Connection.class, (method, args) -> {
+                switch (method.getName()) {
+                    case "getMetaData": return metadata;
+                    case "getAutoCommit": return automatic.get();
+                    case "setAutoCommit": automatic.set((boolean) args[0]); return null;
+                    case "rollback": rollbacks.incrementAndGet(); count.set(0); return null;
+                    case "createStatement":
+                        return proxy(java.sql.Statement.class, (stmtMethod, stmtArgs) -> {
+                            switch (stmtMethod.getName()) {
+                                case "executeQuery":
+                                    java.util.concurrent.atomic.AtomicBoolean first = new java.util.concurrent.atomic.AtomicBoolean(true);
+                                    return proxy(ResultSet.class, (rowMethod, rowArgs) -> {
+                                        if (rowMethod.getName().equals("next")) return first.getAndSet(false);
+                                        if (rowMethod.getName().equals("getInt")) return count.get();
+                                        return defaultValue(rowMethod.getReturnType());
+                                    });
+                                case "execute":
+                                    String sql = (String) stmtArgs[0];
+                                    if (sql.contains("BEGIN TRANSACTION")) { begins.incrementAndGet(); count.set(1); }
+                                    if (sql.contains("HIDDEN_COMMIT_ERROR")) { count.set(0); throw new SQLException("failure after hidden commit"); }
+                                    return false;
+                                case "getUpdateCount": return -1;
+                                default: return defaultValue(stmtMethod.getReturnType());
+                            }
+                        });
+                    default: return defaultValue(method.getReturnType());
+                }
+            }));
+            agent.beginManualTransaction(null);
+        }
+    }
+
+    @Test
+    void lazyJdbcBeginOpensOnePhysicalTransactionBeforePrintAndReadOnlyExec() {
+        ManualFixture fixture = new ManualFixture();
+        Assertions.assertEquals(0, fixture.count.get());
+        fixture.agent.executeQueryResults("PRINT 'hello'", null, new com.dbx.agent.ExecuteQueryOptions(1, null, 5));
+        fixture.agent.executeQueryResults("EXEC('SELECT 1')", null, new com.dbx.agent.ExecuteQueryOptions(1, null, 5));
+        Assertions.assertEquals(1, fixture.begins.get());
+        Assertions.assertEquals(1, fixture.count.get());
+        Assertions.assertFalse(fixture.agent.permitsAutomaticReconnect());
+        fixture.agent.rollbackManualTransaction();
+        Assertions.assertEquals(1, fixture.rollbacks.get());
+    }
+
+    @Test
+    void hiddenCommitFollowedByErrorCannotBeReportedAsSuccessfulRollback() {
+        ManualFixture fixture = new ManualFixture();
+        Assertions.assertThrows(RuntimeException.class, () -> fixture.agent.executeQueryResults(
+            "HIDDEN_COMMIT_ERROR", null, new com.dbx.agent.ExecuteQueryOptions(1, null, 5)));
+        Assertions.assertEquals(0, fixture.count.get());
+        Assertions.assertThrows(IllegalStateException.class, () -> fixture.agent.rollbackManualTransaction());
+        Assertions.assertEquals(0, fixture.rollbacks.get());
+        Assertions.assertFalse(fixture.agent.permitsAutomaticReconnect());
+    }
+
+    @Test
+    void manualSessionDisablesReconnectAndCommitAckDoesNotDependOnAutocommitCleanup() {
+        SqlServerLegacyAgent agent = new SqlServerLegacyAgent();
+        java.util.concurrent.atomic.AtomicBoolean automatic = new java.util.concurrent.atomic.AtomicBoolean(true);
+        java.util.concurrent.atomic.AtomicInteger commits = new java.util.concurrent.atomic.AtomicInteger();
+        DatabaseMetaData metadata = proxy(DatabaseMetaData.class, (method, args) -> {
+            if (method.getName().equals("supportsTransactions")) return true;
+            return defaultValue(method.getReturnType());
+        });
+        TestSupport.setPrivateConnection(agent, proxy(Connection.class, (method, args) -> {
+            switch (method.getName()) {
+                case "getMetaData": return metadata;
+                case "getAutoCommit": return automatic.get();
+                case "setAutoCommit":
+                    if ((boolean) args[0]) throw new SQLException("cleanup failed");
+                    automatic.set(false); return null;
+                case "commit": commits.incrementAndGet(); return null;
+                default: return defaultValue(method.getReturnType());
+            }
+        }));
+        Assertions.assertTrue(agent.permitsAutomaticReconnect());
+        Assertions.assertEquals(true, agent.beginManualTransaction(null).get("manualTransactionBatch"));
+        Assertions.assertFalse(agent.permitsAutomaticReconnect());
+        Assertions.assertEquals(true, agent.commitManualTransaction().get("ok"));
+        Assertions.assertEquals(1, commits.get());
+        Assertions.assertFalse(agent.permitsAutomaticReconnect());
+        agent.disconnect();
+        Assertions.assertTrue(agent.permitsAutomaticReconnect());
+    }
+
+    @Test
+    void metadataUnsupportedRejectsBeforeChangingAutocommitButUnavailableMetadataUsesActualBegin() {
+        SqlServerLegacyAgent unsupported = new SqlServerLegacyAgent();
+        DatabaseMetaData metadata = proxy(DatabaseMetaData.class, (method, args) -> defaultValue(method.getReturnType()));
+        TestSupport.setPrivateConnection(unsupported, proxy(Connection.class, (method, args) -> {
+            if (method.getName().equals("getMetaData")) return metadata;
+            if (method.getName().equals("setAutoCommit")) throw new AssertionError("Unsupported BEGIN must not change the connection");
+            return defaultValue(method.getReturnType());
+        }));
+        Assertions.assertThrows(IllegalStateException.class, () -> unsupported.beginManualTransaction(null));
+        SqlServerLegacyAgent unavailable = new SqlServerLegacyAgent();
+        java.util.concurrent.atomic.AtomicBoolean automatic = new java.util.concurrent.atomic.AtomicBoolean(true);
+        TestSupport.setPrivateConnection(unavailable, proxy(Connection.class, (method, args) -> {
+            switch (method.getName()) {
+                case "getMetaData": throw new SQLException("metadata unavailable");
+                case "getAutoCommit": return automatic.get();
+                case "setAutoCommit": automatic.set((boolean) args[0]); return null;
+                default: return defaultValue(method.getReturnType());
+            }
+        }));
+        Assertions.assertEquals(true, unavailable.beginManualTransaction(null).get("ok"));
+        Assertions.assertFalse(automatic.get());
+    }
+
     @Test
     void sqlServer2000PreloginFailuresTriggerTheOldDriverFallback() {
         // Real mssql-jdbc prelogin rejection for SQL Server 2000.
@@ -368,7 +487,7 @@ class SqlServerLegacyAgentTest {
     }
 
     @Test
-    void legacyTlsUrlUsesSqlServerTlsV1Properties() {
+    void legacyTlsUrlHonorsExplicitProtocolAndRetainsEncryption() {
         ConnectParams params = new ConnectParams(
             "db.example.com",
             14330,
@@ -381,7 +500,7 @@ class SqlServerLegacyAgentTest {
         );
 
         Assertions.assertEquals(
-            "jdbc:sqlserver://db.example.com:14330;databaseName=appdb;applicationName=dbx;encrypt=true;trustServerCertificate=true;sslProtocol=TLSv1",
+            "jdbc:sqlserver://db.example.com:14330;databaseName=appdb;applicationName=dbx;encrypt=true;trustServerCertificate=true;sslProtocol=TLSv1.2",
             SqlServerLegacyAgent.legacyTlsUrl(params)
         );
     }
@@ -458,11 +577,47 @@ class SqlServerLegacyAgentTest {
         );
 
         Assertions.assertEquals(
-            "jdbc:sqlserver://db.example.com:1433;databaseName=custom;applicationName=dbx;encrypt=true;trustServerCertificate=true;sslProtocol=TLSv1",
+            "jdbc:sqlserver://db.example.com:1433;databaseName=custom;applicationName=dbx;encrypt=true;trustServerCertificate=true;sslProtocol=TLSv1.2",
             SqlServerLegacyAgent.legacyTlsUrl(params)
         );
     }
 
+    @Test
+    void legacyTlsUrlParametersOverrideUrlProtocolCaseInsensitively() {
+        ConnectParams params = new ConnectParams("ignored", 0, "", "sa", "secret",
+            "SSLPROTOCOL=tlsv1.2", "jdbc:sqlserver://db.example.com:1433;sslProtocol=TLSv1", false);
+        Assertions.assertEquals("jdbc:sqlserver://db.example.com:1433;encrypt=true;trustServerCertificate=true;sslProtocol=TLSv1.2",
+            SqlServerLegacyAgent.legacyTlsUrl(params));
+    }
+
+    @Test
+    void legacyTlsUrlRejectsInvalidProtocolRatherThanSilentlyDowngrading() {
+        ConnectParams params = new ConnectParams("db.example.com", 1433, "", "sa", "secret",
+            "sslProtocol=not-a-protocol", "", false);
+        Assertions.assertThrows(IllegalArgumentException.class, () -> SqlServerLegacyAgent.legacyTlsUrl(params));
+    }
+    @Test
+    void legacyTlsUrlSupportsDriverTlsV13() {
+        ConnectParams params = new ConnectParams("db.example.com", 1433, "", "sa", "secret",
+            "sslProtocol=tlsv1.3", "", false);
+        Assertions.assertTrue(SqlServerLegacyAgent.legacyTlsUrl(params).endsWith(";sslProtocol=TLSv1.3"));
+    }
+
+    @Test
+    void legacyTlsUrlPreservesBracedValuesAndIgnoresEmbeddedProtocolProperties() {
+        ConnectParams params = new ConnectParams("ignored", 0, "", "sa", "secret", "",
+            "jdbc:sqlserver://db.example.com:1433;applicationName={app;sslProtocol=invalid};sslProtocol={TLSv1.2}", false);
+        Assertions.assertEquals("jdbc:sqlserver://db.example.com:1433;applicationName={app;sslProtocol=invalid};encrypt=true;trustServerCertificate=true;sslProtocol=TLSv1.2",
+            SqlServerLegacyAgent.legacyTlsUrl(params));
+        params.setConnection_string("jdbc:sqlserver://db.example.com:1433;applicationName={app}};sslProtocol=invalid}");
+        Assertions.assertTrue(SqlServerLegacyAgent.legacyTlsUrl(params).endsWith(";sslProtocol=TLSv1"));
+    }
+
+    @Test
+    void legacyTlsDiagnosticsReportsExplicitProtocol() {
+        SQLException error = SqlServerLegacyAgent.withLegacyTlsDiagnostics(new SQLException("connection failed"), "13.2", "TLSv1.2");
+        Assertions.assertTrue(error.getMessage().contains("sslProtocol=TLSv1.2"));
+    }
     @Test
     void relaxedDisabledAlgorithmsRemovesOnlyLegacyTlsEntries() {
         String current =

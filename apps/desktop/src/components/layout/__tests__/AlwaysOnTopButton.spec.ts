@@ -142,6 +142,7 @@ const toolbarProps = {
   hasConnections: false,
   canNewQuery: false,
   hasSqlFileConnections: false,
+  immediateSyncing: false,
 };
 
 describe("always-on-top button visibility", () => {
@@ -243,6 +244,48 @@ describe("always-on-top button visibility", () => {
 
     expect(openBackups).toHaveBeenCalledOnce();
     expect(openMcpSettings).toHaveBeenCalledOnce();
+
+    unmount();
+  });
+
+  it("disables the immediate sync action while syncing", async () => {
+    const settingsStore = useSettingsStore();
+    settingsStore.editorSettings.toolbarItems.immediateSync = true;
+    const { host, unmount } = mount(AppToolbar, { ...toolbarProps, immediateSyncing: true });
+    await settled();
+
+    const button = host.querySelector('[aria-label="toolbar.immediateSync"]');
+    expect(button?.getAttribute("aria-busy")).toBe("true");
+    expect((button as HTMLButtonElement | null)?.disabled).toBe(true);
+
+    unmount();
+  });
+
+  it("renders shortcut hints in toolbar button tooltips", async () => {
+    const settingsStore = useSettingsStore();
+    settingsStore.updateEditorSettings({
+      shortcuts: {
+        ...settingsStore.editorSettings.shortcuts,
+        newQuery: "Mod+N",
+        toggleSidebar: "Mod+B",
+        openSettings: "Mod+,",
+        toggleAiPanel: "Mod+I",
+      },
+    });
+
+    const { host, unmount } = mount(AppToolbar, {
+      ...toolbarProps,
+      showSidebarExpand: true,
+      canNewQuery: true,
+    });
+    await settled();
+    await nextTick();
+
+    const tooltips = [...host.querySelectorAll(".app-toolbar span")].map((el) => el.textContent?.trim() ?? "");
+    expect(tooltips.some((text) => text.includes("toolbar.newQuery (") && text.includes("N)"))).toBe(true);
+    expect(tooltips.some((text) => text.includes("sidebar.expand (") && text.includes("B)"))).toBe(true);
+    expect(tooltips.some((text) => text.includes("settings.title (") && text.includes(","))).toBe(true);
+    expect(tooltips.some((text) => text.includes("AI (") && text.includes("I)"))).toBe(true);
 
     unmount();
   });

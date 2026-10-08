@@ -19,9 +19,9 @@ use crate::sql::{SqlParsingOptions, SqlStatementSplitter};
 use crate::sql_dialect::{qualified_table_name, uses_single_row_insert_statements};
 use crate::transfer::{
     format_ch_array_sql_literal, format_pg_array_sql_literal, format_postgres_vector_sql_literal,
-    is_identity_column_extra, is_mysql_generated_column_extra, is_postgres_vector_type,
-    keyset_pagination_sql_with_identifier_quote, quote_identifier, quote_postgres_string_literal,
-    wrap_dameng_identity_insert_sql_for_table,
+    is_identity_column_extra, is_mysql_generated_column_extra, is_postgres_generated_always_identity_extra,
+    is_postgres_vector_type, keyset_pagination_sql_with_identifier_quote, quote_identifier,
+    quote_postgres_string_literal, wrap_dameng_identity_insert_sql_for_table,
 };
 use crate::types::{ObjectSourceKind, SpatialColumn, SqlExportColumnSelection};
 
@@ -139,6 +139,14 @@ pub struct DatabaseExportRequest {
     /// position. No-op for non-MySQL databases. Defaults to `false` (preserve).
     #[serde(default)]
     pub omit_auto_increment: bool,
+    /// Decode JSON-style `\uXXXX` Unicode escapes back into literal characters
+    /// in exported string literals, so values an application deliberately
+    /// ASCII-escaped before storing (e.g. to keep Vietnamese text safe in a
+    /// non-Unicode TEXT column) read as the original language directly in the
+    /// `.sql` file. Opt-in; defaults to `false` to preserve the exact stored
+    /// bytes on export/import round-trips.
+    #[serde(default)]
+    pub preserve_original_language: bool,
     #[serde(default)]
     pub fail_on_error: bool,
     /// Refuse to truncate an existing destination. Scheduled backups enable
@@ -149,6 +157,8 @@ pub struct DatabaseExportRequest {
     pub output_compression: DatabaseExportOutputCompression,
     #[serde(default)]
     pub insert_dialect: SqlInsertDialect,
+    #[serde(default)]
+    pub insert_mode: SqlInsertMode,
     #[serde(default)]
     pub snapshot_session_id: Option<String>,
     pub batch_size: usize,
@@ -455,6 +465,7 @@ struct PostgresExportSequence {
     last_value: Option<String>,
     owner_table: Option<String>,
     owner_column: Option<String>,
+    created_by_table: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -535,6 +546,19 @@ pub struct BuildExportInsertStatementsOptions {
     pub rows: Vec<Vec<Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_size: Option<usize>,
+    /// Decode JSON-style `\uXXXX` Unicode escapes back into literal characters
+    /// in exported string literals (e.g. `\u1ed0` -> `ố`). Opt-in and defaults
+    /// to `false`: application code may deliberately store ASCII-escaped
+    /// Unicode in a TEXT column (see `decode_unicode_escapes_for_export`), and
+    /// the default export keeps that exact byte-for-byte round trip. Enable
+    /// this only to make the `.sql` file itself readable in the original
+    /// language. Re-importing such an export stores the decoded literal
+    /// characters rather than the original ASCII-escaped form, so it is not a
+    /// byte-faithful backup; any `\uXXXX`-shaped run forming a valid hex code
+    /// point (e.g. `\uface`) is decoded as well, including text that merely
+    /// documents such escapes.
+    #[serde(default)]
+    pub preserve_original_language: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -576,6 +600,9 @@ pub struct BuildDatabaseSqlExportOptions {
     /// Defaults to `false` (preserve). See `DatabaseExportRequest::omit_auto_increment`.
     #[serde(default)]
     pub omit_auto_increment: bool,
+    /// See `DatabaseExportRequest::preserve_original_language`.
+    #[serde(default)]
+    pub preserve_original_language: bool,
 }
 
 pub fn format_export_sql_literal(value: &Value) -> String {
@@ -671,7 +698,7 @@ fn format_export_sql_literal_typed(
     }
     if sqlserver_unicode_string {
         if let Some(text) = value.as_str() {
-            return format!("N{}", quote_export_sql_string(text));
+            return format!("N{}", quote_standard_export_sql_string(text));
         }
     }
     format_export_sql_literal_for_database(value, database_type)
@@ -702,12 +729,74 @@ fn format_postgres_json_export_literal(value: &Value) -> String {
     quote_postgres_string_literal(&text)
 }
 
-fn quote_export_sql_string(text: &str) -> String {
-    format!("'{}'", text.replace('\\', "\\\\").replace('\'', "''"))
-}
-
+/// Quotes a string literal for ANSI-SQL-family export targets (SQL Server,
+/// SQLite, Oracle, DuckDB, and every other engine that falls through to this
+/// default quoting path, plus the dialect-neutral `format_standard_sql_literal`
+/// caller). These dialects do not treat backslash as an escape character --
+/// only a doubled quote mark escapes an embedded `'`. Escaping backslashes
+/// would corrupt any value that legitimately contains one (e.g. JSON text
+/// with `\u00e9` escapes), turning `\u00e9` into `\\u00e9` on export/import
+/// round-trips.
 fn quote_standard_export_sql_string(text: &str) -> String {
     format!("'{}'", text.replace('\'', "''"))
+}
+
+/// Decodes JSON-style `\uXXXX` Unicode escapes (including surrogate pairs)
+/// into their literal characters, leaving every other backslash sequence
+/// untouched. Used only by the opt-in "preserve original language" export
+/// option: application code (e.g. `encodeJsonValuesForDb`-style helpers) may
+/// deliberately store ASCII-escaped Unicode in a TEXT column so the value
+/// survives non-Unicode-aware storage; this renders that text human-readable
+/// directly in the exported `.sql` file without touching the stored bytes in
+/// the source database or breaking the round-trip for any other backslash
+/// usage (e.g. a literal `\n`, a Windows path, or a doubled SQL quote).
+fn decode_unicode_escapes_for_export(text: &str) -> String {
+    if !text.contains("\\u") {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut result = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '\\' && chars.get(i + 1) == Some(&'u') {
+            if let Some(high) = parse_hex4(&chars, i + 2) {
+                if (0xD800..=0xDBFF).contains(&high) {
+                    // Possible surrogate pair: look for a trailing \uDC00-\uDFFF.
+                    let low = if chars.get(i + 6) == Some(&'\\') && chars.get(i + 7) == Some(&'u') {
+                        parse_hex4(&chars, i + 8).filter(|low| (0xDC00..=0xDFFF).contains(low))
+                    } else {
+                        None
+                    };
+                    if let Some(low) = low {
+                        let combined = 0x10000u32 + ((high - 0xD800) << 10) + (low - 0xDC00);
+                        if let Some(decoded) = char::from_u32(combined) {
+                            result.push(decoded);
+                            i += 12;
+                            continue;
+                        }
+                    }
+                    // Lone high surrogate: not representable as a char, keep as-is.
+                    result.push(chars[i]);
+                    i += 1;
+                    continue;
+                }
+                if let Some(decoded) = char::from_u32(high) {
+                    result.push(decoded);
+                    i += 6;
+                    continue;
+                }
+            }
+        }
+        result.push(chars[i]);
+        i += 1;
+    }
+    result
+}
+
+fn parse_hex4(chars: &[char], start: usize) -> Option<u32> {
+    let slice = chars.get(start..start + 4)?;
+    let hex: String = slice.iter().collect();
+    u32::from_str_radix(&hex, 16).ok()
 }
 
 /// SQL Server binary column types. The driver exposes their values as
@@ -751,13 +840,20 @@ fn quote_export_sql_string_for_database(text: &str, database_type: Option<Databa
         database_type if is_mysql_compatible_export_literal_target(database_type) => {
             quote_mysql_compatible_export_sql_string(text)
         }
-        _ => quote_export_sql_string(text),
+        // Not MySQL-wire targets, but both engines interpret backslash escape
+        // sequences in string literals, so they must keep backslash escaping for
+        // round-trip correctness. Neither has MySQL's `\Z`, though, so the SUB
+        // byte is spelled `\x1a` (see [`SubControlEscape`]).
+        Some(DatabaseType::ClickHouse | DatabaseType::Snowflake) => {
+            quote_backslash_escaped_export_sql_string(text, SubControlEscape::Hex)
+        }
+        _ => quote_standard_export_sql_string(text),
     }
 }
 
 fn quote_dameng_export_sql_string(text: &str) -> String {
     if !text.contains('\0') {
-        return quote_export_sql_string(text);
+        return quote_standard_export_sql_string(text);
     }
 
     let mut parts = Vec::new();
@@ -766,29 +862,55 @@ fn quote_dameng_export_sql_string(text: &str) -> String {
             parts.push("CHR(0)".to_string());
         }
         if !segment.is_empty() {
-            parts.push(quote_export_sql_string(segment));
+            parts.push(quote_standard_export_sql_string(segment));
         }
     }
     parts.join(" || ")
 }
 
+/// How a backslash-escaping dialect spells the 0x1A (SUB / Ctrl-Z) byte.
+///
+/// `\Z` is a MySQL-family escape. ClickHouse has no `\Z` in its escape table and
+/// reads the sequence as a literal backslash followed by `Z`; Snowflake has none
+/// either and drops the backslash, yielding `Z`. Both therefore corrupt a stored
+/// SUB byte. Both accept the `\xhh` hexadecimal escape, which spells the byte the
+/// value actually holds.
+#[derive(Clone, Copy)]
+enum SubControlEscape {
+    /// The MySQL-family `\Z`.
+    BackslashZ,
+    /// `\x1a`, for dialects whose escape table has no `\Z`.
+    Hex,
+}
+
 fn quote_mysql_compatible_export_sql_string(text: &str) -> String {
-    format!("'{}'", escape_mysql_compatible_export_sql_string(text))
+    quote_backslash_escaped_export_sql_string(text, SubControlEscape::BackslashZ)
+}
+
+fn quote_backslash_escaped_export_sql_string(text: &str, sub_control: SubControlEscape) -> String {
+    format!("'{}'", escape_backslash_escaped_export_sql_string(text, sub_control))
 }
 
 fn escape_mysql_compatible_export_sql_string(text: &str) -> String {
+    escape_backslash_escaped_export_sql_string(text, SubControlEscape::BackslashZ)
+}
+
+fn escape_backslash_escaped_export_sql_string(text: &str, sub_control: SubControlEscape) -> String {
     let mut escaped = String::with_capacity(text.len());
     for ch in text.chars() {
         match ch {
-            // MySQL-family dumps should keep control characters out of the
-            // physical script layout while relying on the dialect's escapes.
+            // Keep control characters out of the physical script layout while
+            // relying on the dialect's escapes.
             '\0' => escaped.push_str("\\0"),
             '\x08' => escaped.push_str("\\b"),
             '\n' => escaped.push_str("\\n"),
             '\r' => escaped.push_str("\\r"),
             '\t' => escaped.push_str("\\t"),
             '\x0c' => escaped.push_str("\\f"),
-            '\x1a' => escaped.push_str("\\Z"),
+            '\x1a' => escaped.push_str(match sub_control {
+                SubControlEscape::BackslashZ => "\\Z",
+                SubControlEscape::Hex => "\\x1a",
+            }),
             '\\' => escaped.push_str("\\\\"),
             '\'' => escaped.push_str("''"),
             _ => escaped.push(ch),
@@ -861,10 +983,10 @@ fn format_export_temporal_literal(
     let column_type = column_type?;
     if database_type == Some(DatabaseType::SqlServer) {
         return crate::sqlserver_temporal::normalize_sqlserver_temporal_literal(text, Some(column_type))
-            .map(|text| quote_export_sql_string(&text));
+            .map(|text| quote_standard_export_sql_string(&text));
     }
     let kind = export_temporal_column_kind(database_type, column_type)?;
-    format_rfc3339_export_temporal_text(text, kind, database_type).map(|text| quote_export_sql_string(&text))
+    format_rfc3339_export_temporal_text(text, kind, database_type).map(|text| quote_standard_export_sql_string(&text))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1137,14 +1259,14 @@ fn format_xugu_spatial_export_literal_with_srid(
     let text = value.as_str().map_or_else(|| value.to_string(), ToString::to_string);
     let trimmed = text.trim_start();
     if trimmed.len() > 5 && trimmed[..5].eq_ignore_ascii_case("SRID=") {
-        return Some(format!("ST_GeomFromEWKT({})", quote_export_sql_string(&text)));
+        return Some(format!("ST_GeomFromEWKT({})", quote_standard_export_sql_string(&text)));
     }
     if let Some(srid) = srid.filter(|srid| *srid != 0) {
-        return Some(format!("ST_GeomFromEWKT({})", quote_export_sql_string(&format!("SRID={srid};{text}"))));
+        return Some(format!("ST_GeomFromEWKT({})", quote_standard_export_sql_string(&format!("SRID={srid};{text}"))));
     }
     // Xugu accepts a plain WKT string for both GEOMETRY and GEOGRAPHY. Keep
     // that form for SRID 0/legacy values rather than inventing a constructor.
-    Some(quote_export_sql_string(&text))
+    Some(quote_standard_export_sql_string(&text))
 }
 
 /// Database exports encode MySQL spatial cells as `DBX_WKB:<srid>:<hex>` while
@@ -1402,7 +1524,17 @@ pub(crate) fn build_export_insert_statements_excluding_with_dialect(
     // `.sql` files stay readable in plain text editors. Statements that hold a
     // single tuple keep the compact `VALUES (..);` form, which also preserves
     // the "one INSERT per row" output of the single-row insert mode.
-    let statement_head = format!("INSERT INTO {table} ({columns}) VALUES");
+    let overriding = if options.database_type == Some(DatabaseType::Postgres)
+        && insert_columns.iter().any(|(index, _, _)| {
+            is_postgres_generated_always_identity_extra(
+                options.column_extras.get(*index).and_then(|value| value.as_deref()),
+            )
+        }) {
+        " OVERRIDING SYSTEM VALUE"
+    } else {
+        ""
+    };
+    let statement_head = format!("INSERT INTO {table} ({columns}){overriding} VALUES");
     let statement_prefix = format!("{statement_head} ");
     let output_database_type = if insert_dialect == SqlInsertDialect::Source { options.database_type } else { None };
     let statement_overhead_bytes = export_sql_statement_bytes(output_database_type, &statement_prefix) + 1;
@@ -1449,6 +1581,17 @@ pub(crate) fn build_export_insert_statements_excluding_with_dialect(
                 .copied()
                 .flatten()
                 .or_else(|| spatial_columns.get(index).copied().flatten());
+            let decoded_value;
+            let value = if options.preserve_original_language {
+                if let Some(text) = value.as_str() {
+                    decoded_value = Value::String(decode_unicode_escapes_for_export(text));
+                    &decoded_value
+                } else {
+                    value
+                }
+            } else {
+                value
+            };
             let literal = if insert_dialect == SqlInsertDialect::Standard {
                 format_standard_sql_literal(value)
             } else {
@@ -1639,6 +1782,7 @@ mod sql_export_projection_tests {
             spatial_values: vec![vec![None, Some(4326), None, None]],
             rows: vec![vec![json!(1), json!("POINT(1 2)"), json!([0, 255]), Value::Null]],
             batch_size: Some(100),
+            preserve_original_language: false,
         };
         let projected = projection.project_insert_options(options);
         assert_eq!(columns, vec!["id", "shape", "blob", "optional"]);
@@ -1757,6 +1901,7 @@ pub fn build_database_sql_export(options: BuildDatabaseSqlExportOptions) -> Resu
                 spatial_values: table.spatial_values,
                 rows: table.rows,
                 batch_size: Some(insert_batch_size),
+                preserve_original_language: options.preserve_original_language,
             },
             &[],
             options.insert_dialect,
@@ -1859,6 +2004,44 @@ fn split_postgres_export_table_triggers(ddl: &str, database_type: DatabaseType) 
     (table_statements.join("\n"), trigger_statements)
 }
 
+/// PostgreSQL database export: split inline `FOREIGN KEY` constraints out of a
+/// relation's `CREATE TABLE` and return them as deferred
+/// `ALTER TABLE ... ADD CONSTRAINT ...` statements.
+///
+/// Inline foreign keys tie the script's replay to table creation order. The
+/// exporter sorts tables by dependency, but a foreign key cycle can never
+/// satisfy that order, so a backup that inlines its foreign keys cannot be
+/// restored (`ERROR: relation ... does not exist` — issue #10575). Emitting
+/// the constraints after every table and row exists (pg_dump's post-data
+/// position) removes the ordering requirement entirely.
+fn extract_postgres_deferred_foreign_keys(ddl: &str, schema: &str, table: &str) -> (String, Vec<String>) {
+    let fallback_qualified = crate::transfer::qualified_table(table, schema, &DatabaseType::Postgres, None);
+    let mut statements = Vec::new();
+    let mut deferred = Vec::new();
+    for range in crate::db::ddl_scan::top_level_statement_ranges(ddl) {
+        let statement = ddl[range].trim();
+        if statement.is_empty() {
+            continue;
+        }
+        let (stripped, removed) = crate::transfer::strip_inline_foreign_key_constraint_lines_collecting(statement);
+        if !removed.is_empty() {
+            // Qualify the ALTER from the statement's own relation name: whole-
+            // database exports leave `schema` empty and rely on each statement
+            // to carry its schema, so a mismatch here would fail the replay.
+            let qualified = crate::db::ddl_scan::parse_create_table_relation(statement)
+                .map(|(statement_schema, statement_table)| {
+                    crate::transfer::qualified_table(&statement_table, &statement_schema, &DatabaseType::Postgres, None)
+                })
+                .unwrap_or_else(|| fallback_qualified.clone());
+            for clause in removed {
+                deferred.push(format!("ALTER TABLE {qualified} ADD {clause};"));
+            }
+        }
+        statements.push(stripped);
+    }
+    (statements.join("\n"), deferred)
+}
+
 fn postgres_sequence_qualified_name(schema: &str, sequence_name: &str) -> String {
     let db_type = DatabaseType::Postgres;
     if schema.trim().is_empty() {
@@ -1868,11 +2051,10 @@ fn postgres_sequence_qualified_name(schema: &str, sequence_name: &str) -> String
     }
 }
 
-fn generate_postgres_sequence_create_ddl(sequence: &PostgresExportSequence, schema: &str) -> String {
-    let qualified_name = postgres_sequence_qualified_name(schema, &sequence.name);
+fn postgres_sequence_options(sequence: &PostgresExportSequence) -> String {
     let cycle = if sequence.cycle { "CYCLE" } else { "NO CYCLE" };
     format!(
-        "CREATE SEQUENCE IF NOT EXISTS {qualified_name}\n  AS {data_type}\n  START WITH {start_value}\n  INCREMENT BY {increment}\n  MINVALUE {min_value}\n  MAXVALUE {max_value}\n  CACHE {cache_value}\n  {cycle}",
+        "  AS {data_type}\n  START WITH {start_value}\n  INCREMENT BY {increment}\n  MINVALUE {min_value}\n  MAXVALUE {max_value}\n  CACHE {cache_value}\n  {cycle}",
         data_type = sequence.data_type,
         start_value = sequence.start_value,
         increment = sequence.increment,
@@ -1882,33 +2064,73 @@ fn generate_postgres_sequence_create_ddl(sequence: &PostgresExportSequence, sche
     )
 }
 
-fn generate_postgres_sequence_owner_ddl(sequence: &PostgresExportSequence, schema: &str) -> Option<String> {
+fn generate_postgres_sequence_create_ddl(sequence: &PostgresExportSequence, schema: &str) -> String {
+    format!(
+        "CREATE SEQUENCE IF NOT EXISTS {}\n{}",
+        postgres_sequence_qualified_name(schema, &sequence.name),
+        postgres_sequence_options(sequence),
+    )
+}
+
+fn generate_postgres_sequence_post_table_ddl(sequence: &PostgresExportSequence, schema: &str) -> Option<String> {
     let owner_table = sequence.owner_table.as_deref()?;
     let owner_column = sequence.owner_column.as_deref()?;
+    let owner_table = crate::transfer::qualified_table(owner_table, schema, &DatabaseType::Postgres, None);
+    if sequence.created_by_table {
+        // CREATE TABLE owns the sequence. Configure that actual binding without
+        // relying on its name, and quote the whole DO body (identifiers may contain dollar tags).
+        let body = format!(
+            "BEGIN EXECUTE 'ALTER SEQUENCE ' || pg_get_serial_sequence({}, {}) || {}; END;",
+            quote_postgres_string_literal(&owner_table),
+            quote_postgres_string_literal(owner_column),
+            quote_postgres_string_literal(&format!(
+                "\n{} RESTART WITH {}",
+                postgres_sequence_options(sequence),
+                sequence.start_value
+            )),
+        );
+        return Some(format!("DO {}", quote_postgres_string_literal(&body)));
+    }
     Some(format!(
         "ALTER SEQUENCE {} OWNED BY {}.{}",
         postgres_sequence_qualified_name(schema, &sequence.name),
-        crate::transfer::qualified_table(owner_table, schema, &DatabaseType::Postgres, None),
+        owner_table,
         quote_identifier(owner_column, &DatabaseType::Postgres)
     ))
 }
 
 fn generate_postgres_sequence_setval_sql(sequence: &PostgresExportSequence, schema: &str) -> Option<String> {
-    let last_value = sequence.last_value.as_deref()?.trim();
-    if last_value.is_empty() {
-        return None;
-    }
-
-    let sequence_literal = quote_postgres_string_literal(&postgres_sequence_qualified_name(schema, &sequence.name));
+    let last_value = sequence.last_value.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let mut sequence_literal = quote_postgres_string_literal(&postgres_sequence_qualified_name(schema, &sequence.name));
     match (sequence.owner_table.as_deref(), sequence.owner_column.as_deref()) {
         (Some(owner_table), Some(owner_column)) => {
             let owner_table = crate::transfer::qualified_table(owner_table, schema, &DatabaseType::Postgres, None);
+            if sequence.created_by_table {
+                sequence_literal = format!(
+                    "pg_get_serial_sequence({}, {})",
+                    quote_postgres_string_literal(&owner_table),
+                    quote_postgres_string_literal(owner_column),
+                );
+            }
+            if let Some(value) = last_value.filter(|_| sequence.cycle) {
+                // A cycled counter may be below/above the table's extrema after wrapping.
+                return Some(format!("SELECT setval({sequence_literal}, {value}, true)"));
+            }
             let owner_column = quote_identifier(owner_column, &DatabaseType::Postgres);
+            let descending = sequence.increment.trim().starts_with('-');
+            let (aggregate, extreme, comparison) =
+                if descending { ("MIN", "LEAST", "<=") } else { ("MAX", "GREATEST", ">=") };
+            let fallback = last_value.unwrap_or(&sequence.start_value);
+            let called = if last_value.is_some() {
+                "true".to_string()
+            } else {
+                format!("COALESCE({aggregate}({owner_column}) {comparison} {fallback}, false)")
+            };
             Some(format!(
-                "SELECT setval({sequence_literal}, GREATEST(COALESCE(MAX({owner_column}), {last_value}), {last_value}), true) FROM {owner_table}"
+                "SELECT setval({sequence_literal}, {extreme}(COALESCE({aggregate}({owner_column}), {fallback}), {fallback}), {called}) FROM {owner_table}"
             ))
         }
-        _ => Some(format!("SELECT setval({sequence_literal}, {last_value}, true)")),
+        _ => last_value.map(|value| format!("SELECT setval({sequence_literal}, {value}, true)")),
     }
 }
 
@@ -2003,7 +2225,10 @@ const POSTGRES_EXPORT_SEQUENCES_SQL: &str = "SELECT c.relname, \
       COALESCE(s.seqcycle, false), \
       COALESCE(s.seqcache::text, '1'), \
       t.relname, \
-      a.attname \
+      a.attname, \
+      COALESCE(d.deptype = 'i', false) OR \
+      COALESCE(a.atttypid IN (20, 21, 23) AND \
+        pg_get_expr(ad.adbin, ad.adrelid) = format('nextval(%L::regclass)', c.oid::regclass::text), false) \
      FROM pg_class c \
      JOIN pg_namespace n ON n.oid = c.relnamespace \
      LEFT JOIN pg_sequence s ON s.seqrelid = c.oid \
@@ -2014,6 +2239,7 @@ const POSTGRES_EXPORT_SEQUENCES_SQL: &str = "SELECT c.relname, \
      LEFT JOIN pg_class t ON t.oid = d.refobjid \
      LEFT JOIN pg_namespace tn ON tn.oid = t.relnamespace AND tn.nspname = n.nspname \
      LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = d.refobjsubid \
+     LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum \
      WHERE c.relkind = 'S' AND n.nspname = $1 \
      ORDER BY c.relname";
 
@@ -2031,7 +2257,9 @@ const POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL: &str = "SELECT c.relname, \
       false, \
       '1', \
       t.relname, \
-      a.attname \
+      a.attname, \
+      COALESCE(a.atttypid IN (20, 21, 23) AND \
+        pg_get_expr(ad.adbin, ad.adrelid) = format('nextval(%L::regclass)', c.oid::regclass::text), false) \
      FROM pg_class c \
      JOIN pg_namespace n ON n.oid = c.relnamespace \
      LEFT JOIN pg_depend d ON d.classid = 'pg_class'::regclass \
@@ -2041,6 +2269,7 @@ const POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL: &str = "SELECT c.relname, \
      LEFT JOIN pg_class t ON t.oid = d.refobjid \
      LEFT JOIN pg_namespace tn ON tn.oid = t.relnamespace AND tn.nspname = n.nspname \
      LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = d.refobjsubid \
+     LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum \
      WHERE c.relkind = 'S' AND n.nspname = $1 \
      ORDER BY c.relname";
 
@@ -2140,6 +2369,7 @@ async fn list_postgres_export_sequences(
             last_value: None,
             owner_table: row.get::<_, Option<String>>(8),
             owner_column: row.get::<_, Option<String>>(9),
+            created_by_table: row.get::<_, bool>(10),
         })
         .filter(|sequence| {
             sequence.owner_table.as_deref().is_none_or(|owner_table| !excluded.contains(owner_table))
@@ -2581,6 +2811,7 @@ fn database_export_select_sql(
     format!("SELECT {columns} FROM {table}")
 }
 
+#[cfg(test)]
 fn write_database_export_rows<W: Write>(
     file: &mut W,
     rows: &[Vec<Value>],
@@ -2591,6 +2822,35 @@ fn write_database_export_rows<W: Write>(
     schema: &str,
     db_type: &DatabaseType,
     insert_dialect: SqlInsertDialect,
+) -> Result<(), String> {
+    write_database_export_rows_with_mode(
+        file,
+        rows,
+        columns,
+        column_types,
+        column_extras,
+        table,
+        schema,
+        db_type,
+        insert_dialect,
+        SqlInsertMode::default(),
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_database_export_rows_with_mode<W: Write>(
+    file: &mut W,
+    rows: &[Vec<Value>],
+    columns: &[String],
+    column_types: &[Option<String>],
+    column_extras: &[Option<String>],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    insert_dialect: SqlInsertDialect,
+    insert_mode: SqlInsertMode,
+    preserve_original_language: bool,
 ) -> Result<(), String> {
     let insert_indices = columns
         .iter()
@@ -2653,7 +2913,8 @@ fn write_database_export_rows<W: Write>(
             spatial_columns: Vec::new(),
             spatial_values: Vec::new(),
             rows: insert_rows.to_vec(),
-            batch_size: Some(DATABASE_EXPORT_INSERT_BATCH_SIZE),
+            batch_size: Some(insert_mode.batch_size(DATABASE_EXPORT_INSERT_BATCH_SIZE)),
+            preserve_original_language,
         },
         &[],
         insert_dialect,
@@ -3705,7 +3966,7 @@ async fn export_database_sql_core_inner(
         &DatabaseExportObjectCounts {
             tables: tables.len(),
             views: views.len(),
-            sequences: postgres_sequences.len(),
+            sequences: postgres_sequences.iter().filter(|sequence| !sequence.created_by_table).count(),
             extensions: postgres_extensions.len(),
             enums: postgres_enums.len(),
             procedures: procedures.len(),
@@ -3718,6 +3979,9 @@ async fn export_database_sql_core_inner(
     let mut object_index: usize = 0;
     let mut total_rows_exported = 0_u64;
     let mut deferred_postgres_triggers = Vec::new();
+    // PostgreSQL foreign keys collected from table DDL while writing structure,
+    // emitted at the end of the file (see `extract_postgres_deferred_foreign_keys`).
+    let mut deferred_postgres_foreign_keys: Vec<String> = Vec::new();
     // total_objects is known later for the write phase; preparing updates stay
     // presence-only so the UI does not show a counter that later resets.
     emit_database_export_running(&on_progress, &request.export_id, "", 0, 0, 0, true);
@@ -3944,10 +4208,9 @@ async fn export_database_sql_core_inner(
                 writeln!(file, "{}\n", drop_table_if_exists_sql(table_name, &request.schema, &db_type))
                     .map_err(|e| format!("Failed to write file: {e}"))?;
             }
-            for sequence in postgres_sequences
-                .iter()
-                .filter(|sequence| sequence.owner_table.as_deref() == Some(table_name.as_str()))
-            {
+            for sequence in postgres_sequences.iter().filter(|sequence| {
+                !sequence.created_by_table && sequence.owner_table.as_deref() == Some(table_name.as_str())
+            }) {
                 on_progress(ExportProgress {
                     export_id: request.export_id.clone(),
                     current_object: sequence.name.clone(),
@@ -3994,6 +4257,16 @@ async fn export_database_sql_core_inner(
                 Ok(ddl) => {
                     let (ddl, triggers) = split_postgres_export_table_triggers(&ddl, db_type);
                     deferred_postgres_triggers.extend(triggers);
+                    // Defer inline foreign keys so restore never has to satisfy
+                    // the dependency graph's order (cycles included).
+                    let ddl = if db_type == DatabaseType::Postgres {
+                        let (stripped, deferred) =
+                            extract_postgres_deferred_foreign_keys(&ddl, &request.schema, table_name);
+                        deferred_postgres_foreign_keys.extend(deferred);
+                        stripped
+                    } else {
+                        ddl
+                    };
                     let ddl = format_export_table_ddl(
                         &ddl,
                         Some(db_type),
@@ -4075,7 +4348,7 @@ async fn export_database_sql_core_inner(
                                 if snapshot_batch_cancelled(&db_type, &request.export_id) {
                                     return Err(EXPORT_CANCELLED_ERROR.to_string());
                                 }
-                                write_database_export_rows(
+                                write_database_export_rows_with_mode(
                                     &mut file,
                                     &rows,
                                     &col_names,
@@ -4085,6 +4358,8 @@ async fn export_database_sql_core_inner(
                                     &request.schema,
                                     &db_type,
                                     request.insert_dialect,
+                                    request.insert_mode,
+                                    request.preserve_original_language,
                                 )?;
                                 total_rows_exported += rows.len() as u64;
                                 on_progress(ExportProgress {
@@ -4192,7 +4467,7 @@ async fn export_database_sql_core_inner(
                         if row_count == 0 {
                             break;
                         }
-                        write_database_export_rows(
+                        write_database_export_rows_with_mode(
                             &mut file,
                             &result.rows,
                             &col_names,
@@ -4202,6 +4477,8 @@ async fn export_database_sql_core_inner(
                             &request.schema,
                             &db_type,
                             request.insert_dialect,
+                            request.insert_mode,
+                            request.preserve_original_language,
                         )?;
                         total_rows_exported += row_count as u64;
                         if use_keyset {
@@ -4238,7 +4515,7 @@ async fn export_database_sql_core_inner(
 
     if request.include_structure && !postgres_sequences.is_empty() {
         for sequence in &postgres_sequences {
-            if let Some(sql) = generate_postgres_sequence_owner_ddl(sequence, &request.schema) {
+            if let Some(sql) = generate_postgres_sequence_post_table_ddl(sequence, &request.schema) {
                 writeln!(file, "{};\n", sql).map_err(|e| format!("Failed to write file: {e}"))?;
             }
         }
@@ -4502,6 +4779,13 @@ async fn export_database_sql_core_inner(
         writeln!(file, "{trigger}\n").map_err(|e| format!("Failed to write file: {e}"))?;
     }
 
+    // PostgreSQL foreign keys come after every table and row exists, so the
+    // script replays into an empty database no matter what order (or cycle)
+    // the schema's foreign key graph has (issue #10575).
+    for statement in deferred_postgres_foreign_keys {
+        writeln!(file, "{statement}\n").map_err(|e| format!("Failed to write file: {e}"))?;
+    }
+
     // For MySQL: re-enable foreign key checks
     if matches!(db_type, DatabaseType::Mysql) {
         writeln!(file, "SET FOREIGN_KEY_CHECKS = 1;").map_err(|e| format!("Failed to write file: {e}"))?;
@@ -4583,20 +4867,21 @@ mod tests {
         build_database_export_object_source_sql, build_database_sql_export, build_export_insert_statements,
         build_export_insert_statements_excluding, build_export_object_source_sql, build_export_sql_insert,
         create_database_export_writer, database_export_query_options_for_timeout, database_export_select_sql,
-        database_export_total_objects, drop_table_if_exists_sql, ensure_export_destination_dir,
-        export_destination_identity_mismatch, filter_export_table_infos, format_export_sql_literal,
-        format_export_table_ddl, format_mysql_spatial_export_literal, format_xugu_spatial_export_literal,
-        generate_postgres_enum_ddl, generate_postgres_extension_ddl, generate_postgres_sequence_create_ddl,
-        generate_postgres_sequence_owner_ddl, generate_postgres_sequence_setval_sql,
+        database_export_total_objects, decode_unicode_escapes_for_export, drop_table_if_exists_sql,
+        ensure_export_destination_dir, export_destination_identity_mismatch, extract_postgres_deferred_foreign_keys,
+        filter_export_table_infos, format_export_sql_literal, format_export_table_ddl,
+        format_mysql_spatial_export_literal, format_xugu_spatial_export_literal, generate_postgres_enum_ddl,
+        generate_postgres_extension_ddl, generate_postgres_sequence_create_ddl,
+        generate_postgres_sequence_post_table_ddl, generate_postgres_sequence_setval_sql,
         is_postgres_extension_member_routine, mysql_database_export_preamble, mysql_view_dependencies_from_rows,
         mysql_view_dependencies_sql, normalize_export_table_ddl, record_export_destination_identity,
         record_export_error, replace_database_export_select_list, sort_export_views_by_dependencies,
-        split_postgres_export_table_triggers, write_database_export_rows, BuildDatabaseSqlExportOptions,
-        BuildExportInsertStatementsOptions, BuildExportSqlInsertOptions, DatabaseExportObjectCounts,
-        DatabaseExportRequest, DatabaseExportWriter, DdlNormalizeOptions, ExportedTableSql, PostgresExportEnum,
-        PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers, SqlInsertDialect,
-        DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT, POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL,
-        POSTGRES_EXPORT_SEQUENCES_SQL,
+        split_postgres_export_table_triggers, write_database_export_rows, write_database_export_rows_with_mode,
+        BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions, BuildExportSqlInsertOptions,
+        DatabaseExportObjectCounts, DatabaseExportRequest, DatabaseExportWriter, DdlNormalizeOptions, ExportedTableSql,
+        PostgresExportEnum, PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers,
+        SqlInsertDialect, SqlInsertMode, DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT,
+        POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL, POSTGRES_EXPORT_SEQUENCES_SQL,
     };
     use super::{ExportProgress, LenientExportErrors};
     use crate::connection::AppState;
@@ -4797,9 +5082,11 @@ mod tests {
             prevent_overwrite: false,
             output_compression: Default::default(),
             insert_dialect: Default::default(),
+            insert_mode: Default::default(),
             snapshot_session_id: None,
             batch_size: 1000,
             split_max_mb: None,
+            preserve_original_language: false,
         }
     }
 
@@ -5081,6 +5368,85 @@ mod tests {
     }
 
     #[test]
+    fn postgres_export_defers_inline_foreign_keys_to_file_tail_statements() {
+        let ddl = "CREATE TABLE \"public\".\"child_versions\" (\n  \"id\" uuid NOT NULL,\n  \"parent_id\" uuid NOT NULL,\n  CONSTRAINT \"child_versions_pkey\" PRIMARY KEY (id),\n  CONSTRAINT \"fk_child_parent\" FOREIGN KEY (\"parent_id\") REFERENCES \"public\".\"parent_entities\"(\"id\")\n);";
+
+        let (stripped, deferred) = extract_postgres_deferred_foreign_keys(ddl, "public", "child_versions");
+
+        assert!(!stripped.contains("FOREIGN KEY"), "stripped: {stripped}");
+        // Removing the trailing foreign key must also drop the comma it left behind.
+        assert!(stripped.contains("CONSTRAINT \"child_versions_pkey\" PRIMARY KEY (id)\n)"), "stripped: {stripped}");
+        assert_eq!(
+            deferred,
+            vec![
+                "ALTER TABLE \"public\".\"child_versions\" ADD CONSTRAINT \"fk_child_parent\" FOREIGN KEY (\"parent_id\") REFERENCES \"public\".\"parent_entities\"(\"id\");".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn postgres_export_defers_foreign_keys_and_keeps_other_constraints() {
+        let ddl = "CREATE TABLE \"public\".\"assignments\" (\n  \"id\" integer NOT NULL,\n  \"owner_id\" integer NOT NULL,\n  \"reviewer_id\" integer NOT NULL,\n  CONSTRAINT \"assignments_owner_fk\" FOREIGN KEY (\"owner_id\") REFERENCES \"users\"(\"id\"),\n  CONSTRAINT \"assignments_owner_check\" CHECK (owner_id > 0),\n  CONSTRAINT \"assignments_reviewer_fk\" FOREIGN KEY (\"reviewer_id\") REFERENCES \"users\"(\"id\"),\n  CONSTRAINT \"assignments_pair_unique\" UNIQUE (\"owner_id\", \"reviewer_id\")\n);";
+
+        let (stripped, deferred) = extract_postgres_deferred_foreign_keys(ddl, "public", "assignments");
+
+        assert!(!stripped.contains("FOREIGN KEY"), "stripped: {stripped}");
+        assert!(
+            stripped.contains("CONSTRAINT \"assignments_owner_check\" CHECK (owner_id > 0),"),
+            "stripped: {stripped}"
+        );
+        assert!(
+            stripped.contains("CONSTRAINT \"assignments_pair_unique\" UNIQUE (\"owner_id\", \"reviewer_id\")"),
+            "stripped: {stripped}"
+        );
+        assert_eq!(deferred.len(), 2);
+        assert!(deferred[0]
+            .starts_with("ALTER TABLE \"public\".\"assignments\" ADD CONSTRAINT \"assignments_owner_fk\" FOREIGN KEY"));
+        assert!(deferred[1].starts_with(
+            "ALTER TABLE \"public\".\"assignments\" ADD CONSTRAINT \"assignments_reviewer_fk\" FOREIGN KEY"
+        ));
+    }
+
+    #[test]
+    fn postgres_export_defers_foreign_keys_across_multiple_statements() {
+        let no_foreign_keys = "CREATE TABLE \"public\".\"parent_entities\" (\n  \"id\" integer NOT NULL,\n  CONSTRAINT \"parent_entities_pkey\" PRIMARY KEY (id)\n);\nALTER TABLE ONLY \"public\".\"events_2027_h1\" ALTER COLUMN \"status\" DROP DEFAULT;";
+        let (stripped, deferred) = extract_postgres_deferred_foreign_keys(no_foreign_keys, "public", "parent_entities");
+        assert_eq!(stripped, no_foreign_keys);
+        assert!(deferred.is_empty());
+
+        let with_cycle = "CREATE TABLE \"public\".\"cyc_x\" (\n  \"id\" integer NOT NULL,\n  CONSTRAINT \"cyc_x_pkey\" PRIMARY KEY (id),\n  CONSTRAINT \"cyc_x_y_fk\" FOREIGN KEY (\"id\") REFERENCES \"public\".\"cyc_y\"(\"id\")\n);\nALTER TABLE ONLY \"public\".\"cyc_x\" ALTER COLUMN \"id\" DROP DEFAULT;";
+        let (stripped, deferred) = extract_postgres_deferred_foreign_keys(with_cycle, "public", "cyc_x");
+        assert!(!stripped.contains("cyc_x_y_fk"), "stripped: {stripped}");
+        assert!(
+            stripped.contains("ALTER TABLE ONLY \"public\".\"cyc_x\" ALTER COLUMN \"id\" DROP DEFAULT;"),
+            "stripped: {stripped}"
+        );
+        assert_eq!(
+            deferred,
+            vec![
+                "ALTER TABLE \"public\".\"cyc_x\" ADD CONSTRAINT \"cyc_x_y_fk\" FOREIGN KEY (\"id\") REFERENCES \"public\".\"cyc_y\"(\"id\");".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn postgres_export_deferred_foreign_keys_use_the_statement_schema() {
+        // Whole-database exports leave the request schema empty; the ALTER must
+        // still target the schema the CREATE TABLE statement itself carries.
+        let ddl = "CREATE TABLE \"inventory\".\"orders\" (\n  \"id\" integer NOT NULL,\n  \"product_id\" integer NOT NULL,\n  CONSTRAINT \"orders_product_fk\" FOREIGN KEY (\"product_id\") REFERENCES \"inventory\".\"products\"(\"id\")\n);";
+
+        let (stripped, deferred) = extract_postgres_deferred_foreign_keys(ddl, "", "orders");
+
+        assert!(!stripped.contains("FOREIGN KEY"), "stripped: {stripped}");
+        assert_eq!(
+            deferred,
+            vec![
+                "ALTER TABLE \"inventory\".\"orders\" ADD CONSTRAINT \"orders_product_fk\" FOREIGN KEY (\"product_id\") REFERENCES \"inventory\".\"products\"(\"id\");".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn concurrent_prefetch_only_allowed_for_multi_connection_pools() {
         use crate::connection::PoolKind;
 
@@ -5329,6 +5695,7 @@ mod tests {
                 json!("DBX_WKB:0:0101000000000000000000F03F0000000000000040"),
             ]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -5459,6 +5826,7 @@ mod tests {
             spatial_values: vec![vec![Some(3857)]],
             rows: vec![vec![json!("POINT(1 2)")]],
             batch_size: None,
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -5485,6 +5853,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(true), json!(false), Value::Null]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
         let postgres_statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
@@ -5500,6 +5869,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(true), json!(false), Value::Null]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -5513,6 +5883,121 @@ mod tests {
                 "INSERT INTO \"public\".\"flags\" (\"enabled\", \"disabled\", \"unknown\") VALUES (TRUE, FALSE, NULL);"
             ]
         );
+    }
+
+    #[test]
+    fn ansi_export_keeps_backslashes_literal_and_doubles_quotes() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
+            schema: None,
+            table_name: Some("t".to_string()),
+            qualified_table_name: None,
+            columns: vec!["note".to_string()],
+            column_types: vec![Some("nvarchar(255)".to_string())],
+            column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![vec![json!(r"C:\new\it's")]],
+            batch_size: Some(10),
+            preserve_original_language: false,
+        })
+        .unwrap();
+
+        assert_eq!(statements, vec!["INSERT INTO [t] ([note]) VALUES (N'C:\\new\\it''s');"]);
+    }
+
+    #[test]
+    fn clickhouse_and_snowflake_export_escape_backslashes() {
+        for database_type in [DatabaseType::ClickHouse, DatabaseType::Snowflake] {
+            let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+                database_type: Some(database_type),
+                identifier_quote: None,
+                schema: None,
+                table_name: Some("t".to_string()),
+                qualified_table_name: None,
+                columns: vec!["note".to_string()],
+                column_types: vec![Some("String".to_string())],
+                column_extras: Vec::new(),
+                spatial_columns: Vec::new(),
+                spatial_values: Vec::new(),
+                rows: vec![vec![json!(r"C:\new\it's")]],
+                batch_size: Some(10),
+                preserve_original_language: false,
+            })
+            .unwrap();
+
+            let expected = match database_type {
+                DatabaseType::ClickHouse => r"INSERT INTO `t` (`note`) VALUES ('C:\\new\\it''s');",
+                DatabaseType::Snowflake => r#"INSERT INTO "t" ("note") VALUES ('C:\\new\\it''s');"#,
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                statements,
+                vec![expected],
+                "backslash-escaping dialect {database_type:?} must double backslashes"
+            );
+        }
+    }
+
+    #[test]
+    fn clickhouse_and_snowflake_export_spell_the_sub_byte_as_a_hex_escape() {
+        // `\Z` is a MySQL-family escape. ClickHouse reads it as a literal
+        // backslash followed by `Z` (verified on the ClickHouse playground,
+        // 26.10.1.448: `hex('a\Zb')` is `615C5A62`), and Snowflake drops the
+        // backslash and yields `Z`. Both accept `\xhh`, which is the byte the
+        // value holds (`hex('a\x1ab')` is `611A62`). Exporting `\Z` to them
+        // would rewrite a stored SUB byte, so the escape has to be
+        // dialect-specific.
+        for database_type in [DatabaseType::ClickHouse, DatabaseType::Snowflake] {
+            let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+                database_type: Some(database_type),
+                identifier_quote: None,
+                schema: None,
+                table_name: Some("t".to_string()),
+                qualified_table_name: None,
+                columns: vec!["note".to_string()],
+                column_types: vec![Some("String".to_string())],
+                column_extras: Vec::new(),
+                spatial_columns: Vec::new(),
+                spatial_values: Vec::new(),
+                rows: vec![vec![json!("a\x1ab")]],
+                batch_size: Some(10),
+                preserve_original_language: false,
+            })
+            .unwrap();
+
+            let expected = match database_type {
+                DatabaseType::ClickHouse => r"INSERT INTO `t` (`note`) VALUES ('a\x1ab');",
+                DatabaseType::Snowflake => r#"INSERT INTO "t" ("note") VALUES ('a\x1ab');"#,
+                _ => unreachable!(),
+            };
+            assert_eq!(statements, vec![expected], "dialect {database_type:?} must not emit the MySQL-only \\Z escape");
+        }
+    }
+
+    #[test]
+    fn mysql_export_still_uses_the_backslash_z_escape() {
+        // MySQL has no `\xhh` escape, so the SUB byte must keep `\Z` there.
+        // Guards against "fixing" the ClickHouse/Snowflake spelling everywhere.
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            schema: None,
+            table_name: Some("t".to_string()),
+            qualified_table_name: None,
+            columns: vec!["note".to_string()],
+            column_types: vec![Some("text".to_string())],
+            column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![vec![json!("a\x1ab")]],
+            batch_size: Some(10),
+            preserve_original_language: false,
+        })
+        .unwrap();
+
+        assert_eq!(statements, vec![r"INSERT INTO `t` (`note`) VALUES ('a\Zb');"]);
     }
 
     #[test]
@@ -5551,6 +6036,7 @@ mod tests {
                 Value::Null,
             ]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -5586,6 +6072,7 @@ mod tests {
                 vec![json!(3), json!("0xzz"), json!("text"), json!("not-hex")],
             ],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -5625,6 +6112,7 @@ mod tests {
             database: None,
             schema: None,
             omit_auto_increment: false,
+            preserve_original_language: false,
         })
         .expect("build SQL Server database export");
 
@@ -5647,6 +6135,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!("line1\nline2\tcol\rend\\slash\0\x1aO'Hara")]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -5672,6 +6161,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(long_value.clone())], vec![json!(long_value)]],
             batch_size: Some(100),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -5694,6 +6184,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: (0..1001).map(|id| vec![json!(id)]).collect(),
             batch_size: Some(2000),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -5717,6 +6208,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!("first\nsecond\tthird")]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -5738,6 +6230,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!("line1\nline2\tend")]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -5772,6 +6265,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(format!("0x{ZIP_HEX}")), json!("0x"), json!("0XABcd"), Value::Null, json!("0xABcd")]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -5798,6 +6292,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!("0xabc"), json!("0xgg"), json!(7)]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -5829,6 +6324,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!("line1\rline2"), json!("O'Hara"), json!(r"C:\tmp"), json!("plain")]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -5855,6 +6351,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(r#"{"text":"say \"hi\"","path":"C:\\tmp","quote":"O'Hara"}"#)]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -5882,6 +6379,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!("逻辑删除标志：'0'-未删除，'1'-已删除"), json!(style)]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -5910,6 +6408,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(style)]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -5956,6 +6455,7 @@ mod tests {
                 json!([[1.2, 3.4], [5, 6]]),
             ]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -5982,6 +6482,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(1), json!("Ada")], vec![json!(2), json!("O'Hara")], vec![json!(3), json!("Linus")]],
             batch_size: Some(2),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6009,6 +6510,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(1), json!("Ada")], vec![json!(2), json!("O'Hara")], vec![json!(3), json!("Linus")]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6033,6 +6535,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(1), json!("Ada")], vec![json!(2), json!("Linus")]],
             batch_size: Some(1),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6041,6 +6544,71 @@ mod tests {
             vec![
                 "INSERT INTO `users` (`id`, `name`) VALUES (1, 'Ada');",
                 "INSERT INTO `users` (`id`, `name`) VALUES (2, 'Linus');",
+            ]
+        );
+    }
+
+    #[test]
+    fn decode_unicode_escapes_for_export_round_trips_vietnamese_text() {
+        assert_eq!(decode_unicode_escapes_for_export("\\u1ed0ng gi\\u00f3 th\\u1eb3ng"), "Ống gió thẳng");
+        // Leaves non-escape backslashes untouched (e.g. a literal path or doubled quote escape).
+        assert_eq!(decode_unicode_escapes_for_export("600x200\\\" width"), "600x200\\\" width");
+        // A text run with no `\u` escapes at all is returned unchanged (fast path).
+        assert_eq!(decode_unicode_escapes_for_export("plain text"), "plain text");
+        // Surrogate pairs decode to a single non-BMP character.
+        assert_eq!(decode_unicode_escapes_for_export("\\ud83d\\ude00"), "😀");
+        // A malformed/lone high surrogate is left as literal text instead of panicking or corrupting data.
+        assert_eq!(decode_unicode_escapes_for_export("\\ud83dxyz"), "\\ud83dxyz");
+    }
+
+    #[test]
+    fn preserve_original_language_option_decodes_unicode_escapes_in_exported_literals() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
+            schema: None,
+            table_name: Some("VersionValue".to_string()),
+            qualified_table_name: None,
+            columns: vec!["jsonValues".to_string()],
+            column_types: Vec::new(),
+            column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![vec![json!("{\"clientBoqItemName\":\"\\u1ed0ng gi\\u00f3 th\\u1eb3ng\"}")]],
+            batch_size: Some(10),
+            preserve_original_language: true,
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec!["INSERT INTO [VersionValue] ([jsonValues]) VALUES ('{\"clientBoqItemName\":\"Ống gió thẳng\"}');"]
+        );
+    }
+
+    #[test]
+    fn preserve_original_language_defaults_to_false_and_keeps_ascii_escapes() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
+            schema: None,
+            table_name: Some("VersionValue".to_string()),
+            qualified_table_name: None,
+            columns: vec!["jsonValues".to_string()],
+            column_types: Vec::new(),
+            column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![vec![json!("{\"clientBoqItemName\":\"\\u1ed0ng gi\\u00f3 th\\u1eb3ng\"}")]],
+            batch_size: Some(10),
+            preserve_original_language: false,
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                "INSERT INTO [VersionValue] ([jsonValues]) VALUES ('{\"clientBoqItemName\":\"\\u1ed0ng gi\\u00f3 th\\u1eb3ng\"}');"
             ]
         );
     }
@@ -6060,6 +6628,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(1), json!("Ada")], vec![json!(2), json!("Linus")]],
             batch_size: Some(100),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6087,6 +6656,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!("AAAPr9AAEAAAAGfAAA"), json!(1), json!("Ada")]],
             batch_size: Some(100),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6108,6 +6678,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!("*AAABk1AAEAAAAAgAAA"), json!(1), json!("Ada")]],
             batch_size: Some(100),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6129,6 +6700,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(7), json!("Ada")]],
             batch_size: Some(100),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6153,6 +6725,7 @@ mod tests {
                 vec![json!(2), json!("2022-08-25T00:00:00Z"), json!("2022-08-25T00:00:00Z")],
             ],
             batch_size: Some(100),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6217,6 +6790,7 @@ mod tests {
                     Value::Null,
                 ]],
                 batch_size: Some(100),
+                preserve_original_language: false,
             })
             .unwrap();
 
@@ -6255,6 +6829,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!("2022-08-25T09:58:43.123456Z"), json!("2022-08-26T10:59:44+08:00")]],
             batch_size: Some(100),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6282,6 +6857,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!("1"), json!("1010"), json!("1010")], vec![json!(false), json!(3), json!("off")]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6308,6 +6884,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(true), json!(false), Value::Null]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6346,6 +6923,7 @@ mod tests {
                 json!("\0"),
             ]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6379,6 +6957,7 @@ mod tests {
                 vec![json!("2"), json!("0X"), json!("1")],
             ],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6415,6 +6994,7 @@ mod tests {
                 json!("2026-06-12T10:11:12Z"),
             ]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6444,6 +7024,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!("2026-06-12T10:11:12Z"), json!("2026-06-12T18:11:12+08:00")]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6470,6 +7051,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!("2026-06-12T10:11:12Z"), json!("2026-06-12T10:11:12.1234567Z")]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6496,6 +7078,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(1), json!("Hello"), json!("'hello':1A")]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6518,6 +7101,7 @@ mod tests {
                 spatial_values: Vec::new(),
                 rows: vec![vec![json!(1), json!("Ada"), json!("ada@example.com")]],
                 batch_size: Some(10),
+                preserve_original_language: false,
             },
             &["id".to_string()],
         )
@@ -6545,6 +7129,7 @@ mod tests {
                 spatial_values: Vec::new(),
                 rows: vec![vec![json!(1), json!("0x00ff")]],
                 batch_size: Some(10),
+                preserve_original_language: false,
             },
             &["v2".to_string()],
         )
@@ -6569,6 +7154,7 @@ mod tests {
                 spatial_values: Vec::new(),
                 rows: vec![vec![json!(1)]],
                 batch_size: Some(10),
+                preserve_original_language: false,
             },
             &["user_id".to_string()],
         );
@@ -6699,6 +7285,7 @@ mod tests {
             database: None,
             schema: None,
             omit_auto_increment: false,
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -6768,6 +7355,34 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(path).unwrap(),
             "INSERT INTO \"dbo\".\"event]log\" (\"enabled\", \"path\") VALUES (TRUE, 'C:\\exports\\O''Hara');\n\n"
+        );
+    }
+
+    #[test]
+    fn database_row_writer_supports_one_insert_statement_per_row() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("users.sql");
+        let mut file = std::fs::File::create(&path).unwrap();
+
+        write_database_export_rows_with_mode(
+            &mut file,
+            &[vec![json!(1), json!("Ada")], vec![json!(2), json!("Linus")]],
+            &["id".to_string(), "name".to_string()],
+            &[Some("int".to_string()), Some("varchar(32)".to_string())],
+            &[None, None],
+            "users",
+            "app",
+            &DatabaseType::Mysql,
+            SqlInsertDialect::Source,
+            SqlInsertMode::Single,
+            false,
+        )
+        .unwrap();
+        drop(file);
+
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "INSERT INTO `users` (`id`, `name`) VALUES (1, 'Ada');\n\nINSERT INTO `users` (`id`, `name`) VALUES (2, 'Linus');\n\n"
         );
     }
 
@@ -6972,6 +7587,56 @@ mod tests {
     }
 
     #[test]
+    fn postgres_identity_export_preserves_explicit_values_in_each_batch() {
+        for (extra, overrides) in [
+            (Some("generated always as identity (start with 1 increment by 1)"), true),
+            (Some(" GENERATED\tALWAYS  AS IDENTITY "), true),
+            (Some("generated by default as identity"), false),
+            (Some("serial"), false),
+            (None, false),
+        ] {
+            for dialect in ["source", "standard"] {
+                for (batch_size, tuples) in [
+                    (1, vec!["(1, 'Ada');", "(2, 'Grace');", "(3, 'Hopper');"]),
+                    (2, vec!["(1, 'Ada'),\n(2, 'Grace');", "(3, 'Hopper');"]),
+                    (10, vec!["(1, 'Ada'),\n(2, 'Grace'),\n(3, 'Hopper');"]),
+                ] {
+                    let options = serde_json::from_value(json!({
+                        "databaseType": "postgres", "schema": "public", "tableName": "users",
+                        "columns": ["id", "name"], "columnTypes": ["integer", "text"],
+                        "columnExtras": [extra, null], "rows": [[1, "Ada"], [2, "Grace"], [3, "Hopper"]],
+                        "batchSize": batch_size, "insertDialect": dialect
+                    }))
+                    .unwrap();
+                    let sql = build_export_sql_insert(options).unwrap();
+                    let overriding = if overrides { " OVERRIDING SYSTEM VALUE" } else { "" };
+                    let head = format!("INSERT INTO \"public\".\"users\" (\"id\", \"name\"){overriding} VALUES");
+                    let expected = tuples
+                        .iter()
+                        .map(|tuple| format!("{head}{}{tuple}", if tuple.contains('\n') { "\n" } else { " " }))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    assert_eq!(sql, expected, "extra={extra:?}, dialect={dialect}, batch={batch_size}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn postgres_identity_export_does_not_override_excluded_identity_columns() {
+        let options = serde_json::from_value(json!({
+            "databaseType": "postgres", "schema": "public", "tableName": "users",
+            "columns": ["id", "name"], "columnExtras": ["generated always as identity", null],
+            "rows": [[42, "Ada"]], "excludeColumns": ["ID"]
+        }))
+        .unwrap();
+        assert_eq!(
+            build_export_sql_insert(options).unwrap(),
+            "INSERT INTO \"public\".\"users\" (\"name\") VALUES ('Ada');"
+        );
+    }
+
+    #[test]
     fn dameng_identity_export_inserts_enable_identity_insert() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::Dameng),
@@ -6986,6 +7651,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(1), json!("Ada")]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -7015,6 +7681,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(1), json!("Ada")]],
             batch_size: Some(10),
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -7054,6 +7721,7 @@ mod tests {
             database: None,
             schema: None,
             omit_auto_increment: false,
+            preserve_original_language: false,
         })
         .unwrap();
 
@@ -7202,7 +7870,7 @@ mod tests {
         assert!(!POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL.contains("pg_sequence"));
         assert!(!POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL.contains("pg_sequence_last_value"));
 
-        // Both tiers must describe the same ten columns in the same order so
+        // Both tiers must describe the same eleven columns in the same order so
         // the row decoding below stays identical.
         for sql in [POSTGRES_EXPORT_SEQUENCES_SQL, POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL] {
             for fragment in [
@@ -7235,6 +7903,7 @@ mod tests {
             last_value: Some("42".to_string()),
             owner_table: Some("permissions".to_string()),
             owner_column: Some("id".to_string()),
+            created_by_table: false,
         }
     }
 
@@ -7263,7 +7932,7 @@ mod tests {
         let sequence = postgres_sequence("permissions_id_seq");
 
         assert_eq!(
-            generate_postgres_sequence_owner_ddl(&sequence, "public").as_deref(),
+            generate_postgres_sequence_post_table_ddl(&sequence, "public").as_deref(),
             Some("ALTER SEQUENCE \"public\".\"permissions_id_seq\" OWNED BY \"public\".\"permissions\".\"id\"")
         );
         assert_eq!(
@@ -7271,6 +7940,20 @@ mod tests {
             Some(
                 "SELECT setval('\"public\".\"permissions_id_seq\"', GREATEST(COALESCE(MAX(\"id\"), 42), 42), true) FROM \"public\".\"permissions\""
             )
+        );
+    }
+
+    #[test]
+    fn postgres_table_generated_sequence_restores_the_table_bound_sequence() {
+        let mut sequence = postgres_sequence("renamed_identity_sequence");
+        sequence.created_by_table = true;
+        let ddl = generate_postgres_sequence_post_table_ddl(&sequence, "public").unwrap();
+        assert!(ddl.starts_with("DO "));
+        assert!(ddl.contains("ALTER SEQUENCE "));
+        assert!(!ddl.contains("OWNED BY"));
+        assert_eq!(
+            generate_postgres_sequence_setval_sql(&sequence, "public").as_deref(),
+            Some("SELECT setval(pg_get_serial_sequence('\"public\".\"permissions\"', 'id'), GREATEST(COALESCE(MAX(\"id\"), 42), 42), true) FROM \"public\".\"permissions\"")
         );
     }
 
@@ -7348,7 +8031,12 @@ mod tests {
 
     async fn test_app_state(scratch_dir: &std::path::Path) -> AppState {
         let storage = crate::persistence::test_storage::open(&scratch_dir.join("storage.db")).await.unwrap();
-        AppState::new(storage)
+        AppState::new_with_plugin_and_agent_dir_and_app_version(
+            storage,
+            scratch_dir.join("plugins"),
+            scratch_dir.join("agents"),
+            env!("CARGO_PKG_VERSION"),
+        )
     }
 
     // Regression tests for #6327: create_dir_all on every export run is unsafe
@@ -7683,6 +8371,7 @@ mod tests {
             spatial_values: Vec::new(),
             rows: vec![vec![json!(1), json!("login")]],
             batch_size: Some(100),
+            preserve_original_language: false,
         })
         .unwrap();
         assert_eq!(statements, vec!["INSERT INTO `audit-schema`.`events` (`id`, `event_type`) VALUES (1, 'login');"]);

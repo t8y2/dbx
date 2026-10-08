@@ -2,7 +2,7 @@
 import DataGridCellDetailTextPreview from "@/components/grid/DataGridCellDetailTextPreview.vue";
 import DataGridValueTransform from "@/components/grid/DataGridValueTransform.vue";
 import { computed, nextTick, ref, watch } from "vue";
-import { Code2, Copy, Download, Eye, FileUp, Info, Pencil } from "@lucide/vue";
+import { Code2, Copy, Download, Eye, FileUp, Info, Pencil, WrapText } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -46,8 +46,13 @@ let jsonPreviewEditor: UseCellDetailEditorReturn | null = null;
 
 const jsonFormatted = computed(() => settingsStore.editorSettings.cellDetailJsonFormatted);
 const jsonView = computed(() => jsonFormatted.value && !!props.detail?.formattedJson);
+const wordWrapEnabled = computed(() => settingsStore.editorSettings.wordWrap);
 const binaryTextPreview = computed(() => (props.detail && isBlobCellColumnType(props.detail.type) ? binaryCellUtf8Text(props.detail.value, props.detail.type, props.databaseType) : null));
 const presentedValuePreview = computed(() => (binaryTextPreview.value === null ? props.detail?.rawValuePreview : props.detail?.displayValuePreview) ?? "");
+
+function toggleWordWrap() {
+  settingsStore.updateEditorSettings({ wordWrap: !wordWrapEnabled.value });
+}
 
 function toggleJsonFormatted() {
   settingsStore.updateEditorSettings({ cellDetailJsonFormatted: !jsonFormatted.value });
@@ -98,6 +103,7 @@ watch(jsonPreviewContainer, async (element) => {
       appPalette: () => themePalette.value,
       fontSize: () => settingsStore.editorSettings.fontSize,
       fontFamily: () => settingsStore.editorSettings.tableFontFamily,
+      lineWrapping: () => settingsStore.editorSettings.wordWrap,
     });
     await jsonPreviewEditor.create(element, props.detail?.formattedJson ?? "", "json");
   } else if (!element && jsonPreviewEditor) {
@@ -165,6 +171,18 @@ watch(
               <Button v-if="detail.formattedJson" :variant="jsonView ? 'secondary' : 'ghost'" size="sm" class="h-6 gap-1 px-2 text-xs" :title="t('grid.formattedJson')" @click="toggleJsonFormatted">
                 <Code2 class="h-3 w-3" />
                 {{ t("grid.formattedJson") }}
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                class="h-6 w-6"
+                :class="wordWrapEnabled ? 'bg-sky-500/10 text-sky-700 hover:bg-sky-500/20 hover:text-sky-800 dark:text-sky-300 dark:hover:text-sky-200' : 'text-muted-foreground/70 hover:bg-muted hover:text-muted-foreground'"
+                :title="t('settings.wordWrap')"
+                :aria-label="t('settings.wordWrap')"
+                :aria-pressed="wordWrapEnabled"
+                @click="toggleWordWrap"
+              >
+                <WrapText class="h-3 w-3" />
               </Button>
               <Button v-if="detail.isEditable" variant="ghost" size="icon" class="h-6 w-6" :title="t('grid.editValue')" @click="emit('edit')">
                 <Pencil class="h-3 w-3" />

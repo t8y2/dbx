@@ -237,4 +237,41 @@ describe("drawCanvasDataGrid with frozen columns", () => {
     });
     expect(() => drawCanvasDataGrid(options)).not.toThrow();
   });
+
+  it("draws with zebraStriping enabled and disabled", () => {
+    const canvas = createMockCanvas();
+    const optionsWithZebra = createBaseOptions({
+      canvas,
+      zebraStriping: true,
+    });
+    expect(() => drawCanvasDataGrid(optionsWithZebra)).not.toThrow();
+
+    const optionsWithoutZebra = createBaseOptions({
+      canvas,
+      zebraStriping: false,
+    });
+    expect(() => drawCanvasDataGrid(optionsWithoutZebra)).not.toThrow();
+
+    const optionsWithCustomZebraColor = createBaseOptions({
+      canvas,
+      zebraStriping: true,
+      zebraRowBg: "#334455",
+    });
+    expect(() => drawCanvasDataGrid(optionsWithCustomZebraColor)).not.toThrow();
+  });
+
+  it("draws with duplicate and null highlight keys without error", () => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 800;
+    canvas.height = 600;
+    const dupKeys = new Set<number>([0, 1]);
+    const nullKeys = new Set<number>([2]);
+
+    const options = createBaseOptions({
+      canvas,
+      duplicateHighlightKeys: dupKeys,
+      nullHighlightKeys: nullKeys,
+    });
+    expect(() => drawCanvasDataGrid(options)).not.toThrow();
+  });
 });

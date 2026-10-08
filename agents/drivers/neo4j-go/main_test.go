@@ -267,6 +267,26 @@ func TestDecodeQueryOptions(t *testing.T) {
 	}
 }
 
+func TestPropertyColumnsUseCypherTypesAndMergeLabelCombinations(t *testing.T) {
+	record := func(name string, types []any, mandatory bool) *neo4j.Record {
+		return &neo4j.Record{Keys: []string{"propertyName", "propertyTypes", "mandatory"}, Values: []any{name, types, mandatory}}
+	}
+	got := propertyColumns([]*neo4j.Record{
+		record("score", []any{"Long"}, true),
+		record("ratio", []any{"Double"}, true),
+		record("score", []any{"String", "Long"}, false),
+		record("values", []any{"LongArray", "DoubleArray"}, false),
+	})
+	want := []columnInfo{
+		{Name: "ratio", DataType: "Float", IsNullable: false},
+		{Name: "score", DataType: "Integer | String", IsNullable: true},
+		{Name: "values", DataType: "FloatArray | IntegerArray", IsNullable: true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("propertyColumns() = %#v, want %#v", got, want)
+	}
+}
+
 func TestBoundedQueryUsesFetchAll(t *testing.T) {
 	options := queryOptions{SQL: "MATCH (n) RETURN n LIMIT 10000", MaxRows: 10000}
 	if got := effectiveFetchSize(options); got != neo4j.FetchAll {

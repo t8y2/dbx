@@ -447,6 +447,13 @@
           "agentKey": "oracle",
           "label": "Oracle",
           "storeVisible": false
+        },
+        {
+          "profile": "oci",
+          "agentKey": "oracle-oci",
+          "label": "Oracle (OCI)",
+          "storeVisible": true,
+          "storeOrder": 54
         }
       ],
       "singleConnectionPool": true,
@@ -576,6 +583,35 @@
       "metadataConnectionScoped": false,
       "skipTcpProbe": false,
       "defaultPort": 8983,
+      "supportLevel": "browse",
+      "capabilities": {
+        "queryExecution": true,
+        "metadataBrowse": true,
+        "objectBrowser": false,
+        "objectSource": false,
+        "schemaSearch": false,
+        "diagram": false,
+        "tableDataEdit": false,
+        "tableStructureEdit": false,
+        "tableImport": false,
+        "dataTransfer": false,
+        "sqlFileExecution": false,
+        "databaseCreate": false,
+        "fieldLineage": false,
+        "sqlExplain": false,
+        "userAdmin": false,
+        "driverManagement": false
+      }
+    },
+    {
+      "dbType": "couchdb",
+      "label": "Apache CouchDB",
+      "runtimeMode": "native",
+      "mcpMode": "bridge",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": false,
+      "defaultPort": 5984,
       "supportLevel": "browse",
       "capabilities": {
         "queryExecution": true,
@@ -1743,7 +1779,9 @@
       "skipTcpProbe": true,
       "defaultPort": 443,
       "traits": {
-        "schemaAware": true
+        "schemaAware": true,
+        "databaseSchemaQualified": true,
+        "treeSchema": true
       },
       "supportLevel": "operate",
       "capabilities": {
@@ -2489,18 +2527,18 @@
         "queryExecution": true,
         "metadataBrowse": true,
         "objectBrowser": true,
-        "objectSource": false,
+        "objectSource": true,
         "schemaSearch": true,
         "diagram": true,
-        "tableDataEdit": false,
+        "tableDataEdit": true,
         "tableStructureEdit": true,
         "tableImport": true,
         "dataTransfer": false,
         "sqlFileExecution": true,
         "databaseCreate": false,
         "fieldLineage": false,
-        "sqlExplain": false,
-        "userAdmin": false,
+        "sqlExplain": true,
+        "userAdmin": true,
         "driverManagement": true
       }
     },
@@ -2794,7 +2832,7 @@
         "tableDataEdit": false,
         "tableStructureEdit": true,
         "tableImport": false,
-        "dataTransfer": false,
+        "dataTransfer": true,
         "sqlFileExecution": true,
         "databaseCreate": false,
         "fieldLineage": false,

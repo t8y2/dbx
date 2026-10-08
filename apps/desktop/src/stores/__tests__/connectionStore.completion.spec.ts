@@ -132,6 +132,18 @@ function damengConnection(): ConnectionConfig {
   } as ConnectionConfig;
 }
 
+function db2Connection(): ConnectionConfig {
+  return {
+    ...postgresConnection(),
+    id: "db2-1",
+    name: "DB2",
+    db_type: "db2",
+    port: 50000,
+    username: "DBX_TEST",
+    database: "",
+  } as ConnectionConfig;
+}
+
 function dorisConnection(): ConnectionConfig {
   return {
     ...postgresConnection(),
@@ -926,6 +938,33 @@ describe("connectionStore completion assistant", () => {
     expect(cached).toEqual(first);
   });
 
+  it("uses the DB2 login schema for unqualified column completion", async () => {
+    // DB2's CURRENT SCHEMA starts as the authorization ID of the session user, so an
+    // unqualified reference resolves against the login schema — the same convention
+    // as Dameng (see the test above). Without the fallback `listCompletionColumns`
+    // takes its schema-required early return and never asks for the columns at all,
+    // so a tab that has no schema selected gets an empty candidate list.
+    const completionAssistantSearch = vi.fn().mockRejectedValue(new Error("assistant unavailable"));
+    const getColumns = vi.fn().mockResolvedValue([{ name: "PMNUM", data_type: "VARCHAR", is_nullable: false, column_default: null, is_primary_key: false, extra: null, comment: null }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      getColumns,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [db2Connection()];
+    store.connectedIds.add("db2-1");
+
+    const first = await store.listCompletionColumns("db2-1", "", "pm");
+
+    expect(getColumns).toHaveBeenCalledWith("db2-1", "", "DBX_TEST", "pm", undefined, undefined);
+    expect(first).toEqual([expect.objectContaining({ name: "PMNUM", table: "pm", schema: "DBX_TEST" })]);
+  });
+
   it("rejects assistant columns returned for a different MySQL parent table", async () => {
     const completionAssistantSearch = vi.fn().mockResolvedValue({
       candidates: [
@@ -1237,6 +1276,57 @@ describe("connectionStore completion assistant", () => {
     await store.listCompletionColumns("sqlserver-1", "app", "users", "dbo");
     await store.listCompletionColumns("sqlserver-1", "app", "orders", "dbo");
     expect(getColumns.mock.calls.map((call) => call[3])).toEqual(["users", "orders", "users"]);
+  });
+
+  it("caches Mongo completion indexes and invalidates them via invalidateCompletionTableCache and invalidateCompletionCache", async () => {
+    const mongoListIndexSpecs = vi.fn().mockResolvedValue([
+      {
+        name: "email_1",
+        keys: [{ field: "email", direction: "1" }],
+        is_unique: true,
+        is_primary: false,
+        is_sparse: false,
+        expire_after_seconds: null,
+        partial_filter_expression: null,
+        background: false,
+        bucket_size: null,
+        hidden: false,
+        properties_complete: true,
+        extra_options: null,
+      },
+    ]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      mongoListIndexSpecs,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [
+      {
+        ...postgresConnection(),
+        id: "mongo-1",
+        name: "MongoDB",
+        db_type: "mongodb",
+      },
+    ];
+    store.connectedIds.add("mongo-1");
+
+    const first = await store.listMongoCompletionIndexes("mongo-1", "app", "users");
+    expect(first).toEqual([{ name: "email_1", keyPattern: "{ email: 1 }" }]);
+    const second = await store.listMongoCompletionIndexes("mongo-1", "app", "users");
+    expect(second).toEqual([{ name: "email_1", keyPattern: "{ email: 1 }" }]);
+    expect(mongoListIndexSpecs).toHaveBeenCalledTimes(1);
+
+    expect(store.invalidateCompletionTableCache("mongo-1", "app", "users")).toBeGreaterThan(0);
+    await store.listMongoCompletionIndexes("mongo-1", "app", "users");
+    expect(mongoListIndexSpecs).toHaveBeenCalledTimes(2);
+
+    store.invalidateCompletionCache("mongo-1", "app");
+    await store.listMongoCompletionIndexes("mongo-1", "app", "users");
+    expect(mongoListIndexSpecs).toHaveBeenCalledTimes(3);
   });
 
   it("does not let an invalidated column request overwrite fresh metadata", async () => {

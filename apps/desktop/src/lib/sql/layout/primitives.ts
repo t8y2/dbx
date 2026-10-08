@@ -1,4 +1,4 @@
-import type { AstNode, ClauseNode, KeywordNode, LimitClauseNode, ParenthesisNode, SetOperationNode } from "sql-formatter/dist/esm/parser/ast.js";
+import type { AstNode, CaseExpressionNode, ClauseNode, KeywordNode, LimitClauseNode, ParenthesisNode, SetOperationNode } from "sql-formatter/dist/esm/parser/ast.js";
 import type { SqlLayoutRenderers } from "./internals";
 
 /**
@@ -30,6 +30,13 @@ export interface SqlLayoutOptions {
    * wherever it fits, matching the element alignment rule.
    */
   logicalOperatorNewline: "before" | "after" | "none";
+  /**
+   * Where commas are placed in multiline item lists.
+   *
+   * `after` places commas at the end of the line (trailing comma);
+   * `before` places commas at the start of continuation lines (leading comma).
+   */
+  commaPosition: "after" | "before";
   /** Blank lines left between two statements. */
   linesBetweenQueries: number;
   /** Whether indentation is written with tab characters. */
@@ -242,6 +249,79 @@ export function keywordText(text: string, ctx: SqlLayoutContext): string {
   }
 }
 
+/** Whether an AST value contains comments that must retain their own lines. */
+function containsComments(value: unknown, seen = new Set<object>()): boolean {
+  if (!value || typeof value !== "object") return false;
+  const object = value as object;
+  if (seen.has(object)) return false;
+  seen.add(object);
+
+  const record = value as Record<string, unknown>;
+  if (record.type === "line_comment" || record.type === "block_comment" || record.type === "disable_comment") return true;
+  if (Array.isArray(record.leadingComments) && record.leadingComments.length > 0) return true;
+  if (Array.isArray(record.trailingComments) && record.trailingComments.length > 0) return true;
+
+  return Object.entries(record).some(([key, child]) => key !== "leadingComments" && key !== "trailingComments" && containsComments(child, seen));
+}
+
+/**
+ * Renders a CASE expression as one expression when every branch fits. The
+ * regular sql-formatter inline renderer deliberately expands CASE branches;
+ * keeping the expression together makes a CASE projection obey the same
+ * one-field-per-line rule as every other SELECT item.
+ */
+function renderCompactCaseExpression(ctx: SqlLayoutContext, node: CaseExpressionNode, width: number): string | null {
+  if (containsComments(node)) return null;
+
+  const parts: string[] = [keywordText(node.caseKw.text, ctx)];
+  const append = (text: string | null): boolean => {
+    if (!text) return false;
+    parts.push(text);
+    return parts.join(" ").length <= width;
+  };
+
+  if (node.expr.length > 0 && !append(renderInline(collapsedContext(ctx), node.expr, width))) return null;
+
+  for (const clause of node.clauses) {
+    if (clause.type === "case_when") {
+      if (!append(keywordText(clause.whenKw.text, ctx))) return null;
+      if (!append(renderInline(collapsedContext(ctx), clause.condition, width))) return null;
+      if (!append(keywordText(clause.thenKw.text, ctx))) return null;
+      if (!append(renderInline(collapsedContext(ctx), clause.result, width))) return null;
+    } else {
+      if (!append(keywordText(clause.elseKw.text, ctx))) return null;
+      if (!append(renderInline(collapsedContext(ctx), clause.result, width))) return null;
+    }
+  }
+
+  if (!append(keywordText(node.endKw.text, ctx))) return null;
+  return parts.join(" ");
+}
+
+/** Keeps CASE expressions inside functions/parentheses compact as well. */
+function compactNestedCases(ctx: SqlLayoutContext, node: AstNode, width: number): AstNode {
+  switch (node.type) {
+    case "case_expression": {
+      const text = renderCompactCaseExpression(ctx, node, width);
+      // This already-formatted expression is opaque to the upstream renderer;
+      // the original AST remains available for the multiline fallback.
+      return text ? ({ type: "literal", text } as AstNode) : node;
+    }
+    case "parenthesis":
+      return { ...node, children: node.children.map((child) => compactNestedCases(ctx, child, width)) };
+    case "function_call":
+    case "parameterized_data_type":
+    case "array_subscript":
+      return { ...node, parenthesis: compactNestedCases(ctx, node.parenthesis, width) as ParenthesisNode };
+    case "property_access":
+      return { ...node, object: compactNestedCases(ctx, node.object, width) };
+    case "between_predicate":
+      return { ...node, expr1: node.expr1.map((child) => compactNestedCases(ctx, child, width)), expr2: node.expr2.map((child) => compactNestedCases(ctx, child, width)) };
+    default:
+      return node;
+  }
+}
+
 export function splitByComma(children: AstNode[]): AstNode[][] {
   const groups: AstNode[][] = [];
   let current: AstNode[] = [];
@@ -255,6 +335,11 @@ export function splitByComma(children: AstNode[]): AstNode[][] {
   }
   groups.push(current);
   return groups;
+}
+
+/** Whether a clause name is SELECT, including modifiers such as DISTINCT or ALL. */
+export function isProjectionClauseName(name: string): boolean {
+  return /^SELECT(?:\s|$)/i.test(name.trim());
 }
 
 /**
@@ -343,7 +428,27 @@ export function renderInline(ctx: SqlLayoutContext, nodes: AstNode[], width: num
     if (group) return group;
   }
 
-  const direct = ctx.renderers.inline(nodes, width);
+  const caseAt = nodes.findIndex((node) => node.type === "case_expression");
+  if (caseAt >= 0) {
+    const prefix = caseAt === 0 ? "" : renderInline(collapsedContext(ctx), nodes.slice(0, caseAt), width);
+    if (prefix === null) return null;
+    const caseText = renderCompactCaseExpression(ctx, nodes[caseAt] as CaseExpressionNode, width - prefix.length - (prefix ? 1 : 0));
+    if (!caseText) return null;
+
+    let text = prefix ? `${prefix}${separatorBefore(nodes[caseAt], ctx)}${caseText}` : caseText;
+    const tailNodes = nodes.slice(caseAt + 1);
+    if (tailNodes.length > 0) {
+      const tail = renderInline(collapsedContext(ctx), tailNodes, width - text.length - 1);
+      if (!tail) return null;
+      text += `${separatorBefore(tailNodes[0], ctx)}${tail}`;
+    }
+    return text.length <= width ? text : null;
+  }
+
+  const direct = ctx.renderers.inline(
+    nodes.map((node) => compactNestedCases(ctx, node, width)),
+    width,
+  );
   if (direct) return direct;
 
   const joinsOperators = ctx.joinLogicalOperators ?? ctx.options.logicalOperatorNewline === "none";

@@ -202,12 +202,12 @@ async function mountDialog(
   await flushAsyncUpdates();
 }
 
-async function selectWorkbook() {
+async function selectWorkbook(fileName = "rows.xlsx") {
   const fileInput = document.body.querySelector<HTMLInputElement>('input[type="file"]');
   expect(fileInput).toBeTruthy();
   Object.defineProperty(fileInput, "files", {
     configurable: true,
-    value: [new File(["test workbook"], "rows.xlsx", { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" })],
+    value: [new File(["test workbook"], fileName)],
   });
   fileInput?.dispatchEvent(new Event("change", { bubbles: true }));
   await flushAsyncUpdates();
@@ -258,6 +258,45 @@ afterEach(() => {
 });
 
 describe("TableImportDialog existing targets", () => {
+  it.each(["rows.csv", "rows.tsv", "rows.txt", "rows.xlsx"])("maps headerless %s by ordinal position and imports a manual adjustment", async (fileName) => {
+    i18n.global.locale.value = "en";
+    await mountDialog({ prefillTable: "existing_target" });
+    await selectWorkbook(fileName);
+
+    mocks.previewTableImportFile.mockResolvedValueOnce({
+      fileName,
+      filePath: `/tmp/${fileName}`,
+      fileType: fileName.endsWith("xlsx") ? "excel" : "csv",
+      sizeBytes: 24,
+      columns: ["column_1", "column_2", "column_3"],
+      rows: [[1, "Alice", "extra"]],
+      totalRows: 1,
+      sourceFingerprint: "headerless",
+    });
+    const titleInput = [...document.body.querySelectorAll<HTMLInputElement>('input[type="number"]')].find((input) => input.parentElement?.textContent?.includes("Title row"));
+    expect(titleInput).toBeTruthy();
+    titleInput!.value = "0";
+    titleInput!.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.waitFor(() => expect(mocks.previewTableImportFile.mock.calls.at(-1)?.[1]).toMatchObject({ parseOptions: { titleRow: 0 } }));
+    await flushAsyncUpdates();
+    buttonContaining("Next")?.click();
+    await flushAsyncUpdates();
+    const mappings = [...document.body.querySelectorAll<HTMLSelectElement>("select")];
+    expect(mappings.map((select) => select.value)).toEqual(["id", "name", "__skip__"]);
+
+    mappings[1]!.value = "__skip__";
+    mappings[1]!.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushAsyncUpdates();
+    buttonContaining("Next")?.click();
+    await flushAsyncUpdates();
+    buttonContaining("Next")?.click();
+    await flushAsyncUpdates();
+    buttonContaining("Start Import")?.click();
+    await flushAsyncUpdates();
+    expect(mocks.importTableFile).toHaveBeenCalledTimes(1);
+    expect(mocks.importTableFile.mock.calls[0]![0]).toMatchObject({ parseOptions: { titleRow: 0 }, mappings: [{ sourceColumn: "column_1", targetColumn: "id" }] });
+  });
+
   it("lets a database-level import choose an existing table and loads its columns", async () => {
     i18n.global.locale.value = "en";
     await mountDialog();

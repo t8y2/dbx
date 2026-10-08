@@ -4,6 +4,7 @@ import { createApp, defineComponent, h, nextTick, type App, type Component } fro
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig } from "@/types/database";
 import { PG_PROCESS_LIST_SQL } from "@/lib/database/postgresProcessList";
+import { XUGU_OWN_SESSION_SQL, XUGU_TRANSACTION_LIST_SQL } from "@/lib/database/xuguProcessList";
 
 const mocks = vi.hoisted(() => ({
   ensureConnected: vi.fn(),
@@ -120,6 +121,27 @@ const postgresConnection: ConnectionConfig = {
   password: "",
 };
 
+const xuguConnection: ConnectionConfig = {
+  id: "xugu-1",
+  name: "Xugu",
+  db_type: "xugu",
+  database: "SHOP_DEMO",
+  host: "localhost",
+  port: 5138,
+  username: "SYSDBA",
+  password: "",
+};
+
+function xuguTransactionResult() {
+  return {
+    columns: ["NODE_ID", "TRANSACTION_ID", "SESSION_ID", "USER_NAME", "DB_NAME", "CLIENT_IP", "START_TIME"],
+    rows: [
+      [1, "100", 5, "SYSDBA", "SYSTEM", "127.0.0.1", "2026-09-30 10:00:00"],
+      [2, "9007199254740993", 7, "APP_TEST", "SHOP_DEMO", "10.0.0.7", "2026-09-30 09:00:00"],
+    ],
+  };
+}
+
 function mysqlListResult() {
   return {
     columns: ["Id", "User", "Host", "db", "Command", "Time", "State", "Info"],
@@ -153,6 +175,8 @@ beforeEach(() => {
     if (sql === "SHOW FULL PROCESSLIST") return mysqlListResult();
     if (sql === "SELECT pg_backend_pid()") return { columns: ["pg_backend_pid"], rows: [[5]] };
     if (sql === PG_PROCESS_LIST_SQL) return postgresListResult();
+    if (sql === XUGU_OWN_SESSION_SQL) return { columns: ["NODEID", "SESSION_ID"], rows: [[1, 5]] };
+    if (sql === XUGU_TRANSACTION_LIST_SQL) return xuguTransactionResult();
     return { columns: [], rows: [] };
   });
   mocks.executeMulti.mockReset().mockResolvedValue([{ columns: [], rows: [] }]);
@@ -201,6 +225,13 @@ async function selectSessions(...ids: number[]) {
     sessionCheckbox(id)?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await nextTick();
   }
+}
+
+async function mountXuguPanel() {
+  app = createApp(ProcessListPanel, { connection: xuguConnection });
+  app.mount(root!);
+  await vi.waitFor(() => expect(root?.textContent).toContain("9007199254740993"));
+  await nextTick();
 }
 
 describe("ProcessListPanel batch terminate", () => {
@@ -319,5 +350,97 @@ describe("ProcessListPanel batch terminate", () => {
     expect(mocks.executeMulti).toHaveBeenNthCalledWith(1, "pg-1", "", "SELECT pg_terminate_backend(21)", undefined, undefined, { maxRows: 1 });
     expect(mocks.executeMulti).toHaveBeenNthCalledWith(2, "pg-1", "", "SELECT pg_terminate_backend(22)", undefined, undefined, { maxRows: 1 });
     await vi.waitFor(() => expect(root?.textContent).toContain("processList.batchTerminateSummary:2,0"));
+  });
+
+  it("uses transaction labels and SYSTEM context without changing session controls", async () => {
+    await mountXuguPanel();
+    expect(root?.textContent).toContain("processList.transactionTitle");
+    expect(root?.textContent).toContain("processList.transactionScope");
+    expect(root?.textContent).toContain("processList.transactionCount:2");
+    expect(root?.textContent).not.toContain("processList.terminate");
+    expect(root?.querySelector("input[type=checkbox][aria-label^='processList.selectSession']")).toBeNull();
+    expect(mocks.executeQuery).toHaveBeenCalledWith("xugu-1", "SYSTEM", XUGU_OWN_SESSION_SQL, undefined, undefined, { maxRows: 1 });
+    expect(mocks.executeQuery).toHaveBeenCalledWith("xugu-1", "SYSTEM", XUGU_TRANSACTION_LIST_SQL, undefined, undefined, { maxRows: 5000 });
+    const killButtons = gridButtons().filter((button) => button.textContent?.trim() === "processList.transactionKill");
+    expect(killButtons).toHaveLength(2);
+    expect(killButtons[0]?.disabled).toBe(true);
+    expect(killButtons[1]?.disabled).toBe(false);
+
+    killButtons[1]?.click();
+    await nextTick();
+    expect(root?.textContent).toContain("processList.transactionKillConfirm:9007199254740993,2,APP_TEST,SHOP_DEMO");
+    findDialogButton("processList.transactionKill")?.click();
+    await vi.waitFor(() => expect(mocks.executeMulti).toHaveBeenCalledWith("xugu-1", "SYSTEM", "CALL DBMS_DBA.KILL_TRANS(2, 9007199254740993)", undefined, undefined, { maxRows: 1 }));
+    await vi.waitFor(() => expect(mocks.toast).toHaveBeenCalledWith("processList.transactionKillSuccess:9007199254740993", 2500));
+  });
+
+  it("does not query or offer termination if an old Xugu tab belongs to a non-SYSDBA login", async () => {
+    app = createApp(ProcessListPanel, { connection: { ...xuguConnection, username: "DBX_7102_DBA" } });
+    app.mount(root!);
+    await nextTick();
+    expect(root?.textContent).toContain("processList.transactionRequiresSysdba");
+    expect(root?.textContent).not.toContain("processList.transactionCount");
+    expect(gridButtons().filter((button) => button.textContent?.includes("processList.transactionKill"))).toHaveLength(0);
+    expect(mocks.ensureConnected).not.toHaveBeenCalled();
+    expect(mocks.executeQuery).not.toHaveBeenCalled();
+  });
+
+  it("keeps Xugu termination disabled when its own session cannot be identified", async () => {
+    mocks.executeQuery.mockImplementation(async (_connectionId: string, _database: string, sql: string) => {
+      if (sql === XUGU_OWN_SESSION_SQL) throw new Error("session unavailable");
+      if (sql === XUGU_TRANSACTION_LIST_SQL) return xuguTransactionResult();
+      return { columns: [], rows: [] };
+    });
+    await mountXuguPanel();
+    expect(root?.textContent).toContain("processList.transactionNeedsSession");
+    expect(
+      gridButtons()
+        .filter((button) => button.textContent?.trim() === "processList.transactionKill")
+        .every((button) => button.disabled),
+    ).toBe(true);
+  });
+
+  it("rechecks the Xugu session before killing when the connection changed during confirmation", async () => {
+    await mountXuguPanel();
+    gridButtons()
+      .filter((button) => button.textContent?.trim() === "processList.transactionKill")[1]
+      ?.click();
+    await nextTick();
+    mocks.executeQuery.mockImplementation(async (_connectionId: string, _database: string, sql: string) => {
+      if (sql === XUGU_OWN_SESSION_SQL) return { columns: ["NODEID", "SESSION_ID"], rows: [[2, 7]] };
+      if (sql === XUGU_TRANSACTION_LIST_SQL) return xuguTransactionResult();
+      return { columns: [], rows: [] };
+    });
+    findDialogButton("processList.transactionKill")?.click();
+    await vi.waitFor(() => expect(mocks.toast).toHaveBeenCalledWith("processList.transactionKillFailed:processList.transactionCannotKillSelf", 5000));
+    expect(mocks.executeMulti).not.toHaveBeenCalled();
+  });
+
+  it("explains failed Xugu SYSDBA reads without exposing a termination action", async () => {
+    mocks.executeQuery.mockImplementation(async (_connectionId: string, _database: string, sql: string) => {
+      if (sql === XUGU_OWN_SESSION_SQL) return { columns: ["NODEID", "SESSION_ID"], rows: [[1, 5]] };
+      if (sql === XUGU_TRANSACTION_LIST_SQL) throw new Error("E18012: permission denied");
+      return { columns: [], rows: [] };
+    });
+    app = createApp(ProcessListPanel, { connection: xuguConnection });
+    app.mount(root!);
+    await vi.waitFor(() => expect(root?.textContent).toContain("processList.transactionLoadFailed:E18012: permission denied"));
+    expect(gridButtons().filter((button) => button.textContent?.trim() === "processList.transactionKill")).toHaveLength(0);
+    expect(root?.textContent).not.toContain("processList.transactionEmpty");
+    expect(root?.textContent).not.toContain("processList.transactionCount:0");
+  });
+
+  it("clears stale Xugu kill targets after a connection failure on refresh", async () => {
+    await mountXuguPanel();
+    expect(gridButtons().filter((button) => button.textContent?.trim() === "processList.transactionKill")).toHaveLength(2);
+    mocks.executeQuery.mockImplementation(async (_connectionId: string, _database: string, sql: string) => {
+      if (sql === XUGU_TRANSACTION_LIST_SQL) throw new Error("connection reset by peer");
+      return { columns: ["NODEID", "SESSION_ID"], rows: [[1, 5]] };
+    });
+    findGridButton("grid.refresh")?.click();
+    await vi.waitFor(() => expect(root?.textContent).toContain("processList.transactionLoadFailed:connection reset by peer"));
+    expect(gridButtons().filter((button) => button.textContent?.trim() === "processList.transactionKill")).toHaveLength(0);
+    expect(root?.textContent).not.toContain("processList.transactionEmpty");
+    expect(root?.textContent).not.toContain("processList.transactionCount:0");
   });
 });

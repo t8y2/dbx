@@ -83,6 +83,7 @@ enum EstimatedPlanSqlGeneration {
     Postgres,
     Mysql,
     Plain,
+    Xugu,
     Oracle,
     SqlServer,
     Json,
@@ -129,6 +130,14 @@ pub fn build_explain_sql(options: ExplainSqlOptions) -> ExplainSqlBuildResult {
     if !is_safe_explain_sql_for_database(&source, options.database_type) {
         return explain_err("unsafe");
     }
+    if options.database_type == Some(DatabaseType::Xugu) {
+        // Xugu's documented SELECT forms; do not inherit PG-only TABLE/VALUES
+        // shortcuts or permit DML/Autotrace in the first visual-plan implementation.
+        let leading = strip_sql_comments(&source).trim_start().to_lowercase();
+        if !["select", "with"].iter().any(|keyword| starts_with_explain_keyword_boundary(&leading, keyword)) {
+            return explain_err("unsafe");
+        }
+    }
     if options.analyze == Some(true)
         && options.database_type.is_some_and(|database_type| {
             matches!(database_type, DatabaseType::Postgres | DatabaseType::SqlServer)
@@ -149,6 +158,7 @@ pub fn build_explain_sql(options: ExplainSqlOptions) -> ExplainSqlBuildResult {
         }
         EstimatedPlanSqlGeneration::Postgres => format!("EXPLAIN (FORMAT JSON) {source}"),
         EstimatedPlanSqlGeneration::Plain => format!("EXPLAIN {source}"),
+        EstimatedPlanSqlGeneration::Xugu => format!("EXPLAIN VERBOSE {source}"),
         EstimatedPlanSqlGeneration::Oracle => format!("EXPLAIN PLAN FOR {source}"),
         // STATISTICS XML returns the same ShowPlanXML document plus per-operator
         // runtime counters, at the price of actually running the statement.
@@ -192,11 +202,12 @@ pub fn build_dropped_file_preview_sql(options: DroppedFilePreviewSqlOptions) -> 
 pub fn estimated_plan_strategy(database_type: Option<DatabaseType>) -> Option<EstimatedPlanStrategy> {
     use EstimatedPlanAcquisition::{DriverNative, GeneratedSql, SqlServerShowPlanSession};
     use EstimatedPlanFormat::{Json, Text, Xml};
-    use EstimatedPlanSqlGeneration::{Mysql, Oracle, Plain, Postgres, SqlServer};
+    use EstimatedPlanSqlGeneration::{Mysql, Oracle, Plain, Postgres, SqlServer, Xugu};
 
     let strategy = match database_type? {
         DatabaseType::Mysql => EstimatedPlanStrategy { sql_generation: Mysql, acquisition: GeneratedSql, format: Json },
         DatabaseType::Doris => EstimatedPlanStrategy { sql_generation: Plain, acquisition: GeneratedSql, format: Text },
+        DatabaseType::Xugu => EstimatedPlanStrategy { sql_generation: Xugu, acquisition: GeneratedSql, format: Text },
         DatabaseType::Postgres => {
             EstimatedPlanStrategy { sql_generation: Postgres, acquisition: GeneratedSql, format: Json }
         }
@@ -260,6 +271,7 @@ pub fn supports_sql_query(database_type: DatabaseType) -> bool {
             | DatabaseType::Elasticsearch
             | DatabaseType::Easysearch
             | DatabaseType::Solr
+            | DatabaseType::CouchDb
             | DatabaseType::Qdrant
             | DatabaseType::Milvus
             | DatabaseType::Weaviate
@@ -518,6 +530,9 @@ pub enum SearchEngineQueryRisk {
 }
 
 pub fn classify_search_engine_query_risk(source: &str, database_type: DatabaseType) -> Option<SearchEngineQueryRisk> {
+    if database_type == DatabaseType::CouchDb {
+        return classify_couchdb_query_risk(source);
+    }
     if database_type == DatabaseType::Solr {
         return classify_solr_query_risk(source);
     }
@@ -565,6 +580,43 @@ pub fn classify_search_engine_query_risk(source: &str, database_type: DatabaseTy
         "PUT" if has_document_id("_doc") || has_document_id("_create") => Some(SearchEngineQueryRisk::Write),
         "DELETE" if has_document_id("_doc") => Some(SearchEngineQueryRisk::Write),
         "POST" | "PUT" | "PATCH" | "DELETE" => Some(SearchEngineQueryRisk::Dangerous),
+        _ => None,
+    }
+}
+
+fn classify_couchdb_query_risk(source: &str) -> Option<SearchEngineQueryRisk> {
+    let source = strip_leading_search_engine_comments(source);
+    let request_line = source.lines().next()?.trim();
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next()?.to_ascii_uppercase();
+    let raw_path = parts.next()?;
+    let path = raw_path.split('?').next().unwrap_or(raw_path).trim_end_matches('/');
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+
+    match method.as_str() {
+        "GET" | "HEAD" | "OPTIONS" => Some(SearchEngineQueryRisk::ReadOnly),
+        "POST"
+            if segments.last().is_some_and(|s| {
+                s.eq_ignore_ascii_case("_find")
+                    || s.eq_ignore_ascii_case("_explain")
+                    || s.eq_ignore_ascii_case("_all_docs")
+                    || s.eq_ignore_ascii_case("_bulk_get")
+            }) =>
+        {
+            Some(SearchEngineQueryRisk::ReadOnly)
+        }
+        // 视图查询（POST /{db}/_design/{doc}/_view/{name} 带 keys 等参数）只读。
+        "POST"
+            if segments
+                .windows(3)
+                .any(|w| w[0].eq_ignore_ascii_case("_design") && w[2].eq_ignore_ascii_case("_view")) =>
+        {
+            Some(SearchEngineQueryRisk::ReadOnly)
+        }
+        "DELETE" if segments.len() <= 1 => Some(SearchEngineQueryRisk::Dangerous),
+        "DELETE" => Some(SearchEngineQueryRisk::Write),
+        "PUT" if segments.len() <= 1 => Some(SearchEngineQueryRisk::Dangerous),
+        "PUT" | "POST" => Some(SearchEngineQueryRisk::Write),
         _ => None,
     }
 }
@@ -1147,7 +1199,12 @@ fn strip_sql_comments_and_literals_with_metadata(sql: &str, detect_mysql_executa
     let mut in_single_quote = false;
     let mut in_double_quote = false;
     let mut in_backtick_quote = false;
+    // The closing `$$` / `$tag$` of the dollar-quoted literal being skipped.
+    let mut in_dollar_quote: Option<String> = None;
     let mut has_mysql_executable_comment = false;
+    // Last character emitted from code position, used to keep a `$` that is
+    // still part of an identifier (`foo$tag$bar`) from opening a literal.
+    let mut previous_code_char: Option<char> = None;
 
     while let Some(ch) = chars.next() {
         if in_line_comment {
@@ -1203,6 +1260,30 @@ fn strip_sql_comments_and_literals_with_metadata(sql: &str, detect_mysql_executa
             continue;
         }
 
+        if let Some(delimiter) = &in_dollar_quote {
+            if ch == '$' {
+                let mut probe = chars.clone();
+                let mut matched = true;
+                for expected in delimiter.chars().skip(1) {
+                    match probe.next() {
+                        Some(actual) if actual == expected => {}
+                        _ => {
+                            matched = false;
+                            break;
+                        }
+                    }
+                }
+                if matched {
+                    for _ in delimiter.chars().skip(1) {
+                        chars.next();
+                    }
+                    in_dollar_quote = None;
+                }
+            }
+            output.push(' ');
+            continue;
+        }
+
         if ch == '-' && chars.peek() == Some(&'-') {
             chars.next();
             in_line_comment = true;
@@ -1223,20 +1304,35 @@ fn strip_sql_comments_and_literals_with_metadata(sql: &str, detect_mysql_executa
         if ch == '\'' {
             in_single_quote = true;
             output.push(' ');
+            previous_code_char = Some(' ');
             continue;
         }
         if ch == '"' {
             in_double_quote = true;
             output.push(' ');
+            previous_code_char = Some(' ');
             continue;
         }
         if ch == '`' {
             in_backtick_quote = true;
             output.push(' ');
+            previous_code_char = Some(' ');
             continue;
+        }
+        if ch == '$' && !previous_code_char.is_some_and(is_identifier_char) {
+            if let Some(delimiter) = dollar_quote_delimiter(&chars) {
+                for _ in delimiter.chars().skip(1) {
+                    chars.next();
+                }
+                in_dollar_quote = Some(delimiter);
+                output.push(' ');
+                previous_code_char = Some(' ');
+                continue;
+            }
         }
 
         output.push(ch);
+        previous_code_char = Some(ch);
     }
 
     (output, has_mysql_executable_comment)
@@ -1251,6 +1347,58 @@ fn is_mysql_executable_comment_start(chars: &std::iter::Peekable<std::str::Chars
         Some('M') => marker.next() == Some('!'),
         _ => false,
     }
+}
+
+fn is_identifier_char(character: char) -> bool {
+    character.is_ascii_alphanumeric() || character == '_' || character == '$'
+}
+
+/// Read a PostgreSQL dollar-quote delimiter — `$$` or `$tag$` — from the
+/// characters that follow an opening `$`, and return it only when the literal is
+/// actually closed later in the statement.
+///
+/// The tag rules mirror PostgreSQL's own lexer (empty, or an identifier that
+/// does not start with a digit) and sqlparser's dollar-quote tokenizer, so the
+/// keyword scan agrees with the AST classifier in `sql_risk` instead of reading
+/// the body of a literal as SQL. Requiring a matching closing delimiter keeps an
+/// unterminated `$$` — which the database rejects anyway — visible to the
+/// keyword scan, so malformed input still fails closed.
+fn dollar_quote_delimiter(chars: &std::iter::Peekable<std::str::Chars<'_>>) -> Option<String> {
+    let mut probe = chars.clone();
+    let delimiter = if probe.peek() == Some(&'$') {
+        "$$".to_string()
+    } else {
+        let mut tag = String::new();
+        while probe.peek().is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == '_') {
+            tag.push(*probe.peek()?);
+            probe.next();
+        }
+        if tag.is_empty() || tag.starts_with(|ch: char| ch.is_ascii_digit()) || probe.peek() != Some(&'$') {
+            return None;
+        }
+        format!("${tag}$")
+    };
+    for _ in delimiter.chars().skip(1) {
+        probe.next();
+    }
+    dollar_quote_is_closed(&mut probe, &delimiter).then_some(delimiter)
+}
+
+/// True when `delimiter` occurs again in `chars`, which is positioned just after
+/// an opening delimiter.
+fn dollar_quote_is_closed(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, delimiter: &str) -> bool {
+    let delimiter: Vec<char> = delimiter.chars().collect();
+    let mut window: Vec<char> = Vec::with_capacity(delimiter.len());
+    for character in chars.by_ref() {
+        window.push(character);
+        if window.len() > delimiter.len() {
+            window.remove(0);
+        }
+        if window == delimiter {
+            return true;
+        }
+    }
+    false
 }
 
 fn read_mysql_executable_comment_body<I>(chars: &mut std::iter::Peekable<I>) -> Option<String>
@@ -1375,6 +1523,59 @@ mod tests {
         assert!(!is_oracle_proven_read_only_statement("SELECT * FROM t WHERE a IN (1, 2)"));
         assert!(!is_oracle_proven_read_only_statement("SELECT * FROM t WHERE b = 'x' AND c IN (3)"));
         assert!(!is_oracle_proven_read_only_statement("SELECT 1 UNION SELECT 2"));
+    }
+
+    #[test]
+    fn builds_xugu_verbose_text_explain_without_executing_the_query() {
+        for sql in [
+            "SELECT * FROM \"APP_TEST\".\"ORDERS\" WHERE id = 1",
+            "WITH q AS (SELECT 1 FROM DUAL) SELECT * FROM q",
+            "/* plan */ SELECT 1 FROM DUAL",
+            "SELECT 'DELETE; DROP TABLE x' FROM DUAL",
+        ] {
+            for analyze in [None, Some(false), Some(true)] {
+                let result = build_explain_sql(ExplainSqlOptions {
+                    database_type: Some(DatabaseType::Xugu),
+                    format: Some(ExplainFormat::Json),
+                    analyze,
+                    sql: format!(" {sql}; "),
+                });
+                assert_eq!(result.sql.as_deref(), Some(format!("EXPLAIN VERBOSE {sql}").as_str()));
+                assert!(result.ok);
+            }
+        }
+        assert_eq!(estimated_plan_format(Some(DatabaseType::Xugu)), EstimatedPlanFormat::Text);
+        assert_eq!(
+            estimated_plan_strategy(Some(DatabaseType::Xugu)).unwrap().acquisition(),
+            EstimatedPlanAcquisition::GeneratedSql
+        );
+    }
+
+    #[test]
+    fn xugu_explain_rejects_writes_multiple_statements_and_unsupported_forms() {
+        for sql in [
+            "DELETE FROM t",
+            "UPDATE t SET a = 1",
+            "INSERT INTO t VALUES (1)",
+            "MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET t.a = 1",
+            "SELECT 1; DROP TABLE t",
+            "WITH q AS (DELETE FROM t RETURNING *) SELECT * FROM q",
+            "WITH FUNCTION f RETURN INT IS BEGIN RETURN 1; END; SELECT f() FROM DUAL",
+            "EXPLAIN SELECT 1",
+            "TABLE t",
+            "VALUES (1)",
+            "SELECTED",
+            "",
+        ] {
+            let result = build_explain_sql(ExplainSqlOptions {
+                database_type: Some(DatabaseType::Xugu),
+                format: None,
+                analyze: None,
+                sql: sql.to_string(),
+            });
+            assert!(!result.ok, "unsafe Xugu explain source: {sql}");
+            assert!(result.sql.is_none());
+        }
     }
 
     #[test]
@@ -1708,6 +1909,7 @@ mod tests {
         let cases = [
             (DatabaseType::Mysql, "EXPLAIN FORMAT=JSON SELECT 1", Json, GeneratedSql),
             (DatabaseType::Doris, "EXPLAIN SELECT 1", Text, GeneratedSql),
+            (DatabaseType::Xugu, "EXPLAIN VERBOSE SELECT 1", Text, GeneratedSql),
             (DatabaseType::Postgres, "EXPLAIN (FORMAT JSON) SELECT 1", Json, GeneratedSql),
             (DatabaseType::Questdb, "EXPLAIN SELECT 1", Text, GeneratedSql),
             (DatabaseType::Dameng, "EXPLAIN SELECT 1", Text, DriverNative),
@@ -1933,6 +2135,51 @@ mod tests {
             }),
             None
         );
+    }
+
+    #[test]
+    fn strip_sql_comments_and_literals_dollar_quoted() {
+        // #9866: the body of a dollar-quoted literal is data, not SQL.
+        assert_eq!(strip_sql_comments_and_literals("SELECT $$hello$$ FROM t"), "SELECT         FROM t");
+        assert_eq!(strip_sql_comments_and_literals("SELECT $tag$hello$tag$ FROM t"), "SELECT         FROM t");
+        // A literal body may contain quotes, comments and its own `$` without ending early.
+        assert_eq!(
+            strip_sql_comments_and_literals("SELECT $f$ a 'b' /* c */ $$ $f$ FROM t"),
+            "SELECT                      FROM t"
+        );
+        // `$1` is a placeholder, not a literal opener.
+        assert_eq!(strip_sql_comments_and_literals("SELECT $1, $2 FROM t"), "SELECT $1, $2 FROM t");
+        // An unterminated `$$` is not a literal, so the text stays visible to the keyword scan.
+        assert_eq!(strip_sql_comments_and_literals("SELECT $$hello FROM t"), "SELECT $$hello FROM t");
+        // `$` continues an identifier, so `foo$tag$bar` is one word and not a literal.
+        assert_eq!(strip_sql_comments_and_literals("SELECT foo$tag$bar FROM t"), "SELECT foo$tag$bar FROM t");
+    }
+
+    #[test]
+    fn contains_dangerous_sql_keyword_ignores_dollar_quoted_literals() {
+        assert!(!contains_dangerous_sql_keyword("SELECT $$INSERT INTO users VALUES (1)$$ FROM t"));
+        assert!(!contains_dangerous_sql_keyword("SELECT $body$DROP TABLE users$body$ FROM t"));
+        assert!(!contains_dangerous_sql_keyword("SELECT $$it''s a DELETE$$ FROM t"));
+        // Nested dollar quotes in a tagged literal must not close it early.
+        assert!(!contains_dangerous_sql_keyword("SELECT $outer$$DELETE FROM t$$$outer$ FROM t"));
+        // An unterminated literal is malformed input and still fails closed.
+        assert!(contains_dangerous_sql_keyword("SELECT $$DELETE FROM users"));
+    }
+
+    #[test]
+    fn is_write_sql_dollar_quoted_literals_stay_read_only() {
+        for database_type in [DatabaseType::Postgres, DatabaseType::Mysql, DatabaseType::SqlServer] {
+            assert!(
+                !is_write_sql_for_database("SELECT $$INSERT INTO t VALUES(1)$$ FROM t", database_type),
+                "dollar-quoted literal must stay read-only for {database_type:?}"
+            );
+        }
+        assert!(!is_write_sql("SELECT $$DROP TABLE users$$ FROM t"));
+        // `SELECT ... INTO` still creates a table, so the write must survive.
+        assert!(is_write_sql_for_database("SELECT $$x$$ INTO backup FROM t", DatabaseType::Postgres));
+        assert!(is_write_sql_for_database("SELECT $$x$$ INTO backup FROM t", DatabaseType::SqlServer));
+        // A write after a literal is unaffected.
+        assert!(is_write_sql_for_database("SELECT $$x$$ FROM t; DELETE FROM t", DatabaseType::Postgres));
     }
 
     #[test]
@@ -2503,6 +2750,53 @@ mod tests {
         assert_eq!(
             classify_search_engine_query_risk("POST /admin/cores?action=CREATE&name=x", DatabaseType::Solr),
             Some(SearchEngineQueryRisk::Dangerous)
+        );
+
+        assert_eq!(
+            classify_search_engine_query_risk("GET /_all_dbs", DatabaseType::CouchDb),
+            Some(SearchEngineQueryRisk::ReadOnly)
+        );
+        assert_eq!(
+            classify_search_engine_query_risk("POST /mydb/_find\n{\"selector\":{}}", DatabaseType::CouchDb),
+            Some(SearchEngineQueryRisk::ReadOnly)
+        );
+        assert_eq!(
+            classify_search_engine_query_risk(
+                "POST /mydb/_bulk_get\n{\"docs\":[{\"id\":\"a\"}]}",
+                DatabaseType::CouchDb
+            ),
+            Some(SearchEngineQueryRisk::ReadOnly)
+        );
+        assert_eq!(
+            classify_search_engine_query_risk(
+                "POST /mydb/_design/users/_view/by_name\n{\"keys\":[\"a\"]}",
+                DatabaseType::CouchDb
+            ),
+            Some(SearchEngineQueryRisk::ReadOnly)
+        );
+        assert_eq!(
+            classify_search_engine_query_risk("POST /mydb/_design/users/_info", DatabaseType::CouchDb),
+            Some(SearchEngineQueryRisk::Write)
+        );
+        assert_eq!(
+            classify_search_engine_query_risk("POST /mydb\n{\"name\":\"doc\"}", DatabaseType::CouchDb),
+            Some(SearchEngineQueryRisk::Write)
+        );
+        assert_eq!(
+            classify_search_engine_query_risk("PUT /mydb/doc1\n{\"name\":\"doc\"}", DatabaseType::CouchDb),
+            Some(SearchEngineQueryRisk::Write)
+        );
+        assert_eq!(
+            classify_search_engine_query_risk("PUT /mydb", DatabaseType::CouchDb),
+            Some(SearchEngineQueryRisk::Dangerous)
+        );
+        assert_eq!(
+            classify_search_engine_query_risk("DELETE /mydb", DatabaseType::CouchDb),
+            Some(SearchEngineQueryRisk::Dangerous)
+        );
+        assert_eq!(
+            classify_search_engine_query_risk("DELETE /mydb/doc1", DatabaseType::CouchDb),
+            Some(SearchEngineQueryRisk::Write)
         );
         assert_eq!(
             classify_search_engine_query_risk(

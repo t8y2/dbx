@@ -123,13 +123,22 @@ describe("tableEditing", () => {
   });
 
   it("uses unique indexes as row identifiers when primary keys are absent", () => {
-    expect(editableRowIdentifierColumns("postgres", [column("email"), column("name")], [index(["email", "name"]), index(["email"])])).toEqual(["email"]);
-    expect(editableRowIdentifierColumns("postgres", [column("email"), column("name")], [index(["email"], true, "email IS NOT NULL")])).toEqual([]);
+    const columns = [column("email"), column("name")].map((value) => ({ ...value, is_nullable: false }));
+    expect(editableRowIdentifierColumns("postgres", columns, [index(["email", "name"]), index(["email"])])).toEqual(["email"]);
+    expect(editableRowIdentifierColumns("postgres", columns, [index(["email"], true, "email IS NOT NULL")])).toEqual([]);
     expect(editableRowIdentifierColumns("postgres", [column("id", true), column("email")], [index(["email"])])).toEqual(["id"]);
   });
 
+  it("rejects nullable, expression, and unresolved unique indexes as row identifiers", () => {
+    const columns = [column("email"), { ...column("tenant_id"), is_nullable: false }];
+
+    expect(editableRowIdentifierColumns("postgres", columns, [index(["email"])])).toEqual([]);
+    expect(editableRowIdentifierColumns("postgres", columns, [{ ...index(["tenant_id"]), key_is_expression: [true] }])).toEqual([]);
+    expect(editableRowIdentifierColumns("postgres", columns, [index(["missing"])])).toEqual([]);
+  });
+
   it.each(["oracle", "oceanbase-oracle"] as const)("prefers physical %s indexes over the ROWID fallback", (databaseType) => {
-    const columns = [column("OFFER_RELA_ID"), column("ORI_OFFER_ID")];
+    const columns = [column("OFFER_RELA_ID"), column("ORI_OFFER_ID")].map((value) => ({ ...value, is_nullable: false }));
     const primaryIndex = { ...index(["OFFER_RELA_ID"], false), is_primary: true };
 
     expect(editableRowIdentifierColumns(databaseType, columns, [index(["ORI_OFFER_ID"]), primaryIndex], "TABLE")).toEqual(["OFFER_RELA_ID"]);

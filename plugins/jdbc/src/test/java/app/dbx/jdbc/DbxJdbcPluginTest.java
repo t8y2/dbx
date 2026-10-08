@@ -2993,6 +2993,39 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void listSchemasDegradesToEmptyWhenDriverRejectsSchemaMetadata() throws Exception {
+        // #11127: jTDS against SQL Server 2000 throws AbstractMethodError (not a proper
+        // SQLException) from DatabaseMetaData.getSchemas(String, String) because its
+        // implementation predates that JDBC overload. Clicking a table/database in the
+        // sidebar must degrade gracefully instead of failing the whole connection.
+        for (Throwable failure : List.of(
+            new SQLFeatureNotSupportedException("schemas not supported"),
+            new UnsupportedOperationException("unsupported"),
+            new AbstractMethodError("unsupported")
+        )) {
+            String connection = """
+                { "connection_string": "jdbc:dbx-schema-metadata:%s" }
+                """.formatted(failure.getClass().getSimpleName());
+            Driver driver = testDriver("jdbc:dbx-schema-metadata:", schemaMetadataConnection(failure));
+            DriverManager.registerDriver(driver);
+            try {
+                JsonNode response = request("listSchemas", """
+                    {
+                      "connection": %s,
+                      "database": "public"
+                    }
+                    """.formatted(connection));
+
+                assertFalse(response.has("error"), failure.getClass().getSimpleName() + ": " + response);
+                assertEquals(true, response.path("result").isArray(), failure.getClass().getSimpleName() + ": " + response);
+                assertEquals(0, response.path("result").size(), failure.getClass().getSimpleName() + ": " + response);
+            } finally {
+                closeAndDeregister(connection, driver);
+            }
+        }
+    }
+
+    @Test
     void oracleListSchemasFallsBackToJdbcSchemasWhenAllUsersIsMissing() throws Exception {
         Method method = DbxJdbcPlugin.class.getDeclaredMethod("oracleListSchemas", Connection.class);
         method.setAccessible(true);
@@ -3951,6 +3984,41 @@ final class DbxJdbcPluginTest {
         );
     }
 
+    private static Connection schemaMetadataConnection(Throwable failure) {
+        ResultSet emptySchemas = (ResultSet) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { ResultSet.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "next" -> false;
+                case "close" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+        DatabaseMetaData metadata = (DatabaseMetaData) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { DatabaseMetaData.class },
+            (proxy, method, args) -> {
+                if ("getSchemas".equals(method.getName()) && args != null && args.length == 2) {
+                    throw failure;
+                }
+                if ("getSchemas".equals(method.getName())) {
+                    return emptySchemas;
+                }
+                return defaultValue(method.getReturnType());
+            }
+        );
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getMetaData" -> metadata;
+                case "isClosed" -> false;
+                case "close" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
     private static Connection transactionMetadataConnection(Throwable metadataFailure, boolean supportsTransactions) {
         boolean[] autoCommit = { true };
         DatabaseMetaData metadata = (DatabaseMetaData) Proxy.newProxyInstance(
@@ -4477,6 +4545,96 @@ final class DbxJdbcPluginTest {
         );
     }
 
+    private static final class SybaseViewSourceDriver implements Driver {
+        private final String url;
+        private final List<String> calls;
+        private final String[] fragments;
+
+        private SybaseViewSourceDriver(String url, List<String> calls, String... fragments) {
+            this.url = url;
+            this.calls = calls;
+            this.fragments = fragments;
+        }
+
+        @Override
+        public Connection connect(String candidateUrl, Properties info) {
+            return acceptsURL(candidateUrl) ? sybaseViewSourceConnection(calls, fragments) : null;
+        }
+
+        @Override
+        public boolean acceptsURL(String candidateUrl) {
+            return url.equals(candidateUrl);
+        }
+
+        @Override
+        public DriverPropertyInfo[] getPropertyInfo(String candidateUrl, Properties info) {
+            return new DriverPropertyInfo[0];
+        }
+
+        @Override
+        public int getMajorVersion() {
+            return 1;
+        }
+
+        @Override
+        public int getMinorVersion() {
+            return 0;
+        }
+
+        @Override
+        public boolean jdbcCompliant() {
+            return false;
+        }
+
+        @Override
+        public java.util.logging.Logger getParentLogger() {
+            return java.util.logging.Logger.getGlobal();
+        }
+    }
+
+    private static Connection sybaseViewSourceConnection(List<String> calls, String[] fragments) {
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "prepareStatement" -> {
+                    calls.add("sql:" + args[0]);
+                    ResultSet rows = rowsResultSet(
+                        new String[] { "text" },
+                        java.util.Arrays.stream(fragments)
+                            .map(fragment -> new Object[] { fragment })
+                            .toArray(Object[][]::new)
+                    );
+                    yield (PreparedStatement) Proxy.newProxyInstance(
+                        DbxJdbcPluginTest.class.getClassLoader(),
+                        new Class<?>[] { PreparedStatement.class },
+                        (statementProxy, statementMethod, statementArgs) -> switch (statementMethod.getName()) {
+                            case "setString" -> {
+                                calls.add("bind:" + statementArgs[0] + ":" + statementArgs[1]);
+                                yield null;
+                            }
+                            case "executeQuery" -> rows;
+                            case "close" -> null;
+                            default -> defaultValue(statementMethod.getReturnType());
+                        }
+                    );
+                }
+                case "setCatalog" -> {
+                    calls.add("catalog:" + args[0]);
+                    yield null;
+                }
+                case "setSchema" -> {
+                    calls.add("schema:" + args[0]);
+                    yield null;
+                }
+                case "getAutoCommit", "isValid" -> true;
+                case "isClosed" -> false;
+                case "close" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
     private static final class SybaseMetadataDriver implements Driver {
         private final List<String> calls;
 
@@ -4590,6 +4748,122 @@ final class DbxJdbcPluginTest {
 
     private static String metadataArgument(Object value) {
         return value == null ? "<null>" : String.valueOf(value);
+    }
+
+    private static final class RoutineColumnsDriver implements Driver {
+        private final String urlPrefix;
+        private final List<String> calls;
+        private final boolean unsupported;
+
+        private RoutineColumnsDriver(String urlPrefix, List<String> calls, boolean unsupported) {
+            this.urlPrefix = urlPrefix;
+            this.calls = calls;
+            this.unsupported = unsupported;
+        }
+
+        @Override
+        public Connection connect(String url, Properties info) {
+            return acceptsURL(url) ? routineColumnsConnection(calls, unsupported) : null;
+        }
+
+        @Override
+        public boolean acceptsURL(String url) {
+            return url != null && url.startsWith(urlPrefix);
+        }
+
+        @Override
+        public DriverPropertyInfo[] getPropertyInfo(String url, Properties info) {
+            return new DriverPropertyInfo[0];
+        }
+
+        @Override
+        public int getMajorVersion() {
+            return 1;
+        }
+
+        @Override
+        public int getMinorVersion() {
+            return 0;
+        }
+
+        @Override
+        public boolean jdbcCompliant() {
+            return false;
+        }
+
+        @Override
+        public java.util.logging.Logger getParentLogger() {
+            return java.util.logging.Logger.getGlobal();
+        }
+    }
+
+    private static Connection routineColumnsConnection(List<String> calls, boolean unsupported) {
+        DatabaseMetaData metadata = (DatabaseMetaData) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { DatabaseMetaData.class },
+            (proxy, method, args) -> {
+                if ("getSearchStringEscape".equals(method.getName())) {
+                    return "\\";
+                }
+                if ("getProcedureColumns".equals(method.getName())) {
+                    calls.add("getProcedureColumns:" + metadataArgument(args[0]) + ":" + metadataArgument(args[1])
+                        + ":" + metadataArgument(args[2]) + ":" + metadataArgument(args[3]));
+                    if (unsupported) {
+                        throw new SQLFeatureNotSupportedException("routine columns unavailable");
+                    }
+                    return rowsResultSet(
+                        new String[] {
+                            "COLUMN_NAME", "COLUMN_TYPE", "DATA_TYPE", "TYPE_NAME", "LENGTH",
+                            "NULLABLE", "SCALE", "PRECISION", "ORDINAL_POSITION"
+                        },
+                        new Object[][] {
+                            { "p_out", DatabaseMetaData.procedureColumnOut, Types.VARCHAR, "VARCHAR", 80,
+                                DatabaseMetaData.procedureNullable, null, null, 3 },
+                            { null, DatabaseMetaData.procedureColumnReturn, Types.INTEGER, "INTEGER", 4,
+                                DatabaseMetaData.procedureNullableUnknown, 0, 10, 0 },
+                            { "p_id", DatabaseMetaData.procedureColumnIn, Types.BIGINT, "BIGINT", 8,
+                                DatabaseMetaData.procedureNoNulls, 0, 19, 1 },
+                            { null, DatabaseMetaData.procedureColumnInOut, Types.DECIMAL, "DECIMAL", 16,
+                                DatabaseMetaData.procedureNullable, 3, 12, 2 },
+                            { "p_mystery", null, null, null, null, null, null, null, null }
+                        }
+                    );
+                }
+                if ("getFunctionColumns".equals(method.getName())) {
+                    calls.add("getFunctionColumns:" + metadataArgument(args[0]) + ":" + metadataArgument(args[1])
+                        + ":" + metadataArgument(args[2]) + ":" + metadataArgument(args[3]));
+                    if (unsupported) {
+                        throw new SQLFeatureNotSupportedException("routine columns unavailable");
+                    }
+                    return rowsResultSet(
+                        new String[] {
+                            "COLUMN_NAME", "COLUMN_TYPE", "DATA_TYPE", "TYPE_NAME", "LENGTH",
+                            "NULLABLE", "SCALE", "PRECISION", "ORDINAL_POSITION"
+                        },
+                        new Object[][] {
+                            { "answer", DatabaseMetaData.functionColumnOut, Types.INTEGER, "INTEGER", 4,
+                                DatabaseMetaData.functionNullable, 0, 10, 2 },
+                            { null, DatabaseMetaData.functionReturn, Types.NUMERIC, "NUMERIC", 16,
+                                DatabaseMetaData.functionNullableUnknown, 2, 15, 0 },
+                            { "value", DatabaseMetaData.functionColumnIn, Types.INTEGER, "INTEGER", 4,
+                                DatabaseMetaData.functionNoNulls, 0, 10, 1 }
+                        }
+                    );
+                }
+                return defaultValue(method.getReturnType());
+            }
+        );
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getMetaData" -> metadata;
+                case "isClosed" -> false;
+                case "isValid" -> true;
+                case "close", "setCatalog", "setSchema" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
     }
 
     private static void closeAndDeregister(String connection, Driver driver) throws Exception {
@@ -5450,6 +5724,121 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void getObjectSourceReturnsOrderedSybaseViewSourceWithBoundIdentity() throws Exception {
+        List<String> calls = new ArrayList<>();
+        String url = "jdbc:sybase:Tds:sybase-view-source-test:5000";
+        Driver driver = new SybaseViewSourceDriver(
+            url,
+            calls,
+            "CREATE VIEW active_users",
+            " AS SELECT id",
+            " FROM users WHERE active = 1"
+        );
+        DriverManager.registerDriver(driver);
+        String connection = """
+            {
+              "connection_string": "%s",
+              "connect_timeout_secs": 30
+            }
+            """.formatted(url);
+        try {
+            JsonNode response = request("getObjectSource", """
+                {
+                  "connection": %s,
+                  "database": "appdb",
+                  "schema": "reporting'owner",
+                  "name": "active_'users",
+                  "object_type": "VIEW"
+                }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals(
+                "CREATE VIEW active_users AS SELECT id FROM users WHERE active = 1",
+                response.path("result").path("source").asText()
+            );
+            assertEquals("reporting'owner", response.path("result").path("schema").asText());
+            assertEquals("VIEW", response.path("result").path("object_type").asText());
+            assertEquals(List.of(
+                "catalog:appdb",
+                "schema:reporting'owner",
+                "sql:SELECT sc.text FROM sysobjects so, syscomments sc "
+                    + "WHERE user_name(so.uid) = ? AND so.name = ? AND sc.id = so.id ORDER BY sc.colid",
+                "bind:1:reporting'owner",
+                "bind:2:active_'users"
+            ), calls);
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
+    void getObjectSourceSupportsJtdsSybaseViewSource() throws Exception {
+        List<String> calls = new ArrayList<>();
+        String url = "jdbc:jtds:sybase://sybase-view-source-test:5000/appdb";
+        Driver driver = new SybaseViewSourceDriver(url, calls, "CREATE VIEW audit_log AS SELECT 1");
+        DriverManager.registerDriver(driver);
+        String connection = """
+            { "connection_string": "%s", "connect_timeout_secs": 30 }
+            """.formatted(url);
+        try {
+            JsonNode response = request("getObjectSource", """
+                {
+                  "connection": %s,
+                  "database": "appdb",
+                  "schema": "dbo",
+                  "name": "audit_log",
+                  "object_type": "VIEW"
+                }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals(
+                "CREATE VIEW audit_log AS SELECT 1",
+                response.path("result").path("source").asText()
+            );
+            assertTrue(calls.contains("bind:1:dbo"), calls.toString());
+            assertTrue(calls.contains("bind:2:audit_log"), calls.toString());
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
+    void getObjectSourceReportsMissingOrEmptySybaseViewSource() throws Exception {
+        assertSybaseViewSourceNotFound("jdbc:sybase:Tds:sybase-view-missing-test:5000");
+        assertSybaseViewSourceNotFound("jdbc:sybase:Tds:sybase-view-empty-test:5000", null, "");
+    }
+
+    private static void assertSybaseViewSourceNotFound(String url, String... fragments) throws Exception {
+        List<String> calls = new ArrayList<>();
+        Driver driver = new SybaseViewSourceDriver(url, calls, fragments);
+        DriverManager.registerDriver(driver);
+        String connection = """
+            { "connection_string": "%s", "connect_timeout_secs": 30 }
+            """.formatted(url);
+        try {
+            JsonNode response = request("getObjectSource", """
+                {
+                  "connection": %s,
+                  "database": "appdb",
+                  "schema": "dbo",
+                  "name": "missing_view",
+                  "object_type": "VIEW"
+                }
+                """.formatted(connection));
+
+            assertTrue(response.has("error"), response.toString());
+            assertEquals(
+                "Object source not found",
+                response.path("error").path("message").asText()
+            );
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
     void getObjectSourceBuildsExecutableTableDdlForPlainJdbcDrivers() throws Exception {
         String sourceDb = "jdbc:h2:mem:dbx_ddl_src;DB_CLOSE_DELAY=-1";
         try (Statement st = DriverManager.getConnection(sourceDb, "sa", "").createStatement()) {
@@ -5518,6 +5907,147 @@ final class DbxJdbcPluginTest {
         request("close", """
             { "connection": { "connection_string": "%s", "username": "sa" } }
             """.formatted(targetUrl));
+    }
+
+    @Test
+    void getObjectSourceReturnsSortedProcedureMetadataWithoutInventingSource() throws Exception {
+        List<String> calls = new ArrayList<>();
+        String url = "jdbc:dbx-routine-columns-procedure:";
+        Driver driver = new RoutineColumnsDriver(url, calls, false);
+        DriverManager.registerDriver(driver);
+        String connection = """
+            { "connection_string": "%sdemo" }
+            """.formatted(url);
+        try {
+            JsonNode response = request("getObjectSource", """
+                {
+                  "connection": %s,
+                  "database": "catalog1",
+                  "schema": "APP",
+                  "name": "process_order",
+                  "object_type": "PROCEDURE"
+                }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            JsonNode result = response.path("result");
+            assertEquals("", result.path("source").asText());
+            assertFalse(result.path("editable").asBoolean(true));
+            assertEquals(List.of("getProcedureColumns:catalog1:APP:process\\_order:%"), calls);
+            JsonNode parameters = result.path("routine_parameters");
+            assertEquals(5, parameters.size());
+            assertEquals("RETURN", parameters.path(0).path("name").asText());
+            assertEquals("RETURN", parameters.path(0).path("mode").asText());
+            assertEquals(0, parameters.path(0).path("ordinal").asInt());
+            assertFalse(parameters.path(0).has("nullable"));
+            assertEquals("p_id", parameters.path(1).path("name").asText());
+            assertEquals("IN", parameters.path(1).path("mode").asText());
+            assertEquals(Types.BIGINT, parameters.path(1).path("jdbc_type").asInt());
+            assertEquals(19, parameters.path(1).path("precision").asInt());
+            assertFalse(parameters.path(1).path("nullable").asBoolean(true));
+            assertTrue(parameters.path(2).path("name").isNull());
+            assertEquals("INOUT", parameters.path(2).path("mode").asText());
+            assertEquals(3, parameters.path(2).path("scale").asInt());
+            assertTrue(parameters.path(2).path("nullable").asBoolean());
+            assertEquals("OUT", parameters.path(3).path("mode").asText());
+            assertEquals(80, parameters.path(3).path("length").asInt());
+            assertEquals("UNKNOWN", parameters.path(4).path("mode").asText());
+            assertFalse(parameters.path(4).has("ordinal"));
+            assertFalse(parameters.path(4).has("jdbc_type"));
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
+    void getObjectSourceUsesFunctionColumnConstants() throws Exception {
+        List<String> calls = new ArrayList<>();
+        String url = "jdbc:dbx-routine-columns-function:";
+        Driver driver = new RoutineColumnsDriver(url, calls, false);
+        DriverManager.registerDriver(driver);
+        String connection = """
+            { "connection_string": "%sdemo" }
+            """.formatted(url);
+        try {
+            JsonNode response = request("getObjectSource", """
+                {
+                  "connection": %s,
+                  "database": "catalog1",
+                  "schema": "APP",
+                  "name": "calculate_total",
+                  "object_type": "FUNCTION"
+                }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals(List.of("getFunctionColumns:catalog1:APP:calculate\\_total:%"), calls);
+            JsonNode parameters = response.path("result").path("routine_parameters");
+            assertEquals("RETURN", parameters.path(0).path("mode").asText());
+            assertEquals("IN", parameters.path(1).path("mode").asText());
+            assertEquals("OUT", parameters.path(2).path("mode").asText());
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
+    void getObjectSourceKeepsRoutineDetailsAvailableWhenColumnMetadataIsUnsupported() throws Exception {
+        List<String> calls = new ArrayList<>();
+        String url = "jdbc:dbx-routine-columns-unsupported:";
+        Driver driver = new RoutineColumnsDriver(url, calls, true);
+        DriverManager.registerDriver(driver);
+        String connection = """
+            { "connection_string": "%sdemo" }
+            """.formatted(url);
+        try {
+            JsonNode response = request("getObjectSource", """
+                {
+                  "connection": %s,
+                  "database": "catalog1",
+                  "schema": "APP",
+                  "name": "legacy_proc",
+                  "object_type": "PROCEDURE"
+                }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals("", response.path("result").path("source").asText());
+            assertFalse(response.path("result").path("editable").asBoolean(true));
+            assertFalse(response.path("result").has("routine_parameters"));
+            assertEquals(List.of("getProcedureColumns:catalog1:APP:legacy\\_proc:%"), calls);
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
+    void getObjectSourceKeepsSybaseRoutineBehaviorUnchanged() throws Exception {
+        List<String> calls = new ArrayList<>();
+        String url = "jdbc:sybase:Tds:sybase-routine-unsupported-test:5000";
+        Driver driver = new SybaseViewSourceDriver(url, calls);
+        DriverManager.registerDriver(driver);
+        String connection = """
+            { "connection_string": "%s" }
+            """.formatted(url);
+        try {
+            JsonNode response = request("getObjectSource", """
+                {
+                  "connection": %s,
+                  "database": "appdb",
+                  "schema": "dbo",
+                  "name": "legacy_proc",
+                  "object_type": "PROCEDURE"
+                }
+                """.formatted(connection));
+
+            assertEquals(
+                "Object source is not supported by this JDBC driver",
+                response.path("error").path("message").asText()
+            );
+            assertTrue(calls.isEmpty());
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
     }
 
     @Test

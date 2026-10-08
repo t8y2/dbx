@@ -71,7 +71,7 @@ export function serializeSettingsTransfer(settings: EditorSettings, meta: Settin
 const SETTINGS_TRANSFER_CATEGORY_ORDER: readonly SettingsTransferCategoryId[] = ["appearance", "editor", "formatter", "navigation", "data", "shortcuts", "snippets", "other"];
 
 const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readonly EditorSettingsDraftKey[]> = {
-  appearance: ["fontFamily", "fontSize", "tableFontFamily", "uiFontFamily", "uiScale", "theme", "customThemes", "activeCustomThemeId", "backgroundImage", "toolbarItems"],
+  appearance: ["fontFamily", "fontSize", "tableFontFamily", "uiFontFamily", "uiScale", "theme", "customThemes", "activeCustomThemeId", "backgroundImage", "toolbarItems", "welcomePageMode", "webLogoPosition"],
   editor: [
     "executeMode",
     "defaultTransactionMode",
@@ -79,6 +79,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "executeAllOnBlankLine",
     "showExecutionTargetPicker",
     "showStatementRunButtons",
+    "locateCursorOnGutterExecute",
     "showLineNumbers",
     "showCurrentStatementFrame",
     "showInsertValueHints",
@@ -86,6 +87,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "tableCompletionSchemaQualification",
     "insertSpaceAfterCompletion",
     "sqlServerSpaceConfirmsCompletion",
+    "functionCompletionIncludeParams",
     "sortCompletionColumnsAlphabetically",
     "selectFirstCompletionOnOpen",
     "completionTriggerMode",
@@ -102,6 +104,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "appCloseUnsavedTabsMode",
     "savedSqlOpenTargetMode",
     "prefillNewQueryWithSelect",
+    "openQueryOnConnectionOpen",
     "generateSqlIncludeDatabaseName",
     "generateSqlQuoteIdentifiers",
     "formatSqlOnSqlFileSave",
@@ -119,14 +122,17 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "tabGroupMode",
     "colorizeConnectionTabs",
     "tabSortMode",
+    "tabMaxWidth",
     "sidebarActivation",
     "sidebarObjectDisplay",
     "routineSourceOpenMode",
     "sidebarTableSearchEnabled",
     "sidebarSearchOpenedDatabasesOnly",
     "autoSelectActiveSidebarNode",
+    "sidebarPinDefaultDatabase",
     "sidebarBrowseObjectsOnDatabaseActivation",
     "openTabsRestoreMode",
+    "autoReloadRestoredDataTabsOnOpen",
     "disconnectTabHandlingMode",
     "deleteConnectionTabHandlingMode",
     "rememberConnectionDatabaseOnDelete",
@@ -147,6 +153,8 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "showColumnTypesInHeader",
     "showColumnHeaderTooltips",
     "showResultSourceDatabase",
+    "resultTabNamingMode",
+    "resultTabPreferComments",
     "dataGridShowTransposeFieldMetadata",
     "colorizeDataGridCellTypes",
     "dataGridTypeColorSchemes",
@@ -160,9 +168,13 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "dataGridToolbarLayout",
     "defaultAutoKeepResults",
     "multiStatementDefaultView",
+    "defaultExplainView",
     "dataGridAutoTransposeSingleRow",
     "dataGridCellDetailButtonVisible",
+    "dataGridCellDetailDialogDefault",
     "dataGridCrosshairHighlight",
+    "dataGridStripedRows",
+    "dataGridZebraRowBg",
     "flatteningMultiLineText",
     "dataGridShowWhitespace",
     "pageSize",
@@ -176,10 +188,13 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "infiniteScroll",
     "regexMaxMatchCount",
     "autoCalculateTotalRows",
+    "modelGenerationTemplates",
     "tableColumnTemplateFields",
     "redisKeyTemplates",
     "redisDatabaseDisplayLimit",
     "exportBatchSize",
+    "preferredExportPath",
+    "autoOpenExportFolder",
     "csvQuoteMode",
     "csvNullMode",
     "exportRowLimitEnabled",
@@ -190,7 +205,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "globalDateTimeImportFormat",
   ],
   shortcuts: ["shortcuts", "sqlShortcuts"],
-  snippets: ["snippets"],
+  snippets: ["snippets", "snippetTriggerKey"],
   other: ["updateDownloadSource", "updateNotificationsEnabled", "autoDownloadUpdates", "autoUpdateApp", "autoUpdateDrivers", "autoUpdateJdbc", "autoUpdateMcp", "autoUpdatePlugins"],
 };
 
@@ -272,21 +287,25 @@ const PASS_THROUGH_BOOLEAN_KEYS = [
   "showWhitespace",
   "showExecutionTargetPicker",
   "autoAliasTables",
+  "functionCompletionIncludeParams",
   "confirmDangerousSqlExecution",
   "confirmUnsavedSqlClose",
   "showColumnCommentsInHeader",
   "showColumnTypesInHeader",
   "showColumnHeaderTooltips",
   "showResultSourceDatabase",
+  "resultTabPreferComments",
   "colorizeDataGridCellTypes",
   "showIndexIndicatorsInHeader",
   "compactColumnHeaderActions",
   "dataGridQuickEntry",
+  "dataGridStripedRows",
   "flatteningMultiLineText",
   "dataGridShowWhitespace",
   "infiniteScroll",
   "autoCalculateTotalRows",
   "autoSelectActiveSidebarNode",
+  "sidebarPinDefaultDatabase",
   "sidebarAllowHorizontalScroll",
   "sidebarShowTooltips",
   "updateNotificationsEnabled",
@@ -301,7 +320,10 @@ const PASS_THROUGH_BOOLEAN_KEYS = [
 const PASS_THROUGH_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (value: unknown) => boolean>> = {
   // The editor font slider and the Ctrl+wheel zoom both clamp to this range.
   fontSize: (value) => typeof value === "number" && Number.isFinite(value) && value >= EDITOR_MIN_FONT_SIZE && value <= EDITOR_MAX_FONT_SIZE,
+  welcomePageMode: (value) => value === "intro" || value === "workspace",
   appLayout: (value) => value === "separated" || value === "classic",
+  webLogoPosition: (value) => value === "left" || value === "right" || value === "hidden",
+  resultTabNamingMode: (value) => value === "source" || value === "ordinal" || value === "comment",
   activeCustomThemeId: (value) => typeof value === "string" && value.trim().length > 0,
   // normalizeToolbarItems keeps unknown/typed values for every known key, so
   // each one must already be the boolean the UI writes, and no extra key may
@@ -340,7 +362,7 @@ const CUSTOM_THEME_DDL_COLORS_SHAPE = valueKindShape(DEFAULT_CUSTOM_THEME_DDL_CO
  * cover them and a wrong-typed value (e.g. `background: {}`) would otherwise
  * pass validation and reach the persisted settings.
  */
-const CUSTOM_THEME_OPTIONAL_COLOR_KEYS = ["background", "foreground"] as const;
+const CUSTOM_THEME_OPTIONAL_COLOR_KEYS = ["background", "foreground", "activeLine", "selection", "cursor", "gutterBackground", "lineNumber", "matchingBracket"] as const;
 
 function hasValidOptionalColorKinds(value: unknown): boolean {
   if (!isPlainObject(value)) return false;
@@ -376,6 +398,16 @@ function isSqlSnippetItem(value: unknown): boolean {
   if (!isPlainObject(value)) return false;
   if (!isNonEmptyTrimmedString(value.id) || !isNonEmptyTrimmedString(value.label) || !isNonEmptyTrimmedString(value.prefix) || typeof value.body !== "string") return false;
   return value.enabled === undefined || typeof value.enabled === "boolean";
+}
+
+function isModelGenerationTemplatesShape(value: unknown): boolean {
+  if (!Array.isArray(value)) return false;
+  const ids = new Set<string>();
+  return value.every((item) => {
+    if (!isPlainObject(item) || typeof item.id !== "string" || !item.id || ids.has(item.id) || !isNonEmptyTrimmedString(item.name) || typeof item.extension !== "string" || !/^[a-zA-Z0-9]+$/.test(item.extension) || typeof item.body !== "string") return false;
+    ids.add(item.id);
+    return true;
+  });
 }
 
 function isSqlShortcutActionItem(value: unknown): boolean {
@@ -441,6 +473,7 @@ const NESTED_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (value: un
   sidebarHiddenTablePrefixes: isNonEmptyStringArray,
   redisKeyTemplates: isNonEmptyStringArray,
   snippets: (value) => isArrayOfShape(value, isSqlSnippetItem),
+  modelGenerationTemplates: isModelGenerationTemplatesShape,
   sqlShortcuts: (value) => isArrayOfShape(value, isSqlShortcutActionItem),
   sqlVariableSyntaxOverrides: (value) => isSqlVariableSyntaxOverridesShape(value, (toggle) => toggle === false),
 };
@@ -465,6 +498,7 @@ const RAW_STRUCTURED_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (v
   sidebarHiddenTablePrefixes: isStringArray,
   redisKeyTemplates: isStringArray,
   snippets: (value) => isArrayOfShape(value, isSqlSnippetItem),
+  modelGenerationTemplates: isModelGenerationTemplatesShape,
   sqlShortcuts: (value) => isArrayOfShape(value, isSqlShortcutActionItem),
   sqlVariableSyntaxOverrides: (value) => isSqlVariableSyntaxOverridesShape(value, (toggle) => typeof toggle === "boolean"),
 };

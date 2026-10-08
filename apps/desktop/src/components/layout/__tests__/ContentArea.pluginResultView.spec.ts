@@ -50,6 +50,12 @@ const connection = {
   password: "",
 };
 
+const targetConnection = {
+  ...connection,
+  id: "conn-2",
+  name: "Target MySQL",
+};
+
 function result(sourceStatement?: string): QueryResult {
   return {
     columns: ["id"],
@@ -81,8 +87,9 @@ async function mountContentArea(tab: QueryTab) {
   const pinia = createPinia();
   setActivePinia(pinia);
   const connectionStore = useConnectionStore();
-  connectionStore.connections = [connection];
+  connectionStore.connections = [connection, targetConnection];
   const queryStore = useQueryStore();
+  queryStore.tabs = [tab];
   const openPluginWorkbench = vi.spyOn(queryStore, "openPluginWorkbench");
   const state = reactive({ activeTab: tab });
   const host = document.createElement("div");
@@ -177,6 +184,61 @@ describe("ContentArea result-view context", () => {
     expect(openPluginWorkbench.mock.calls[0]?.[2]).toEqual(
       expect.objectContaining({
         context: expect.objectContaining({ sql: "SELECT * FROM users" }),
+      }),
+    );
+  });
+
+  it("passes the active tab schema so plugin re-runs resolve unqualified names", async () => {
+    const openPluginWorkbench = await mountContentArea(
+      queryTab({
+        schema: "public",
+        lastExecutedSql: "SELECT * FROM users",
+        result: result("SELECT * FROM users"),
+      }),
+    );
+
+    expect(openPluginWorkbench).toHaveBeenCalledWith(
+      "com.example.chart",
+      "result.chart",
+      expect.objectContaining({
+        context: expect.objectContaining({ schema: "public" }),
+      }),
+    );
+  });
+
+  it("uses the active multi-database result execution scope", async () => {
+    const activeResult = result("SELECT * FROM users");
+    const openPluginWorkbench = await mountContentArea(
+      queryTab({
+        schema: "source_schema",
+        result: activeResult,
+        activeResultRunId: "target-run",
+        resultRuns: [
+          {
+            id: "target-run",
+            title: "Target run",
+            sequence: 1,
+            sql: "SELECT * FROM users",
+            createdAt: 1,
+            result: activeResult,
+            multiDbExecution: {
+              kind: "multi-db",
+              batchId: "batch-1",
+              target: { connectionId: targetConnection.id, database: "target_database", schema: "target_schema" },
+              status: "success",
+            },
+          },
+        ],
+      }),
+    );
+
+    expect(openPluginWorkbench).toHaveBeenCalledWith(
+      "com.example.chart",
+      "result.chart",
+      expect.objectContaining({
+        connectionId: targetConnection.id,
+        database: "target_database",
+        context: expect.objectContaining({ connectionId: targetConnection.id, database: "target_database", schema: "target_schema" }),
       }),
     );
   });

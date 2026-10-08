@@ -73,6 +73,34 @@ export function resolveDataGridPaginationTotal(options: { paginationTotalRowCoun
   return Math.min(total, options.maxRows);
 }
 
+export interface ReconcileDataGridExactTotalOptions {
+  offset: number;
+  rowCount: number;
+  exactTotal: number;
+}
+
+/**
+ * Total to display after a page landed with rows beyond the exact counted
+ * total, or `undefined` when the counted total still describes the page.
+ *
+ * The COUNT that produced the exact total and the query that served the page
+ * are two separate snapshots: rows can land between them (a table being
+ * written to), and an agent result session serves the snapshot it was opened
+ * with even after newer rows were counted. Rendering that page against the
+ * stale total shows row indexes past the claimed end of the result (#10968) —
+ * adopt the observed extent instead, so the displayed total always covers
+ * every row the grid actually shows.
+ */
+export function reconcileDataGridExactTotalWithObservedPage(options: ReconcileDataGridExactTotalOptions): number | undefined {
+  const { offset, rowCount, exactTotal } = options;
+  if (!Number.isSafeInteger(offset) || offset < 0) return undefined;
+  if (!Number.isSafeInteger(rowCount) || rowCount <= 0) return undefined;
+  if (!Number.isSafeInteger(exactTotal) || exactTotal < 0) return undefined;
+  const observedExtent = offset + rowCount;
+  if (observedExtent <= exactTotal) return undefined;
+  return observedExtent;
+}
+
 export function hasCompleteLocalDataGridResult(options: CompleteLocalDataGridResultOptions): boolean {
   if (!options.isResultsContext || options.truncated === true || options.hasMore === true) return false;
   if (options.pageLimit === undefined) return true;
@@ -133,4 +161,38 @@ export function dataGridLoadAllSegment(loadedRowCount: number, maxRows: number, 
   const boundedMaxRows = Number.isFinite(maxRows) ? Math.max(0, Math.trunc(maxRows)) : 0;
   if (!canFetchMore || offset >= boundedMaxRows) return null;
   return { offset, limit: boundedMaxRows - offset };
+}
+
+/**
+ * Target cumulative row count for the initial chunk of an explicit "load all"
+ * run. Each chunk is bounded by `chunkLimit` (the per-request result-row cap,
+ * e.g. 100,000), but an existing dataset that has already reached or exceeded
+ * `chunkLimit` must still be able to start loading subsequent chunks up to
+ * `totalRowCount` (if known) or by another chunk increment (#10752).
+ */
+export function dataGridLoadAllInitialTarget(loadedRowCount: number, chunkLimit: number, totalRowCount?: number): number {
+  const loaded = Number.isFinite(loadedRowCount) ? Math.max(0, Math.trunc(loadedRowCount)) : 0;
+  const chunk = Number.isFinite(chunkLimit) ? Math.max(1, Math.trunc(chunkLimit)) : 1;
+  const chunkCap = loaded < chunk ? chunk : loaded + chunk;
+  const total = typeof totalRowCount === "number" && Number.isFinite(totalRowCount) && totalRowCount >= 0 ? Math.trunc(totalRowCount) : undefined;
+  return total !== undefined ? Math.min(chunkCap, total) : chunkCap;
+}
+
+/**
+ * Next chunk of an explicit "load all" run, issued after the previous chunk
+ * completed. The per-request result-row cap bounds each request, not the run:
+ * the button promises every remaining row (the confirm dialog quotes the real
+ * remaining count), so stopping at the cap left tables half-loaded (#10752).
+ * The run ends only when the server returns fewer rows than requested, when a
+ * known total has been reached, or when a chunk appends nothing (loop guard).
+ */
+export function dataGridLoadAllNextSegment(options: { loadedRowCount: number; requestedOffset: number; requestedLimit: number; totalRowCount?: number }): DataGridLoadAllSegment | null {
+  const loadedRowCount = Number.isFinite(options.loadedRowCount) ? Math.max(0, Math.trunc(options.loadedRowCount)) : 0;
+  const requestedLimit = Number.isFinite(options.requestedLimit) ? Math.max(0, Math.trunc(options.requestedLimit)) : 0;
+  if (requestedLimit <= 0) return null;
+  const appendedRows = loadedRowCount - Math.max(0, Math.trunc(options.requestedOffset));
+  if (appendedRows < requestedLimit) return null;
+  const totalRowCount = typeof options.totalRowCount === "number" && Number.isFinite(options.totalRowCount) && options.totalRowCount >= 0 ? Math.trunc(options.totalRowCount) : undefined;
+  if (totalRowCount !== undefined && loadedRowCount >= totalRowCount) return null;
+  return { offset: loadedRowCount, limit: totalRowCount !== undefined ? Math.min(requestedLimit, totalRowCount - loadedRowCount) : requestedLimit };
 }

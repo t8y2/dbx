@@ -43,7 +43,7 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "datafile",
 ]);
 
-const fullWidthLabelTypes: Set<TreeNodeType> = new Set(["table", "view", "materialized_view", "mongo-collection", "mongo-bucket", "dynamodb-table", "vector-collection", "elasticsearch-index"]);
+const fullWidthLabelTypes: Set<TreeNodeType> = new Set(["table", "view", "materialized_view", "procedure", "function", "mongo-collection", "mongo-bucket", "dynamodb-table", "vector-collection", "elasticsearch-index"]);
 
 const emptyContainerTypes: Set<TreeNodeType> = new Set(["saved-sql-root", "saved-sql-folder", "type"]);
 
@@ -69,7 +69,7 @@ const pinnableTypes: Set<TreeNodeType> = new Set([
   "nacos-namespace",
 ]);
 
-const commentTypes: Set<TreeNodeType> = new Set(["connection", "schema", "table", "view", "materialized_view", "column", "mongo-collection", "dynamodb-table", "vector-collection", "elasticsearch-index"]);
+const commentTypes: Set<TreeNodeType> = new Set(["connection", "schema", "table", "view", "materialized_view", "column", "procedure", "function", "trigger", "sequence", "synonym", "package", "mongo-collection", "dynamodb-table", "vector-collection", "elasticsearch-index"]);
 
 export const SIDEBAR_INDENT_DEFAULT_PX = 16;
 
@@ -149,8 +149,12 @@ export function sidebarTreeNodeComment(node: TreeNode, showConnectionNotes: bool
   return node.comment || null;
 }
 
+export function isSidebarCommentSupportedType(type: TreeNodeType): boolean {
+  return commentTypes.has(type);
+}
+
 export function isSidebarCommentAlignableNode(node: TreeNode): boolean {
-  return commentTypes.has(node.type);
+  return isSidebarCommentSupportedType(node.type);
 }
 
 export function usesFullWidthTreeLabel(type: TreeNodeType, allowHorizontalScroll: boolean, hasTrailingComment = false): boolean {

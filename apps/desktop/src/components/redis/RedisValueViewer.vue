@@ -5,7 +5,7 @@ import type { CalendarDateTime } from "@internationalized/date";
 import { useI18n } from "vue-i18n";
 import { onClickOutside } from "@vueuse/core";
 import { DynamicScroller, DynamicScrollerItem, RecycleScroller } from "vue-virtual-scroller";
-import { Check, ChevronDown, Copy, ClipboardCopy, Eye, Trash2, Save, RefreshCw, Plus, Loader2, Pencil, WrapText, ArrowUp, ArrowDown, ArrowUpDown, Search, X, FileArchive } from "@lucide/vue";
+import { Check, ChevronDown, Copy, ClipboardCopy, Eye, Trash2, Save, RefreshCw, Plus, Loader2, Pencil, WrapText, ArrowUp, ArrowDown, ArrowUpDown, Search, X, FileArchive, Download } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -28,14 +28,16 @@ import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatTtl } from "@/lib/common/ttlFormat";
 import { computeDisplayTtl, computeTtlCountdownTick, computeTtlCountdownValue, computeTtlForExpiryEdit, DEFAULT_REDIS_AUTO_REFRESH_INTERVAL_SECONDS, normalizeRedisAutoRefreshInterval } from "@/lib/redis/redisAutoRefresh";
 import {
+  autoRedisValueFormat,
   canRenderRedisValueFormat,
   canEditRedisMemberDetail,
   decodeRedisBlob,
+  detectedRedisStructuredCodec,
   formatRedisMemberDetail,
   getRedisMemberSelectionKey,
   isRedisBlob,
+  isRedisJsonContainerValue,
   parseRedisJsonDetail,
-  preferredRedisValueFormat,
   REDIS_VALUE_FORMAT_DISPLAY_ORDER,
   redisBlobText,
   redisCollectionPageItems,
@@ -57,6 +59,7 @@ import {
   REDIS_VALUE_CODEC_ORDER,
   type RedisCollectionItem,
   type RedisHashRowCopyTarget,
+  type RedisMemberDetail,
   type RedisValueCodec,
   type RedisValueFormat,
 } from "@/lib/redis/redisValuePresentation";
@@ -69,6 +72,7 @@ import { unixSecondsToCalendarDateTime } from "@/components/ui/date-time-picker/
 import { applyRedisExpiryPolicy, type RedisExpiryMode, redisExpiryModeForTtl, validateRedisExpiry } from "@/lib/redis/redisExpiry";
 import { redisKeyRawToText, redisKeyTextToDisplay, redisKeyTextToRaw } from "@/lib/redis/redisCommandSession";
 import { formatBytes } from "@/lib/database/serverMetrics";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 
 const { t, locale } = useI18n();
 const { toast } = useToast();
@@ -103,6 +107,7 @@ const REDIS_COLLECTION_ROW_HEIGHT = 32;
 const REDIS_STREAM_MIN_ROW_HEIGHT = 96;
 const data = ref<RedisValue | null>(null);
 const loading = ref(false);
+const downloadingLargeValue = ref(false);
 const loadingMore = ref(false);
 const showRenameKeyDialog = ref(false);
 const renamingKey = ref(false);
@@ -191,10 +196,10 @@ const isResizingHashColumns = ref(false);
 const zsetTableRef = ref<HTMLElement | null>(null);
 const zsetScoreWidth = ref(220);
 const isResizingZsetColumns = ref(false);
-const stringValueView = ref<RedisValueFormat>(readPreferredRedisValueFormat());
-const memberValueView = ref<RedisValueFormat>(readPreferredRedisValueFormat());
-const stringValueCodec = ref<RedisValueCodec>(readPreferredRedisValueCodec());
-const memberValueCodec = ref<RedisValueCodec>(readPreferredRedisValueCodec());
+const stringValueView = ref<RedisValueFormat>(readStoredRedisValueFormat() ?? "utf8");
+const memberValueView = ref<RedisValueFormat>(readStoredRedisValueFormat() ?? "utf8");
+const stringValueCodec = ref<RedisValueCodec>(readStoredRedisValueCodec() ?? "none");
+const memberValueCodec = ref<RedisValueCodec>(readStoredRedisValueCodec() ?? "none");
 const redisJsonWordWrap = ref(readRedisJsonWordWrap());
 const redisJsonUnicodeMode = ref(readRedisJsonUnicodeMode());
 const redisJsonDecoded = computed(() => redisJsonUnicodeMode.value === "decoded");
@@ -477,6 +482,40 @@ watch([memberValueCodec, selectedMemberRaw], ([codec]) => {
 const stringGzipBadge = computed(() => (stringBlob.value ? isGzipMagic(decodeRedisBlob(stringBlob.value)) : false));
 const memberGzipBadge = computed(() => (isRedisBlob(selectedMemberRaw.value) ? isGzipMagic(decodeRedisBlob(selectedMemberRaw.value)) : false));
 
+/**
+ * Badge label for the detected payload representation (issue #10922): JSON
+ * containers and deterministic binary formats the user would otherwise see
+ * as an opaque blob. Plain strings and scalar JSON get no badge.
+ */
+function redisDetectionBadgeLabel(detail: RedisMemberDetail | null): string | null {
+  if (!detail) return null;
+  if (detail.javaSerialized) return t("redis.detectedJavaSerialized");
+  if (detail.pickle) return t("redis.detectedPickle");
+  if (detail.msgpack) return t("redis.detectedMsgpack");
+  if (detail.phpSerialized) return t("redis.detectedPhpSerialized");
+  if (isRedisJsonContainerValue(detail.json?.value)) return "JSON";
+  return null;
+}
+
+const stringValueDetectionLabel = computed(() => redisDetectionBadgeLabel(stringValueDetail.value));
+const memberDetectionLabel = computed(() => redisDetectionBadgeLabel(selectedMemberDetail.value));
+
+/**
+ * Issue #10922: payloads with a deterministic container format open decoded
+ * instead of as an opaque blob — but only while the user has not pinned a
+ * codec; any explicit codec choice (including "none") disables detection.
+ */
+function applyDetectedStringCodec(detail: RedisMemberDetail) {
+  if (isStringValueTruncated.value) return;
+  if (readStoredRedisValueCodec() != null) return;
+  stringValueCodec.value = detectedRedisStructuredCodec(detail) ?? "none";
+}
+
+function applyDetectedMemberCodec(detail: RedisMemberDetail) {
+  if (readStoredRedisValueCodec() != null) return;
+  memberValueCodec.value = detectedRedisStructuredCodec(detail) ?? "none";
+}
+
 interface RedisDecodedDetail {
   formattedText: string;
   value: unknown;
@@ -674,6 +713,46 @@ const largeStringPreviewHint = computed(() => {
   }
   return t("redis.largeStringPreviewHintUnknown", { loaded: formatBytes(loaded) });
 });
+
+function redisDownloadFileName(keyDisplay: string, encoding: RedisBlob["encoding"]): string {
+  const safe =
+    keyDisplay
+      .replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_")
+      .trim()
+      .slice(0, 120) || "redis-value";
+  return `${safe}.${encoding === "utf8" ? "txt" : "bin"}`;
+}
+
+async function downloadLargeValue() {
+  if (downloadingLargeValue.value || !isStringValueTruncated.value) return;
+  downloadingLargeValue.value = true;
+  try {
+    const blob = await api.redisGetRawValue(props.connectionId, props.db, props.keyRaw);
+    const bytes = decodeRedisBlob(blob);
+    const filename = redisDownloadFileName(props.keyDisplay, blob.encoding);
+    if (isTauriRuntime()) {
+      const [{ save }, { writeFile }] = await Promise.all([import("@tauri-apps/plugin-dialog"), import("@tauri-apps/plugin-fs")]);
+      const extension = blob.encoding === "utf8" ? "txt" : "bin";
+      const path = await save({ defaultPath: filename, filters: [{ name: t(blob.encoding === "utf8" ? "redis.downloadValueTextFileType" : "redis.downloadValueFileType"), extensions: [extension] }] });
+      if (path) {
+        await writeFile(path, bytes);
+        toast(t("redis.downloadValueSuccess"), 2500);
+      }
+    } else {
+      const url = URL.createObjectURL(new Blob([bytes.slice().buffer as ArrayBuffer], { type: blob.encoding === "utf8" ? "text/plain;charset=utf-8" : "application/octet-stream" }));
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      toast(t("redis.downloadValueSuccess"), 2500);
+    }
+  } catch (error) {
+    toast(errorMessage(error), 4000);
+  } finally {
+    downloadingLargeValue.value = false;
+  }
+}
 const streamRows = computed<RedisStreamRow[]>(() => {
   if (redisKind.value !== "stream") return [];
   return streamEntries.value.map((entry, index) => ({
@@ -1233,22 +1312,27 @@ function rememberRedisJsonUnicodeMode(mode: RedisJsonUnicodeMode) {
   }
 }
 
-function readPreferredRedisValueFormat(): RedisValueFormat {
+/**
+ * The persisted format preference, or null when the user never pinned one.
+ * Null is the auto-detection signal for issue #10922: detected JSON opens in
+ * the JSON view instead of raw UTF-8. Legacy values ("raw") map like before.
+ */
+function readStoredRedisValueFormat(): RedisValueFormat | null {
   try {
     const stored = localStorage.getItem(REDIS_VALUE_FORMAT_STORAGE_KEY);
     if (stored === "raw") return "utf8";
-    return stored === "utf8" || stored === "ascii" || stored === "binary" || stored === "json" || stored === "hex" || stored === "base64" ? stored : "utf8";
+    return stored === "utf8" || stored === "ascii" || stored === "binary" || stored === "json" || stored === "hex" || stored === "base64" ? stored : null;
   } catch {
-    return "utf8";
+    return null;
   }
 }
 
-function readPreferredRedisValueCodec(): RedisValueCodec {
+function readStoredRedisValueCodec(): RedisValueCodec | null {
   try {
     const stored = localStorage.getItem(REDIS_VALUE_CODEC_STORAGE_KEY);
-    return isRedisValueCodec(stored) ? stored : "none";
+    return isRedisValueCodec(stored) ? stored : null;
   } catch {
-    return "none";
+    return null;
   }
 }
 
@@ -1592,7 +1676,13 @@ async function load(options: { background?: boolean; notifyParent?: boolean; pre
       const allowJsonText = loadedValue.data.kind === "string";
       if (loadedValue.data.truncated) stringValueCodec.value = "none";
       const detail = formatRedisMemberDetail(loadedValue.data.content, { allowJsonText });
-      stringValueView.value = preferredRedisValueFormat(loadedValue.data.content, readPreferredRedisValueFormat(), { allowJsonText });
+      // Issue #10922: detected JSON opens pretty-printed, detected structured
+      // codecs open decoded — unless the user pinned an explicit format/codec.
+      // Bitmap payloads render through the string pipeline but are never JSON
+      // or a structured codec, so detection only runs for plain strings.
+      stringValueView.value = autoRedisValueFormat(detail, readStoredRedisValueFormat());
+      if (allowJsonText) applyDetectedStringCodec(detail);
+
       stringJsonRawBaseline.value = detail.json?.formattedText ?? "";
       stringJsonDraftBaseline.value = jsonDraftBaseline(stringJsonRawBaseline.value, redisJsonDecoded.value);
       editValue.value = stringValueView.value === "json" && detail.json ? stringJsonDraftBaseline.value : detail.rawText;
@@ -1894,7 +1984,8 @@ function selectMember(title: string, value: unknown, context: RedisMemberContext
   selectedMemberKey.value = getRedisMemberSelectionKey(title, value, identity);
   selectedMemberContext.value = context;
   isEditingMember.value = false;
-  memberValueView.value = preferredRedisValueFormat(value, readPreferredRedisValueFormat(), { allowJsonText: true });
+  memberValueView.value = autoRedisValueFormat(detail, readStoredRedisValueFormat());
+  applyDetectedMemberCodec(detail);
   memberJsonRawBaseline.value = detail.json?.formattedText ?? "";
   memberJsonDraftBaseline.value = jsonDraftBaseline(memberJsonRawBaseline.value, redisJsonDecoded.value);
   memberEditValue.value = memberValueView.value === "json" && detail.json ? memberJsonDraftBaseline.value : detail.rawText;
@@ -2847,6 +2938,7 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
               {{ redisCodecLabel(codec) }}
             </Button>
           </RedisHorizontalScrollbar>
+          <Badge v-if="stringValueDetectionLabel" variant="outline" class="shrink-0 text-xs text-muted-foreground" :title="t('redis.detectedBadgeTitle')" :aria-label="t('redis.detectedBadgeTitle')">{{ stringValueDetectionLabel }}</Badge>
           <FileArchive v-if="!isStringValueTruncated && stringGzipBadge && stringValueCodec === 'none'" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" :title="t('redis.gzipBadgeTitle')" :aria-label="t('redis.gzipBadgeTitle')" />
           <span class="flex-1" />
           <label v-if="isTextRedisFormat(stringValueView) || activeStructuredStringDetail || isDecompressCodec(stringValueCodec)" class="flex items-center gap-1.5 text-muted-foreground">
@@ -2953,7 +3045,12 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
         <pre v-else class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-4 text-sm leading-6" :class="detailTextClass(stringValueView)">{{ detailTextForFormat(stringValueDetail, stringValueView) }}</pre>
         <div v-if="isStringValueTruncated" data-redis-large-string-preview class="flex shrink-0 items-center gap-2 border-t bg-muted/30 px-4 py-2 text-xs text-muted-foreground">
           <Eye class="h-3.5 w-3.5 shrink-0" />
-          <span>{{ largeStringPreviewHint }}</span>
+          <span class="min-w-0 flex-1">{{ largeStringPreviewHint }}</span>
+          <Button variant="outline" size="sm" class="h-7 shrink-0" :disabled="downloadingLargeValue" :title="t('redis.downloadValue')" :aria-label="t('redis.downloadValue')" @click="downloadLargeValue">
+            <Loader2 v-if="downloadingLargeValue" class="mr-1 h-3 w-3 animate-spin" />
+            <Download v-else class="mr-1 h-3 w-3" />
+            {{ t("redis.downloadValue") }}
+          </Button>
         </div>
         <div v-else-if="isBinaryStringValue" class="px-4 py-2 border-t text-xs text-muted-foreground shrink-0">
           {{ t("redis.binaryStringReadonlyHint") }}
@@ -3624,6 +3721,7 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             <Input v-if="isEditingMember && selectedMemberContext?.kind === 'hash'" v-model="memberFieldEditValue" class="h-7 min-w-0 flex-1 text-sm" :placeholder="t('redis.field')" :aria-label="t('redis.field')" @keydown.enter="saveMemberEdit" />
             <span v-else class="truncate">{{ selectedMemberTitle ? formatValue(selectedMemberTitle) : t("redis.memberDetail") }}</span>
             <Badge variant="outline" class="shrink-0 text-xs">{{ redisFormatLabel(memberValueView, selectedMemberDetail.rawLabel) }}</Badge>
+            <Badge v-if="memberDetectionLabel" variant="outline" class="shrink-0 text-xs text-muted-foreground" :title="t('redis.detectedBadgeTitle')" :aria-label="t('redis.detectedBadgeTitle')">{{ memberDetectionLabel }}</Badge>
             <Badge v-if="memberGzipBadge && memberValueCodec === 'none'" variant="outline" class="shrink-0 text-xs text-muted-foreground" :title="t('redis.gzipBadgeTitle')" :aria-label="t('redis.gzipBadgeTitle')">
               <FileArchive class="h-3 w-3 mr-1" />
               Gzip

@@ -2209,7 +2209,7 @@ impl SqlImportRowStream {
         .await?;
         Ok(Self {
             decoder,
-            splitter: Some(StreamingSqlFileSplitter::new(options.sql_dialect, parsing_options)),
+            splitter: Some(StreamingSqlFileSplitter::new(options.sql_dialect, parsing_options, false)),
             family,
             target: None,
             rows: Vec::new(),
@@ -9240,6 +9240,7 @@ mod tests {
             column_comments: vec![],
             rows: vec![vec![serde_json::json!(""), serde_json::Value::Null]],
             numeric_column_right_align: false,
+            auto_filter: None,
         }])
         .unwrap();
         std::fs::write(&path, workbook).unwrap();
@@ -10568,6 +10569,7 @@ mod tests {
                 column_comments: vec![],
                 rows: vec![vec![serde_json::json!(1)]],
                 numeric_column_right_align: false,
+                auto_filter: None,
             },
             XlsxWorksheetData {
                 sheet_name: Some("Second".to_string()),
@@ -10576,6 +10578,7 @@ mod tests {
                 column_comments: vec![],
                 rows: vec![vec![serde_json::json!("Ada")]],
                 numeric_column_right_align: false,
+                auto_filter: None,
             },
         ])
         .unwrap();
@@ -10614,6 +10617,7 @@ mod tests {
                 column_comments: vec![],
                 rows: vec![vec![serde_json::json!(1)]],
                 numeric_column_right_align: false,
+                auto_filter: None,
             },
             XlsxWorksheetData {
                 sheet_name: Some("Second".to_string()),
@@ -10622,6 +10626,7 @@ mod tests {
                 column_comments: vec![],
                 rows: vec![vec![serde_json::json!("Ada")], vec![serde_json::json!("Grace")]],
                 numeric_column_right_align: false,
+                auto_filter: None,
             },
         ])
         .unwrap();
@@ -10835,6 +10840,7 @@ mod tests {
                 vec![serde_json::json!(2), serde_json::json!("Grace")],
             ],
             numeric_column_right_align: false,
+            auto_filter: None,
         }])
         .unwrap();
         std::fs::write(&path, workbook).unwrap();
@@ -11212,6 +11218,7 @@ mod tests {
                 vec![serde_json::json!("summary"), serde_json::json!(2)],
             ],
             numeric_column_right_align: false,
+            auto_filter: None,
         }])
         .unwrap();
         std::fs::write(&path, workbook).unwrap();
@@ -11816,6 +11823,7 @@ mod tests {
                 vec![serde_json::json!(2), serde_json::json!(2.25)],
             ],
             numeric_column_right_align: false,
+            auto_filter: None,
         }])
         .unwrap();
         std::fs::write(&path, workbook).unwrap();
@@ -11915,6 +11923,7 @@ mod tests {
                 vec![serde_json::json!("summary"), serde_json::json!(2)],
             ],
             numeric_column_right_align: false,
+            auto_filter: None,
         }])
         .unwrap();
         std::fs::write(&path, workbook).unwrap();

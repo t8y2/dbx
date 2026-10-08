@@ -9,6 +9,7 @@ export interface XlsxSqlWorksheet {
   sheetName: "SQL";
   columns: string[];
   rows: Array<Array<string>>;
+  autoFilter?: boolean;
 }
 
 function splitExcelCellText(value: string): string[] {

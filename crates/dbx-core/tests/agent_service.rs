@@ -128,6 +128,7 @@ fn registry_with_driver(db_type: &str, version: &str, jre: &str) -> AgentRegistr
                 sha256: None,
                 size: 42,
                 format: None,
+                delta: None,
             }),
             native: std::collections::HashMap::new(),
         },
@@ -158,6 +159,7 @@ fn registry_with_native_driver(db_type: &str, version: &str, jre: &str) -> Agent
                 sha256: None,
                 size: 0,
                 format: None,
+                delta: None,
             }),
             native: [(
                 AgentManager::current_platform().to_string(),
@@ -166,6 +168,7 @@ fn registry_with_native_driver(db_type: &str, version: &str, jre: &str) -> Agent
                     sha256: None,
                     size: 42,
                     format: None,
+                    delta: None,
                 },
             )]
             .into_iter()
@@ -173,6 +176,106 @@ fn registry_with_native_driver(db_type: &str, version: &str, jre: &str) -> Agent
         },
     );
     AgentRegistry { jre: None, jres: std::collections::HashMap::new(), drivers }
+}
+
+/// A native-only driver the registry publishes for every platform *except* this
+/// one, mirroring the Windows-only Oracle OCI agent on macOS and Linux.
+fn registry_with_foreign_platform_native_driver(db_type: &str, version: &str) -> AgentRegistry {
+    let current = AgentManager::current_platform();
+    let native = ["macos-aarch64", "macos-x64", "linux-aarch64", "linux-x64", "windows-aarch64", "windows-x64"]
+        .into_iter()
+        .filter(|platform| *platform != current)
+        .map(|platform| {
+            (
+                platform.to_string(),
+                ArtifactInfo {
+                    url: format!("https://example.com/dbx-agent-{db_type}-{platform}"),
+                    sha256: None,
+                    size: 42,
+                    format: None,
+                    delta: None,
+                },
+            )
+        })
+        .collect();
+    let mut drivers = std::collections::HashMap::new();
+    drivers.insert(
+        db_type.to_string(),
+        DriverInfo {
+            version: version.to_string(),
+            label: db_type.to_string(),
+            min_app_version: "0.1.0".to_string(),
+            jre: DEFAULT_JRE_KEY.to_string(),
+            // Native-only drivers still carry a zero-size legacy JAR placeholder,
+            // which must not be mistaken for an installable fallback.
+            jar: Some(ArtifactInfo {
+                url: format!("https://example.com/dbx-agent-{db_type}-legacy-placeholder.jar"),
+                sha256: None,
+                size: 0,
+                format: None,
+                delta: None,
+            }),
+            native,
+        },
+    );
+    AgentRegistry { jre: None, jres: std::collections::HashMap::new(), drivers }
+}
+
+#[test]
+fn agent_list_hides_a_driver_the_registry_publishes_for_other_platforms_only() {
+    let manager = test_manager("foreign-platform-hidden");
+    let registry = registry_with_foreign_platform_native_driver("oracle-oci", "0.1.0");
+
+    let agents = build_agent_list(&manager, Some(&registry));
+
+    assert!(
+        !agents.iter().any(|agent| agent.db_type == "oracle-oci"),
+        "a driver with no artifact for this platform must not be offered for install"
+    );
+}
+
+#[test]
+fn agent_list_keeps_an_installed_driver_the_registry_publishes_for_other_platforms_only() {
+    let manager = test_manager("foreign-platform-installed");
+    let native_path = manager.driver_native_path("oracle-oci");
+    std::fs::create_dir_all(native_path.parent().unwrap()).unwrap();
+    std::fs::write(&native_path, b"agent").unwrap();
+    manager
+        .save_state(&dbx_core::agent_manager::AgentState {
+            installed_drivers: [(
+                "oracle-oci".to_string(),
+                InstalledDriver {
+                    version: "0.1.0".to_string(),
+                    installed_at: "2026-05-18T00:00:00Z".to_string(),
+                    jre: DEFAULT_JRE_KEY.to_string(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        })
+        .unwrap();
+    let registry = registry_with_foreign_platform_native_driver("oracle-oci", "0.1.0");
+
+    let agents = build_agent_list(&manager, Some(&registry));
+
+    let oci = agents
+        .iter()
+        .find(|agent| agent.db_type == "oracle-oci")
+        .expect("an installed driver must stay listed so it can be upgraded or removed");
+    assert!(oci.installed);
+}
+
+#[test]
+fn agent_list_keeps_the_sqlite_worker_although_its_binaries_target_another_platform() {
+    // The SSH worker executes on the remote host, so a `native` set without a
+    // desktop platform must not hide it (#8987).
+    let manager = test_manager("sqlite-worker-platform-gate");
+    let registry = registry_with_foreign_platform_native_driver("sqlite-worker", "0.1.0");
+
+    let agents = build_agent_list(&manager, Some(&registry));
+
+    assert!(agents.iter().any(|agent| agent.db_type == "sqlite-worker"));
 }
 
 #[test]

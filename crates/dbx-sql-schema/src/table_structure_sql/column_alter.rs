@@ -3,7 +3,7 @@ use super::column_format::{
     is_dameng_identity_compatible_type, is_mysql_character_data_type, original_is_mysql_generated_column,
     original_mysql_generated_clause,
 };
-use super::columns::build_drop_column_sql;
+use super::columns::{build_add_column_sql, build_drop_column_sql};
 use super::comments::build_sqlserver_column_comment_sql_for_profile;
 use super::dialect::{capabilities_for, database_label, StructureDialect};
 use super::types::{EditableStructureColumn, SingleColumnAlterSqlOptions, TableStructureSqlResult};
@@ -12,6 +12,8 @@ use super::util::{
     original_default, qualified_table, quote_ident, quote_string,
 };
 use crate::table_structure_sql::ColumnExtra;
+
+const SINGLE_COLUMN_ADD_PREVIEW_ID_PREFIX: &str = "ddl-preview:";
 
 pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> TableStructureSqlResult {
     let capabilities = capabilities_for(options.database_type, options.driver_profile.as_deref());
@@ -39,6 +41,43 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
             return TableStructureSqlResult { statements, warnings };
         }
         statements.push(build_drop_column_sql(dialect, &table, &original.name));
+        return TableStructureSqlResult { statements, warnings };
+    }
+
+    // The sidebar marks field-DDL previews explicitly in the draft id. Keep
+    // `original` in that request so generated-column expressions can be copied
+    // into the ADD definition without changing the meaning of position data
+    // for existing API callers.
+    if options.column.id.starts_with(SINGLE_COLUMN_ADD_PREVIEW_ID_PREFIX) {
+        if !capabilities.add_column {
+            warnings.push(format!("Adding columns is not supported for {database_label} from this editor."));
+            return TableStructureSqlResult { statements, warnings };
+        }
+        if options.column.name.trim().is_empty() {
+            warnings.push("Column name cannot be empty.".to_string());
+            return TableStructureSqlResult { statements, warnings };
+        }
+        if options.column.data_type.trim().is_empty() {
+            warnings.push("Column type cannot be empty.".to_string());
+            return TableStructureSqlResult { statements, warnings };
+        }
+        if !capabilities.comment && !clean(&options.column.comment).is_empty() {
+            warnings.push(format!(
+                "Column comments are not supported for {database_label} from this editor; the comment for \"{}\" was ignored.",
+                options.column.name
+            ));
+        }
+        statements.extend(build_add_column_sql(
+            dialect,
+            options.database_type,
+            capabilities.comment,
+            &table,
+            &options.column,
+            "",
+            options.schema.as_deref(),
+            &options.table_name,
+            options.driver_profile.as_deref(),
+        ));
         return TableStructureSqlResult { statements, warnings };
     }
 
@@ -1029,6 +1068,7 @@ pub(super) fn build_sqlite_existing_column_sql(
     statements
 }
 
+#[cfg(feature = "duckdb-sidecar")]
 pub(super) fn build_duckdb_existing_column_sql(table: &str, column: &EditableStructureColumn) -> Vec<String> {
     let Some(original) = &column.original else {
         return Vec::new();

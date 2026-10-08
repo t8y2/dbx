@@ -1,13 +1,46 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useI18n } from "vue-i18n";
-import { AlignLeft, Camera, CaseLower, CaseSensitive, CaseUpper, ClipboardPaste, Code2, Columns3, Download, Eye, FileCode, Highlighter, MessageSquareText, Minimize2, Pencil, PencilRuler, Play, Copy, List, Scissors, Search, Sparkles, Table2, TextSelect, Trash2, WandSparkles } from "@lucide/vue";
+import {
+  AlignLeft,
+  ArrowDownUp,
+  Camera,
+  CaseLower,
+  CaseSensitive,
+  CaseUpper,
+  ChevronsUpDown,
+  ClipboardPaste,
+  Code2,
+  Columns3,
+  Download,
+  Eye,
+  FileCode,
+  FoldVertical,
+  GitBranch,
+  Highlighter,
+  MessageSquareText,
+  Minimize2,
+  Pencil,
+  PencilRuler,
+  Play,
+  Copy,
+  List,
+  Scissors,
+  Search,
+  Sparkles,
+  Table2,
+  TextSelect,
+  Trash2,
+  UnfoldVertical,
+  WandSparkles,
+} from "@lucide/vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { canFormatSqlForDatabaseType } from "@/lib/sql/sqlFormatter";
 import { supportsQueryEditorBlockComments } from "@/lib/database/databaseFeatureSupport";
 import { normalizeShortcutSettings, type ShortcutSettings } from "@/lib/editor/shortcutRegistry";
 import { queryContextObjectActions, type QueryContextObjectAction } from "@/lib/sql/queryCursorTableTarget";
 import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
+import type { SqlSelectionCaseMode } from "@/lib/sql/sqlSelectionCase";
 import type { QueryEditorProps } from "./queryEditorTypes";
 
 export interface QueryEditorContextMenuState {
@@ -20,11 +53,14 @@ export interface QueryEditorContextMenuState {
   contextObjectTarget: SqlObjectNavigationTarget | null;
   shortcuts: ShortcutSettings;
   expandSelectStar: (() => void) | undefined;
+  canExplain?: boolean;
+  hasContent?: boolean;
 }
 
 export interface QueryEditorContextMenuActions {
   executeFromContextMenu: () => void;
   executeInNewResultTabFromContextMenu: () => void;
+  explainFromContextMenu?: () => void;
   requestPreviewChanges: (sql?: string) => void;
   exportQueryFromContextMenu: (format: "csv" | "xlsx" | "txt") => void;
   toggleCommentFromContextMenu: () => void;
@@ -36,7 +72,7 @@ export interface QueryEditorContextMenuActions {
   cutSelectedSqlFromContextMenu: () => void;
   pasteClipboardSqlFromContextMenu: () => void;
   pasteClipboardSqlRestoringSource: () => void;
-  convertSelectedSqlCase: (mode: "upper" | "lower") => void;
+  convertSelectedSqlCase: (mode: SqlSelectionCaseMode) => void;
   convertSelectedNamingStyle: () => void;
   openDelimitedListDialog: () => void;
   addNextSelectionOccurrenceFromContextMenu: () => void;
@@ -47,6 +83,9 @@ export interface QueryEditorContextMenuActions {
   emitContextObjectAction: (action: QueryContextObjectAction) => void;
   openCodeSnapshot: () => void;
   sendSelectionToAi: () => void;
+  toggleFoldFromContextMenu?: () => void;
+  foldAllFromContextMenu?: () => void;
+  unfoldAllFromContextMenu?: () => void;
 }
 
 const props = defineProps<{ getState: () => QueryEditorContextMenuState; actions: QueryEditorContextMenuActions }>();
@@ -131,6 +170,13 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
             shortcut: shortcuts.executeSqlInNewResultTab,
           },
           {
+            label: t("toolbar.explainPlan"),
+            action: actions.explainFromContextMenu,
+            disabled: state.canExplain === false || !canExecuteContextSql,
+            icon: GitBranch,
+            shortcut: shortcuts.explainSql,
+          },
+          {
             label: t("editor.previewChanges"),
             action: () => void actions.requestPreviewChanges(props.getState().previewContextSql),
             disabled: !state.previewContextSql,
@@ -171,9 +217,9 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
       shortcut: shortcuts.toggleBlockComment,
     },
     {
-      label: t("editor.contextMenu.formatSelectionSql"),
+      label: canCopySelectedSql ? t("editor.contextMenu.formatSelectionSql") : t("toolbar.formatSql"),
       action: () => void actions.formatCurrentSql(),
-      disabled: state.readOnly || !canCopySelectedSql || !canFormatSqlForDatabaseType(state.databaseType),
+      disabled: state.readOnly || (!canCopySelectedSql && !canExecuteContextSql && !state.hasContent) || !canFormatSqlForDatabaseType(state.databaseType),
       icon: AlignLeft,
       shortcut: shortcuts.formatSql,
     },
@@ -182,6 +228,30 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
       action: actions.compressCurrentSql,
       disabled: state.readOnly || !canCopySelectedSql,
       icon: Minimize2,
+    },
+    {
+      label: t("editor.contextMenu.folding"),
+      icon: ChevronsUpDown,
+      children: [
+        {
+          label: t("editor.contextMenu.toggleFold"),
+          action: () => actions.toggleFoldFromContextMenu?.(),
+          icon: ChevronsUpDown,
+          shortcut: shortcuts.toggleFold,
+        },
+        {
+          label: t("editor.contextMenu.foldAll"),
+          action: () => actions.foldAllFromContextMenu?.(),
+          icon: FoldVertical,
+          shortcut: shortcuts.foldAll,
+        },
+        {
+          label: t("editor.contextMenu.unfoldAll"),
+          action: () => actions.unfoldAllFromContextMenu?.(),
+          icon: UnfoldVertical,
+          shortcut: shortcuts.unfoldAll,
+        },
+      ],
     },
     {
       label: t("editor.contextMenu.copySelection"),
@@ -231,6 +301,13 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
       disabled: !canCopySelectedSql,
       icon: Sparkles,
       shortcut: shortcuts.sendSelectionToAi,
+    },
+    {
+      label: t("editor.contextMenu.toggleCaseSelection"),
+      action: () => actions.convertSelectedSqlCase("toggle"),
+      disabled: !canCopySelectedSql,
+      icon: ArrowDownUp,
+      shortcut: shortcuts.toggleCaseSelection,
     },
     {
       label: t("editor.contextMenu.uppercaseSelection"),

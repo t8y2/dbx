@@ -32,6 +32,8 @@ The installer verifies the download, installs `dbx-mcp` into `~/.dbx/bin`, and p
 
 Rerun the same install command to upgrade. A matching version reports `already up to date`. Version probing uses `dbx-mcp --version`, falling back to `~/.dbx/bin/.dbx-mcp-version` for older binaries. Offline installation fails without replacing an existing binary. Download sources are tried in order: npmjs, npmmirror, then GitHub Releases; an integrity mismatch stops installation.
 
+On macOS, the shell installer also verifies the official Developer ID signature and stable `com.dbx.app.mcp` designated requirement before replacing the binary. Unsigned, ad-hoc, unexpected-signer or hash-bound artifacts are rejected, leaving the installed binary and version marker unchanged. This check applies to the shell installer; Homebrew and npm retain their own installation flows.
+
 Homebrew is also available on macOS and Linux:
 
 ```bash
@@ -392,6 +394,18 @@ Updated servers do not let `DBX_MCP_ALLOW_WRITES` or `DBX_MCP_ALLOW_DANGEROUS_SQ
 | `DBX_MCP_DEBUG_SQL` | Include SQL in temporary diagnostics |
 
 ## Troubleshooting
+
+### Credential access after an upgrade
+
+Standalone macOS MCP runs without Keychain dialogs. If the existing encryption key is locked or denied, startup fails with `KEYRING_ACCESS_FAILED` (possibly inside `SECRET_KEY_UNAVAILABLE`) instead of repeatedly asking for a password. Unlock your login keychain first. For an older hash-bound authorization, run the **same official executable used by your MCP client** once in a terminal:
+
+```bash
+"$HOME/.dbx/bin/dbx-mcp" --authorize-keychain
+```
+
+Replace that path for a Homebrew or npm installation. The command verifies the running program's official signature and stable designated requirement before reading the existing DBX Keychain item. It does not open the database, start an MCP transport, create or replace a key, export key material, or rewrite an ACL itself. macOS may ask for confirmation once; choose **Always Allow** for the verified DBX executable, then restart your MCP client. An already-authorized executable should not prompt. Stable signing keeps that authorization valid across normal signed upgrades, not across a changed signing team or a revoked permission.
+
+Do not put `--authorize-keychain` in your MCP client's arguments: it is a one-time recovery command and exits immediately. Missing keys still require the Desktop data-security setup; this command cannot recreate a lost key. Windows and Linux do not use this macOS command. On those platforms, restore access to the credential store for the same OS user (or the configured headless key file) and restart MCP; denied or corrupt providers must not cause a replacement encryption key to be generated.
 
 <Accordions>
   <Accordion title="The optional platform package was not installed">Reinstall without `--no-optional`, then verify the platform with `node -p 'process.platform + "-" + process.arch'`. The current platform must appear in the supported platform table.</Accordion>

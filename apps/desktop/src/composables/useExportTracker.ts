@@ -3,6 +3,7 @@ import * as api from "@/lib/backend/api";
 import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
 import { uuid } from "@/lib/common/utils";
 import { formatQueryDuration } from "@/lib/format/duration";
+import { autoRevealExportedPathIfConfigured } from "@/lib/export/exportPath";
 
 export type BackgroundTaskKind = "table-export" | "database-export" | "data-dictionary" | "sql-file" | "data-transfer" | "data-generation" | "multi-db-execution" | "schema-diff" | "data-compare";
 export type BackgroundTaskStatus = "Running" | "Writing" | "Cancelling" | "Done" | "Error" | "Cancelled";
@@ -361,6 +362,9 @@ function finishDataTransferTask(task: ExportTask) {
 
 function finishExportTask(task: ExportTask) {
   task.finishedAt ??= Date.now();
+  if (task.status === "Done" && (task.kind === "table-export" || task.kind === "database-export" || task.kind === "data-dictionary") && task.databaseExportSource !== "scheduled" && task.filePath) {
+    void autoRevealExportedPathIfConfigured(task.filePath);
+  }
 }
 
 // Implementation lives in @/lib/format/duration (shared with the DataGrid
@@ -690,7 +694,8 @@ export function useExportTracker() {
     task.tableName = progress.tableName || task.tableName;
     task.rowsExported = progress.rowsExported;
     task.totalRows = progress.totalRows;
-    task.status = normalizeExportStatus(progress.status);
+    const nextStatus = normalizeExportStatus(progress.status);
+    task.status = task.status === "Cancelling" && (nextStatus === "Running" || nextStatus === "Writing") ? "Cancelling" : nextStatus;
     task.errorMessage = progress.errorMessage || null;
     if (task.status === "Done" || task.status === "Error" || task.status === "Cancelled") finishExportTask(task);
   }
@@ -718,6 +723,12 @@ export function useExportTracker() {
     if (!task || task.kind !== "database-export" || task.status === "Done" || task.status === "Error" || task.status === "Cancelled") return;
     task.status = "Cancelling";
     task.preparing = false;
+  }
+
+  function markTableExportTaskCancelling(exportId: string) {
+    const task = taskMap.get(exportId);
+    if (!task || task.kind !== "table-export" || task.status === "Done" || task.status === "Error" || task.status === "Cancelled") return;
+    task.status = "Cancelling";
   }
 
   function restoreDatabaseExportTaskRunning(exportId: string) {
@@ -852,6 +863,7 @@ export function useExportTracker() {
       } else if (task?.kind === "data-transfer") {
         await api.cancelTransfer(exportId);
       } else {
+        markTableExportTaskCancelling(exportId);
         await api.cancelTableExport(exportId);
       }
     } catch {

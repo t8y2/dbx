@@ -38,6 +38,7 @@ const pendingImportContent = ref("");
 const showConfigConnectionSelectDialog = ref(false);
 const configConnectionSelectMode = ref<"export" | "import">("export");
 const configConnectionSelectList = ref<ConnectionConfig[]>([]);
+const configConnectionSelectLayout = ref<SidebarLayout | null>(null);
 const pendingExportConnectionIds = ref<string[]>([]);
 const pendingImportPreview = ref<ConnectionConfigBundle | null>(null);
 const pendingImportSource = ref<"dbx" | "navicat" | "dbeaver" | "datagrip">("dbx");
@@ -396,18 +397,21 @@ export function useDialogSources() {
     pendingImportPreview.value = null;
     pendingImportSource.value = "dbx";
     configConnectionSelectList.value = [];
+    configConnectionSelectLayout.value = null;
     configPassphraseError.value = "";
   }
 
   function clearPendingExportState() {
     pendingExportConnectionIds.value = [];
     configConnectionSelectList.value = [];
+    configConnectionSelectLayout.value = null;
     configPassphraseError.value = "";
   }
 
-  function openConnectionSelect(mode: "export" | "import", connections: ConnectionConfig[]) {
+  function openConnectionSelect(mode: "export" | "import", connections: ConnectionConfig[], layout?: SidebarLayout | null) {
     configConnectionSelectMode.value = mode;
     configConnectionSelectList.value = connections;
+    configConnectionSelectLayout.value = layout ?? null;
     showConfigConnectionSelectDialog.value = true;
   }
 
@@ -435,7 +439,7 @@ export function useDialogSources() {
   // Config export/import helpers
   function onExportClick() {
     clearPendingExportState();
-    openConnectionSelect("export", connectionStore.connections);
+    openConnectionSelect("export", connectionStore.connections, connectionStore.sidebarLayout);
   }
 
   function onExportConnectionsSelected(connectionIds: string[]) {
@@ -516,7 +520,7 @@ export function useDialogSources() {
       const preview = await connectionStore.parseConnectionsImport(result.content, null);
       pendingImportPreview.value = preview;
       if (source === "dbx") {
-        openConnectionSelect("import", preview.connections);
+        openConnectionSelect("import", preview.connections, preview.layout);
         return;
       }
       const { count, layout } = await connectionStore.applyConnectionsImport(preview);
@@ -533,7 +537,7 @@ export function useDialogSources() {
       pendingImportPreview.value = preview;
       showConfigPassphraseDialog.value = false;
       configPassphraseError.value = "";
-      openConnectionSelect("import", preview.connections);
+      openConnectionSelect("import", preview.connections, preview.layout);
     } catch (e: any) {
       configPassphraseError.value = e?.message === "wrong_passphrase" ? t("configExport.wrongPassphrase") : e?.message === "crypto_unavailable" ? t("configExport.cryptoUnavailable") : e?.message || String(e);
     }
@@ -611,6 +615,7 @@ export function useDialogSources() {
     applyingImportSelection,
     configConnectionSelectMode,
     configConnectionSelectList,
+    configConnectionSelectLayout,
     transferPrefillConnectionId,
     transferPrefillDatabase,
     transferPrefillCatalog,

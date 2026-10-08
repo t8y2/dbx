@@ -6,7 +6,20 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Di
 import { Button } from "@/components/ui/button";
 import { buildTransferObjectSelections, countTransferObjects } from "./transferSelections";
 import { createTaskLoadTracker } from "./taskLoadTracker";
-import { confirmTransferWithProductionSafety, createTransferSubmission, rebuildUnavailableReason, resolveTransferStrategy, supportsTransferUpsert, transferStrategyOptions, type TransferStrategy } from "./transferStrategy";
+import { describeTransferStructureOperation, summarizeTransferStructureOperations } from "./structurePlanSummary";
+import {
+  confirmTransferWithProductionSafety,
+  createTransferSubmission,
+  hasTransferSqlPreview,
+  rebuildUnavailableReason,
+  resolveTransferStrategy,
+  supportsTransferUpsert,
+  transferPlanReviewText,
+  transferPreviewSql,
+  transferStrategyOptions,
+  TRANSFER_STRUCTURE_PREVIEW_UNAVAILABLE,
+  type TransferStrategy,
+} from "./transferStrategy";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -181,7 +194,7 @@ const targetTableStrategy = computed<TransferStrategy>({
 const targetTableNameCase = ref<TransferTableNameCase>("preserve");
 const quoteTargetColumnNames = ref(true);
 const batchSize = ref(1000);
-const showRebuildConfirm = ref(false);
+const showSqlPreviewConfirm = ref(false);
 const isSubmitting = ref(false);
 const pendingTransferId = ref<string | null>(null);
 const showStartConfirm = ref(false);
@@ -812,7 +825,7 @@ async function requestStartTransfer() {
     await transferSubmission.start(request);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    toast(message === "TRANSFER_REBUILD_PREVIEW_UNAVAILABLE" ? t("transfer.rebuildPreviewUnavailable") : t("transfer.previewFailed", { message }), 5000);
+    toast(transferPreviewFailureMessage(message), 5000);
   } finally {
     if (pendingTransferId.value === request.transferId) {
       pendingTransferId.value = null;
@@ -1069,18 +1082,79 @@ const confirmationSummary = computed(() => {
 });
 
 const confirmationStrategy = computed(() => (confirmationRequest.value ? transferStrategyLabel(confirmationRequest.value) : ""));
-const rebuildConfirmationDetails = computed(() => {
-  const rebuild = confirmationPreview.value?.rebuild;
-  if (!rebuild) return "";
-  const missingTargets = rebuild.tables.some((table) => !table.backupTable);
-  return [confirmationSummary.value, t("transfer.rebuildSummary", { count: rebuild.tables.length }), missingTargets ? t("transfer.rebuildMissingTargets") : ""].filter(Boolean).join("\n");
+const confirmationTitle = computed(() => {
+  if (!confirmationRequest.value) return "";
+  // A rebuild keeps its strategy title (it covers rename + create); a plain structure transfer
+  // is titled by what the user is actually reviewing.
+  return confirmationRequest.value.dropTargetBeforeCreate ? confirmationStrategy.value : t("transfer.structurePlanTitle");
 });
+/** The read-only SQL both confirmations review, composed so no operation is shown twice. */
+const confirmationSql = computed(() => (confirmationPreview.value ? transferPreviewSql(confirmationPreview.value) : ""));
+const confirmationDangerMessage = computed(() => (confirmationRequest.value?.dropTargetBeforeCreate ? t("transfer.rebuildDanger") : t("transfer.structurePreviewDanger")));
+const confirmationDetails = computed(() => {
+  const preview = confirmationPreview.value;
+  const request = confirmationRequest.value;
+  if (!preview || !request) return "";
+  const lines = [confirmationSummary.value];
+  if (preview.rebuild) {
+    const missingTargets = preview.rebuild.tables.some((table) => !table.backupTable);
+    if (!preview.structure) lines.push(t("transfer.rebuildSummary", { count: preview.rebuild.tables.length }));
+    if (missingTargets) lines.push(t("transfer.rebuildMissingTargets"));
+  }
+  if (preview.structure) {
+    const operations = preview.structure.operations ?? [];
+    const operationSummary = summarizeTransferStructureOperations(operations);
+    lines.push(t("transfer.structurePlanTitle"));
+
+    const createdCounts = [
+      [operationSummary.createdSchemas, "structurePlanSchemas"],
+      [operationSummary.createdTables, "structurePlanTables"],
+      [operationSummary.indexes, "structurePlanIndexes"],
+      [operationSummary.foreignKeys, "structurePlanForeignKeys"],
+      [operationSummary.sequences, "structurePlanSequences"],
+      [operationSummary.comments, "structurePlanComments"],
+    ] as const;
+    const createdItems = createdCounts.filter(([count]) => count > 0).map(([count, label]) => `${count} ${t(`transfer.${label}`, count)}`);
+    if (createdItems.length > 0) lines.push(`${t("transfer.structurePlanCreated")}: ${createdItems.join(" · ")}`);
+    if (operationSummary.skippedTables > 0) {
+      lines.push(`${t("transfer.structurePlanSkipped")}: ${operationSummary.skippedTables} ${t("transfer.structurePlanTables", operationSummary.skippedTables)}`);
+    }
+    if (operationSummary.rebuiltTables > 0) {
+      lines.push(`${t("transfer.structurePlanRebuilt")}: ${operationSummary.rebuiltTables} ${t("transfer.structurePlanTables", operationSummary.rebuiltTables)}`);
+    }
+    if (operations.length > 0) {
+      lines.push(t("transfer.plannedOperations"));
+      lines.push(
+        ...operations.map((operation) => {
+          const description = describeTransferStructureOperation(operation);
+          const label = t(description.key, description.values);
+          const suffix = description.suffixKey ? ` — ${t(description.suffixKey)}` : "";
+          return `• ${label}${suffix}`;
+        }),
+      );
+    }
+    lines.push(t("transfer.structurePlanSqlPreview"));
+
+    const unexpandedObjects = request.objects.filter((selection) => selection.objectType !== "TABLE" && selection.names.length > 0);
+    if (unexpandedObjects.length > 0) {
+      lines.push(t("transfer.structurePreviewUnexpandedObjects", { objects: unexpandedObjects.map((selection) => selection.names.join(", ")).join("; ") }));
+    }
+    lines.push(t("transfer.structurePreviewRevalidation"));
+  }
+  return lines.filter(Boolean).join("\n");
+});
+
+function transferPreviewFailureMessage(message: string): string {
+  if (message === "TRANSFER_REBUILD_PREVIEW_UNAVAILABLE") return t("transfer.rebuildPreviewUnavailable");
+  if (message === TRANSFER_STRUCTURE_PREVIEW_UNAVAILABLE) return t("transfer.structurePreviewUnavailable");
+  return t("transfer.previewFailed", { message });
+}
 
 function requestTransferConfirmation(request: api.TransferRequest, preview: api.TransferOwnershipPreview): Promise<boolean> {
   confirmationRequest.value = request;
   confirmationPreview.value = preview;
-  const reviewText = preview.rebuild
-    ? [confirmationStrategy.value, rebuildConfirmationDetails.value, preview.rebuild.sql].filter(Boolean).join("\n\n")
+  const reviewText = hasTransferSqlPreview(preview)
+    ? transferPlanReviewText(confirmationStrategy.value, confirmationDetails.value, preview)
     : [confirmationSummary.value, `${t("transfer.targetTableHandling")}: ${confirmationStrategy.value}`, ...request.objects.map((selection) => selection.names.join(", "))].join("\n");
   return confirmTransferWithProductionSafety({
     request,
@@ -1090,7 +1164,7 @@ function requestTransferConfirmation(request: api.TransferRequest, preview: api.
     confirm: () =>
       new Promise((resolve) => {
         resolveTransferConfirmation = resolve;
-        if (request.dropTargetBeforeCreate) showRebuildConfirm.value = true;
+        if (hasTransferSqlPreview(preview)) showSqlPreviewConfirm.value = true;
         else showStartConfirm.value = true;
       }),
   });
@@ -1100,7 +1174,7 @@ function resolveStartDecision(confirmed: boolean) {
   const resolve = resolveTransferConfirmation;
   resolveTransferConfirmation = undefined;
   showStartConfirm.value = false;
-  showRebuildConfirm.value = false;
+  showSqlPreviewConfirm.value = false;
   resolve?.(confirmed);
 }
 
@@ -1124,7 +1198,7 @@ watch(
   { flush: "sync" },
 );
 watch(
-  showRebuildConfirm,
+  showSqlPreviewConfirm,
   (isOpen) => {
     if (!isOpen) resolveStartDecision(false);
   },
@@ -1460,16 +1534,7 @@ async function saveConfigTask() {
     </DialogContent>
   </Dialog>
 
-  <DangerConfirmDialog
-    v-model:open="showRebuildConfirm"
-    :sql="confirmationPreview?.rebuild?.sql"
-    :title="confirmationStrategy"
-    :message="t('transfer.rebuildDanger')"
-    :details-text="rebuildConfirmationDetails"
-    :confirm-label="t('transfer.start')"
-    :close-on-confirm="false"
-    @confirm="resolveStartDecision(true)"
-  />
+  <DangerConfirmDialog v-model:open="showSqlPreviewConfirm" :sql="confirmationSql" :title="confirmationTitle" :message="confirmationDangerMessage" :details-text="confirmationDetails" :confirm-label="t('transfer.start')" :close-on-confirm="false" @confirm="resolveStartDecision(true)" />
 
   <Dialog v-model:open="ownershipDialogOpen">
     <DialogContent class="sm:max-w-[520px]" @interact-outside.prevent>

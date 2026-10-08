@@ -159,13 +159,13 @@ describe("SshHostKeyPromptDialog web bridge", () => {
     connectionPositioner.textContent = "New connection";
     document.body.append(connectionPositioner);
 
-    const promptPositioner = document.body.querySelector<HTMLElement>(".dialog-positioner.z-\\[200\\]");
-    const promptOverlay = document.body.querySelector<HTMLElement>(".dialog-overlay.z-\\[200\\]");
+    const promptPositioner = document.body.querySelector<HTMLElement>(".dialog-positioner.\\!z-\\[200\\]");
+    const promptOverlay = document.body.querySelector<HTMLElement>(".dialog-overlay.\\!z-\\[200\\]");
     expect(promptPositioner).not.toBeNull();
     expect(promptOverlay).not.toBeNull();
     expect(connectionPositioner.classList.contains("z-50")).toBe(true);
-    expect(promptPositioner?.classList.contains("z-[200]")).toBe(true);
-    expect(promptOverlay?.classList.contains("z-[200]")).toBe(true);
+    expect(promptPositioner?.classList.contains("!z-[200]")).toBe(true);
+    expect(promptOverlay?.classList.contains("!z-[200]")).toBe(true);
     expect(document.body.textContent).toContain("layered.example.test:22");
 
     const buttons = document.body.querySelectorAll<HTMLButtonElement>("button");

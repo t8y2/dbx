@@ -51,6 +51,34 @@ describe("SQL completion replacement", () => {
 });
 
 describe("sqlCompletion keyword snippets", () => {
+  it.each(["mysql", "postgres", "oracle"] as const)("offers the REPLACE keyword in %s CREATE OR statements", (databaseType) => {
+    for (const text of ["CREATE OR ", "CREATE OR r", "CREATE OR repla", "-- heading\nCREATE /* comment */ OR repla"]) {
+      const items = buildSqlCompletionItems(text, text.length, { tables: [], columnsByTable: new Map(), databaseType });
+      expect(items[0], text).toMatchObject({ label: "REPLACE", type: "keyword" });
+      expect(items[0].apply ?? items[0].label).toBe("REPLACE");
+    }
+  });
+
+  it("preserves REPLACE function completion in SELECT expressions", () => {
+    const text = "SELECT repla";
+    const items = buildSqlCompletionItems(text, text.length, { tables: [], columnsByTable: new Map(), databaseType: "mysql" });
+    expect(items[0]).toMatchObject({ label: "REPLACE", type: "function" });
+    expect(items[0]?.apply).toMatch(/^REPLACE\(/);
+  });
+
+  it.each(["sqlserver", "sqlite"] as const)("does not suggest unsupported CREATE OR REPLACE syntax on %s", (databaseType) => {
+    const text = "CREATE OR repla";
+    const items = buildSqlCompletionItems(text, text.length, { tables: [], columnsByTable: new Map(), databaseType });
+    expect(items.some((item) => item.type === "keyword" && item.label === "REPLACE")).toBe(false);
+  });
+
+  it("honors lower-case keyword preferences for CREATE OR REPLACE", () => {
+    const text = "create or repla";
+    const items = buildSqlCompletionItems(text, text.length, { tables: [], columnsByTable: new Map(), databaseType: "postgres", keywordCase: "lower" });
+    expect(items[0]).toMatchObject({ label: "replace", type: "keyword" });
+    expect(items[0].apply ?? items[0].label).toBe("replace");
+  });
+
   it("auto-opens and suggests SELECT when typing sel", () => {
     const sql = "sel";
     const items = buildSqlCompletionItems(sql, sql.length, {
@@ -60,6 +88,147 @@ describe("sqlCompletion keyword snippets", () => {
 
     expect(shouldAutoOpenSqlCompletion(sql, sql.length)).toBe(true);
     expect(items).toEqual(expect.arrayContaining([expect.objectContaining({ label: "select *", type: "snippet" }), expect.objectContaining({ label: "SELECT", type: "keyword" })]));
+  });
+
+  it("offers uppercase keyword completion when typing full lowercase keywords for case conversion (#8325)", () => {
+    const testCases = [
+      { sql: "select", word: "SELECT" },
+      { sql: "SELECT id from", word: "FROM" },
+      { sql: "SELECT * FROM users where", word: "WHERE" },
+      { sql: "SELECT * FROM users WHERE id = 1 and", word: "AND" },
+      { sql: "SELECT * FROM users WHERE id = 1 or", word: "OR" },
+      { sql: "SELECT * FROM users WHERE id is", word: "IS" },
+      { sql: "SELECT * FROM users WHERE id is null", word: "NULL" },
+      { sql: "SELECT * FROM users WHERE id not", word: "NOT" },
+      { sql: "SELECT * FROM users WHERE id between", word: "BETWEEN" },
+      { sql: "SELECT * FROM users WHERE name like", word: "LIKE" },
+      { sql: "SELECT * FROM users WHERE id in", word: "IN" },
+      { sql: "SELECT * FROM users order", word: "ORDER" },
+      { sql: "SELECT * FROM users ORDER by", word: "BY" },
+      { sql: "SELECT * FROM users group", word: "GROUP" },
+      { sql: "SELECT * FROM users GROUP by", word: "BY" },
+      { sql: "SELECT * FROM users GROUP BY id having", word: "HAVING" },
+      { sql: "SELECT * FROM users limit", word: "LIMIT" },
+      { sql: "SELECT * FROM users LIMIT 10 offset", word: "OFFSET" },
+      { sql: "SELECT * FROM users join", word: "JOIN" },
+      { sql: "SELECT * FROM users inner", word: "INNER" },
+      { sql: "SELECT * FROM users left", word: "LEFT" },
+      { sql: "SELECT * FROM users right", word: "RIGHT" },
+      { sql: "SELECT * FROM users full", word: "FULL" },
+      { sql: "SELECT * FROM users cross", word: "CROSS" },
+      { sql: "SELECT * FROM users JOIN orders on", word: "ON" },
+      { sql: "UPDATE users set", word: "SET" },
+      { sql: "INSERT into", word: "INTO" },
+      { sql: "INSERT INTO users values", word: "VALUES" },
+      { sql: "SELECT distinct", word: "DISTINCT" },
+      { sql: "SELECT id as", word: "AS" },
+      { sql: "SELECT CASE when", word: "WHEN" },
+      { sql: "SELECT CASE WHEN 1 then", word: "THEN" },
+      { sql: "SELECT CASE WHEN 1 THEN 2 else", word: "ELSE" },
+      { sql: "SELECT CASE WHEN 1 THEN 2 ELSE 3 end", word: "END" },
+      { sql: "CREATE table", word: "TABLE" },
+      { sql: "DROP table", word: "TABLE" },
+      { sql: "ALTER table", word: "TABLE" },
+    ];
+
+    for (const { sql, word } of testCases) {
+      const legacy = getSqlCompletionContext(sql, sql.length);
+      const semanticContext = sqlCompletionContextFromSemantic(buildSqlSemanticModel(sql, sql.length), legacy);
+      const items = buildSqlCompletionItemsFromContext(semanticContext, {
+        tables: [{ name: "users" }, { name: "orders" }],
+        columnsByTable: new Map([
+          [
+            "users",
+            [
+              { name: "id", table: "users" },
+              { name: "name", table: "users" },
+            ],
+          ],
+          [
+            "orders",
+            [
+              { name: "id", table: "orders" },
+              { name: "user_id", table: "orders" },
+            ],
+          ],
+        ]),
+        keywordCase: "upper",
+      });
+
+      const keywordItem = items.find((item) => item.label === word && item.type === "keyword");
+      expect(keywordItem, `Expected keyword ${word} in completion for "${sql}"`).toBeDefined();
+      expect(keywordItem?.exactMatch, `Expected exactMatch flag for ${word}`).toBe(true);
+      expect(
+        items.slice(0, 2).map((item) => item.label),
+        `Expected ${word} in top suggestions for "${sql}"`,
+      ).toContain(word);
+    }
+  });
+
+  it("offers lowercase keyword completion when typing full uppercase keywords with keywordCase 'lower' (#8325)", () => {
+    const sql = "SELECT * FROM users WHERE";
+    const legacy = getSqlCompletionContext(sql, sql.length);
+    const semanticContext = sqlCompletionContextFromSemantic(buildSqlSemanticModel(sql, sql.length), legacy);
+    const items = buildSqlCompletionItemsFromContext(semanticContext, {
+      tables: [{ name: "users" }],
+      columnsByTable: new Map([
+        [
+          "users",
+          [
+            { name: "id", table: "users" },
+            { name: "name", table: "users" },
+          ],
+        ],
+      ]),
+      keywordCase: "lower",
+    });
+
+    const whereItem = items.find((item) => item.label === "where" && item.type === "keyword");
+    expect(whereItem).toBeDefined();
+    expect(whereItem?.exactMatch).toBe(true);
+    expect(items[0]?.label).toBe("where");
+  });
+
+  it("keeps multi-word keywords available alongside individual keywords (#8325)", () => {
+    const orderSql = "SELECT * FROM users order";
+    const orderLegacy = getSqlCompletionContext(orderSql, orderSql.length);
+    const orderContext = sqlCompletionContextFromSemantic(buildSqlSemanticModel(orderSql, orderSql.length), orderLegacy);
+    const orderItems = buildSqlCompletionItemsFromContext(orderContext, {
+      tables: [{ name: "users" }],
+      columnsByTable: new Map([
+        [
+          "users",
+          [
+            { name: "id", table: "users" },
+            { name: "name", table: "users" },
+          ],
+        ],
+      ]),
+      keywordCase: "upper",
+    });
+
+    expect(orderItems.some((item) => item.label === "ORDER" && item.type === "keyword")).toBe(true);
+    expect(orderItems.some((item) => item.label === "ORDER BY" && item.type === "keyword")).toBe(true);
+
+    const groupSql = "SELECT * FROM users group";
+    const groupLegacy = getSqlCompletionContext(groupSql, groupSql.length);
+    const groupContext = sqlCompletionContextFromSemantic(buildSqlSemanticModel(groupSql, groupSql.length), groupLegacy);
+    const groupItems = buildSqlCompletionItemsFromContext(groupContext, {
+      tables: [{ name: "users" }],
+      columnsByTable: new Map([
+        [
+          "users",
+          [
+            { name: "id", table: "users" },
+            { name: "name", table: "users" },
+          ],
+        ],
+      ]),
+      keywordCase: "upper",
+    });
+
+    expect(groupItems.some((item) => item.label === "GROUP" && item.type === "keyword")).toBe(true);
+    expect(groupItems.some((item) => item.label === "GROUP BY" && item.type === "keyword")).toBe(true);
   });
 
   it("offers DuckDB-specific query and statement keywords", () => {
@@ -601,6 +770,39 @@ describe("sqlCompletion database functions", () => {
       columnsByTable: new Map(),
     });
     expect(ntileItems.find((item) => item.label === "ntile")?.apply).toBe("ntile(${buckets})");
+  });
+
+  it("suggests ClickHouse FINAL and query modifiers as keywords", () => {
+    const sql = "SELECT * FROM events FI";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "clickhouse",
+      tables: [{ name: "events", type: "table" }],
+      columnsByTable: new Map(),
+    });
+
+    expect(items.find((item) => item.label === "FINAL")).toMatchObject({ type: "keyword" });
+  });
+
+  it("suggests ClickHouse PREWHERE and SETTINGS as keywords", () => {
+    const sql = "SELECT * FROM events SETT";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "clickhouse",
+      tables: [{ name: "events", type: "table" }],
+      columnsByTable: new Map(),
+    });
+
+    expect(items.find((item) => item.label === "SETTINGS")).toMatchObject({ type: "keyword" });
+  });
+
+  it("does not leak ClickHouse FINAL to MySQL", () => {
+    const sql = "SELECT * FROM events FI";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "mysql",
+      tables: [{ name: "events", type: "table" }],
+      columnsByTable: new Map(),
+    });
+
+    expect(items.some((item) => item.label === "FINAL")).toBe(false);
   });
 
   it("does not leak ClickHouse-only functions to MySQL", () => {

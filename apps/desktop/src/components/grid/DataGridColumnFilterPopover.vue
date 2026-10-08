@@ -2,6 +2,7 @@
 import { ArrowDown, ArrowUp, ArrowUpDown, Check, Database, Filter, Loader2, Search } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
+import LightTooltip from "@/components/ui/LightTooltip.vue";
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type { DataGridLocalFilterOption, DataGridLocalFilterSort } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
 
@@ -114,15 +115,20 @@ const { t } = useI18n();
         </span>
       </div>
       <div class="max-h-72 overflow-auto py-0.5">
-        <button v-for="option in props.options" :key="option.key" type="button" class="grid w-full grid-cols-[1.75rem_minmax(0,1fr)_3.5rem] items-center px-2 py-1 text-left text-xs hover:bg-accent" @click="emit('toggleValue', option.key)">
-          <span class="flex h-4 w-4 items-center justify-center rounded border" :class="props.draftValues?.has(option.key) ? 'border-blue-600 bg-blue-600 text-white' : 'border-border bg-background text-foreground/70'">
-            <Check v-if="props.draftValues?.has(option.key)" class="h-3 w-3 stroke-[3]" />
-          </span>
-          <span class="truncate font-mono" :class="{ 'italic text-muted-foreground': option.value === null }">
-            {{ option.label }}
-          </span>
-          <span class="text-right tabular-nums text-muted-foreground text-xs">{{ option.count ?? "" }}</span>
-        </button>
+        <LightTooltip v-for="option in props.options" :key="option.key" :text="option.label" side="left" content-class="w-max max-w-[min(32rem,calc(100vw-2rem))]">
+          <button type="button" class="grid w-full grid-cols-[1.75rem_minmax(0,1fr)_3.5rem] items-center px-2 py-1 text-left text-xs hover:bg-accent" @click="emit('toggleValue', option.key)">
+            <span class="flex h-4 w-4 items-center justify-center rounded border" :class="props.draftValues?.has(option.key) ? 'border-blue-600 bg-blue-600 text-white' : 'border-border bg-background text-foreground/70'">
+              <Check v-if="props.draftValues?.has(option.key)" class="h-3 w-3 stroke-[3]" />
+            </span>
+            <span class="truncate font-mono" :class="{ 'italic text-muted-foreground': option.value === null }">
+              {{ option.label }}
+            </span>
+            <span class="text-right tabular-nums text-muted-foreground text-xs">{{ option.count ?? "" }}</span>
+          </button>
+          <template #content>
+            <div class="max-h-72 overflow-auto whitespace-pre-wrap break-all px-3 py-2 font-mono">{{ option.label }}</div>
+          </template>
+        </LightTooltip>
         <div v-if="props.draftMode === 'local' && props.allOptionsCount > props.options.length" class="px-2 py-0.5 text-center text-[10px] text-muted-foreground">
           {{ t("grid.moreValues", { count: props.allOptionsCount - props.options.length }) }}
         </div>

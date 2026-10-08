@@ -26,7 +26,7 @@ describe("external SQL file API", () => {
     mocks.invoke.mockResolvedValue({ kind: "content", content: "select 1;", version });
 
     await expect(readExternalSqlFile("/tmp/demo.sql")).resolves.toBe("select 1;");
-    expect(mocks.invoke).toHaveBeenCalledWith("read_external_sql_file", { path: "/tmp/demo.sql" });
+    expect(mocks.invoke).toHaveBeenCalledWith("read_external_sql_file", { path: "/tmp/demo.sql", maxSizeBytes: undefined, encoding: null });
   });
 
   it("returns the disk version with an editor snapshot", async () => {
@@ -51,6 +51,7 @@ describe("external SQL file API", () => {
       content: "select 2;",
       expectedContentHash: "abc123",
       expectedMissing: false,
+      encoding: "utf8",
     });
   });
 
@@ -63,6 +64,7 @@ describe("external SQL file API", () => {
       content: "select 2;",
       expectedContentHash: null,
       expectedMissing: true,
+      encoding: "utf8",
     });
   });
 

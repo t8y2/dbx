@@ -223,6 +223,17 @@ async function withTaskBusy(taskId: string, action: () => Promise<void>) {
   }
 }
 
+/** Post-action catch-up refresh. A healthy worker claims a woken run in well
+ * under a second — faster than the page's 3s activity poll — so run/cancel
+ * clicks re-query once shortly after to show the real transition. */
+function refreshSoon() {
+  setTimeout(() => {
+    void refreshRuns();
+    void refreshTasks();
+    void refreshResidents();
+  }, 1200);
+}
+
 function openCreate() {
   editingTask.value = null;
   editorOpen.value = true;
@@ -250,6 +261,7 @@ async function runNow(task: TaskDefinition) {
     await schedulerApi.runTask(task.id);
     await refreshRuns();
     await refreshTasks();
+    refreshSoon();
   });
 }
 
@@ -260,6 +272,7 @@ async function cancelRun(taskId: string, runId: string) {
     await schedulerApi.cancelRun(taskId, runId);
     await refreshRuns();
     await refreshTasks();
+    refreshSoon();
   } catch (reason) {
     toast(String(reason), 5000);
   } finally {

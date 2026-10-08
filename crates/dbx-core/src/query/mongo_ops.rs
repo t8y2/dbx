@@ -88,7 +88,7 @@ pub async fn mongo_list_collections_core(
     crate::document_ops::list_collections_core(state, connection_id, database).await
 }
 
-async fn ensure_collection_exists_for_query(
+pub async fn ensure_collection_exists_for_query(
     state: &AppState,
     connection_id: &str,
     database: &str,

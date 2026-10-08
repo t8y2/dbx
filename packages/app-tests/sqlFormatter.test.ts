@@ -301,3 +301,21 @@ test("compressSqlText preserves unterminated block comments", () => {
   const sql = "DELETE FROM users /* unfinished";
   assert.equal(compressSqlText(sql), sql);
 });
+
+test("Oracle: formats byte and code-point function variants with functionCase", async () => {
+  const formattedLower = await formatSqlText("SELECT SUBSTR(a, 1), SUBSTRB(b, 1), INSTRB(c, 'x'), LENGTHB(d) FROM dual", "oracle", {
+    functionCase: "lower",
+  });
+  assert.match(formattedLower, /\bsubstr\(/);
+  assert.match(formattedLower, /\bsubstrb\(/);
+  assert.match(formattedLower, /\binstrb\(/);
+  assert.match(formattedLower, /\blengthb\(/);
+
+  const formattedUpper = await formatSqlText("select substr(a, 1), substrb(b, 1), instrb(c, 'x'), lengthb(d) from dual", "oracle", {
+    functionCase: "upper",
+  });
+  assert.match(formattedUpper, /\bSUBSTR\(/);
+  assert.match(formattedUpper, /\bSUBSTRB\(/);
+  assert.match(formattedUpper, /\bINSTRB\(/);
+  assert.match(formattedUpper, /\bLENGTHB\(/);
+});

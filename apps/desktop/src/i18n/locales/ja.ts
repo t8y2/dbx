@@ -3465,6 +3465,8 @@ export default withEnglishFallback({
     skillsSendBlocked: "リクエストは送信されませんでした",
     skillsGroupDefault: "既定ディレクトリ",
     skillsGroupCustom: "カスタムディレクトリ",
+    skillsDuplicateName: "名前が重複",
+    skillsDuplicateNameNote: "このディレクトリ内の別のスキルが同じ名前を使用しているため、AI が区別できません。どちらかの SKILL.md の name フィールドを変更してください。",
     skillsReasonNotFound: "Skill フォルダーまたは SKILL.md が存在しません",
     skillsReasonRootUnavailable: "ソースディレクトリを利用できません（無効・移動・削除）",
     skillsReasonOversized: "SKILL.md が 1 MiB のサイズ上限を超えています",

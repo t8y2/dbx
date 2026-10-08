@@ -3674,6 +3674,8 @@ export default withEnglishFallback({
     skillsSendBlocked: "请求未发送",
     skillsGroupDefault: "默认目录",
     skillsGroupCustom: "自定义目录",
+    skillsDuplicateName: "名称重复",
+    skillsDuplicateNameNote: "该目录下另一个 Skill 使用了相同名称，AI 无法区分它们。请修改其中一个 SKILL.md 的 name 字段。",
     skillsReasonNotFound: "Skill 目录或 SKILL.md 已不存在",
     skillsReasonRootUnavailable: "来源目录不可用（已禁用、移动或删除）",
     skillsReasonOversized: "SKILL.md 超过 1 MiB 大小限制",

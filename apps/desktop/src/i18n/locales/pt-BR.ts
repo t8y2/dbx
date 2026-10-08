@@ -3432,6 +3432,8 @@ export default withEnglishFallback({
     skillsSendBlocked: "Solicitação não enviada",
     skillsGroupDefault: "Diretório padrão",
     skillsGroupCustom: "Diretório personalizado",
+    skillsDuplicateName: "Nome duplicado",
+    skillsDuplicateNameNote: "Outro skill neste diretório usa o mesmo nome, então a IA não consegue distingui-los. Altere o campo name em um dos arquivos SKILL.md deles.",
     skillsReasonNotFound: "A pasta da skill ou o SKILL.md não existe mais",
     skillsReasonRootUnavailable: "O diretório de origem está indisponível (desativado, movido ou excluído)",
     skillsReasonOversized: "SKILL.md excede o limite de 1 MiB",

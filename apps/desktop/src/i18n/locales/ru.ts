@@ -3618,6 +3618,8 @@ export default withEnglishFallback({
     skillsSendBlocked: "Запрос не отправлен",
     skillsGroupDefault: "Каталог по умолчанию",
     skillsGroupCustom: "Пользовательский каталог",
+    skillsDuplicateName: "Дублирующееся имя",
+    skillsDuplicateNameNote: "Другой навык в этом каталоге использует то же имя, поэтому ИИ не может их различить. Измените поле name в одном из их файлов SKILL.md.",
     skillsReasonNotFound: "Папка навыка или SKILL.md больше не существует",
     skillsReasonRootUnavailable: "Его исходный каталог недоступен (отключён, перемещён или удалён)",
     skillsReasonOversized: "SKILL.md превышает ограничение размера в 1 МиБ",

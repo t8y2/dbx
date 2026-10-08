@@ -3394,6 +3394,8 @@ export default withEnglishFallback({
     skillsSendBlocked: "Sorğu göndərilmədi",
     skillsGroupDefault: "Standart kataloq",
     skillsGroupCustom: "Xüsusi kataloq",
+    skillsDuplicateName: "Təkrarlanan ad",
+    skillsDuplicateNameNote: "Bu kataloqdakı başqa bir skill eyni addan istifadə edir, ona görə AI onları ayıra bilmir. Onlardan birinin SKILL.md faylındakı name sahəsini dəyişdirin.",
     skillsReasonNotFound: "Skill qovluğu və ya SKILL.md artık mövcud deyil",
     skillsReasonRootUnavailable: "Mənbə kataloğu əlçatmazdır (deaktiv edilib, köçürülüb və ya silinib)",
     skillsReasonOversized: "SKILL.md 1 MiB həddini aşır",

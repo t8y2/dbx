@@ -107,7 +107,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
 import { useUserSkillStore } from "@/stores/userSkillStore";
-import { buildSelectedSkillChips, removeSkillIds, userSkillSourceOfId } from "@/lib/ai/userSkillSelection";
+import { buildSelectedSkillChips, duplicateSkillNames, removeSkillIds, userSkillSourceOfId } from "@/lib/ai/userSkillSelection";
 import { aiConversationTypographyCssVariables } from "@/lib/ai/aiTypography";
 import { buildSkillListing, buildSkillListingLines } from "@/lib/ai/skillListing";
 import { type ReadUserSkillFailure, type UserSkillFailureReason, type UserSkillMeta, type UserSkillRootSettings, type UserSkillsListResult } from "@/types/userSkills";
@@ -701,6 +701,20 @@ const USE_SKILL_TOOL_NAME = "use_skill";
 // vanished from discovery must keep a removable chip (prd.md:37) instead of
 // silently becoming an id the user can no longer drop.
 const selectedSkillChips = computed(() => buildSelectedSkillChips(selectedSkillIds.value, (id) => userSkillStore.metaFor(id), loadedSkillIds.value));
+
+/**
+ * Per-root duplicate display names, keyed by source. Two same-named skills in one
+ * root are unresolvable for the model — `use_skill` addresses by name + source
+ * (ADR Decision 6) and the source is identical, so it can only answer "ambiguous".
+ * The selector flags those rows and tells the user the one fix that exists on
+ * their side (rename a directory); cross-root name collisions are normal and are
+ * deliberately not flagged.
+ */
+const duplicateNamesBySource = computed(() => {
+  const bySource = new Map<"custom" | "default", Set<string>>();
+  for (const group of userSkillStore.groupedSkills) bySource.set(group.source, duplicateSkillNames(group.skills));
+  return bySource;
+});
 
 /**
  * The skill a completed `use_skill` call actually loaded, as reported by the
@@ -6845,13 +6859,25 @@ async function openExternalUrl(url: string) {
                       <div class="px-2 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
                         {{ t(group.source === "custom" ? "ai.skillsGroupCustom" : "ai.skillsGroupDefault") }}
                       </div>
+                      <!-- Same-root name collision: the model addresses skills by name + source,
+                           so it cannot pick between these two, and only changing one of the two
+                           frontmatter `name` values fixes it (the folder name is irrelevant). -->
+                      <div v-if="duplicateNamesBySource.get(group.source)?.size" class="ai-skill-duplicate-note mx-2 mb-1 rounded-sm bg-amber-500/10 px-2 py-1 text-[10px] leading-snug text-amber-600">
+                        {{ t("ai.skillsDuplicateNameNote") }}
+                      </div>
                       <template v-for="skill in group.skills" :key="skill.id">
                         <button type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs hover:bg-muted" @click="toggleSkillSelected(skill.id)">
                           <div class="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border" :class="selectedSkillIds.includes(skill.id) ? 'border-primary bg-primary text-primary-foreground' : ''">
                             <Check v-if="selectedSkillIds.includes(skill.id)" class="h-3 w-3" />
                           </div>
                           <div class="min-w-0 flex-1 text-left">
-                            <div class="truncate font-medium">{{ skill.name }}</div>
+                            <div class="flex items-center gap-1">
+                              <span class="truncate font-medium">{{ skill.name }}</span>
+                              <span v-if="duplicateNamesBySource.get(group.source)?.has(skill.name)" class="ai-skill-duplicate-name inline-flex shrink-0 items-center gap-0.5 rounded-sm bg-amber-500/15 px-1 text-[10px] font-normal text-amber-600" :title="t('ai.skillsDuplicateName')">
+                                <AlertTriangle class="h-2.5 w-2.5" />
+                                {{ t("ai.skillsDuplicateName") }}
+                              </span>
+                            </div>
                             <div class="truncate text-[10px] text-muted-foreground">{{ skill.description }}</div>
                           </div>
                         </button>

@@ -3322,6 +3322,8 @@ export default withEnglishFallback({
     skillsSendBlocked: "請求未送出",
     skillsGroupDefault: "預設目錄",
     skillsGroupCustom: "自訂目錄",
+    skillsDuplicateName: "名稱重複",
+    skillsDuplicateNameNote: "此目錄下另一個 Skill 使用了相同名稱，AI 無法區分它們。請修改其中一個 SKILL.md 的 name 欄位。",
     skillsReasonNotFound: "Skill 目錄或 SKILL.md 已不存在",
     skillsReasonRootUnavailable: "來源目錄不可用（已停用、移動或刪除）",
     skillsReasonOversized: "SKILL.md 超過 1 MiB 大小限制",

@@ -3762,6 +3762,8 @@ export default {
     skillsSendBlocked: "Request not sent",
     skillsGroupDefault: "Default directory",
     skillsGroupCustom: "Custom directory",
+    skillsDuplicateName: "Duplicate name",
+    skillsDuplicateNameNote: "Another skill in this directory has the same name, so the AI cannot tell them apart. Change the name field in one of their SKILL.md files.",
     skillsReasonNotFound: "The skill folder or SKILL.md no longer exists",
     skillsReasonRootUnavailable: "Its source directory is unavailable (disabled, moved, or deleted)",
     skillsReasonOversized: "SKILL.md exceeds the 1 MiB size limit",

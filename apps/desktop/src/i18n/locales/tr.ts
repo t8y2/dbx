@@ -3367,6 +3367,8 @@ export default withEnglishFallback({
     skillsSendBlocked: "İstek gönderilmedi",
     skillsGroupDefault: "Varsayılan dizin",
     skillsGroupCustom: "Özel dizin",
+    skillsDuplicateName: "Yinelenen ad",
+    skillsDuplicateNameNote: "Bu dizindeki başka bir skill aynı adı kullanıyor, bu yüzden AI ikisini ayırt edemez. Birinin SKILL.md dosyasındaki name alanını değiştirin.",
     skillsReasonNotFound: "Skill klasörü veya SKILL.md artık mevcut değil",
     skillsReasonRootUnavailable: "Kaynak dizini kullanılamıyor (devre dışı, taşınmış veya silinmiş)",
     skillsReasonOversized: "SKILL.md 1 MiB sınırını aşıyor",

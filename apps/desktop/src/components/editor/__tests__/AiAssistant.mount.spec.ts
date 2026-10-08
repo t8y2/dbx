@@ -1027,18 +1027,20 @@ describe("AiAssistant mount", () => {
   const SKILL = { id: "d-review", name: "sql-review", description: "review rules" };
   const SKILL_BODY = "---\nname: sql-review\ndescription: review rules\n---\n\nAlways check the WHERE clause.";
 
-  function configureSkillCatalog(): void {
-    aiAssistantMountApi.skillCatalog = { defaultRoot: { status: "ok", skills: [SKILL] }, customRoot: null };
+  function configureSkillCatalog(skills: Array<{ id: string; name: string; description: string }> = [SKILL]): void {
+    aiAssistantMountApi.skillCatalog = { defaultRoot: { status: "ok", skills }, customRoot: null };
   }
 
   function configureSkillRead(failures: Array<{ id: string; reason: string }> = []): void {
     aiAssistantMountApi.skillReadResult = failures.length ? { skills: [], failures } : { skills: [{ ...SKILL, content: SKILL_BODY }], failures: [] };
   }
 
-  /** Drives the real selector: open the popover and tick the one listed skill. */
-  async function selectSkill(container: HTMLElement): Promise<void> {
+  /**
+   * Opens the real selector popover and returns it. Selecting a row does not close
+   * it, so an already-open popover is reused.
+   */
+  async function openSkillSelector(container: HTMLElement): Promise<HTMLElement> {
     const trigger = container.querySelector<HTMLElement>(".ai-skills-selector-trigger")!;
-    // The selector can already be open (selecting a row does not close it).
     let popover = container.querySelector<HTMLElement>('[data-slot="popover-content"]');
     if (!popover) {
       trigger.click();
@@ -1046,7 +1048,13 @@ describe("AiAssistant mount", () => {
       popover = container.querySelector<HTMLElement>('[data-slot="popover-content"]');
     }
     expect(popover).not.toBeNull();
-    const row = Array.from(popover!.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes(SKILL.name));
+    return popover!;
+  }
+
+  /** Drives the real selector: open the popover and tick the one listed skill. */
+  async function selectSkill(container: HTMLElement): Promise<void> {
+    const popover = await openSkillSelector(container);
+    const row = Array.from(popover.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes(SKILL.name));
     expect(row).toBeTruthy();
     row!.click();
     await settle();
@@ -1507,6 +1515,70 @@ describe("AiAssistant mount", () => {
     const custom = aiAssistantMountApi.runAgentStreamCustoms.at(-1) as { skillListing?: string[] } | undefined;
     expect(custom?.skillListing).toBeUndefined();
     expect((aiAssistantMountApi.runAgentStreamInputs.at(-1) as { allowSkills?: boolean }).allowSkills).toBe(false);
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // Same-root name collision. Discovery is flat, so this is two directories
+  // declaring one frontmatter name; `use_skill` addresses by name + source and
+  // therefore can only answer "ambiguous" here. The tool already says so — this
+  // marker is how the user learns why and what to do about it.
+  it("flags same-root duplicate skill names in the selector and leaves unique names alone", async () => {
+    // Control run: distinct names must render no marker and no note, so the
+    // assertions below cannot pass vacuously.
+    configureSkillCatalog([
+      { id: "d-alpha", name: "alpha", description: "first rules" },
+      { id: "d-beta", name: "beta", description: "second rules" },
+    ]);
+    const unique = await mountPanel(true, POSTGRES, configureAiPanel);
+    const uniquePopover = await openSkillSelector(unique.container);
+    expect(uniquePopover.textContent).toContain("alpha");
+    expect(uniquePopover.textContent).toContain("beta");
+    expect(uniquePopover.querySelectorAll(".ai-skill-duplicate-name").length).toBe(0);
+    expect(uniquePopover.querySelector(".ai-skill-duplicate-note")).toBeNull();
+    expect(unique.errors.map(String)).toEqual([]);
+
+    configureSkillCatalog([
+      { id: "d-a", name: "sql-review", description: "rules A" },
+      { id: "d-b", name: "sql-review", description: "rules B" },
+    ]);
+    const duplicate = await mountPanel(true, POSTGRES, configureAiPanel);
+    const popover = await openSkillSelector(duplicate.container);
+
+    const badges = Array.from(popover.querySelectorAll<HTMLElement>(".ai-skill-duplicate-name"));
+    expect(badges.length).toBe(2);
+    expect(badges.every((badge) => badge.textContent?.includes(i18n.global.t("ai.skillsDuplicateName")))).toBe(true);
+    const note = popover.querySelector(".ai-skill-duplicate-note");
+    expect(note?.textContent).toContain(i18n.global.t("ai.skillsDuplicateNameNote"));
+    // The advice must name the file the user can actually edit: the collision key is
+    // the frontmatter `name`, so renaming the folder would not resolve it. The literal
+    // filename is identical in every locale, which makes it the stable property to pin
+    // (the rest of the wording is free to change).
+    expect(note?.textContent).toContain("SKILL.md");
+    expect(duplicate.errors.map(String)).toEqual([]);
+  });
+
+  // The counterpart: one name in two *different* roots is resolvable (`use_skill`
+  // takes a `source`), so it is normal and must stay unflagged — flagging it would
+  // tell the user to rename a skill that works.
+  it("does not flag a name shared across roots, where source already separates them", async () => {
+    aiAssistantMountApi.skillCatalog = {
+      defaultRoot: { status: "ok", skills: [{ id: "d-review", name: "sql-review", description: "default copy" }] },
+      customRoot: { status: "ok", skills: [{ id: "c-review", name: "sql-review", description: "custom copy" }] },
+    };
+    const { errors, container } = await mountPanel(true, POSTGRES, (settings) => {
+      configureAiPanel(settings);
+      settings.desktopSettings = { ...settings.desktopSettings, custom_ai_skill_root_enabled: true };
+    });
+
+    const popover = await openSkillSelector(container);
+    // Both groups really rendered their row, so the negative assertion below is
+    // about an unflagged collision rather than about a missing catalog.
+    expect(popover.textContent).toContain(i18n.global.t("ai.skillsGroupDefault"));
+    expect(popover.textContent).toContain(i18n.global.t("ai.skillsGroupCustom"));
+    expect(popover.textContent).toContain("default copy");
+    expect(popover.textContent).toContain("custom copy");
+    expect(popover.querySelectorAll(".ai-skill-duplicate-name").length).toBe(0);
+    expect(popover.querySelector(".ai-skill-duplicate-note")).toBeNull();
     expect(errors.map(String)).toEqual([]);
   });
 });

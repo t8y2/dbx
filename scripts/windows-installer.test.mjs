@@ -239,11 +239,13 @@ ${elevationInit}
   \u0024{IfNot} \u0024{Errors}
     SetFileAttributes "$INSTDIR\\dbx.exe" READONLY
   \u0024{EndIf}
-  StrCpy $0 "$INSTDIR\\dbx.exe"
-  WriteINIStr "$EXEDIR\\result.ini" "diagnostics" "dialog" "$(dbxFileWriteErrorNoIgnore)"
 FunctionEnd
 Section
   SetOutPath $INSTDIR
+  ; NSIS applies the selected language after .onInit returns.
+  Call DbxUpdateElevationStatus
+  StrCpy $0 "$INSTDIR\\dbx.exe"
+  WriteINIStr "$EXEDIR\\result.ini" "diagnostics" "dialog" "$(dbxFileWriteErrorNoIgnore)"
   !insertmacro DbxExtractFile "/oname=dbx.exe" "${payload}" "$INSTDIR\\dbx.exe"
   WriteINIStr "$EXEDIR\\result.ini" "install" "complete" "1"
 SectionEnd

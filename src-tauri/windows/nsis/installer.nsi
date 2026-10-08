@@ -577,6 +577,7 @@ FunctionEnd
 ; installer folder without ever continuing past a failed required-file write.
 !macro DbxExtractFile OPTIONS SOURCE DESTINATION
   StrCpy $DbxFailedFile "${DESTINATION}"
+  Call DbxUpdateElevationStatus
   ${Do}
     Call DbxPrepareFileWrite
     SetOverwrite try

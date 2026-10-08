@@ -1390,6 +1390,17 @@ fn openai_stream_has_finish_reason(event: &serde_json::Value) -> bool {
     })
 }
 
+/// Normalizes provider-specific output-limit labels into the two values the
+/// agent event contract exposes. Other stop reasons (for example tool calls or
+/// a normal stop) are intentionally not surfaced as truncation.
+fn output_limit_finish_reason(reason: &str) -> Option<&'static str> {
+    match reason.to_ascii_lowercase().as_str() {
+        "length" => Some("length"),
+        "max_tokens" | "max_output_tokens" => Some("max_tokens"),
+        _ => None,
+    }
+}
+
 pub fn responses_stream_text(event: &serde_json::Value) -> Option<&str> {
     let event_type = event["type"].as_str().unwrap_or_default();
     if !event_type.is_empty() && event_type != "response.output_text.delta" {
@@ -4490,6 +4501,11 @@ async fn stream_claude_with_tools(
                                             let existing_input = token_usage.as_ref().map(|u| u.input_tokens).unwrap_or(0);
                                             token_usage = Some(TokenUsage { input_tokens: existing_input, output_tokens: o as u32 });
                                         }
+                                        if let Some(reason) = event["delta"]["stop_reason"].as_str()
+                                            .and_then(output_limit_finish_reason)
+                                        {
+                                            on_event(StreamToolEvent::FinishReason { reason: reason.to_string() });
+                                        }
                                     }
                                     "content_block_start" => {
                                         let idx = event["index"].as_u64().unwrap_or(0) as u32;
@@ -4843,6 +4859,12 @@ async fn stream_responses_with_tools(
                                 if let Some(usage) = responses_token_usage(&event) {
                                     token_usage = Some(usage);
                                 }
+                                if let Some(reason) = event["response"]["incomplete_details"]["reason"]
+                                    .as_str()
+                                    .and_then(output_limit_finish_reason)
+                                {
+                                    on_event(StreamToolEvent::FinishReason { reason: reason.to_string() });
+                                }
 
                                 if let Some(text) = responses_stream_text(&event) {
                                     emitted.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -5097,6 +5119,12 @@ async fn stream_gemini_with_tools(
                                     token_usage = Some(TokenUsage { input_tokens: p as u32, output_tokens: c as u32 });
                                 }
                                 if let Some(candidates) = event["candidates"].as_array() {
+                                    if let Some(reason) = candidates[0]["finishReason"]
+                                        .as_str()
+                                        .and_then(output_limit_finish_reason)
+                                    {
+                                        on_event(StreamToolEvent::FinishReason { reason: reason.to_string() });
+                                    }
                                     if let Some(parts) = candidates[0]["content"]["parts"].as_array() {
                                         for part in parts {
                                             // Text
@@ -5255,10 +5283,10 @@ mod tests {
         gemini_text, is_agens_endpoint, is_kimi_model, is_retryable_error, list_models_core, maybe_bearer_headers,
         maybe_tag_retry_after, measure_first_stream_chunk, merge_global_max_retries, minimax_stream_semantics,
         ollama_selected_model_tool_support, openai_message_content, openai_response_text, openai_stream_reasoning,
-        openai_stream_text, parse_dynamic_effort_capability, parse_gemini_model_list_response,
-        parse_model_list_response, parse_retry_after, parse_retry_after_secs, provider_requires_api_key,
-        redact_secrets, redact_url_query, resolve_endpoint, resolve_gemini_stream_endpoint, resolve_model_effort_core,
-        resolve_model_list_endpoint, resolve_ollama_show_endpoint, responses_function_tool,
+        openai_stream_text, output_limit_finish_reason, parse_dynamic_effort_capability,
+        parse_gemini_model_list_response, parse_model_list_response, parse_retry_after, parse_retry_after_secs,
+        provider_requires_api_key, redact_secrets, redact_url_query, resolve_endpoint, resolve_gemini_stream_endpoint,
+        resolve_model_effort_core, resolve_model_list_endpoint, resolve_ollama_show_endpoint, responses_function_tool,
         responses_max_output_tokens, responses_stream_text, responses_text, responses_token_usage,
         retain_ollama_completion_models, retry_after_secs, set_chat_completion_token_limit, stream, stream_claude,
         stream_claude_with_tools, stream_data_payload, stream_error, stream_openai_with_tools, stream_with_tools,
@@ -5270,6 +5298,15 @@ mod tests {
         MINIMAX_REASONING_DETAILS_PAYLOAD_KEY, TEST_PROMPT,
     };
     use super::{redacted_http_detail, sensitive_values};
+
+    #[test]
+    fn normalizes_provider_output_limit_reasons() {
+        assert_eq!(output_limit_finish_reason("length"), Some("length"));
+        assert_eq!(output_limit_finish_reason("MAX_TOKENS"), Some("max_tokens"));
+        assert_eq!(output_limit_finish_reason("max_output_tokens"), Some("max_tokens"));
+        assert_eq!(output_limit_finish_reason("stop"), None);
+        assert_eq!(output_limit_finish_reason("tool_calls"), None);
+    }
 
     #[test]
     fn structured_image_attachment_becomes_openai_image_content() {

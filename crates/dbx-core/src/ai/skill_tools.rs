@@ -48,9 +48,12 @@ const MAX_CATALOG_ENTRIES: usize = 100;
 const MAX_CANDIDATE_DESCRIPTION_CHARS: usize = 200;
 /// Keep one file tool result below the generic intermediate-result budget.
 pub const DEFAULT_READ_CHUNK_CHARS: usize = 10_000;
+/// `use_skill` includes both an instruction page and a file catalogue, so it
+/// needs one shared ceiling rather than independently bounded pieces.
+const MAX_USE_SKILL_RESULT_CHARS: usize = 10_000;
 /// How much of a skill body `use_skill` returns before handing over a cursor.
 /// A longer body is paged rather than truncated — see `format_skill`.
-const SKILL_BODY_CHUNK_CHARS: usize = 8_000;
+const SKILL_BODY_CHUNK_CHARS: usize = 6_000;
 
 /// The two skill tools, in dispatch order.
 pub fn tool_definitions() -> Vec<ToolDefinition> {
@@ -323,16 +326,24 @@ fn format_skill(skill: &ResolvedSkill) -> String {
     if listing.entries.is_empty() {
         output.push_str("(this skill ships no extra files)\n");
     }
+    let mut catalogue_omitted_for_budget = false;
     for entry in &listing.entries {
         let kind = if entry.text { "[text]" } else { "[binary]" };
-        output.push_str(&format!("- {} ({} bytes) {kind}\n", entry.relative_path, entry.bytes));
+        let rendered = format!("- {} ({} bytes) {kind}\n", entry.relative_path, entry.bytes);
+        // Reserve room for the continuation instructions below. Never let a
+        // long filename turn a bounded first page back into a generic tool
+        // result that the agent loop has to compact.
+        if output.chars().count() + rendered.chars().count() + 400 > MAX_USE_SKILL_RESULT_CHARS {
+            catalogue_omitted_for_budget = true;
+            break;
+        }
+        output.push_str(&rendered);
     }
-    if listing.truncated {
+    if listing.truncated || catalogue_omitted_for_budget {
         // A capped listing must say so, or the model reads a partial file list
         // as the whole skill.
         output.push_str(&format!(
-            "(the file list is truncated at {} entries; this skill ships more)\n",
-            skills::SKILL_LISTING_MAX_ENTRIES
+            "(the file list is truncated; use `read_skill_file` only for paths referenced by the instructions)\n"
         ));
     }
     output.push_str(
@@ -552,6 +563,7 @@ mod tests {
         let answer = use_skill_answer(&target("big-skill", None), &roots).unwrap().text;
         assert!(!answer.contains("END-OF-BODY"), "an oversized body must not come back whole: {answer}");
         assert!(answer.contains("Read the rest with `read_skill_file`"), "{answer}");
+        assert!(answer.chars().count() <= MAX_USE_SKILL_RESULT_CHARS, "{answer}");
         assert!(answer.contains("nextOffset"), "{answer}");
         assert!(
             answer.contains(&format!("`offset` {SKILL_BODY_CHUNK_CHARS}")),

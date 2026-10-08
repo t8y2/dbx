@@ -261,6 +261,7 @@ SectionEnd
         ['1028', /未請求|啟動時已有系統管理員權限/],
       ]) {
         for (const action of ['writable', 'readonly', 'retry', 'cancel', 'manual']) {
+          t.diagnostic(`Windows extraction: language=${language}, action=${action}`)
           const locked = ['retry', 'cancel', 'manual'].includes(action)
           writeFileSync(path.join(target, 'dbx.exe'), 'original executable contents')
           rmSync(report, { force: true })
@@ -268,7 +269,10 @@ SectionEnd
           try {
             execFileSync(exe, [`/LANG=${language}`, ...(locked ? ['/LOCK'] : []), ...(action === 'manual' ? ['/MANUAL'] : []), ...(action === 'retry' ? ['/RETRY'] : []), ...(action === 'readonly' ? ['/READONLY'] : []), `/D=${target}`], { timeout: 15_000, windowsVerbatimArguments: true, argv0: `"${exe}"` })
           } catch (error) {
-            if (typeof error.status !== 'number') throw error
+            if (typeof error.status !== 'number') {
+              const diagnostic = existsSync(report) ? readFileSync(report, 'utf8') : 'No fixture report'
+              throw new Error(`language=${language}, action=${action}: ${error.message}\n${diagnostic}`, { cause: error })
+            }
             exitCode = error.status
           }
           const output = readFileSync(report, 'utf8')

@@ -267,7 +267,7 @@ SectionEnd
           rmSync(report, { force: true })
           let exitCode = 0
           try {
-            execFileSync(exe, [`/LANG=${language}`, ...(locked ? ['/LOCK'] : []), ...(action === 'manual' ? ['/MANUAL'] : []), ...(action === 'retry' ? ['/RETRY'] : []), ...(action === 'readonly' ? ['/READONLY'] : []), `/D=${target}`], { timeout: 15_000, windowsVerbatimArguments: true, argv0: `"${exe}"` })
+            execFileSync(exe, ['/S', `/LANG=${language}`, ...(locked ? ['/LOCK'] : []), ...(action === 'manual' ? ['/MANUAL'] : []), ...(action === 'retry' ? ['/RETRY'] : []), ...(action === 'readonly' ? ['/READONLY'] : []), `/D=${target}`], { timeout: 15_000, windowsVerbatimArguments: true, argv0: `"${exe}"` })
           } catch (error) {
             if (typeof error.status !== 'number') {
               const diagnostic = existsSync(report) ? readFileSync(report, 'utf8') : 'No fixture report'

@@ -1075,6 +1075,9 @@ func oracleServerMajorVersionFromDBConn(ctx context.Context, db *sql.DB) (int, b
 }
 
 func oracleServerMajorVersionFromDriverConn(driverConn any) (int, bool) {
+	if guarded, ok := driverConn.(*oracleQueryConnection); ok {
+		driverConn = guarded.oracleThinConnection
+	}
 	conn, ok := driverConn.(*go_ora.Connection)
 	if !ok {
 		return 0, false
@@ -1276,7 +1279,7 @@ func openDBWithStringConverter(params connectParams, stringConverter converters.
 	if stringConverter != nil {
 		go_ora.SetStringConverter(connector, stringConverter, nil)
 	}
-	db := sql.OpenDB(connector)
+	db := sql.OpenDB(oracleQueryConnector{connector})
 	db.SetMaxOpenConns(4)
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(30 * time.Minute)
@@ -3892,11 +3895,16 @@ func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageRes
 // projection so the remaining columns stay readable; panics on later pages
 // surface as errors instead.
 func (s *server) runPagedOracleSelect(sqlText string, opts queryOptions, pageSize int, start time.Time) (queryPageResult, *querySession, error) {
+	// Until a cursor is handed to the caller, this function owns its rows,
+	// including panics while reading Columns/ColumnTypes before the first page.
+	var ownedRows *sql.Rows
+	defer func() { s.closeRows(ownedRows) }()
 	for attempt := 0; ; attempt++ {
 		rows, err := s.queryRowsWithOracleValueRewriteIfNeeded(sqlText, opts.TimeoutSecs, opts.DeferLOBs)
 		if err != nil {
 			return queryPageResult{}, nil, err
 		}
+		ownedRows = rows
 		columns, err := rows.Columns()
 		if err != nil {
 			s.closeRows(rows)
@@ -3913,7 +3921,7 @@ func (s *server) runPagedOracleSelect(sqlText string, opts queryOptions, pageSiz
 		if err != nil {
 			s.closeRows(rows)
 			var panicErr oracleDriverPanicError
-			if attempt == 0 && !oracleSQLLocksRows(sqlText) && errors.As(err, &panicErr) {
+			if attempt == 0 && !s.hasManualTransaction() && !oracleSQLLocksRows(sqlText) && errors.As(err, &panicErr) {
 				if placeholder, ok := oraclePlaceholderRetrySQL(sqlText, s.loadOracleColumnMeta); ok {
 					sqlText = placeholder
 					continue
@@ -3922,6 +3930,7 @@ func (s *server) runPagedOracleSelect(sqlText string, opts queryOptions, pageSiz
 			return queryPageResult{}, nil, err
 		}
 		if result.HasMore {
+			ownedRows = nil
 			return result, session, nil
 		}
 		s.closeRows(rows)
@@ -4257,7 +4266,7 @@ func columnTypeNames(rows *sql.Rows) []string {
 	return result
 }
 
-func (s *server) queryRowsWithOracleValueRewriteIfNeeded(sqlText string, timeoutSecs int, deferLOBs bool) (*sql.Rows, error) {
+func (s *server) queryRowsWithOracleValueRewriteIfNeeded(sqlText string, timeoutSecs int, deferLOBs bool) (resultRows *sql.Rows, queryErr error) {
 	// A statement that keeps row locks while it runs is rewritten before the
 	// first attempt: when such a statement panics after the rows were locked,
 	// the locks stay behind and the retry below blocks on them until the query
@@ -4281,7 +4290,7 @@ func (s *server) queryRowsWithOracleValueRewriteIfNeeded(sqlText string, timeout
 			// worth retrying through the value-rewrite fallback below; other
 			// failures keep their own error.
 			var panicErr oracleDriverPanicError
-			if !errors.As(rewrittenErr, &panicErr) {
+			if s.hasManualTransaction() || !errors.As(rewrittenErr, &panicErr) {
 				return nil, rewrittenErr
 			}
 		}
@@ -4289,7 +4298,7 @@ func (s *server) queryRowsWithOracleValueRewriteIfNeeded(sqlText string, timeout
 	rows, err := s.queryRowsWithTimeout(sqlText, nil, timeoutSecs)
 	if err != nil {
 		var panicErr oracleDriverPanicError
-		if errors.As(err, &panicErr) {
+		if !s.hasManualTransaction() && errors.As(err, &panicErr) {
 			rewritten, rewriteErr := rewriteOracleSelectSQL(sqlText, s.loadOracleColumnMeta, false)
 			if rewriteErr == nil && rewritten != sqlText {
 				rewrittenRows, rewrittenErr := s.queryRowsWithTimeout(rewritten, nil, timeoutSecs)
@@ -4310,6 +4319,13 @@ func (s *server) queryRowsWithOracleValueRewriteIfNeeded(sqlText string, timeout
 		}
 		return nil, err
 	}
+	// Metadata access can panic too. Retain ownership until rows are actually
+	// returned; the caller cannot clean up rows it has not received.
+	defer func() {
+		if rows != resultRows {
+			s.closeRows(rows)
+		}
+	}()
 	typeNames := columnTypeNames(rows)
 	if !oracleColumnTypeNamesContainXMLType(typeNames) {
 		return rows, nil

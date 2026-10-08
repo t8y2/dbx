@@ -3,6 +3,7 @@ import { withEnglishFallback } from "./fallback";
 import { mongodbDatabaseDumpZhTW as mongoDump } from "./mongodbDatabaseDump";
 import { meilisearchManagementZhTW } from "./meilisearchManagement";
 import { schedulerZhTW as scheduler } from "./schedulerMessages";
+import { pluginPathPickerZhTW as pluginPathPicker } from "./pluginPathPickerMessages";
 import docs from "./docs/zh-TW";
 import { dataDictionaryZhTW as dataDictionary } from "./dataDictionaryMessages";
 import { consulZhTWMessages } from "./consulZhTW";
@@ -10903,5 +10904,8 @@ export default withEnglishFallback({
   },
   scheduler: {
     ...scheduler,
+  },
+  pluginPathPicker: {
+    ...pluginPathPicker,
   },
 });

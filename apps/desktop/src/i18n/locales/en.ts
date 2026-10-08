@@ -6,6 +6,7 @@ import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessag
 import { meilisearchManagementEn } from "./meilisearchManagement";
 import { schedulerEn as scheduler } from "./schedulerMessages";
 import { mongodbDatabaseDumpEn as mongoDump } from "./mongodbDatabaseDump";
+import { pluginPathPickerEn as pluginPathPicker } from "./pluginPathPickerMessages";
 
 const consul = {
   ...consulUiMessages,
@@ -11545,5 +11546,8 @@ export default {
   },
   scheduler: {
     ...scheduler,
+  },
+  pluginPathPicker: {
+    ...pluginPathPicker,
   },
 };

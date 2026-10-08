@@ -5,6 +5,7 @@ import { dataDictionaryZhCN as dataDictionary } from "./dataDictionaryMessages";
 import { consul } from "./consulZhCN";
 import { meilisearchManagementZhCN } from "./meilisearchManagement";
 import { schedulerZhCN as scheduler } from "./schedulerMessages";
+import { pluginPathPickerZhCN as pluginPathPicker } from "./pluginPathPickerMessages";
 import { mongodbDatabaseDumpZhCN as mongoDump } from "./mongodbDatabaseDump";
 
 export default withEnglishFallback({
@@ -11526,5 +11527,8 @@ export default withEnglishFallback({
   },
   scheduler: {
     ...scheduler,
+  },
+  pluginPathPicker: {
+    ...pluginPathPicker,
   },
 });

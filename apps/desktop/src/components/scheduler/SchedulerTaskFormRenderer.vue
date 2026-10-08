@@ -18,7 +18,7 @@ import { invokePlugin } from "@/lib/backend/api";
 import { pickPluginFieldFile } from "@/lib/plugins/pluginFieldPicker";
 import { configFromFormValues, formFieldRequired, visibleFormFields, type SchedulerFormValues } from "@/lib/scheduler/schedulerForm";
 import type { ConnectionConfig, PluginFormField, PluginFormFieldOption, PluginFormFieldValue } from "@/types/database";
-import SchedulerPluginPathPickerDialog from "./SchedulerPluginPathPickerDialog.vue";
+import PluginPathPickerDialog from "@/components/plugins/PluginPathPickerDialog.vue";
 
 const props = defineProps<{
   fields: readonly PluginFormField[];
@@ -306,11 +306,11 @@ function isSecretTextarea(field: PluginFormField): boolean {
       </div>
       <div v-if="field.description" class="text-[11px] leading-5 text-muted-foreground">{{ field.description }}</div>
       <p v-if="field.picker?.source === 'plugin' && !pluginPickerConnectionId(field)" class="text-[11px] leading-5 text-muted-foreground" :data-scheduler-picker-needs-connection="field.key">
-        {{ t("scheduler.pathPicker.needsConnectionShort") }}
+        {{ t("pluginPathPicker.needsConnectionShort") }}
       </p>
     </div>
     <p v-if="shownFields.length === 0" class="text-xs text-muted-foreground">{{ t("scheduler.editor.noConfigFields") }}</p>
-    <SchedulerPluginPathPickerDialog
+    <PluginPathPickerDialog
       v-if="pluginPathPickerField"
       v-model:open="pluginPathPickerOpen"
       :plugin-id="pluginId"

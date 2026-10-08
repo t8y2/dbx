@@ -209,13 +209,13 @@ describe("SchedulerTaskFormRenderer", () => {
       await clickBrowseButton(container);
       // The dialog normalizes an empty stored path to the connection root.
       expect(mocks.invokePluginPathBrowse).toHaveBeenCalledWith("io.dbx.files", "files/listDirs", "conn-src", "/", "en");
-      expect(document.body.querySelector("[data-scheduler-path-picker]")).not.toBeNull();
+      expect(document.body.querySelector("[data-plugin-path-picker]")).not.toBeNull();
 
-      document.body.querySelector<HTMLElement>('[data-scheduler-path-picker-entry="/sub"]')!.click();
+      document.body.querySelector<HTMLElement>('[data-plugin-path-picker-entry="/sub"]')!.click();
       await nextTick();
       await new Promise((resolve) => setTimeout(resolve, 0));
       await nextTick();
-      document.body.querySelector<HTMLElement>("[data-scheduler-path-picker-choose]")!.click();
+      document.body.querySelector<HTMLElement>("[data-plugin-path-picker-choose]")!.click();
       await nextTick();
       await new Promise((resolve) => setTimeout(resolve, 0));
       expect(values.source_path).toBe("/sub");
@@ -243,7 +243,7 @@ describe("SchedulerTaskFormRenderer", () => {
       expect(button!.dataset.schedulerPickerPlugin).toBeUndefined();
       button!.click();
       await nextTick();
-      expect(document.body.querySelector("[data-scheduler-path-picker]")).toBeNull();
+      expect(document.body.querySelector("[data-plugin-path-picker]")).toBeNull();
     });
   });
 });

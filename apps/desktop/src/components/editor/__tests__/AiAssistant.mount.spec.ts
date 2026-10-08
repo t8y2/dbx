@@ -1217,6 +1217,42 @@ describe("AiAssistant mount", () => {
     }>;
   }
 
+  // `/skill` rides a second command source and must reach the same selector the
+  // context-row button opens, on a different trigger (the palette entry fires on
+  // `mousedown` so the textarea keeps focus).
+  //
+  // Scope note: this file stubs the popover, so it only proves the entry exists,
+  // consumes the typed command and drives the open state. The dismissal
+  // regression — the programmatic open was followed by a textarea focus, which
+  // reka read as focus-outside and closed the popover — is invisible behind that
+  // stub and is pinned by `AiAssistant.skillPaletteFocus.spec.ts`, which mounts
+  // the real popover. Keep both.
+  it("opens the skill selector from the /skill palette entry", async () => {
+    configureSkillCatalog();
+    // Self-sufficient catalog: under `-t` this test runs alone, so the file's
+    // afterEach re-arm of the default mock has not happened yet.
+    aiAssistantMountApi.listUserSkills.mockImplementation(() => Promise.resolve(aiAssistantMountApi.skillCatalog));
+    const { errors, container } = await mountPanel(true, POSTGRES, configureAiPanel);
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea.ai-conversation-text")!;
+    textarea.focus();
+    textarea.value = "/skill";
+    textarea.setSelectionRange(6, 6);
+    textarea.dispatchEvent(new Event("input"));
+    await settle();
+
+    const paletteEntry = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes("/skill"));
+    expect(paletteEntry, "/skill palette entry").toBeDefined();
+    paletteEntry!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    await settle();
+
+    // The typed command text is consumed either way.
+    expect(textarea.value).toBe("");
+    const popover = container.querySelector<HTMLElement>('[data-slot="popover-content"]');
+    expect(popover, "skill selector popover").not.toBeNull();
+    expect(popover!.textContent).toContain(i18n.global.t("ai.skillsGroupDefault"));
+    expect(errors.map(String)).toEqual([]);
+  });
+
   // Req 5: the toggle alone opens the gate — no selection needed — and the tool
   // flag follows the listing rather than being a second decision (ADR Decision 10).
   it("injects the skill listing from the Settings toggle with nothing selected", async () => {

@@ -3234,7 +3234,13 @@ function selectCommand(command: AiSlashEntry) {
     // Routed through the gated open state, so the palette entry cannot open the
     // selector when the provider has no skill capability (Req 15a).
     skillSelectorOpen.value = true;
-    nextTick(() => promptTextareaRef.value?.focus());
+    // No `nextTick(() => textarea.focus())` on this branch, unlike the action
+    // branch below. The just-opened popover autofocuses its own content, so
+    // pulling focus back to the textarea fires a `focusin` outside the layer and
+    // reka's DismissableLayer reads it as a focus-outside and dismisses the
+    // popover on the next tick — the `/skill` entry then looks like it does
+    // nothing at all. The entry fires on `mousedown` with `prevent`, so the
+    // textarea already keeps focus; nothing needs to be restored.
     return;
   }
   activeAction.value = command.button.action;

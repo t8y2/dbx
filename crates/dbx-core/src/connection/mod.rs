@@ -3805,6 +3805,64 @@ impl AppState {
         result
     }
 
+    /// Server-side resolver for manifest field pickers that declare
+    /// `source: "plugin"` (scheduler/connection forms asking the plugin to
+    /// browse its own storage tree).
+    ///
+    /// The frontend only ever sends the connection id: this method resolves
+    /// the stored connection (with hydrated secrets) through the same
+    /// `get_or_create_pool` chain the scheduler plugin executor uses — the
+    /// plugin's `connection/connect` receives the lifecycle payload there —
+    /// and then invokes `method` with just the connection id, so secrets
+    /// never reach the webview, logs, or events. The method rides the same
+    /// generic invokePlugin channel as form-field `options_action`; `task/*`
+    /// stays frozen for the scheduler task RPC contract.
+    pub async fn invoke_plugin_path_browse(
+        &self,
+        plugin_id: &str,
+        method: &str,
+        connection_id: &str,
+        path: &str,
+        locale: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
+        if method.starts_with("task/") {
+            return Err("Path browse must use a non-task plugin method (task/* is the frozen scheduler RPC namespace)"
+                .to_string());
+        }
+        if method.starts_with("host/") {
+            return Err("Path browse must use a plugin method; host/* is the host-reserved namespace".to_string());
+        }
+        let connection_id = connection_id.trim();
+        if connection_id.is_empty() {
+            return Err("Path browse requires a connection id".to_string());
+        }
+        if path.len() > 4_096 || path.chars().any(char::is_control) {
+            return Err("Path browse received an invalid path".to_string());
+        }
+        let connection = self
+            .storage
+            .load_connections()
+            .await?
+            .into_iter()
+            .find(|config| config.id == connection_id)
+            .ok_or_else(|| format!("Connection '{connection_id}' was not found"))?;
+        if connection.db_type != DatabaseType::Plugin || connection.plugin_id.as_deref() != Some(plugin_id) {
+            return Err(format!("Connection '{connection_id}' is not owned by plugin '{plugin_id}'"));
+        }
+        // Opens (or reuses) the plugin connection server-side: hydrates the
+        // stored config and drives the plugin's connection/connect, so the
+        // browse call below can address the open session by id alone.
+        self.get_or_create_pool(connection_id, None)
+            .await
+            .map_err(|error| format!("Cannot open connection {connection_id}: {error}"))?;
+        let params = serde_json::json!({
+            "connectionId": connection_id,
+            "path": path,
+            "locale": locale,
+        });
+        self.plugin_host.invoke(plugin_id, method, params, None, Some(std::time::Duration::from_secs(60))).await
+    }
+
     pub async fn connect_redis_sentinel(
         &self,
         connection_id: &str,

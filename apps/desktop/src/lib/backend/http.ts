@@ -259,6 +259,7 @@ import type {
   PluginFilesystemReadResult,
   PluginInstallResult,
   PluginMarketplaceInstallRequest,
+  PluginPathBrowseResult,
   PluginRepository,
   PluginRepositoryCatalogResult,
   PluginRollbackResult,
@@ -734,6 +735,10 @@ export async function invokePlugin<T = unknown>(pluginId: string, method: string
 
 export async function invokePluginConnectionAction(config: ConnectionConfig, actionId: string): Promise<PluginConnectionActionResult> {
   return post("/api/plugins/connection-action", { config, actionId });
+}
+
+export async function invokePluginPathBrowse(pluginId: string, method: string, connectionId: string, path: string, locale?: string): Promise<PluginPathBrowseResult> {
+  return post("/api/plugins/path-browse", { pluginId, method, connectionId, path, locale });
 }
 
 export async function notifyPlugin(pluginId: string, method: string, params: unknown = null): Promise<void> {

@@ -127,6 +127,7 @@ import type {
   PluginBinaryEvent,
   PluginConnectionActionResult,
   PluginEvent,
+  PluginPathBrowseResult,
   PluginFilesystemListResult,
   PluginFilesystemMutationResult,
   PluginFilesystemReadResult,
@@ -2765,6 +2766,10 @@ export async function stopPlugin(pluginId: string): Promise<void> {
 
 export async function invokePlugin<T = unknown>(pluginId: string, method: string, params: unknown = null, timeoutMs?: number): Promise<T> {
   return invoke("invoke_plugin", { pluginId, method, params, timeoutMs });
+}
+
+export async function invokePluginPathBrowse(pluginId: string, method: string, connectionId: string, path: string, locale?: string): Promise<PluginPathBrowseResult> {
+  return invoke("invoke_plugin_path_browse", { pluginId, method, connectionId, path, locale });
 }
 
 export async function invokePluginConnectionAction(config: ConnectionConfig, actionId: string): Promise<PluginConnectionActionResult> {

@@ -105,7 +105,7 @@
       }
     },
     "fieldPicker": {
-      "description": "Local-file action on a text/password/textarea field. Desktop hosts store the chosen absolute path in the declaring field; browser hosts cannot read a client path and upload the file content into 'content_field' instead.",
+      "description": "Local-file action on a text/password/textarea field. Desktop hosts store the chosen absolute path in the declaring field; browser hosts cannot read a client path and upload the file content into 'content_field' instead. With source:'plugin' the host browses the plugin's own storage tree for the connection named by connection_field instead of opening a native dialog.",
       "type": "object",
       "additionalProperties": false,
       "required": ["kind"],
@@ -127,6 +127,30 @@
         "content_field": {
           "description": "Declared sibling field that receives the file content on hosts without a client filesystem.",
           "$ref": "#/$defs/identifier"
+        },
+        "source": {
+          "description": "Switches the picker to a plugin-backed browser. Only 'plugin' is defined; omitted keeps the local native picker. Requires kind 'directory'.",
+          "enum": ["plugin"]
+        },
+  "action": {
+    "description": "Plugin method serving the directory browse over the generic invokePlugin channel (never task/*, never host/*), e.g. 'files/listDirs'. Receives {connectionId, path, locale} and returns {entries: [{name, path, is_dir}], truncated?, resolved_path?}: resolved_path names the directory actually listed when the requested path is not a directory and the plugin answers from its parent. Requires source 'plugin'.",
+    "type": "string",
+    "minLength": 1,
+    "maxLength": 128,
+    "pattern": "^(?!/)(?!.*//).+$"
+  },
+        "connection_field": {
+          "description": "Sibling field key (or ordered fallback chain of keys) supplying the connection id to browse; the host falls back to the task's bound connection. Requires source 'plugin'.",
+          "oneOf": [
+            { "$ref": "#/$defs/identifier" },
+            {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 8,
+              "uniqueItems": true,
+              "items": { "$ref": "#/$defs/identifier" }
+            }
+          ]
         }
       }
     },
@@ -137,6 +161,7 @@
         "label": { "type": "string", "minLength": 1 },
         "description": { "type": "string" },
         "placeholder": { "type": "string" },
+        "empty_label": { "type": "string", "description": "Localized label of the empty entry a host offers on a may-stay-empty dynamic `options_action` select." },
         "options": { "type": "object", "propertyNames": { "minLength": 1 }, "additionalProperties": { "type": "string", "minLength": 1 } }
       }
     },
@@ -155,7 +180,21 @@
         "label": { "type": "string", "minLength": 1 },
         "description": { "type": "string" },
         "fields": { "type": "object", "propertyNames": { "$ref": "#/$defs/identifier" }, "additionalProperties": { "$ref": "#/$defs/formFieldLocalization" } },
-        "actions": { "type": "object", "propertyNames": { "$ref": "#/$defs/identifier" }, "additionalProperties": { "$ref": "#/$defs/actionLocalization" } }
+        "actions": { "type": "object", "propertyNames": { "$ref": "#/$defs/identifier" }, "additionalProperties": { "$ref": "#/$defs/actionLocalization" } },
+        "triggers": {
+          "description": "task-provider trigger localizations keyed by the provider-local trigger id; `fields` translates the trigger's config form exactly like the contribution-level `fields` map.",
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/identifier" },
+          "additionalProperties": { "$ref": "#/$defs/triggerLocalization" }
+        }
+      }
+    },
+    "triggerLocalization": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "label": { "type": "string", "minLength": 1 },
+        "fields": { "type": "object", "propertyNames": { "$ref": "#/$defs/identifier" }, "additionalProperties": { "$ref": "#/$defs/formFieldLocalization" } }
       }
     },
     "manifestLocalization": {
@@ -238,11 +277,20 @@
         "type": { "enum": ["text", "password", "number", "boolean", "select", "radio", "textarea"] },
         "description": { "type": ["string", "null"] },
         "placeholder": { "type": ["string", "null"] },
+        "empty_label": {
+          "description": "Label of the empty entry a host offers on a may-stay-empty dynamic `options_action` select (empty = follow the fallback connection). Hosts fall back to `placeholder`, then to their own default wording; localize via localizations.<locale>…fields.<key>.empty_label.",
+          "type": ["string", "null"]
+        },
         "required": { "type": "boolean" },
         "default": { "type": ["string", "number", "boolean", "null"] },
         "options": { "type": "array", "items": { "$ref": "#/$defs/selectOption" } },
         "binding": { "enum": ["config", "secret", "name", "host", "port", "username", "password", "database"] },
         "picker": { "$ref": "#/$defs/fieldPicker" },
+        "options_action": {
+          "description": "Renders the text field as a dynamic select. `host/…` names the host-reserved self-service namespace (no plugin RPC; `host/connections` lists the saved connections a provider accepts); any other value is a sidecar method invoked with `{ locale }` and returning `{ options: [{ value, label }] }`.",
+          "type": "string",
+          "minLength": 1
+        },
         "visible_when": { "$ref": "#/$defs/fieldCondition" },
         "required_when": { "$ref": "#/$defs/fieldCondition" }
       },

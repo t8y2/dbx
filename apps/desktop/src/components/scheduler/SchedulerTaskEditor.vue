@@ -377,7 +377,7 @@ function close() {
 
         <section v-if="configFields.length > 0" class="space-y-3">
           <h4 class="text-sm font-semibold">{{ t("scheduler.editor.sectionConfig") }}</h4>
-          <SchedulerTaskFormRenderer :fields="configFields" :model-value="formValues" @update:model-value="updateFormValues" />
+          <SchedulerTaskFormRenderer :fields="configFields" :model-value="formValues" :connections="providerConnections" :plugin-id="selectedProvider?.pluginId" :task-connection-id="draft.target?.connectionId || ''" @update:model-value="updateFormValues" />
         </section>
 
         <section class="space-y-3">

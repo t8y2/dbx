@@ -384,6 +384,40 @@ export interface PluginFormFieldPicker {
    * in the declaring field and clear this one instead.
    */
   content_field?: string;
+  /**
+   * Switches the picker from the local native dialog to a plugin-backed
+   * browser: the host walks the plugin's own storage tree for the connection
+   * named by `connection_field`. Only `"plugin"` is defined; omitted keeps the
+   * local-native behavior.
+   */
+  source?: "plugin";
+  /** Plugin method serving the browse (same generic invokePlugin channel as `options_action`; never `task/*`). Required when `source: "plugin"`. */
+  action?: string;
+  /**
+   * Sibling field(s) supplying the connection id to browse: a single key, or an
+   * ordered fallback chain (first non-empty sibling wins, then the task's bound
+   * connection). Every entry must be a declared sibling field key.
+   */
+  connection_field?: string | string[];
+}
+
+/** One directory row of a plugin-backed path browse (`files/listDirs` contract). */
+export interface PluginPathBrowseEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+}
+
+export interface PluginPathBrowseResult {
+  entries?: PluginPathBrowseEntry[];
+  truncated?: boolean;
+  /**
+   * The directory actually listed, present only when it differs from the
+   * requested `path` — the plugin redirects a non-directory start (e.g. a
+   * file path in copy single-file mode) to its parent instead of returning
+   * an empty listing.
+   */
+  resolved_path?: string;
 }
 
 /**
@@ -399,6 +433,14 @@ export interface PluginFormField {
   type: PluginFormFieldType;
   description?: string;
   placeholder?: string;
+  /**
+   * Label of the empty entry a host offers on a dynamic `options_action`
+   * select whose value may stay empty (empty = follow the fallback
+   * connection). Hosts fall back to `placeholder`, then to their own default
+   * wording, so pre-`empty_label` manifests keep working. Localize per field
+   * via `localizations.<locale>…fields.<key>.empty_label`.
+   */
+  empty_label?: string;
   required?: boolean;
   /** Declared default. Hosts older than the manifest serialization fix send
    * `null` for "no default", which the form treats as unset. */
@@ -707,6 +749,7 @@ export interface PluginFormFieldLocalization {
   label?: string;
   description?: string;
   placeholder?: string;
+  empty_label?: string;
   options?: Record<string, string>;
 }
 

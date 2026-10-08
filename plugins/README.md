@@ -222,7 +222,7 @@ Field bindings:
 
 Password fields default to `secret` when `binding` is omitted. DBX validates required values and value types before calling the plugin. The plugin receives the hydrated connection only in its backend lifecycle request; the workbench UI receives a connection ID and non-secret navigation context.
 
-Absent optional fields stay absent: when DBX hands the manifest to its own UI it omits `description`, `placeholder`, `default`, and `binding` for fields that do not declare them, and `"default": null` means "no default" exactly like omitting the key. Treat a missing value as unset — never as an empty string, and never as the literal text `null`, which is not a storable plugin value.
+Absent optional fields stay absent: when DBX hands the manifest to its own UI it omits `description`, `placeholder`, `empty_label`, `default`, and `binding` for fields that do not declare them, and `"default": null` means "no default" exactly like omitting the key. Treat a missing value as unset — never as an empty string, and never as the literal text `null`, which is not a storable plugin value.
 
 Well-known field keys: a `config`-bound field keyed `connect_timeout_secs` declares the plugin's own connect/handshake timeout and is the single source of truth for it. On save, DBX mirrors its resolved value (the declared `default`, or the value a user entered in the connection form) into the typed `ConnectionConfig.connect_timeout_secs` — the dialog's generic global/per-connection timeout radios do not apply to providers declaring this field. The host's `connection/test` and `connection/connect` RPC deadline follows the same resolved value (stored `external_config` first, then the declared `default`), so the deadline never fires before the plugin's own timeout; providers that do not declare the field keep the generic typed-timeout behavior. Declare it when your transport needs more than the generic built-in 10s default (e.g. SSH handshakes on slow links).
 
@@ -246,6 +246,45 @@ A `text`, `password`, or `textarea` field may declare `picker` when the user sho
 - `kind` is `file` (default use case) or `directory` (desktop-only: a browser cannot hand a folder to the plugin). `accept` lists up to 16 filters as extensions (`.pem`) or MIME types (`text/plain`) and is passed to the native dialog and the browser file input unchanged. Uploads are capped at 1 MiB.
 
 `picker` is additive; hosts older than the release that ships it reject the manifest, so keep `engines.dbx` at or above that release when the form relies on it.
+
+##### Plugin-backed directory browse (`source: "plugin"`)
+
+A `text` field may extend `picker` with `source: "plugin"` to browse the plugin's **own storage tree** instead of a local native dialog — the scheduler task form uses it so a `source_path` can be picked from the real directories of the referenced storage connection:
+
+```json
+{
+  "key": "source_path",
+  "label": "Source path",
+  "type": "text",
+  "binding": "config",
+  "picker": {
+    "kind": "directory",
+    "source": "plugin",
+    "action": "files/listDirs",
+    "connection_field": "source_connection_id"
+  }
+}
+```
+
+- `kind` must be `"directory"`; local-only attributes (`accept`, `content_field`) are rejected alongside `source: "plugin"`. Omitting `source` keeps the local native picker byte-for-byte.
+- `action` names the plugin method that serves the browse. It rides the **same generic invokePlugin channel as form-field `options_action`** — it is an ordinary sidecar method, *not* a `task/*` scheduler RPC (that namespace stays frozen to the four fixed task methods). The reserved `host/` prefix is rejected.
+- `connection_field` names the sibling field(s) that carry the connection id to browse: a single key, or an **ordered fallback chain** (array — first non-empty sibling wins). It is optional; a picker without it browses the task's bound primary connection directly. Every entry must be a declared sibling key.
+- **RPC contract** (host → plugin): the host resolves the stored connection **server-side** — the same `connect` chain every other host surface uses, so hydrated secrets never reach the webview, logs, or events — then invokes `action` with `{ "connectionId": string, "path": string, "locale": string }` and expects `{ "entries": [{ "name": string, "path": string, "is_dir": boolean }] }` (optionally `truncated: boolean` and `resolved_path: string`). The plugin **filters to directories** (`is_dir` is always `true` in practice; the field exists so a future mixed listing stays compatible), and `path` uses the plugin's own listing vocabulary so the picked value can be stored verbatim. Two refinements keep the browse usable on real storage:
+  - **Filter directories first, then cap.** `truncated` means the *directory* listing was cut (after filtering), never "files crowded out the tail directories" — a file-heavy directory must still surface every directory up to the cap.
+  - **Non-directory starts redirect to the parent.** When `path` exists but is not a directory (a file path picked in a copy single-file flow), the plugin answers with the **parent directory's** entries and sets `resolved_path` to the directory actually listed; the host dialog re-anchors its breadcrumb there and says so. `resolved_path` is absent on ordinary listings. A missing `path` stays a readable error inside the dialog.
+  Failures (connection unavailable, path missing) surface inside the browse dialog with a retry; they never fail the form.
+- Hosts that predate the feature ignore the extra picker keys only if their manifest validation is older than the attribute; declare `engines.dbx` at or above the release that validates them.
+
+#### Dynamic options (`options_action` on form fields)
+
+A `text` field may declare `options_action` to be rendered as a select instead of a free-text input. The value names where the options come from:
+
+- **`host/…` is a reserved namespace the host serves from its own state — no RPC reaches the plugin** (the same self-service idea as `picker`). The only defined action today is `host/connections`, which lists the user's saved connections matching the provider; the select's options are connection names with connection ids as values. Use it for fields that reference another saved connection and are allowed to stay empty (empty = follow the task's primary connection).
+- **Any other value is a sidecar method** (e.g. `sudo/profiles/options`). The host invokes it with `{ locale }` (the current DBX UI locale, so labels arrive localized) and expects `{ "options": [{ "value": string, "label": string }] }`.
+
+A dynamic select whose value may stay empty (empty = follow the task's primary connection or the field's declared fallback) always offers one **empty entry**. Its label comes from the field's optional `empty_label` string; when the field does not declare it, the host falls back to the field's `placeholder`, and finally to its own default wording — so manifests that predate `empty_label` and named the semantics in `placeholder` keep rendering as before. Localize the label per field with `localizations.<locale>…contributions.<id>.fields.<key>.empty_label` (task triggers accept the same key under `triggers.<id>.fields.<key>`), exactly like `placeholder`. The empty entry never persists a value: picking it (or clearing the select) stores nothing, and the saved config omits the key.
+
+In both cases the host keeps a stored value visible even when it disappears from the option list, and falls back to the declared text input when the plugin id is missing, the call fails, or the result is empty. The `host/` prefix exists so a plugin method can never collide with a host action; do not declare `host/…` values you expect the plugin to serve. (This is the form-field counterpart of the command contribution's [declarative launch options](#declarative-launch-options-options_action).)
 
 #### Conditional fields
 

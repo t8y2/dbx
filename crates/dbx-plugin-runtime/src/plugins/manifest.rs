@@ -251,6 +251,8 @@ pub struct PluginFormFieldLocalization {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placeholder: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub empty_label: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub options: BTreeMap<String, String>,
 }
@@ -331,6 +333,15 @@ pub struct PluginFormFieldDefinition {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placeholder: Option<String>,
+    /// Label of the empty entry a host offers on a dynamic `options_action`
+    /// select whose value may stay empty (empty = "follow the fallback
+    /// connection"). Localization chain: the per-locale
+    /// `localizations.<locale>…fields.<key>.empty_label`, then this value,
+    /// then the host's own default wording — so pre-`empty_label` manifests
+    /// that put the hint in `placeholder` keep working. Documented in
+    /// `plugins/README.md` ("Dynamic options").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub empty_label: Option<String>,
     #[serde(default)]
     pub required: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -352,6 +363,12 @@ pub struct PluginFormFieldDefinition {
     /// connection form fetches it and renders the field as a dynamic select.
     /// Optional and forward/backward compatible: older hosts reject the
     /// manifest, hosts without UI support keep the declared type.
+    ///
+    /// Values prefixed `host/` name the host-reserved self-service namespace
+    /// (like `picker`): the host resolves them from its own state and never
+    /// sends an RPC to the plugin — `host/connections` lists the saved
+    /// connections a provider accepts. Unprefixed values are sidecar methods
+    /// invoked as usual; the prefix keeps the two namespaces from colliding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options_action: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -604,6 +621,55 @@ pub struct PluginFormFieldPicker {
     /// sources cannot disagree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_field: Option<String>,
+    /// Switches the picker from the host's local native dialog to a
+    /// **plugin-backed browser**: the host opens a dialog that walks the
+    /// plugin's own storage tree for the connection named by
+    /// [`Self::connection_field`]. Only `directory` is defined; the omitted
+    /// source keeps the local-native behavior byte-for-byte.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<PluginFormFieldPickerSource>,
+    /// Plugin method serving the browse (e.g. `files/listDirs`). Same generic
+    /// `invokePlugin` channel as form-field `options_action` — never a
+    /// `task/*` method (that namespace stays frozen). Required when
+    /// `source: "plugin"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    /// Sibling field(s) supplying the connection id to browse. A string is a
+    /// single key; an array is an ordered fallback chain (first non-empty
+    /// sibling wins, then the task's bound connection). Every entry must be a
+    /// declared sibling field key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_field: Option<PluginPickerConnectionField>,
+}
+
+/// Where a plugin-backed picker browses (see
+/// [`PluginFormFieldPicker::source`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginFormFieldPickerSource {
+    /// Browse the plugin's own storage for the referenced connection instead
+    /// of a local native dialog.
+    Plugin,
+}
+
+/// A picker's `connection_field`: one sibling key or an ordered fallback chain
+/// (see [`PluginFormFieldPicker::connection_field`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PluginPickerConnectionField {
+    One(String),
+    Chain(Vec<String>),
+}
+
+impl PluginPickerConnectionField {
+    /// Referenced sibling keys in declaration order (a chain keeps duplicates
+    /// so error messages can quote the manifest verbatim).
+    pub fn keys(&self) -> &[String] {
+        match self {
+            Self::One(key) => std::slice::from_ref(key),
+            Self::Chain(keys) => keys,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2047,6 +2113,54 @@ fn validate_form_field_picker(
     if picker.kind == PluginFormFieldPickerKind::Directory && picker.content_field.is_some() {
         errors.push(format!("{location} cannot upload a directory into a content field"));
     }
+    // Plugin-backed browse (`source: "plugin"`) shares the picker attribute but
+    // has its own, stricter shape: local-only attributes are meaningless there,
+    // the action rides the generic invokePlugin channel (so `task/*` — the
+    // frozen scheduler namespace — and the reserved `host/` self-service
+    // prefix are both rejected), and only directory browsing is defined.
+    if picker.source.is_none() && (picker.action.is_some() || picker.connection_field.is_some()) {
+        errors.push(format!(
+            "{location} action/connection_field require source \"plugin\" (omit them for the local native picker)"
+        ));
+    }
+    if picker.source == Some(PluginFormFieldPickerSource::Plugin) {
+        if picker.kind != PluginFormFieldPickerKind::Directory {
+            errors.push(format!("{location} source \"plugin\" only supports kind \"directory\""));
+        }
+        if picker.content_field.is_some() {
+            errors.push(format!("{location} source \"plugin\" cannot upload into a content field"));
+        }
+        if picker.action.is_none() {
+            errors.push(format!("{location} source \"plugin\" requires action (the plugin browse method)"));
+        }
+        // connection_field stays optional: a picker without it browses the
+        // task's bound connection directly (single-connection providers).
+    }
+    if let Some(action) = &picker.action {
+        // Unlike the command action's options_action (a lowercase-only
+        // namespace), a picker action addresses the plugin's own RPC surface,
+        // whose method spelling is the plugin's choice (`files/listDirs` is
+        // camelCase like its `files/listStream` siblings). Only shape is
+        // enforced: non-empty, slash-separated, no whitespace/control bytes.
+        if !valid_plugin_method_name(action) {
+            errors.push(format!("{location} action '{action}' must look like a plugin method name"));
+        }
+        if action.starts_with("task/") {
+            errors.push(format!(
+                "{location} action '{action}' uses the frozen scheduler task/ namespace; declare a non-task plugin method"
+            ));
+        }
+        if action.starts_with("host/") {
+            errors.push(format!("{location} action '{action}' uses the reserved host/ namespace"));
+        }
+    }
+    if let Some(connection_field) = &picker.connection_field {
+        for key in connection_field.keys() {
+            if !fields.iter().any(|candidate| &candidate.key == key) {
+                errors.push(format!("{location} connection_field references unknown field '{key}'"));
+            }
+        }
+    }
     let Some(content_key) = &picker.content_field else {
         return;
     };
@@ -2066,11 +2180,23 @@ fn validate_form_field_picker(
     }
 }
 
+/// Shape check for a picker's plugin method name: slash-separated segments
+/// without whitespace or control bytes. The segment spelling is the plugin's
+/// own RPC convention (camelCase allowed); reserved prefixes (`task/`,
+/// `host/`) are rejected separately in [`validate_form_field_picker`].
+fn valid_plugin_method_name(action: &str) -> bool {
+    !action.is_empty()
+        && action.len() <= 128
+        && !action.starts_with('/')
+        && !action.ends_with('/')
+        && !action.contains("//")
+        && action.chars().all(|character| !character.is_whitespace() && !character.is_control())
+}
+
 /// Accept entries are file extensions (`.pem`) or MIME types (`text/plain`), so
 /// the browser `<input accept>` attribute and the native dialog filters can use
 /// them directly. Anything else is rejected instead of silently ignored.
-fn valid_picker_filter(filter: &str) -> bool {
-    if let Some(extension) = filter.strip_prefix('.') {
+fn valid_picker_filter(filter: &str) -> bool {    if let Some(extension) = filter.strip_prefix('.') {
         return !extension.is_empty()
             && extension.len() <= 16
             && extension.chars().all(|character| character.is_ascii_alphanumeric());
@@ -4210,6 +4336,188 @@ mod tests {
         assert!(errors.contains("content_field references unknown field 'missing'"), "{errors}");
         assert!(errors.contains("content_field cannot be the declaring field"), "{errors}");
         assert!(errors.contains("cannot upload a directory into a content field"), "{errors}");
+    }
+
+    /// The files plugin asks the host to browse its own storage tree: the
+    /// picker names a sidecar method (`files/listDirs`, the generic
+    /// invokePlugin channel — never `task/*`) and the sibling field(s) that
+    /// carry the connection id, with an ordered fallback chain for the
+    /// destination path (destination → source → task connection).
+    #[test]
+    fn parses_and_validates_plugin_directory_pickers() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.files",
+            "name": "Files",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.1" },
+            "contributions": [{
+                "type": "connection-provider",
+                "id": "files.connection",
+                "label": "Storage",
+                "database_type": "files",
+                "fields": [
+                    {
+                        "key": "source_path",
+                        "label": "Source path",
+                        "type": "text",
+                        "binding": "config",
+                        "picker": { "kind": "directory", "source": "plugin", "action": "files/listDirs", "connection_field": "source_connection_id" }
+                    },
+                    {
+                        "key": "destination_path",
+                        "label": "Destination path",
+                        "type": "text",
+                        "binding": "config",
+                        "picker": { "kind": "directory", "source": "plugin", "action": "files/listDirs", "connection_field": ["destination_connection_id", "source_connection_id"] }
+                    },
+                    { "key": "source_connection_id", "label": "Source connection", "type": "text", "binding": "config" },
+                    { "key": "destination_connection_id", "label": "Destination connection", "type": "text", "binding": "config" }
+                ]
+            }]
+        }))
+        .unwrap();
+
+        let compatibility = manifest.compatibility(dir.path(), "0.6.15");
+        assert!(compatibility.compatible, "{:?}", compatibility.errors);
+        let provider = manifest.connection_provider("files.connection").unwrap().unwrap();
+        let source = provider.fields[0].picker.as_ref().unwrap();
+        assert_eq!(source.source, Some(super::PluginFormFieldPickerSource::Plugin));
+        assert_eq!(source.action.as_deref(), Some("files/listDirs"));
+        assert_eq!(
+            source.connection_field.as_ref().unwrap().keys(),
+            &["source_connection_id".to_string()][..]
+        );
+        let destination = provider.fields[1].picker.as_ref().unwrap();
+        assert_eq!(
+            destination.connection_field.as_ref().unwrap().keys(),
+            &["destination_connection_id".to_string(), "source_connection_id".to_string()][..]
+        );
+        // Round-trip: the UI's manifest keeps the plugin-picker attributes, and
+        // legacy pickers keep omitting them.
+        let serialized = serde_json::to_value(&manifest).unwrap();
+        assert_eq!(serialized["contributions"][0]["fields"][0]["picker"]["source"], "plugin");
+        assert_eq!(serialized["contributions"][0]["fields"][0]["picker"]["action"], "files/listDirs");
+        assert!(serialized["contributions"][0]["fields"][3]["picker"].is_null());
+    }
+
+    #[test]
+    fn rejects_invalid_plugin_directory_pickers() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.files",
+            "name": "Files",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.1" },
+            "contributions": [{
+                "type": "connection-provider",
+                "id": "files.connection",
+                "label": "Storage",
+                "database_type": "files",
+                "fields": [
+                    // Local picker attributes without source: "plugin".
+                    { "key": "local_with_action", "label": "A", "type": "text", "binding": "config",
+                      "picker": { "kind": "file", "action": "files/listDirs" } },
+                    // File kind is not defined for plugin-backed browse.
+                    { "key": "plugin_file", "label": "B", "type": "text", "binding": "config",
+                      "picker": { "kind": "file", "source": "plugin", "action": "files/listDirs", "connection_field": "conn" } },
+                    // Browser-upload pairing is meaningless for plugin browse.
+                    { "key": "plugin_content", "label": "C", "type": "text", "binding": "config",
+                      "picker": { "kind": "directory", "source": "plugin", "action": "files/listDirs", "content_field": "conn" } },
+                    // task/* is the frozen scheduler namespace; host/ is reserved.
+                    { "key": "task_method", "label": "D", "type": "text", "binding": "config",
+                      "picker": { "kind": "directory", "source": "plugin", "action": "task/browse", "connection_field": "conn" } },
+                    // source "plugin" without an action cannot browse anything.
+                    { "key": "no_action", "label": "H", "type": "text", "binding": "config",
+                      "picker": { "kind": "directory", "source": "plugin", "connection_field": "conn" } },
+                    { "key": "host_method", "label": "E", "type": "text", "binding": "config",
+                      "picker": { "kind": "directory", "source": "plugin", "action": "host/browse", "connection_field": "conn" } },
+                    // Malformed method name.
+                    { "key": "bad_method", "label": "F", "type": "text", "binding": "config",
+                      "picker": { "kind": "directory", "source": "plugin", "action": "files listDirs", "connection_field": "conn" } },
+                    // connection_field must reference declared siblings.
+                    { "key": "ghost_connection", "label": "G", "type": "text", "binding": "config",
+                      "picker": { "kind": "directory", "source": "plugin", "action": "files/listDirs", "connection_field": "missing_field" } },
+                    { "key": "conn", "label": "Connection", "type": "text", "binding": "config" }
+                ]
+            }]
+        }))
+        .unwrap();
+
+        let compatibility = manifest.compatibility(dir.path(), "0.6.15");
+        assert!(!compatibility.compatible);
+        let errors = compatibility.errors.join("\n");
+        assert!(errors.contains("action/connection_field require source \"plugin\""), "{errors}");
+        assert!(errors.contains("source \"plugin\" only supports kind \"directory\""), "{errors}");
+        assert!(errors.contains("source \"plugin\" cannot upload into a content field"), "{errors}");
+        assert!(errors.contains("source \"plugin\" requires action"), "{errors}");
+        assert!(errors.contains("frozen scheduler task/ namespace"), "{errors}");
+        assert!(errors.contains("reserved host/ namespace"), "{errors}");
+        assert!(errors.contains("action 'files listDirs' must look like a plugin method name"), "{errors}");
+        assert!(errors.contains("connection_field references unknown field 'missing_field'"), "{errors}");
+    }
+
+    /// `empty_label` names the empty entry a host offers on a may-stay-empty
+    /// dynamic `options_action` select (the files plugin's connection-id
+    /// fields). It localizes through the same per-field map as `placeholder`,
+    /// and fields that do not declare it keep omitting the key entirely.
+    #[test]
+    fn parses_and_serializes_empty_label() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("bin")).unwrap();
+        std::fs::write(dir.path().join("bin/placeholder"), "").unwrap();
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.files",
+            "name": "Files",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.1" },
+            "entrypoints": { "backend": { "executable": "bin/placeholder" } },
+            "localizations": {
+                "zh-CN": { "contributions": { "files.tasks": { "triggers": { "copy": { "fields": {
+                    "source_connection_id": { "empty_label": "（跟随任务连接）" }
+                } } } } } }
+            },
+            "contributions": [{
+                "type": "task-provider",
+                "id": "files.tasks",
+                "label": "Files tasks",
+                "capabilities": ["run"],
+                "triggers": [{
+                    "id": "copy",
+                    "label": "Copy",
+                    "mode": "run",
+                    "fields": [
+                        { "key": "source_connection_id", "label": "Source connection id", "type": "text", "binding": "config", "options_action": "host/connections", "empty_label": "(task connection)" }
+                    ]
+                }]
+            }]
+        }))
+        .unwrap();
+
+        let compatibility = manifest.compatibility(dir.path(), "0.6.15");
+        assert!(compatibility.compatible, "{:?}", compatibility.errors);
+        let PluginContribution::TaskProvider(provider) = &manifest.contributions[0] else {
+            panic!("task provider contribution expected");
+        };
+        let field = &provider.triggers[0].fields[0];
+        assert_eq!(field.empty_label.as_deref(), Some("(task connection)"));
+        assert_eq!(
+            manifest.localizations["zh-CN"].contributions["files.tasks"].triggers["copy"].fields["source_connection_id"]
+                .empty_label
+                .as_deref(),
+            Some("（跟随任务连接）")
+        );
+        // Round-trip keeps the declared key; fields without it stay omitted.
+        let serialized = serde_json::to_value(&manifest).unwrap();
+        let serialized_field = &serialized["contributions"][0]["triggers"][0]["fields"][0];
+        assert_eq!(serialized_field["empty_label"], "(task connection)");
+        assert!(serialized_field["placeholder"].is_null());
     }
 
     #[test]

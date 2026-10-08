@@ -416,6 +416,7 @@ function localizeField(field: PluginFormField, localization?: PluginFormFieldLoc
     label: localizedRequiredText(field.label, localization.label),
     description: localizedOptionalText(field.description, localization.description),
     placeholder: localizedOptionalText(field.placeholder, localization.placeholder),
+    empty_label: localizedOptionalText(field.empty_label, localization.empty_label),
     options: field.options?.map((option) => ({ ...option, label: localizedRequiredText(option.label, localization.options?.[option.value]) })),
   };
 }

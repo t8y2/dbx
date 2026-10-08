@@ -107,6 +107,7 @@ export const activatePlugin = forward("activatePlugin");
 export const listActivePlugins = forward("listActivePlugins");
 export const stopPlugin = forward("stopPlugin");
 export const invokePlugin = forward("invokePlugin");
+export const invokePluginPathBrowse = forward("invokePluginPathBrowse");
 export const invokePluginConnectionAction = forward("invokePluginConnectionAction");
 export const notifyPlugin = forward("notifyPlugin");
 export const sendPluginBinary = forward("sendPluginBinary");

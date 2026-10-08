@@ -430,6 +430,14 @@ pub struct PluginTaskTriggerContribution {
 
 Risk UI 策略：Low 无额外提示；Medium 保存时提示；High 创建/修改时明确确认。任务一旦保存启用，后续自动执行不得每次要求人工确认。
 
+表单字段即连接表单的同一套字段系统（`PluginFormFieldDefinition`，含 `options_action` / `picker` / `visible_when` / `required_when`），调度器不发明第二套字段属性。其中 `options_action` 的 **`host/` 前缀是宿主自服务的保留命名空间**（类比 `picker` 也是宿主自服务）：由宿主从本地状态解析选项、不发起任何插件 RPC——当前唯一定义的动作是 `host/connections`（列出该 provider 可用的已保存连接，连接名为 label、连接 id 为 value），用于「引用另一条已保存连接且允许留空（空 = 跟随任务主连接）」的字段。不带前缀的值仍是插件 sidecar 方法（`invokePlugin`，携带 `{ locale }`），两者靠前缀避免撞名。
+
+**picker 的 plugin 目录浏览（additive，2026-10，不动本 ADR 的 task RPC 冻结面）**：字段级 `picker` 在既有本地原生选择器之上新增 `source: "plugin"` 形态——`{ "kind": "directory", "source": "plugin", "action": "<插件方法>", "connection_field": "<兄弟字段key | key数组>" }`。宿主打开目录浏览对话框，沿 `action` 指定的插件方法逐级浏览该连接的真实目录树；`connection_field` 声明提供连接 id 的兄弟字段（单个 key，或按序回退的 key 数组，首个非空者生效），最终回退任务绑定主连接（编辑器以 `taskConnectionId` 传入渲染器）。RPC 走与 `options_action` 同一条通用 `invokePlugin` 通道：宿主**在服务端**按 connection_id 打开已存连接（复用 `get_or_create_pool` → `connection/connect` 生命周期链，secret 只进插件侧 lifecycle payload），再以 `{ connectionId, path, locale }` 调用插件方法，期望返回 `{ entries: [{ name, path, is_dir }] }`（可选 `truncated`）；**目录过滤在插件侧完成**，前端只消费目录条目。`action` 禁用 `task/`（调度器 task RPC 仍冻结为 task/validate|execute|start|stop|status 四方法）与 `host/` 前缀；连接不可用/路径不存在在对话框内展示并可重试，不失败表单。契约细节见 `plugins/README.md`「Plugin-backed directory browse」。
+
+**listDirs 契约精化（additive，2026-10，向后兼容）**：(1) **先过滤后截断**——插件侧对目录条目先过滤、再应用条目数/字节双预算上限，`truncated` 语义确定为「目录空间被截断」，文件密集目录不再把尾部子目录截掉；(2) **非目录起点重定向父目录**——`path` 存在但不是目录时（copy 单文件模式从文件路径起步），插件改列其父目录并在响应新增可选 `resolved_path`（实际列举的目录；普通列举不出现），宿主对话框收到后以它为当前位置渲染面包屑并提示「该路径不是目录，已定位到其上级」；`path` 不存在保持既有可读错误。对话框同步补齐：当前路径手动输入回车跳转、加载态/错误重试/`truncated` 提示/空目录空态。
+
+**空选项的声明式契约 `empty_label`（additive，2026-10）**：允许留空的 `options_action` select 由宿主提供一个空选项，文案取字段新可选属性 `empty_label`（Rust `PluginFormFieldDefinition` / TS `PluginFormField` / `manifest.schema.json` / `plugins/README.md` 四处同名，本地化键同位于 `localizations.<locale>…fields.<key>.empty_label`）；未声明回退 `placeholder`（既有 files 声明继续可用），再回退宿主 i18n 默认文案（scheduler 三语言）。空值哨兵 `__dbx_empty__` 保持渲染器模块私有常量（reka-ui 禁止 `SelectItem value=""`；宿主内无其它可复用惯例），仅存在于下拉项 value，永不落入保存的 config（映射回 undefined）。
+
 ## 27–36. Plugin 固定 RPC / 事件
 
 遵循「固定方法 + declared capability」模式（同 `connection/*`、`filesystem/*`）。新增固定 RPC：

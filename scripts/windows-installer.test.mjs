@@ -72,6 +72,9 @@ ${elevationInit}
   \u0024{IfNot} \u0024{Errors}
     StrCpy $DbxTestCancel 1
   \u0024{EndIf}
+FunctionEnd
+Section
+  ; NSIS applies the selected language after .onInit returns.
   StrCpy $0 "register zero"
   StrCpy $1 "register one"
   StrCpy $2 "register two"
@@ -80,13 +83,11 @@ ${elevationInit}
   WriteINIStr "$EXEDIR\\result.ini" "probe" "registers" "$0|$1|$2|$3"
   WriteINIStr "$EXEDIR\\result.ini" "probe" "destination" "$INSTDIR"
   WriteINIStr "$EXEDIR\\result.ini" "probe" "language" "$LANGUAGE"
-  WriteINIStr "$EXEDIR\\result.ini" "probe" "elevation" "$DbxElevationStatus"
+  WriteINIStr "$EXEDIR\\result.ini" "probe" "elevation" "$DbxElevationCode"
   WriteINIStr "$EXEDIR\\result.ini" "probe" "fileError" "$DbxFileProbeError"
   WriteINIStr "$EXEDIR\\result.ini" "probe" "folderError" "$DbxDirectoryProbeError"
   SetErrorLevel 0
   Quit
-FunctionEnd
-Section
 SectionEnd
 `
   const source = path.join(dir, 'probe.nsi')
@@ -94,9 +95,9 @@ SectionEnd
   try {
     // Also compile the unmodified production launch instruction and init code.
     writeFileSync(source, script.replace(fixtureHelper, helper))
-    execFileSync(compiler, ['/V2', source], { encoding: 'utf8', timeout: 30_000 })
+    execFileSync(compiler, ['/V2', '/INPUTCHARSET', 'UTF8', source], { encoding: 'utf8', timeout: 30_000 })
     writeFileSync(source, script)
-    execFileSync(compiler, ['/V2', source], { encoding: 'utf8', timeout: 30_000 })
+    execFileSync(compiler, ['/V2', '/INPUTCHARSET', 'UTF8', source], { encoding: 'utf8', timeout: 30_000 })
     const run = (args, target = destination) => {
       rmSync(result, { force: true })
       let status = 0
@@ -112,7 +113,7 @@ SectionEnd
     assert.equal(writable.status, 0, writable.output)
     assert.match(writable.output, /register zero\|register one\|register two\|register three/)
     assert.doesNotMatch(writable.output, /handoff/)
-    assert.match(writable.output, /elevation=Not requested/)
+    assert.match(writable.output, /elevation=0/)
     assert.match(writable.output, /fileError=0/)
     assert.match(writable.output, /folderError=0/)
     assert.equal(readFileSync(binary, 'utf8'), 'original executable contents')
@@ -151,7 +152,7 @@ SectionEnd
     const elevated = run(['/TEST_ELEVATED'])
     assert.equal(elevated.status, 0)
     assert.doesNotMatch(elevated.output, /handoff/)
-    assert.match(elevated.output, /elevation=Attempted; administrator permission not obtained/)
+    assert.match(elevated.output, /elevation=3/)
     assert.match(elevated.output, /register zero\|register one\|register two\|register three/)
 
     const wrongUser = run(['/DBX_ELEVATED', '/DBX_LANG=1033', '/DBX_PROFILE="different Windows account"'])
@@ -257,10 +258,10 @@ SectionEnd
     const compilation = execFileSync(compiler, [`${flag}V2`, `${flag}INPUTCHARSET`, 'UTF8', source], { encoding: 'utf8', timeout: 30_000 })
     assert.doesNotMatch(compilation, /unknown variable|unknown constant|unknown identifier/i)
     await t.test('Windows locked-file extraction stops and reports diagnostics', { skip: !available }, () => {
-      for (const [language, elevation] of [
-        ['1033', /Not requested|Already running as administrator/],
-        ['2052', /未请求|启动时已有管理员权限/],
-        ['1028', /未請求|啟動時已有系統管理員權限/],
+      for (const [language, diagnosticLabel, instruction] of [
+        ['1033', 'Diagnostic code:', 'Please run the installer as administrator.'],
+        ['2052', '诊断码：', '请以管理员权限运行安装程序。'],
+        ['1028', '診斷碼：', '請以系統管理員權限執行安裝程式。'],
       ]) {
         for (const action of ['writable', 'readonly', 'retry', 'cancel', 'manual']) {
           t.diagnostic(`Windows extraction: language=${language}, action=${action}`)
@@ -279,9 +280,11 @@ SectionEnd
             exitCode = error.status
           }
           const output = readFileSync(report, 'utf16le')
-          assert.ok(output.includes(exe), output)
+          assert.doesNotMatch(output, /Installer:|安装包：|安裝套件：/)
           assert.ok(output.includes(target), output)
-          assert.match(output, elevation)
+          assert.ok(output.includes(diagnosticLabel), output)
+          assert.match(output, new RegExp(`A[01]-E[01]-F${locked ? 32 : 0}-D0`))
+          assert.ok(output.includes(instruction), output)
           assert.ok(output.includes('1.0.1'), output)
           assert.doesNotMatch(output, /Program Files|\$Dbx|\$EXEPATH|\$INSTDIR/)
           if (action === 'cancel' || action === 'manual') {

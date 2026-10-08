@@ -98,7 +98,7 @@ Var WixMode
 Var OldMainBinaryName
 Var DbxElevated
 Var DbxIsAdmin
-Var DbxElevationStatus
+Var DbxElevationCode
 Var DbxFileProbeError
 Var DbxDirectoryProbeError
 Var DbxFailedFile
@@ -511,21 +511,21 @@ AllowSkipFiles off
 !define DBX_WRITE_CANCEL 2
 !define DBX_WRITE_RETRY 4
 !define DBX_WRITE_MANUAL 1001
-LangString dbxInstallDiagnostics ${LANG_ENGLISH} "Installer: $EXEPATH$\r$\nVersion: ${VERSION}$\r$\nDestination: $INSTDIR$\r$\nAdministrator permission: $DbxIsAdmin (1=yes, 0=no)$\r$\nAutomatic elevation: $DbxElevationStatus$\r$\nAccess precheck codes (not the extraction error): file=$DbxFileProbeError, folder=$DbxDirectoryProbeError"
-LangString dbxInstallDiagnostics ${LANG_SIMPCHINESE} "安装包：$EXEPATH$\r$\n版本：${VERSION}$\r$\n安装目录：$INSTDIR$\r$\n当前管理员权限：$DbxIsAdmin（1=是，0=否）$\r$\n自动提权：$DbxElevationStatus$\r$\n权限预检查错误码（非本次写入错误）：文件=$DbxFileProbeError，目录=$DbxDirectoryProbeError"
-LangString dbxInstallDiagnostics ${LANG_TRADCHINESE} "安裝套件：$EXEPATH$\r$\n版本：${VERSION}$\r$\n安裝目錄：$INSTDIR$\r$\n目前系統管理員權限：$DbxIsAdmin（1=是，0=否）$\r$\n自動提升權限：$DbxElevationStatus$\r$\n權限預先檢查錯誤碼（非本次寫入錯誤）：檔案=$DbxFileProbeError，目錄=$DbxDirectoryProbeError"
-LangString dbxFileWriteErrorNoIgnore ${LANG_ENGLISH} "Unable to write this file:$\r$\n$0$\r$\n$\r$\n$(dbxInstallDiagnostics)$\r$\n$\r$\nClose DBX and retry. If it still fails, send a screenshot of this dialog.$\r$\nRetry tries again; Cancel stops installation. Required files cannot be skipped."
-LangString dbxFileWriteErrorNoIgnore ${LANG_SIMPCHINESE} "无法写入文件：$\r$\n$0$\r$\n$\r$\n$(dbxInstallDiagnostics)$\r$\n$\r$\n请关闭 DBX 后重试；若仍失败，请反馈此弹框截图。$\r$\n“重试”再次尝试；“取消”停止安装。必需文件不能跳过。"
-LangString dbxFileWriteErrorNoIgnore ${LANG_TRADCHINESE} "無法寫入檔案：$\r$\n$0$\r$\n$\r$\n$(dbxInstallDiagnostics)$\r$\n$\r$\n請關閉 DBX 後重試；若仍失敗，請回報此對話方塊截圖。$\r$\n「重試」再次嘗試；「取消」停止安裝。必要檔案不能略過。"
+LangString dbxInstallDiagnostics ${LANG_ENGLISH} "Version: ${VERSION}$\r$\nDestination: $INSTDIR$\r$\nDiagnostic code: A$DbxIsAdmin-E$DbxElevationCode-F$DbxFileProbeError-D$DbxDirectoryProbeError"
+LangString dbxInstallDiagnostics ${LANG_SIMPCHINESE} "版本：${VERSION}$\r$\n安装目录：$INSTDIR$\r$\n诊断码：A$DbxIsAdmin-E$DbxElevationCode-F$DbxFileProbeError-D$DbxDirectoryProbeError"
+LangString dbxInstallDiagnostics ${LANG_TRADCHINESE} "版本：${VERSION}$\r$\n安裝目錄：$INSTDIR$\r$\n診斷碼：A$DbxIsAdmin-E$DbxElevationCode-F$DbxFileProbeError-D$DbxDirectoryProbeError"
+LangString dbxFileWriteErrorNoIgnore ${LANG_ENGLISH} "Unable to write this file:$\r$\n$0$\r$\n$\r$\n$(dbxInstallDiagnostics)$\r$\n$\r$\nPlease run the installer as administrator."
+LangString dbxFileWriteErrorNoIgnore ${LANG_SIMPCHINESE} "无法写入文件：$\r$\n$0$\r$\n$\r$\n$(dbxInstallDiagnostics)$\r$\n$\r$\n请以管理员权限运行安装程序。"
+LangString dbxFileWriteErrorNoIgnore ${LANG_TRADCHINESE} "無法寫入檔案：$\r$\n$0$\r$\n$\r$\n$(dbxInstallDiagnostics)$\r$\n$\r$\n請以系統管理員權限執行安裝程式。"
 LangString dbxFileWriteTitle ${LANG_ENGLISH} "Unable to write an installation file"
 LangString dbxFileWriteTitle ${LANG_SIMPCHINESE} "无法写入安装文件"
 LangString dbxFileWriteTitle ${LANG_TRADCHINESE} "無法寫入安裝檔案"
 LangString dbxManualInstall ${LANG_ENGLISH} "Manual installation"
 LangString dbxManualInstall ${LANG_SIMPCHINESE} "手动安装"
 LangString dbxManualInstall ${LANG_TRADCHINESE} "手動安裝"
-LangString dbxFileWriteError ${LANG_ENGLISH} "$DbxFailedFile$\r$\n$\r$\n$(dbxInstallDiagnostics)$\r$\n$\r$\nClose DBX and retry. Manual installation opens the installer folder, selects the installer, and exits this installation. No failed file can be skipped."
-LangString dbxFileWriteError ${LANG_SIMPCHINESE} "$DbxFailedFile$\r$\n$\r$\n$(dbxInstallDiagnostics)$\r$\n$\r$\n请关闭 DBX 后重试。“手动安装”将打开安装包所在目录、选中安装包，并退出当前安装。写入失败的文件不能跳过。"
-LangString dbxFileWriteError ${LANG_TRADCHINESE} "$DbxFailedFile$\r$\n$\r$\n$(dbxInstallDiagnostics)$\r$\n$\r$\n請關閉 DBX 後重試。「手動安裝」將開啟安裝套件所在目錄、選取安裝套件，並結束目前安裝。寫入失敗的檔案不能略過。"
+LangString dbxFileWriteError ${LANG_ENGLISH} "$DbxFailedFile$\r$\n$\r$\n$(dbxInstallDiagnostics)$\r$\n$\r$\nPlease run the installer as administrator."
+LangString dbxFileWriteError ${LANG_SIMPCHINESE} "$DbxFailedFile$\r$\n$\r$\n$(dbxInstallDiagnostics)$\r$\n$\r$\n请以管理员权限运行安装程序。"
+LangString dbxFileWriteError ${LANG_TRADCHINESE} "$DbxFailedFile$\r$\n$\r$\n$(dbxInstallDiagnostics)$\r$\n$\r$\n請以系統管理員權限執行安裝程式。"
 LangString dbxManualInstallFallback ${LANG_ENGLISH} "Yes: open the installer folder and exit. No: retry. Cancel: stop installation."
 LangString dbxManualInstallFallback ${LANG_SIMPCHINESE} "“是”：打开安装包目录并退出；“否”：重试；“取消”：停止安装。"
 LangString dbxManualInstallFallback ${LANG_TRADCHINESE} "「是」：開啟安裝套件目錄並結束；「否」：重試；「取消」：停止安裝。"
@@ -541,38 +541,22 @@ LangString dbxElevationUserMismatch ${LANG_ENGLISH} "Please approve elevation us
 LangString dbxElevationUserMismatch ${LANG_SIMPCHINESE} "请使用启动安装程序的同一个 Windows 账户授权提权，以确保 DBX 的安装信息和快捷方式保留在正确的用户配置中。"
 LangString dbxElevationUserMismatch ${LANG_TRADCHINESE} "請使用啟動安裝程式的同一個 Windows 帳戶授權提升權限，以確保 DBX 的安裝資訊和捷徑保留在正確的使用者設定中。"
 
-LangString dbxElevationNotChecked ${LANG_ENGLISH} "Not checked"
-LangString dbxElevationNotChecked ${LANG_SIMPCHINESE} "未检查"
-LangString dbxElevationNotChecked ${LANG_TRADCHINESE} "未檢查"
-LangString dbxElevationNotRequested ${LANG_ENGLISH} "Not requested (precheck did not detect access denied)"
-LangString dbxElevationNotRequested ${LANG_SIMPCHINESE} "未请求（预检查未检测到拒绝访问）"
-LangString dbxElevationNotRequested ${LANG_TRADCHINESE} "未請求（預先檢查未偵測到拒絕存取）"
-LangString dbxElevationAlreadyAdmin ${LANG_ENGLISH} "Already running as administrator"
-LangString dbxElevationAlreadyAdmin ${LANG_SIMPCHINESE} "启动时已有管理员权限"
-LangString dbxElevationAlreadyAdmin ${LANG_TRADCHINESE} "啟動時已有系統管理員權限"
-LangString dbxElevationSucceeded ${LANG_ENGLISH} "Attempted; now running as administrator"
-LangString dbxElevationSucceeded ${LANG_SIMPCHINESE} "已尝试，当前已有管理员权限"
-LangString dbxElevationSucceeded ${LANG_TRADCHINESE} "已嘗試，目前已有系統管理員權限"
-LangString dbxElevationUnconfirmed ${LANG_ENGLISH} "Attempted; administrator permission not obtained"
-LangString dbxElevationUnconfirmed ${LANG_SIMPCHINESE} "已尝试，但当前未获得管理员权限"
-LangString dbxElevationUnconfirmed ${LANG_TRADCHINESE} "已嘗試，但目前未取得系統管理員權限"
-LangString dbxElevationFailedStatus ${LANG_ENGLISH} "Attempted; authorization denied or launch failed"
-LangString dbxElevationFailedStatus ${LANG_SIMPCHINESE} "已尝试，授权被拒绝或启动失败"
-LangString dbxElevationFailedStatus ${LANG_TRADCHINESE} "已嘗試，授權遭拒或啟動失敗"
-
 Function DbxUpdateElevationStatus
+  ; Compact support code: A=admin, E=elevation state, F/D=access prechecks.
+  ; E: 0=not requested, 1=already admin, 2=elevated, 3=unconfirmed,
+  ; 4=launch denied/failed, 5=profile mismatch. NA means not checked.
   System::Call 'shell32::IsUserAnAdmin() i .s'
   Pop $DbxIsAdmin
   ${If} $DbxElevated = 1
     ${If} $DbxIsAdmin != 0
-      StrCpy $DbxElevationStatus "$(dbxElevationSucceeded)"
+      StrCpy $DbxElevationCode 2
     ${Else}
-      StrCpy $DbxElevationStatus "$(dbxElevationUnconfirmed)"
+      StrCpy $DbxElevationCode 3
     ${EndIf}
   ${ElseIf} $DbxIsAdmin != 0
-    StrCpy $DbxElevationStatus "$(dbxElevationAlreadyAdmin)"
+    StrCpy $DbxElevationCode 1
   ${Else}
-    StrCpy $DbxElevationStatus "$(dbxElevationNotRequested)"
+    StrCpy $DbxElevationCode 0
   ${EndIf}
 FunctionEnd
 
@@ -632,8 +616,9 @@ Function DbxShowWriteError
   ; NSIS uses a 32-bit stub even for x64/arm64 application payloads.
   ; TASKDIALOGCONFIG is 96 bytes; use the Windows Retry/Cancel buttons plus
   ; a localized custom Manual installation button. Cancel is the default.
+  ; Size to content so the default narrow layout does not shorten diagnostic paths.
   System::Call '*(i ${DBX_WRITE_MANUAL}, w "$(dbxManualInstall)") p .r1'
-  System::Call '*(i 96, p $HWNDPARENT, p 0, i 0x1008, i 0x18, w "$(^Name)", p 65534, w "$(dbxFileWriteTitle)", w "$(dbxFileWriteError)", i 1, p r1, i 2, i 0, p 0, i 0, p 0, p 0, p 0, p 0, p 0, p 0, p 0, p 0, i 0) p .r0'
+  System::Call '*(i 96, p $HWNDPARENT, p 0, i 0x1001008, i 0x18, w "$(^Name)", p 65534, w "$(dbxFileWriteTitle)", w "$(dbxFileWriteError)", i 1, p r1, i 2, i 0, p 0, i 0, p 0, p 0, p 0, p 0, p 0, p 0, p 0, p 0, i 0) p .r0'
   StrCpy $3 -1
   System::Call 'comctl32::TaskDialogIndirect(p r0, *i .r2, p 0, p 0) i .r3'
   System::Free $0
@@ -677,8 +662,8 @@ Function DbxEnsureInstallAccess
   Push $2
   Push $3
   Call DbxUpdateElevationStatus
-  StrCpy $DbxFileProbeError "$(dbxElevationNotChecked)"
-  StrCpy $DbxDirectoryProbeError "$(dbxElevationNotChecked)"
+  StrCpy $DbxFileProbeError "NA"
+  StrCpy $DbxDirectoryProbeError "NA"
   ${If} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
     System::Call 'kernel32::CreateFileW(w "$INSTDIR\${MAINBINARYNAME}.exe", i 0x40000000, i 7, p 0, i 3, i 0, p 0) p .r0 ?e'
     Pop $1
@@ -728,7 +713,7 @@ Function DbxEnsureInstallAccess
     ClearErrors
     ExecShell "runas" "$EXEPATH" '/DBX_ELEVATED /DBX_PROFILE="$3" /DBX_LANG=$LANGUAGE $2 /D=$INSTDIR'
     ${If} ${Errors}
-      StrCpy $DbxElevationStatus "$(dbxElevationFailedStatus)"
+      StrCpy $DbxElevationCode 4
       MessageBox MB_OK|MB_ICONSTOP "$(dbxElevationFailed)$\r$\n$\r$\n$(dbxInstallDiagnostics)" /SD IDOK
       SetErrorLevel 740
       Pop $3
@@ -757,9 +742,10 @@ Function .onInit
     ; entered in the UAC credential dialog.
     ${GetOptions} $CMDLINE "/DBX_PROFILE=" $0
     ${If} $0 != $PROFILE
-      StrCpy $DbxFileProbeError "$(dbxElevationNotChecked)"
-      StrCpy $DbxDirectoryProbeError "$(dbxElevationNotChecked)"
+      StrCpy $DbxFileProbeError "NA"
+      StrCpy $DbxDirectoryProbeError "NA"
       Call DbxUpdateElevationStatus
+      StrCpy $DbxElevationCode 5
       MessageBox MB_OK|MB_ICONSTOP "$(dbxElevationUserMismatch)$\r$\n$\r$\n$(dbxInstallDiagnostics)" /SD IDOK
       SetErrorLevel 740
       Quit

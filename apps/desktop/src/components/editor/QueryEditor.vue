@@ -1195,6 +1195,28 @@ function selectSqlLineFromGutter(currentView: EditorViewType, line: { from: numb
   return true;
 }
 
+/**
+ * 选中光标所在的当前可执行语句（与「执行当前语句」共用同一套范围计算，
+ * 边界行为保持一致）；属于纯选区操作，不改文档，因此只读编辑器同样可用。
+ */
+function selectCurrentStatementFromView(currentView: EditorViewType): boolean {
+  const range = executableStatementRangeAtPosition(currentView, currentView.state.selection.main.head);
+  if (!range || range.from === range.to) return false;
+  currentView.dispatch({
+    selection: { anchor: range.from, head: range.to },
+    scrollIntoView: true,
+    userEvent: "select.keyboard",
+  });
+  currentView.focus();
+  return true;
+}
+
+function selectCurrentStatementFromContextMenu(): void {
+  const currentView = view.value;
+  if (!currentView) return;
+  selectCurrentStatementFromView(currentView);
+}
+
 const contextMenuActions: QueryEditorContextMenuActions = {
   executeFromContextMenu,
   executeInNewResultTabFromContextMenu,
@@ -1217,6 +1239,7 @@ const contextMenuActions: QueryEditorContextMenuActions = {
   selectAllSelectionOccurrencesFromContextMenu,
   openFindReplaceFromContextMenu,
   deleteEmptyLines,
+  selectCurrentStatementFromContextMenu,
   selectAllSqlFromContextMenu,
   emitContextObjectAction,
   openCodeSnapshot,
@@ -1389,6 +1412,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         ...binding(shortcuts.undo, (view) => codeMirrorRuntime.codeMirrorUndo?.(view) ?? false),
         ...binding(shortcuts.redo, (view) => codeMirrorRuntime.codeMirrorRedo?.(view) ?? false),
         ...binding(shortcuts.selectAll, (view) => codeMirrorRuntime.codeMirrorSelectAll?.(view) ?? false),
+        ...binding(shortcuts.selectCurrentStatement, selectCurrentStatementFromView),
         ...binding(shortcuts.extendSelection, extendQueryEditorSelectionForView),
         ...binding(shortcuts.addNextSelectionOccurrence, addNextQueryEditorSelectionOccurrence),
         ...binding(shortcuts.selectAllSelectionOccurrences, selectAllQueryEditorSelectionOccurrences),

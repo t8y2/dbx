@@ -181,6 +181,16 @@ describe("shortcutRegistry editor actions", () => {
     expect(findShortcutConflict("explainSql", "Mod+E", DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
   });
 
+  it("registers a configurable editor shortcut for selecting the current statement", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "selectCurrentStatement");
+
+    expect(definition).toMatchObject({ labelKey: "settings.shortcutSelectCurrentStatement", scope: "editor", defaultShortcut: "Mod+Shift+E" });
+    expect(shortcutToCodeMirrorKey(DEFAULT_SHORTCUT_SETTINGS.selectCurrentStatement)).toBe("Mod-Shift-e");
+    expect(findShortcutConflict("selectCurrentStatement", DEFAULT_SHORTCUT_SETTINGS.selectCurrentStatement, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+    // 与侧栏「断开连接」同键属于有意的跨作用域复用（仅提示，不影响编辑器内触发）
+    expect(findCrossScopeShortcutConflicts(DEFAULT_SHORTCUT_SETTINGS).selectCurrentStatement).toContain("disconnectSidebarConnection");
+  });
+
   it("keeps current-view search and editor find contextual on Mod+F", () => {
     const focusSearch = SHORTCUT_DEFINITIONS.find((item) => item.id === "focusSearch");
     const find = SHORTCUT_DEFINITIONS.find((item) => item.id === "find");

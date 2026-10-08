@@ -6195,6 +6195,7 @@ export default withEnglishFallback({
     rollbackSql: "回溯 SQL",
   },
   schemaDiff: {
+    connectionDisconnected: "資料庫連線已中斷，結構比對已停止。",
     optionsTitle: "比較選項",
     selectConfig: "選擇配置",
     newConfigName: "新配置",

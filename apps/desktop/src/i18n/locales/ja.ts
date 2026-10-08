@@ -6870,6 +6870,7 @@ export default withEnglishFallback({
     rollbackSql: "ロールバックSQL",
   },
   schemaDiff: {
+    connectionDisconnected: "データベース接続が切断されたため、スキーマ比較を停止しました。",
     optionsTitle: "比較オプション",
     selectConfig: "設定を選択",
     newConfigName: "新しい設定",

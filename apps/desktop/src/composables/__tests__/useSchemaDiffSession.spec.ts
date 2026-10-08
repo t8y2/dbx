@@ -22,6 +22,42 @@ vi.mock("@/lib/schema/schemaDiffMetadataLoad", () => ({ loadSchemaDetails: vi.fn
 
 const { startSchemaDiffSession } = await import("../useSchemaDiffSession.ts");
 
+test("disconnecting either side stops the compare after its issued table-list requests settle", async () => {
+  const { cancelSchemaDiffTasksForConnection } = await import("@/lib/schema/schemaDiffCancellation");
+  const { loadSchemaDetails } = await import("@/lib/schema/schemaDiffMetadataLoad");
+  vi.clearAllMocks();
+  const finish: Array<(tables: never[]) => void> = [];
+  const session = startSchemaDiffSession(
+    {
+      sourceConnectionId: "cancel-source",
+      sourceDatabase: "app",
+      sourceSchema: "",
+      targetConnectionId: "cancel-target",
+      targetDatabase: "app",
+      targetSchema: "",
+      sourceDbType: "mysql",
+      targetDbType: "mysql",
+      options: {},
+      ignoreComments: false,
+      label: "cancel compare",
+    },
+    { tableListLoader: { load: vi.fn(() => new Promise<never[]>((resolve) => finish.push(resolve))) } },
+  );
+  const cancellation = cancelSchemaDiffTasksForConnection("cancel-target", new Error("connection disconnected"));
+  assert.ok(cancellation);
+  finish[0]([]);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(session.status, "running");
+  finish[1]([]);
+  await cancellation;
+  assert.equal(session.status, "failed");
+  assert.equal(session.error, "connection disconnected");
+  assert.equal(vi.mocked(loadSchemaDetails).mock.calls.length, 0);
+  assert.equal(apiMock.prepareSchemaDiff.mock.calls.length, 0);
+  assert.equal(trackerMock.updateCompareTask.mock.calls.at(-1)?.[1].status, "Error");
+  vi.clearAllMocks();
+});
+
 test("applies every exclude rule before loading source and target details", async () => {
   const { loadSchemaDetails } = await import("@/lib/schema/schemaDiffMetadataLoad");
   vi.mocked(loadSchemaDetails).mockClear();

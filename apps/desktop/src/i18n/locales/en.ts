@@ -7770,6 +7770,7 @@ export default {
     rollbackSql: "Rollback SQL",
   },
   schemaDiff: {
+    connectionDisconnected: "Schema comparison stopped because a database connection was disconnected.",
     optionsTitle: "Compare Options",
     selectConfig: "Select config",
     newConfigName: "New Config",

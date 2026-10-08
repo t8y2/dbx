@@ -6681,6 +6681,7 @@ export default withEnglishFallback({
     rollbackSql: "롤백 SQL",
   },
   schemaDiff: {
+    connectionDisconnected: "데이터베이스 연결이 끊어져 스키마 비교가 중지되었습니다.",
     optionsTitle: "비교 옵션",
     selectConfig: "설정 선택",
     newConfigName: "새 설정",

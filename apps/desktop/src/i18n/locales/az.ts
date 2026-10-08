@@ -6812,6 +6812,7 @@ export default withEnglishFallback({
     rollbackSql: "Geri qaytarma SQL-i",
   },
   schemaDiff: {
+    connectionDisconnected: "Verilənlər bazası bağlantısı kəsildiyi üçün sxem müqayisəsi dayandırıldı.",
     optionsTitle: "Müqayisə seçimləri",
     selectConfig: "Konfiqurasiya seç",
     newConfigName: "Yeni konfiqurasiya",

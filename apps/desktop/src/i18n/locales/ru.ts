@@ -8083,6 +8083,7 @@ export default withEnglishFallback({
     rollbackSql: "SQL отката",
   },
   schemaDiff: {
+    connectionDisconnected: "Сравнение схем остановлено, поскольку соединение с базой данных было отключено.",
     optionsTitle: "Параметры сравнения",
     selectConfig: "Выбрать конфигурацию",
     newConfigName: "Новая конфигурация",

@@ -7534,6 +7534,7 @@ export default withEnglishFallback({
     rollbackSql: "SQL Rollback",
   },
   schemaDiff: {
+    connectionDisconnected: "Perbandingan skema dihentikan karena koneksi database terputus.",
     optionsTitle: "Opsi Perbandingan",
     selectConfig: "Pilih konfigurasi",
     newConfigName: "Konfigurasi Baru",

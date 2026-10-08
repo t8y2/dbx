@@ -7756,6 +7756,7 @@ export default withEnglishFallback({
     rollbackSql: "回滚 SQL",
   },
   schemaDiff: {
+    connectionDisconnected: "数据库连接已断开，结构比对已停止。",
     optionsTitle: "比较选项",
     selectConfig: "选择配置",
     newConfigName: "新配置",

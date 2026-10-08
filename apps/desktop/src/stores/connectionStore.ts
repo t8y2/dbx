@@ -1,4 +1,5 @@
 import { defineStore } from "pinia";
+import { cancelSchemaDiffTasksForConnection } from "@/lib/schema/schemaDiffCancellation";
 import type { SqlFilePreview } from "@/lib/backend/api";
 import { uuid } from "@/lib/common/utils";
 import { containsHan, orderedSubsequenceSpan, pinyinFirstLetters } from "@/lib/common/pinyin";
@@ -1120,11 +1121,11 @@ export const useConnectionStore = defineStore("connection", () => {
     return bounded;
   }
 
-  function startDisconnectRequest(connectionId: string): Promise<void> {
+  function startDisconnectRequest(connectionId: string, metadataDrain?: Promise<void>): Promise<void> {
     const clientAttempt = activeLocalConnectionAttempts.get(connectionId) ?? successfulLocalConnectionAttempts.get(connectionId);
     let request: Promise<void>;
     try {
-      request = api.disconnectDb(connectionId, clientAttempt);
+      request = metadataDrain ? metadataDrain.then(() => api.disconnectDb(connectionId, clientAttempt)) : api.disconnectDb(connectionId, clientAttempt);
     } catch (error) {
       request = Promise.reject(error);
     }
@@ -4772,10 +4773,11 @@ export const useConnectionStore = defineStore("connection", () => {
    * `disconnectTabHandlingMode`，否则会把刚保留下来的 SQL 页签又关掉。
    */
   async function disconnect(connectionId: string, options: { skipTabHandling?: boolean } = {}) {
+    const metadataDrain = cancelSchemaDiffTasksForConnection(connectionId, new Error(i18n.global.t("schemaDiff.connectionDisconnected")));
     const stateRevision = bumpConnectionStateRevision(connectionId);
     const shouldRemoveOneTimeConnection = getConfig(connectionId)?.one_time === true;
     if (hasSqlServerActivityTraceForConnection(connectionId)) await disposeSqlServerActivityTracesForConnection(connectionId);
-    const disconnectRequest = startDisconnectRequest(connectionId);
+    const disconnectRequest = startDisconnectRequest(connectionId, metadataDrain);
     cancelLocalConnectionAttempt(connectionId);
 
     connectedIds.value.delete(connectionId);

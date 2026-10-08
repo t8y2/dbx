@@ -88,6 +88,7 @@ function createMongoExportState(options: {
   hasCompleteLocalResult?: UseDataGridExportOptions["hasCompleteLocalResult"];
   completeLocalResult?: UseDataGridExportOptions["completeLocalResult"];
   externalCellValue?: UseDataGridExportOptions["externalCellValue"];
+  visibleColumnIndexes?: number[];
 }) {
   const items = options.items ?? [options.item];
   const selectedRowIds = options.selectedRowIds ?? new Set<number>();
@@ -121,6 +122,7 @@ function createMongoExportState(options: {
     hasCompleteLocalResult: options.hasCompleteLocalResult,
     completeLocalResult: options.completeLocalResult,
     externalCellValue: options.externalCellValue,
+    visibleColumnIndexes: options.visibleColumnIndexes ? computed(() => options.visibleColumnIndexes) : undefined,
   };
   return useDataGridExport(state);
 }
@@ -1805,6 +1807,74 @@ describe("useDataGridExport prepared row statements", () => {
     expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["name"], [["Visible"], ["Other"]], expect.anything(), expect.anything());
   });
 
+  it("exports duplicate-named columns by source position from the full result", async () => {
+    setActivePinia(createPinia());
+    const state = createMongoExportState({
+      columns: ["id", "id"],
+      item: { ...row(["1", "one"]), sourceIndex: 0 },
+      mongoDocuments: [{ id: 1 }],
+      visibleColumnIndexes: [0, 1],
+      fullExportResult: async () => ({
+        columns: ["id", "id"],
+        column_types: ["int", "varchar"],
+        rows: [
+          ["1", "one"],
+          ["2", "two"],
+        ],
+        affected_rows: 2,
+        execution_time_ms: 1,
+      }),
+    });
+
+    await state.exportCsv();
+
+    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(
+      expect.any(String),
+      ["id", "id"],
+      [
+        ["1", "one"],
+        ["2", "two"],
+      ],
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it("exports duplicate-named columns by source position when the complete result is local", async () => {
+    setActivePinia(createPinia());
+    const completeLocalResult = {
+      columns: ["id", "id"],
+      column_types: ["int", "varchar"],
+      rows: [
+        ["1", "one"],
+        ["2", "two"],
+      ],
+      affected_rows: 2,
+      execution_time_ms: 1,
+    };
+    const state = createMongoExportState({
+      columns: ["id", "id"],
+      item: { ...row(["1", "one"]), sourceIndex: 0 },
+      mongoDocuments: [{ id: 1 }],
+      visibleColumnIndexes: [0, 1],
+      hasCompleteLocalResult: computed(() => true),
+      completeLocalResult: computed(() => completeLocalResult),
+    });
+
+    await state.exportCsv();
+
+    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(
+      expect.any(String),
+      ["id", "id"],
+      [
+        ["1", "one"],
+        ["2", "two"],
+      ],
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
   it("passes the CSV NULL setting to the export call", async () => {
     setActivePinia(createPinia());
     const state = createMongoExportState({
@@ -1868,6 +1938,166 @@ describe("useDataGridExport prepared row statements", () => {
     await state.exportJson();
 
     expect(exportQueryResultJson).toHaveBeenCalledWith(expect.any(String), columns, [[mongoCopyDocument._id, mongoCopyDocument.valueMap, mongoCopyDocument.createdTime]]);
+  });
+
+  it("preserves Mongo Extended JSON when exporting a single selected row", async () => {
+    const columns = ["_id", "valueMap", "createdTime"];
+    const doc1 = {
+      _id: { $oid: "6a9fb51db2f0c46b94002f26" },
+      valueMap: { field1: "A", count: { $numberLong: "1234567890123" } },
+      createdTime: { $date: "2026-09-08T07:11:25.458Z" },
+    };
+    const doc2 = {
+      _id: { $oid: "6a9fb51db2f0c46b94002f27" },
+      valueMap: { field1: "B", count: { $numberLong: "9876543210987" } },
+      createdTime: { $date: "2026-09-09T08:00:00.000Z" },
+    };
+    const item1 = { ...row(["6a9fb51db2f0c46b94002f26", JSON.stringify(doc1.valueMap), 'ISODate("2026-09-08T07:11:25.458Z")']), id: 101, sourceIndex: 0 };
+    const item2 = { ...row(["6a9fb51db2f0c46b94002f27", JSON.stringify(doc2.valueMap), 'ISODate("2026-09-09T08:00:00.000Z")']), id: 102, sourceIndex: 1 };
+    const state = createMongoExportState({
+      columns,
+      item: item1,
+      items: [item1, item2],
+      mongoDocuments: [doc1, doc2],
+      selectedRowIds: new Set([102]),
+    });
+
+    await state.exportJson([102]);
+
+    expect(exportQueryResultJson).toHaveBeenCalledWith(expect.any(String), columns, [[doc2._id, doc2.valueMap, doc2.createdTime]]);
+  });
+
+  it("preserves Mongo Extended JSON when exporting selected columns", async () => {
+    const columns = ["_id", "valueMap", "createdTime"];
+    const doc1 = {
+      _id: { $oid: "6a9fb51db2f0c46b94002f26" },
+      valueMap: { field1: "A" },
+      createdTime: { $date: "2026-09-08T07:11:25.458Z" },
+    };
+    const item1 = { ...row(["6a9fb51db2f0c46b94002f26", JSON.stringify(doc1.valueMap), 'ISODate("2026-09-08T07:11:25.458Z")']), id: 101, sourceIndex: 0 };
+    const state = createMongoExportState({
+      columns,
+      item: item1,
+      items: [item1],
+      mongoDocuments: [doc1],
+    });
+
+    await state.exportJson({ columnIndexes: [1, 2] });
+
+    expect(exportQueryResultJson).toHaveBeenCalledWith(expect.any(String), ["valueMap", "createdTime"], [[doc1.valueMap, doc1.createdTime]]);
+  });
+
+  it("preserves Mongo Extended JSON when exporting selected row and column intersection", async () => {
+    const columns = ["_id", "valueMap", "createdTime"];
+    const doc1 = {
+      _id: { $oid: "6a9fb51db2f0c46b94002f26" },
+      valueMap: { field1: "A" },
+      createdTime: { $date: "2026-09-08T07:11:25.458Z" },
+    };
+    const doc2 = {
+      _id: { $oid: "6a9fb51db2f0c46b94002f27" },
+      valueMap: { field1: "B" },
+      createdTime: { $date: "2026-09-09T08:00:00.000Z" },
+    };
+    const item1 = { ...row(["6a9fb51db2f0c46b94002f26", JSON.stringify(doc1.valueMap), 'ISODate("2026-09-08T07:11:25.458Z")']), id: 101, sourceIndex: 0 };
+    const item2 = { ...row(["6a9fb51db2f0c46b94002f27", JSON.stringify(doc2.valueMap), 'ISODate("2026-09-09T08:00:00.000Z")']), id: 102, sourceIndex: 1 };
+    const state = createMongoExportState({
+      columns,
+      item: item1,
+      items: [item1, item2],
+      mongoDocuments: [doc1, doc2],
+    });
+
+    await state.exportJson({ rowIds: [102], columnIndexes: [0, 2] });
+
+    expect(exportQueryResultJson).toHaveBeenCalledWith(expect.any(String), ["_id", "createdTime"], [[doc2._id, doc2.createdTime]]);
+  });
+
+  it("exports non-Mongo CSV with selected columns and rows", async () => {
+    setActivePinia(createPinia());
+    const table: DataGridTableMeta = {
+      tableName: "users",
+      primaryKeys: ["id"],
+      columns: [
+        { name: "id", data_type: "int" },
+        { name: "name", data_type: "varchar" },
+        { name: "email", data_type: "varchar" },
+      ],
+    };
+    const rowDataList = [
+      [1, "Alice", "alice@example.com"],
+      [2, "Bob", "bob@example.com"],
+      [3, "Charlie", "charlie@example.com"],
+    ];
+    const state = createExportState(table, ["id", "name", "email"], undefined, undefined, undefined, rowDataList, [2]);
+
+    await state.exportCsv({ rowIds: [2], columnIndexes: [1, 2] });
+
+    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["name", "email"], [["Bob", "bob@example.com"]], expect.anything(), expect.anything());
+  });
+
+  it("exports non-Mongo JSON with selected columns and rows", async () => {
+    setActivePinia(createPinia());
+    const table: DataGridTableMeta = {
+      tableName: "users",
+      primaryKeys: ["id"],
+      columns: [
+        { name: "id", data_type: "int" },
+        { name: "name", data_type: "varchar" },
+        { name: "email", data_type: "varchar" },
+      ],
+    };
+    const rowDataList = [
+      [1, "Alice", "alice@example.com"],
+      [2, "Bob", "bob@example.com"],
+      [3, "Charlie", "charlie@example.com"],
+    ];
+    const state = createExportState(table, ["id", "name", "email"], undefined, undefined, undefined, rowDataList, [1, 3]);
+
+    await state.exportJson({ rowIds: [1, 3], columnIndexes: [1] });
+
+    expect(exportQueryResultJson).toHaveBeenLastCalledWith(expect.any(String), ["name"], [["Alice"], ["Charlie"]]);
+  });
+
+  it("exports rectangular cell selection matrix with correct rows and columns", async () => {
+    setActivePinia(createPinia());
+    const table: DataGridTableMeta = {
+      tableName: "users",
+      primaryKeys: ["id"],
+      columns: [
+        { name: "id", data_type: "int" },
+        { name: "name", data_type: "varchar" },
+        { name: "email", data_type: "varchar" },
+      ],
+    };
+    const rowDataList = [
+      [1, "Alice", "alice@example.com"],
+      [2, "Bob", "bob@example.com"],
+      [3, "Charlie", "charlie@example.com"],
+    ];
+    const matrix: CellSelectionMatrix = {
+      rowIndexes: [0, 1],
+      columnIndexes: [1, 2],
+      columns: ["name", "email"],
+      rows: [
+        ["Alice", "alice@example.com"],
+        ["Bob", "bob@example.com"],
+      ],
+    };
+    const state = createExportState(table, ["id", "name", "email"], matrix, undefined, undefined, rowDataList);
+
+    await state.exportCsv({ rowIds: [1, 2], columnIndexes: [1, 2] });
+
+    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(
+      expect.any(String),
+      ["name", "email"],
+      [
+        ["Alice", "alice@example.com"],
+        ["Bob", "bob@example.com"],
+      ],
+      expect.anything(),
+      expect.anything(),
+    );
   });
 });
 

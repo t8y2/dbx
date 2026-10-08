@@ -190,8 +190,16 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libsecret-1-dev
+          sudo timeout --kill-after=30s 10m apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            update
+          sudo timeout --kill-after=30s 10m apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libsecret-1-dev
 
       # Pin mold because runner image updates can change bundled DuckDB C++ links.
       # The pinned build prevents duckdb_create_config runtime failures.
@@ -249,6 +257,12 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Rust cache
+        env:
+          RUSTC_WRAPPER: ""
+          RUST_FEATURE_MODE: ""
+          RUST_TEST_GROUP: ""
+          CC: ""
+          CXX: ""
         uses: swatinem/rust-cache@v2
         with:
           workspaces: "./ -> target"
@@ -763,8 +777,16 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libsecret-1-dev
+          sudo timeout --kill-after=30s 10m apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            update
+          sudo timeout --kill-after=30s 10m apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libsecret-1-dev
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97.1
@@ -805,6 +827,12 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Rust cache
+        env:
+          RUSTC_WRAPPER: ""
+          RUST_FEATURE_MODE: ""
+          RUST_TEST_GROUP: ""
+          CC: ""
+          CXX: ""
         uses: swatinem/rust-cache@v2
         with:
           workspaces: "./ -> target"
@@ -846,8 +874,16 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libsecret-1-dev
+          sudo timeout --kill-after=30s 10m apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            update
+          sudo timeout --kill-after=30s 10m apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libsecret-1-dev
         if: matrix.group != 'foundation'
 
       # Pin mold because runner image updates can change bundled C++ links.
@@ -895,6 +931,12 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Rust cache
+        env:
+          RUSTC_WRAPPER: ""
+          RUST_FEATURE_MODE: ""
+          RUST_TEST_GROUP: ""
+          CC: ""
+          CXX: ""
         uses: swatinem/rust-cache@v2
         with:
           workspaces: "./ -> target"
@@ -1330,8 +1372,16 @@ jobs:
       - name: Install system dependencies
         if: matrix.driver == 'duckdb'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libdbus-1-dev pkg-config
+          sudo timeout --kill-after=30s 10m apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            update
+          sudo timeout --kill-after=30s 10m apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            install -y libdbus-1-dev pkg-config
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97.1
       # Pin mold because runner image updates can change bundled DuckDB C++ links.
@@ -1374,6 +1424,12 @@ jobs:
             echo "CXX=${SCCACHE_PATH} c++"
           } >> "$GITHUB_ENV"
       - name: Rust cache
+        env:
+          RUSTC_WRAPPER: ""
+          RUST_FEATURE_MODE: ""
+          RUST_TEST_GROUP: ""
+          CC: ""
+          CXX: ""
         uses: swatinem/rust-cache@v2
         with:
           workspaces: agents/drivers/${{ matrix.driver }} -> target

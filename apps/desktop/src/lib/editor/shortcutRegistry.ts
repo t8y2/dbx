@@ -36,6 +36,7 @@ export type ShortcutActionId =
   | "toggleFold"
   | "foldAll"
   | "unfoldAll"
+  | "editCell"
   | "editTableStructure"
   | "copyCurrentRow"
   | "deleteCurrentRow"
@@ -380,6 +381,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutUnfoldAll",
     scope: "editor",
     defaultShortcut: foldAllDefaultShortcut("unfoldAll"),
+  },
+  {
+    id: "editCell",
+    labelKey: "settings.shortcutEditCell",
+    scope: "grid",
+    defaultShortcut: "F2",
   },
   {
     id: "editTableStructure",

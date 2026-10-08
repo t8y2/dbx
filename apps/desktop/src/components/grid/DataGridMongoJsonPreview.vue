@@ -40,6 +40,8 @@ watch(previewContainer, async (element) => {
       fontSize: () => settingsStore.editorSettings.fontSize,
       fontFamily: () => settingsStore.editorSettings.tableFontFamily,
       lineWrapping: () => settingsStore.editorSettings.wordWrap,
+      lineNumbers: true,
+      folding: true,
     });
     await previewEditor.create(element, props.text, "json");
   } else if (!element && previewEditor) {

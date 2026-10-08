@@ -89,6 +89,23 @@ test("native Rust driver caches exclude failed build artifacts", () => {
   assert.ok(content.includes("cache-on-failure: false"));
 });
 
+test("main and fork Rust jobs use the same rust-cache fingerprint", () => {
+  const stableCacheEnvironment = /- name: Rust cache\s+env:\s+RUSTC_WRAPPER: ""\s+RUST_FEATURE_MODE: ""\s+RUST_TEST_GROUP: ""\s+CC: ""\s+CXX: ""\s+uses: swatinem\/rust-cache@v2/;
+  for (const name of ["packages", "rust-fmt-clippy", "rust-test", "agent-rust"]) {
+    assert.match(job(name), stableCacheEnvironment);
+  }
+});
+
+test("Linux Rust dependency installs bound apt mirror stalls", () => {
+  for (const name of ["packages", "rust-fmt-clippy", "rust-test", "agent-rust"]) {
+    const content = job(name);
+    assert.equal((content.match(/sudo timeout --kill-after=30s 10m apt-get/g) ?? []).length, 2);
+    for (const option of ["Acquire::Retries=3", "Acquire::http::Timeout=30", "Acquire::https::Timeout=30"]) {
+      assert.ok(content.includes(option));
+    }
+  }
+});
+
 test("Rust test jobs install pinned nextest and retain separate doctests", () => {
   const pluginDevHost = readFileSync(new URL("../workflows/plugin-dev-host.yml", import.meta.url), "utf8");
   const pluginRelease = readFileSync(new URL("../workflows/plugin-cli-release.yml", import.meta.url), "utf8");

@@ -207,6 +207,7 @@ import {
   isCancelSearchShortcut,
   isCopyCurrentRowShortcut,
   isDeleteCurrentRowShortcut,
+  isEditCellShortcut,
   isEditTableStructureShortcut,
   isFocusSearchShortcut,
   isFocusWhereShortcut,
@@ -6275,6 +6276,10 @@ function affectedRowIds(): number[] {
   if (hasRowSelection.value && selectedRowCount.value > 0) {
     return [...selectedRowIds.value].filter((rowId) => !getRowItem(rowId)?.isDraft);
   }
+  if (contextCell.value?.col === -1 && contextCell.value.rowId !== undefined) {
+    const item = getRowItem(contextCell.value.rowId);
+    return item && !item.isDraft ? [item.id] : [];
+  }
   const range = selectedRange.value;
   if (range && range.startRow !== range.endRow) {
     return displayRowRefs.value
@@ -6284,6 +6289,41 @@ function affectedRowIds(): number[] {
   }
   return [];
 }
+
+function targetColumnIndexes(): number[] {
+  if (hasColumnSelection.value && selectedColumnIndexes.value.size > 0) {
+    return [...selectedColumnIndexes.value].sort((a, b) => a - b);
+  }
+  if (contextHeaderVisibleColIdx.value !== null && contextHeaderVisibleColIdx.value !== undefined) {
+    return [contextHeaderVisibleColIdx.value];
+  }
+  if (contextHeaderColumnIndex.value !== null) {
+    const idx = visibleColumnIndexes.value.indexOf(contextHeaderColumnIndex.value);
+    if (idx >= 0) return [idx];
+  }
+  return [];
+}
+
+const hasSelectedRows = computed(() => affectedRowIds().length > 0);
+const hasSelectedColumns = computed(() => targetColumnIndexes().length > 0);
+
+function activeCellSelectionTarget(): { rowIds: number[]; columnIndexes: number[] } | null {
+  if (selectedCellMatrix.value && selectedCellMatrix.value.rowIndexes.length > 0 && selectedCellMatrix.value.columnIndexes.length > 0) {
+    const rowIds = selectedCellMatrix.value.rowIndexes
+      .map((rowIndex) => displayItemAt(rowIndex))
+      .filter((item): item is RowItem => !!item && !item.isDraft)
+      .map((item) => item.id);
+    if (rowIds.length > 0) {
+      return {
+        rowIds,
+        columnIndexes: selectedCellMatrix.value.columnIndexes.slice(),
+      };
+    }
+  }
+  return null;
+}
+
+const hasSelectedCells = computed(() => !hasRowSelection.value && !hasColumnSelection.value && hasCellSelection.value && !!activeCellSelectionTarget());
 
 function deletableRowIds(rowIds: number[]): number[] {
   const eligible = rowIds.filter((rowId) => canDeleteRowItem(getRowItem(rowId)));
@@ -6296,55 +6336,170 @@ function deletableRowIds(rowIds: number[]): number[] {
 function exportSelectedRowsCsv() {
   const rowIds = affectedRowIds();
   if (rowIds.length === 0) return;
-  return exportCsv(rowIds);
+  const columnIndexes = hasSelectedColumns.value ? targetColumnIndexes() : undefined;
+  return exportCsv({ rowIds, columnIndexes });
 }
 
 function exportSelectedRowsXlsx() {
   const rowIds = affectedRowIds();
   if (rowIds.length === 0) return;
-  return exportXlsx(rowIds);
+  const columnIndexes = hasSelectedColumns.value ? targetColumnIndexes() : undefined;
+  return exportXlsx({ rowIds, columnIndexes });
 }
 
 function openSelectedRowsXlsx() {
+  const cellTarget = activeCellSelectionTarget();
+  if (cellTarget) return openXlsx(cellTarget);
   const rowIds = affectedRowIds();
-  if (rowIds.length === 0) return openXlsx();
-  return openXlsx(rowIds);
+  const columnIndexes = hasSelectedColumns.value ? targetColumnIndexes() : undefined;
+  if (rowIds.length === 0 && columnIndexes === undefined) return openXlsx();
+  return openXlsx({ rowIds: rowIds.length > 0 ? rowIds : undefined, columnIndexes });
 }
 
 function exportSelectedRowsXlsxWithSql() {
   const rowIds = affectedRowIds();
   if (rowIds.length === 0) return;
-  return exportXlsxWithSql(rowIds);
+  const columnIndexes = hasSelectedColumns.value ? targetColumnIndexes() : undefined;
+  return exportXlsxWithSql({ rowIds, columnIndexes });
 }
 
 function exportSelectedRowsJson() {
   const rowIds = affectedRowIds();
   if (rowIds.length === 0) return;
-  return exportJson(rowIds);
+  const columnIndexes = hasSelectedColumns.value ? targetColumnIndexes() : undefined;
+  return exportJson({ rowIds, columnIndexes });
 }
 
 function exportSelectedRowsMarkdown() {
   const rowIds = affectedRowIds();
   if (rowIds.length === 0) return;
-  return exportMarkdown(rowIds);
+  const columnIndexes = hasSelectedColumns.value ? targetColumnIndexes() : undefined;
+  return exportMarkdown({ rowIds, columnIndexes });
 }
 
 function exportSelectedRowsHtml() {
   const rowIds = affectedRowIds();
   if (rowIds.length === 0) return;
-  return exportHtml(rowIds);
+  const columnIndexes = hasSelectedColumns.value ? targetColumnIndexes() : undefined;
+  return exportHtml({ rowIds, columnIndexes });
 }
 
 function exportSelectedRowsSql() {
   const rowIds = affectedRowIds();
   if (rowIds.length === 0) return;
-  return exportSql(rowIds);
+  const columnIndexes = hasSelectedColumns.value ? targetColumnIndexes() : undefined;
+  return exportSql({ rowIds, columnIndexes });
 }
 
 function exportSelectedRowsTxt() {
   const rowIds = affectedRowIds();
   if (rowIds.length === 0) return;
-  return exportTxt(rowIds);
+  const columnIndexes = hasSelectedColumns.value ? targetColumnIndexes() : undefined;
+  return exportTxt({ rowIds, columnIndexes });
+}
+
+function exportSelectedColumnsCsv() {
+  const columnIndexes = targetColumnIndexes();
+  if (columnIndexes.length === 0) return;
+  const rowIds = hasSelectedRows.value ? affectedRowIds() : undefined;
+  return exportCsv({ rowIds, columnIndexes });
+}
+
+function exportSelectedColumnsXlsx() {
+  const columnIndexes = targetColumnIndexes();
+  if (columnIndexes.length === 0) return;
+  const rowIds = hasSelectedRows.value ? affectedRowIds() : undefined;
+  return exportXlsx({ rowIds, columnIndexes });
+}
+
+function exportSelectedColumnsXlsxWithSql() {
+  const columnIndexes = targetColumnIndexes();
+  if (columnIndexes.length === 0) return;
+  const rowIds = hasSelectedRows.value ? affectedRowIds() : undefined;
+  return exportXlsxWithSql({ rowIds, columnIndexes });
+}
+
+function exportSelectedColumnsJson() {
+  const columnIndexes = targetColumnIndexes();
+  if (columnIndexes.length === 0) return;
+  const rowIds = hasSelectedRows.value ? affectedRowIds() : undefined;
+  return exportJson({ rowIds, columnIndexes });
+}
+
+function exportSelectedColumnsMarkdown() {
+  const columnIndexes = targetColumnIndexes();
+  if (columnIndexes.length === 0) return;
+  const rowIds = hasSelectedRows.value ? affectedRowIds() : undefined;
+  return exportMarkdown({ rowIds, columnIndexes });
+}
+
+function exportSelectedColumnsHtml() {
+  const columnIndexes = targetColumnIndexes();
+  if (columnIndexes.length === 0) return;
+  const rowIds = hasSelectedRows.value ? affectedRowIds() : undefined;
+  return exportHtml({ rowIds, columnIndexes });
+}
+
+function exportSelectedColumnsSql() {
+  const columnIndexes = targetColumnIndexes();
+  if (columnIndexes.length === 0) return;
+  const rowIds = hasSelectedRows.value ? affectedRowIds() : undefined;
+  return exportSql({ rowIds, columnIndexes });
+}
+
+function exportSelectedColumnsTxt() {
+  const columnIndexes = targetColumnIndexes();
+  if (columnIndexes.length === 0) return;
+  const rowIds = hasSelectedRows.value ? affectedRowIds() : undefined;
+  return exportTxt({ rowIds, columnIndexes });
+}
+
+function exportSelectedCellsCsv() {
+  const target = activeCellSelectionTarget();
+  if (!target) return;
+  return exportCsv(target);
+}
+
+function exportSelectedCellsXlsx() {
+  const target = activeCellSelectionTarget();
+  if (!target) return;
+  return exportXlsx(target);
+}
+
+function exportSelectedCellsXlsxWithSql() {
+  const target = activeCellSelectionTarget();
+  if (!target) return;
+  return exportXlsxWithSql(target);
+}
+
+function exportSelectedCellsJson() {
+  const target = activeCellSelectionTarget();
+  if (!target) return;
+  return exportJson(target);
+}
+
+function exportSelectedCellsMarkdown() {
+  const target = activeCellSelectionTarget();
+  if (!target) return;
+  return exportMarkdown(target);
+}
+
+function exportSelectedCellsHtml() {
+  const target = activeCellSelectionTarget();
+  if (!target) return;
+  return exportHtml(target);
+}
+
+function exportSelectedCellsSql() {
+  const target = activeCellSelectionTarget();
+  if (!target) return;
+  return exportSql(target);
+}
+
+function exportSelectedCellsTxt() {
+  const target = activeCellSelectionTarget();
+  if (!target) return;
+  return exportTxt(target);
 }
 
 function executePreviewAction(action: PreviewAction) {
@@ -6719,6 +6874,8 @@ watch(valueEditorContainer, async (el) => {
       fontSize: editorFontSize,
       fontFamily: detailEditorFontFamily,
       lineWrapping: () => settingsStore.editorSettings.wordWrap,
+      lineNumbers: true,
+      folding: true,
     });
     const editor = valueDetailEditor;
     await editor.create(el, detailEditValue.value, activeCellDetail.value?.type);
@@ -8549,7 +8706,7 @@ const exportMenuItems = computed(() => {
             : []),
         ]
       : [];
-  const selectedItems = isMultiRow.value
+  const selectedRowsItems = hasSelectedRows.value
     ? [
         {
           value: "selected-csv",
@@ -8578,6 +8735,64 @@ const exportMenuItems = computed(() => {
         { value: "selected-txt", label: t("grid.exportSelectedRowsTxt") },
       ]
     : [];
+  const selectedColumnsItems = hasSelectedColumns.value
+    ? [
+        {
+          value: "selected-columns-csv",
+          label: t("grid.exportSelectedColumnsCsv"),
+          separatorBefore: true,
+        },
+        { value: "selected-columns-xlsx", label: t("grid.exportSelectedColumnsXlsx") },
+        ...(canIncludeSql
+          ? [
+              {
+                value: "selected-columns-xlsx-with-sql",
+                label: t("grid.exportSelectedColumnsXlsxWithSql"),
+              },
+            ]
+          : []),
+        { value: "selected-columns-json", label: t("grid.exportSelectedColumnsJson") },
+        {
+          value: "selected-columns-markdown",
+          label: t("grid.exportSelectedColumnsMarkdown"),
+        },
+        {
+          value: "selected-columns-html",
+          label: t("grid.exportSelectedColumnsHtml"),
+        },
+        { value: "selected-columns-sql", label: t("grid.exportSelectedColumnsSql") },
+        { value: "selected-columns-txt", label: t("grid.exportSelectedColumnsTxt") },
+      ]
+    : [];
+  const selectedCellsItems = hasSelectedCells.value
+    ? [
+        {
+          value: "selected-cells-csv",
+          label: t("grid.exportSelectedCellsCsv"),
+          separatorBefore: true,
+        },
+        { value: "selected-cells-xlsx", label: t("grid.exportSelectedCellsXlsx") },
+        ...(canIncludeSql
+          ? [
+              {
+                value: "selected-cells-xlsx-with-sql",
+                label: t("grid.exportSelectedCellsXlsxWithSql"),
+              },
+            ]
+          : []),
+        { value: "selected-cells-json", label: t("grid.exportSelectedCellsJson") },
+        {
+          value: "selected-cells-markdown",
+          label: t("grid.exportSelectedCellsMarkdown"),
+        },
+        {
+          value: "selected-cells-html",
+          label: t("grid.exportSelectedCellsHtml"),
+        },
+        { value: "selected-cells-sql", label: t("grid.exportSelectedCellsSql") },
+        { value: "selected-cells-txt", label: t("grid.exportSelectedCellsTxt") },
+      ]
+    : [];
 
   if (!hasFullResultExport) {
     return [
@@ -8590,7 +8805,9 @@ const exportMenuItems = computed(() => {
       { value: "sql", label: t("grid.exportSql") },
       { value: "txt", label: t("grid.exportTxt") },
       ...allResultItems,
-      ...selectedItems,
+      ...selectedRowsItems,
+      ...selectedColumnsItems,
+      ...selectedCellsItems,
     ];
   }
 
@@ -8630,7 +8847,9 @@ const exportMenuItems = computed(() => {
     { value: "sql", label: t("grid.exportCurrentResultSql") },
     { value: "txt", label: t("grid.exportCurrentResultTxt") },
     ...allResultItems,
-    ...selectedItems,
+    ...selectedRowsItems,
+    ...selectedColumnsItems,
+    ...selectedCellsItems,
   ];
 });
 
@@ -8666,6 +8885,22 @@ function selectExportMenuItem(value: string) {
     "selected-html": exportSelectedRowsHtml,
     "selected-sql": exportSelectedRowsSql,
     "selected-txt": exportSelectedRowsTxt,
+    "selected-columns-csv": exportSelectedColumnsCsv,
+    "selected-columns-xlsx": exportSelectedColumnsXlsx,
+    "selected-columns-xlsx-with-sql": exportSelectedColumnsXlsxWithSql,
+    "selected-columns-json": exportSelectedColumnsJson,
+    "selected-columns-markdown": exportSelectedColumnsMarkdown,
+    "selected-columns-html": exportSelectedColumnsHtml,
+    "selected-columns-sql": exportSelectedColumnsSql,
+    "selected-columns-txt": exportSelectedColumnsTxt,
+    "selected-cells-csv": exportSelectedCellsCsv,
+    "selected-cells-xlsx": exportSelectedCellsXlsx,
+    "selected-cells-xlsx-with-sql": exportSelectedCellsXlsxWithSql,
+    "selected-cells-json": exportSelectedCellsJson,
+    "selected-cells-markdown": exportSelectedCellsMarkdown,
+    "selected-cells-html": exportSelectedCellsHtml,
+    "selected-cells-sql": exportSelectedCellsSql,
+    "selected-cells-txt": exportSelectedCellsTxt,
   };
   actions[value]?.();
 }
@@ -10088,7 +10323,7 @@ async function onGridKeydown(event: KeyboardEvent) {
     event.stopPropagation();
     return;
   }
-  if (event.key === "Enter" && editSelectedCell()) {
+  if ((isEditCellShortcut(event, settingsStore.editorSettings.shortcuts) || (!event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && event.key === "Enter")) && editSelectedCell()) {
     event.preventDefault();
     return;
   }
@@ -12468,6 +12703,8 @@ defineExpose({
   toggleMultiRowTranspose,
   focusSearch,
   focusWhere,
+  editSelectedCell,
+  selectSingleCell,
   openGoToColumn,
   visibleColumnCount,
   displayableColumnCount,
@@ -12731,7 +12968,7 @@ function exportSubmenu(): ContextMenuItem {
       action: exportXlsxWithSql,
     });
   }
-  if (isMultiRow.value) {
+  if (hasSelectedRows.value) {
     items.push(
       { label: "", separator: true },
       { label: t("grid.exportSelectedRowsCsv"), action: exportSelectedRowsCsv },
@@ -12761,6 +12998,70 @@ function exportSubmenu(): ContextMenuItem {
       },
       { label: t("grid.exportSelectedRowsSql"), action: exportSelectedRowsSql },
       { label: t("grid.exportSelectedRowsTxt"), action: exportSelectedRowsTxt },
+    );
+  }
+  if (hasSelectedColumns.value) {
+    items.push(
+      { label: "", separator: true },
+      { label: t("grid.exportSelectedColumnsCsv"), action: exportSelectedColumnsCsv },
+      {
+        label: t("grid.exportSelectedColumnsXlsx"),
+        action: exportSelectedColumnsXlsx,
+      },
+      ...(props.context === "results" && !!(props.exportSql || props.sql)?.trim()
+        ? [
+            {
+              label: t("grid.exportSelectedColumnsXlsxWithSql"),
+              action: exportSelectedColumnsXlsxWithSql,
+            },
+          ]
+        : []),
+      {
+        label: t("grid.exportSelectedColumnsJson"),
+        action: exportSelectedColumnsJson,
+      },
+      {
+        label: t("grid.exportSelectedColumnsMarkdown"),
+        action: exportSelectedColumnsMarkdown,
+      },
+      {
+        label: t("grid.exportSelectedColumnsHtml"),
+        action: exportSelectedColumnsHtml,
+      },
+      { label: t("grid.exportSelectedColumnsSql"), action: exportSelectedColumnsSql },
+      { label: t("grid.exportSelectedColumnsTxt"), action: exportSelectedColumnsTxt },
+    );
+  }
+  if (hasSelectedCells.value) {
+    items.push(
+      { label: "", separator: true },
+      { label: t("grid.exportSelectedCellsCsv"), action: exportSelectedCellsCsv },
+      {
+        label: t("grid.exportSelectedCellsXlsx"),
+        action: exportSelectedCellsXlsx,
+      },
+      ...(props.context === "results" && !!(props.exportSql || props.sql)?.trim()
+        ? [
+            {
+              label: t("grid.exportSelectedCellsXlsxWithSql"),
+              action: exportSelectedCellsXlsxWithSql,
+            },
+          ]
+        : []),
+      {
+        label: t("grid.exportSelectedCellsJson"),
+        action: exportSelectedCellsJson,
+      },
+      {
+        label: t("grid.exportSelectedCellsMarkdown"),
+        action: exportSelectedCellsMarkdown,
+      },
+      {
+        label: t("grid.exportSelectedCellsHtml"),
+        action: exportSelectedCellsHtml,
+      },
+      { label: t("grid.exportSelectedCellsSql"), action: exportSelectedCellsSql },
+      { label: t("grid.exportSelectedCellsTxt"), action: exportSelectedCellsTxt },
     );
   }
   const extractorItems = buildExtractorContextItems("export");

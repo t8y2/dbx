@@ -230,6 +230,9 @@ pub struct ConnectionConfig {
     /// Empty means inherit the global editor setting.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub redis_key_templates: Vec<String>,
+    /// Default Redis MATCH pattern for new key-browser tabs; empty means all keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redis_key_filter: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redis_key_grouping: Option<RedisKeyGrouping>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -698,6 +701,8 @@ struct ConnectionConfigData {
     #[serde(default)]
     pub redis_key_templates: Vec<String>,
     #[serde(default)]
+    pub redis_key_filter: Option<String>,
+    #[serde(default)]
     pub redis_key_grouping: Option<RedisKeyGrouping>,
     #[serde(default)]
     pub etcd_endpoints: String,
@@ -784,6 +789,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             redis_scan_page_size: data.redis_scan_page_size,
             redis_database_aliases: data.redis_database_aliases,
             redis_key_templates: data.redis_key_templates,
+            redis_key_filter: data.redis_key_filter,
             redis_key_grouping: data.redis_key_grouping,
             etcd_endpoints: data.etcd_endpoints,
             gbase_server: data.gbase_server,
@@ -3133,6 +3139,7 @@ mod tests {
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_filter: None,
             redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),

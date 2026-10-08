@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, ref, watch, type ComponentPublicInstance } from "vue";
+import { computed, ref, type ComponentPublicInstance } from "vue";
 import { useI18n } from "vue-i18n";
 import { AlertTriangle, Check, Copy, Loader2, TextWrap } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { useDialogEditorFocusRestore } from "@/composables/useDialogEditorFocusRestore";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { createBoundedTextPreview } from "@/lib/common/boundedTextPreview";
@@ -21,10 +22,7 @@ const suppressFuturePrompts = defineModel<boolean>("suppressFuturePrompts", { de
 const wrap = ref(true);
 const copied = ref(false);
 
-// The CodeMirror editor (if any) that was focused when this dialog opened, so
-// its internal selection can be restored without letting the browser move the caret.
-let editorRootToRestoreFocus: HTMLElement | null = null;
-let focusRestoreGeneration = 0;
+const { onCloseAutoFocus: onDangerDialogCloseAutoFocus } = useDialogEditorFocusRestore(open);
 
 const props = withDefaults(
   defineProps<{
@@ -88,19 +86,6 @@ const dialogOpen = computed({
   },
 });
 
-watch(
-  () => open.value,
-  (isOpen) => {
-    if (!isOpen) return;
-    focusRestoreGeneration += 1;
-    // Keep the original editor while a prior close animation is still pending.
-    if (editorRootToRestoreFocus) return;
-    const active = document.activeElement;
-    editorRootToRestoreFocus = active instanceof HTMLElement ? active.closest(".cm-editor") : null;
-  },
-  { immediate: true },
-);
-
 const confirmButtonRef = ref<ComponentPublicInstance | HTMLButtonElement | null>(null);
 const cancelButtonRef = ref<ComponentPublicInstance | HTMLButtonElement | null>(null);
 
@@ -120,32 +105,6 @@ function onDangerDialogOpenAutoFocus(event: Event) {
     event.preventDefault();
     focusButton(confirmButtonRef.value);
   }
-}
-
-/**
- * Restores focus through CodeMirror's own `EditorView.focus()` instead of the browser default.
- *
- * Reka UI's default close-auto-focus calls plain DOM `.focus()` on the element that was active
- * before the dialog opened. In WebKit, refocusing a CodeMirror contenteditable this way can reset
- * its caret to the start of the document, which makes the editor scroll to the top (#7692).
- * `EditorView.focus()` restores CodeMirror's internal selection without creating that false change.
- */
-function onDangerDialogCloseAutoFocus(event: Event) {
-  const target = editorRootToRestoreFocus;
-  if (!target || !target.isConnected) {
-    editorRootToRestoreFocus = null;
-    return;
-  }
-  event.preventDefault();
-  // An interrupted close may emit after the dialog has reopened. Suppress the stale native
-  // restoration, but retain the editor for the next completed close.
-  if (dialogOpen.value) return;
-  const generation = focusRestoreGeneration;
-  void import("@codemirror/view").then(({ EditorView }) => {
-    if (dialogOpen.value || generation !== focusRestoreGeneration || editorRootToRestoreFocus !== target) return;
-    editorRootToRestoreFocus = null;
-    EditorView.findFromDOM(target)?.focus();
-  });
 }
 
 function onConfirm() {

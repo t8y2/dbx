@@ -122,6 +122,18 @@ describe("shortcutRegistry editor actions", () => {
     expect(findShortcutConflict("goToColumn", "Mod+F", shortcuts)).toBeNull();
   });
 
+  it("registers edit-cell F2 as a conflict-free grid default", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "editCell");
+
+    expect(definition).toMatchObject({
+      labelKey: "settings.shortcutEditCell",
+      scope: "grid",
+      defaultShortcut: "F2",
+    });
+    expect(DEFAULT_SHORTCUT_SETTINGS.editCell).toBe("F2");
+    expect(findShortcutConflict("editCell", DEFAULT_SHORTCUT_SETTINGS.editCell, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+  });
+
   it("registers copy-current-row Mod+D and edit-table-structure Mod+Shift+D as conflict-free grid defaults", () => {
     const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "editTableStructure");
 

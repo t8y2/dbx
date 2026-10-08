@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildTransferObjectSelections, countTransferObjects, matchBulkObjectNames, parseBulkObjectNames } from "../transferSelections";
+import { buildTransferObjectSelectionField, buildTransferObjectSelections, countTransferObjects, matchBulkObjectNames, parseBulkObjectNames } from "../transferSelections";
 
 function setOf(names: string[]): Set<string> {
   return new Set(names);
@@ -42,6 +42,23 @@ describe("buildTransferObjectSelections", () => {
   it("drops TABLE selections (handled by the tables field)", () => {
     const result = buildTransferObjectSelections({ TABLE: setOf(["t1", "t2"]) }, []);
     expect(result).toEqual([]);
+  });
+
+  it("keeps an explicit empty objects field for a saved TABLE-only request", () => {
+    const request = {
+      tables: ["orders"],
+      ...buildTransferObjectSelectionField({ TABLE: setOf(["orders"]) }, []),
+    };
+    expect(Object.hasOwn(request, "objects")).toBe(true);
+    expect(request.objects).toEqual([]);
+  });
+
+  it("keeps only the non-table selection for a saved TABLE + VIEW request", () => {
+    const request = {
+      tables: ["orders"],
+      ...buildTransferObjectSelectionField({ TABLE: setOf(["orders"]), VIEW: setOf(["v_orders"]) }, []),
+    };
+    expect(request.objects).toEqual([{ objectType: "VIEW", names: ["v_orders"] }]);
   });
 
   it("filters disabled object types even when stale selections remain", () => {

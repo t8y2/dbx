@@ -4,7 +4,7 @@ import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { buildTransferObjectSelections, countTransferObjects } from "./transferSelections";
+import { buildTransferObjectSelectionField, countTransferObjects } from "./transferSelections";
 import { createTaskLoadTracker } from "./taskLoadTracker";
 import { describeTransferStructureOperation, summarizeTransferStructureOperations } from "./structurePlanSummary";
 import {
@@ -812,7 +812,7 @@ async function requestStartTransfer() {
     tables: [...selectedTables.value],
     createTable: transferContent.value !== "dataOnly",
     content: transferContent.value,
-    objects: buildTransferObjectSelections(selectedObjects.value, treeDisabledGroups.value),
+    ...buildTransferObjectSelectionField(selectedObjects.value, treeDisabledGroups.value),
     ...transferStrategyOptions(targetTableStrategy.value),
     targetTableNameCase: targetTableNameCase.value,
     quoteTargetColumnNames: quoteTargetColumnNames.value,

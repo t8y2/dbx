@@ -1735,6 +1735,7 @@ export const useConnectionStore = defineStore("connection", () => {
       idle_timeout_secs: config.idle_timeout_secs ?? 60,
       keepalive_interval_secs: config.keepalive_interval_secs ?? DEFAULT_KEEPALIVE_INTERVAL_SECS,
       redis_database_aliases: normalizeRedisDatabaseAliases(config.redis_database_aliases),
+      redis_key_filter: dbType === "redis" && typeof config.redis_key_filter === "string" ? config.redis_key_filter.trim() || undefined : undefined,
       redis_key_templates: (() => {
         const templates = normalizeRedisKeyTemplates(config.redis_key_templates);
         return templates.length > 0 ? templates : undefined;

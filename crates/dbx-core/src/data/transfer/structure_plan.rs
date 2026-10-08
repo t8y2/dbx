@@ -28,8 +28,14 @@ const CREATE_TABLE_DISABLED_NOTE: &str =
 /// Emitted when the transfer also moves non-table schema objects whose DDL this preview
 /// deliberately does not expand (views, routines, triggers, standalone sequences, ...).
 const UNEXPANDED_OBJECTS_NOTE: &str = "\
--- Additional selected schema objects are transferred during execution.
+-- Additional schema objects selected by this request (or the legacy PostgreSQL default) are transferred.
 -- Their generated DDL is not expanded in this preview.";
+
+/// Emitted for PostgreSQL-compatible table transfers whose dependency closure is applied by
+/// the execution pass but is intentionally not expanded in the table DDL preview.
+const POSTGRES_TABLE_DEPENDENCIES_NOTE: &str = "\
+-- PostgreSQL table dependencies (types, extensions, policies and sequence bindings) are transferred
+-- for the selected tables during execution; their generated SQL is not expanded in this preview.";
 
 /// Plan the structure DDL a structure-only transfer is about to run.
 ///
@@ -147,6 +153,9 @@ pub(super) async fn build_structure_preview(
     }
 
     sections.extend(table_sections);
+    if pg_compat_transfer && !request.tables.is_empty() {
+        sections.push(POSTGRES_TABLE_DEPENDENCIES_NOTE.to_string());
+    }
     if !deferred_fk_alters.is_empty() {
         // MySQL-family targets defer foreign keys so creation order never has to satisfy
         // them; the create pass flushes these after every table exists.
@@ -496,13 +505,15 @@ fn unexpanded_schema_object_notes(
     target_db_type: &DatabaseType,
     request: &TransferRequest,
 ) -> Vec<String> {
-    if !should_transfer_schema_objects(source_db_type, target_db_type, &request.content, &request.objects) {
+    if !should_transfer_schema_objects(source_db_type, target_db_type, request) {
         return Vec::new();
     }
+    let selections = match request.object_selection_mode() {
+        TransferObjectSelectionMode::LegacyUnspecified => return vec![UNEXPANDED_OBJECTS_NOTE.to_string()],
+        TransferObjectSelectionMode::Explicit(selections) => selections,
+    };
     let mut notes = vec![UNEXPANDED_OBJECTS_NOTE.to_string()];
-    // An empty selection is the legacy PostgreSQL default (everything is transferred), so
-    // there is no concrete list to print — and the note above already says so.
-    for selection in &request.objects {
+    for selection in selections {
         if selection.object_type == TransferObjectKind::Table || selection.names.is_empty() {
             continue;
         }
@@ -658,6 +669,26 @@ mod tests {
         assert_eq!(schema["kind"], "createSchema");
         assert_eq!(schema["objectName"], "reporting");
         assert!(schema.get("sourceTable").is_none());
+    }
+
+    #[test]
+    fn unexpanded_object_notes_distinguish_legacy_and_explicit_empty_selections() {
+        let legacy = structure_request(json!({}));
+        let explicit_empty = structure_request(json!({ "objects": [] }));
+        let explicit_view = structure_request(json!({
+            "objects": [{ "objectType": "VIEW", "names": ["v_orders"] }]
+        }));
+
+        assert_eq!(
+            unexpanded_schema_object_notes(&DatabaseType::Postgres, &DatabaseType::Postgres, &legacy),
+            vec![UNEXPANDED_OBJECTS_NOTE.to_string()],
+        );
+        assert!(unexpanded_schema_object_notes(&DatabaseType::Postgres, &DatabaseType::Postgres, &explicit_empty)
+            .is_empty());
+        assert_eq!(
+            unexpanded_schema_object_notes(&DatabaseType::Postgres, &DatabaseType::Postgres, &explicit_view),
+            vec![UNEXPANDED_OBJECTS_NOTE.to_string(), "-- Views: v_orders".to_string()],
+        );
     }
 
     async fn sqlite_fixture() -> (tempfile::TempDir, Arc<AppState>, String, String) {

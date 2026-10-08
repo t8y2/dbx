@@ -1,6 +1,6 @@
 export const redisGroupingEn = {
   preparingLegacy: "Preparing the previous view; custom groups remain available…",
-  fuzzyTreeUnavailable: "This fuzzy search exceeds the existing tree resource limit. Choose List to browse the loaded matches, or narrow the search to use Tree.",
+  fuzzyTreeUnavailable: "This search exceeds the existing tree resource limit. Choose List to browse the loaded matches, or narrow the search to use Tree.",
   useList: "Use List",
   settings: "Grouping rules",
   toggle: "Custom groups",
@@ -28,7 +28,7 @@ export const redisGroupingEn = {
 };
 export const redisGroupingZhCN = {
   preparingLegacy: "正在准备原有视图，期间仍可浏览自定义分组…",
-  fuzzyTreeUnavailable: "当前模糊搜索超过已有树视图资源限制。请选择列表浏览已加载匹配项，或缩小搜索范围后使用前缀树。",
+  fuzzyTreeUnavailable: "当前搜索超过已有树视图资源限制。请选择列表浏览已加载匹配项，或缩小搜索范围后使用前缀树。",
   useList: "使用列表",
   settings: "分组规则",
   toggle: "自定义分组",
@@ -56,7 +56,7 @@ export const redisGroupingZhCN = {
 };
 export const redisGroupingZhTW = {
   preparingLegacy: "正在準備原有檢視，期間仍可瀏覽自訂分組…",
-  fuzzyTreeUnavailable: "目前模糊搜尋超過既有樹狀檢視資源限制。請選擇列表瀏覽已載入匹配項，或縮小搜尋範圍後使用前綴樹。",
+  fuzzyTreeUnavailable: "目前搜尋超過既有樹狀檢視資源限制。請選擇列表瀏覽已載入匹配項，或縮小搜尋範圍後使用前綴樹。",
   useList: "使用列表",
   settings: "分組規則",
   toggle: "自訂分組",
@@ -85,7 +85,7 @@ export const redisGroupingZhTW = {
 
 export const redisGroupingEs = {
   preparingLegacy: "Preparando la vista anterior; los grupos personalizados siguen disponibles…",
-  fuzzyTreeUnavailable: "Esta búsqueda difusa supera el límite de recursos de la vista de árbol existente. Elige Lista para explorar las coincidencias cargadas o acota la búsqueda para usar Árbol.",
+  fuzzyTreeUnavailable: "Esta búsqueda supera el límite de recursos de la vista de árbol existente. Elige Lista para explorar las coincidencias cargadas o acota la búsqueda para usar Árbol.",
   useList: "Usar lista",
   settings: "Reglas de agrupación",
   toggle: "Grupos personalizados",

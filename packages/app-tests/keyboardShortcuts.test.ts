@@ -27,6 +27,7 @@ import {
   isSwitchToPreviousTabShortcut,
   isCopyCurrentRowShortcut,
   isDeleteCurrentRowShortcut,
+  isEditCellShortcut,
   isToggleResultsPaneShortcut,
   isToggleTransposeShortcut,
   isZoomInShortcut,
@@ -425,6 +426,13 @@ test("matches Cmd+S for saving", () => {
 test("matches copy current row Mod+D by default while honoring custom shortcuts", () => {
   assert.equal(isCopyCurrentRowShortcut({ key: "d", metaKey: true }), true);
   assert.equal(isCopyCurrentRowShortcut({ key: "d", altKey: true }, { copyCurrentRow: "Alt+D" }), true);
+});
+
+test("matches edit cell F2 by default while honoring custom shortcuts", () => {
+  assert.equal(isEditCellShortcut({ key: "F2" }), true);
+  assert.equal(isEditCellShortcut({ key: "e", ctrlKey: true }, { editCell: "Mod+E" } as any), true);
+  assert.equal(isEditCellShortcut({ key: "F2" }, { editCell: "Mod+E" } as any), false);
+  assert.equal(isEditCellShortcut({ key: "F2", ctrlKey: true }), false);
 });
 
 test("matches Delete for deleting current row", () => {

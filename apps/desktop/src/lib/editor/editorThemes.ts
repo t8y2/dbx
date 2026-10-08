@@ -1131,6 +1131,7 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
       whiteSpace: "nowrap",
     },
     ".cm-tooltip.cm-completionInfo": {
+      fontFamily: `var(${EDITOR_FONT_FAMILY_CSS_VAR}, var(--font-mono, monospace))`,
       maxWidth: "min(420px, calc(100vw - 24px))",
       overflowWrap: "anywhere",
       zIndex: "10000",

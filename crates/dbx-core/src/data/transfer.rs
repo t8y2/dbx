@@ -268,8 +268,8 @@ pub struct TransferRequest {
     pub create_table: bool,
     #[serde(default)]
     pub content: TransferContent,
-    #[serde(default)]
-    pub objects: Vec<TransferObjectSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objects: Option<Vec<TransferObjectSelection>>,
     #[serde(default)]
     pub mode: TransferMode,
     #[serde(default)]
@@ -422,7 +422,42 @@ pub struct TransferStructurePreviewTable {
     pub sql: String,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum TransferObjectSelectionMode<'a> {
+    LegacyUnspecified,
+    Explicit(&'a [TransferObjectSelection]),
+}
+
+impl<'a> TransferObjectSelectionMode<'a> {
+    fn selections(self) -> &'a [TransferObjectSelection] {
+        match self {
+            Self::LegacyUnspecified => &[],
+            Self::Explicit(selections) => selections,
+        }
+    }
+
+    fn is_legacy_unspecified(self) -> bool {
+        matches!(self, Self::LegacyUnspecified)
+    }
+
+    fn filter_supported(self, supported: &[TransferObjectKind]) -> Option<Vec<TransferObjectSelection>> {
+        match self {
+            Self::LegacyUnspecified => None,
+            Self::Explicit(selections) => Some(
+                selections.iter().filter(|selection| supported.contains(&selection.object_type)).cloned().collect(),
+            ),
+        }
+    }
+}
+
 impl TransferRequest {
+    fn object_selection_mode(&self) -> TransferObjectSelectionMode<'_> {
+        match self.objects.as_deref() {
+            Some(selections) => TransferObjectSelectionMode::Explicit(selections),
+            None => TransferObjectSelectionMode::LegacyUnspecified,
+        }
+    }
+
     pub fn target_table_name(&self, source_table: &str) -> String {
         match self.target_table_name_case {
             TransferTableNameCase::Preserve => source_table.to_string(),
@@ -935,7 +970,8 @@ fn rewrite_cross_family_schema_qualifier(
 
 pub fn validate_transfer_request(request: &TransferRequest) -> Result<(), String> {
     validate_transfer_target_table_names(request)?;
-    if matches!(request.content, TransferContent::DataOnly) && !request.objects.is_empty() {
+    let selection_mode = request.object_selection_mode();
+    if matches!(request.content, TransferContent::DataOnly) && !selection_mode.selections().is_empty() {
         return Err("仅数据模式不传输非表对象".to_string());
     }
     if request.drop_target_before_create
@@ -945,7 +981,7 @@ pub fn validate_transfer_request(request: &TransferRequest) -> Result<(), String
              Data-only mode does not create tables, so a dropped target would not be rebuilt."
             .to_string());
     }
-    for selection in &request.objects {
+    for selection in selection_mode.selections() {
         if selection.names.is_empty() {
             return Err(format!("Object selection for {:?} is empty", selection.object_type));
         }
@@ -2238,6 +2274,24 @@ fn is_postgres_family_target(target_db: &DatabaseType) -> bool {
     )
 }
 
+/// Engines whose ordinary string literals keep a backslash literal, so a
+/// transferred value must not have its backslashes doubled: `C:\tmp` has to stay
+/// `'C:\tmp'` instead of becoming `'C:\\tmp'`. Mirrors the SQL export path
+/// (`quote_export_sql_string_for_database`) and the grid's copy-as-SQL path,
+/// which both only double backslashes for dialects whose escape table has one.
+fn keeps_backslash_literal(target_db: &DatabaseType) -> bool {
+    matches!(
+        target_db,
+        DatabaseType::Oracle
+            | DatabaseType::OceanbaseOracle
+            | DatabaseType::Dameng
+            | DatabaseType::Sqlite
+            | DatabaseType::Rqlite
+            | DatabaseType::Turso
+            | DatabaseType::CloudflareD1
+    )
+}
+
 fn is_mysql_numeric_base_type(data_type: &str) -> bool {
     let normalized = data_type.trim().to_ascii_lowercase();
     let base = normalized.split(['(', ' ']).next().unwrap_or("");
@@ -2827,6 +2881,22 @@ struct PostgresDomainSource {
     checks: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct PostgresTableDependencySelection {
+    extension_names: Vec<String>,
+    enum_type_names: Vec<String>,
+    domain_names: Vec<String>,
+}
+
+impl PostgresTableDependencySelection {
+    fn type_names(&self) -> Vec<String> {
+        let mut names = self.enum_type_names.iter().chain(&self.domain_names).cloned().collect::<Vec<_>>();
+        names.sort();
+        names.dedup();
+        names
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PostgresMaterializedViewSource {
     view_name: String,
@@ -3083,6 +3153,7 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
             }
             let escaped = if is_postgres_family_target(db_type)
                 || matches!(db_type, DatabaseType::SqlServer | DatabaseType::H2)
+                || keeps_backslash_literal(db_type)
             {
                 literal.replace('\'', "''")
             } else {
@@ -7661,7 +7732,7 @@ pub fn selected_object_names(selections: &[TransferObjectSelection], kind: &Tran
 }
 
 fn selected_postgres_sequence_names(request: &TransferRequest) -> Vec<String> {
-    let mut names = selected_object_names(&request.objects, &TransferObjectKind::Sequence);
+    let mut names = selected_object_names(request.object_selection_mode().selections(), &TransferObjectKind::Sequence);
     names.sort();
     names.dedup();
     names
@@ -7675,12 +7746,27 @@ fn postgres_transfer_relation_names(request: &TransferRequest) -> Vec<String> {
     names
 }
 
-/// Whether a kind participates in a transfer. An empty selection is the legacy
-/// PG→PG default: every kind participates (views, functions, triggers,
-/// materialized views are all transferred). Once the caller explicitly selects
-/// objects, only kinds with a non-empty selection participate.
-pub fn object_kind_selected_or_defaulted(selections: &[TransferObjectSelection], kind: &TransferObjectKind) -> bool {
-    selections.is_empty() || !selected_object_names(selections, kind).is_empty()
+/// Whether a kind participates in a transfer. `None` is the legacy PG→PG fallback;
+/// `Some([])` is an explicit empty selection and selects no kinds.
+pub fn object_kind_selected_or_defaulted(
+    selections: Option<&[TransferObjectSelection]>,
+    kind: &TransferObjectKind,
+) -> bool {
+    selections.is_none_or(|selections| !selected_object_names(selections, kind).is_empty())
+}
+
+fn object_name_selected_or_defaulted(
+    selection_mode: TransferObjectSelectionMode<'_>,
+    kind: &TransferObjectKind,
+    name: &str,
+) -> bool {
+    match selection_mode {
+        TransferObjectSelectionMode::LegacyUnspecified => true,
+        TransferObjectSelectionMode::Explicit(selections) => {
+            object_kind_selected_or_defaulted(Some(selections), kind)
+                && selected_object_names(selections, kind).iter().any(|selected| selected == name)
+        }
+    }
 }
 
 pub fn should_copy_data(content: &TransferContent) -> bool {
@@ -7702,12 +7788,11 @@ fn transfer_kind_from_object_source_kind(kind: &db::ObjectSourceKind) -> Option<
 
 fn filter_object_sources_by_selection(
     sources: Vec<db::ObjectSource>,
-    selections: &[TransferObjectSelection],
+    selection_mode: TransferObjectSelectionMode<'_>,
 ) -> Vec<db::ObjectSource> {
-    // Empty selection is the legacy PG→PG default: transfer everything.
-    if selections.is_empty() {
+    let TransferObjectSelectionMode::Explicit(selections) = selection_mode else {
         return sources;
-    }
+    };
     sources
         .into_iter()
         .filter(|source| {
@@ -7728,29 +7813,29 @@ fn filter_object_sources_by_selection(
 pub fn should_transfer_schema_objects(
     source_db_type: &DatabaseType,
     target_db_type: &DatabaseType,
-    content: &TransferContent,
-    objects: &[TransferObjectSelection],
+    request: &TransferRequest,
 ) -> bool {
-    if matches!(content, TransferContent::DataOnly) {
+    if matches!(request.content, TransferContent::DataOnly) {
         return false;
     }
-    if !objects.is_empty() {
-        // A table-only selection is already handled by the table transfer pass.
-        // Do not enter the PostgreSQL-family schema-object path just because the
-        // request also carries the selected table kind. This matters for
-        // Kingbase, whose catalog is not a drop-in PostgreSQL catalog.
-        return objects
-            .iter()
-            .any(|selection| selection.object_type != TransferObjectKind::Table && !selection.names.is_empty());
+    match request.object_selection_mode() {
+        TransferObjectSelectionMode::Explicit(selections) => {
+            // A table-only selection is already handled by the table transfer pass.
+            // Explicit empty selections must never enter a legacy all-objects path.
+            selections
+                .iter()
+                .any(|selection| selection.object_type != TransferObjectKind::Table && !selection.names.is_empty())
+        }
+        TransferObjectSelectionMode::LegacyUnspecified => {
+            if matches!(source_db_type, DatabaseType::Kingbase) || matches!(target_db_type, DatabaseType::Kingbase) {
+                // Kingbase V8 does not expose every PostgreSQL pg_catalog relation used
+                // by the optional object scanner, so keep its confirmed no-fallback behavior.
+                return false;
+            }
+            transfer_object_family(source_db_type) == Some(TransferObjectFamily::Postgres)
+                && transfer_object_family(target_db_type) == Some(TransferObjectFamily::Postgres)
+        }
     }
-    if matches!(source_db_type, DatabaseType::Kingbase) || matches!(target_db_type, DatabaseType::Kingbase) {
-        // Kingbase V8 does not expose every PostgreSQL pg_catalog relation used
-        // by the optional object scanner. Empty selection means the legacy
-        // table-transfer request here, so avoid probing unsupported catalogs.
-        return false;
-    }
-    transfer_object_family(source_db_type) == Some(TransferObjectFamily::Postgres)
-        && transfer_object_family(target_db_type) == Some(TransferObjectFamily::Postgres)
 }
 
 /// Transfers selected non-table objects from source to target.
@@ -7773,7 +7858,7 @@ where
     }
     let source_db_type = get_db_type(state, &request.source_connection_id).await?;
     let target_db_type = get_db_type(state, &request.target_connection_id).await?;
-    if !should_transfer_schema_objects(&source_db_type, &target_db_type, &request.content, &request.objects) {
+    if !should_transfer_schema_objects(&source_db_type, &target_db_type, request) {
         return Ok(TransferObjectOutcome::default());
     }
     if !is_same_transfer_family(&source_db_type, &target_db_type) {
@@ -7793,8 +7878,7 @@ where
     let mut filtered_request = request.clone();
     if let Some(family) = transfer_object_family(&source_db_type) {
         let supported = transfer_object_kinds_for_family(&family);
-        filtered_request.objects =
-            request.objects.iter().filter(|sel| supported.contains(&sel.object_type)).cloned().collect();
+        filtered_request.objects = request.object_selection_mode().filter_supported(&supported);
     }
     match transfer_object_family(&source_db_type) {
         Some(TransferObjectFamily::Postgres) => {
@@ -7849,9 +7933,11 @@ where
     let source_db = &request.source_database;
     let target_db =
         if request.target_database.trim().is_empty() { source_db.as_str() } else { request.target_database.as_str() };
-    let order = ordered_transfer_object_kinds(request.objects.iter().map(|s| s.object_type).collect());
+    let order = ordered_transfer_object_kinds(
+        request.object_selection_mode().selections().iter().map(|s| s.object_type).collect(),
+    );
     for kind in order {
-        for name in selected_object_names(&request.objects, &kind) {
+        for name in selected_object_names(request.object_selection_mode().selections(), &kind) {
             if is_cancelled(&request.transfer_id).await {
                 return Err("Cancelled".to_string());
             }
@@ -7918,9 +8004,11 @@ where
     let mut outcome = TransferObjectOutcome::default();
     let source_schema = resolve_oracle_schema(&request.source_schema, &request.source_database);
     let target_schema = resolve_oracle_schema(&request.target_schema, &request.target_database);
-    let order = ordered_transfer_object_kinds(request.objects.iter().map(|s| s.object_type).collect());
+    let order = ordered_transfer_object_kinds(
+        request.object_selection_mode().selections().iter().map(|s| s.object_type).collect(),
+    );
     for kind in order {
-        for name in selected_object_names(&request.objects, &kind) {
+        for name in selected_object_names(request.object_selection_mode().selections(), &kind) {
             if is_cancelled(&request.transfer_id).await {
                 return Err("Cancelled".to_string());
             }
@@ -7989,9 +8077,11 @@ where
         if request.source_schema.trim().is_empty() { "dbo".to_string() } else { request.source_schema.clone() };
     let target_schema =
         if request.target_schema.trim().is_empty() { "dbo".to_string() } else { request.target_schema.clone() };
-    let order = ordered_transfer_object_kinds(request.objects.iter().map(|s| s.object_type).collect());
+    let order = ordered_transfer_object_kinds(
+        request.object_selection_mode().selections().iter().map(|s| s.object_type).collect(),
+    );
     for kind in order {
-        for name in selected_object_names(&request.objects, &kind) {
+        for name in selected_object_names(request.object_selection_mode().selections(), &kind) {
             if is_cancelled(&request.transfer_id).await {
                 return Err("Cancelled".to_string());
             }
@@ -8059,7 +8149,8 @@ where
     let target_db_type = get_db_type(state, &request.target_connection_id).await?;
     let allowed = cross_family_transferable_object_kinds(&source_db_type, &target_db_type);
     let unsupported: Vec<String> = request
-        .objects
+        .object_selection_mode()
+        .selections()
         .iter()
         .filter(|selection| !allowed.contains(&selection.object_type))
         .map(|selection| format!("{:?}", selection.object_type))
@@ -8080,9 +8171,11 @@ where
     };
     let source_schema = resolve_schema(&request.source_schema, &request.source_database, &source_db_type);
     let target_schema = resolve_schema(&request.target_schema, &request.target_database, &target_db_type);
-    let order = ordered_transfer_object_kinds(request.objects.iter().map(|s| s.object_type).collect());
+    let order = ordered_transfer_object_kinds(
+        request.object_selection_mode().selections().iter().map(|s| s.object_type).collect(),
+    );
     for kind in order {
-        for name in selected_object_names(&request.objects, &kind) {
+        for name in selected_object_names(request.object_selection_mode().selections(), &kind) {
             if is_cancelled(&request.transfer_id).await {
                 return Err("Cancelled".to_string());
             }
@@ -8362,19 +8455,102 @@ async fn get_postgres_trigger_sources_for_transfer(
         .collect())
 }
 
+fn postgres_table_dependency_selection_sql(schema: &str, tables: &[String]) -> Option<String> {
+    if tables.is_empty() {
+        return None;
+    }
+    let table_list = tables.iter().map(|table| quote_string_literal(table)).collect::<Vec<_>>().join(", ");
+    let source_schema = quote_string_literal(schema);
+    Some(format!(
+        "WITH RECURSIVE selected_tables AS ( \
+             SELECT c.oid FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = {source_schema} AND c.relkind IN ('r','p','f') AND c.relname IN ({table_list}) \
+         ), selected_dependencies(classid, objid) AS ( \
+             SELECT 'pg_catalog.pg_class'::regclass, oid FROM selected_tables \
+             UNION SELECT 'pg_catalog.pg_attrdef'::regclass, a.oid \
+             FROM pg_catalog.pg_attrdef a JOIN selected_tables t ON t.oid = a.adrelid \
+             UNION SELECT 'pg_catalog.pg_constraint'::regclass, c.oid \
+             FROM pg_catalog.pg_constraint c JOIN selected_tables t ON t.oid = c.conrelid \
+             UNION SELECT 'pg_catalog.pg_class'::regclass, i.indexrelid \
+             FROM pg_catalog.pg_index i JOIN selected_tables t ON t.oid = i.indrelid \
+             UNION \
+             SELECT d.refclassid, d.refobjid \
+             FROM pg_catalog.pg_depend d \
+             JOIN selected_dependencies parent ON d.classid = parent.classid AND d.objid = parent.objid \
+             WHERE d.deptype <> 'p' AND d.refclassid IN ( \
+                 'pg_catalog.pg_type'::regclass, 'pg_catalog.pg_proc'::regclass, \
+                 'pg_catalog.pg_extension'::regclass, 'pg_catalog.pg_opclass'::regclass, \
+                 'pg_catalog.pg_operator'::regclass, 'pg_catalog.pg_collation'::regclass \
+             ) \
+         ) \
+         SELECT 'ENUM'::text, t.typname \
+         FROM selected_dependencies d JOIN pg_catalog.pg_type t ON d.classid = 'pg_catalog.pg_type'::regclass AND d.objid = t.oid \
+         JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace \
+         WHERE t.typtype = 'e' AND n.nspname = {source_schema} \
+         UNION \
+         SELECT 'DOMAIN'::text, t.typname \
+         FROM selected_dependencies d JOIN pg_catalog.pg_type t ON d.classid = 'pg_catalog.pg_type'::regclass AND d.objid = t.oid \
+         JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace \
+         WHERE t.typtype = 'd' AND n.nspname = {source_schema} \
+         UNION \
+         SELECT 'EXTENSION'::text, e.extname \
+         FROM selected_dependencies d JOIN pg_catalog.pg_extension e ON d.classid = 'pg_catalog.pg_extension'::regclass AND d.objid = e.oid \
+         ORDER BY 1, 2"
+    ))
+}
+
+async fn get_postgres_table_dependency_selection(
+    state: &AppState,
+    pool_key: &str,
+    schema: &str,
+    tables: &[String],
+) -> Result<PostgresTableDependencySelection, String> {
+    let Some(sql) = postgres_table_dependency_selection_sql(schema, tables) else {
+        return Ok(PostgresTableDependencySelection::default());
+    };
+    let rows = execute_on_pool(state, pool_key, &sql).await?.rows;
+    let mut selection = PostgresTableDependencySelection::default();
+    for row in rows {
+        let (Some(kind), Some(name)) = (json_string_cell(&row, 0), json_string_cell(&row, 1)) else {
+            continue;
+        };
+        match kind.as_str() {
+            "ENUM" => selection.enum_type_names.push(name),
+            "DOMAIN" => selection.domain_names.push(name),
+            "EXTENSION" => selection.extension_names.push(name),
+            _ => {}
+        }
+    }
+    for names in [&mut selection.extension_names, &mut selection.enum_type_names, &mut selection.domain_names] {
+        names.sort();
+        names.dedup();
+    }
+    Ok(selection)
+}
+
 async fn get_postgres_extension_sources_for_transfer(
     state: &AppState,
     pool_key: &str,
     schema: &str,
+    selected_names: Option<&[String]>,
 ) -> Result<Vec<PostgresExtensionSource>, String> {
-    let sql = format!(
-        "SELECT e.extname \
-         FROM pg_extension e \
-         JOIN pg_namespace n ON n.oid = e.extnamespace \
-         WHERE n.nspname = {} \
-         ORDER BY e.extname",
-        quote_string_literal(schema)
-    );
+    let sql = if let Some(names) = selected_names {
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+        let name_list = names.iter().map(|name| quote_string_literal(name)).collect::<Vec<_>>().join(", ");
+        format!("SELECT extname FROM pg_catalog.pg_extension WHERE extname IN ({name_list}) ORDER BY extname")
+    } else {
+        format!(
+            "SELECT e.extname \
+             FROM pg_extension e \
+             JOIN pg_namespace n ON n.oid = e.extnamespace \
+             WHERE n.nspname = {} \
+             ORDER BY e.extname",
+            quote_string_literal(schema)
+        )
+    };
     let rows = execute_on_pool(state, pool_key, &sql).await?.rows;
     Ok(rows
         .into_iter()
@@ -8511,15 +8687,94 @@ async fn get_postgres_policy_statements_for_transfer(
     Ok(result_rows_to_string_statements(execute_on_pool(state, pool_key, &sql).await?.rows))
 }
 
+fn postgres_transfer_relation_scope_filter(request: &TransferRequest) -> String {
+    match request.object_selection_mode() {
+        TransferObjectSelectionMode::LegacyUnspecified => {
+            let names = postgres_transfer_relation_names(request);
+            let name_list = names.iter().map(|name| quote_string_literal(name)).collect::<Vec<_>>().join(", ");
+            let table_filter =
+                if names.is_empty() { "FALSE".to_string() } else { format!("c.relname IN ({name_list})") };
+            format!("(c.relkind IN ('v','m') OR ({table_filter} AND c.relkind IN ('r','p','f','S'))) ")
+        }
+        TransferObjectSelectionMode::Explicit(selections) => {
+            let mut filters = Vec::new();
+            if !request.tables.is_empty() {
+                let names = request.tables.iter().map(|name| quote_string_literal(name)).collect::<Vec<_>>().join(", ");
+                filters.push(format!("(c.relkind IN ('r','p','f') AND c.relname IN ({names}))"));
+            }
+            for (kind, relkind) in [
+                (TransferObjectKind::View, "v"),
+                (TransferObjectKind::MaterializedView, "m"),
+                (TransferObjectKind::Sequence, "S"),
+            ] {
+                let names = selected_object_names(selections, &kind);
+                if !names.is_empty() {
+                    let name_list = names.iter().map(|name| quote_string_literal(name)).collect::<Vec<_>>().join(", ");
+                    filters.push(format!("(c.relkind = '{relkind}' AND c.relname IN ({name_list}))"));
+                }
+            }
+            if filters.is_empty() {
+                "FALSE".to_string()
+            } else {
+                filters.join(" OR ")
+            }
+        }
+    }
+}
+
+fn postgres_transfer_routine_scope_filter(request: &TransferRequest, has_prokind: bool) -> String {
+    match request.object_selection_mode() {
+        TransferObjectSelectionMode::LegacyUnspecified => {
+            postgres_transfer_routine_catalog_sql(has_prokind).1.to_string()
+        }
+        TransferObjectSelectionMode::Explicit(selections) => {
+            let mut filters = Vec::new();
+            let functions = selected_object_names(selections, &TransferObjectKind::Function);
+            if !functions.is_empty() {
+                let names = functions.iter().map(|name| quote_string_literal(name)).collect::<Vec<_>>().join(", ");
+                filters.push(if has_prokind {
+                    format!("(p.prokind = 'f' AND p.proname IN ({names}))")
+                } else {
+                    format!("(p.proname IN ({names}) AND NOT p.proisagg AND NOT p.proiswindow)")
+                });
+            }
+            if has_prokind {
+                let procedures = selected_object_names(selections, &TransferObjectKind::Procedure);
+                if !procedures.is_empty() {
+                    let names = procedures.iter().map(|name| quote_string_literal(name)).collect::<Vec<_>>().join(", ");
+                    filters.push(format!("(p.prokind = 'p' AND p.proname IN ({names}))"));
+                }
+            }
+            if filters.is_empty() {
+                "FALSE".to_string()
+            } else {
+                filters.join(" OR ")
+            }
+        }
+    }
+}
+
 fn postgres_transfer_ownership_statements_sql(
     source_schema: &str,
     target_schema: &str,
-    tables: &[String],
+    request: &TransferRequest,
     has_prokind: bool,
+    dependency_type_names: &[String],
 ) -> String {
-    let table_list = tables.iter().map(|table| quote_string_literal(table)).collect::<Vec<_>>().join(", ");
-    let table_filter = if tables.is_empty() { "FALSE".to_string() } else { format!("c.relname IN ({table_list})") };
-    let (routine_kind, routine_filter) = postgres_transfer_routine_catalog_sql(has_prokind);
+    let (routine_kind, _) = postgres_transfer_routine_catalog_sql(has_prokind);
+    let relation_filter = postgres_transfer_relation_scope_filter(request);
+    let routine_filter = postgres_transfer_routine_scope_filter(request, has_prokind);
+    let is_legacy = request.object_selection_mode().is_legacy_unspecified();
+    let schema_scope_filter = if is_legacy { "TRUE" } else { "FALSE" };
+    let type_filter = if is_legacy {
+        "t.typtype IN ('e','d')".to_string()
+    } else if dependency_type_names.is_empty() {
+        "FALSE".to_string()
+    } else {
+        let names = dependency_type_names.iter().map(|name| quote_string_literal(name)).collect::<Vec<_>>().join(", ");
+        format!("t.typtype IN ('e','d') AND t.typname IN ({names})")
+    };
+
     format!(
         "WITH relation_owners AS ( \
              SELECT CASE c.relkind \
@@ -8532,7 +8787,7 @@ fn postgres_transfer_ownership_statements_sql(
                     pg_get_userbyid(c.relowner) AS owner_name \
              FROM pg_catalog.pg_class c \
              JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-             WHERE n.nspname = {source_schema} AND (c.relkind IN ('v','m') OR ({table_filter} AND c.relkind IN ('r','p','f','S'))) \
+             WHERE n.nspname = {source_schema} AND {relation_filter} \
          ), \
          routine_owners AS ( \
              SELECT format('ALTER %s %I.%I(%s) OWNER TO ', \
@@ -8549,12 +8804,12 @@ fn postgres_transfer_ownership_statements_sql(
                     pg_get_userbyid(t.typowner) AS owner_name \
              FROM pg_catalog.pg_type t \
              JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace \
-             WHERE n.nspname = {source_schema} AND t.typtype IN ('e','d') \
+             WHERE n.nspname = {source_schema} AND {type_filter} \
          ) \
          SELECT stmt_prefix, owner_name FROM ( \
              SELECT format('ALTER SCHEMA %I OWNER TO ', {target_schema}) AS stmt_prefix, \
                     pg_get_userbyid(n.nspowner) AS owner_name \
-             FROM pg_catalog.pg_namespace n WHERE n.nspname = {source_schema} \
+             FROM pg_catalog.pg_namespace n WHERE n.nspname = {source_schema} AND {schema_scope_filter} \
              UNION ALL SELECT stmt_prefix, owner_name FROM relation_owners \
              UNION ALL SELECT stmt_prefix, owner_name FROM routine_owners \
              UNION ALL SELECT stmt_prefix, owner_name FROM type_owners \
@@ -8562,19 +8817,33 @@ fn postgres_transfer_ownership_statements_sql(
          WHERE stmt_prefix IS NOT NULL AND owner_name IS NOT NULL",
         source_schema = quote_string_literal(source_schema),
         target_schema = quote_string_literal(target_schema),
-        table_filter = table_filter,
+        relation_filter = relation_filter,
+        routine_filter = routine_filter,
+        type_filter = type_filter,
+        schema_scope_filter = schema_scope_filter,
     )
 }
 
 async fn get_postgres_ownership_statements_for_transfer(
     state: &AppState,
     pool_key: &str,
-    source_schema: &str,
-    target_schema: &str,
-    tables: &[String],
+    request: &TransferRequest,
     has_prokind: bool,
 ) -> Result<Vec<PostgresOwnershipStatement>, String> {
-    let sql = postgres_transfer_ownership_statements_sql(source_schema, target_schema, tables, has_prokind);
+    let dependency_type_names = if request.object_selection_mode().is_legacy_unspecified() {
+        Vec::new()
+    } else {
+        get_postgres_table_dependency_selection(state, pool_key, &request.source_schema, &request.tables)
+            .await?
+            .type_names()
+    };
+    let sql = postgres_transfer_ownership_statements_sql(
+        &request.source_schema,
+        &request.target_schema,
+        request,
+        has_prokind,
+        &dependency_type_names,
+    );
     Ok(result_rows_to_postgres_ownership_statements(execute_on_pool(state, pool_key, &sql).await?.rows))
 }
 
@@ -8731,16 +9000,8 @@ pub async fn preview_transfer_ownership(
     let (missing_owners, target_owner) =
         if request.create_table && is_postgres_compat_transfer(source_db_type, target_db_type) {
             let has_prokind = postgres_transfer_catalog_capabilities(state, source_pool_key).await?.has_prokind;
-            let relation_names = postgres_transfer_relation_names(request);
-            let statements = get_postgres_ownership_statements_for_transfer(
-                state,
-                source_pool_key,
-                &request.source_schema,
-                &request.target_schema,
-                &relation_names,
-                has_prokind,
-            )
-            .await?;
+            let statements =
+                get_postgres_ownership_statements_for_transfer(state, source_pool_key, request, has_prokind).await?;
             let roles = distinct_postgres_ownership_roles(&statements);
             let existing_roles = get_existing_postgres_roles(state, target_pool_key, &roles).await?;
             let missing_owners = roles.into_iter().filter(|role| !existing_roles.contains(role)).collect::<Vec<_>>();
@@ -8787,12 +9048,13 @@ pub async fn preview_transfer_ownership(
 fn postgres_transfer_grant_statements_sql(
     source_schema: &str,
     target_schema: &str,
-    tables: &[String],
+    request: &TransferRequest,
     has_prokind: bool,
 ) -> String {
-    let table_list = tables.iter().map(|table| quote_string_literal(table)).collect::<Vec<_>>().join(", ");
-    let table_filter = if tables.is_empty() { "FALSE".to_string() } else { format!("c.relname IN ({table_list})") };
-    let (routine_kind, routine_filter) = postgres_transfer_routine_catalog_sql(has_prokind);
+    let (routine_kind, _) = postgres_transfer_routine_catalog_sql(has_prokind);
+    let relation_filter = postgres_transfer_relation_scope_filter(request);
+    let routine_filter = postgres_transfer_routine_scope_filter(request, has_prokind);
+    let schema_scope_filter = if request.object_selection_mode().is_legacy_unspecified() { "TRUE" } else { "FALSE" };
     format!(
         "WITH schema_grants AS ( \
              SELECT format( \
@@ -8805,7 +9067,7 @@ fn postgres_transfer_grant_statements_sql(
              FROM ( \
                  SELECT n.nspname, (aclexplode(n.nspacl)).* \
                  FROM pg_catalog.pg_namespace n \
-                 WHERE n.nspname = {source_schema} \
+                 WHERE n.nspname = {source_schema} AND {schema_scope_filter} \
              ) a \
              LEFT JOIN pg_roles grantee ON grantee.oid = a.grantee \
              GROUP BY a.grantee, grantee.rolname \
@@ -8825,7 +9087,7 @@ fn postgres_transfer_grant_statements_sql(
                      SELECT c.relname, c.relkind, (aclexplode(c.relacl)).* \
                      FROM pg_catalog.pg_class c \
                      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-                     WHERE n.nspname = {source_schema} AND (c.relkind IN ('v','m') OR ({table_filter} AND c.relkind IN ('r','p','f','S'))) \
+                     WHERE n.nspname = {source_schema} AND {relation_filter} \
                  ) a \
                  LEFT JOIN pg_roles grantee ON grantee.oid = a.grantee \
              ) rels \
@@ -8862,19 +9124,20 @@ fn postgres_transfer_grant_statements_sql(
          WHERE stmt IS NOT NULL",
         source_schema = quote_string_literal(source_schema),
         target_schema = quote_string_literal(target_schema),
-        table_filter = table_filter,
+        schema_scope_filter = schema_scope_filter,
+        relation_filter = relation_filter,
+        routine_filter = routine_filter,
     )
 }
 
 async fn get_postgres_grant_statements_for_transfer(
     state: &AppState,
     pool_key: &str,
-    source_schema: &str,
-    target_schema: &str,
-    tables: &[String],
+    request: &TransferRequest,
     has_prokind: bool,
 ) -> Result<Vec<String>, String> {
-    let sql = postgres_transfer_grant_statements_sql(source_schema, target_schema, tables, has_prokind);
+    let sql =
+        postgres_transfer_grant_statements_sql(&request.source_schema, &request.target_schema, request, has_prokind);
     Ok(result_rows_to_string_statements(execute_on_pool(state, pool_key, &sql).await?.rows))
 }
 
@@ -11282,11 +11545,48 @@ where
 
     ensure_postgres_transfer_schema_exists(state, target_pool_key, &request.target_schema, &target_db_type).await?;
 
-    let extensions =
-        get_postgres_extension_sources_for_transfer(state, source_pool_key, &request.source_schema).await?;
-    let enum_types = get_postgres_enum_sources_for_transfer(state, source_pool_key, &request.source_schema).await?;
-    let domains = get_postgres_domain_sources_for_transfer(state, source_pool_key, &request.source_schema).await?;
-    let selected_sequence_names = if request.objects.is_empty() {
+    let selection_mode = request.object_selection_mode();
+    let table_dependencies = if selection_mode.is_legacy_unspecified() {
+        None
+    } else {
+        Some(
+            get_postgres_table_dependency_selection(state, source_pool_key, &request.source_schema, &request.tables)
+                .await?,
+        )
+    };
+    let extensions = get_postgres_extension_sources_for_transfer(
+        state,
+        source_pool_key,
+        &request.source_schema,
+        table_dependencies.as_ref().map(|dependencies| dependencies.extension_names.as_slice()),
+    )
+    .await?
+    .into_iter()
+    .filter(|extension| {
+        table_dependencies
+            .as_ref()
+            .is_none_or(|dependencies| dependencies.extension_names.contains(&extension.extension_name))
+    })
+    .collect::<Vec<_>>();
+    let enum_types = get_postgres_enum_sources_for_transfer(state, source_pool_key, &request.source_schema)
+        .await?
+        .into_iter()
+        .filter(|enum_type| {
+            table_dependencies
+                .as_ref()
+                .is_none_or(|dependencies| dependencies.enum_type_names.contains(&enum_type.type_name))
+        })
+        .collect::<Vec<_>>();
+    let domains = get_postgres_domain_sources_for_transfer(state, source_pool_key, &request.source_schema)
+        .await?
+        .into_iter()
+        .filter(|domain| {
+            table_dependencies
+                .as_ref()
+                .is_none_or(|dependencies| dependencies.domain_names.contains(&domain.domain_name))
+        })
+        .collect::<Vec<_>>();
+    let selected_sequence_names = if selection_mode.is_legacy_unspecified() {
         get_postgres_sequence_names_for_transfer(state, source_pool_key, &request.source_schema).await?
     } else {
         selected_postgres_sequence_names(request)
@@ -11436,16 +11736,18 @@ where
     let object_sources = filter_object_sources_by_selection(
         get_postgres_schema_object_sources_for_transfer(state, source_pool_key, &request.source_schema, has_prokind)
             .await?,
-        &request.objects,
+        request.object_selection_mode(),
     );
     let materialized_views =
         get_postgres_materialized_view_sources_for_transfer(state, source_pool_key, &request.source_schema)
             .await?
             .into_iter()
             .filter(|view| {
-                object_kind_selected_or_defaulted(&request.objects, &TransferObjectKind::MaterializedView)
-                    && selected_object_names(&request.objects, &TransferObjectKind::MaterializedView)
-                        .contains(&view.view_name)
+                object_name_selected_or_defaulted(
+                    request.object_selection_mode(),
+                    &TransferObjectKind::MaterializedView,
+                    &view.view_name,
+                )
             })
             .collect::<Vec<_>>();
     let trigger_sources =
@@ -11453,9 +11755,11 @@ where
             .await?
             .into_iter()
             .filter(|trigger| {
-                object_kind_selected_or_defaulted(&request.objects, &TransferObjectKind::Trigger)
-                    && selected_object_names(&request.objects, &TransferObjectKind::Trigger)
-                        .contains(&trigger.trigger_name)
+                object_name_selected_or_defaulted(
+                    request.object_selection_mode(),
+                    &TransferObjectKind::Trigger,
+                    &trigger.trigger_name,
+                )
             })
             .collect::<Vec<_>>();
     let policy_statements = get_postgres_policy_statements_for_transfer(
@@ -11468,19 +11772,10 @@ where
         catalog_capabilities.supports_policy_permissiveness,
     )
     .await?;
-    let relation_names = postgres_transfer_relation_names(request);
     let ownership_statements = if matches!(request.ownership_policy, TransferOwnershipPolicy::Skip) {
         Vec::new()
     } else {
-        get_postgres_ownership_statements_for_transfer(
-            state,
-            source_pool_key,
-            &request.source_schema,
-            &request.target_schema,
-            &relation_names,
-            has_prokind,
-        )
-        .await?
+        get_postgres_ownership_statements_for_transfer(state, source_pool_key, request, has_prokind).await?
     };
     let ownership_existing_roles = if matches!(request.ownership_policy, TransferOwnershipPolicy::ReassignMissing) {
         let roles = distinct_postgres_ownership_roles(&ownership_statements);
@@ -11495,15 +11790,8 @@ where
     } else {
         None
     };
-    let grant_statements = get_postgres_grant_statements_for_transfer(
-        state,
-        source_pool_key,
-        &request.source_schema,
-        &request.target_schema,
-        &relation_names,
-        has_prokind,
-    )
-    .await?;
+    let grant_statements =
+        get_postgres_grant_statements_for_transfer(state, source_pool_key, request, has_prokind).await?;
     let materialized_view_step_count = materialized_views
         .iter()
         .map(|view| generate_postgres_materialized_view_ddls(view, &request.target_schema).len())
@@ -12120,6 +12408,7 @@ for line in sys.stdin:
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_filter: None,
             redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
@@ -12344,6 +12633,31 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             target[2].column_default = Some("1".into());
             assert!(h2_writable_transfer_columns(&source, &target, &mode, "ITEMS").is_ok());
         }
+    }
+
+    #[test]
+    fn transfer_keeps_backslashes_literal_for_oracle_family_and_sqlite() {
+        for db_type in [
+            DatabaseType::Oracle,
+            DatabaseType::OceanbaseOracle,
+            DatabaseType::Dameng,
+            DatabaseType::Sqlite,
+            DatabaseType::Rqlite,
+            DatabaseType::Turso,
+            DatabaseType::CloudflareD1,
+        ] {
+            assert_eq!(
+                escape_value_typed(&json!(r"C:\tmp\o'clock"), &db_type, Some("VARCHAR(64)")),
+                r"'C:\tmp\o''clock'",
+                "{db_type:?}"
+            );
+        }
+
+        // Dialects whose escape table does have a backslash escape keep doubling it.
+        assert_eq!(
+            escape_value_typed(&json!(r"C:\tmp\o'clock"), &DatabaseType::Mysql, Some("varchar(64)")),
+            r"'C:\\tmp\\o''clock'"
+        );
     }
 
     #[test]
@@ -12628,8 +12942,36 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
         }))
         .unwrap();
         assert_eq!(request.content, TransferContent::StructureAndData);
-        assert!(request.objects.is_empty());
+        assert_eq!(request.objects, None);
         assert!(request.quote_target_column_names);
+    }
+
+    #[test]
+    fn transfer_request_distinguishes_missing_empty_and_selected_objects() {
+        let mut base = serde_json::json!({
+            "transferId": "t1", "sourceConnectionId": "s", "sourceDatabase": "db",
+            "sourceSchema": "public", "targetConnectionId": "t", "targetDatabase": "db",
+            "targetSchema": "public", "tables": ["a"], "createTable": true,
+            "mode": "append", "targetTableNameCase": "preserve", "batchSize": 1000
+        });
+        let legacy: TransferRequest = serde_json::from_value(base.clone()).unwrap();
+        assert_eq!(legacy.objects, None);
+        assert!(serde_json::to_value(&legacy).unwrap().get("objects").is_none());
+
+        base["objects"] = serde_json::json!([]);
+        let explicit_empty: TransferRequest = serde_json::from_value(base.clone()).unwrap();
+        assert_eq!(explicit_empty.objects, Some(Vec::new()));
+        assert_eq!(serde_json::to_value(&explicit_empty).unwrap()["objects"], serde_json::json!([]));
+
+        base["objects"] = serde_json::json!([{"objectType": "VIEW", "names": ["v1"]}]);
+        let explicit_selection: TransferRequest = serde_json::from_value(base).unwrap();
+        assert_eq!(
+            explicit_selection.objects,
+            Some(vec![TransferObjectSelection {
+                object_type: TransferObjectKind::View,
+                names: vec!["v1".to_string()],
+            }]),
+        );
     }
 
     #[test]
@@ -12647,10 +12989,10 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             tables: vec!["a".to_string()],
             create_table: true,
             content: TransferContent::StructureOnly,
-            objects: vec![TransferObjectSelection {
+            objects: Some(vec![TransferObjectSelection {
                 object_type: TransferObjectKind::View,
                 names: vec!["v1".to_string()],
-            }],
+            }]),
             mode: TransferMode::Append,
             target_table_name_case: TransferTableNameCase::Preserve,
             quote_target_column_names: true,
@@ -12707,6 +13049,17 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             assert!(!sqlserver.contains(&TransferObjectKind::MaterializedView));
             assert!(transfer_object_kinds(&DatabaseType::Sqlite).is_empty());
         }
+
+        #[test]
+        fn object_kind_fallback_distinguishes_unspecified_from_explicit_empty() {
+            let view = TransferObjectKind::View;
+            assert!(object_kind_selected_or_defaulted(None, &view));
+            assert!(!object_kind_selected_or_defaulted(Some(&[]), &view));
+            assert!(object_kind_selected_or_defaulted(
+                Some(&[TransferObjectSelection { object_type: view, names: vec!["v1".into()] }]),
+                &view,
+            ));
+        }
     }
 
     mod transfer_validation_tests {
@@ -12732,17 +13085,17 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
                 ownership_policy: TransferOwnershipPolicy::Preserve,
                 batch_size: 1000,
                 content: TransferContent::DataOnly,
-                objects: Vec::new(),
+                objects: Some(Vec::new()),
                 drop_target_before_create: false,
                 drop_target_confirmed: false,
             };
             assert!(validate_transfer_request(&base).is_ok());
 
             let with_objects = TransferRequest {
-                objects: vec![TransferObjectSelection {
+                objects: Some(vec![TransferObjectSelection {
                     object_type: TransferObjectKind::View,
                     names: vec!["v".into()],
-                }],
+                }]),
                 ..base.clone()
             };
             // DataOnly + objects → error
@@ -12772,7 +13125,7 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
                 ownership_policy: TransferOwnershipPolicy::Preserve,
                 batch_size: 1000,
                 content: TransferContent::StructureAndData,
-                objects: Vec::new(),
+                objects: Some(Vec::new()),
                 drop_target_before_create: false,
                 drop_target_confirmed: false,
             };
@@ -12878,96 +13231,124 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
                 .contains(&View));
         }
 
+        fn should_transfer_with_objects(
+            source: &DatabaseType,
+            target: &DatabaseType,
+            content: TransferContent,
+            objects: Option<Vec<TransferObjectSelection>>,
+        ) -> bool {
+            let mut request = super::test_transfer_request(vec!["orders"]);
+            request.content = content;
+            request.objects = objects;
+            should_transfer_schema_objects(source, target, &request)
+        }
+
         #[test]
         fn should_transfer_schema_objects_matrix() {
-            // DataOnly never transfers schema objects, even for PG-family pairs.
-            assert!(!should_transfer_schema_objects(
+            let view = || TransferObjectSelection { object_type: TransferObjectKind::View, names: vec!["v1".into()] };
+            let table =
+                || TransferObjectSelection { object_type: TransferObjectKind::Table, names: vec!["orders".into()] };
+
+            // DataOnly never transfers schema objects, regardless of selection state.
+            assert!(!should_transfer_with_objects(
                 &DatabaseType::Postgres,
                 &DatabaseType::Postgres,
-                &TransferContent::DataOnly,
-                &[]
+                TransferContent::DataOnly,
+                None,
             ));
-            assert!(!should_transfer_schema_objects(
+            assert!(!should_transfer_with_objects(
                 &DatabaseType::Postgres,
                 &DatabaseType::Postgres,
-                &TransferContent::DataOnly,
-                &[TransferObjectSelection { object_type: TransferObjectKind::View, names: vec!["v1".into()] }]
+                TransferContent::DataOnly,
+                Some(vec![view()]),
             ));
-            assert!(!should_transfer_schema_objects(
+            assert!(!should_transfer_with_objects(
                 &DatabaseType::Mysql,
                 &DatabaseType::Dameng,
-                &TransferContent::DataOnly,
-                &[TransferObjectSelection { object_type: TransferObjectKind::View, names: vec!["v1".into()] }]
+                TransferContent::DataOnly,
+                Some(vec![view()]),
             ));
-            // Non-empty selections participate in structure modes.
-            assert!(should_transfer_schema_objects(
+
+            // Explicit selections run only when a non-table object is selected.
+            assert!(should_transfer_with_objects(
                 &DatabaseType::Postgres,
                 &DatabaseType::Mysql,
-                &TransferContent::StructureOnly,
-                &[TransferObjectSelection { object_type: TransferObjectKind::View, names: vec!["v1".into()] }]
+                TransferContent::StructureOnly,
+                Some(vec![view()]),
             ));
-            // Empty selection: PG→PG keeps the legacy transfer-everything default
-            // only when structure participates in the transfer.
-            assert!(should_transfer_schema_objects(
+            assert!(!should_transfer_with_objects(
                 &DatabaseType::Postgres,
                 &DatabaseType::Postgres,
-                &TransferContent::StructureOnly,
-                &[]
+                TransferContent::StructureOnly,
+                Some(Vec::new()),
             ));
-            assert!(!should_transfer_schema_objects(
-                &DatabaseType::Kingbase,
+            assert!(!should_transfer_with_objects(
                 &DatabaseType::Postgres,
-                &TransferContent::StructureAndData,
-                &[]
+                &DatabaseType::Postgres,
+                TransferContent::StructureOnly,
+                Some(vec![table()]),
             ));
-            assert!(!should_transfer_schema_objects(
-                &DatabaseType::Kingbase,
-                &DatabaseType::Kingbase,
-                &TransferContent::StructureAndData,
-                &[TransferObjectSelection { object_type: TransferObjectKind::Table, names: vec!["orders".into()] }]
+
+            // Only legacy-unspecified PostgreSQL pairs keep the all-objects fallback.
+            assert!(should_transfer_with_objects(
+                &DatabaseType::Postgres,
+                &DatabaseType::Postgres,
+                TransferContent::StructureOnly,
+                None,
             ));
-            assert!(should_transfer_schema_objects(
-                &DatabaseType::Kingbase,
-                &DatabaseType::Kingbase,
-                &TransferContent::StructureOnly,
-                &[TransferObjectSelection { object_type: TransferObjectKind::View, names: vec!["v_orders".into()] }]
-            ));
-            assert!(should_transfer_schema_objects(
+            assert!(should_transfer_with_objects(
                 &DatabaseType::Postgres,
                 &DatabaseType::OpenGauss,
-                &TransferContent::StructureOnly,
-                &[]
+                TransferContent::StructureOnly,
+                None,
             ));
-            // empty selection: every other combination transfers nothing
-            assert!(!should_transfer_schema_objects(
+            assert!(!should_transfer_with_objects(
+                &DatabaseType::Kingbase,
+                &DatabaseType::Postgres,
+                TransferContent::StructureAndData,
+                None,
+            ));
+            assert!(!should_transfer_with_objects(
+                &DatabaseType::Kingbase,
+                &DatabaseType::Kingbase,
+                TransferContent::StructureAndData,
+                Some(vec![table()]),
+            ));
+            assert!(should_transfer_with_objects(
+                &DatabaseType::Kingbase,
+                &DatabaseType::Kingbase,
+                TransferContent::StructureOnly,
+                Some(vec![view()]),
+            ));
+            assert!(!should_transfer_with_objects(
                 &DatabaseType::Postgres,
                 &DatabaseType::Mysql,
-                &TransferContent::StructureOnly,
-                &[]
+                TransferContent::StructureOnly,
+                None,
             ));
-            assert!(!should_transfer_schema_objects(
+            assert!(!should_transfer_with_objects(
                 &DatabaseType::Mysql,
                 &DatabaseType::Mysql,
-                &TransferContent::StructureAndData,
-                &[]
+                TransferContent::StructureAndData,
+                None,
             ));
-            assert!(!should_transfer_schema_objects(
+            assert!(!should_transfer_with_objects(
                 &DatabaseType::Mysql,
                 &DatabaseType::Dameng,
-                &TransferContent::StructureOnly,
-                &[]
+                TransferContent::StructureOnly,
+                None,
             ));
-            assert!(!should_transfer_schema_objects(
+            assert!(!should_transfer_with_objects(
                 &DatabaseType::Dameng,
                 &DatabaseType::SqlServer,
-                &TransferContent::StructureAndData,
-                &[]
+                TransferContent::StructureAndData,
+                None,
             ));
-            assert!(!should_transfer_schema_objects(
+            assert!(!should_transfer_with_objects(
                 &DatabaseType::Sqlite,
                 &DatabaseType::Sqlite,
-                &TransferContent::StructureOnly,
-                &[]
+                TransferContent::StructureOnly,
+                None,
             ));
         }
 
@@ -13689,6 +14070,19 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
         }
 
         #[test]
+        fn postgres_table_dependency_closure_is_scoped_to_selected_tables() {
+            assert!(postgres_table_dependency_selection_sql("public", &[]).is_none());
+            let sql = postgres_table_dependency_selection_sql("public", &["orders".into()]).unwrap();
+            assert!(sql.contains("c.relkind IN ('r','p','f') AND c.relname IN ('orders')"));
+            assert!(sql.contains("selected_dependencies(classid, objid)"));
+            assert!(sql.contains("'pg_catalog.pg_type'::regclass"));
+            assert!(sql.contains("'pg_catalog.pg_extension'::regclass"));
+            assert!(sql.contains("'ENUM'::text"));
+            assert!(sql.contains("'DOMAIN'::text"));
+            assert!(sql.contains("'EXTENSION'::text"));
+        }
+
+        #[test]
         fn postgres_transfer_relation_sources_exclude_extension_members() {
             for relkind in ['v', 'm'] {
                 let sql = postgres_transfer_relation_sources_sql("public", relkind);
@@ -13704,25 +14098,38 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
         }
 
         #[test]
-        fn postgres_transfer_ownership_supports_legacy_catalogs() {
-            let modern = postgres_transfer_ownership_statements_sql("public", "archive", &["items".into()], true);
-            assert!(modern.contains("CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END"));
-            assert!(modern.contains("p.prokind IN ('p','f')"));
-
-            let legacy = postgres_transfer_ownership_statements_sql("public", "archive", &["items".into()], false);
+        fn postgres_transfer_ownership_scopes_explicit_objects_and_supports_legacy_catalogs() {
+            let mut request = super::test_transfer_request(vec!["items"]);
+            request.objects = None;
+            let legacy = postgres_transfer_ownership_statements_sql("public", "archive", &request, false, &[]);
             assert!(!legacy.contains("prokind"));
             assert!(legacy.contains("'FUNCTION'"));
             assert!(legacy.contains("NOT p.proisagg"));
             assert!(legacy.contains("NOT p.proiswindow"));
+            assert!(legacy.contains("n.nspname = 'public' AND TRUE"));
+
+            request.objects = Some(vec![
+                TransferObjectSelection { object_type: TransferObjectKind::View, names: vec!["v_orders".into()] },
+                TransferObjectSelection { object_type: TransferObjectKind::Function, names: vec!["f_orders".into()] },
+            ]);
+            let explicit = postgres_transfer_ownership_statements_sql(
+                "public",
+                "archive",
+                &request,
+                true,
+                &["order_status".into()],
+            );
+            assert!(explicit.contains("c.relkind = 'v' AND c.relname IN ('v_orders')"));
+            assert!(explicit.contains("p.prokind = 'f' AND p.proname IN ('f_orders')"));
+            assert!(explicit.contains("t.typname IN ('order_status')"));
+            assert!(explicit.contains("n.nspname = 'public' AND FALSE"));
         }
 
         #[test]
-        fn postgres_transfer_grants_support_legacy_catalogs() {
-            let modern = postgres_transfer_grant_statements_sql("public", "archive", &["items".into()], true);
-            assert!(modern.contains("CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END"));
-            assert!(modern.contains("p.prokind IN ('p','f')"));
-
-            let legacy = postgres_transfer_grant_statements_sql("public", "archive", &["items".into()], false);
+        fn postgres_transfer_grants_scope_explicit_objects_and_support_legacy_catalogs() {
+            let mut request = super::test_transfer_request(vec!["items"]);
+            request.objects = None;
+            let legacy = postgres_transfer_grant_statements_sql("public", "archive", &request, false);
             assert!(!legacy.contains("prokind"));
             assert!(legacy.contains("'FUNCTION'::text AS routine_kind"));
             assert!(legacy.contains("NOT p.proisagg"));
@@ -13731,6 +14138,15 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             assert!(legacy.contains("(aclexplode(n.nspacl)).*"));
             assert!(legacy.contains("(aclexplode(c.relacl)).*"));
             assert!(legacy.contains("(aclexplode(p.proacl)).*"));
+
+            request.objects = Some(vec![
+                TransferObjectSelection { object_type: TransferObjectKind::View, names: vec!["v_orders".into()] },
+                TransferObjectSelection { object_type: TransferObjectKind::Function, names: vec!["f_orders".into()] },
+            ]);
+            let explicit = postgres_transfer_grant_statements_sql("public", "archive", &request, true);
+            assert!(explicit.contains("c.relkind = 'v' AND c.relname IN ('v_orders')"));
+            assert!(explicit.contains("p.prokind = 'f' AND p.proname IN ('f_orders')"));
+            assert!(explicit.contains("n.nspname = 'public' AND FALSE"));
         }
 
         #[test]
@@ -13755,23 +14171,31 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             ];
             let selection =
                 vec![TransferObjectSelection { object_type: TransferObjectKind::View, names: vec!["v1".into()] }];
-            let filtered = filter_object_sources_by_selection(sources, &selection);
+            let filtered =
+                filter_object_sources_by_selection(sources.clone(), TransferObjectSelectionMode::Explicit(&selection));
             assert_eq!(filtered.len(), 1);
             assert_eq!(filtered[0].name, "v1");
+            assert!(filter_object_sources_by_selection(sources.clone(), TransferObjectSelectionMode::Explicit(&[]),)
+                .is_empty());
+            assert_eq!(
+                filter_object_sources_by_selection(sources, TransferObjectSelectionMode::LegacyUnspecified).len(),
+                2,
+            );
         }
 
         #[test]
         fn selected_postgres_sequences_are_prepared_without_changing_default_requests() {
             let mut request = test_transfer_request(vec!["biz_banner"]);
+            request.objects = None;
             assert!(selected_postgres_sequence_names(&request).is_empty());
 
-            request.objects = vec![
+            request.objects = Some(vec![
                 TransferObjectSelection { object_type: TransferObjectKind::Table, names: vec!["biz_banner".into()] },
                 TransferObjectSelection {
                     object_type: TransferObjectKind::Sequence,
                     names: vec!["biz_banner_id_seq".into(), "biz_banner_id_seq".into()],
                 },
-            ];
+            ]);
 
             assert_eq!(selected_postgres_sequence_names(&request), vec!["biz_banner_id_seq"]);
             assert_eq!(postgres_transfer_relation_names(&request), vec!["biz_banner", "biz_banner_id_seq"]);
@@ -13856,7 +14280,7 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             tables: tables.into_iter().map(str::to_string).collect(),
             create_table: true,
             content: TransferContent::default(),
-            objects: Vec::new(),
+            objects: Some(Vec::new()),
             mode: TransferMode::Append,
             target_table_name_case: TransferTableNameCase::Preserve,
             quote_target_column_names: true,
@@ -18403,6 +18827,7 @@ SELECT 1 FROM dual"#
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_filter: None,
             redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),

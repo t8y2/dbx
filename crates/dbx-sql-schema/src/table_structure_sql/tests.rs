@@ -5007,6 +5007,57 @@ fn sqlserver_uncheck_primary_key_and_drop_column_does_not_emit_drop_column() {
 }
 
 #[test]
+fn sqlserver_drop_column_removes_default_constraint_first() {
+    let cases = [
+        (Some("dbo"), Some("((0))"), "[dbo].[orders]", true),
+        (None, Some("((0))"), "[orders]", true),
+        (Some("dbo"), Some("NULL"), "[dbo].[orders]", false),
+        (Some("dbo"), None, "[dbo].[orders]", false),
+    ];
+
+    for (schema, column_default, table, drops_default) in cases {
+        let mut big = column("big");
+        big.data_type = "bigint".to_string();
+        big.is_nullable = false;
+        big.marked_for_drop = true;
+        big.original = Some(ColumnInfo {
+            name: "big".to_string(),
+            data_type: "bigint".to_string(),
+            is_nullable: false,
+            column_default: column_default.map(str::to_string),
+            ..Default::default()
+        });
+
+        let mut expected = Vec::new();
+        if drops_default {
+            let drop_default = build_sqlserver_drop_default_constraint_sql(table, "big");
+            assert!(drop_default.contains(&format!("OBJECT_ID(N'{table}')")), "{drop_default}");
+            expected.push(drop_default);
+        }
+        expected.push(format!("ALTER TABLE {table} DROP COLUMN [big];"));
+
+        let batch = build_table_structure_change_sql(structure_change_options(
+            DatabaseType::SqlServer,
+            schema,
+            "orders",
+            vec![big.clone()],
+        ));
+        assert_eq!(batch.warnings, Vec::<String>::new());
+        assert_eq!(batch.statements, expected, "schema {schema:?}, default {column_default:?}");
+
+        let single = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            driver_profile: None,
+            schema: schema.map(str::to_string),
+            table_name: "orders".to_string(),
+            column: big,
+        });
+        assert_eq!(single.warnings, Vec::<String>::new());
+        assert_eq!(single.statements, expected, "schema {schema:?}, default {column_default:?}");
+    }
+}
+
+#[test]
 fn dameng_set_not_null_before_add_primary_key() {
     // DM8: PK columns must be NOT NULL; DM auto-adds NOT NULL but clients still MODIFY first.
     // Order: column MODIFY NOT NULL, then ADD PRIMARY KEY.

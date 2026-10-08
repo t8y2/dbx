@@ -6,8 +6,9 @@ use super::column_alter::{
     build_h2_existing_column_sql, build_informix_existing_column_sql, build_iris_existing_column_sql,
     build_mysql_existing_column_clause, build_oracle_like_existing_column_sql, build_oscar_existing_column_sql,
     build_postgres_existing_column_sql, build_questdb_existing_column_sql, build_sqlite_existing_column_sql,
-    build_sqlserver_existing_column_sql, build_xugu_existing_column_sql, dameng_drops_identity,
-    has_column_extra_change, has_existing_column_attribute_change, validate_dameng_existing_identity_change,
+    build_sqlserver_drop_default_constraint_sql, build_sqlserver_existing_column_sql, build_xugu_existing_column_sql,
+    dameng_drops_identity, has_column_extra_change, has_existing_column_attribute_change,
+    validate_dameng_existing_identity_change,
 };
 use super::column_format::{
     column_definition, has_dameng_identity, is_dameng_identity_compatible_type, is_mysql_character_data_type,
@@ -16,7 +17,7 @@ use super::column_format::{
 use super::comments::build_sqlserver_column_comment_sql_for_profile;
 use super::dialect::{capabilities_for, database_label, is_oracle_like, StructureDialect};
 use super::indexes::has_existing_index_change;
-use super::types::{EditableStructureColumn, TableStructureSqlOptions};
+use super::types::{ColumnInfo, EditableStructureColumn, TableStructureSqlOptions};
 use super::util::{
     clean, is_protected_manticore_id_column, normalize_default, original_comment, original_default, qualified_table,
     quote_ident, quote_string,
@@ -112,7 +113,7 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
                 warnings.push("Manticore Search id column cannot be dropped from this editor.".to_string());
                 continue;
             }
-            statements.push(build_drop_column_sql(dialect, &table, &original.name));
+            statements.extend(build_drop_column_sql(dialect, &table, original));
             continue;
         }
 
@@ -657,11 +658,18 @@ pub(super) fn build_add_column_sql(
     statements
 }
 
-pub(super) fn build_drop_column_sql(dialect: StructureDialect, table: &str, column_name: &str) -> String {
+pub(super) fn build_drop_column_sql(dialect: StructureDialect, table: &str, original: &ColumnInfo) -> Vec<String> {
+    let column_name = &original.name;
     if dialect == StructureDialect::Informix {
-        return format!("ALTER TABLE {table} DROP ({});", quote_ident(dialect, column_name));
+        return vec![format!("ALTER TABLE {table} DROP ({});", quote_ident(dialect, column_name))];
     }
-    format!("ALTER TABLE {table} DROP COLUMN {};", quote_ident(dialect, column_name))
+    let mut statements = Vec::new();
+    // SQL Server refuses to drop a column that a default constraint still depends on (error 5074).
+    if dialect == StructureDialect::SqlServer && !normalize_default(original.column_default.as_ref()).is_empty() {
+        statements.push(build_sqlserver_drop_default_constraint_sql(table, column_name));
+    }
+    statements.push(format!("ALTER TABLE {table} DROP COLUMN {};", quote_ident(dialect, column_name)));
+    statements
 }
 
 pub(super) fn column_position_clause(

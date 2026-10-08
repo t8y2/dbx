@@ -40,7 +40,7 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
             warnings.push("Manticore Search id column cannot be dropped from this editor.".to_string());
             return TableStructureSqlResult { statements, warnings };
         }
-        statements.push(build_drop_column_sql(dialect, &table, &original.name));
+        statements.extend(build_drop_column_sql(dialect, &table, original));
         return TableStructureSqlResult { statements, warnings };
     }
 

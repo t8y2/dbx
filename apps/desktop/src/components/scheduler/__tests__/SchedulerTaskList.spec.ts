@@ -104,6 +104,46 @@ describe("SchedulerTaskList", () => {
     expect(container.textContent).toContain("Connection missing");
   });
 
+  it("renders a plugin-reserved connection alias as its localized label and stays healthy", async () => {
+    // The files tasks declare `local` as a static option on their
+    // host/connections field — a valid side no stored connection row backs.
+    const aliasProviders: SchedulerTaskProviderDescriptor[] = [
+      {
+        ...providers[0]!,
+        triggers: [
+          {
+            id: "sync",
+            label: "Sync Directory",
+            mode: "run" as const,
+            fields: [{ key: "source_connection_id", label: "Source", type: "text" as const, options_action: "host/connections", options: [{ value: "local", label: "本地路径" }] }],
+          },
+        ],
+      },
+    ];
+    const container = document.createElement("div");
+    document.body.append(container);
+    const app = createApp(SchedulerTaskList, {
+      tasks: [task({ target: { connectionId: "local" } })],
+      healthContext: { providers: aliasProviders, connectionIds: new Set<string>() },
+      connectionNames: new Map(),
+      cancellingRunIds: new Set<string>(),
+      onCreate: () => {},
+      onEdit: () => {},
+      onDelete: () => {},
+      onViewRuns: () => {},
+      onRunNow: () => {},
+      onCancel: () => {},
+      onToggleEnabled: () => {},
+    });
+    mountedApps.push(app);
+    app.use(i18n);
+    app.mount(container);
+    await nextTick();
+    expect(container.textContent).toContain("本地路径");
+    expect(container.textContent).not.toContain("Connection missing");
+    expect(container.textContent).not.toContain("local");
+  });
+
   it("routes run-now and cancel to the right task and run", async () => {
     const events: ListEvents = { runNow: [], cancel: [], toggle: [] };
     const container = await mountList([task()], new Map([["task-1", "run-9"]]), events);

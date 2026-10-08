@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { CalendarClock, ListMusic, Pencil, Play, Plus, RefreshCw, Search, Square, Trash2 } from "@lucide/vue";
-import { defaultTimeZone, findProvider, providerSourceLabel, taskHealth, triggerSummary, type TaskHealthContext } from "@/lib/scheduler/schedulerProviders";
+import { declaredConnectionLabel, defaultTimeZone, findProvider, providerSourceLabel, taskHealth, triggerSummary, type TaskHealthContext } from "@/lib/scheduler/schedulerProviders";
 import type { TaskDefinition, TaskRunStatus } from "@/lib/scheduler/schedulerTypes";
 
 const props = defineProps<{
@@ -60,7 +60,17 @@ function providerLabel(task: TaskDefinition): string {
 function connectionLabel(task: TaskDefinition): string {
   const id = task.target?.connectionId;
   if (!id) return t("scheduler.editor.connectionAny");
-  return props.connectionNames.get(id) ?? id;
+  const stored = props.connectionNames.get(id);
+  if (stored) return stored;
+  // Plugin-reserved aliases (e.g. the files tasks' `local`) are not stored
+  // connections: show the declaring manifest option's localized label
+  // instead of the raw id.
+  const provider = findProvider(props.healthContext.providers, task.providerId);
+  for (const trigger of provider?.triggers ?? []) {
+    const label = declaredConnectionLabel(trigger, id);
+    if (label) return label;
+  }
+  return id;
 }
 
 function healthOf(task: TaskDefinition) {

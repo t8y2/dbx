@@ -191,7 +191,8 @@ export interface TaskHealthContext {
  * Projects a task's health from what the UI can see:
  * - provider missing from discovery → `unavailable` (plugin uninstalled);
  * - trigger missing / execution mode mismatching the declared trigger mode → `invalid`;
- * - bound connection missing from the store → `warning`;
+ * - bound connection missing from the store → `warning` (unless the provider
+ *   itself declares the id as a reserved alias, see {@link declaredConnectionAliases});
  * - otherwise → `healthy`.
  */
 export function taskHealth(task: Pick<TaskDefinition, "providerId" | "providerType" | "trigger" | "execution" | "target" | "config">, context: TaskHealthContext): TaskHealth {
@@ -202,8 +203,36 @@ export function taskHealth(task: Pick<TaskDefinition, "providerId" | "providerTy
   if (provider.triggers.length > 0 && !declared) return "invalid";
   if (declared && declared.mode !== task.execution.mode) return "invalid";
   const connectionId = task.target?.connectionId;
-  if (connectionId && !context.connectionIds.has(connectionId)) return "warning";
+  if (connectionId && !context.connectionIds.has(connectionId) && !declaredConnectionAliases(declared).has(connectionId)) return "warning";
   return "healthy";
+}
+
+/**
+ * Plugin-declared connection ids that no host connection row will ever back.
+ * A trigger's `options_action: "host/connections"` fields may ship static
+ * options — reserved aliases like the files tasks' `local` ("plain path on
+ * this machine") — which are valid targets the store simply does not know
+ * about, so neither health nor labels may treat them as missing.
+ */
+export function declaredConnectionAliases(trigger: SchedulerTaskTriggerContribution | undefined): Set<string> {
+  const aliases = new Set<string>();
+  for (const field of trigger?.fields ?? []) {
+    if (field.options_action !== "host/connections") continue;
+    for (const option of field.options ?? []) {
+      if (option?.value !== undefined) aliases.add(String(option.value));
+    }
+  }
+  return aliases;
+}
+
+/** The declaring option's (localized) label for a reserved alias, if any. */
+export function declaredConnectionLabel(trigger: SchedulerTaskTriggerContribution | undefined, id: string): string | undefined {
+  for (const field of trigger?.fields ?? []) {
+    if (field.options_action !== "host/connections") continue;
+    const match = field.options?.find((option) => String(option.value) === id);
+    if (match?.label) return match.label;
+  }
+  return undefined;
 }
 
 /**

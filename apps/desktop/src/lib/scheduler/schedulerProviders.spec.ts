@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { discoverTaskProviders, findProvider, findTrigger, splitTriggerId, taskHealth, triggerId, triggerSummary, withLocalizedContributions, withStoredTriggerId, type TriggerSummaryTranslator } from "./schedulerProviders";
+import { declaredConnectionAliases, declaredConnectionLabel, discoverTaskProviders, findProvider, findTrigger, splitTriggerId, taskHealth, triggerId, triggerSummary, withLocalizedContributions, withStoredTriggerId, type TriggerSummaryTranslator } from "./schedulerProviders";
 import type { InstalledPlugin } from "@/types/database";
 import type { SchedulerTaskProviderDescriptor } from "./schedulerTypes";
 
@@ -129,6 +129,41 @@ describe("taskHealth", () => {
   });
 
   it("warning when the bound connection is missing", () => {
+    expect(taskHealth(task({ target: { connectionId: "conn-deleted" } }), context)).toBe("warning");
+  });
+
+  it("healthy when the bound id is a plugin-reserved alias declared by the trigger", () => {
+    // The files tasks' manifest declares `local` as a static option on its
+    // host/connections field: a valid side no stored connection row backs.
+    const aliasProvider = discoverTaskProviders([
+      pluginWithContributions("io.dbx.files", [
+        {
+          type: "task-provider",
+          id: "io.dbx.files.tasks",
+          label: "Files Tasks",
+          triggers: [
+            {
+              id: "sync",
+              label: "Sync Directory",
+              mode: "run",
+              fields: [{ key: "source_connection_id", label: "Source", type: "text", options_action: "host/connections", options: [{ value: "local", label: "本地路径" }] }],
+            },
+          ],
+        },
+      ]),
+    ]);
+    const aliasContext = { providers: aliasProvider, connectionIds: new Set<string>() };
+    const aliasTask = task({
+      providerId: "io.dbx.files.tasks",
+      config: { __triggerId: "io.dbx.files.tasks/sync" },
+      target: { connectionId: "local" },
+    });
+    expect(taskHealth(aliasTask, aliasContext)).toBe("healthy");
+    // The alias's declaring option also carries the localized row label.
+    const trigger = aliasContext.providers[0]!.triggers[0]!;
+    expect(declaredConnectionLabel(trigger, "local")).toBe("本地路径");
+    expect(declaredConnectionAliases(trigger).has("local")).toBe(true);
+    // A genuinely unknown id still warns.
     expect(taskHealth(task({ target: { connectionId: "conn-deleted" } }), context)).toBe("warning");
   });
 });

@@ -187,18 +187,15 @@ test('Installer write failure diagnostics compile', { skip: !compilerAvailable }
   const fixtureDiagnostics = diagnostics
     .replace('Function DbxShowWriteError', 'Function DbxShowWriteErrorActual')
     .replace('    Call DbxShowWriteError\n', '    Call DbxShowWriteError\n    WriteINIStr "$EXEDIR\\result.ini" "trace" "action" "$DbxWriteFailureAction"\n')
-    .replace('  StrCpy $DbxWriteFailureAction ${IDCANCEL}\n', '  StrCpy $DbxWriteFailureAction ${IDCANCEL}\n  WriteINIStr "$EXEDIR\\result.ini" "trace" "dialog" "entered"\n')
-    .replace('    Goto dbx_write_dialog_done\n', '    WriteINIStr "$EXEDIR\\result.ini" "trace" "silent" "1"\n    Goto dbx_write_dialog_done\n')
-    .replace('  dbx_write_dialog_done:\n', '  dbx_write_dialog_done:\n    WriteINIStr "$EXEDIR\\result.ini" "trace" "dialog" "returning"\n')
     .replace(`ExecShell "open" "$WINDIR\\explorer.exe" '/select,"$EXEPATH"'`,
       `WriteINIStr "$EXEDIR\\result.ini" "manual" "args" '/select,"$EXEPATH"'`)
   const dialogSelection = `Function DbxShowWriteError
   \u0024{If} $TestManual = 1
-    StrCpy $DbxWriteFailureAction 1001
+    StrCpy $DbxWriteFailureAction \u0024{DBX_WRITE_MANUAL}
   \u0024{ElseIf} $TestRetry = 1
     StrCpy $TestRetry 0
     System::Call 'kernel32::CloseHandle(p $TestHandle)'
-    StrCpy $DbxWriteFailureAction \u0024{IDRETRY}
+    StrCpy $DbxWriteFailureAction \u0024{DBX_WRITE_RETRY}
   \u0024{Else}
     Call DbxShowWriteErrorActual
   \u0024{EndIf}
@@ -257,7 +254,8 @@ SectionEnd
   try {
     writeFileSync(source, script)
     const flag = process.platform === 'win32' ? '/' : '-'
-    execFileSync(compiler, [`${flag}V2`, `${flag}INPUTCHARSET`, 'UTF8', source], { encoding: 'utf8', timeout: 30_000 })
+    const compilation = execFileSync(compiler, [`${flag}V2`, `${flag}INPUTCHARSET`, 'UTF8', source], { encoding: 'utf8', timeout: 30_000 })
+    assert.doesNotMatch(compilation, /unknown variable|unknown constant|unknown identifier/i)
     await t.test('Windows locked-file extraction stops and reports diagnostics', { skip: !available }, () => {
       for (const [language, elevation] of [
         ['1033', /Not requested|Already running as administrator/],
@@ -287,7 +285,7 @@ SectionEnd
           assert.ok(output.includes('1.0.1'), output)
           assert.doesNotMatch(output, /Program Files|\$Dbx|\$EXEPATH|\$INSTDIR/)
           if (action === 'cancel' || action === 'manual') {
-            assert.notEqual(exitCode, 0, 'A failed required-file write must fail installation')
+            assert.equal(exitCode, 2, 'A failed required-file write must stop installation')
             assert.doesNotMatch(output, /complete=1/)
             if (action === 'manual') assert.ok(output.includes(`args=/select,"${exe}"`), output)
             else assert.doesNotMatch(output, /\[manual\]/)

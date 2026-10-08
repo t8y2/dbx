@@ -508,6 +508,9 @@ FunctionEnd
 
 ; Required application files must never be skipped after a write failure.
 AllowSkipFiles off
+!define DBX_WRITE_CANCEL 2
+!define DBX_WRITE_RETRY 4
+!define DBX_WRITE_MANUAL 1001
 LangString dbxInstallDiagnostics ${LANG_ENGLISH} "Installer: $EXEPATH$\r$\nVersion: ${VERSION}$\r$\nDestination: $INSTDIR$\r$\nAdministrator permission: $DbxIsAdmin (1=yes, 0=no)$\r$\nAutomatic elevation: $DbxElevationStatus$\r$\nAccess precheck codes (not the extraction error): file=$DbxFileProbeError, folder=$DbxDirectoryProbeError"
 LangString dbxInstallDiagnostics ${LANG_SIMPCHINESE} "安装包：$EXEPATH$\r$\n版本：${VERSION}$\r$\n安装目录：$INSTDIR$\r$\n当前管理员权限：$DbxIsAdmin（1=是，0=否）$\r$\n自动提权：$DbxElevationStatus$\r$\n权限预检查错误码（非本次写入错误）：文件=$DbxFileProbeError，目录=$DbxDirectoryProbeError"
 LangString dbxInstallDiagnostics ${LANG_TRADCHINESE} "安裝套件：$EXEPATH$\r$\n版本：${VERSION}$\r$\n安裝目錄：$INSTDIR$\r$\n目前系統管理員權限：$DbxIsAdmin（1=是，0=否）$\r$\n自動提升權限：$DbxElevationStatus$\r$\n權限預先檢查錯誤碼（非本次寫入錯誤）：檔案=$DbxFileProbeError，目錄=$DbxDirectoryProbeError"
@@ -588,9 +591,9 @@ FunctionEnd
       ${ExitDo}
     ${EndIf}
     Call DbxShowWriteError
-    ${If} $DbxWriteFailureAction = ${IDRETRY}
+    ${If} $DbxWriteFailureAction = ${DBX_WRITE_RETRY}
       ${Continue}
-    ${ElseIf} $DbxWriteFailureAction = 1001
+    ${ElseIf} $DbxWriteFailureAction = ${DBX_WRITE_MANUAL}
       Call DbxManualInstall
     ${EndIf}
     SetErrorLevel 2
@@ -620,7 +623,7 @@ Function DbxShowWriteError
   Push $1
   Push $2
   Push $3
-  StrCpy $DbxWriteFailureAction ${IDCANCEL}
+  StrCpy $DbxWriteFailureAction ${DBX_WRITE_CANCEL}
   ; Unattended failures stop installation without opening Explorer or a dialog.
   ${If} ${Silent}
     Goto dbx_write_dialog_done
@@ -629,7 +632,7 @@ Function DbxShowWriteError
   ; NSIS uses a 32-bit stub even for x64/arm64 application payloads.
   ; TASKDIALOGCONFIG is 96 bytes; use the Windows Retry/Cancel buttons plus
   ; a localized custom Manual installation button. Cancel is the default.
-  System::Call '*(i 1001, w "$(dbxManualInstall)") p .r1'
+  System::Call '*(i ${DBX_WRITE_MANUAL}, w "$(dbxManualInstall)") p .r1'
   System::Call '*(i 96, p $HWNDPARENT, p 0, i 0x1008, i 0x18, w "$(^Name)", p 65534, w "$(dbxFileWriteTitle)", w "$(dbxFileWriteError)", i 1, p r1, i 2, i 0, p 0, i 0, p 0, p 0, p 0, p 0, p 0, p 0, p 0, p 0, i 0) p .r0'
   StrCpy $3 -1
   System::Call 'comctl32::TaskDialogIndirect(p r0, *i .r2, p 0, p 0) i .r3'
@@ -642,10 +645,10 @@ Function DbxShowWriteError
     MessageBox MB_YESNOCANCEL|MB_ICONSTOP|MB_DEFBUTTON3 "$(dbxFileWriteError)$\r$\n$\r$\n$(dbxManualInstallFallback)" /SD IDCANCEL IDYES dbx_write_manual IDNO dbx_write_retry
     Goto dbx_write_dialog_done
     dbx_write_manual:
-      StrCpy $DbxWriteFailureAction 1001
+      StrCpy $DbxWriteFailureAction ${DBX_WRITE_MANUAL}
       Goto dbx_write_dialog_done
     dbx_write_retry:
-      StrCpy $DbxWriteFailureAction ${IDRETRY}
+      StrCpy $DbxWriteFailureAction ${DBX_WRITE_RETRY}
   ${EndIf}
 
   dbx_write_dialog_done:

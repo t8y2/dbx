@@ -90,6 +90,8 @@ impl SchedulerService {
     pub async fn run_now(&self, id: &str) -> Result<TaskRun, TaskError> {
         let run = self.store.enqueue_manual(id.to_owned()).await?;
         self.audit(id, TaskAuditAction::Run, json!({"runId": run.id})).await;
+        // A manual trigger must start now, not on the worker's next poll.
+        self.store.touch_wake();
         Ok(run)
     }
 
@@ -100,6 +102,9 @@ impl SchedulerService {
         let accepted = self.store.request_cancel(run_id.to_owned()).await?;
         if accepted {
             self.audit(&run.task_id, TaskAuditAction::Cancel, json!({"runId": run_id})).await;
+            // Nudge the engine's cancel sweep (`reap`) instead of letting the
+            // running task keep going until the next poll.
+            self.store.touch_wake();
         }
         Ok(accepted)
     }
@@ -210,6 +215,9 @@ impl SchedulerService {
             json!({"sessionId": session_id, "runId": run.id}),
         )
         .await;
+        // Same latency contract as a manual run: the restart run must be
+        // claimed now, not on the worker's next poll.
+        self.store.touch_wake();
         Ok(run)
     }
 

@@ -38,6 +38,11 @@ use super::TaskError;
 /// dropped — the token remains the primary stop signal).
 const CANCEL_GRACE: Duration = Duration::from_secs(30);
 
+/// How often the wake watcher checks `<scheduler>/wake` for a mutation nudge
+/// (see [`SchedulerStore::touch_wake`]). Pure mtime `stat`s — cheap enough to
+/// keep manual-trigger latency well under a second.
+const WAKE_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
 #[derive(Debug)]
 pub struct SchedulerEngine {
     store: SchedulerStore,
@@ -127,17 +132,40 @@ impl SchedulerEngine {
         }
         self.enqueue_startup_runs().await;
         log::info!("[scheduler] worker {} took over the scheduler lease", self.worker_id);
+        // Wake watcher: service mutations touch `<scheduler>/wake` (run now,
+        // accepted cancels, resident restarts) and this loop ticks at once
+        // instead of waiting out the poll interval — a manual trigger must
+        // start in well under a second, not on the next 10s poll.
+        let wakeups = Arc::new(tokio::sync::Notify::new());
+        {
+            let store = self.store.clone();
+            let wakeups = wakeups.clone();
+            let watcher_shutdown = shutdown.clone();
+            tokio::spawn(async move {
+                // `None`-initialized on purpose: a wake file left over from a
+                // previous session fires one harmless startup tick, whereas
+                // consuming the current mtime here would swallow a real
+                // mutation racing the worker's lease acquisition.
+                let mut last_seen: Option<std::time::SystemTime> = None;
+                loop {
+                    tokio::select! {
+                        _ = watcher_shutdown.cancelled() => return,
+                        _ = tokio::time::sleep(WAKE_POLL_INTERVAL) => {
+                            let mtime = store.wake_mtime();
+                            if mtime.is_some() && mtime != last_seen {
+                                last_seen = mtime;
+                                wakeups.notify_one();
+                            }
+                        }
+                    }
+                }
+            });
+        }
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => break,
-                _ = tokio::time::sleep(self.poll_interval) => {
-                    if let Err(error) = lease.heartbeat().await {
-                        log::warn!("[scheduler] lease heartbeat failed: {error}");
-                    }
-                    if let Err(error) = self.tick().await {
-                        log::error!("[scheduler] scheduler tick failed: {error}");
-                    }
-                }
+                _ = wakeups.notified() => self.beat(&lease).await,
+                _ = tokio::time::sleep(self.poll_interval) => self.beat(&lease).await,
             }
         }
         log::info!("[scheduler] worker {} shutting down", self.worker_id);
@@ -147,6 +175,17 @@ impl SchedulerEngine {
             log::warn!("[scheduler] cannot cancel queued runs during shutdown: {error}");
         }
         lease.release().await;
+    }
+
+    /// One loop pass (poll tick or wake nudge): renew the lease, then run
+    /// the scheduling pass.
+    async fn beat(self: &Arc<Self>, lease: &LeaseGuard) {
+        if let Err(error) = lease.heartbeat().await {
+            log::warn!("[scheduler] lease heartbeat failed: {error}");
+        }
+        if let Err(error) = self.tick().await {
+            log::error!("[scheduler] scheduler tick failed: {error}");
+        }
     }
 
     /// One scheduling pass. Public so tests and embedders can drive the loop

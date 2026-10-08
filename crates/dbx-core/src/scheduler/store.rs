@@ -249,6 +249,22 @@ impl SchedulerStore {
         self.directory.join("logs")
     }
 
+    /// Cross-process nudge (manual-trigger latency): a service mutation (run
+    /// now, accepted cancel, resident restart) touches `<scheduler>/wake` and
+    /// the engine's watcher ticks immediately instead of waiting out the poll
+    /// interval. Only the mtime carries signal — the content is a timestamp
+    /// for debugging — and a failed touch is deliberately ignored: the next
+    /// regular tick still picks the mutation up.
+    pub fn touch_wake(&self) {
+        let _ = std::fs::write(self.directory.join("wake"), chrono::Utc::now().to_rfc3339());
+    }
+
+    /// Watcher side of [`Self::touch_wake`]: `None` when the file does not
+    /// exist yet (a stale wake from a previous session never fires a tick).
+    pub fn wake_mtime(&self) -> Option<std::time::SystemTime> {
+        std::fs::metadata(self.directory.join("wake")).and_then(|meta| meta.modified()).ok()
+    }
+
     async fn access<T: Send + 'static>(
         &self,
         action: impl FnOnce(&mut Connection) -> Result<T, TaskError> + Send + 'static,

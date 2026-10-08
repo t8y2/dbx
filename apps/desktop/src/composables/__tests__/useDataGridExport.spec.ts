@@ -1240,6 +1240,22 @@ describe("useDataGridExport prepared row statements", () => {
     expect(vi.mocked(extractDataGridSelection).mock.lastCall?.[0].options.sql).toEqual(saved.sql);
   });
 
+  it("follows the extractor option for the copied SQL table qualifier (#11195)", async () => {
+    const tableMeta: DataGridTableMeta = { ...editableTable, schema: "SYSDBA" };
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [0, 1], columns: ["id", "name"], rows: [[1, "Ada"]] };
+    vi.mocked(extractDataGridSelection).mockResolvedValue({ text: "copied", mimeType: "text/plain", fileExtension: "sql", rowCount: 1, columnCount: 2 });
+    const withDatabaseName = { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, includeDatabaseName: true } };
+
+    const enabled = createExportState(tableMeta, ["id", "name"], matrix, [1, "Ada"], undefined, matrix.rows, [], withDatabaseName, false, undefined, false, undefined, undefined, "dameng");
+    await enabled.copyWithExtractor("sql-inserts");
+    expect(vi.mocked(extractDataGridSelection).mock.lastCall?.[0].tableMeta).toMatchObject({ schema: "SYSDBA", tableName: "users" });
+
+    // 未勾选（默认）时保持既有行为：把可选的库名/模式名前缀交给后端省略
+    const disabled = createExportState(tableMeta, ["id", "name"], matrix, [1, "Ada"], undefined, matrix.rows, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, undefined, undefined, "dameng");
+    await disabled.copyWithExtractor("sql-inserts");
+    expect(vi.mocked(extractDataGridSelection).mock.lastCall?.[0].tableMeta?.schema).toBeUndefined();
+  });
+
   it("does not report success when an extractor export save is cancelled", async () => {
     const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [1], columns: ["name"], rows: [["Ada"]] };
     vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: '[{"name":"Ada"}]', mimeType: "application/json", fileExtension: "json", rowCount: 1, columnCount: 1 });

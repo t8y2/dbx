@@ -1783,7 +1783,14 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
   const savedExtractorMigrationVersion = settings.dataGridExtractorOptionsMigrationVersion;
   const normalizedExtractorOptions = normalizeDataGridExtractorOptions(settings.dataGridExtractorOptions);
   const isLegacyExtractorOptions = typeof savedExtractorMigrationVersion !== "number" || savedExtractorMigrationVersion < DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION;
-  const dataGridExtractorOptions = isLegacyExtractorOptions && normalizedExtractorOptions.dsv.nullText === "NULL" ? { ...normalizedExtractorOptions, dsv: { ...normalizedExtractorOptions.dsv, nullText: "" } } : normalizedExtractorOptions;
+  const dataGridExtractorOptions = (() => {
+    if (!isLegacyExtractorOptions) return normalizedExtractorOptions;
+    // v1：旧的 "NULL" 文本迁移为空串
+    const nullTextMigrated = normalizedExtractorOptions.dsv.nullText === "NULL" ? { ...normalizedExtractorOptions, dsv: { ...normalizedExtractorOptions.dsv, nullText: "" } } : normalizedExtractorOptions;
+    // v2：复制/导出 SQL 的「包含数据库名称」改为由提取器勾选框决定且默认关闭，
+    // 历史持久化的 true 一并归位到新默认（想带库名/模式名的用户重新勾选即可）
+    return nullTextMigrated.sql.includeDatabaseName ? { ...nullTextMigrated, sql: { ...nullTextMigrated.sql, includeDatabaseName: false } } : nullTextMigrated;
+  })();
   // Preserve the explicit intent behind the legacy update controls. Disabling
   // update reminders was a full opt-out; disabling automatic downloads only
   // opted out of downloading the DBX package itself.

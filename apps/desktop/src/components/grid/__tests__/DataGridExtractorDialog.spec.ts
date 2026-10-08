@@ -103,6 +103,20 @@ describe("extractor draft preview", () => {
     expect(host.querySelector("pre")?.textContent).toBe("initial");
   });
 
+  it("offers the database-name option for SQL updates as well (#11195)", async () => {
+    const { props, host, save } = mountDialog();
+    props.preference = "sql-updates";
+    props.items = [{ value: "sql-updates", label: "UPDATE" }];
+    props.open = true;
+    await advancePreview();
+
+    // 勾选后保存应带上 includeDatabaseName（复制为 UPDATE 也支持带库名/模式名）
+    await toggle(host, "copyExtractorIncludeDatabaseName");
+    const button = Array.from(host.querySelectorAll("button")).find((item) => item.textContent?.includes("common.save"))!;
+    button.click();
+    expect(save).toHaveBeenCalledWith(expect.objectContaining({ options: expect.objectContaining({ sql: expect.objectContaining({ includeDatabaseName: true }) }) }));
+  });
+
   it("previews unsaved quote and temporal options without mutating saved settings", async () => {
     const { props, host, preview, save } = mountDialog();
     props.open = true;

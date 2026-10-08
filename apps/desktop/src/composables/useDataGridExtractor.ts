@@ -255,7 +255,12 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       selectedColumnIndexes,
       rows,
       selectionKind,
-      options: extractorOptionValues,
+      // For dialects whose tableMeta keeps the schema qualifier regardless of
+      // the flag (DATABASE_SCHEMA_QUALIFIED_TYPES), the backend strips every
+      // namespace prefix when include_database_name=false, which would regress
+      // the default output to a bare table name; keep the flag aligned with
+      // the qualified tableMeta we intentionally preserved.
+      options: tableMeta && (tableMeta.schema !== undefined || tableMeta.database !== undefined) ? { ...extractorOptionValues, sql: { ...extractorOptionValues.sql, includeDatabaseName: true } } : extractorOptionValues,
     };
     requestSources.set(request, {
       rowIds: sourceRowIds,

@@ -2309,7 +2309,12 @@ export const useSettingsStore = defineStore("settings", () => {
           const needsWelcomePageDefaultMigration = typeof savedSettings.welcomePageModeDefaultVersion !== "number" || savedSettings.welcomePageModeDefaultVersion < WELCOME_PAGE_DEFAULT_VERSION;
           const needsTabNavigationShortcutMigration = needsTabNavigationHistoryShortcutMigration(savedSettings.shortcuts);
           const savedNullText = (savedSettings.dataGridExtractorOptions as Partial<DataGridExtractorOptions> | undefined)?.dsv?.nullText;
-          const needsDataGridExtractorOptionsMigration = (typeof savedSettings.dataGridExtractorOptionsMigrationVersion !== "number" || savedSettings.dataGridExtractorOptionsMigrationVersion < DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION) && savedNullText === "NULL";
+          // v2 also resets a historically persisted includeDatabaseName=true, so
+          // trigger the eager persist for that stale disk value even when the
+          // v1 "NULL" marker is already migrated away.
+          const savedSqlIncludeDatabaseName = (savedSettings.dataGridExtractorOptions as Partial<DataGridExtractorOptions> | undefined)?.sql?.includeDatabaseName;
+          const needsDataGridExtractorOptionsMigration =
+            (typeof savedSettings.dataGridExtractorOptionsMigrationVersion !== "number" || savedSettings.dataGridExtractorOptionsMigrationVersion < DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION) && (savedNullText === "NULL" || savedSqlIncludeDatabaseName === true);
           const savedUpdateDownloadSource = (saved as { updateDownloadSource?: unknown }).updateDownloadSource;
           if (savedUpdateDownloadSource === "atomgit" || needsExecuteModeDefaultMigration || needsWelcomePageDefaultMigration || needsTabNavigationShortcutMigration || needsSidebarBrowseObjectsMigration || needsDataGridExtractorOptionsMigration) {
             // Persist one-time migrations so removed or unsafe defaults cannot reappear.

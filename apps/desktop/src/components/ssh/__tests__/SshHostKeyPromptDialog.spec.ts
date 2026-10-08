@@ -474,6 +474,35 @@ describe("SshHostKeyPromptDialog web bridge", () => {
     });
   });
 
+  it("pads the prompt scroll container so the input focus ring is not clipped", async () => {
+    // Regression: the container had no horizontal padding, so the 2px focus
+    // ring of the `w-full` input was clipped on the left/right edges even
+    // though `overflow-y-auto` also clips the horizontal axis.
+    await mountDialog();
+
+    const eventSource = MockEventSource.instances[0];
+    eventSource?.emit({
+      type: "prompt",
+      request: {
+        id: "ring-clip-1",
+        kind: "UserInput",
+        host: "",
+        port: 0,
+        prompt: "Please enter 6 digits.",
+        title: "Dynamic token",
+        source: "Terminal",
+        echo: false,
+      },
+    });
+    await nextTick();
+
+    const input = document.body.querySelector<HTMLInputElement>("input");
+    if (!input) throw new Error("plugin prompt input was not rendered");
+    const scroller = input.closest(".overflow-y-auto");
+    expect(scroller).not.toBeNull();
+    expect(scroller?.classList.contains("px-1")).toBe(true);
+  });
+
   it("answers a fixed-choice plugin question by picking an option", async () => {
     await mountDialog();
 

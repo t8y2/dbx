@@ -28,8 +28,14 @@ const CREATE_TABLE_DISABLED_NOTE: &str =
 /// Emitted when the transfer also moves non-table schema objects whose DDL this preview
 /// deliberately does not expand (views, routines, triggers, standalone sequences, ...).
 const UNEXPANDED_OBJECTS_NOTE: &str = "\
--- Additional selected schema objects are transferred during execution.
+-- Additional schema objects selected by this request (or the legacy PostgreSQL default) are transferred.
 -- Their generated DDL is not expanded in this preview.";
+
+/// Emitted for PostgreSQL-compatible table transfers whose dependency closure is applied by
+/// the execution pass but is intentionally not expanded in the table DDL preview.
+const POSTGRES_TABLE_DEPENDENCIES_NOTE: &str = "\
+-- PostgreSQL table dependencies (types, extensions, policies and sequence bindings) are transferred
+-- for the selected tables during execution; their generated SQL is not expanded in this preview.";
 
 /// Plan the structure DDL a structure-only transfer is about to run.
 ///
@@ -44,7 +50,11 @@ pub(super) async fn build_structure_preview(
     target_pool_key: &str,
 ) -> Result<TransferStructurePreview, String> {
     if !request.create_table {
-        return Ok(TransferStructurePreview { sql: CREATE_TABLE_DISABLED_NOTE.to_string(), tables: Vec::new() });
+        return Ok(TransferStructurePreview {
+            sql: CREATE_TABLE_DISABLED_NOTE.to_string(),
+            tables: Vec::new(),
+            operations: Vec::new(),
+        });
     }
 
     let pg_compat_transfer = is_postgres_compat_transfer(source_db_type, target_db_type);
@@ -66,7 +76,10 @@ pub(super) async fn build_structure_preview(
     let (tables, known_foreign_keys) = sorted_source_tables_with_foreign_keys(state, request).await;
 
     let mut sections: Vec<String> = Vec::new();
+    let mut operations = Vec::new();
+    let mut deferred_fk_operations = Vec::new();
     if let Some(create_schema_sql) = &create_schema_sql {
+        operations.push(TransferStructureOperation::schema(&request.target_schema));
         sections.push(format!(
             "-- Ensure the target schema exists\n{}",
             statement_block(std::slice::from_ref(create_schema_sql))
@@ -91,6 +104,11 @@ pub(super) async fn build_structure_preview(
         // A rebuild renames every preexisting target aside before the create pass runs, so
         // those tables are created fresh — the same reset the create pass performs.
         if preexisting && !request.drop_target_before_create {
+            operations.push(TransferStructureOperation::table(
+                TransferStructureOperationKind::SkipExistingTable,
+                table,
+                &target_table,
+            ));
             let note = format!(
                 "-- {table} -> {target_table}: the target table already exists, so this transfer plans no structure \
                  DDL for it"
@@ -110,6 +128,7 @@ pub(super) async fn build_structure_preview(
             request,
             table,
             &target_table,
+            preexisting && request.drop_target_before_create,
             source_db_type,
             target_db_type,
             source_pool_key,
@@ -120,6 +139,8 @@ pub(super) async fn build_structure_preview(
         )
         .await?;
         deferred_fk_alters.extend(planned.deferred_fk_alters);
+        operations.extend(planned.operations);
+        deferred_fk_operations.extend(planned.deferred_fk_operations);
 
         let section = format!("-- {} -> {}\n{}", table, target_table, statement_block(&planned.statements));
         planned_tables.push(TransferStructurePreviewTable {
@@ -132,6 +153,9 @@ pub(super) async fn build_structure_preview(
     }
 
     sections.extend(table_sections);
+    if pg_compat_transfer && !request.tables.is_empty() {
+        sections.push(POSTGRES_TABLE_DEPENDENCIES_NOTE.to_string());
+    }
     if !deferred_fk_alters.is_empty() {
         // MySQL-family targets defer foreign keys so creation order never has to satisfy
         // them; the create pass flushes these after every table exists.
@@ -140,14 +164,92 @@ pub(super) async fn build_structure_preview(
             statement_block(&deferred_fk_alters)
         ));
     }
+    operations.extend(deferred_fk_operations);
     sections.extend(unexpanded_schema_object_notes(source_db_type, target_db_type, request));
 
-    Ok(TransferStructurePreview { sql: sections.join("\n\n"), tables: planned_tables })
+    Ok(TransferStructurePreview { sql: sections.join("\n\n"), tables: planned_tables, operations })
 }
 
 struct PlannedTableStructure {
     statements: Vec<String>,
+    operations: Vec<TransferStructureOperation>,
     deferred_fk_alters: Vec<String>,
+    deferred_fk_operations: Vec<TransferStructureOperation>,
+}
+
+fn sequence_operation(
+    kind: TransferStructureOperationKind,
+    sequence: &PostgresOwnedSequence,
+    target_table: &str,
+) -> TransferStructureOperation {
+    TransferStructureOperation::object(kind, &sequence.name, &sequence.owner_table, target_table)
+}
+
+fn postgres_index_operations(
+    indexes: &[db::IndexInfo],
+    source_table: &str,
+    target_table: &str,
+) -> Vec<TransferStructureOperation> {
+    indexes
+        .iter()
+        .filter(|index| !index.is_primary && !index.name.trim().is_empty() && !index.columns.is_empty())
+        .map(|index| {
+            TransferStructureOperation::object(
+                TransferStructureOperationKind::CreateIndex,
+                &index.name,
+                source_table,
+                target_table,
+            )
+        })
+        .collect()
+}
+
+fn foreign_key_operations(names: &[String], source_table: &str, target_table: &str) -> Vec<TransferStructureOperation> {
+    names
+        .iter()
+        .map(|name| {
+            TransferStructureOperation::object(
+                TransferStructureOperationKind::AddForeignKey,
+                name,
+                source_table,
+                target_table,
+            )
+        })
+        .collect()
+}
+
+fn comment_operations(
+    columns: &[db::ColumnInfo],
+    source_table: &str,
+    target_table: &str,
+    target_db_type: &DatabaseType,
+    table_comment: Option<&str>,
+) -> Vec<TransferStructureOperation> {
+    let table_comments_supported = supports_comment_on_transfer_ddl(target_db_type);
+    let column_comments_supported = table_comments_supported || matches!(target_db_type, DatabaseType::ClickHouse);
+    let mut operations = Vec::new();
+
+    if table_comments_supported && table_comment.is_some_and(|comment| !comment.trim().is_empty()) {
+        operations.push(TransferStructureOperation::table(
+            TransferStructureOperationKind::AddComment,
+            source_table,
+            target_table,
+        ));
+    }
+    if column_comments_supported {
+        operations.extend(columns.iter().filter_map(|column| {
+            column.comment.as_deref().filter(|comment| !comment.trim().is_empty()).map(|_| {
+                TransferStructureOperation::object(
+                    TransferStructureOperationKind::AddComment,
+                    &column.name,
+                    source_table,
+                    target_table,
+                )
+            })
+        }));
+    }
+
+    operations
 }
 
 /// Render the statements the create pass runs for one table, in execution order.
@@ -157,6 +259,7 @@ async fn plan_table_structure(
     request: &TransferRequest,
     table: &str,
     target_table: &str,
+    rebuild_existing_target: bool,
     source_db_type: &DatabaseType,
     target_db_type: &DatabaseType,
     source_pool_key: &str,
@@ -205,26 +308,50 @@ async fn plan_table_structure(
         prepared.ddl
     };
 
-    let mut statements = owned_sequences.create_statements.clone();
+    let mut statements = Vec::new();
+    let mut operations = Vec::new();
+    for (sequence, statement) in owned_sequences.create_sequences.iter().zip(&owned_sequences.create_statements) {
+        statements.push(statement.clone());
+        operations.push(sequence_operation(TransferStructureOperationKind::CreateSequence, sequence, target_table));
+    }
+    let table_kind = if rebuild_existing_target {
+        TransferStructureOperationKind::RebuildTable
+    } else {
+        TransferStructureOperationKind::CreateTable
+    };
+    operations.push(TransferStructureOperation::table(table_kind, table, target_table));
+
     // Normalize the DDL exactly like the executor does before running it: the reused
     // PostgreSQL script spans several statements, has its inline foreign keys stripped, and
     // drops the post-table index/foreign-key statements that are re-applied from structured
     // metadata below. A statement the create pass filters out must never appear here.
     statements.extend(transfer_ddl_statements(&ddl, target_db_type));
-    statements.extend(generate_comment_ddl_with_column_quoting(
+
+    let comment_statements = generate_comment_ddl_with_column_quoting(
         &columns,
         target_table,
         &request.target_schema,
         target_db_type,
         table_comment.as_deref(),
         request.quote_target_column_names,
-    ));
+    );
+    operations.extend(comment_operations(&columns, table, target_table, target_db_type, table_comment.as_deref()));
+    statements.extend(comment_statements);
+
     for sequence in &owned_sequences.owned_sequences {
         statements.push(postgres_owned_sequence_bind_sql(request, sequence));
+        operations.push(sequence_operation(TransferStructureOperationKind::BindSequence, sequence, target_table));
     }
+
+    let mut deferred_fk_operations = Vec::new();
+    if supports_deferred_mysql_foreign_keys(target_db_type) {
+        deferred_fk_operations = foreign_key_operations(&prepared.deferred_fk_names, table, target_table);
+    }
+
     if pg_compat_transfer && preserves_target_table_name {
         // PostgreSQL-compatible targets restore indexes and foreign keys from structured
-        // source metadata once the table exists.
+        // source metadata once the table exists. The operation records use the same metadata
+        // consumed by the DDL generators; SQL is never parsed to infer them.
         let indexes = get_postgres_indexes_for_transfer(
             state,
             source_pool_key,
@@ -239,6 +366,8 @@ async fn plan_table_structure(
             &request.target_schema,
             index_if_not_exists,
         ));
+        operations.extend(postgres_index_operations(&indexes, table, target_table));
+
         let foreign_keys = get_postgres_foreign_keys_for_transfer(
             state,
             source_pool_key,
@@ -253,9 +382,19 @@ async fn plan_table_structure(
             &request.source_schema,
             &request.target_schema,
         ));
+        let foreign_key_names = group_foreign_keys_by_constraint_name(&foreign_keys)
+            .into_iter()
+            .map(|(name, _)| name.to_string())
+            .collect::<Vec<_>>();
+        operations.extend(foreign_key_operations(&foreign_key_names, table, target_table));
     }
 
-    Ok(PlannedTableStructure { statements, deferred_fk_alters: prepared.deferred_fk_alters })
+    Ok(PlannedTableStructure {
+        statements,
+        operations,
+        deferred_fk_alters: prepared.deferred_fk_alters,
+        deferred_fk_operations,
+    })
 }
 
 /// Read and de-duplicate the source columns the create pass uses, failing the same way the
@@ -366,13 +505,15 @@ fn unexpanded_schema_object_notes(
     target_db_type: &DatabaseType,
     request: &TransferRequest,
 ) -> Vec<String> {
-    if !should_transfer_schema_objects(source_db_type, target_db_type, &request.content, &request.objects) {
+    if !should_transfer_schema_objects(source_db_type, target_db_type, request) {
         return Vec::new();
     }
+    let selections = match request.object_selection_mode() {
+        TransferObjectSelectionMode::LegacyUnspecified => return vec![UNEXPANDED_OBJECTS_NOTE.to_string()],
+        TransferObjectSelectionMode::Explicit(selections) => selections,
+    };
     let mut notes = vec![UNEXPANDED_OBJECTS_NOTE.to_string()];
-    // An empty selection is the legacy PostgreSQL default (everything is transferred), so
-    // there is no concrete list to print — and the note above already says so.
-    for selection in &request.objects {
+    for selection in selections {
         if selection.object_type == TransferObjectKind::Table || selection.names.is_empty() {
             continue;
         }
@@ -407,6 +548,148 @@ fn statement_block(statements: &[String]) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn structured_ddl_metadata_produces_operation_dtos() {
+        let index = db::IndexInfo {
+            name: "idx_orders_created_at".into(),
+            columns: vec!["lower(\"email\")".into()],
+            is_unique: false,
+            is_primary: false,
+            filter: None,
+            index_type: Some("btree".into()),
+            included_columns: None,
+            comment: None,
+            key_is_expression: vec![true],
+            column_opclasses: vec![Some("text_pattern_ops".into())],
+            key_options: vec![1],
+            constraint_backed: false,
+        };
+        let index_sql = generate_postgres_index_ddl(std::slice::from_ref(&index), "orders", "public", true);
+        let index_operations = postgres_index_operations(std::slice::from_ref(&index), "orders", "orders");
+        assert_eq!(
+            index_sql,
+            vec![
+                "CREATE INDEX IF NOT EXISTS \"idx_orders_created_at\" ON \"public\".\"orders\" USING btree (lower(\"email\") text_pattern_ops DESC NULLS LAST)"
+            ]
+        );
+        assert_eq!(index_operations[0].kind, TransferStructureOperationKind::CreateIndex);
+        assert_eq!(index_operations[0].object_name.as_deref(), Some("idx_orders_created_at"));
+
+        let foreign_key = db::ForeignKeyInfo {
+            name: "fk_orders_user".into(),
+            column: "user_id".into(),
+            ref_schema: Some("public".into()),
+            ref_table: "users".into(),
+            ref_column: "id".into(),
+            on_update: None,
+            on_delete: None,
+        };
+        let foreign_key_sql =
+            generate_postgres_foreign_key_ddl(std::slice::from_ref(&foreign_key), "orders", "public", "reporting");
+        let foreign_key_names = group_foreign_keys_by_constraint_name(std::slice::from_ref(&foreign_key))
+            .into_iter()
+            .map(|(name, _)| name.to_string())
+            .collect::<Vec<_>>();
+        let pg_foreign_key_operations = foreign_key_operations(&foreign_key_names, "orders", "orders");
+        assert!(foreign_key_sql[0].contains("fk_orders_user"));
+        assert_eq!(pg_foreign_key_operations[0].kind, TransferStructureOperationKind::AddForeignKey);
+        assert_eq!(pg_foreign_key_operations[0].object_name.as_deref(), Some("fk_orders_user"));
+
+        let request = structure_request(json!({
+            "sourceDatabase": "app",
+            "sourceSchema": "public",
+            "targetDatabase": "warehouse",
+            "targetSchema": "reporting"
+        }));
+        let mysql_foreign_key_sql = generate_mysql_foreign_key_alter_statements(
+            std::slice::from_ref(&foreign_key),
+            &request,
+            "orders",
+            &DatabaseType::Mysql,
+        );
+        let mysql_foreign_key_operations = foreign_key_operations(&foreign_key_names, "orders", "orders");
+        assert!(mysql_foreign_key_sql[0].contains("ADD CONSTRAINT `fk_orders_user`"));
+        assert_eq!(mysql_foreign_key_operations[0].kind, TransferStructureOperationKind::AddForeignKey);
+
+        let sequence = PostgresOwnedSequence {
+            name: "orders_id_seq".into(),
+            owner_table: "orders".into(),
+            owner_column: "id".into(),
+        };
+        let sequence_definition = PostgresTransferSequence {
+            name: sequence.name.clone(),
+            data_type: "bigint".into(),
+            start_value: "1".into(),
+            min_value: "1".into(),
+            max_value: "9223372036854775807".into(),
+            increment: "1".into(),
+            cycle: false,
+            cache_value: "1".into(),
+            last_value: None,
+            is_called: None,
+        };
+        let create_sequence_sql =
+            generate_postgres_transfer_sequence_create_ddl(&sequence_definition, "reporting", false);
+        let bind_sequence_sql = postgres_owned_sequence_bind_sql(&request, &sequence);
+        let create_sequence_operation =
+            sequence_operation(TransferStructureOperationKind::CreateSequence, &sequence, "orders");
+        let bind_sequence_operation =
+            sequence_operation(TransferStructureOperationKind::BindSequence, &sequence, "orders");
+        assert!(create_sequence_sql.contains("CREATE SEQUENCE"));
+        assert_eq!(create_sequence_operation.kind, TransferStructureOperationKind::CreateSequence);
+        assert!(bind_sequence_sql.contains("OWNED BY"));
+        assert_eq!(bind_sequence_operation.kind, TransferStructureOperationKind::BindSequence);
+        assert_eq!(bind_sequence_operation.target_table.as_deref(), Some("orders"));
+
+        let columns = vec![db::ColumnInfo {
+            name: "id".into(),
+            comment: Some("primary identifier".into()),
+            ..Default::default()
+        }];
+        let comment_sql = generate_comment_ddl_with_column_quoting(
+            &columns,
+            "orders",
+            "reporting",
+            &DatabaseType::Postgres,
+            Some("order records"),
+            true,
+        );
+        let comment_operations =
+            comment_operations(&columns, "orders", "orders", &DatabaseType::Postgres, Some("order records"));
+        assert_eq!(comment_sql.len(), 2);
+        assert_eq!(comment_operations.len(), 2);
+        assert!(comment_operations
+            .iter()
+            .all(|operation| operation.kind == TransferStructureOperationKind::AddComment));
+        assert_eq!(comment_operations[0].object_name, None);
+        assert_eq!(comment_operations[1].object_name.as_deref(), Some("id"));
+
+        let schema = serde_json::to_value(TransferStructureOperation::schema("reporting")).unwrap();
+        assert_eq!(schema["kind"], "createSchema");
+        assert_eq!(schema["objectName"], "reporting");
+        assert!(schema.get("sourceTable").is_none());
+    }
+
+    #[test]
+    fn unexpanded_object_notes_distinguish_legacy_and_explicit_empty_selections() {
+        let legacy = structure_request(json!({}));
+        let explicit_empty = structure_request(json!({ "objects": [] }));
+        let explicit_view = structure_request(json!({
+            "objects": [{ "objectType": "VIEW", "names": ["v_orders"] }]
+        }));
+
+        assert_eq!(
+            unexpanded_schema_object_notes(&DatabaseType::Postgres, &DatabaseType::Postgres, &legacy),
+            vec![UNEXPANDED_OBJECTS_NOTE.to_string()],
+        );
+        assert!(unexpanded_schema_object_notes(&DatabaseType::Postgres, &DatabaseType::Postgres, &explicit_empty)
+            .is_empty());
+        assert_eq!(
+            unexpanded_schema_object_notes(&DatabaseType::Postgres, &DatabaseType::Postgres, &explicit_view),
+            vec![UNEXPANDED_OBJECTS_NOTE.to_string(), "-- Views: v_orders".to_string()],
+        );
+    }
 
     async fn sqlite_fixture() -> (tempfile::TempDir, Arc<AppState>, String, String) {
         let directory = tempfile::tempdir().unwrap();
@@ -485,6 +768,16 @@ mod tests {
         let structure = preview.structure.expect("structure-only must expose its structure SQL plan");
 
         assert_eq!(structure.tables.len(), 2, "every selected table must be planned: {:?}", structure.tables);
+        assert_eq!(
+            structure
+                .operations
+                .iter()
+                .filter(|operation| operation.kind == TransferStructureOperationKind::CreateTable)
+                .count(),
+            2,
+            "new targets must have one logical create operation each: {:?}",
+            structure.operations
+        );
         for table in &structure.tables {
             assert!(!table.preexisting, "a fresh target has no preexisting tables: {table:?}");
             assert!(table.sql.contains("CREATE TABLE"), "{}", table.sql);
@@ -516,6 +809,9 @@ mod tests {
             structure.sql
         );
         assert!(structure.sql.contains("already exists"), "{}", structure.sql);
+        assert_eq!(structure.operations.len(), 1);
+        assert_eq!(structure.operations[0].kind, TransferStructureOperationKind::SkipExistingTable);
+        assert_eq!(structure.operations[0].target_table.as_deref(), Some("orders"));
 
         // The preview must not have touched the preexisting table.
         let rows = execute_read_on_pool(&state, &target_pool, "SELECT legacy FROM orders WHERE id = 7").await.unwrap();
@@ -591,6 +887,21 @@ mod tests {
         // The structure plan is rendered without repeating the rename/cleanup operations.
         let structure = preview.structure.expect("structure-only must expose its structure SQL plan");
         assert!(structure.sql.contains("CREATE TABLE"), "{}", structure.sql);
+        assert_eq!(
+            structure
+                .operations
+                .iter()
+                .filter(|operation| operation.kind == TransferStructureOperationKind::RebuildTable)
+                .count(),
+            2,
+            "each rebuilt target is represented once: {:?}",
+            structure.operations
+        );
+        assert!(
+            structure.operations.iter().all(|operation| operation.kind != TransferStructureOperationKind::CreateTable),
+            "a rebuild must not also be listed as a normal create: {:?}",
+            structure.operations
+        );
         assert!(!structure.sql.contains("RENAME"), "{}", structure.sql);
         assert!(!structure.sql.contains("DROP TABLE"), "{}", structure.sql);
         for table in &structure.tables {

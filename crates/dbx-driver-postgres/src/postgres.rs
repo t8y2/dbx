@@ -90,6 +90,12 @@ pub struct PostgresTableAccessInfo {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PostgresInheritsParent {
+    pub schema: String,
+    pub table: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PostgresTablePartitionInfo {
     pub is_partition: bool,
     pub parent_schema: Option<String>,
@@ -103,6 +109,14 @@ pub struct PostgresTablePartitionInfo {
     pub is_foreign: bool,
     pub foreign_server: Option<String>,
     pub foreign_options: Vec<(String, String)>,
+    /// Traditional `INHERITS` parent tables (relkind ≠ 'p'), in
+    /// `inhseqno` order. A relation is either a declarative partition
+    /// (`is_partition = true`, single parent of relkind 'p') or a
+    /// traditional-inheritance child (one or more `INHERITS` parents of
+    /// relkind 'r'), never both. Empty for plain tables and declarative
+    /// partitions. Used by table sync to emit `CREATE TABLE ... INHERITS
+    /// (parent...)` so the dependency survives a structure transfer.
+    pub inherits_parents: Vec<PostgresInheritsParent>,
 }
 
 /// The state of a partition-local column DEFAULT relative to the parent's
@@ -4065,8 +4079,9 @@ pub async fn get_table_partition_info(
     };
     let relkind = relation.try_get::<_, String>(0).unwrap_or_default();
     let is_partition = relation.try_get::<_, bool>(1).unwrap_or(false);
+    let has_inherits_parent = relation.try_get::<_, bool>(2).unwrap_or(false);
     let is_foreign = relkind == "f";
-    if relkind != "p" && !is_foreign && !is_partition {
+    if relkind != "p" && !is_foreign && !is_partition && !has_inherits_parent {
         return Ok(PostgresTablePartitionInfo::default());
     }
 
@@ -4078,7 +4093,12 @@ pub async fn get_table_partition_info(
     )
     .await?;
     let Some(row) = rows.first() else {
-        return Ok(PostgresTablePartitionInfo { is_partition, is_foreign, ..Default::default() });
+        let inherits_parents = if has_inherits_parent {
+            get_table_inherits_parents_inner(&client, schema, table).await?
+        } else {
+            Vec::new()
+        };
+        return Ok(PostgresTablePartitionInfo { is_partition, is_foreign, inherits_parents, ..Default::default() });
     };
     let foreign_options = row
         .try_get::<_, Option<Vec<String>>>(5)
@@ -4088,6 +4108,12 @@ pub async fn get_table_partition_info(
         .into_iter()
         .filter_map(|option| option.split_once('=').map(|(key, value)| (key.to_string(), value.to_string())))
         .collect();
+    // `postgres_table_partition_info_sql` only carries the single declarative
+    // partition parent (a partition has exactly one). A traditional-inheritance
+    // child can have several `INHERITS` parents, fetched separately so the
+    // declarative-partition path stays untouched.
+    let inherits_parents =
+        if has_inherits_parent { get_table_inherits_parents_inner(&client, schema, table).await? } else { Vec::new() };
     Ok(PostgresTablePartitionInfo {
         is_partition,
         parent_schema: row.try_get::<_, Option<String>>(0).ok().flatten().filter(|value| !value.is_empty()),
@@ -4097,11 +4123,47 @@ pub async fn get_table_partition_info(
         is_foreign,
         foreign_server: row.try_get::<_, Option<String>>(4).ok().flatten().filter(|value| !value.is_empty()),
         foreign_options,
+        inherits_parents,
     })
 }
 
 pub async fn get_table_partition_key(pool: &Pool, schema: &str, table: &str) -> Result<Option<String>, String> {
     Ok(get_table_partition_info(pool, schema, table).await?.key)
+}
+
+/// The traditional `INHERITS` parents of a relation (relkind ≠ 'p'), in
+/// `inhseqno` order. Used by table sync to emit
+/// `CREATE TABLE ... INHERITS (parent...)`. Returns an empty vector for
+/// plain tables and declarative partitions. Unlike
+/// `get_table_partition_info` this never hits the declarative-partition
+/// catalog (`relispartition` / `pg_partitioned_table`), so it runs on
+/// 9.x servers where `INHERITS` is the only inheritance form.
+pub async fn get_table_inherits_parents(
+    pool: &Pool,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<PostgresInheritsParent>, String> {
+    let schema = if schema.is_empty() { "public" } else { schema };
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    get_table_inherits_parents_inner(&client, schema, table).await
+}
+
+async fn get_table_inherits_parents_inner(
+    client: &deadpool_postgres::Client,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<PostgresInheritsParent>, String> {
+    let rows = postgres_query_cached(client, postgres_table_inherits_parents_sql(), &[&schema, &table])
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(rows
+        .iter()
+        .map(|row| PostgresInheritsParent {
+            schema: row.try_get::<_, String>(0).unwrap_or_default(),
+            table: row.try_get::<_, String>(1).unwrap_or_default(),
+        })
+        .filter(|parent| !parent.schema.is_empty() && !parent.table.is_empty())
+        .collect())
 }
 
 /// The partitioning strategy of a single PostgreSQL partitioned parent, read
@@ -4659,6 +4721,10 @@ pub async fn fetch_postgres_partition_tree(
                 is_foreign,
                 foreign_server: row.try_get::<_, Option<String>>(9).ok().flatten().filter(|value| !value.is_empty()),
                 foreign_options,
+                // This tree only walks declarative partitions (the query
+                // filters `c.relispartition`); traditional-inheritance
+                // children are not tree nodes, so they carry no parents here.
+                inherits_parents: Vec::new(),
             };
             Some(PostgresPartitionTreeNode {
                 oid,
@@ -5721,7 +5787,12 @@ fn postgres_table_partition_relation_sql() -> &'static str {
               SELECT 1 FROM pg_catalog.pg_inherits i \
               WHERE i.inhrelid = c.oid \
                 AND (SELECT parent.relkind FROM pg_catalog.pg_class parent WHERE parent.oid = i.inhparent) = 'p' \
-            ) AS is_partition \
+            ) AS is_partition, \
+            EXISTS ( \
+              SELECT 1 FROM pg_catalog.pg_inherits i \
+              WHERE i.inhrelid = c.oid \
+                AND COALESCE((SELECT parent.relkind FROM pg_catalog.pg_class parent WHERE parent.oid = i.inhparent), 'r') <> 'p' \
+            ) AS has_inherits_parent \
      FROM pg_catalog.pg_class c \
      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
      WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r','p','f') \
@@ -5763,6 +5834,23 @@ fn postgres_table_partition_info_compat_sql() -> &'static str {
      LEFT JOIN pg_catalog.pg_foreign_server fs ON fs.oid = ft.ftserver \
      WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r','p','f') \
      LIMIT 1"
+}
+
+fn postgres_table_inherits_parents_sql() -> &'static str {
+    // Traditional-inheritance parents only: a declarative partition child
+    // is also a `pg_inherits` row, but its parent has relkind 'p', which we
+    // exclude here so partitions stay owned by `get_table_partition_info`.
+    // Uses no 10+ catalog columns (`relispartition`/`pg_partitioned_table`),
+    // so it runs unchanged on 9.x where `INHERITS` is the only form.
+    "SELECT pn.nspname AS parent_schema, pc.relname AS parent_table \
+     FROM pg_catalog.pg_inherits i \
+     JOIN pg_catalog.pg_class pc ON pc.oid = i.inhparent \
+     JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace \
+     JOIN pg_catalog.pg_class c ON c.oid = i.inhrelid \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     WHERE n.nspname = $1 AND c.relname = $2 \
+       AND COALESCE(pc.relkind, 'r') <> 'p' \
+     ORDER BY i.inhseqno"
 }
 
 fn postgres_table_partition_local_objects_sql() -> &'static str {
@@ -9527,9 +9615,12 @@ fn opengauss_foreign_keys_sql() -> &'static str {
 }
 
 fn postgres_table_dependencies_sql() -> &'static str {
-    // Foreign keys aren't the only ordering constraint on export/replay: a
-    // partition must be created after its parent table exists too, so union
-    // in `pg_inherits` partition-of edges alongside the FK edges.
+    // Foreign keys aren't the only ordering constraint on export/replay:
+    // a child relation must be created after its parent exists too. The
+    // `pg_inherits` union covers both declarative partitions (parent
+    // relkind 'p') and traditional `INHERITS` children (parent relkind
+    // 'r'); both need the parent first, so no `relispartition` filter is
+    // applied here (matching the 9.x compat path).
     "SELECT child.relname AS table_name, parent.relname AS ref_table \
      FROM pg_catalog.pg_constraint con \
      JOIN pg_catalog.pg_class child ON child.oid = con.conrelid \
@@ -9542,7 +9633,7 @@ fn postgres_table_dependencies_sql() -> &'static str {
      UNION \
      SELECT child.relname AS table_name, parent.relname AS ref_table \
      FROM pg_catalog.pg_inherits i \
-     JOIN pg_catalog.pg_class child ON child.oid = i.inhrelid AND child.relispartition \
+     JOIN pg_catalog.pg_class child ON child.oid = i.inhrelid \
      JOIN pg_catalog.pg_namespace child_schema ON child_schema.oid = child.relnamespace \
      JOIN pg_catalog.pg_class parent ON parent.oid = i.inhparent \
      JOIN pg_catalog.pg_namespace parent_schema ON parent_schema.oid = parent.relnamespace \
@@ -12610,13 +12701,42 @@ mod tests {
         assert!(sql.contains("parent_schema.nspname = $1"));
         assert!(!sql.contains("information_schema"));
         assert!(sql.contains("pg_catalog.pg_inherits"));
-        assert!(sql.contains("child.relispartition"));
+        // Both declarative partitions and traditional `INHERITS` children need
+        // their parent created first, so the dependency edge covers every
+        // `pg_inherits` row (no `relispartition` filter) — matching the 9.x
+        // compat path which never had the column to filter on.
+        assert!(!sql.contains("relispartition"));
         // 兼容版面向 9.x：不能引用 relispartition，但 INHERITS 边要保留
         // （旧式子表同样要先建父表）。
         assert!(!compat_sql.contains("relispartition"));
         assert!(compat_sql.contains("pg_catalog.pg_inherits"));
         assert!(compat_sql.contains("con.contype = 'f'"));
         assert!(compat_sql.contains("ORDER BY table_name, ref_table"));
+    }
+
+    #[test]
+    fn postgres_table_inherits_parents_sql_targets_traditional_parents() {
+        let sql = postgres_table_inherits_parents_sql();
+        // Resolves parents via pg_inherits, excludes the declarative-partition
+        // 'p' relkind so partition parents stay owned by partition_info.
+        assert!(sql.contains("pg_catalog.pg_inherits"));
+        assert!(sql.contains("i.inhrelid"));
+        assert!(sql.contains("COALESCE(pc.relkind, 'r') <> 'p'"));
+        // Order is stable across DB restarts.
+        assert!(sql.contains("ORDER BY i.inhseqno"));
+        // No 10+-only columns, so it runs unchanged on 9.x.
+        assert!(!sql.contains("relispartition"));
+        assert!(!sql.contains("pg_partitioned_table"));
+    }
+
+    #[test]
+    fn postgres_table_partition_relation_sql_flags_inherits_parent() {
+        let sql = postgres_table_partition_relation_sql();
+        assert!(sql.contains("AS is_partition"));
+        assert!(sql.contains("AS has_inherits_parent"));
+        // The INHERITS flag selects parents whose relkind is not 'p'
+        // (declarative partitions are excluded so they stay is_partition).
+        assert!(sql.contains("<> 'p'"));
     }
 
     #[test]

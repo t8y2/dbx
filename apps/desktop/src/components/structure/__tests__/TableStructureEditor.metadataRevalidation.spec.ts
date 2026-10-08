@@ -323,7 +323,7 @@ beforeEach(() => {
   mocks.executeQuery.mockResolvedValue({ columns: [], rows: [] });
   mocks.executeBatch.mockResolvedValue({ rowsAffected: 0 });
   mocks.listDataTypes.mockResolvedValue([]);
-  mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: false, isPartition: false });
+  mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: false, isPartition: false, isForeign: false });
   mocks.getTableOwner.mockResolvedValue("");
   mocks.buildTableOwnerChangeSql.mockResolvedValue({ statements: [], warnings: [] });
   mocks.buildTableStructureChangeSql.mockResolvedValue({ statements: [], warnings: [] });
@@ -744,6 +744,32 @@ describe("TableStructureEditor column index actions", () => {
     nullable.dispatchEvent(new Event("change"));
     await vi.waitFor(() => expect(root.textContent).toContain("structureEditor.spatialIndexNullable"));
     expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+
+  it("renders checkboxes without dynamic yes/no toggle text (#8148)", async () => {
+    loadMetadata();
+    const root = await mountStructureEditor();
+    await openSubmenu(fieldRow(root, "email"), "structureEditor.createColumnIndex");
+    menuButton("structureEditor.createNormalIndex").click();
+    await expectIndexName(root, "idx_email");
+
+    const unique = indexRow(root).querySelector<HTMLInputElement>("[data-index-unique]")!;
+    const uniqueCell = unique.closest("td")!;
+    expect(uniqueCell.textContent?.trim()).toBe("");
+
+    unique.checked = true;
+    unique.dispatchEvent(new Event("change"));
+    await settle();
+    expect(uniqueCell.textContent?.trim()).toBe("");
+
+    const nullable = fieldRow(root, "location").querySelector<HTMLInputElement>('input[aria-label="structureEditor.nullable"]')!;
+    const nullableCell = nullable.closest("td")!;
+    expect(nullableCell.textContent?.trim()).toBe("");
+
+    nullable.checked = true;
+    nullable.dispatchEvent(new Event("change"));
+    await settle();
+    expect(nullableCell.textContent?.trim()).toBe("");
   });
 });
 

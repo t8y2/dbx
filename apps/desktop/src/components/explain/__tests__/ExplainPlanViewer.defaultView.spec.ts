@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApp, h, nextTick, ref, type App } from "vue";
 import { createI18n } from "vue-i18n";
 import en from "@/i18n/locales/en";
@@ -8,6 +8,9 @@ import zhCN from "@/i18n/locales/zh-CN";
 import { parseExplainResult } from "@/lib/diagram/explainPlan";
 import ExplainPlanViewer from "@/components/explain/ExplainPlanViewer.vue";
 import type { QueryResult } from "@/types/database";
+
+// The real CodeMirror-backed editor needs Pinia settings; only the view switch is under test here.
+vi.mock("@/components/redis/RedisJsonEditor.vue", () => ({ default: { render: () => h("div", { "data-testid": "json-editor" }) } }));
 
 let app: App | undefined;
 
@@ -153,7 +156,7 @@ describe("ExplainPlanViewer defaultView prop", () => {
     app.mount(container);
     await nextTick();
 
-    const rawBtn = [...container.querySelectorAll("button")].find((btn) => btn.textContent?.includes("JSON"));
+    const rawBtn = [...container.querySelectorAll("button")].find((btn) => btn.textContent?.trim() === "JSON");
     expect(rawBtn?.className).toContain("bg-secondary");
   });
 

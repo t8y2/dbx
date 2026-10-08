@@ -572,6 +572,10 @@ async fn remove_connection_respects_global_connection_scope() {
 
 #[tokio::test]
 async fn enforces_global_connection_scope_and_read_only_policy() {
+    let mut allowed = test_connection("allowed", "shared-db");
+    allowed.note = "Allowed connection note".to_string();
+    let mut blocked_connection = test_connection("blocked", "blocked-db");
+    blocked_connection.note = "Hidden connection note".to_string();
     let backend = PolicyBackend {
         policy: McpGlobalPolicy {
             read_only: true,
@@ -579,11 +583,7 @@ async fn enforces_global_connection_scope_and_read_only_policy() {
             allowed_connection_ids: Some(vec!["allowed".to_string(), "allowed-staging".to_string()]),
             ..Default::default()
         },
-        connections: vec![
-            test_connection("allowed", "shared-db"),
-            test_connection("allowed-staging", "shared-db"),
-            test_connection("blocked", "blocked-db"),
-        ],
+        connections: vec![allowed, test_connection("allowed-staging", "shared-db"), blocked_connection],
         group_paths: Ok(HashMap::from([
             ("allowed".to_string(), vec!["Project".to_string(), "Production".to_string()]),
             ("allowed-staging".to_string(), vec!["Project".to_string(), "Staging".to_string()]),
@@ -603,6 +603,18 @@ async fn enforces_global_connection_scope_and_read_only_policy() {
     assert!(listed_text.contains("Project / Production"));
     assert!(listed_text.contains("Project / Staging"));
     assert!(!listed_text.contains("Secret"));
+    assert!(listed_text.contains("Allowed connection note"));
+    assert!(!listed_text.contains("Hidden connection note"));
+
+    let resource = client
+        .peer()
+        .read_resource(ReadResourceRequestParams::new("dbx://connections"))
+        .await
+        .expect("read scoped connections resource");
+    let ResourceContents::TextResourceContents { text, .. } = &resource.contents[0] else {
+        panic!("connections resource should be text");
+    };
+    assert_eq!(text, &listed_text);
 
     let blocked = client
         .peer()
@@ -763,6 +775,8 @@ async fn connection_group_path_failure_preserves_connection_listing() {
     assert_ne!(listed.is_error, Some(true));
     assert!(listed_text.contains("| ID | Name | Group Path |"));
     assert!(listed_text.contains("local-db"));
+    assert!(listed_text.contains("| Database | Note |"));
+    assert!(listed_text.contains("| :memory: |  |"));
 
     client.cancel().await.expect("close MCP client");
     server_task.abort();
@@ -770,9 +784,13 @@ async fn connection_group_path_failure_preserves_connection_listing() {
 
 #[tokio::test]
 async fn runtime_connection_scope_preserves_group_paths() {
+    let mut scoped = test_connection("scoped", "shared-db");
+    scoped.note = "业务库 | TEST\n只读查询".to_string();
+    let mut outside = test_connection("outside", "shared-db");
+    outside.note = "Out-of-scope connection note".to_string();
     let backend = PolicyBackend {
         policy: McpGlobalPolicy::default(),
-        connections: vec![test_connection("scoped", "shared-db"), test_connection("outside", "shared-db")],
+        connections: vec![scoped, outside],
         group_paths: Ok(HashMap::from([
             ("scoped".to_string(), vec!["Project".to_string(), "Production".to_string()]),
             ("outside".to_string(), vec!["Project".to_string(), "Staging".to_string()]),
@@ -793,6 +811,19 @@ async fn runtime_connection_scope_preserves_group_paths() {
     assert!(listed_text.contains("| scoped | shared-db | Project / Production |"));
     assert!(!listed_text.contains("outside"));
     assert!(!listed_text.contains("Project / Staging"));
+    assert!(listed_text.contains("业务库 \\| TEST 只读查询"));
+    assert!(!listed_text.contains("Out-of-scope connection note"));
+    assert_eq!(listed_text.lines().count(), 3);
+
+    let resource = client
+        .peer()
+        .read_resource(ReadResourceRequestParams::new("dbx://connections"))
+        .await
+        .expect("read scoped connections resource");
+    let ResourceContents::TextResourceContents { text, .. } = &resource.contents[0] else {
+        panic!("connections resource should be text");
+    };
+    assert_eq!(text, &listed_text);
 
     client.cancel().await.expect("close MCP client");
     server_task.abort();

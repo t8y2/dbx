@@ -33,8 +33,25 @@ const aiAssistantMountApi = vi.hoisted(() => ({
   runAgentStreamInputs: [] as unknown[],
   // Second argument: the model-facing history the panel built for that request.
   runAgentStreamHistories: [] as unknown[],
+  // Fifth argument: the custom prompt context (globals, templates, skill listing).
+  runAgentStreamCustoms: [] as unknown[],
   savedConversations: [] as Array<Record<string, unknown>>,
   codeHighlighterDelayMs: 0,
+  // Skill catalog + body a test wants the backend to answer with.
+  skillCatalog: {
+    defaultRoot: { status: "ok", skills: [] as Array<{ id: string; name: string; description: string }> },
+    customRoot: null as { status: string; skills: Array<{ id: string; name: string; description: string }> } | null,
+  },
+  skillReadResult: undefined as undefined | { skills: Array<{ id: string; name: string; description: string; content: string }>; failures: Array<{ id: string; reason: string }> },
+  skillReadCalls: [] as string[][],
+  // How many times the panel asked for the catalog. The banner's Refresh and a
+  // retried send both re-read it, so a count is what tells the two apart.
+  skillListCalls: 0,
+  // `supportsCliProviders` is a runtime capability, so a CLI model config is only a
+  // valid active config under Tauri. The panel mounts on the web/http lane here
+  // (false), where a CLI config is ineligible and its disabled selector never
+  // renders — the skill-capability test flips this for its own duration.
+  tauriRuntime: false,
 }));
 
 // `onMounted` imports the syntax highlighter lazily; this module-level delay stands in for the
@@ -58,10 +75,82 @@ vi.mock("@/lib/ai/ai", async (importOriginal) => {
     runAgentStream: async (...args: unknown[]) => {
       aiAssistantMountApi.runAgentStreamInputs.push(args[0]);
       aiAssistantMountApi.runAgentStreamHistories.push(args[1]);
+      aiAssistantMountApi.runAgentStreamCustoms.push(args[4]);
       const onEvent = args[2] as (event: { type: string; delta?: string }) => void;
       return aiAssistantMountApi.runAgentStream?.(onEvent) ?? "";
     },
   };
+});
+
+vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => aiAssistantMountApi.tauriRuntime }));
+
+// Reka's popover does not survive this harness: once a `PopoverContent` sibling
+// exists, the trigger's merged click handler is dropped on its re-render, so a
+// click can never open one (verified against a bare reka root in isolation).
+// The panel's own logic is what these tests are about — the skill selector's open
+// state, the listed rows, the chips — so the popover is stubbed to the same
+// observable contract: trigger toggles, content renders only while open, and the
+// closed state still emits no `[data-slot="popover-content"]`.
+vi.mock("@/components/ui/popover", async () => {
+  const { cloneVNode, defineComponent, h, inject, provide, ref, watch } = await import("vue");
+  const contextKey = Symbol("popover-stub");
+  const passthrough = (name: string) =>
+    defineComponent({
+      name,
+      setup(_, { slots }) {
+        return () => h("div", slots.default?.());
+      },
+    });
+  const Popover = defineComponent({
+    name: "PopoverStub",
+    props: { open: { type: Boolean, default: false } },
+    emits: ["update:open"],
+    setup(props, { emit, slots }) {
+      const open = ref(props.open);
+      watch(
+        () => props.open,
+        (value) => {
+          open.value = value;
+        },
+      );
+      provide(contextKey, {
+        open,
+        toggle: () => {
+          open.value = !open.value;
+          emit("update:open", open.value);
+        },
+      });
+      return () => h("div", { "data-slot": "popover" }, slots.default?.());
+    },
+  });
+  const PopoverTrigger = defineComponent({
+    name: "PopoverTriggerStub",
+    setup(_, { slots }) {
+      const context = inject<{ open: { value: boolean }; toggle: () => void } | undefined>(contextKey);
+      // `as-child` semantics for a plain element trigger (the attributes land on
+      // the caller's own button, which is what the panel's tests read); a trigger
+      // built from a component keeps its own element and gets a wrapper instead.
+      return () => {
+        const attributes = {
+          "data-slot": "popover-trigger",
+          "aria-expanded": String(context?.open.value ?? false),
+          onClick: () => context?.toggle(),
+        };
+        const children = slots.default?.() ?? [];
+        const child = Array.isArray(children) ? children[0] : children;
+        return child && typeof child.type === "string" ? cloneVNode(child, attributes) : h("span", attributes, children);
+      };
+    },
+  });
+  const PopoverContent = defineComponent({
+    name: "PopoverContentStub",
+    setup(_, { slots }) {
+      const context = inject<{ open: { value: boolean } } | undefined>(contextKey);
+      // `role="dialog"` mirrors reka's own content role, which the panel's tests read.
+      return () => (context?.open.value ? h("div", { "data-slot": "popover-content", role: "dialog" }, slots.default?.()) : null);
+    },
+  });
+  return { Popover, PopoverTrigger, PopoverContent, PopoverAnchor: passthrough("PopoverAnchorStub") };
 });
 
 vi.mock("@/lib/backend/api", async (importOriginal) => {
@@ -75,8 +164,23 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
       aiAssistantMountApi.savedConversations.push(conversation);
       return Promise.resolve();
     },
-    readUserSkills: empty,
-    listUserSkills: aiAssistantMountApi.listUserSkills,
+    // The send path consults the skill catalog (metadata only — bodies are read
+    // on demand by the use_skill tool); an empty catalog keeps sends skill-free.
+    //
+    // One catalog mock serves both callers. It counts (the send path and a
+    // refreshed selector both read the catalog, so a count tells them apart),
+    // then delegates to the shared mock that afterEach re-arms. A test supplies a
+    // catalog either by writing `skillCatalog` — the installed default
+    // implementation reads it back — or by driving that mock directly.
+    listUserSkills: () => {
+      aiAssistantMountApi.skillListCalls += 1;
+      return aiAssistantMountApi.listUserSkills();
+    },
+    readUserSkills: (ids: string[]) => {
+      aiAssistantMountApi.skillReadCalls.push(ids);
+      const result = aiAssistantMountApi.skillReadResult;
+      return result ? Promise.resolve(result) : Promise.reject(new Error("readUserSkills not configured"));
+    },
     loadAiConfigs: empty,
     listPlugins: empty,
     loadPromptTemplates: empty,
@@ -103,9 +207,19 @@ afterEach(() => {
   aiAssistantMountApi.runAgentStream = undefined;
   aiAssistantMountApi.runAgentStreamInputs = [];
   aiAssistantMountApi.runAgentStreamHistories = [];
+  aiAssistantMountApi.runAgentStreamCustoms = [];
   aiAssistantMountApi.savedConversations = [];
   aiAssistantMountApi.codeHighlighterDelayMs = 0;
+  aiAssistantMountApi.skillCatalog = { defaultRoot: { status: "ok", skills: [] }, customRoot: null };
+  aiAssistantMountApi.skillReadResult = undefined;
+  aiAssistantMountApi.skillReadCalls = [];
+  aiAssistantMountApi.skillListCalls = 0;
+  aiAssistantMountApi.tauriRuntime = false;
+  // Reset the shared catalog mock, then re-arm the default implementation that
+  // reads `skillCatalog`: `mockReset()` alone leaves it returning undefined, so
+  // every test would start from a broken catalog.
   aiAssistantMountApi.listUserSkills.mockReset();
+  aiAssistantMountApi.listUserSkills.mockImplementation(() => Promise.resolve(aiAssistantMountApi.skillCatalog));
   while (cleanups.length) cleanups.pop()?.();
 });
 
@@ -438,6 +552,70 @@ describe("AiAssistant mount", () => {
     const modelTrigger = container.querySelector<HTMLButtonElement>(".ai-model-selector-trigger");
     expect(modelTrigger?.getAttribute("aria-label")).toBe("deepseek-chat");
     expect(modelTrigger?.getAttribute("title")).toBe("deepseek-chat");
+  });
+
+  // Skill capability belongs to DBX's built-in AI only (prd 09-30 Req 15a). A CLI
+  // user can still hold a selection, so the narrowed capability has to be stated:
+  // a disabled control with no reason would read as a bug rather than a boundary.
+  it("disables the skill selector with a reason under a CLI provider", async () => {
+    const { errors, container } = await mountPanel(true, undefined, (settings) => {
+      // A CLI config is only an eligible model when the runtime supports CLI
+      // providers, so this test runs the panel on the Tauri lane.
+      aiAssistantMountApi.tauriRuntime = true;
+      settings.aiConfigs = [
+        {
+          id: "cli-default",
+          name: "Claude Code",
+          provider: "claude-code-cli",
+          apiKey: "",
+          authMethod: "api-key",
+          endpoint: "",
+          model: "",
+          apiStyle: "completions",
+          isDefault: true,
+        },
+      ];
+      settings.activeModel = { configId: "cli-default", modelId: "" };
+    });
+
+    const trigger = container.querySelector<HTMLButtonElement>(".ai-skills-selector-trigger");
+    expect(trigger).not.toBeNull();
+    expect(trigger!.disabled).toBe(true);
+    expect(trigger!.getAttribute("aria-label")).toBe(i18n.global.t("ai.skillsUnsupportedForCliProvider"));
+    expect(trigger!.getAttribute("title")).toBe(i18n.global.t("ai.skillsUnsupportedForCliProvider"));
+    // A disabled button is not what keeps the popover shut — clicking must not open
+    // it either, or the user reaches the silent selection state this replaces.
+    trigger!.click();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(container.querySelector('[data-slot="popover-content"]')).toBeNull();
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("keeps the skill selector enabled and labelled for a built-in provider", async () => {
+    const { errors, container } = await mountPanel(true, undefined, (settings) => {
+      aiAssistantMountApi.tauriRuntime = true;
+      settings.aiConfigs = [
+        {
+          id: "builtin-default",
+          name: "DeepSeek",
+          provider: "deepseek",
+          apiKey: "test-key",
+          authMethod: "api-key",
+          endpoint: "https://api.deepseek.com",
+          model: "deepseek-chat",
+          apiStyle: "completions",
+          isDefault: true,
+        },
+      ];
+      settings.activeModel = { configId: "builtin-default", modelId: "deepseek-chat" };
+    });
+
+    const trigger = container.querySelector<HTMLButtonElement>(".ai-skills-selector-trigger");
+    expect(trigger).not.toBeNull();
+    expect(trigger!.disabled).toBe(false);
+    expect(trigger!.getAttribute("aria-label")).toBe(i18n.global.t("ai.skillsEntry"));
+    expect(trigger!.getAttribute("title")).toBe(i18n.global.t("ai.skillsEntry"));
+    expect(errors.map(String)).toEqual([]);
   });
 
   // These states settle through requestAnimationFrame plus async measurement, and the component
@@ -963,5 +1141,601 @@ describe("AiAssistant mount", () => {
     const resaved = aiAssistantMountApi.savedConversations.at(-1) as { messages: Array<{ role: string; selectionsOmitted?: boolean }> };
     expect(resaved.messages.find((message) => message.role === "user")?.selectionsOmitted).toBe(true);
     expect(second.errors.map(String)).toEqual([]);
+  });
+
+  // --- Skills (prd 09-30): the listing gate, the two chip states, the forced load ---
+
+  const SKILL = { id: "d-review", name: "sql-review", description: "review rules" };
+  const SKILL_BODY = "---\nname: sql-review\ndescription: review rules\n---\n\nAlways check the WHERE clause.";
+
+  function configureSkillCatalog(skills: Array<{ id: string; name: string; description: string }> = [SKILL]): void {
+    aiAssistantMountApi.skillCatalog = { defaultRoot: { status: "ok", skills }, customRoot: null };
+  }
+
+  function configureSkillRead(failures: Array<{ id: string; reason: string }> = []): void {
+    aiAssistantMountApi.skillReadResult = failures.length ? { skills: [], failures } : { skills: [{ ...SKILL, content: SKILL_BODY }], failures: [] };
+  }
+
+  /**
+   * Opens the real selector popover and returns it. Selecting a row does not close
+   * it, so an already-open popover is reused.
+   */
+  async function openSkillSelector(container: HTMLElement): Promise<HTMLElement> {
+    const trigger = container.querySelector<HTMLElement>(".ai-skills-selector-trigger")!;
+    let popover = container.querySelector<HTMLElement>('[data-slot="popover-content"]');
+    if (!popover) {
+      trigger.click();
+      await settle();
+      popover = container.querySelector<HTMLElement>('[data-slot="popover-content"]');
+    }
+    expect(popover).not.toBeNull();
+    return popover!;
+  }
+
+  /** Drives the real selector: open the popover and tick the one listed skill. */
+  async function selectSkill(container: HTMLElement): Promise<void> {
+    const popover = await openSkillSelector(container);
+    const row = Array.from(popover.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes(SKILL.name));
+    expect(row).toBeTruthy();
+    row!.click();
+    await settle();
+  }
+
+  function skillChip(container: HTMLElement): HTMLButtonElement | null {
+    return container.querySelector<HTMLButtonElement>(".ai-skill-chip");
+  }
+
+  function skillHint(container: HTMLElement): HTMLButtonElement | null {
+    return container.querySelector<HTMLButtonElement>(".ai-skill-hint");
+  }
+
+  /** The send-blocked banner is the panel's only `role="alert"` region. */
+  function skillBanner(container: HTMLElement): HTMLElement | null {
+    return container.querySelector<HTMLElement>('[role="alert"]');
+  }
+
+  /** A recovery action inside that banner, addressed by its rendered label. */
+  function skillBannerButton(container: HTMLElement, label: string): HTMLButtonElement | undefined {
+    return Array.from(container.querySelectorAll<HTMLButtonElement>('[role="alert"] button')).find((button) => button.textContent?.trim() === label);
+  }
+
+  async function sendPrompt(container: HTMLElement, text: string): Promise<void> {
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea.ai-conversation-text")!;
+    textarea.value = text;
+    textarea.dispatchEvent(new Event("input"));
+    await settle();
+    sendControl(container).click();
+    await settle();
+  }
+
+  function lastHistory(): Array<{ role: string; content: string; toolCalls?: Array<{ id: string; name: string; arguments: Record<string, unknown> }>; toolCallId?: string }> {
+    return aiAssistantMountApi.runAgentStreamHistories.at(-1) as Array<{
+      role: string;
+      content: string;
+      toolCalls?: Array<{ id: string; name: string; arguments: Record<string, unknown> }>;
+      toolCallId?: string;
+    }>;
+  }
+
+  // `/skill` rides a second command source and must reach the same selector the
+  // context-row button opens, on a different trigger (the palette entry fires on
+  // `mousedown` so the textarea keeps focus).
+  //
+  // Scope note: this file stubs the popover, so it only proves the entry exists,
+  // consumes the typed command and drives the open state. The dismissal
+  // regression — the programmatic open was followed by a textarea focus, which
+  // reka read as focus-outside and closed the popover — is invisible behind that
+  // stub and is pinned by `AiAssistant.skillPaletteFocus.spec.ts`, which mounts
+  // the real popover. Keep both.
+  it("opens the skill selector from the /skill palette entry", async () => {
+    configureSkillCatalog();
+    // Self-sufficient catalog: under `-t` this test runs alone, so the file's
+    // afterEach re-arm of the default mock has not happened yet.
+    aiAssistantMountApi.listUserSkills.mockImplementation(() => Promise.resolve(aiAssistantMountApi.skillCatalog));
+    const { errors, container } = await mountPanel(true, POSTGRES, configureAiPanel);
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea.ai-conversation-text")!;
+    textarea.focus();
+    textarea.value = "/skill";
+    textarea.setSelectionRange(6, 6);
+    textarea.dispatchEvent(new Event("input"));
+    await settle();
+
+    const paletteEntry = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes("/skill"));
+    expect(paletteEntry, "/skill palette entry").toBeDefined();
+    paletteEntry!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    await settle();
+
+    // The typed command text is consumed either way.
+    expect(textarea.value).toBe("");
+    const popover = container.querySelector<HTMLElement>('[data-slot="popover-content"]');
+    expect(popover, "skill selector popover").not.toBeNull();
+    expect(popover!.textContent).toContain(i18n.global.t("ai.skillsGroupDefault"));
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // Req 5: the toggle alone opens the gate — no selection needed — and the tool
+  // flag follows the listing rather than being a second decision (ADR Decision 10).
+  it("injects the skill listing from the Settings toggle with nothing selected", async () => {
+    configureSkillCatalog();
+    const { errors, container } = await mountPanel(true, POSTGRES, (settings) => {
+      configureAiPanel(settings);
+      settings.desktopSettings = { ...settings.desktopSettings, custom_ai_skill_auto_enabled: true };
+    });
+    expect(skillChip(container)).toBeNull();
+
+    await sendPrompt(container, "which tables are stale?");
+
+    const custom = aiAssistantMountApi.runAgentStreamCustoms.at(-1) as { skillListing?: string[] } | undefined;
+    // The entry line is language-neutral, so the assertion does not depend on the
+    // active locale; the unselected entry carries no [user-selected] marker.
+    expect(custom?.skillListing?.join("\n")).toContain(`- ${SKILL.name} [default]: review rules`);
+    expect((aiAssistantMountApi.runAgentStreamInputs.at(-1) as { allowSkills?: boolean }).allowSkills).toBe(true);
+    // Assembled by the real prompt builder: the listing really reaches the
+    // system prompt, not just the request object.
+    const request = buildAgentRequest(aiAssistantMountApi.runAgentStreamInputs.at(-1) as AiRequestInput, [], custom);
+    expect(request.systemPrompt).toContain(`- ${SKILL.name} [default]: review rules`);
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("lights the chip from a completed use_skill call and keeps it after reopening the panel", async () => {
+    configureSkillCatalog();
+    aiAssistantMountApi.runAgentStream = async (onEvent) => {
+      // The id comes from the backend's own answer. Deriving it from the call
+      // arguments would light a chip even when the call loaded nothing.
+      onEvent({
+        type: "tool_call_end",
+        tool_call_id: "call-1",
+        tool_name: "use_skill",
+        result: { content: "skill body", explain_data: { skillId: SKILL.id } },
+        is_error: false,
+      });
+      return "reviewed";
+    };
+    const first = await mountPanel(true, POSTGRES, configureAiPanel);
+    await selectSkill(first.container);
+    expect(skillChip(first.container)!.textContent).not.toContain(i18n.global.t("ai.skillsLoadedState"));
+
+    await sendPrompt(first.container, "review this query");
+    expect(skillChip(first.container)!.textContent).toContain(i18n.global.t("ai.skillsLoadedState"));
+
+    // Panel closed and reopened over the same conversation. The selection itself
+    // is panel-session state, so the user re-picks the skill — and the loaded
+    // state must already be on the chip instead of resetting with the panel.
+    const stored = aiAssistantMountApi.savedConversations.at(-1)!;
+    cleanups.shift()?.();
+    aiAssistantMountApi.conversations = [stored];
+    aiAssistantMountApi.runAgentStreamInputs = [];
+    aiAssistantMountApi.runAgentStreamHistories = [];
+    aiAssistantMountApi.runAgentStreamCustoms = [];
+    const second = await mountPanel(true, POSTGRES, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = true;
+    });
+    expect(second.container.textContent).toContain("review this query");
+    await selectSkill(second.container);
+    expect(skillChip(second.container)!.textContent).toContain(i18n.global.t("ai.skillsLoadedState"));
+    expect(second.errors.map(String)).toEqual([]);
+  });
+
+  // A `use_skill` that ends in an error loaded nothing, so no chip may claim it
+  // did: a lit chip is a fact that later re-reads that skill's body into the
+  // prompt.
+  it("does not mark a skill loaded when the use_skill call ends in an error", async () => {
+    configureSkillCatalog();
+    aiAssistantMountApi.runAgentStream = async (onEvent) => {
+      onEvent({ type: "tool_call_start", tool_call_id: "call-1", tool_name: "use_skill", args: { skill: SKILL.name, source: "default" } });
+      // The ambiguity answer: two skills share the name, so nothing was loaded.
+      onEvent({
+        type: "tool_call_end",
+        tool_call_id: "call-1",
+        tool_name: "use_skill",
+        result: { content: "Several skills are named ..." },
+        is_error: true,
+      });
+      return "reviewed";
+    };
+    const { errors, container } = await mountPanel(true, POSTGRES, configureAiPanel);
+    await selectSkill(container);
+
+    await sendPrompt(container, "review this query");
+
+    expect(skillChip(container)).not.toBeNull();
+    expect(skillChip(container)!.textContent).not.toContain(i18n.global.t("ai.skillsLoadedState"));
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // Regression: the load used to be recorded on `tool_call_start`, before the
+  // tool had run, so an uncompleted call lit the chip.
+  it("does not mark a skill loaded from an in-flight tool_call_start", async () => {
+    configureSkillCatalog();
+    aiAssistantMountApi.runAgentStream = async (onEvent) => {
+      onEvent({ type: "tool_call_start", tool_call_id: "call-1", tool_name: "use_skill", args: { skill: SKILL.name, source: "default" } });
+      return "reviewed";
+    };
+    const { errors, container } = await mountPanel(true, POSTGRES, configureAiPanel);
+    await selectSkill(container);
+
+    await sendPrompt(container, "review this query");
+
+    expect(skillChip(container)).not.toBeNull();
+    expect(skillChip(container)!.textContent).not.toContain(i18n.global.t("ai.skillsLoadedState"));
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("shows the one-time hint until a selected skill is loaded, and clicking it loads", async () => {
+    configureSkillCatalog();
+    configureSkillRead();
+    const { errors, container } = await mountPanel(true, POSTGRES, configureAiPanel);
+
+    await selectSkill(container);
+    expect(skillHint(container)).not.toBeNull();
+    expect(skillHint(container)!.textContent?.trim()).toBe(i18n.global.t("ai.skillsPreloadHint", { name: SKILL.name }));
+
+    // A further turn does not spawn a second hint: it is latched, not per-turn.
+    await sendPrompt(container, "anything else");
+    expect(container.querySelectorAll(".ai-skill-hint").length).toBe(1);
+
+    // Clicking it is the same force-load as the chip, and loading is what makes
+    // it fall away.
+    skillHint(container)!.click();
+    await settle();
+    expect(skillHint(container)).toBeNull();
+    expect(skillChip(container)!.textContent).toContain(i18n.global.t("ai.skillsLoadedState"));
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("does not re-show the hint once it has been shown in this conversation", async () => {
+    configureSkillCatalog();
+    const { errors, container } = await mountPanel(true, POSTGRES, configureAiPanel);
+
+    await selectSkill(container);
+    expect(skillHint(container)).not.toBeNull();
+
+    container.querySelector<HTMLButtonElement>(".ai-skill-chip-remove")!.click();
+    await settle();
+    expect(skillHint(container)).toBeNull();
+
+    await selectSkill(container);
+    expect(skillChip(container)).not.toBeNull();
+    expect(skillHint(container)).toBeNull();
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // Req 13's core promise: the body reaches the model, and nothing but the fact
+  // reaches the record. A conversation record is the record a chat sync or backup
+  // would ship, so a body (up to 1 MiB per skill) must never be written into it —
+  // the same rule the #10058 selection footprint follows.
+  it("replays a forced skill load without writing its body into the record", async () => {
+    configureSkillCatalog();
+    configureSkillRead();
+    const { errors, container } = await mountPanel(true, POSTGRES, configureAiPanel);
+    await selectSkill(container);
+
+    skillChip(container)!.click();
+    await settle();
+    expect(aiAssistantMountApi.skillReadCalls.at(-1)).toEqual([SKILL.id]);
+    expect(skillChip(container)!.textContent).toContain(i18n.global.t("ai.skillsLoadedState"));
+
+    await sendPrompt(container, "review this query");
+
+    const history = lastHistory();
+    const call = history.find((message) => message.toolCalls?.length);
+    const result = history.find((message) => message.role === "tool");
+    expect(call?.toolCalls?.[0]).toMatchObject({ name: "use_skill", arguments: { skill: SKILL.name, source: "default" } });
+    // The pair is a real round: the result answers the call it was paired with.
+    expect(result?.toolCallId).toBe(call?.toolCalls?.[0].id);
+    expect(result?.content).toContain("Always check the WHERE clause.");
+    // The listing (and with it the tool table) is there for that request.
+    expect((aiAssistantMountApi.runAgentStreamInputs.at(-1) as { allowSkills?: boolean }).allowSkills).toBe(true);
+
+    const saved = aiAssistantMountApi.savedConversations.at(-1)! as unknown as {
+      messages: Array<{ role: string; content: string; loadedSkillIds?: string[] }>;
+    };
+    // The fact, on the newest assistant turn — and no body anywhere in the record.
+    expect(saved.messages.filter((message) => message.loadedSkillIds?.length).map((message) => message.loadedSkillIds)).toEqual([[SKILL.id]]);
+    expect(saved.messages.some((message) => message.role === "tool")).toBe(false);
+    expect(JSON.stringify(saved)).not.toContain("Always check the WHERE clause.");
+    expect(errors.map(String)).toEqual([]);
+
+    // Restart over that record: the body is gone from memory (a hand-built record
+    // stands in for one written by a previous app run, so this process never held
+    // the body), the chip is lit from the fact alone, and the body comes back from
+    // disk for the request that needs it.
+    cleanups.shift()?.();
+    aiAssistantMountApi.conversations = [
+      storedConversation({
+        id: "conv-skill-restored",
+        connectionId: "postgres",
+        database: "app",
+        connectionName: "PostgreSQL",
+        messages: [
+          { role: "user", content: "review this query" },
+          { role: "assistant", content: "reviewed", loadedSkillIds: [SKILL.id] },
+        ],
+      }),
+    ];
+    aiAssistantMountApi.runAgentStreamInputs = [];
+    aiAssistantMountApi.runAgentStreamHistories = [];
+    aiAssistantMountApi.runAgentStreamCustoms = [];
+    aiAssistantMountApi.skillReadCalls = [];
+    const second = await mountPanel(true, POSTGRES, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = true;
+    });
+    await selectSkill(second.container);
+    expect(skillChip(second.container)!.textContent).toContain(i18n.global.t("ai.skillsLoadedState"));
+    expect(aiAssistantMountApi.skillReadCalls).toEqual([]);
+
+    await sendPrompt(second.container, "and the indexes?");
+    expect(aiAssistantMountApi.skillReadCalls).toEqual([[SKILL.id]]);
+    const replayed = lastHistory().find((message) => message.role === "tool");
+    expect(replayed?.content).toContain("Always check the WHERE clause.");
+    expect(second.errors.map(String)).toEqual([]);
+  });
+
+  // The body is session-only, so a conversation can outlive it (the skill was
+  // deleted, or grew past the read limit). The fact must then stop claiming the
+  // skill is loaded instead of leaving a lit chip over a body nobody has.
+  it("clears the fact when a recorded skill can no longer be read", async () => {
+    configureSkillCatalog();
+    configureSkillRead([{ id: SKILL.id, reason: "oversized" }]);
+    useToast().dismissToast();
+    useToast().message.value = "";
+    aiAssistantMountApi.conversations = [
+      storedConversation({
+        id: "conv-skill-gone",
+        connectionId: "postgres",
+        database: "app",
+        connectionName: "PostgreSQL",
+        messages: [
+          { role: "user", content: "review this query" },
+          { role: "assistant", content: "reviewed", loadedSkillIds: [SKILL.id] },
+        ],
+      }),
+    ];
+    const { errors, container } = await mountPanel(true, POSTGRES, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = true;
+    });
+    await selectSkill(container);
+    expect(skillChip(container)!.textContent).toContain(i18n.global.t("ai.skillsLoadedState"));
+
+    await sendPrompt(container, "and the indexes?");
+
+    // The restore was attempted for the recorded id — the body is not in this
+    // process, and a distinct conversation id keeps a sibling test's session body
+    // from satisfying it.
+    expect(aiAssistantMountApi.skillReadCalls.at(-1)).toEqual([SKILL.id]);
+    expect(useToast().message.value).toContain(i18n.global.t("ai.skillsReasonOversized"));
+    expect(skillChip(container)!.textContent).not.toContain(i18n.global.t("ai.skillsLoadedState"));
+    // The request still went out — without the body it could not restore.
+    expect(lastHistory().some((message) => message.role === "tool")).toBe(false);
+    // And the record stops asserting it: the next snapshot no longer carries it.
+    const resaved = aiAssistantMountApi.savedConversations.at(-1) as { messages: Array<{ loadedSkillIds?: string[] }> };
+    expect(resaved.messages.some((message) => message.loadedSkillIds?.length)).toBe(false);
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // The refusal is the guard: a body that hit the read limit would be injected as
+  // a tool result and wreck the context, so it is reported instead — and nothing
+  // enters the history.
+  it("reports a refused skill read instead of injecting a body", async () => {
+    configureSkillCatalog();
+    configureSkillRead([{ id: SKILL.id, reason: "oversized" }]);
+    useToast().dismissToast();
+    useToast().message.value = "";
+    const { errors, container } = await mountPanel(true, POSTGRES, configureAiPanel);
+    await selectSkill(container);
+
+    skillChip(container)!.click();
+    await settle();
+
+    expect(aiAssistantMountApi.skillReadCalls.at(-1)).toEqual([SKILL.id]);
+    expect(useToast().visible.value).toBe(true);
+    expect(useToast().message.value).toContain(i18n.global.t("ai.skillsReasonOversized"));
+    expect(skillChip(container)!.textContent).not.toContain(i18n.global.t("ai.skillsLoadedState"));
+
+    await sendPrompt(container, "review this query");
+    expect(lastHistory().some((message) => message.role === "tool")).toBe(false);
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // The send-blocked banner (Req 15 / ADR Decision 8). Bodies load on demand, so
+  // a deleted or unreadable file no longer stops a request — but a skill the user
+  // ticked that is no longer in the catalog still does, and the failure has to
+  // name which skill and offer the way out rather than failing silently.
+  it("blocks the send and names a selected skill the catalog no longer lists", async () => {
+    configureSkillCatalog();
+    const { errors, container } = await mountPanel(true, POSTGRES, configureAiPanel);
+    await selectSkill(container);
+    expect(skillChip(container)).not.toBeNull();
+
+    // The skill disappears between selection and send. The send path re-reads the
+    // catalog (metadata only, never a body) and refuses before assembling any
+    // request.
+    aiAssistantMountApi.skillCatalog = { defaultRoot: { status: "ok", skills: [] }, customRoot: null };
+    await sendPrompt(container, "review this query");
+
+    expect(aiAssistantMountApi.runAgentStreamInputs).toEqual([]);
+    const banner = skillBanner(container)!;
+    expect(banner).not.toBeNull();
+    expect(banner.textContent).toContain(i18n.global.t("ai.skillsSendBlocked"));
+    expect(banner.textContent).toContain(SKILL.name);
+    // An `ok` root that simply lacks the id is `not_found`. The two reasons carry
+    // different copy, and only `root_unavailable` offers Open Settings.
+    expect(banner.textContent).toContain(i18n.global.t("ai.skillsReasonNotFound"));
+    expect(banner.textContent).not.toContain(i18n.global.t("ai.skillsReasonRootUnavailable"));
+    expect(skillBannerButton(container, i18n.global.t("ai.skillsRetry"))).not.toBeUndefined();
+    expect(skillBannerButton(container, i18n.global.t("ai.skillsRefresh"))).not.toBeUndefined();
+    expect(skillBannerButton(container, i18n.global.t("ai.skillsOpenSettings"))).toBeUndefined();
+
+    // Remove is the documented recovery for this case: it drops the failed id so
+    // the stale selection cannot block every later send.
+    const remove = Array.from(banner.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.getAttribute("aria-label") === i18n.global.t("common.remove"))!;
+    expect(remove).toBeTruthy();
+    remove.click();
+    await settle();
+    expect(skillBanner(container)).toBeNull();
+    expect(skillChip(container)).toBeNull();
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("re-sends from the banner once the skill is back, and Refresh only re-reads the catalog", async () => {
+    configureSkillCatalog();
+    const { errors, container } = await mountPanel(true, POSTGRES, configureAiPanel);
+    await selectSkill(container);
+    aiAssistantMountApi.skillCatalog = { defaultRoot: { status: "ok", skills: [] }, customRoot: null };
+    await sendPrompt(container, "review this query");
+    expect(skillBanner(container)).not.toBeNull();
+
+    // Refresh re-reads the catalog without sending: the failure describes what
+    // the request would carry, so it stands until the request is retried.
+    const before = aiAssistantMountApi.skillListCalls;
+    skillBannerButton(container, i18n.global.t("ai.skillsRefresh"))!.click();
+    await settle();
+    expect(aiAssistantMountApi.skillListCalls).toBeGreaterThan(before);
+    expect(aiAssistantMountApi.runAgentStreamInputs).toEqual([]);
+    expect(skillBanner(container)).not.toBeNull();
+
+    // Retry is a real send of the same draft. With the skill back in the
+    // catalog it goes through, and the listing (with the tools) rides along.
+    aiAssistantMountApi.skillCatalog = { defaultRoot: { status: "ok", skills: [SKILL] }, customRoot: null };
+    skillBannerButton(container, i18n.global.t("ai.skillsRetry"))!.click();
+    await settle();
+    expect(aiAssistantMountApi.runAgentStreamInputs.length).toBe(1);
+    expect((aiAssistantMountApi.runAgentStreamInputs[0] as { allowSkills?: boolean }).allowSkills).toBe(true);
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("reports an unavailable root and offers Open Settings only for it", async () => {
+    configureSkillCatalog();
+    const { errors, container } = await mountPanel(true, POSTGRES, configureAiPanel);
+    await selectSkill(container);
+
+    // The whole default root is gone (removed, disabled, or unreadable) rather
+    // than just this skill. That is the one reason with a settings-shaped fix, so
+    // it is the one that renders the Open Settings action.
+    aiAssistantMountApi.skillCatalog = { defaultRoot: { status: "missing", skills: [] }, customRoot: null };
+    await sendPrompt(container, "review this query");
+
+    expect(aiAssistantMountApi.runAgentStreamInputs).toEqual([]);
+    const banner = skillBanner(container)!;
+    expect(banner.textContent).toContain(i18n.global.t("ai.skillsReasonRootUnavailable"));
+    expect(banner.textContent).not.toContain(i18n.global.t("ai.skillsReasonNotFound"));
+    expect(skillBannerButton(container, i18n.global.t("ai.skillsOpenSettings"))).not.toBeUndefined();
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // Req 12 / 15a: a selection made under an API provider must not leak into a CLI
+  // run after the user switches models — the CLI run has no skill tools at all.
+  it("sends no skill content to a CLI provider even with a skill selected", async () => {
+    configureSkillCatalog();
+    aiAssistantMountApi.tauriRuntime = true;
+    let panelSettings: ReturnType<typeof useSettingsStore> | undefined;
+    const { errors, container } = await mountPanel(true, POSTGRES, (settings) => {
+      panelSettings = settings;
+      settings.aiConfigs = [
+        {
+          id: "api",
+          name: "Custom",
+          provider: "openai-compatible",
+          apiKey: "test-key",
+          authMethod: "api-key",
+          endpoint: "https://example.com/v1",
+          model: "test-model",
+          apiStyle: "completions",
+          isDefault: true,
+        },
+        {
+          id: "cli",
+          name: "Claude Code",
+          provider: "claude-code-cli",
+          apiKey: "",
+          authMethod: "api-key",
+          endpoint: "",
+          model: "",
+          apiStyle: "completions",
+        },
+      ];
+      settings.activeModel = { configId: "api", modelId: "test-model" };
+    });
+    await selectSkill(container);
+    expect(skillChip(container)).not.toBeNull();
+
+    // Req 15a: the selection stays visible after the model switch.
+    panelSettings!.activeModel = { configId: "cli", modelId: "" };
+    await settle();
+    expect(skillChip(container)).not.toBeNull();
+
+    await sendPrompt(container, "review this query");
+
+    const custom = aiAssistantMountApi.runAgentStreamCustoms.at(-1) as { skillListing?: string[] } | undefined;
+    expect(custom?.skillListing).toBeUndefined();
+    expect((aiAssistantMountApi.runAgentStreamInputs.at(-1) as { allowSkills?: boolean }).allowSkills).toBe(false);
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // Same-root name collision. Discovery is flat, so this is two directories
+  // declaring one frontmatter name; `use_skill` addresses by name + source and
+  // therefore can only answer "ambiguous" here. The tool already says so — this
+  // marker is how the user learns why and what to do about it.
+  it("flags same-root duplicate skill names in the selector and leaves unique names alone", async () => {
+    // Control run: distinct names must render no marker and no note, so the
+    // assertions below cannot pass vacuously.
+    configureSkillCatalog([
+      { id: "d-alpha", name: "alpha", description: "first rules" },
+      { id: "d-beta", name: "beta", description: "second rules" },
+    ]);
+    const unique = await mountPanel(true, POSTGRES, configureAiPanel);
+    const uniquePopover = await openSkillSelector(unique.container);
+    expect(uniquePopover.textContent).toContain("alpha");
+    expect(uniquePopover.textContent).toContain("beta");
+    expect(uniquePopover.querySelectorAll(".ai-skill-duplicate-name").length).toBe(0);
+    expect(uniquePopover.querySelector(".ai-skill-duplicate-note")).toBeNull();
+    expect(unique.errors.map(String)).toEqual([]);
+
+    configureSkillCatalog([
+      { id: "d-a", name: "sql-review", description: "rules A" },
+      { id: "d-b", name: "sql-review", description: "rules B" },
+    ]);
+    const duplicate = await mountPanel(true, POSTGRES, configureAiPanel);
+    const popover = await openSkillSelector(duplicate.container);
+
+    const badges = Array.from(popover.querySelectorAll<HTMLElement>(".ai-skill-duplicate-name"));
+    expect(badges.length).toBe(2);
+    expect(badges.every((badge) => badge.textContent?.includes(i18n.global.t("ai.skillsDuplicateName")))).toBe(true);
+    const note = popover.querySelector(".ai-skill-duplicate-note");
+    expect(note?.textContent).toContain(i18n.global.t("ai.skillsDuplicateNameNote"));
+    // The advice must name the file the user can actually edit: the collision key is
+    // the frontmatter `name`, so renaming the folder would not resolve it. The literal
+    // filename is identical in every locale, which makes it the stable property to pin
+    // (the rest of the wording is free to change).
+    expect(note?.textContent).toContain("SKILL.md");
+    expect(duplicate.errors.map(String)).toEqual([]);
+  });
+
+  // The counterpart: one name in two *different* roots is resolvable (`use_skill`
+  // takes a `source`), so it is normal and must stay unflagged — flagging it would
+  // tell the user to rename a skill that works.
+  it("does not flag a name shared across roots, where source already separates them", async () => {
+    aiAssistantMountApi.skillCatalog = {
+      defaultRoot: { status: "ok", skills: [{ id: "d-review", name: "sql-review", description: "default copy" }] },
+      customRoot: { status: "ok", skills: [{ id: "c-review", name: "sql-review", description: "custom copy" }] },
+    };
+    const { errors, container } = await mountPanel(true, POSTGRES, (settings) => {
+      configureAiPanel(settings);
+      settings.desktopSettings = { ...settings.desktopSettings, custom_ai_skill_root_enabled: true };
+    });
+
+    const popover = await openSkillSelector(container);
+    // Both groups really rendered their row, so the negative assertion below is
+    // about an unflagged collision rather than about a missing catalog.
+    expect(popover.textContent).toContain(i18n.global.t("ai.skillsGroupDefault"));
+    expect(popover.textContent).toContain(i18n.global.t("ai.skillsGroupCustom"));
+    expect(popover.textContent).toContain("default copy");
+    expect(popover.textContent).toContain("custom copy");
+    expect(popover.querySelectorAll(".ai-skill-duplicate-name").length).toBe(0);
+    expect(popover.querySelector(".ai-skill-duplicate-note")).toBeNull();
+    expect(errors.map(String)).toEqual([]);
   });
 });

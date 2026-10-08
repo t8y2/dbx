@@ -277,8 +277,11 @@ test("nextest, doctests and coverage select identical packages and features in e
       const nextest = rustCommand("test", group, mode);
       const doctest = rustCommand("doctest", group, mode);
       assert.deepEqual(nextest.slice(0, 3), ["nextest", "run", "--no-fail-fast"]);
-      assert.deepEqual(doctest, ["test", "--doc", ...nextest.slice(3)]);
-      assert.deepEqual(rustCommand("tree", group, mode), ["tree", ...nextest.slice(3)]);
+      const selection = nextest.slice(3).filter((argument) => argument !== "--timings");
+      assert.deepEqual(doctest, ["test", "--doc", ...selection]);
+      assert.deepEqual(rustCommand("tree", group, mode), ["tree", ...selection]);
+      assert.ok(nextest.includes("--timings"));
+      assert.ok(rustCommand("clippy", "workspace", mode).includes("--timings"));
       assert.ok(nextest.includes("--no-default-features"));
       assert.ok(nextest.includes("--locked"));
     }

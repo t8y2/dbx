@@ -611,6 +611,23 @@ describe("normalizeEditorSettings", () => {
     expect(configured.dataGridExtractorOptions.dsv.nullText).toBe("NULL");
   });
 
+  it("resets the copy extractor database-name opt-in once when migrating to v2", () => {
+    const legacy = normalizeEditorSettings({
+      dataGridExtractorOptionsMigrationVersion: 1,
+      dataGridExtractorOptions: { sql: { includeDatabaseName: true } },
+    });
+    // 历史持久化的「包含数据库名称」归位到新默认：复制/导出 SQL 默认不带库名/模式名
+    expect(legacy.dataGridExtractorOptions.sql.includeDatabaseName).toBe(false);
+    expect(legacy.dataGridExtractorOptionsMigrationVersion).toBe(DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION);
+
+    const current = normalizeEditorSettings({
+      dataGridExtractorOptionsMigrationVersion: DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION,
+      dataGridExtractorOptions: { sql: { includeDatabaseName: true } },
+    });
+    // 迁移之后用户的显式勾选必须被保留
+    expect(current.dataGridExtractorOptions.sql.includeDatabaseName).toBe(true);
+  });
+
   it("defaults retained result runs to tiled tabs and preserves list mode", () => {
     expect(normalizeEditorSettings({}).resultRunDisplayMode).toBe("tabs");
     expect(normalizeEditorSettings({ resultRunDisplayMode: "list" }).resultRunDisplayMode).toBe("list");
@@ -832,6 +849,15 @@ describe("normalizeDesktopSettings", () => {
     expect(normalizeDesktopSettings({}).launch_at_login).toBe(false);
     expect(normalizeDesktopSettings({ launch_at_login: undefined }).launch_at_login).toBe(false);
     expect(normalizeDesktopSettings({ launch_at_login: true }).launch_at_login).toBe(true);
+  });
+
+  // Req 5: the automatic skill listing costs prompt tokens on every request, so a
+  // record written before the toggle existed (key absent) must normalize to off,
+  // and only an explicit `true` may turn it on.
+  it("defaults the automatic skill listing to off", () => {
+    expect(normalizeDesktopSettings({}).custom_ai_skill_auto_enabled).toBe(false);
+    expect(normalizeDesktopSettings({ custom_ai_skill_auto_enabled: null }).custom_ai_skill_auto_enabled).toBe(false);
+    expect(normalizeDesktopSettings({ custom_ai_skill_auto_enabled: true }).custom_ai_skill_auto_enabled).toBe(true);
   });
 });
 

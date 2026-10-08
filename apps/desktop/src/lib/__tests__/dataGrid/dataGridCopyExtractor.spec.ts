@@ -12,11 +12,13 @@ describe("data-grid extractor options", () => {
     expect(normalizeDataGridExtractorOptions({ sql: { quoteIdentifiers: "false", temporalFormat: "custom" } }).sql).toMatchObject({ quoteIdentifiers: true, temporalFormat: "native" });
   });
 
-  it("keeps database qualification for legacy options and persists explicit opt-out", () => {
-    expect(normalizeDataGridExtractorOptions({ sql: {} }).sql.includeDatabaseName).toBe(true);
-    const configured = normalizeDataGridExtractorOptions({ sql: { includeDatabaseName: false } });
-    expect(normalizeDataGridExtractorOptions(JSON.parse(JSON.stringify(configured))).sql.includeDatabaseName).toBe(false);
-    expect(normalizeDataGridExtractorOptions({ sql: { includeDatabaseName: "false" } }).sql.includeDatabaseName).toBe(true);
+  it("defaults to dropping database qualification and keeps an explicit opt-in", () => {
+    expect(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql.includeDatabaseName).toBe(false);
+    expect(normalizeDataGridExtractorOptions({ sql: {} }).sql.includeDatabaseName).toBe(false);
+    const configured = normalizeDataGridExtractorOptions({ sql: { includeDatabaseName: true } });
+    expect(configured.sql.includeDatabaseName).toBe(true);
+    expect(normalizeDataGridExtractorOptions(JSON.parse(JSON.stringify(configured))).sql.includeDatabaseName).toBe(true);
+    expect(normalizeDataGridExtractorOptions({ sql: { includeDatabaseName: "true" } }).sql.includeDatabaseName).toBe(false);
   });
 
   it("defaults DSV NULL output to an empty spreadsheet field", () => {

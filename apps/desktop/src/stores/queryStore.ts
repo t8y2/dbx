@@ -210,6 +210,7 @@ interface BuildQueryResultExportRequestOptions {
   format: "csv" | "xlsx" | "json" | "txt" | "sql";
   includeSqlSheet?: boolean;
   exportTableName?: string;
+  exportSchema?: string;
   exportColumnTypes?: Array<string | null | undefined>;
   exportColumnExtras?: Array<string | null | undefined>;
   insertMode?: SqlInsertMode;
@@ -9620,6 +9621,7 @@ export const useQueryStore = defineStore("query", () => {
     const rowLimit = settings.exportRowLimitEnabled ? settings.exportRowLimit : null;
     const totalRows = typeof tab.resultTotalRowCount === "number" ? (rowLimit === null ? tab.resultTotalRowCount : Math.min(tab.resultTotalRowCount, rowLimit)) : null;
     const clientSessionId = `${tabClientSessionId(tab, "export")}:${options.exportId}`;
+    const hasUniqueInsertTarget = tab.tableMeta !== undefined && tab.queryAnalysis?.multiSource !== true && (tab.queryAnalysis?.sources?.length ?? 1) === 1 && (tab.queryWriteTargets?.length ?? 1) <= 1;
 
     return {
       exportId: options.exportId,
@@ -9645,7 +9647,8 @@ export const useQueryStore = defineStore("query", () => {
       clientSessionId,
       nullLiteral: csvNullLiteralForMode(settings.csvNullMode),
       executionId: uuid(),
-      exportTableName: options.exportTableName,
+      exportTableName: options.format === "sql" && hasUniqueInsertTarget ? options.exportTableName : undefined,
+      exportSchema: options.format === "sql" && hasUniqueInsertTarget && options.exportTableName ? options.exportSchema : undefined,
       exportColumnTypes: options.exportColumnTypes,
       exportColumnExtras: options.exportColumnExtras,
       numericColumnRightAlign: settings.numericColumnRightAlign,

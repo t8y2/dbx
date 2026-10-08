@@ -94,6 +94,7 @@ impl CloudSyncTaskExecutor {
             username: config.webdav_username.clone(),
             password: None,
             remote_path: config.webdav_remote_path.clone(),
+            user_agent: None,
         };
         // The password lives in the secret store; resolve it here exactly like
         // the Tauri command does (never from the task config — ADR §10).

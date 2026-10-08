@@ -274,7 +274,7 @@ Only legacy context-menu contributions without `action` require a backend entryp
 
 Reference contributions by ID: a connection provider's `workbench` must point to a declared workbench and `filesystem_provider` to a declared filesystem provider. A contribution icon takes precedence over the plugin-level icon.
 
-Choose `workbench` for a custom file browser: the plugin owns its list, virtualization, previews, context menus, and split panes. Choose `filesystem_provider` only to use DBX's generic file manager; declaring both defaults to the workbench. A legacy `context-menu` invokes `contextMenu/<contribution-id>` on the backend, while a declarative `open-workbench` action opens its same-plugin Workbench directly; `result-view` receives a result snapshot in workbench context, and the opened contribution id arrives in the `dbx-plugin-init` payload so one UI entrypoint can serve several workbenches and result views. See the [full contribution protocol](https://github.com/t8y2/dbx/blob/main/plugins/README.md) for payloads.
+Choose `workbench` for a custom file browser: the plugin owns its list, virtualization, previews, context menus, and split panes. Choose `filesystem_provider` only to use DBX's generic file manager; declaring both defaults to the workbench. A legacy `context-menu` invokes `contextMenu/<contribution-id>` on the backend, while a declarative `open-workbench` action opens its same-plugin Workbench directly; `result-view` receives a result snapshot in workbench context. The SDK exposes the Host-selected contribution id as `dbxPlugin.contributionId` after initialization, so one UI entrypoint can serve several workbenches and result views. See the [full contribution protocol](https://github.com/t8y2/dbx/blob/main/plugins/README.md) for payloads.
 
 ### Filesystem Protocol
 
@@ -327,11 +327,21 @@ The host also authors three reserved fields on every workbench context: `workben
 
 The UI runs in an isolated iframe. DBX exposes the bridge as `window.dbxPlugin`; do not import DBX Vue/Tauri modules or assume that Node.js, local files, or arbitrary network access are available.
 
+When multiple Workbench or result-view contributions share one UI entrypoint, use the Host-selected identity to route the UI:
+
+```js
+await window.dbxPlugin.ready;
+const contributionId = window.dbxPlugin.contributionId;
+```
+
+`contributionId` is independent of `context`; for example, a Workbench opened from Plugin Center can have an empty `{}` context. The SDK records the identity before resolving `ready`, making it deterministic to read afterward. The legacy `dbx-plugin-init` event still carries the full init payload as a notification, but it is one-shot and must not be the only source of authoritative state.
+
 The following custom `objects/list` and `objects/changed` methods must be implemented by your backend. The asset example assumes the package contains `ui/assets/empty-state.svg`:
 
 ```js
 await window.dbxPlugin.ready;
 
+const contributionId = window.dbxPlugin.contributionId;
 const context = window.dbxPlugin.context;
 const result = await window.dbxPlugin.invoke("objects/list", { prefix: "docs/" }, { timeoutMs: 30000 });
 const off = window.dbxPlugin.onContext((nextContext) => render(nextContext));
@@ -343,6 +353,7 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | API | Purpose |
 | --- | --- |
 | `ready` | Waits for Host initialization; start application logic after `await dbxPlugin.ready`. |
+| `contributionId` | Read-only identity of the contribution opened by the Host; available after `await ready` and independent of `context`. |
 | `context` / `onContext(fn)` | Reads or observes the current workbench context. |
 | `locale` | Reads the current DBX locale; the plugin translates its own UI. |
 | `theme` | Reads `appearance` and DBX design tokens for light/dark support. |

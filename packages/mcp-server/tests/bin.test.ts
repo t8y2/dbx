@@ -19,11 +19,19 @@ type InitializeResponse = {
   };
 };
 
+type DiscoverResponse = {
+  id: number;
+  result: {
+    resultType?: string;
+    supportedVersions?: string[];
+    capabilities?: Record<string, unknown>;
+    _meta?: Record<string, { name?: string }>;
+  };
+};
+
 type ErrorResponse = {
   id: number;
-  error: {
-    code: number;
-  };
+  error: { code: number };
 };
 
 test("hides the native server console window on Windows", async () => {
@@ -32,7 +40,7 @@ test("hides the native server console window on Windows", async () => {
   assert.match(launcher, /windowsHide:\s*true/);
 });
 
-test("falls back from server discovery when invoked through an npm-style symlink", async () => {
+test("answers server discovery and still serves the legacy initialize flow through an npm-style symlink", async () => {
   const bin = await symlinkedMcpServer();
   let child: ChildProcessWithoutNullStreams | undefined;
   try {
@@ -45,7 +53,10 @@ test("falls back from server discovery when invoked through an npm-style symlink
       },
     });
 
-    const discoveryPromise = readJsonRpcResponse<ErrorResponse>(child, 5000);
+    // A client that probes discovery without the `_meta` the final spec made
+    // mandatory must still see the pre-upgrade `-32601`, which is the signal it
+    // treats as "legacy server, use initialize" and falls back on.
+    const bareProbePromise = readJsonRpcResponse<ErrorResponse>(child, 5000);
     child.stdin.write(
       encodeMessage({
         jsonrpc: "2.0",
@@ -54,16 +65,45 @@ test("falls back from server discovery when invoked through an npm-style symlink
         params: {},
       }),
     );
+    const bareProbe = await bareProbePromise;
+    assert.equal(bareProbe.id, 1);
+    assert.equal(bareProbe.error.code, -32601);
 
-    const discovery = await discoveryPromise;
-    assert.equal(discovery.id, 1);
-    assert.equal(discovery.error.code, -32601);
-
-    const responsePromise = readJsonRpcResponse<InitializeResponse>(child, 5000);
+    // Modern agents start with `server/discover` (MCP 2026-07-28) and must get a
+    // real discovery result rather than the legacy `-32601` rejection. Per the
+    // 2026-07-28 spec every request carries its protocol version and client
+    // capabilities in `_meta`.
+    const discoveryPromise = readJsonRpcResponse<DiscoverResponse>(child, 5000);
     child.stdin.write(
       encodeMessage({
         jsonrpc: "2.0",
         id: 2,
+        method: "server/discover",
+        params: {
+          _meta: {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": { name: "dbx-test", version: "0.0.0" },
+            "io.modelcontextprotocol/clientCapabilities": {},
+          },
+        },
+      }),
+    );
+
+    const discovery = await discoveryPromise;
+    assert.equal(discovery.id, 2);
+    assert.ok(discovery.result, `discovery failed: ${JSON.stringify(discovery)}`);
+    assert.equal(discovery.result._meta?.["io.modelcontextprotocol/serverInfo"]?.name, "dbx");
+    assert.ok(
+      discovery.result.supportedVersions?.includes("2026-07-28"),
+      `discovery must advertise 2026-07-28, got ${JSON.stringify(discovery.result.supportedVersions)}`,
+    );
+
+    // Legacy agents keep using the initialize handshake, unchanged.
+    const responsePromise = readJsonRpcResponse<InitializeResponse>(child, 5000);
+    child.stdin.write(
+      encodeMessage({
+        jsonrpc: "2.0",
+        id: 3,
         method: "initialize",
         params: {
           protocolVersion: "2024-11-05",
@@ -75,7 +115,7 @@ test("falls back from server discovery when invoked through an npm-style symlink
 
     const response = await responsePromise;
 
-    assert.equal(response.id, 2);
+    assert.equal(response.id, 3);
     assert.equal(response.result.serverInfo.name, "dbx");
   } finally {
     child?.kill();

@@ -246,8 +246,12 @@ fn resolve_requested_export_columns(
     (resolved_columns, resolved_column_types, resolved_primary_keys)
 }
 
-fn requested_mysql_sql_export_needs_column_metadata(database_type: DatabaseType, format: &str) -> bool {
-    database_type == DatabaseType::Mysql && format.eq_ignore_ascii_case("sql")
+/// A data-grid SQL export must resolve column metadata from the table when the
+/// result-set types cannot drive the INSERT-omission rules: MySQL (generated
+/// column extras) and SQL Server (TDS reports `rowversion` as `varbinary`,
+/// never as `timestamp`).
+fn requested_sql_export_needs_column_metadata(database_type: DatabaseType, format: &str) -> bool {
+    matches!(database_type, DatabaseType::Mysql | DatabaseType::SqlServer) && format.eq_ignore_ascii_case("sql")
 }
 
 fn ensure_sql_insert_export_types_supported(format: &str, column_types: &[Option<String>]) -> Result<(), String> {
@@ -280,7 +284,14 @@ fn resolve_requested_column_extras_by_position(
         .collect()
 }
 
+/// Resolve the column types used by a SQL export. The data grid supplies the
+/// types it read from the result set; SQL Server reports `timestamp`/
+/// `rowversion` there as `varbinary`/`binary` (TDS), so the INSERT-omission
+/// rules would never see it. SQL Server therefore prefers the table metadata
+/// (sys.columns) types; other engines keep the result-set types for literal
+/// formatting and only fall back to metadata for missing entries.
 fn resolve_requested_export_column_types(
+    database_type: DatabaseType,
     requested_columns: &[String],
     requested_column_types: &[Option<String>],
     table_columns: &[crate::db::ColumnInfo],
@@ -290,14 +301,18 @@ fn resolve_requested_export_column_types(
         .iter()
         .enumerate()
         .map(|(index, requested)| {
-            requested_column_types
+            let requested_type = requested_column_types
                 .get(index)
                 .cloned()
                 .flatten()
-                .filter(|column_type| !column_type.trim().is_empty())
-                .or_else(|| {
-                    table_columns_by_name.get(&requested.to_ascii_lowercase()).map(|column| column.data_type.clone())
-                })
+                .filter(|column_type| !column_type.trim().is_empty());
+            let metadata_type =
+                table_columns_by_name.get(&requested.to_ascii_lowercase()).map(|column| column.data_type.clone());
+            if database_type == DatabaseType::SqlServer {
+                metadata_type.filter(|column_type| !column_type.trim().is_empty()).or(requested_type)
+            } else {
+                requested_type.or(metadata_type)
+            }
         })
         .collect()
 }
@@ -1633,30 +1648,29 @@ async fn export_table_data_core_inner(
             request.column_types.as_deref(),
             request.primary_keys.as_deref(),
         );
-        let (column_types, column_extras) =
-            if requested_mysql_sql_export_needs_column_metadata(db_type, &request.format) {
-                let table_columns = crate::schema::get_columns_core(
-                    state,
-                    &request.connection_id,
-                    &request.database,
-                    request.schema.as_deref().unwrap_or(""),
-                    &request.table_name,
-                )
-                .await?;
-                (
-                    resolve_requested_export_column_types(&col_names, &requested_column_types, &table_columns),
-                    resolve_requested_export_column_extras(&col_names, &table_columns),
-                )
-            } else {
-                (
-                    requested_column_types,
-                    resolve_requested_column_extras_by_position(
-                        db_type,
-                        requested_columns,
-                        request.column_extras.as_deref(),
-                    ),
-                )
-            };
+        let (column_types, column_extras) = if requested_sql_export_needs_column_metadata(db_type, &request.format) {
+            let table_columns = crate::schema::get_columns_core(
+                state,
+                &request.connection_id,
+                &request.database,
+                request.schema.as_deref().unwrap_or(""),
+                &request.table_name,
+            )
+            .await?;
+            (
+                resolve_requested_export_column_types(db_type, &col_names, &requested_column_types, &table_columns),
+                resolve_requested_export_column_extras(&col_names, &table_columns),
+            )
+        } else {
+            (
+                requested_column_types,
+                resolve_requested_column_extras_by_position(
+                    db_type,
+                    requested_columns,
+                    request.column_extras.as_deref(),
+                ),
+            )
+        };
         (col_names, column_types, column_extras, primary_keys)
     } else {
         let columns = crate::schema::get_columns_core(
@@ -3572,7 +3586,7 @@ mod tests {
     }
 
     #[test]
-    fn requested_mysql_sql_export_resolves_column_metadata_only_for_sql() {
+    fn requested_sql_exports_resolve_column_metadata_for_mysql_and_sqlserver() {
         let table_columns = vec![
             crate::db::ColumnInfo {
                 name: "ID".to_string(),
@@ -3589,13 +3603,16 @@ mod tests {
         ];
         let requested_columns = vec!["virtual_total".to_string(), "id".to_string(), "missing".to_string()];
 
-        assert!(requested_mysql_sql_export_needs_column_metadata(DatabaseType::Mysql, "SQL"));
+        assert!(requested_sql_export_needs_column_metadata(DatabaseType::Mysql, "SQL"));
+        assert!(requested_sql_export_needs_column_metadata(DatabaseType::SqlServer, "sql"));
         for format in ["csv", "json", "xlsx"] {
-            assert!(!requested_mysql_sql_export_needs_column_metadata(DatabaseType::Mysql, format));
+            assert!(!requested_sql_export_needs_column_metadata(DatabaseType::Mysql, format));
         }
-        assert!(!requested_mysql_sql_export_needs_column_metadata(DatabaseType::Postgres, "sql"));
+        assert!(!requested_sql_export_needs_column_metadata(DatabaseType::Postgres, "sql"));
+        assert!(!requested_sql_export_needs_column_metadata(DatabaseType::SqlServer, "csv"));
         assert_eq!(
             resolve_requested_export_column_types(
+                DatabaseType::Mysql,
                 &requested_columns,
                 &[Some("".to_string()), Some("bigint".to_string())],
                 &table_columns,
@@ -3605,6 +3622,38 @@ mod tests {
         assert_eq!(
             resolve_requested_export_column_extras(&requested_columns, &table_columns),
             vec![Some("VIRTUAL GENERATED".to_string()), Some("auto_increment".to_string()), None]
+        );
+
+        // SQL Server: result-set types report `rowversion` as `varbinary`, so the
+        // table metadata types must win — this is what makes the `timestamp` /
+        // `computed` omission rules hit on grid SQL exports.
+        let sqlserver_columns = vec![
+            crate::db::ColumnInfo { name: "id".to_string(), data_type: "int".to_string(), ..Default::default() },
+            crate::db::ColumnInfo {
+                name: "row_version".to_string(),
+                data_type: "timestamp".to_string(),
+                ..Default::default()
+            },
+            crate::db::ColumnInfo {
+                name: "total".to_string(),
+                data_type: "int".to_string(),
+                extra: Some("computed".to_string()),
+                ..Default::default()
+            },
+        ];
+        let sqlserver_requested = vec!["id".to_string(), "row_version".to_string(), "total".to_string()];
+        assert_eq!(
+            resolve_requested_export_column_types(
+                DatabaseType::SqlServer,
+                &sqlserver_requested,
+                &[Some("int4".to_string()), Some("varbinary".to_string()), Some("int4".to_string())],
+                &sqlserver_columns,
+            ),
+            vec![Some("int".to_string()), Some("timestamp".to_string()), Some("int".to_string())]
+        );
+        assert_eq!(
+            resolve_requested_export_column_extras(&sqlserver_requested, &sqlserver_columns),
+            vec![None, None, Some("computed".to_string())]
         );
     }
 

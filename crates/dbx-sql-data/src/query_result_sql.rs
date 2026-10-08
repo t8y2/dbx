@@ -776,6 +776,13 @@ fn add_sql_server_offset_fetch(statement: &str, limit: usize, offset: usize) -> 
         return Some(inject_sql_server_top(statement, limit));
     }
 
+    // 词法扫描对 `#` 临时表、反斜杠字符串等会漏掉结尾 ORDER BY；此时 ROW_NUMBER
+    // 包装会把 ORDER BY 留在派生表里并被 SQL Server 拒绝，也不应按 (SELECT NULL)
+    // 排序。退回 ROWCOUNT 封顶执行，保留原语句和用户排序。
+    if order_by_index.is_none() && sql_server_ast_has_order_by(statement) {
+        return Some(add_sql_server_rowcount_pagination(statement, limit, offset));
+    }
+
     // The inner query may end with a line comment after removing ORDER BY.
     // Keep the derived-table closing parenthesis on a new line so it is not
     // swallowed by `--` / `#` comments.
@@ -1616,10 +1623,13 @@ fn sql_server_count_sql(statement: &str) -> Option<String> {
             || select.from.is_empty()
             || !group_by_is_empty
             || select.having.is_some()
-            || !select
-                .projection
-                .iter()
-                .all(|item| matches!(item, SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(_, _)))
+            || !select.projection.iter().all(|item| match item {
+                SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(_, _) => true,
+                SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
+                    matches!(expr, Expr::Identifier(_) | Expr::CompoundIdentifier(_))
+                }
+                _ => false,
+            })
         {
             return None;
         }
@@ -1918,6 +1928,18 @@ fn sql_server_ast_has_offset_or_fetch(statement: &str) -> bool {
     // OFFSET 挂在 limit_clause 里（可能是 `OFFSET n ROWS` 单独出现，也可能与 FETCH 同时出现）。
     let has_offset = matches!(&query.limit_clause, Some(LimitClause::LimitOffset { offset: Some(_), .. }));
     has_offset || query.fetch.is_some()
+}
+
+/// 词法扫描器对 `#` 临时表、反斜杠字符串等会漏掉结尾 ORDER BY，AST 解析不受影响。
+/// 用于判断这类语句是否带有无法定位的顶层 ORDER BY：定位不到就不能安全地包派生表。
+fn sql_server_ast_has_order_by(statement: &str) -> bool {
+    let Ok(statements) = Parser::parse_sql(&MsSqlDialect {}, statement) else {
+        return false;
+    };
+    let [Statement::Query(query)] = statements.as_slice() else {
+        return false;
+    };
+    query.order_by.is_some()
 }
 
 fn add_fetch_first_limit(statement: &str, limit: usize, offset: usize) -> String {
@@ -3264,6 +3286,45 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_mixed_wildcard_count_preserves_query_predicates() {
+        for projection in
+            ["x_JtRoomCode, RoomInfo, *", "sr.x_JtRoomCode, sr.RoomInfo, sr.*", "sr.RoomInfo AS info, sr.*"]
+        {
+            let sql = format!("SELECT {projection} FROM s_room sr WHERE sr.RoomInfo LIKE N'%合肥天珺一期%' AND sr.x_JtRoomCode IS NULL ORDER BY sr.RoomInfo");
+            let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+                sql: sql.clone(),
+                query_base_sql: sql,
+                database_type: Some(DatabaseType::SqlServer),
+                pagination: QueryPagination { limit: 1000, offset: 0, session_id: None },
+                use_agent_cursor: false,
+                first_page_uses_actual_sql: false,
+            });
+            assert_eq!(plan.count_sql.as_deref(), Some("SELECT COUNT(*) AS dbx_total_rows FROM s_room sr WHERE sr.RoomInfo LIKE N'%合肥天珺一期%' AND sr.x_JtRoomCode IS NULL;"));
+            assert!(plan.sql_to_execute.starts_with("SELECT TOP (1000)"));
+        }
+    }
+
+    #[test]
+    fn sqlserver_mixed_wildcard_count_rejects_semantic_modifiers_and_expressions() {
+        for sql in [
+            "SELECT DISTINCT id, * FROM rooms",
+            "SELECT TOP 10 id, * FROM rooms",
+            "SELECT COUNT(*), * FROM rooms",
+            "SELECT id + 1, * FROM rooms",
+            "SELECT id, * FROM rooms GROUP BY id",
+        ] {
+            assert!(
+                !build_count_query_sql(CountQuerySqlOptions {
+                    original_sql: sql.to_string(),
+                    database_type: Some(DatabaseType::SqlServer),
+                })
+                .ok,
+                "must not rewrite {sql}"
+            );
+        }
+    }
+
+    #[test]
     fn sqlserver_join_wildcard_count_removes_top_level_order_by() {
         let result = build_count_query_sql(CountQuerySqlOptions {
             original_sql: "SELECT * FROM AAA a JOIN BBB b ON a.id = b.id ORDER BY a.id".to_string(),
@@ -4114,6 +4175,32 @@ WHERE u.id = picked.id;
             result.sql.unwrap(),
             "SELECT * FROM t WHERE p = 'C:\\' ORDER BY id OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY"
         );
+    }
+
+    // `#` 临时表/反斜杠字符串让词法扫描漏掉结尾 ORDER BY 时，offset > 0 不能走
+    // ROW_NUMBER 派生表包装（SQL Server 拒绝派生表里的 ORDER BY），退回 ROWCOUNT 封顶。
+    #[test]
+    fn sqlserver_hidden_order_by_uses_bounded_rowcount_pagination() {
+        for (original, expected) in [
+            (
+                "SELECT * FROM t WHERE p = 'C:\\' ORDER BY id",
+                "EXEC sys.sp_executesql N'SET ROWCOUNT 1000; SELECT * FROM t WHERE p = ''C:\\'' ORDER BY id'; /*__dbx_result_offset=500__*/",
+            ),
+            (
+                "SELECT * FROM #t ORDER BY id",
+                "EXEC sys.sp_executesql N'SET ROWCOUNT 1000; SELECT * FROM #t ORDER BY id'; /*__dbx_result_offset=500__*/",
+            ),
+        ] {
+            let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+                original_sql: original.to_string(),
+                database_type: Some(DatabaseType::SqlServer),
+                limit: 500,
+                offset: 500,
+            });
+
+            assert!(result.ok, "must stay paginatable: {original}");
+            assert_eq!(result.sql.unwrap(), expected);
+        }
     }
 
     // UNION 顶层的 OFFSET/FETCH 也不能被注入 TOP。

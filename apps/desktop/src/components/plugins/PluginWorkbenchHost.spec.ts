@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   writePluginLocalFileChunk: vi.fn(),
   closePluginLocalFile: vi.fn(),
   openPluginWorkbench: vi.fn(),
+  isTauriRuntime: vi.fn(),
 }));
 
 vi.mock("@/lib/backend/tauri", () => ({
@@ -32,7 +33,7 @@ vi.mock("@/lib/backend/api", () => ({
   readPluginUiAsset: mocks.readPluginUiAsset,
   subscribePluginEvents: mocks.subscribePluginEvents,
 }));
-vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: mocks.isTauriRuntime }));
 vi.mock("@/lib/common/clipboard", () => ({ copyToClipboard: vi.fn() }));
 vi.mock("@/composables/useTheme", () => ({ useTheme: () => ({ isDark: ref(false), themeRevision: ref(0) }) }));
 vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { uiFontFamily: "", fontFamily: "", fontSize: 14 } }) }));
@@ -45,6 +46,7 @@ vi.mock("@/stores/connectionStore", () => ({
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({ openPluginWorkbench: mocks.openPluginWorkbench }) }));
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ locale: ref("en"), t: (key: string) => key }) }));
 
+import { clearPluginUiHtmlCache } from "@/lib/plugins/pluginUiHtmlCache";
 import PluginWorkbenchHost from "./PluginWorkbenchHost.vue";
 
 const plugin: InstalledPlugin = {
@@ -72,7 +74,13 @@ describe("PluginWorkbenchHost initialization", () => {
   let root: HTMLDivElement;
 
   beforeEach(() => {
+    clearPluginUiHtmlCache();
     vi.clearAllMocks();
+    mocks.isTauriRuntime.mockReturnValue(false);
+    const settings = (window as unknown as { happyDOM: { settings: Record<string, boolean> } }).happyDOM.settings;
+    settings.disableJavaScriptFileLoading = true;
+    settings.disableCSSFileLoading = true;
+    settings.handleDisabledFileLoadingAsSuccess = true;
     vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => window.setTimeout(() => callback(0), 0));
     vi.stubGlobal("getComputedStyle", () => Object.assign([], { getPropertyValue: () => "" }));
     mocks.readPluginUiEntry.mockResolvedValue({ dataBase64: btoa("<!doctype html><html><body></body></html>"), contentType: "text/html" });
@@ -106,6 +114,23 @@ describe("PluginWorkbenchHost initialization", () => {
     postMessage.mockClear();
     return { frame: frame!, postMessage, ready };
   }
+
+  it("passes the packaged module URL and existing asset CSP into srcdoc", async () => {
+    mocks.isTauriRuntime.mockReturnValue(true);
+    vi.stubEnv("PROD", true);
+    vi.stubGlobal("location", { protocol: "tauri:" });
+    mocks.readPluginUiEntry.mockResolvedValue({
+      dataBase64: btoa('<!doctype html><html><head></head><body><script type="module" src="./entry/app.mjs"></script></body></html>'),
+      contentType: "text/html",
+    });
+
+    const { frame } = await mountHost();
+    const srcdoc = frame.getAttribute("srcdoc") ?? "";
+    expect(srcdoc).toContain('<script type="module" src="dbx-plugin://localhost/sample/entry/app.mjs"></script>');
+    expect(srcdoc).toContain('<base href="dbx-plugin://localhost/sample/entry/">');
+    expect(srcdoc).toContain("script-src 'unsafe-inline' blob: dbx-plugin:;");
+    expect(mocks.readPluginUiAsset).not.toHaveBeenCalled();
+  });
 
   it("runs reinit before one init when load precedes ready", async () => {
     const firstReinit = deferred();

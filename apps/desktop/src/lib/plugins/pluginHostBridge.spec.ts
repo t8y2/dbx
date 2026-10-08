@@ -1032,18 +1032,24 @@ describe("PluginHostBridge", () => {
   });
 
   it("injects a <base> and widens resource CSP sources for the plugin asset origin", () => {
-    const document = pluginSandboxDocument("<html><head></head><body></body></html>", [], undefined, { baseUrl: "dbx-plugin://localhost/io.github.t8y2.s3/assets/" });
+    const document = pluginSandboxDocument('<html><head></head><body><script type="module" src="dbx-plugin://localhost/io.github.t8y2.s3/entry/app.mjs"></script><script type="module" src="https://cdn.example.test/app.mjs"></script></body></html>', [], undefined, {
+      baseUrl: "dbx-plugin://localhost/io.github.t8y2.s3/assets/",
+    });
     expect(document).toContain('<base href="dbx-plugin://localhost/io.github.t8y2.s3/assets/">');
     expect(document).toContain("script-src 'unsafe-inline' blob: dbx-plugin:;");
     expect(document).toContain("font-src data: blob: dbx-plugin:;");
+    expect(document).toContain('src="dbx-plugin://localhost/io.github.t8y2.s3/entry/app.mjs"');
+    const scriptPolicy = document.match(/script-src[^;]+;/)?.[0] ?? "";
+    expect(scriptPolicy).not.toContain("https://cdn.example.test");
     // <base> leads the head injection so inlined CSS url() resolves against it.
     expect(document.indexOf("<base ")).toBeLessThan(document.indexOf("<style>"));
   });
 
   it("allows the WebView2-mapped asset origin exactly", () => {
-    const document = pluginSandboxDocument("<html><head></head><body></body></html>", [], undefined, { baseUrl: "http://dbx-plugin.localhost/io.github.t8y2.s3/assets/" });
+    const document = pluginSandboxDocument('<html><head></head><body><script type="module" src="http://dbx-plugin.localhost/io.github.t8y2.s3/entry/app.mjs"></script></body></html>', [], undefined, { baseUrl: "http://dbx-plugin.localhost/io.github.t8y2.s3/assets/" });
     expect(document).toContain("script-src 'unsafe-inline' blob: http://dbx-plugin.localhost;");
     expect(document).toContain('<base href="http://dbx-plugin.localhost/io.github.t8y2.s3/assets/">');
+    expect(document).toContain('src="http://dbx-plugin.localhost/io.github.t8y2.s3/entry/app.mjs"');
   });
 
   it("rejects malformed asset base URLs without touching the CSP", () => {
@@ -1661,11 +1667,16 @@ describe("PluginHostBridge", () => {
 describe("plugin SDK source", () => {
   interface SdkWindow {
     dbxPlugin?: {
+      ready: Promise<unknown>;
+      contributionId?: string;
+      context?: Record<string, unknown>;
+      onInit: (listener: (context: unknown) => void) => () => void;
       invoke: (method: string, params?: unknown, options?: { timeoutMs?: number }) => Promise<unknown>;
       getPlanCapabilities: (connectionId: string) => Promise<unknown>;
       explainPlan: (request: unknown) => Promise<unknown>;
       getTableMetadata: (context: unknown) => Promise<unknown>;
     };
+    receiveHostMessage: (message: unknown) => void;
   }
 
   function loadSdk(posted: unknown[], initialTheme?: { appearance: "dark" | "light"; tokens: Record<string, string> }): SdkWindow {
@@ -1677,10 +1688,19 @@ describe("plugin SDK source", () => {
       },
       dispatchEvent: vi.fn(),
     } as unknown as Document;
+    let onMessage: ((event: MessageEvent) => void) | undefined;
+    const parent = { postMessage: (message: unknown) => posted.push(message) };
+    const addEventListener = (type: string, listener: (event: MessageEvent) => void) => {
+      if (type === "message") onMessage = listener;
+    };
     // The SDK IIFE only touches window and the bare-global addEventListener at
     // boot; parent.postMessage is captured for later request() calls, so a
     // stub window/parent is enough here.
-    new Function("window", "parent", "addEventListener", "document", pluginSdkSource(initialTheme))(sandbox, { postMessage: (message: unknown) => posted.push(message) }, () => {}, document);
+    new Function("window", "parent", "addEventListener", "document", pluginSdkSource(initialTheme))(sandbox, parent, addEventListener, document);
+    sandbox.receiveHostMessage = (message) => {
+      if (!onMessage) throw new Error("SDK did not register its host-message listener");
+      onMessage({ source: parent, data: message } as unknown as MessageEvent);
+    };
     return sandbox;
   }
 
@@ -1718,6 +1738,51 @@ describe("plugin SDK source", () => {
 
     expect(dbxPlugin).toBeDefined();
     expect(posted[0]).toMatchObject({ source: "dbx-plugin", type: "ready" });
+  });
+
+  it("exposes the opened contribution after ready when init was already delivered and context is empty", async () => {
+    const sdkMessages: unknown[] = [];
+    const hostMessages: unknown[] = [];
+    const sdk = loadSdk(sdkMessages);
+    const probe: PluginWorkbenchContribution = { type: "workbench", id: "sample.probe", label: "Probe" };
+    const generation: PluginWorkbenchContribution = { type: "workbench", id: "sample.generation", label: "Generation" };
+    const target = { postMessage: (message: unknown) => hostMessages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin([], [probe, generation]), generation, {}, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn() });
+
+    bridge.sendInit();
+    const init = hostMessages[0] as Record<string, unknown>;
+    expect(init).toMatchObject({ type: "init", contributionId: "sample.generation", context: {} });
+    sdk.receiveHostMessage(init);
+
+    await sdk.dbxPlugin!.ready;
+
+    expect(sdk.dbxPlugin!.contributionId).toBe("sample.generation");
+    expect(sdk.dbxPlugin!.contributionId).not.toBe(probe.id);
+    expect(sdk.dbxPlugin!.context).toEqual({});
+    const lateInit = vi.fn();
+    sdk.dbxPlugin!.onInit(lateInit);
+    expect(lateInit).toHaveBeenCalledWith({});
+  });
+
+  it("sets contribution identity independently of table context before ready and onInit", async () => {
+    const sdk = loadSdk([]);
+    const hostMessages: unknown[] = [];
+    const tableContext = { connectionId: "connection-1", database: "app", schema: "public", table: "orders" };
+    const generation: PluginWorkbenchContribution = { type: "workbench", id: "sample.generation", label: "Generation" };
+    const target = { postMessage: (message: unknown) => hostMessages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin([], [generation]), generation, tableContext, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn() });
+    let observed: { context: unknown; contributionId?: string } | undefined;
+    sdk.dbxPlugin!.onInit((context) => {
+      observed = { context, contributionId: sdk.dbxPlugin!.contributionId };
+    });
+
+    bridge.sendInit();
+    sdk.receiveHostMessage(hostMessages[0]);
+    await sdk.dbxPlugin!.ready;
+
+    expect(observed).toEqual({ context: tableContext, contributionId: "sample.generation" });
+    expect(sdk.dbxPlugin!.context).toEqual(tableContext);
+    expect(sdk.dbxPlugin!.contributionId).toBe("sample.generation");
   });
 
   it("keeps cloneable values intact and plain scalars by reference", () => {

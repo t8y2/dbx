@@ -104,6 +104,8 @@ watch(jsonPreviewContainer, async (element) => {
       fontSize: () => settingsStore.editorSettings.fontSize,
       fontFamily: () => settingsStore.editorSettings.tableFontFamily,
       lineWrapping: () => settingsStore.editorSettings.wordWrap,
+      lineNumbers: true,
+      folding: true,
     });
     await jsonPreviewEditor.create(element, props.detail?.formattedJson ?? "", "json");
   } else if (!element && jsonPreviewEditor) {

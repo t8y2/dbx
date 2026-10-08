@@ -1,7 +1,8 @@
 use super::column_format::{
     clickhouse_column_type, column_data_type, column_definition, has_dameng_identity,
-    is_dameng_identity_compatible_type, is_mysql_character_data_type, original_is_mysql_generated_column,
-    original_mysql_generated_clause,
+    is_dameng_identity_compatible_type, is_mysql_character_data_type, normalize_generation_expression,
+    normalize_mysql_generated_storage, original_is_mysql_generated_column, original_mysql_generated_clause,
+    original_mysql_generated_values, strip_outer_parentheses,
 };
 use super::columns::{build_add_column_sql, build_drop_column_sql};
 use super::comments::build_sqlserver_column_comment_sql_for_profile;
@@ -11,9 +12,14 @@ use super::util::{
     clean, format_default_for_sql, is_protected_manticore_id_column, normalize_default, original_comment,
     original_default, qualified_table, quote_ident, quote_string,
 };
+use super::validation::mysql_literal_default_error;
 use crate::table_structure_sql::ColumnExtra;
 
 const SINGLE_COLUMN_ADD_PREVIEW_ID_PREFIX: &str = "ddl-preview:";
+
+fn single_column_literal_default_error(options: &SingleColumnAlterSqlOptions) -> Option<String> {
+    mysql_literal_default_error(options.database_type, options.driver_profile.as_deref(), false, &options.column)
+}
 
 pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> TableStructureSqlResult {
     let capabilities = capabilities_for(options.database_type, options.driver_profile.as_deref());
@@ -40,7 +46,7 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
             warnings.push("Manticore Search id column cannot be dropped from this editor.".to_string());
             return TableStructureSqlResult { statements, warnings };
         }
-        statements.push(build_drop_column_sql(dialect, &table, &original.name));
+        statements.extend(build_drop_column_sql(dialect, &table, original));
         return TableStructureSqlResult { statements, warnings };
     }
 
@@ -59,6 +65,10 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
         }
         if options.column.data_type.trim().is_empty() {
             warnings.push("Column type cannot be empty.".to_string());
+            return TableStructureSqlResult { statements, warnings };
+        }
+        if let Some(warning) = single_column_literal_default_error(&options) {
+            warnings.push(warning);
             return TableStructureSqlResult { statements, warnings };
         }
         if !capabilities.comment && !clean(&options.column.comment).is_empty() {
@@ -88,8 +98,12 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
         return TableStructureSqlResult { statements, warnings };
     };
 
-    if !has_existing_column_attribute_change(&options.column) && !has_column_extra_change(&options.column) {
+    if !has_existing_column_attribute_change(&options.column) && !has_column_extra_change(dialect, &options.column) {
         warnings.push("No changes detected for this column.".to_string());
+        return TableStructureSqlResult { statements, warnings };
+    }
+    if let Some(warning) = single_column_literal_default_error(&options) {
+        warnings.push(warning);
         return TableStructureSqlResult { statements, warnings };
     }
 
@@ -132,7 +146,7 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
         ));
         return TableStructureSqlResult { statements, warnings };
     }
-    if !has_rename && !has_attribute_change && !has_column_extra_change(&options.column) {
+    if !has_rename && !has_attribute_change && !has_column_extra_change(dialect, &options.column) {
         return TableStructureSqlResult { statements, warnings };
     }
 
@@ -179,6 +193,7 @@ fn is_column_extra_empty(extra: &ColumnExtra) -> bool {
     !extra.auto_increment.unwrap_or(false)
         && !extra.on_update_current_timestamp.unwrap_or(false)
         && extra.identity.is_none()
+        && !extra.generated.as_ref().is_some_and(|generated| !generated.expression.trim().is_empty())
         && !extra.manticore_indexed.unwrap_or(false)
         && !extra.manticore_stored.unwrap_or(false)
         && !extra.manticore_attribute.unwrap_or(false)
@@ -337,9 +352,10 @@ pub(super) fn validate_dameng_existing_identity_change(
     }
 }
 
-pub(super) fn has_column_extra_change(column: &EditableStructureColumn) -> bool {
+pub(super) fn has_column_extra_change(dialect: StructureDialect, column: &EditableStructureColumn) -> bool {
     let Some(original) = &column.original else { return false };
     let current_extra = column.extra.as_ref();
+    let is_mysql = dialect == StructureDialect::Mysql;
     match (current_extra, original.extra.as_deref()) {
         // Neither has extra → no change
         (None, None | Some("")) => false,
@@ -351,6 +367,12 @@ pub(super) fn has_column_extra_change(column: &EditableStructureColumn) -> bool 
             original_has_auto_increment(orig)
                 || orig_lower.contains("on update")
                 || original_has_identity(orig)
+                // MySQL-only: PostgreSQL-family introspection reports generated
+                // columns in the same `generated always as (...) stored` shape,
+                // which the structure editor of those dialects never parses
+                // into `extra.generated` — treating it as a change would flag
+                // untouched PG generated columns on every save.
+                || (is_mysql && original_mysql_generated_values(orig).is_some())
                 || indexed
                 || stored
                 || attribute
@@ -383,8 +405,34 @@ pub(super) fn has_column_extra_change(column: &EditableStructureColumn) -> bool 
             curr_has_ai != orig_has_ai
                 || curr_has_on_update != orig_has_on_update
                 || identity_changed
+                || (is_mysql && mysql_generated_changed(curr, orig))
                 || curr_manticore != orig_manticore
         }
+    }
+}
+
+/// Edit detection for MySQL generated columns. `None` inherits the original
+/// definition (no change); an empty edited expression removes the attribute
+/// (changed only when the original was generated); otherwise the expression is
+/// compared whitespace- and case-insensitively and the storage normalized, so
+/// an untouched column does not register a spurious `MODIFY`.
+fn mysql_generated_changed(curr: &ColumnExtra, orig: &str) -> bool {
+    match &curr.generated {
+        Some(generated) => {
+            // Same single-layer unwrapping the renderer applies, so wrapping
+            // parentheses typed by hand do not produce a no-op MODIFY.
+            let edited = strip_outer_parentheses(generated.expression.trim());
+            match original_mysql_generated_values(orig) {
+                Some((original_expression, original_storage)) if !edited.is_empty() => {
+                    let edited_normalized = normalize_generation_expression(edited);
+                    let edited_storage = normalize_mysql_generated_storage(generated.storage.as_deref());
+                    edited_normalized != original_expression || edited_storage != original_storage
+                }
+                Some(_) => true,
+                None => !edited.is_empty(),
+            }
+        }
+        None => false,
     }
 }
 

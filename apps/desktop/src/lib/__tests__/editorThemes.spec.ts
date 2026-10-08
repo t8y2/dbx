@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildEditorFontThemeRules, buildSqlCompletionThemeRules, editorDiagnosticColors, editorThemeAppearanceFor, IDE_EDITOR_THEMES, loadEditorTheme, resolveCustomThemeBackgrounds, resolveEditorTheme, SQL_BUILTIN_HIGHLIGHT_TAG } from "@/lib/editor/editorThemes";
+import { buildEditorFontThemeRules, buildSqlCompletionThemeRules, EDITOR_FONT_FAMILY_CSS_VAR, editorDiagnosticColors, editorThemeAppearanceFor, IDE_EDITOR_THEMES, loadEditorTheme, resolveCustomThemeBackgrounds, resolveEditorTheme, SQL_BUILTIN_HIGHLIGHT_TAG } from "@/lib/editor/editorThemes";
 import { DEFAULT_APP_CUSTOM_UI_COLORS, wcagContrastRatio, type AppThemePalette } from "@/lib/app/appTheme";
 import { DEFAULT_CUSTOM_THEME_COLORS, type CustomThemeColors, type EditorTheme } from "@/stores/settingsStore";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
@@ -214,6 +214,17 @@ describe("SQL completion theme", () => {
 
     expect(rules[".cm-tooltip.cm-tooltip-autocomplete"]).toMatchObject({ borderRadius: "var(--dbx-radius-md)" });
     expect(rules[".cm-tooltip.cm-tooltip-autocomplete > ul > li"]).toMatchObject({ borderRadius: "var(--dbx-radius-sm)" });
+  });
+
+  it("renders the info popup in the configured editor font", () => {
+    // The info popup is a sibling tooltip rather than a child of the
+    // autocomplete tooltip, so it inherits nothing from it and needs the
+    // variable set on its own rule.
+    const rules = buildSqlCompletionThemeRules();
+    const editorFont = `var(${EDITOR_FONT_FAMILY_CSS_VAR}, var(--font-mono, monospace))`;
+
+    expect(rules[".cm-tooltip.cm-completionInfo"]).toMatchObject({ fontFamily: editorFont });
+    expect(rules[".cm-completionLabel"]).toMatchObject({ fontFamily: editorFont });
   });
 
   it("keeps completion labels ahead of long detail text", () => {

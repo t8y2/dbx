@@ -37,19 +37,20 @@ const SAFE_READ_PRAGMA_NAMES = new Set(["table_info", "table_xinfo", "index_list
  * string escape. Both rules are MySQL family features: on SQL Server `#tmp` is a
  * temporary table, and on PostgreSQL `standard_conforming_strings` is on by
  * default, so `'dir\'` is a complete string. Assuming the MySQL rules everywhere
- * hides SQL from the classifier — `SELECT * FROM #tmp; DELETE FROM #tmp;` (SQL
- * Server) and `SELECT 'dir\'; DELETE FROM users;` (PostgreSQL) would otherwise be
- * read as one read-only statement and auto-execute unconfirmed.
+ * hides SQL from the safety scans — `SELECT * FROM #tmp; DELETE FROM prod.users;`
+ * (SQL Server) and `SELECT 'dir\'; DELETE FROM users;` (PostgreSQL) would
+ * otherwise be read as one read-only statement and auto-execute.
  *
  * Mirrors `is_mysql_compatible_database` in `crates/dbx-sql-core/src/sql.rs`,
- * which gates `supports_hash_line_comments` the same way. An unknown dialect is
- * deliberately not treated as MySQL: keeping `#` and backslashes literal can only
- * split more statements than before, which raises the assessed risk rather than
- * lowering it.
+ * which gates `supports_hash_line_comments` the same way, and
+ * `SqlScanLexerRules` in `crates/dbx-core/src/safety/production_safety.rs`.
+ * An unknown dialect is deliberately not treated as MySQL: keeping `#` and
+ * backslashes literal can only split more statements than before, which raises
+ * the assessed risk rather than lowering it.
  */
 const MYSQL_LEXER_DATABASE_TYPES = new Set<string>(["mysql", "doris", "starrocks", "manticoresearch", "goldendb"]);
 
-function usesMysqlLexerRules(dialect?: DatabaseType | string): boolean {
+export function usesMysqlLexerRules(dialect?: DatabaseType | string): boolean {
   return typeof dialect === "string" && MYSQL_LEXER_DATABASE_TYPES.has(dialect.trim().toLowerCase());
 }
 

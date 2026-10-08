@@ -15,6 +15,7 @@ import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
 import type { DataGridDistinctValueSuggestionState, DataGridDistinctValueSuggestionTarget } from "@/lib/dataGrid/dataGridDistinctValueSuggestions";
 import type { DataGridLocalFilterOption } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
 import type { DataGridFilterEditorView } from "@/stores/settingsStore";
+import type { DatabaseType } from "@/types/database";
 import { clampSearchSplitWidth } from "@/lib/dataGrid/dataGridSearchSplit";
 
 type LocalFilterSummary = {
@@ -31,6 +32,7 @@ const props = defineProps<{
   commentByColumn?: ReadonlyMap<string, string>;
   conditionColumns: readonly DataGridConditionColumnOption[];
   identifierQuote?: string;
+  databaseType?: DatabaseType;
   historyScope: DataGridConditionHistoryScope;
   canUseWhereSearch: boolean;
   compact: boolean;
@@ -305,6 +307,7 @@ onUnmounted(onResizeEnd);
         kind="where"
         :columns="conditionColumns"
         :identifier-quote="identifierQuote"
+        :database-type="databaseType"
         :history-scope="historyScope"
         placeholder="WHERE"
         :history-empty-text="t('grid.conditionHistoryEmpty')"
@@ -377,6 +380,7 @@ onUnmounted(onResizeEnd);
         kind="orderBy"
         :columns="conditionColumns"
         :identifier-quote="identifierQuote"
+        :database-type="databaseType"
         :history-scope="historyScope"
         placeholder="ORDER BY"
         :history-empty-text="t('grid.conditionHistoryEmpty')"

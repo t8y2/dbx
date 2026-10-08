@@ -1521,6 +1521,50 @@ describe("sqlCompletion scoped context classification", () => {
     expect(items.filter((item) => item.type === "column").map((item) => item.label)).not.toContain("orders.name");
   });
 
+  it("offers the CTE name as a table candidate above fuzzy catalog matches (#8381)", () => {
+    // The reported shape: no space between `as` and `(`, cursor still inside `tm`.
+    const sql = "with tmp as(select id, c1, c2 from test.t)\nselect * from tm";
+    // Same composition the editor provider uses: the semantic layer carries the
+    // resolved CTE reference that the legacy context alone does not keep.
+    const legacy = getSqlCompletionContext(sql, sql.length);
+    const semanticContext = sqlCompletionContextFromSemantic(buildSqlSemanticModel(sql, sql.length), legacy);
+    const items = buildSqlCompletionItemsFromContext(semanticContext, {
+      tables: [{ name: "tb_market_price" }],
+      columnsByTable: new Map(),
+    });
+
+    const cteIndex = items.findIndex((item) => item.label === "tmp");
+    expect(cteIndex).toBeGreaterThanOrEqual(0);
+    expect(items[cteIndex]).toMatchObject({ type: "table" });
+    // The CTE is what the statement selects from, so it outranks a catalog table
+    // that only matched by initials.
+    expect(cteIndex).toBeLessThan(items.findIndex((item) => item.label === "tb_market_price"));
+    // The alias snippet for the relation being typed stays available, matching
+    // the document's existing alias-completion behaviour.
+    expect(items.some((item) => item.type === "snippet" && item.apply === "tm ")).toBe(true);
+  });
+
+  it("offers a star-projection CTE as a table candidate without a duplicate alias snippet", () => {
+    // `SELECT *` inside the CTE body leaves its extracted columns empty; the
+    // CTE itself must still complete as a table (#8381's most common shape).
+    const sql = "with tmp as(select * from test.t)\nselect * from tm";
+    const legacy = getSqlCompletionContext(sql, sql.length);
+    const semanticContext = sqlCompletionContextFromSemantic(buildSqlSemanticModel(sql, sql.length), legacy);
+    const items = buildSqlCompletionItemsFromContext(semanticContext, { tables: [], columnsByTable: new Map() });
+
+    expect(items.some((item) => item.type === "table" && item.label === "tmp")).toBe(true);
+    expect(items.some((item) => item.type === "snippet" && item.apply === "tmp ")).toBe(false);
+  });
+
+  it("does not offer the half-typed relation as a table candidate", () => {
+    const sql = "with tmp as(select id from test.t)\nselect * from tm";
+    const legacy = getSqlCompletionContext(sql, sql.length);
+    const semanticContext = sqlCompletionContextFromSemantic(buildSqlSemanticModel(sql, sql.length), legacy);
+    const items = buildSqlCompletionItemsFromContext(semanticContext, { tables: [], columnsByTable: new Map() });
+
+    expect(items.filter((item) => item.type === "table").map((item) => item.label)).not.toContain("tm");
+  });
+
   it("keeps the CTE body's own tables while completing inside that body", () => {
     const sql = "WITH cte AS (SELECT id, na FROM orders) SELECT * FROM cte";
     const cursor = sql.indexOf(" FROM orders");

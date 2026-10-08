@@ -86,6 +86,30 @@ and Java rather than Docker; those matrix entries explicitly retain Java 21.
 | Cassandra | 3.11.19, 5.0.6 |
 | RabbitMQ | 3.13, 4.3 |
 
+## Rust caches and build timings
+
+Linux package, clippy, Rust test and native Agent jobs use the same pinned sccache
+compiler wrappers on main and fork PRs. Main uses the existing S3 backend; jobs
+without repository secrets use sccache's local disk backend. Only backend settings
+are conditional: changing `CC` or `CXX` invalidates native build-script fingerprints
+even if a target archive was restored. The cache key retains the real compiler
+environment; only the CI selection variables are excluded. Full/fast features and
+test-group selection remain unchanged and can still require additional builds.
+
+All Rust target caches use the `v1-rust-complete` namespace and save only after a
+successful job, from main. This bypasses old partial snapshots without deleting
+caches or changing the S3 namespace. A cancelled or failed first build must not
+publish a shared snapshot: rust-cache does not update an exact cache hit, so later
+successful builds would otherwise keep restoring the unfinished snapshot.
+The first successful main run must populate the new namespace before fork PRs can
+reuse it. Target caching is not a per-commit snapshot of workspace artifacts.
+
+Clippy, nextest and native Agent nextest builds emit Cargo HTML timing reports.
+Their `DBX-*-cargo-timings` artifacts are retained for three days, including after
+failures when a report exists, but uploads do not delay cancelled runs. Inspect
+these reports alongside sccache statistics: its hit rate excludes unsupported
+crate types and does not measure the time spent compiling and linking test binaries.
+
 ## Validation
 
 Run these from the repository root:

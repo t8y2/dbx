@@ -6,10 +6,17 @@ export interface ColumnIdentity {
   increment?: number;
 }
 
+export interface ColumnGenerated {
+  /** Generation expression without the surrounding parentheses; empty means "not generated". */
+  expression: string;
+  storage?: "VIRTUAL" | "STORED";
+}
+
 export interface ColumnExtra {
   autoIncrement?: boolean;
   onUpdateCurrentTimestamp?: boolean;
   identity?: ColumnIdentity;
+  generated?: ColumnGenerated;
   manticoreIndexed?: boolean;
   manticoreStored?: boolean;
   manticoreAttribute?: boolean;
@@ -101,6 +108,10 @@ export interface BuildTableStructureChangeSqlOptions {
    * the backend rejects `CREATE INDEX CONCURRENTLY` on such tables (fail
    * closed) instead of downgrading to a blocking `CREATE INDEX`. */
   partitioned?: boolean;
+  /** The target table is a PostgreSQL foreign table (`relkind = 'f'`);
+   * PostgreSQL rejects `COMMENT ON TABLE` for these, so the backend must
+   * generate `COMMENT ON FOREIGN TABLE`. */
+  foreignTable?: boolean;
   /** When true, the connection is GaussDB M-mode which uses MySQL-compatible
    * SQL dialect with backtick quoting. */
   isGaussdbMMode?: boolean;

@@ -176,6 +176,8 @@ fn build_large_value_preview_columns(options: &TableDataSelectSqlOptions) -> Opt
         };
         let marker = if database_type == Some(DatabaseType::Mysql) {
             format!("CONCAT('{marker_kind}:{preview_size}:', LENGTH({quoted})) AS {marker_alias}")
+        } else if database_type == Some(DatabaseType::Postgres) && kind == LargeValuePreviewKind::Binary {
+            format!("'{marker_kind}:{preview_size}:' || octet_length({quoted})::text AS {marker_alias}")
         } else {
             format!("'{marker_kind}:{preview_size}' AS {marker_alias}")
         };

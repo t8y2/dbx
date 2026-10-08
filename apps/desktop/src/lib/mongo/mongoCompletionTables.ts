@@ -56,6 +56,7 @@ export const FIELD_QUERY_OPERATORS: MongoOperatorSpec[] = specs([
   ["$exists", "Matches documents that have the field", "$exists: true"],
   ["$type", "Matches documents by BSON type", '$type: "${string}"'],
   ["$regex", "Matches a regular expression", '$regex: "${pattern}"'],
+  ["$options", "Regular expression options", '$options: "${i}"'],
   ["$mod", "Matches values by modulo division", "$mod: [${divisor}, ${remainder}]"],
   ["$all", "Matches arrays containing all the values", "$all: [${}]"],
   ["$elemMatch", "Matches arrays with an element matching all criteria", "$elemMatch: { ${} }"],
@@ -329,6 +330,11 @@ export const EXPRESSION_OPERATORS: MongoOperatorSpec[] = specs([
   ["$isoWeek", "ISO week number of a date", '$isoWeek: "$${field}"'],
   ["$isoWeekYear", "ISO week-numbering year of a date", '$isoWeekYear: "$${field}"'],
   ["$isoDayOfWeek", "ISO day of the week of a date", '$isoDayOfWeek: "$${field}"'],
+  // Bitwise
+  ["$bitAnd", "Returns the bitwise AND of an array of numbers", "$bitAnd: [${}]"],
+  ["$bitOr", "Returns the bitwise OR of an array of numbers", "$bitOr: [${}]"],
+  ["$bitXor", "Returns the bitwise XOR of an array of numbers", "$bitXor: [${}]"],
+  ["$bitNot", "Returns the bitwise NOT of a number", "$bitNot: ${}"],
   // Types and misc
   ["$type", "Returns the BSON type of a value", "$type: ${}"],
   ["$convert", "Converts a value to a given type", '$convert: { input: ${}, to: "${string}" }'],
@@ -426,6 +432,10 @@ const JSON_SCHEMA_KEYWORDS: Spec[] = [
  * object of the update operator.
  */
 export const OPERATOR_SUB_KEYS: Record<string, MongoOperatorSpec[]> = {
+  roles: specs([
+    ["role", "Name of the role", 'role: "${read}"'],
+    ["db", "Database on which the role is granted", 'db: "${admin}"'],
+  ]),
   $text: specs([
     ["$search", "Words or phrases to search for", '$search: "${text}"'],
     ["$language", "Language for stemming and stop words", '$language: "${en}"'],
@@ -480,6 +490,96 @@ export const OPERATOR_SUB_KEYS: Record<string, MongoOperatorSpec[]> = {
     ["value", "Value or expression to fill with", "value: ${}"],
     ["method", "Fill method", 'method: "${linear}"'],
   ]),
+  $dateToString: specs([
+    ["date", "Date to format", 'date: "$${field}"'],
+    ["format", "Format specification string", 'format: "${%Y-%m-%d}"'],
+    ["timezone", "Timezone for formatting", 'timezone: "${UTC}"'],
+    ["onNull", "Value to return if date is null or missing", "onNull: ${}"],
+  ]),
+  $dateFromParts: specs([
+    ["year", "Calendar year", "year: ${}"],
+    ["month", "Month of year (1-12)", "month: ${}"],
+    ["day", "Day of month (1-31)", "day: ${}"],
+    ["hour", "Hour of day (0-23)", "hour: ${}"],
+    ["minute", "Minute of hour (0-59)", "minute: ${}"],
+    ["second", "Second of minute (0-59)", "second: ${}"],
+    ["millisecond", "Millisecond of second (0-999)", "millisecond: ${}"],
+    ["timezone", "Timezone for formatting", 'timezone: "${UTC}"'],
+    ["isoWeekYear", "ISO week-numbering year", "isoWeekYear: ${}"],
+    ["isoWeek", "ISO week number (1-53)", "isoWeek: ${}"],
+    ["isoDayOfWeek", "Day of week (1-7, Monday is 1)", "isoDayOfWeek: ${}"],
+  ]),
+  $dateToParts: specs([
+    ["date", "Date to convert to parts", 'date: "$${field}"'],
+    ["timezone", "Timezone for calculation", 'timezone: "${UTC}"'],
+    ["iso8601", "Whether to return ISO week date parts", "iso8601: true"],
+  ]),
+  $trim: specs([
+    ["input", "String to trim", 'input: "$${field}"'],
+    ["chars", "Characters to trim", 'chars: "${ }"'],
+  ]),
+  $ltrim: specs([
+    ["input", "String to trim", 'input: "$${field}"'],
+    ["chars", "Characters to trim", 'chars: "${ }"'],
+  ]),
+  $rtrim: specs([
+    ["input", "String to trim", 'input: "$${field}"'],
+    ["chars", "Characters to trim", 'chars: "${ }"'],
+  ]),
+  $replaceOne: specs([
+    ["input", "String to search in", 'input: "$${field}"'],
+    ["find", "String or regex to search for", 'find: "${find}"'],
+    ["replacement", "String to replace with", 'replacement: "${replacement}"'],
+  ]),
+  $replaceAll: specs([
+    ["input", "String to search in", 'input: "$${field}"'],
+    ["find", "String or regex to search for", 'find: "${find}"'],
+    ["replacement", "String to replace with", 'replacement: "${replacement}"'],
+  ]),
+  $regexMatch: specs([
+    ["input", "String to evaluate", 'input: "$${field}"'],
+    ["regex", "Regular expression to match", 'regex: "${pattern}"'],
+    ["options", "Regular expression options", 'options: "${i}"'],
+  ]),
+  $regexFind: specs([
+    ["input", "String to evaluate", 'input: "$${field}"'],
+    ["regex", "Regular expression to match", 'regex: "${pattern}"'],
+    ["options", "Regular expression options", 'options: "${i}"'],
+  ]),
+  $regexFindAll: specs([
+    ["input", "String to evaluate", 'input: "$${field}"'],
+    ["regex", "Regular expression to match", 'regex: "${pattern}"'],
+    ["options", "Regular expression options", 'options: "${i}"'],
+  ]),
+  $filter: specs([
+    ["input", "Array expression to filter", 'input: "$${field}"'],
+    ["as", "Variable name for each element", 'as: "${item}"'],
+    ["cond", "Boolean expression for each element", "cond: ${}"],
+    ["limit", "Maximum number of elements to return", "limit: ${}"],
+  ]),
+  $map: specs([
+    ["input", "Array expression to transform", 'input: "$${field}"'],
+    ["as", "Variable name for each element", 'as: "${item}"'],
+    ["in", "Expression applied to each element", "in: ${}"],
+  ]),
+  $reduce: specs([
+    ["input", "Array expression to reduce", 'input: "$${field}"'],
+    ["initialValue", "Initial value of the accumulator", "initialValue: ${}"],
+    ["in", "Expression applied to each element", "in: ${}"],
+  ]),
+  $cond: specs([
+    ["if", "Condition to evaluate", "if: ${}"],
+    ["then", "Result if condition is true", "then: ${}"],
+    ["else", "Result if condition is false", "else: ${}"],
+  ]),
+  $switch: specs([
+    ["branches", "Array of case-then branch documents", "branches: [{ case: ${}, then: ${} }]"],
+    ["default", "Default expression if no branch matches", "default: ${}"],
+  ]),
+  switchBranch: specs([
+    ["case", "Condition expression to evaluate", "case: ${}"],
+    ["then", "Result expression when case is true", "then: ${}"],
+  ]),
 };
 
 const BSON_TYPE_ALIASES: Spec[] = [
@@ -509,6 +609,24 @@ const BSON_TYPE_ALIASES: Spec[] = [
  * gets a well-formed literal; numbers do not.
  */
 export const ENUM_VALUES: Record<string, MongoOperatorSpec[]> = {
+  builtInRole: specs([
+    ["read", "Provides reading data on all non-system collections", '"read"'],
+    ["readWrite", "Provides all the privileges of the read role plus ability to modify data", '"readWrite"'],
+    ["dbAdmin", "Provides administrative tasks such as schema-related tasks", '"dbAdmin"'],
+    ["dbOwner", "Provides all privileges of readWrite, dbAdmin, and userAdmin", '"dbOwner"'],
+    ["userAdmin", "Provides ability to create and modify roles and users on the current database", '"userAdmin"'],
+    ["clusterAdmin", "Provides highest cluster-level administrative privileges", '"clusterAdmin"'],
+    ["clusterManager", "Provides management and monitoring actions", '"clusterManager"'],
+    ["clusterMonitor", "Provides read-only access to monitoring tools", '"clusterMonitor"'],
+    ["hostManager", "Provides ability to monitor and manage servers", '"hostManager"'],
+    ["backup", "Provides privileges needed to back up data", '"backup"'],
+    ["restore", "Provides privileges needed to restore data", '"restore"'],
+    ["readAnyDatabase", "Provides the same privileges as read on all databases except local and config", '"readAnyDatabase"'],
+    ["readWriteAnyDatabase", "Provides the same privileges as readWrite on all databases except local and config", '"readWriteAnyDatabase"'],
+    ["userAdminAnyDatabase", "Provides the same privileges as userAdmin on all databases except local and config", '"userAdminAnyDatabase"'],
+    ["dbAdminAnyDatabase", "Provides the same privileges as dbAdmin on all databases except local and config", '"dbAdminAnyDatabase"'],
+    ["root", "Provides access to the operations and all the resources of the readWriteAnyDatabase, dbAdminAnyDatabase, userAdminAnyDatabase, clusterAdmin, restore, and backup combined", '"root"'],
+  ]),
   $type: specs(BSON_TYPE_ALIASES),
   bsonType: specs(BSON_TYPE_ALIASES),
   $options: specs([

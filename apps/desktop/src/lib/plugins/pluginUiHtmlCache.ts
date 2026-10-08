@@ -1,9 +1,10 @@
-// The inlined plugin ui document is multiple megabytes; rebuilding it per
+// The processed plugin UI document is multiple megabytes; rebuilding it per
 // workbench instance (every dock panel, every tab) re-reads the entry through
 // the bridge and re-parses it each time. Module scope is the point: the cache
 // is shared by every PluginWorkbenchHost instance, so only the first boot of a
 // plugin version pays the read/decode/inline pipeline.
 import * as api from "@/lib/backend/api";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { COMPONENT_PLUGINS_UPDATED_EVENT } from "@/lib/updates/componentUpdateEvents";
 
 export interface PluginUiHtml {
@@ -45,7 +46,30 @@ export function clearPluginUiHtmlCache(): void {
   inFlight.clear();
 }
 
-// --- First-boot pipeline (read → decode → inline local assets) -------------
+// --- First-boot pipeline (read → decode → prepare local assets) -------------
+
+/** Base URL for packaged plugin UI resources on desktop hosts. */
+export function pluginUiAssetBaseUrl(pluginId: string, entryDirectory = ""): string | undefined {
+  if (!isTauriRuntime()) return undefined;
+  const origin = location.protocol === "http:" || location.protocol === "https:" ? `${location.protocol}//dbx-plugin.localhost/${pluginId}/` : `dbx-plugin://localhost/${pluginId}/`;
+  return entryDirectory ? `${origin}${entryDirectory}/` : origin;
+}
+
+function pluginUiAssetUrl(pluginId: string, path: string, source: string): string | undefined {
+  const baseUrl = pluginUiAssetBaseUrl(pluginId);
+  if (!baseUrl) return undefined;
+  const assetUrl = new URL(
+    path
+      .split("/")
+      .map((segment) => encodeURIComponent(segment))
+      .join("/"),
+    baseUrl,
+  );
+  const sourceUrl = new URL(source.trim(), "https://dbx-plugin.invalid/");
+  assetUrl.search = sourceUrl.search;
+  assetUrl.hash = sourceUrl.hash;
+  return assetUrl.href;
+}
 
 function localUiAssetPath(source: string): string | undefined {
   const trimmed = source.trim();
@@ -70,22 +94,39 @@ async function inlineLocalUiAssets(html: string, pluginId: string): Promise<Plug
   }
   const document = new DOMParser().parseFromString(html, "text/html");
   const resources = [...document.querySelectorAll("script[src], link[rel='stylesheet'][href]")];
-  // Dynamic-import chunks and CSS url() references live next to the entry
-  // script; its directory is the <base> the sandbox document needs to resolve
-  // them through the dbx-plugin scheme.
+  // Keep the existing first-local-resource directory for the sandbox <base>
+  // used by document-relative assets such as inlined CSS url(). External
+  // module imports resolve from their own preserved module URLs instead.
   let entryDirectory = "";
   // Fetch every referenced asset concurrently — these are bridge round-trips
   // into the sidecar, and panels reopen this path on every workbench (re)load.
   const fetched = await Promise.all(
-    resources.map((resource) => {
+    resources.map(async (resource) => {
       const source = resource.getAttribute(resource.tagName === "SCRIPT" ? "src" : "href");
       const path = source ? localUiAssetPath(source) : undefined;
-      if (!path) return Promise.resolve({ resource, content: null });
+      if (!source || !path) return { resource, content: null };
       if (!entryDirectory) entryDirectory = path.split("/").slice(0, -1).join("/");
-      return api.readPluginUiAsset(pluginId, path).then((asset) => ({
+      const isModuleScript = resource.tagName === "SCRIPT" && resource.getAttribute("type")?.trim().toLowerCase() === "module";
+      // Keep the external module URL only in packaged builds: `tauri dev` serves
+      // the app from the devUrl (http(s):), which maps module URLs onto the
+      // WebView2-only http-subdomain form that WKWebView/webkit2gtk never serve,
+      // so the entry module would fail to load at all in dev there. Dev keeps
+      // the inline fallback below (nested imports resolve relative to the
+      // srcdoc <base>, as they did before the packaged fix).
+      if (isModuleScript && import.meta.env.PROD) {
+        const url = pluginUiAssetUrl(pluginId, path, source);
+        if (url) {
+          // Keep the module's real URL: browsers resolve its static and dynamic
+          // imports from this URL, not from the srcdoc document's <base>.
+          resource.setAttribute("src", url);
+          return { resource, content: null };
+        }
+      }
+      const asset = await api.readPluginUiAsset(pluginId, path);
+      return {
         resource,
         content: new TextDecoder().decode(Uint8Array.from(atob(asset.dataBase64), (character) => character.charCodeAt(0))),
-      }));
+      };
     }),
   );
   for (const { resource, content } of fetched) {
@@ -117,7 +158,7 @@ async function inlineLocalUiAssets(html: string, pluginId: string): Promise<Plug
   return { html: document.documentElement.outerHTML, entryDirectory };
 }
 
-/** Full first-boot pipeline: read the ui entry through the bridge, decode, inline local assets. */
+/** Full first-boot pipeline: read the ui entry through the bridge, decode, and prepare local assets. */
 export async function loadPluginUiHtml(pluginId: string): Promise<PluginUiHtml> {
   const asset = await api.readPluginUiEntry(pluginId);
   const bytes = Uint8Array.from(atob(asset.dataBase64), (character) => character.charCodeAt(0));

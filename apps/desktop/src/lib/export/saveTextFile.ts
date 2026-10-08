@@ -2,7 +2,7 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { appendDebugLog, getBrowserMemorySnapshot, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { autoRevealExportedPathIfConfigured, promptExportSavePath } from "./exportPath";
 
-export async function saveTextFile(content: string, defaultFileName: string, filterName: string, filterExt: string, diagnostics: { exportId?: string; operation?: string; autoOpenFolder?: boolean } = {}): Promise<boolean> {
+export async function saveTextFile(content: string, defaultFileName: string, filterName: string, filterExt: string, diagnostics: { exportId?: string; operation?: string; autoOpenFolder?: boolean } = {}): Promise<string | boolean> {
   const logSaveStage = (stage: string, details: Record<string, unknown> = {}) => {
     if (!isDebugLoggingEnabled()) return;
     appendDebugLog("info", `[DBX][export:save:${stage}]`, {
@@ -28,7 +28,7 @@ export async function saveTextFile(content: string, defaultFileName: string, fil
     if (path && diagnostics.autoOpenFolder) {
       void autoRevealExportedPathIfConfigured(path);
     }
-    return Boolean(path);
+    return path || false;
   }
 
   const blob = new Blob([content], { type: "text/plain;charset=utf-8" });

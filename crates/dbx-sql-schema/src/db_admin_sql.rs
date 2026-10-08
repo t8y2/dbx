@@ -3102,6 +3102,7 @@ mod tests {
                 mysql_engine: None,
                 transwarp_create: None,
                 partitioned: false,
+                foreign_table: false,
                 is_gaussdb_m_mode: false,
                 table_collation: None,
             });

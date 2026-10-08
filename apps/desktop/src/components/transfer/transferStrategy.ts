@@ -60,6 +60,11 @@ export function transferPreviewSql(preview: TransferOwnershipPreview): string {
   return preview.rebuild?.sql ?? "";
 }
 
+/** Production review keeps the human-readable plan ahead of the exact SQL preview. */
+export function transferPlanReviewText(strategy: string, summary: string, preview: TransferOwnershipPreview): string {
+  return [strategy, summary, transferPreviewSql(preview)].filter(Boolean).join("\n\n");
+}
+
 /** Whether this preview has SQL the user must review in a read-only confirmation. */
 export function hasTransferSqlPreview(preview: TransferOwnershipPreview): boolean {
   return Boolean(preview.rebuild || preview.structure);

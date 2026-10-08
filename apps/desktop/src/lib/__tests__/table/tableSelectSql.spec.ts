@@ -239,6 +239,20 @@ describe("tableMetaWithoutOptionalDatabaseQualifier — copy extractors (#9326)"
     expect(tableMetaWithoutOptionalDatabaseQualifier({ schema: "public", tableName: "users" }, "postgres", false)).toEqual({ schema: undefined, tableName: "users" });
   });
 
+  it("covers the copy-SQL dialects reported in #11195", () => {
+    // Dameng exposes schemas as databases; a copied INSERT/UPDATE must still be
+    // able to opt into the schema prefix, so the qualifier only drops when the
+    // extractor option is off.
+    const damengMeta = { schema: "SYSDBA", tableName: "PEOPLE" };
+    expect(tableMetaWithoutOptionalDatabaseQualifier(damengMeta, "dameng", false)).toEqual({ schema: undefined, tableName: "PEOPLE" });
+    expect(tableMetaWithoutOptionalDatabaseQualifier(damengMeta, "dameng", true)).toBe(damengMeta);
+    // MySQL family and ClickHouse address tables as database.table.
+    const clickhouseMeta = { database: "analytics", tableName: "events" };
+    expect(tableMetaWithoutOptionalDatabaseQualifier(clickhouseMeta, "clickhouse", false)).toEqual({ database: undefined, tableName: "events" });
+    expect(tableMetaWithoutOptionalDatabaseQualifier(clickhouseMeta, "clickhouse", true)).toBe(clickhouseMeta);
+    expect(tableMetaWithoutOptionalDatabaseQualifier({ database: "appdb", tableName: "people" }, "goldendb", false)).toEqual({ database: undefined, tableName: "people" });
+  });
+
   it("returns undefined tableMeta unchanged", () => {
     expect(tableMetaWithoutOptionalDatabaseQualifier(undefined, "mysql", false)).toBeUndefined();
   });

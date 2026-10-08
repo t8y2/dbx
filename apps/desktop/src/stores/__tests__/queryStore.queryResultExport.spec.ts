@@ -102,6 +102,93 @@ describe("queryStore query result export", () => {
     expect(request?.insertMode).toBe("single");
   });
 
+  it("keeps query execution schema separate from the resolved Oracle INSERT owner", async () => {
+    mocks.getConfig.mockReturnValue({
+      id: "oracle-1",
+      name: "Oracle",
+      db_type: "oracle",
+      database: "ORCLPDB1",
+      default_schema: "CURRENT_USER",
+      query_timeout_secs: 30,
+    });
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCLPDB1", "Query", "query", "CURRENT_USER", "SELECT ID FROM APP_OWNER.USERS");
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    tab.lastExecutedSql = tab.sql;
+    tab.result = {
+      columns: ["ID"],
+      rows: [[1]],
+      affected_rows: 0,
+      execution_time_ms: 1,
+    };
+    tab.tableMeta = { schema: "APP_OWNER", tableName: "USERS", columns: [], primaryKeys: ["ID"] };
+    tab.queryAnalysis = {
+      schema: "APP_OWNER",
+      tableName: "USERS",
+      selectStar: false,
+      sources: [{ key: "USERS:0", schema: "APP_OWNER", tableName: "USERS" }],
+      columns: [{ sourceName: "ID", resultName: "ID", expression: "ID" }],
+    };
+
+    const request = await store.buildQueryResultExportRequest(tabId, {
+      exportId: "oracle-owner-export",
+      filePath: "users.sql",
+      format: "sql",
+      exportTableName: "USERS",
+      exportSchema: "APP_OWNER",
+    });
+
+    expect(request).toMatchObject({
+      databaseType: "oracle",
+      database: "ORCLPDB1",
+      schema: "CURRENT_USER",
+      exportSchema: "APP_OWNER",
+      exportTableName: "USERS",
+    });
+  });
+
+  it("does not use a first source as the INSERT target of a multi-source query", async () => {
+    mocks.getConfig.mockReturnValue({
+      id: "oracle-1",
+      name: "Oracle",
+      db_type: "oracle",
+      database: "ORCLPDB1",
+      default_schema: "CURRENT_USER",
+      query_timeout_secs: 30,
+    });
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCLPDB1", "Query", "query", "CURRENT_USER", "SELECT U.ID FROM APP_OWNER.USERS U JOIN APP_OWNER.ORDERS O ON O.USER_ID = U.ID");
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    tab.lastExecutedSql = tab.sql;
+    tab.result = { columns: ["ID"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 };
+    tab.tableMeta = { schema: "APP_OWNER", tableName: "USERS", columns: [], primaryKeys: ["ID"] };
+    tab.queryAnalysis = {
+      schema: "APP_OWNER",
+      tableName: "USERS",
+      selectStar: false,
+      multiSource: true,
+      sources: [
+        { key: "USERS:0", schema: "APP_OWNER", tableName: "USERS" },
+        { key: "ORDERS:1", schema: "APP_OWNER", tableName: "ORDERS" },
+      ],
+      columns: [{ sourceName: "ID", resultName: "ID", expression: "U.ID" }],
+    };
+
+    const request = await store.buildQueryResultExportRequest(tabId, {
+      exportId: "oracle-join-export",
+      filePath: "query.sql",
+      format: "sql",
+      exportTableName: "USERS",
+      exportSchema: "APP_OWNER",
+    });
+
+    expect(request?.schema).toBe("CURRENT_USER");
+    expect(request?.exportTableName).toBeUndefined();
+    expect(request?.exportSchema).toBeUndefined();
+  });
+
   it("uses the Agent cursor for SQL Server legacy result export", async () => {
     mocks.getConfig.mockReturnValue({
       id: "sqlserver-2000",

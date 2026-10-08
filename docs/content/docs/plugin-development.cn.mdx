@@ -274,7 +274,7 @@ context-menu 也可以声明由 Host 处理的 Workbench action：
 
 同一插件内通过 `id` 互相引用：Connection Provider 的 `workbench` 必须指向一个已声明的工作台，`filesystem_provider` 必须指向一个已声明的文件系统 Provider。图标优先使用 Contribution 的 `icon`，缺失时回退到插件级 `icon`。
 
-自定义文件浏览器应使用 `workbench`：列表、虚拟滚动、预览、右键菜单和分栏由插件前端实现。只有希望使用 DBX 通用文件管理器时才选择 `filesystem_provider`；同时声明两者时默认打开工作台。未声明 `action` 的旧式 `context-menu` 调用后端 `contextMenu/<contribution-id>`；声明式 `open-workbench` action 则由 Host 直接打开同插件 Workbench。`result-view` 在工作台 context 中接收结果快照，被打开的 contribution id 会通过 `dbx-plugin-init` 负载下发，因此单个 UI 入口可以为多个工作台和结果视图服务；具体负载见[完整贡献点协议](https://github.com/t8y2/dbx/blob/main/plugins/README.md)。
+自定义文件浏览器应使用 `workbench`：列表、虚拟滚动、预览、右键菜单和分栏由插件前端实现。只有希望使用 DBX 通用文件管理器时才选择 `filesystem_provider`；同时声明两者时默认打开工作台。未声明 `action` 的旧式 `context-menu` 调用后端 `contextMenu/<contribution-id>`；声明式 `open-workbench` action 则由 Host 直接打开同插件 Workbench。`result-view` 在工作台 context 中接收结果快照。SDK 会在初始化后通过 `dbxPlugin.contributionId` 暴露 Host 选中的 contribution id，因此单个 UI 入口可以为多个工作台和结果视图服务；具体负载见[完整贡献点协议](https://github.com/t8y2/dbx/blob/main/plugins/README.md)。
 
 ### 文件系统协议
 
@@ -327,11 +327,21 @@ Workbench 上下文跨越 DBX 与插件边界时是 JSON 数据快照。宿主�
 
 UI 在隔离的 iframe 中运行，DBX 通过 `window.dbxPlugin` 提供桥接对象。不要导入 DBX 的 Vue/Tauri 模块，也不要假设浏览器页面能直接访问 Node.js、文件系统或网络。
 
+多个 Workbench 或 result-view contribution 共用同一个 UI 入口时，可通过 Host 选中的 identity 路由页面：
+
+```js
+await window.dbxPlugin.ready;
+const contributionId = window.dbxPlugin.contributionId;
+```
+
+`contributionId` 与 `context` 相互独立；例如从 Plugin Center 打开的 Workbench，其 context 可以是空对象 `{}`。SDK 会在 resolve `ready` 前记录 identity，因此 `await dbxPlugin.ready` 后可确定性地读取。为兼容旧插件，`dbx-plugin-init` 仍会携带完整 init payload 并作为通知派发；但该事件只派发一次，不应成为读取权威状态的唯一来源。
+
 以下自定义 `objects/list` 和 `objects/changed` 需要由插件后端实现，资源示例假设包内存在 `ui/assets/empty-state.svg`：
 
 ```js
 await window.dbxPlugin.ready;
 
+const contributionId = window.dbxPlugin.contributionId;
 const context = window.dbxPlugin.context;
 const result = await window.dbxPlugin.invoke("objects/list", { prefix: "docs/" }, { timeoutMs: 30000 });
 const off = window.dbxPlugin.onContext((nextContext) => render(nextContext));
@@ -343,6 +353,7 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | API | 作用 |
 | --- | --- |
 | `ready` | 等待 Host 完成初始化；应用启动逻辑放在 `await dbxPlugin.ready` 之后。 |
+| `contributionId` | Host 打开的 contribution 的只读 identity；`await ready` 后可读取，且与 `context` 独立。 |
 | `context` / `onContext(fn)` | 读取或监听当前工作台上下文。 |
 | `locale` | 读取当前语言；插件 UI 需自行完成翻译。 |
 | `theme` | 读取 `appearance` 和 DBX 设计 tokens，适配明暗主题。 |

@@ -72,6 +72,10 @@ const DESKTOP_DEVICE_LOCAL_SETTINGS: &[&str] = &[
     // An OS login-item registration only exists on the machine that made it;
     // syncing the flag would silently register DBX on every other device.
     "launch_at_login",
+    // Device-local like the two above: it gates which of *this* device's skill
+    // files reach the prompt, so a synced "on" would inject another machine's
+    // catalog here.
+    "custom_ai_skill_auto_enabled",
 ];
 const NON_SYNCABLE_DESKTOP_SETTINGS: &[&str] = &["debug_logging_enabled"];
 const NON_SYNCABLE_EDITOR_SETTINGS: &[&str] = &[
@@ -93,6 +97,11 @@ pub struct WebDavConfig {
     pub username: Option<String>,
     pub password: Option<String>,
     pub remote_path: Option<String>,
+    /// Optional User-Agent override for WebDAV gateways that only allow
+    /// specific client applications. When empty no User-Agent is sent,
+    /// matching the long-standing default behavior.
+    #[serde(default)]
+    pub user_agent: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -957,6 +966,7 @@ fn syncable_desktop_settings(mut settings: DesktopSettings) -> DesktopSettings {
     settings.agent_store_dir = None;
     settings.custom_ai_skill_root_enabled = false;
     settings.custom_ai_skill_root = None;
+    settings.custom_ai_skill_auto_enabled = false;
     settings.debug_logging_enabled = false;
     settings
 }
@@ -1787,6 +1797,10 @@ impl WebDavClient {
         let builder = Client::builder();
         let builder =
             if webdav_endpoint_uses_direct_connection(&config.endpoint) { builder.no_proxy() } else { builder };
+        let builder = match config.user_agent.as_deref().map(str::trim).filter(|ua| !ua.is_empty()) {
+            Some(user_agent) => builder.user_agent(user_agent),
+            None => builder,
+        };
         let http = builder.build().expect("failed to build WebDAV HTTP client");
         Self { http, config }
     }
@@ -3425,6 +3439,29 @@ mod tests {
         (format!("http://{address}/"), server)
     }
 
+    /// Single-request WebDAV server that returns the complete request head
+    /// (request line plus headers) instead of just the request line.
+    async fn spawn_webdav_request_capture_server() -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = socket.read(&mut chunk).await.unwrap();
+                assert!(read > 0, "request ended before headers were complete");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let response = "HTTP/1.1 207 Multi-Status\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            socket.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        (format!("http://{address}/"), server)
+    }
+
     fn github_snippet_response(content: &str) -> String {
         serde_json::json!({
             "files": { DEFAULT_SNIPPET_FILE_NAME: { "content": content } }
@@ -3491,6 +3528,7 @@ mod tests {
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_filter: None,
             redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
@@ -3577,6 +3615,7 @@ mod tests {
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_filter: None,
             redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
@@ -3678,6 +3717,7 @@ mod tests {
             username: None,
             password: None,
             remote_path: Some("DBX-home/sync/snapshot.json".to_string()),
+            user_agent: None,
         });
 
         client.put_snapshot(&snapshot).await.unwrap();
@@ -3703,6 +3743,7 @@ mod tests {
             username: None,
             password: None,
             remote_path: Some("DBX-home/sync/snapshot.json".to_string()),
+            user_agent: None,
         });
 
         client.put_snapshot(&snapshot).await.unwrap();
@@ -3728,6 +3769,7 @@ mod tests {
             username: None,
             password: None,
             remote_path: Some("DBX-home/sync/snapshot.json".to_string()),
+            user_agent: None,
         });
 
         let error = client.put_snapshot(&snapshot).await.unwrap_err();
@@ -3746,6 +3788,7 @@ mod tests {
             username: None,
             password: None,
             remote_path: Some("snapshot.json".to_string()),
+            user_agent: None,
         });
 
         client.put_snapshot(&snapshot).await.unwrap();
@@ -3761,11 +3804,47 @@ mod tests {
             username: None,
             password: None,
             remote_path: Some("DBX-home/sync/snapshot.json".to_string()),
+            user_agent: None,
         });
 
         client.test().await.unwrap();
 
         assert_eq!(server.await.unwrap(), vec!["PROPFIND / HTTP/1.1"]);
+    }
+
+    #[tokio::test]
+    async fn webdav_requests_send_configured_user_agent() {
+        let (endpoint, server) = spawn_webdav_request_capture_server().await;
+        let client = WebDavClient::new(WebDavConfig {
+            endpoint,
+            username: None,
+            password: None,
+            remote_path: None,
+            user_agent: Some("Zotero/7.0.15".to_string()),
+        });
+
+        client.test().await.unwrap();
+
+        let request = server.await.unwrap();
+        assert!(request.starts_with("PROPFIND / "));
+        assert!(request.lines().any(|line| line.eq_ignore_ascii_case("user-agent: Zotero/7.0.15")));
+    }
+
+    #[tokio::test]
+    async fn webdav_requests_omit_user_agent_by_default() {
+        let (endpoint, server) = spawn_webdav_request_capture_server().await;
+        let client = WebDavClient::new(WebDavConfig {
+            endpoint,
+            username: None,
+            password: None,
+            remote_path: None,
+            user_agent: None,
+        });
+
+        client.test().await.unwrap();
+
+        let request = server.await.unwrap();
+        assert!(!request.to_ascii_lowercase().contains("user-agent:"));
     }
 
     #[test]
@@ -3848,6 +3927,7 @@ mod tests {
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_filter: None,
             redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
@@ -4665,6 +4745,7 @@ mod tests {
             username: Some("alice".to_string()),
             password: None,
             remote_path: None,
+            user_agent: None,
         };
         let snippet = SnippetSyncConfig {
             provider: SnippetProvider::GitHub,
@@ -4843,6 +4924,7 @@ mod tests {
             username: Some("alice".to_string()),
             password: None,
             remote_path: Some("DBX/sync/snapshot.json".to_string()),
+            user_agent: None,
         };
         save_webdav_password(&source, &webdav, "webdav-secret").await.unwrap();
         let snippet = SnippetSyncConfig {
@@ -5282,6 +5364,7 @@ mod tests {
             username: None,
             password: None,
             remote_path: Some("snapshot.json".to_string()),
+            user_agent: None,
         });
         client.put_snapshot(&snapshot).await.unwrap();
         let (downloaded, _) = client.get_snapshot().await.unwrap();

@@ -31,6 +31,6 @@ capabilities:
   sqlFileExecution: true
   databaseCreate: false
   fieldLineage: false
-  sqlExplain: false
+  sqlExplain: true
   userAdmin: true
   driverManagement: true

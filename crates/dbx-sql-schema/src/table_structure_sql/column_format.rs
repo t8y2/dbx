@@ -53,8 +53,7 @@ pub(super) fn column_definition(dialect: StructureDialect, column: &EditableStru
             parts.push(format!("COLLATE {}", quote_ident(dialect, &column.collation)));
         }
     }
-    let mysql_generated_clause =
-        (dialect == StructureDialect::Mysql).then(|| original_mysql_generated_clause(column)).flatten();
+    let mysql_generated_clause = (dialect == StructureDialect::Mysql).then(|| mysql_generated_clause(column)).flatten();
     if let Some(generated_clause) = mysql_generated_clause.as_ref() {
         parts.push(generated_clause.clone());
     }
@@ -76,6 +75,13 @@ pub(super) fn column_definition(dialect: StructureDialect, column: &EditableStru
     if mysql_generated_clause.is_none() && !default_value.is_empty() {
         parts.push(format!("DEFAULT {}", format_default_for_sql(dialect, &column.data_type, &default_value)));
     }
+    // Oracle's column grammar is `col type [DEFAULT expr] [NOT NULL]`, so NOT NULL is skipped
+    // above and appended here, after DEFAULT, matching `build_create_table_sql` (t8y2/dbx#9477).
+    // Without it `ADD (...)` silently created a nullable column (t8y2/dbx#11234). A primary key
+    // column stays without it because the follow-up `ADD PRIMARY KEY` already enforces NOT NULL.
+    if dialect == StructureDialect::Oracle && !column.is_nullable && !column.is_primary_key {
+        parts.push("NOT NULL".to_string());
+    }
     if mysql_generated_clause.is_none() {
         if let Some(on_update) = column.extra.as_ref().and_then(|e| e.on_update_current_timestamp).filter(|v| *v) {
             if on_update && dialect == StructureDialect::Mysql {
@@ -89,6 +95,132 @@ pub(super) fn column_definition(dialect: StructureDialect, column: &EditableStru
         parts.push(format!("COMMENT {}", quote_string(&clean(&column.comment))));
     }
     parts.join(" ")
+}
+
+/// Renders the MySQL `GENERATED ALWAYS AS (...) ...` clause for a column.
+///
+/// The edited `extra.generated` value wins when present: an empty expression
+/// removes the generated-column attribute (rendering no clause), otherwise the
+/// clause is rebuilt from the edited expression and storage. When the field is
+/// absent (legacy payloads) the clause is inherited from the original
+/// definition so untouched generated columns round-trip verbatim.
+pub(super) fn mysql_generated_clause(column: &EditableStructureColumn) -> Option<String> {
+    match column.extra.as_ref().and_then(|extra| extra.generated.as_ref()) {
+        Some(generated) => render_mysql_generated_clause(&generated.expression, generated.storage.as_deref()),
+        None => original_mysql_generated_clause(column),
+    }
+}
+
+fn render_mysql_generated_clause(expression: &str, storage: Option<&str>) -> Option<String> {
+    let expression = strip_outer_parentheses(expression.trim());
+    if expression.is_empty() {
+        return None;
+    }
+    let storage = normalize_mysql_generated_storage(storage);
+    Some(format!("GENERATED ALWAYS AS ({expression}) {storage}"))
+}
+
+/// Removes one pair of enclosing parentheses when they wrap the whole
+/// expression, so a user-entered `(a + b)` does not render as `AS ((a + b))`.
+/// Edit detection strips the same single layer before comparing, so typing
+/// wrapping parentheses by hand does not register a spurious `MODIFY`.
+pub(super) fn strip_outer_parentheses(expression: &str) -> &str {
+    let trimmed = expression.trim();
+    if !trimmed.starts_with('(') || !trimmed.ends_with(')') {
+        return trimmed;
+    }
+    let mut depth = 0i32;
+    for (index, ch) in trimmed.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 && index != trimmed.len() - 1 {
+                    // The first pair closes before the end: not a full wrap.
+                    return trimmed;
+                }
+            }
+            _ => {}
+        }
+    }
+    trimmed[1..trimmed.len() - 1].trim()
+}
+
+/// MariaDB reports `PERSISTENT`, which is an alias of `STORED`; introspection
+/// already normalizes it, and unknown values fall back to the MySQL default.
+pub(super) fn normalize_mysql_generated_storage(storage: Option<&str>) -> &'static str {
+    match storage.map(str::trim).unwrap_or("").to_ascii_lowercase().as_str() {
+        "stored" | "persistent" => "STORED",
+        _ => "VIRTUAL",
+    }
+}
+
+/// Normalizes a generation expression for edit detection: whitespace is
+/// collapsed and keywords/identifiers compare case-insensitively, while the
+/// contents of quoted string literals ('...' and "...") keep their exact
+/// spelling — a user editing only the case of a literal ('Yes' → 'yes') must
+/// still register as a change, because MySQL stores and evaluates that
+/// difference verbatim.
+pub(super) fn normalize_generation_expression(expression: &str) -> String {
+    let mut normalized = String::with_capacity(expression.len());
+    let mut chars = expression.chars().peekable();
+    let mut pending_space = false;
+    while let Some(ch) = chars.next() {
+        // MySQL treats double quotes as string quotes unless ANSI_QUOTES is
+        // enabled; either way the quoted text must keep its exact spelling.
+        if ch == '\'' || ch == '"' {
+            if pending_space && !normalized.is_empty() {
+                normalized.push(' ');
+            }
+            pending_space = false;
+            normalized.push(ch);
+            // Copy the quoted text verbatim; a doubled quote is an escape inside it.
+            while let Some(quoted_ch) = chars.next() {
+                normalized.push(quoted_ch);
+                if quoted_ch == ch {
+                    if chars.peek() == Some(&ch) {
+                        normalized.push(chars.next().expect("peeked escaped quote"));
+                    } else {
+                        break;
+                    }
+                }
+            }
+        } else if ch.is_whitespace() {
+            pending_space = !normalized.is_empty();
+        } else {
+            if pending_space && !normalized.is_empty() {
+                normalized.push(' ');
+            }
+            pending_space = false;
+            normalized.extend(ch.to_lowercase());
+        }
+    }
+    normalized
+}
+
+/// Parses a MySQL generated-column clause out of a raw `extra` string into
+/// (whitespace-normalized lowercase expression, normalized storage), so edit
+/// detection can compare drafts against the introspected definition.
+pub(super) fn original_mysql_generated_values(extra: &str) -> Option<(String, &'static str)> {
+    let lower = extra.to_ascii_lowercase();
+    let marker = "generated always as";
+    let start = lower.find(marker)? + marker.len();
+    let rest = extra[start..].trim_start();
+    let expression = rest.strip_prefix('(')?;
+    let close = expression.rfind(')')?;
+    let expression = strip_outer_parentheses(expression[..close].trim());
+    if expression.is_empty() {
+        return None;
+    }
+    let normalized = normalize_generation_expression(expression);
+    // `close` indexes the stripped string where `rest` keeps the leading
+    // parenthesis, so the text after `)` starts one byte later in `rest`.
+    let tail = rest[close + 2..].trim().to_ascii_lowercase();
+    let storage = match tail.split_whitespace().next() {
+        Some(token) => normalize_mysql_generated_storage(Some(token)),
+        None => "VIRTUAL",
+    };
+    Some((normalized, storage))
 }
 
 pub(super) fn original_mysql_generated_clause(column: &EditableStructureColumn) -> Option<String> {

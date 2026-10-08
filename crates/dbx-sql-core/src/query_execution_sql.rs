@@ -83,6 +83,7 @@ enum EstimatedPlanSqlGeneration {
     Postgres,
     Mysql,
     Plain,
+    Xugu,
     Oracle,
     SqlServer,
     Json,
@@ -129,6 +130,14 @@ pub fn build_explain_sql(options: ExplainSqlOptions) -> ExplainSqlBuildResult {
     if !is_safe_explain_sql_for_database(&source, options.database_type) {
         return explain_err("unsafe");
     }
+    if options.database_type == Some(DatabaseType::Xugu) {
+        // Xugu's documented SELECT forms; do not inherit PG-only TABLE/VALUES
+        // shortcuts or permit DML/Autotrace in the first visual-plan implementation.
+        let leading = strip_sql_comments(&source).trim_start().to_lowercase();
+        if !["select", "with"].iter().any(|keyword| starts_with_explain_keyword_boundary(&leading, keyword)) {
+            return explain_err("unsafe");
+        }
+    }
     if options.analyze == Some(true)
         && options.database_type.is_some_and(|database_type| {
             matches!(database_type, DatabaseType::Postgres | DatabaseType::SqlServer)
@@ -149,6 +158,7 @@ pub fn build_explain_sql(options: ExplainSqlOptions) -> ExplainSqlBuildResult {
         }
         EstimatedPlanSqlGeneration::Postgres => format!("EXPLAIN (FORMAT JSON) {source}"),
         EstimatedPlanSqlGeneration::Plain => format!("EXPLAIN {source}"),
+        EstimatedPlanSqlGeneration::Xugu => format!("EXPLAIN VERBOSE {source}"),
         EstimatedPlanSqlGeneration::Oracle => format!("EXPLAIN PLAN FOR {source}"),
         // STATISTICS XML returns the same ShowPlanXML document plus per-operator
         // runtime counters, at the price of actually running the statement.
@@ -192,11 +202,12 @@ pub fn build_dropped_file_preview_sql(options: DroppedFilePreviewSqlOptions) -> 
 pub fn estimated_plan_strategy(database_type: Option<DatabaseType>) -> Option<EstimatedPlanStrategy> {
     use EstimatedPlanAcquisition::{DriverNative, GeneratedSql, SqlServerShowPlanSession};
     use EstimatedPlanFormat::{Json, Text, Xml};
-    use EstimatedPlanSqlGeneration::{Mysql, Oracle, Plain, Postgres, SqlServer};
+    use EstimatedPlanSqlGeneration::{Mysql, Oracle, Plain, Postgres, SqlServer, Xugu};
 
     let strategy = match database_type? {
         DatabaseType::Mysql => EstimatedPlanStrategy { sql_generation: Mysql, acquisition: GeneratedSql, format: Json },
         DatabaseType::Doris => EstimatedPlanStrategy { sql_generation: Plain, acquisition: GeneratedSql, format: Text },
+        DatabaseType::Xugu => EstimatedPlanStrategy { sql_generation: Xugu, acquisition: GeneratedSql, format: Text },
         DatabaseType::Postgres => {
             EstimatedPlanStrategy { sql_generation: Postgres, acquisition: GeneratedSql, format: Json }
         }
@@ -1515,6 +1526,59 @@ mod tests {
     }
 
     #[test]
+    fn builds_xugu_verbose_text_explain_without_executing_the_query() {
+        for sql in [
+            "SELECT * FROM \"APP_TEST\".\"ORDERS\" WHERE id = 1",
+            "WITH q AS (SELECT 1 FROM DUAL) SELECT * FROM q",
+            "/* plan */ SELECT 1 FROM DUAL",
+            "SELECT 'DELETE; DROP TABLE x' FROM DUAL",
+        ] {
+            for analyze in [None, Some(false), Some(true)] {
+                let result = build_explain_sql(ExplainSqlOptions {
+                    database_type: Some(DatabaseType::Xugu),
+                    format: Some(ExplainFormat::Json),
+                    analyze,
+                    sql: format!(" {sql}; "),
+                });
+                assert_eq!(result.sql.as_deref(), Some(format!("EXPLAIN VERBOSE {sql}").as_str()));
+                assert!(result.ok);
+            }
+        }
+        assert_eq!(estimated_plan_format(Some(DatabaseType::Xugu)), EstimatedPlanFormat::Text);
+        assert_eq!(
+            estimated_plan_strategy(Some(DatabaseType::Xugu)).unwrap().acquisition(),
+            EstimatedPlanAcquisition::GeneratedSql
+        );
+    }
+
+    #[test]
+    fn xugu_explain_rejects_writes_multiple_statements_and_unsupported_forms() {
+        for sql in [
+            "DELETE FROM t",
+            "UPDATE t SET a = 1",
+            "INSERT INTO t VALUES (1)",
+            "MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET t.a = 1",
+            "SELECT 1; DROP TABLE t",
+            "WITH q AS (DELETE FROM t RETURNING *) SELECT * FROM q",
+            "WITH FUNCTION f RETURN INT IS BEGIN RETURN 1; END; SELECT f() FROM DUAL",
+            "EXPLAIN SELECT 1",
+            "TABLE t",
+            "VALUES (1)",
+            "SELECTED",
+            "",
+        ] {
+            let result = build_explain_sql(ExplainSqlOptions {
+                database_type: Some(DatabaseType::Xugu),
+                format: None,
+                analyze: None,
+                sql: sql.to_string(),
+            });
+            assert!(!result.ok, "unsafe Xugu explain source: {sql}");
+            assert!(result.sql.is_none());
+        }
+    }
+
+    #[test]
     fn builds_postgres_json_explain_sql() {
         let result = build_explain_sql(ExplainSqlOptions {
             database_type: Some(DatabaseType::Postgres),
@@ -1845,6 +1909,7 @@ mod tests {
         let cases = [
             (DatabaseType::Mysql, "EXPLAIN FORMAT=JSON SELECT 1", Json, GeneratedSql),
             (DatabaseType::Doris, "EXPLAIN SELECT 1", Text, GeneratedSql),
+            (DatabaseType::Xugu, "EXPLAIN VERBOSE SELECT 1", Text, GeneratedSql),
             (DatabaseType::Postgres, "EXPLAIN (FORMAT JSON) SELECT 1", Json, GeneratedSql),
             (DatabaseType::Questdb, "EXPLAIN SELECT 1", Text, GeneratedSql),
             (DatabaseType::Dameng, "EXPLAIN SELECT 1", Text, DriverNative),

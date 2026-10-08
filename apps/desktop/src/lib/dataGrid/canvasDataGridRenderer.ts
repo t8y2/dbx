@@ -80,6 +80,8 @@ export interface DrawCanvasDataGridOptions {
   editingCell: CanvasEditingCell | null;
   searchMatchKeys: ReadonlySet<number>;
   currentSearchMatch: CanvasSearchMatch | null;
+  duplicateHighlightKeys?: ReadonlySet<number>;
+  nullHighlightKeys?: ReadonlySet<number>;
   formatCell: (value: CellValue, columnIndex: number, row: CanvasDataGridRow) => string;
   isNullValue?: (value: CellValue) => boolean;
   columnIsBoolean?: (columnIndex: number) => boolean;
@@ -124,6 +126,8 @@ interface CanvasRenderState {
   searchFill: string;
   currentSearchFill: string;
   currentSearchBorder: string;
+  duplicateHighlightFill: string;
+  nullHighlightFill: string;
 }
 
 export interface CanvasBackingStoreMetrics {
@@ -341,6 +345,8 @@ function resolveCanvasRenderState(canvas: HTMLCanvasElement, isDark: boolean, st
     searchFill: isDark ? DATA_GRID_DARK_SEARCH_COLORS.match : theme.cellSearch,
     currentSearchFill: isDark ? DATA_GRID_DARK_SEARCH_COLORS.current : theme.cellCurrentSearch,
     currentSearchBorder: isDark ? DATA_GRID_DARK_SEARCH_COLORS.currentBorder : theme.cellCurrentSearchBorder,
+    duplicateHighlightFill: isDark ? "rgba(245, 158, 11, 0.25)" : "rgb(254, 237, 204)",
+    nullHighlightFill: isDark ? "rgba(14, 165, 233, 0.25)" : "rgb(224, 242, 254)",
   };
   canvasRenderStateCache.set(canvas, state);
   return state;
@@ -367,6 +373,8 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions): boolean 
     editingCell,
     searchMatchKeys,
     currentSearchMatch,
+    duplicateHighlightKeys,
+    nullHighlightKeys,
     formatCell,
     isNullValue,
     newRowCellPlaceholder,
@@ -419,7 +427,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions): boolean 
   ctx.imageSmoothingEnabled = false;
   ctx.clearRect(0, 0, width, height);
 
-  const { normalFont, tabularFont, semiboldFont, italicFont, theme, searchFill, currentSearchFill, currentSearchBorder } = resolveCanvasRenderState(canvas, isDark, styleKey);
+  const { normalFont, tabularFont, semiboldFont, italicFont, theme, searchFill, currentSearchFill, currentSearchBorder, duplicateHighlightFill, nullHighlightFill } = resolveCanvasRenderState(canvas, isDark, styleKey);
 
   const scrollTop = scroller.scrollTop;
   const scrollLeft = scroller.scrollLeft;
@@ -442,6 +450,8 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions): boolean 
   const firstCol = firstVisibleColumn(offsets, Math.max(0, contentStart - maxPreviewRightShift));
   const columnOffset = offsets[firstCol] ?? 0;
   const paintSearchMatches = !isScrolling && searchMatchKeys.size > 0;
+  const paintDuplicateHighlights = !isScrolling && duplicateHighlightKeys !== undefined && duplicateHighlightKeys.size > 0;
+  const paintNullHighlights = !isScrolling && nullHighlightKeys !== undefined && nullHighlightKeys.size > 0;
   const rowNumberBorderX = crispCanvasLine(rowNumberWidth - 1, scaleX);
   const rowNumberTextX = alignCanvasPixel(Math.max(0, rowNumberWidth - 1) / 2, scaleX);
   const rowTextOffsetY = alignCanvasPixel(CANVAS_DATA_GRID_ROW_HEIGHT / 2, scaleY);
@@ -550,6 +560,8 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions): boolean 
       const selectedBorderVisual = !selectedCell ? false : suppressAllSelectedCellBorders ? false : paintSelectionOuterFrame ? dataGridSelectionFrameKindAtCell(selectionFrames, item.displayIndex, visibleColIdx) !== "range" : true;
       const isSearchMatch = paintSearchMatches && searchMatchKeys.has(dataGridSearchMatchKey(item.displayIndex, actualColIdx));
       const isCurrentSearchMatch = paintSearchMatches && currentSearchMatch?.displayRow === item.displayIndex && currentSearchMatch.col === actualColIdx;
+      const isDuplicateHighlight = paintDuplicateHighlights && duplicateHighlightKeys.has(dataGridSearchMatchKey(item.displayIndex, actualColIdx));
+      const isNullHighlight = !isDuplicateHighlight && paintNullHighlights && nullHighlightKeys.has(dataGridSearchMatchKey(item.displayIndex, actualColIdx));
       const clippedX = Math.max(drawX, rowNumberWidth);
       const cellPaintWidth = Math.min(width, drawX + colWidth) - clippedX;
       if (cellPaintWidth <= 0) return;
@@ -574,6 +586,13 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions): boolean 
       }
       if (selectedFillVisual && isDirtyCell) {
         ctx.fillStyle = theme.cellSelectedDirty;
+        ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
+      }
+      if (isDuplicateHighlight) {
+        ctx.fillStyle = duplicateHighlightFill;
+        ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
+      } else if (isNullHighlight) {
+        ctx.fillStyle = nullHighlightFill;
         ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
       }
       if (isSearchMatch) {

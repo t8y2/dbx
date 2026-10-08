@@ -32,6 +32,8 @@ import {
 import { importPreviewInput, importSourceDisplayName, uploadedImportSourceFromPreview } from "@/lib/import/importSource";
 import { getDataTypeOptions } from "@/lib/table/tableStructureEditorState";
 import { metadataSchemaForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { isSchemaAware } from "@/lib/database/databaseFeatureSupport";
+import { schemaOptionsForConnection } from "@/composables/useSchemaOptions";
 import type { ColumnInfo, DatabaseType } from "@/types/database";
 import * as api from "@/lib/backend/api";
 
@@ -185,7 +187,21 @@ const importFileExtensions = computed(() => ["csv", "tsv", "txt", "json", "xlsx"
 // ordinary INSERT/error behavior instead of approximating an upsert.
 const IMPORT_CONFLICT_DATABASE_TYPES = new Set<DatabaseType>(["postgres", "kingbase", "opengauss", "sqlite", "cloudflare-d1", "duckdb", "mysql", "doris", "starrocks"]);
 const supportsImportConflictPolicy = computed(() => structureDatabaseType.value !== undefined && IMPORT_CONFLICT_DATABASE_TYPES.has(structureDatabaseType.value));
-const targetSchema = computed(() => metadataSchemaForConnection(selectedConnection.value, props.prefillDatabase || "", props.prefillSchema));
+function defaultInitialSchema() {
+  if (props.prefillSchema !== undefined) return props.prefillSchema;
+  return metadataSchemaForConnection(selectedConnection.value, props.prefillDatabase || "", props.prefillSchema) || "";
+}
+
+const isSchemaCapable = computed(() => isSchemaAware(structureDatabaseType.value));
+const showSchemaSelector = computed(() => isSchemaCapable.value && !!props.prefillConnectionId);
+const selectedSchema = ref(defaultInitialSchema());
+const schemaOptions = ref<string[]>([]);
+const loadingSchemas = ref(false);
+let schemaOptionsRequestId = 0;
+const targetSchema = computed(() => {
+  if (selectedSchema.value) return selectedSchema.value;
+  return metadataSchemaForConnection(selectedConnection.value, props.prefillDatabase || "", props.prefillSchema) || "";
+});
 const dataTypeOptions = computed(() => mergeDataTypeOptions(dynamicDataTypeOptions.value, getDataTypeOptions(structureDatabaseType.value), Object.values(columnDataTypes.value)));
 const hasExistingTarget = computed(() => !!props.prefillTable || loadingExistingTables.value || existingTableNames.value.length > 0);
 const targetTableName = computed(() => (targetMode.value === "create" ? newTableName.value.trim() : selectedExistingTable.value));
@@ -258,7 +274,10 @@ const progressPercentFloor = ref(0);
 const progressPercent = computed(() => Math.max(rawProgressPercent.value, progressPercentFloor.value));
 const currentStepIndex = computed(() => wizardSteps.findIndex((step) => step.value === wizardStep.value));
 const targetLabel = computed(() => {
-  const pieces = [selectedConnection.value?.name, props.prefillDatabase, props.prefillSchema, targetTableName.value].filter(Boolean);
+  // Database-as-schema engines (MySQL/SQLite family) resolve targetSchema to
+  // the database name; keep it out of the label so it does not render twice.
+  const schemaPiece = targetSchema.value && targetSchema.value !== props.prefillDatabase ? targetSchema.value : "";
+  const pieces = [selectedConnection.value?.name, props.prefillDatabase, schemaPiece, targetTableName.value].filter(Boolean);
   return pieces.join(" / ");
 });
 const selectedSourceName = computed(() => {
@@ -383,6 +402,10 @@ function resetState() {
   batchEncodingRequestId++;
   existingTablesRequestId++;
   targetColumnsRequestId++;
+  schemaOptionsRequestId++;
+  schemaOptions.value = [];
+  loadingSchemas.value = false;
+  selectedSchema.value = defaultInitialSchema();
   if (previewReloadTimer) {
     clearTimeout(previewReloadTimer);
     previewReloadTimer = null;
@@ -622,8 +645,60 @@ async function loadDataTypeOptions() {
   }
 }
 
-async function loadExistingTables() {
-  if (props.prefillTable || loadingExistingTables.value || existingTableNames.value.length || !props.prefillConnectionId || !props.prefillDatabase) return;
+async function loadSchemaOptions() {
+  const connectionId = props.prefillConnectionId;
+  const database = props.prefillDatabase || "";
+  if (!connectionId || !isSchemaCapable.value) {
+    schemaOptions.value = [];
+    loadingSchemas.value = false;
+    return;
+  }
+  const requestId = ++schemaOptionsRequestId;
+  loadingSchemas.value = true;
+  try {
+    await store.ensureConnected(connectionId);
+    const rawSchemas = await api.listSchemas(connectionId, database);
+    if (requestId !== schemaOptionsRequestId) return;
+    const filtered = schemaOptionsForConnection(rawSchemas, selectedConnection.value, database);
+    const active = selectedSchema.value || targetSchema.value;
+    if (active && !filtered.includes(active)) {
+      schemaOptions.value = [active, ...filtered];
+    } else {
+      schemaOptions.value = filtered;
+    }
+  } catch {
+    if (requestId === schemaOptionsRequestId) {
+      const active = selectedSchema.value || targetSchema.value;
+      schemaOptions.value = active ? [active] : [];
+    }
+  } finally {
+    if (requestId === schemaOptionsRequestId) {
+      loadingSchemas.value = false;
+    }
+  }
+}
+
+function handleSchemaChange(newSchema: string) {
+  const trimmed = newSchema.trim();
+  if (selectedSchema.value === trimmed) return;
+  selectedSchema.value = trimmed;
+  if (trimmed && !schemaOptions.value.includes(trimmed)) {
+    schemaOptions.value = [trimmed, ...schemaOptions.value];
+  }
+  existingTableNames.value = [];
+  selectedExistingTable.value = "";
+  targetColumns.value = [];
+  loadedTargetTableName.value = "";
+  if (targetMode.value === "existing") {
+    columnMapping.value = {};
+  }
+  if (targetMode.value === "existing" || wizardStep.value === "options") {
+    void loadExistingTables(true);
+  }
+}
+
+async function loadExistingTables(force = false) {
+  if (props.prefillTable || (!force && (loadingExistingTables.value || existingTableNames.value.length > 0)) || !props.prefillConnectionId || !props.prefillDatabase) return;
   const requestId = ++existingTablesRequestId;
   loadingExistingTables.value = true;
   errorMessage.value = "";
@@ -994,9 +1069,9 @@ async function startImport() {
     );
     progress.value = { importId: summary.importId, status: "done", rowsImported: summary.rowsImported, totalRows: summary.totalRows, elapsedMs: summary.elapsedMs };
     toast(t("tableImport.success", { count: summary.rowsImported }), 2500);
-    store.invalidateMetadataCache(props.prefillConnectionId, props.prefillDatabase || "", props.prefillSchema || undefined, tableName);
+    store.invalidateMetadataCache(props.prefillConnectionId, props.prefillDatabase || "", targetSchema.value || undefined, tableName);
     if (targetMode.value === "create") {
-      store.refreshObjectListTreeNode(props.prefillConnectionId, props.prefillDatabase || "", props.prefillSchema || undefined).catch((error) => {
+      store.refreshObjectListTreeNode(props.prefillConnectionId, props.prefillDatabase || "", targetSchema.value || undefined).catch((error) => {
         console.warn("[DBX][table-import:refresh-created-table-failed]", error);
       });
     }
@@ -1102,12 +1177,12 @@ async function startBatchImport() {
       task.rowsImported = summary.rowsImported;
       completedRows += summary.rowsImported;
       completedBytes += task.preview.sizeBytes;
-      store.invalidateMetadataCache(props.prefillConnectionId, props.prefillDatabase || "", props.prefillSchema || undefined, task.tableName);
+      store.invalidateMetadataCache(props.prefillConnectionId, props.prefillDatabase || "", targetSchema.value || undefined, task.tableName);
     }
     refreshImportElapsedClock();
     progress.value = { importId: importId.value, status: "done", phase: "done", rowsImported: completedRows, totalRows: completedRows, totalRowsExact: true, bytesRead: totalBytes, totalBytes, elapsedMs: liveElapsedMs.value };
     toast(t("tableImport.success", { count: completedRows }), 2500);
-    store.refreshObjectListTreeNode(props.prefillConnectionId, props.prefillDatabase || "", props.prefillSchema || undefined).catch((error) => {
+    store.refreshObjectListTreeNode(props.prefillConnectionId, props.prefillDatabase || "", targetSchema.value || undefined).catch((error) => {
       console.warn("[DBX][table-import:refresh-created-table-failed]", error);
     });
   } catch (e: any) {
@@ -1212,6 +1287,7 @@ watch(
   (value) => {
     if (value) {
       resetState();
+      if (showSchemaSelector.value) void loadSchemaOptions();
       void loadTargetColumns();
       void loadDataTypeOptions();
     } else {
@@ -1231,12 +1307,16 @@ watch([textEncoding, decimalSeparator], schedulePreviewReloadAfterEncodingChange
 watch([newTableName, columnMapping, columnDataTypes], saveActiveBatchTask, { deep: true });
 watch(wizardStep, (step) => {
   if (step !== "mapping") closeDataTypePicker();
-  if (step === "options") void loadExistingTables();
+  if (step === "options") {
+    if (showSchemaSelector.value) void loadSchemaOptions();
+    void loadExistingTables();
+  }
 });
 watch(targetMode, (mode) => {
   if (mode === "existing") {
     columnDataTypes.value = {};
     dynamicDataTypeOptions.value = [];
+    if (!existingTableNames.value.length) void loadExistingTables();
     void loadTargetColumns();
   } else {
     targetColumnsRequestId++;
@@ -1402,7 +1482,7 @@ watch(rawProgressPercent, (percent) => {
             </div>
           </div>
 
-          <div class="grid grid-cols-[minmax(0,1fr)_minmax(220px,320px)] gap-3 rounded-md border p-3">
+          <div class="grid gap-3 rounded-md border p-3" :class="showSchemaSelector ? 'grid-cols-1 md:grid-cols-[minmax(0,1.2fr)_minmax(140px,1fr)_minmax(180px,1.2fr)]' : 'grid-cols-[minmax(0,1fr)_minmax(220px,320px)]'">
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.targetMode") }}</Label>
               <div class="grid grid-cols-2 gap-2">
@@ -1416,6 +1496,31 @@ watch(rawProgressPercent, (percent) => {
                 </button>
               </div>
             </div>
+            <div v-if="showSchemaSelector" class="space-y-1.5">
+              <Label class="text-xs">{{ t("transfer.targetSchema") }}</Label>
+              <div v-if="props.prefillTable" class="flex h-8 items-center rounded-md border px-2 text-xs font-mono">
+                <span class="truncate">{{ targetSchema || props.prefillSchema || "-" }}</span>
+              </div>
+              <SearchableSelect
+                v-else
+                data-testid="target-schema-select"
+                :model-value="selectedSchema"
+                :options="schemaOptions.length ? schemaOptions : selectedSchema ? [selectedSchema] : []"
+                :placeholder="t('transfer.selectSchema')"
+                :search-placeholder="t('transfer.searchSchema')"
+                :empty-text="t('common.noResults')"
+                :loading-text="t('common.loading')"
+                :loading="loadingSchemas"
+                :allow-custom="true"
+                trigger-class="h-8 font-mono text-xs"
+                @update:model-value="handleSchemaChange"
+                @update:open="
+                  (isOpen) => {
+                    if (isOpen) void loadSchemaOptions();
+                  }
+                "
+              />
+            </div>
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.targetTableName") }}</Label>
               <Input v-if="targetMode === 'create'" v-model="newTableName" class="h-8 text-xs font-mono" />
@@ -1424,6 +1529,7 @@ watch(rawProgressPercent, (percent) => {
               </div>
               <SearchableSelect
                 v-else
+                data-testid="target-table-select"
                 :model-value="selectedExistingTable"
                 :options="existingTableNames"
                 :placeholder="t('tableImport.noExistingTarget')"

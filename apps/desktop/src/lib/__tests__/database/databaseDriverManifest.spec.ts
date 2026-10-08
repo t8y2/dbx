@@ -17,14 +17,13 @@ describe("databaseDriverManifest", () => {
       sqlFileExecution: true,
       databaseCreate: false,
       fieldLineage: false,
-      sqlExplain: false,
+      sqlExplain: true,
       userAdmin: true,
       driverManagement: true,
     });
-    for (const capability of ["objectSource", "tableDataEdit", "userAdmin"] as const) {
+    for (const capability of ["objectSource", "tableDataEdit", "userAdmin", "sqlExplain"] as const) {
       expect(supportsDatabaseFeature("xugu", capability), capability).toBe(true);
     }
-    expect(supportsDatabaseFeature("xugu", "sqlExplain")).toBe(false);
   });
 
   it("uses agent cursor only for agent or external runtimes", () => {

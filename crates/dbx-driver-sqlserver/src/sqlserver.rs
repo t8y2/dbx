@@ -91,6 +91,24 @@ impl SqlServerClient {
             self.inner.query(query, params).await
         }
     }
+
+    /// Best-effort TDS ATTENTION to interrupt the in-flight batch. SQL Server
+    /// 2000 keeps executing a batch after TCP FIN, so desktop builds (feature
+    /// `native-attention`, vendored tiberius) signal the server over the wire
+    /// before the connection is discarded. ATTENTION is never proof of
+    /// rollback: every caller discards the connection right after.
+    #[cfg(feature = "native-attention")]
+    pub async fn send_attention(&mut self) -> tiberius::Result<()> {
+        self.inner.send_attention().await
+    }
+
+    /// No-op fallback for builds whose tiberius comes from crates.io
+    /// (standalone agent driver workspaces), where the wire call above does
+    /// not exist. Connection discard still aborts the session.
+    #[cfg(not(feature = "native-attention"))]
+    pub async fn send_attention(&mut self) -> tiberius::Result<()> {
+        Ok(())
+    }
 }
 
 impl Deref for SqlServerClient {

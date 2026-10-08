@@ -1,3 +1,5 @@
+use dbx_sql_core::value_literals::quote_string_literal;
+use dbx_sql_dialect::postgres_index_key::decorate_postgres_index_key;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use log;
@@ -4182,7 +4184,7 @@ fn column_def_with_charset(
     }
     if profile.inline_column_comment {
         if let Some(comment) = &col.comment {
-            definition.push_str(&format!(" COMMENT {}", comment_literal(comment)));
+            definition.push_str(&format!(" COMMENT {}", quote_string_literal(comment)));
         }
     }
     definition
@@ -4449,18 +4451,7 @@ fn postgres_index_column_sql(
 ) -> String {
     let trimmed = column.trim();
     let base = if is_expression.unwrap_or(false) { trimmed.to_string() } else { quote_id(column, db_type) };
-    let with_opclass = match opclass.filter(|opclass| !opclass.is_empty()) {
-        Some(opclass) => format!("{base} {opclass}"),
-        None => base,
-    };
-    match key_options {
-        Some(options) => format!(
-            "{with_opclass} {} NULLS {}",
-            if options & 1 != 0 { "DESC" } else { "ASC" },
-            if options & 2 != 0 { "FIRST" } else { "LAST" }
-        ),
-        None => with_opclass,
-    }
+    decorate_postgres_index_key(&base, opclass, key_options)
 }
 
 pub fn create_index_sql(table_name: &str, index: &IndexInfo, db_type: DatabaseType, schema: Option<&str>) -> String {
@@ -4562,7 +4553,7 @@ pub fn create_index_sql(table_name: &str, index: &IndexInfo, db_type: DatabaseTy
     let filter_clause = if filter.is_empty() { String::new() } else { format!(" WHERE {filter}") };
     let comment = index.comment.as_deref().unwrap_or("");
     let comment_clause = if !comment.trim().is_empty() && profile.index_supports_comment {
-        format!(" COMMENT {}", comment_literal(comment))
+        format!(" COMMENT {}", quote_string_literal(comment))
     } else {
         String::new()
     };
@@ -4667,10 +4658,6 @@ fn drop_object_sql(diff: &TableDiff, db_type: DatabaseType, schema: Option<&str>
         return format!("DROP {object_type} {name}{cascade};");
     }
     format!("DROP {object_type} IF EXISTS {name}{cascade};")
-}
-
-fn comment_literal(comment: &str) -> String {
-    format!("'{}'", comment.replace('\'', "''"))
 }
 
 /// Bare temporal keywords that are defaults in their own right and must not be quoted.
@@ -5460,7 +5447,7 @@ fn column_comment_sql(
     if profile.column_comment_via_modify_only {
         return vec![format!("-- Column comment for {column_name}: use ALTER TABLE ... MODIFY COLUMN to set comment")];
     }
-    vec![format!("COMMENT ON COLUMN {table}.{} IS {};", quote_id(column_name, db_type), comment_literal(comment))]
+    vec![format!("COMMENT ON COLUMN {table}.{} IS {};", quote_id(column_name, db_type), quote_string_literal(comment))]
 }
 
 fn table_comment_sql(table_name: &str, comment: &str, db_type: DatabaseType, schema: Option<&str>) -> Vec<String> {
@@ -5470,9 +5457,9 @@ fn table_comment_sql(table_name: &str, comment: &str, db_type: DatabaseType, sch
         return build_sqlserver_table_comment_sql(&table, schema, table_name, comment);
     }
     if profile.table_comment_via_alter {
-        vec![format!("ALTER TABLE {table} COMMENT = {};", comment_literal(comment))]
+        vec![format!("ALTER TABLE {table} COMMENT = {};", quote_string_literal(comment))]
     } else {
-        vec![format!("COMMENT ON TABLE {table} IS {};", comment_literal(comment))]
+        vec![format!("COMMENT ON TABLE {table} IS {};", quote_string_literal(comment))]
     }
 }
 
@@ -5599,7 +5586,7 @@ fn generate_create_table_sql(
                 def.push_str(&column_modifier_tail(&profile, col, &mapped_type, db_type, source_dialect, skip_default));
                 if profile.inline_column_comment {
                     if let Some(comment) = col.comment.as_deref().filter(|c| !c.is_empty()) {
-                        def.push_str(&format!(" COMMENT {}", comment_literal(comment)));
+                        def.push_str(&format!(" COMMENT {}", quote_string_literal(comment)));
                     }
                 }
                 if !suffix.is_empty() {
@@ -5625,7 +5612,7 @@ fn generate_create_table_sql(
                 def.push_str(&column_modifier_tail(&profile, col, &mapped_type, db_type, source_dialect, skip_default));
                 if profile.inline_column_comment {
                     if let Some(comment) = col.comment.as_deref().filter(|c| !c.is_empty()) {
-                        def.push_str(&format!(" COMMENT {}", comment_literal(comment)));
+                        def.push_str(&format!(" COMMENT {}", quote_string_literal(comment)));
                     }
                 }
                 col_defs.push(def);
@@ -12113,6 +12100,18 @@ mod tests {
         let diffs = diff_columns_with_options(&source, &target, false, false, false, 0.5);
         let sql = gen_sql(wrap_table_diff("t", diffs), DatabaseType::Postgres, None);
         assert!(sql.contains("COMMENT ON COLUMN"), "PG comment: {sql}");
+    }
+
+    #[test]
+    fn schema_diff_comment_sql_uses_shared_literal_escaping() {
+        let cases = [("hello", "'hello'"), ("O'Reilly", "'O''Reilly'"), ("", "''"), ("中文注释", "'中文注释'")];
+
+        for (comment, literal) in cases {
+            assert_eq!(
+                column_comment_sql("users", "display_name", comment, DatabaseType::Postgres, Some("public")),
+                vec![format!("COMMENT ON COLUMN \"public\".\"users\".\"display_name\" IS {literal};")]
+            );
+        }
     }
 
     #[test]

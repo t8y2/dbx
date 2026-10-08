@@ -74,7 +74,7 @@ import { detectAndFormatStructured } from "@/lib/sql/autoFormat";
 import { restoreSqlFromSourcePaste } from "@/lib/sql/sqlSourcePaste";
 import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
 
-import { createQueryEditorExecutionViewportOwnership, isQueryEditorPositionVisible } from "@/lib/editor/queryEditorExecutionViewport";
+import { createQueryEditorExecutionViewportOwnership, isQueryEditorPositionVisible, locateCursorForGutterExecution } from "@/lib/editor/queryEditorExecutionViewport";
 import { mapQueryEditorFormatSelection } from "@/lib/editor/queryEditorFormatSelection";
 import { joinQueryEditorLines } from "@/lib/editor/queryEditorJoinLines";
 
@@ -1177,13 +1177,9 @@ function executeSqlStatementFromGutter(currentView: EditorViewType, line: { from
   // selection overlapping that statement is more specific, so preserve it; a
   // selection elsewhere in the document must not hijack the click.
   const editorViewportRequestId = executionViewportOwnership.beginRequest();
-  const selection = currentView.state.selection.main;
-  const hasSelectedSql = !selection.empty && currentView.state.sliceDoc(selection.from, selection.to).trim().length > 0;
-  const selectionOverlapsStatement = hasSelectedSql && selection.from < statementRange.to && statementRange.from < selection.to;
+  const { selectionOverlapsStatement } = locateCursorForGutterExecution(currentView, statementRange, settingsStore.editorSettings.locateCursorOnGutterExecute);
   const executionSnapshot = selectionOverlapsStatement ? sqlExecutionSnapshotFromView(currentView) : sqlExecutionSnapshotForRange(currentView, statementRange);
   emitExecutionRequest({ ...executionSnapshot, editorViewportRequestId });
-  // 不主动聚焦编辑器，否则 CodeMirror 会把屏幕滚回之前的光标位置。
-  // currentView.focus();
   return true;
 }
 
@@ -1197,6 +1193,28 @@ function selectSqlLineFromGutter(currentView: EditorViewType, line: { from: numb
   });
   currentView.focus();
   return true;
+}
+
+/**
+ * 选中光标所在的当前可执行语句（与「执行当前语句」共用同一套范围计算，
+ * 边界行为保持一致）；属于纯选区操作，不改文档，因此只读编辑器同样可用。
+ */
+function selectCurrentStatementFromView(currentView: EditorViewType): boolean {
+  const range = executableStatementRangeAtPosition(currentView, currentView.state.selection.main.head);
+  if (!range || range.from === range.to) return false;
+  currentView.dispatch({
+    selection: { anchor: range.from, head: range.to },
+    scrollIntoView: true,
+    userEvent: "select.keyboard",
+  });
+  currentView.focus();
+  return true;
+}
+
+function selectCurrentStatementFromContextMenu(): void {
+  const currentView = view.value;
+  if (!currentView) return;
+  selectCurrentStatementFromView(currentView);
 }
 
 const contextMenuActions: QueryEditorContextMenuActions = {
@@ -1221,6 +1239,7 @@ const contextMenuActions: QueryEditorContextMenuActions = {
   selectAllSelectionOccurrencesFromContextMenu,
   openFindReplaceFromContextMenu,
   deleteEmptyLines,
+  selectCurrentStatementFromContextMenu,
   selectAllSqlFromContextMenu,
   emitContextObjectAction,
   openCodeSnapshot,
@@ -1393,6 +1412,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         ...binding(shortcuts.undo, (view) => codeMirrorRuntime.codeMirrorUndo?.(view) ?? false),
         ...binding(shortcuts.redo, (view) => codeMirrorRuntime.codeMirrorRedo?.(view) ?? false),
         ...binding(shortcuts.selectAll, (view) => codeMirrorRuntime.codeMirrorSelectAll?.(view) ?? false),
+        ...binding(shortcuts.selectCurrentStatement, selectCurrentStatementFromView),
         ...binding(shortcuts.extendSelection, extendQueryEditorSelectionForView),
         ...binding(shortcuts.addNextSelectionOccurrence, addNextQueryEditorSelectionOccurrence),
         ...binding(shortcuts.selectAllSelectionOccurrences, selectAllQueryEditorSelectionOccurrences),
@@ -2754,7 +2774,12 @@ function scrollCursorIntoView() {
 }
 
 function beginExecutionViewportTracking() {
-  executionViewportOwnership.beginExecution();
+  // Snapshot visibility while the viewport still has its pre-execution size:
+  // once the results pane opens it shrinks the editor, and a cursor that was
+  // visible before execution must not be scrolled away by the shrink (#10480).
+  const currentView = view.value;
+  const cursorVisible = currentView ? isQueryEditorPositionVisible(currentView.state.selection.main.head, currentView.visibleRanges, currentView.viewport) : false;
+  executionViewportOwnership.beginExecution(cursorVisible);
 }
 
 function recordExecutionViewportInteraction() {

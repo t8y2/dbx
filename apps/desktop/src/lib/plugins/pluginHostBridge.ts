@@ -1089,12 +1089,13 @@ export function pluginNetworkOrigins(permissions: readonly string[] | undefined)
 
 export interface PluginSandboxOptions {
   /**
-   * Base URL under which the workbench document may fetch further plugin UI
-   * assets (code-split chunks, fonts) — `dbx-plugin://localhost/<id>/assets/`
-   * on native custom schemes, `http(s)://dbx-plugin.localhost/<id>/assets/`
-   * where WebView2 maps the scheme to an http subdomain. Injected as the
-   * document `<base>` and allowed in the resource CSP directives. Omit on
-   * hosts without the plugin asset protocol (the web host).
+   * Base URL for plugin UI resources resolved relative to the srcdoc document
+   * (for example, inlined CSS `url()` references) — `dbx-plugin://localhost/<id>/`
+   * on native custom schemes, `http(s)://dbx-plugin.localhost/<id>/` where
+   * WebView2 maps the scheme to an http subdomain. Injected as the document
+   * `<base>` and allowed in resource CSP directives. External module imports
+   * resolve from their own preserved URLs. Omit on hosts without the plugin
+   * asset protocol (the web host).
    */
   baseUrl?: string;
   /**
@@ -1112,8 +1113,8 @@ export function pluginSandboxDocument(html: string, permissions?: readonly strin
   const assetSource = pluginAssetCspSource(options?.baseUrl);
   const scriptSrc = options?.allowUnsafeEval ? "script-src 'unsafe-inline' 'unsafe-eval'" : "script-src 'unsafe-inline'";
   const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; ${scriptSrc} blob:${assetSource}; style-src 'unsafe-inline' blob:; img-src data: blob:${assetSource}; font-src data: blob:${assetSource}; ${connectSrc} media-src data: blob:${assetSource};">`;
-  // <base> must precede every relative URL the document resolves (inlined CSS
-  // url(), dynamic import specifiers), so it leads the injection.
+  // <base> must precede relative URLs resolved from the srcdoc itself (such as
+  // inlined CSS url() references), so it leads the injection.
   const base = options?.baseUrl && assetSource ? `<base href="${escapeHtmlAttribute(options.baseUrl)}">` : "";
   const sdk = `<script>${pluginSdkSource(theme)}</script>`;
   const uiKit = `<style>${pluginUiKitCss()}</style>`;
@@ -1252,6 +1253,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
     const pending = new Map();
     const listeners = { event: new Set(), binary: new Set(), init: new Set(), context: new Set(), filedrop: new Set(), dragstate: new Set(), close: new Set() };
     let sequence = 0;
+    let contributionId;
     let context;
     let locale = 'en';
     let theme;
@@ -1353,6 +1355,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
     };
     window.dbxPlugin = Object.freeze({
       ready,
+      get contributionId() { return contributionId; },
       get context() { return context; },
       get locale() { return locale; },
       get theme() { return theme; },
@@ -1511,6 +1514,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         pending.delete(message.id);
         if (message.error) handler.reject(new Error(message.error)); else handler.resolve(message.result);
       } else if (message.type === 'init') {
+        contributionId = message.contributionId;
         capabilities = message.capabilities || {};
         context = message.context;
         locale = typeof message.locale === 'string' ? message.locale : 'en';

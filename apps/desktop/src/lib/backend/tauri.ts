@@ -327,6 +327,7 @@ export interface DesktopSettings {
   agent_store_dir?: string | null;
   custom_ai_skill_root_enabled?: boolean | null;
   custom_ai_skill_root?: string | null;
+  custom_ai_skill_auto_enabled?: boolean | null;
   sidebar_table_page_size?: number | null;
 }
 
@@ -383,6 +384,7 @@ export interface WebDavConfig {
   username?: string;
   password?: string;
   remotePath?: string;
+  userAgent?: string;
 }
 
 export interface WebDavSyncSummary {
@@ -594,13 +596,29 @@ export interface DriverInstallProgress {
 }
 
 export interface AiMessage {
-  role: "user" | "assistant" | "system";
+  role: "user" | "assistant" | "system" | "tool";
   content: string;
   /** Transient images for this message. Persisted conversation history intentionally omits them. */
   images?: Array<{
     mediaType: string;
     data: string;
   }>;
+  /** For `role: "tool"`: the call this message answers. */
+  toolCallId?: string;
+  /** For `role: "assistant"`: the calls this turn made. The panel builds one of
+   *  these per request to replay a loaded skill as a real tool round; it is never
+   *  written to a conversation record. */
+  toolCalls?: AiToolCallRef[];
+}
+
+/** Mirrors `ToolCallRef` in `crates/dbx-ai-provider/src/ai.rs`. `providerPayload`
+ *  is provider-private replay data (Gemini thought signatures) that only a real
+ *  provider round can produce; a panel-built call leaves it unset. */
+export interface AiToolCallRef {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+  providerPayload?: unknown;
 }
 
 export interface AiTaskContract {
@@ -634,6 +652,7 @@ export interface AiStreamChunk {
   session_id: string;
   delta: string;
   reasoning_delta?: string;
+  finish_reason?: string;
   done: boolean;
   /** Web-only explicit terminal error; Tauri reports invoke failures directly. */
   error?: string;
@@ -700,6 +719,7 @@ export type AgentEvent =
        */
       type: "response_complete";
     }
+  | { type: "output_truncated"; finish_reason: string }
   | { type: "agent_end"; input_tokens?: number; output_tokens?: number }
   | {
       type: "context_compacted";
@@ -731,6 +751,7 @@ export async function aiAgentStream(
   confirmedSchema?: string,
   _signal?: AbortSignal,
   selectedDatabases?: string[],
+  allowSkills = false,
 ): Promise<string> {
   const unlisten: UnlistenFn = await listen<TauriAgentEvent>("ai-agent-event", (event) => {
     const payload = event.payload;
@@ -755,6 +776,7 @@ export async function aiAgentStream(
       confirmedDatabase,
       confirmedSchema,
       selectedDatabases,
+      allowSkills,
     });
   } catch (e) {
     unlisten();
@@ -1352,6 +1374,17 @@ export interface AiChatMessage {
    * the turn was not empty. Absent on records written before the field existed.
    */
   selectionsOmitted?: boolean;
+  /**
+   * Skills this conversation has had loaded (prd 09-30 Req 13), carried on the
+   * newest assistant turn of each snapshot.
+   *
+   * Only the fact, never the body: a body can reach 1 MiB per skill, the stored
+   * message array is an unbounded column with no per-message cap, and it is
+   * re-serialized in full on every save. Bodies stay in memory and are re-read
+   * from disk when a request needs them — the same shape as the #10058 selection
+   * footprint above, which keeps a flag instead of its payload.
+   */
+  loadedSkillIds?: string[];
 }
 
 export interface AiConversation {
@@ -2499,6 +2532,7 @@ export async function listPartitions(connectionId: string, database: string, sch
 export interface TablePartitionStatus {
   isPartitionedParent: boolean;
   isPartition: boolean;
+  isForeign: boolean;
 }
 
 export async function getTablePartitionStatus(connectionId: string, database: string, schema: string, table: string): Promise<TablePartitionStatus> {
@@ -5488,6 +5522,13 @@ export interface TransferRequest {
   quoteTargetColumnNames: boolean;
   ownershipPolicy?: TransferOwnershipPolicy;
   batchSize: number;
+  /**
+   * Optional per-source-table transfer filter.
+   * Key = source table name; value = a bare `WHERE` predicate
+   * (`id <= 90000`) or a complete `SELECT`
+   * (`select * from t_order where id <= 90000`). Missing/empty = full table.
+   */
+  tableFilters?: Record<string, string>;
   dropTargetBeforeCreate: boolean;
   dropTargetConfirmed: boolean;
 }
@@ -5500,9 +5541,19 @@ export interface TransferStructurePreviewTable {
   sql: string;
 }
 
+export type TransferStructureOperationKind = "createSchema" | "createTable" | "skipExistingTable" | "rebuildTable" | "createIndex" | "addForeignKey" | "createSequence" | "bindSequence" | "addComment";
+
+export interface TransferStructureOperation {
+  kind: TransferStructureOperationKind;
+  objectName?: string;
+  sourceTable?: string;
+  targetTable?: string;
+}
+
 export interface TransferStructurePreview {
   sql: string;
   tables: TransferStructurePreviewTable[];
+  operations: TransferStructureOperation[];
 }
 
 export interface TransferOwnershipPreview {
@@ -6084,6 +6135,8 @@ export interface QueryResultExportRequest {
   executionId?: string;
   dateTimeFormat?: string;
   exportTableName?: string;
+  /** Explicit INSERT target schema; separate from `schema`, which scopes query execution. */
+  exportSchema?: string;
   exportColumnTypes?: Array<string | null | undefined>;
   selectedColumns?: SqlExportColumnSelection[];
   /**

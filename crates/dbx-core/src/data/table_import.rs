@@ -13076,7 +13076,9 @@ mod tests {
             TableImportConflictPolicy::Error,
             &[],
             None,
-            None,
+            // Pin the legacy 512 KiB cap so the two 300 KiB rows form separate
+            // batches and the cancellation check lands between writes.
+            Some(512 * 1024),
             &mut db_write_ms,
             &mut statement_count,
         )
@@ -13686,11 +13688,6 @@ mod tests {
 
     #[test]
     fn import_insert_batches_split_long_rows_by_sql_size() {
-        let mappings = vec![TableImportColumnMapping {
-            source_column: "payload".to_string(),
-            target_column: "payload".to_string(),
-            target_data_type: None,
-        }];
         let data = ParsedImportFile {
             columns: vec!["payload".to_string()],
             rows: (0..4).map(|index| vec![serde_json::json!(format!("{index}{}", "x".repeat(180 * 1024)))]).collect(),
@@ -13698,9 +13695,26 @@ mod tests {
             effective_encoding: None,
         };
 
-        let batches =
-            build_import_insert_batches(&data, &mappings, &[], "events", "public", &DatabaseType::Postgres, 500)
-                .unwrap();
+        let plan = CompiledImportPlan {
+            mapped_source_indexes: vec![0],
+            target_columns: vec!["payload".to_string()],
+            column_types: vec![Some("text".to_string())],
+        };
+        // The default target now allows one large multi-row INSERT; pin the
+        // legacy 512 KiB cap so row-count-based splitting keeps being exercised.
+        let batches = build_import_insert_batches_with_plan(
+            &data.rows,
+            &plan,
+            "events",
+            "public",
+            &DatabaseType::Postgres,
+            false,
+            TableImportConflictPolicy::Error,
+            &[],
+            None,
+            Some(512 * 1024),
+        )
+        .unwrap();
 
         assert!(batches.len() > 1);
         assert_eq!(batches.iter().map(|batch| batch.row_count).sum::<usize>(), 4);

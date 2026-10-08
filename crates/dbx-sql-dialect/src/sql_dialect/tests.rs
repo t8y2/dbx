@@ -1021,8 +1021,8 @@ fn builds_postgres_table_data_large_value_previews() {
         schema: Some("public".to_string()),
         table_name: "large_rows".to_string(),
         primary_keys: vec!["id".to_string()],
-        columns: vec!["id".to_string(), "payload".to_string(), "metadata".to_string()],
-        column_types: vec!["integer".to_string(), "text".to_string(), "jsonb".to_string()],
+        columns: vec!["id".to_string(), "payload".to_string(), "metadata".to_string(), "content".to_string()],
+        column_types: vec!["integer".to_string(), "text".to_string(), "jsonb".to_string(), "bytea".to_string()],
         large_value_preview_size: Some(8192),
         limit: Some(100),
         ..Default::default()
@@ -1032,6 +1032,8 @@ fn builds_postgres_table_data_large_value_previews() {
     assert!(sql.contains("'T:8192' AS \"__DBX_LARGE_VALUE_BYTES_T_1\""));
     assert!(sql.contains("left(\"metadata\"::text, 8193) AS \"metadata\""));
     assert!(sql.contains("'T:8192' AS \"__DBX_LARGE_VALUE_BYTES_K_2\""));
+    assert!(sql.contains("substring(\"content\" from 1 for 8193) AS \"content\""));
+    assert!(sql.contains("'B:8192:' || octet_length(\"content\")::text AS \"__DBX_LARGE_VALUE_BYTES_B_3\""));
 }
 
 #[test]
@@ -1138,7 +1140,7 @@ fn preserves_postgres_array_types_in_large_value_previews() {
     assert!(sql.contains("'T:8' AS \"__DBX_LARGE_VALUE_BYTES_K_11\""));
     assert!(sql.contains("'T:8' AS \"__DBX_LARGE_VALUE_BYTES_S_12\""));
     assert!(sql.contains("'V:8' AS \"__DBX_LARGE_VALUE_BYTES_V_13\""));
-    assert!(sql.contains("'B:8' AS \"__DBX_LARGE_VALUE_BYTES_B_14\""));
+    assert!(sql.contains("'B:8:' || octet_length(\"bytea_value\")::text AS \"__DBX_LARGE_VALUE_BYTES_B_14\""));
 }
 
 #[test]

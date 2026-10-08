@@ -83,7 +83,7 @@ function mountGrid(
     hidden_column_indexes: options.displayableColumns === false ? [0] : undefined,
   });
 
-  const grid = ref<{ tableInfoToolbarCapability: DataGridToolbarActionCapability }>();
+  const grid = ref<{ tableInfoToolbarCapability: DataGridToolbarActionCapability; goToColumnToolbarCapability: DataGridToolbarActionCapability }>();
   const host = document.createElement("div");
   document.body.append(host);
   const Root = defineComponent({
@@ -137,12 +137,6 @@ function gridRoot(host: HTMLElement): HTMLElement {
   const root = host.querySelector<HTMLElement>("[data-grid-root]");
   if (!root) throw new Error("Data grid root not found");
   return root;
-}
-
-function goToColumnButton(host: HTMLElement): HTMLButtonElement {
-  const button = [...host.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent?.trim() === "Go to column");
-  if (!button) throw new Error("Go-to-column button not found");
-  return button;
 }
 
 function goToColumnItem(name: string, position: number): HTMLButtonElement {
@@ -269,8 +263,27 @@ describe("DataGrid go-to-column shortcut", () => {
 
     expect(event.defaultPrevented).toBe(true);
     expect(bubbled).not.toHaveBeenCalled();
-    expect(goToColumnButton(host).getAttribute("aria-expanded")).toBe("true");
+    expect(host.querySelector("[data-column-lookup-panel]")).not.toBeNull();
     expect(document.activeElement?.getAttribute("placeholder")).toBe("Search column/comment...");
+  });
+
+  it("toggles the column lookup panel from its toolbar capability", async () => {
+    const { host, grid } = mountGrid({ columns: ["id", "name"] });
+    await settle();
+
+    expect(grid.value?.goToColumnToolbarCapability.active).toBe(false);
+
+    await grid.value!.goToColumnToolbarCapability.onTrigger();
+    await settle();
+
+    expect(host.querySelector("[data-column-lookup-panel]")).not.toBeNull();
+    expect(grid.value?.goToColumnToolbarCapability.active).toBe(true);
+
+    await grid.value!.goToColumnToolbarCapability.onTrigger();
+    await settle();
+
+    expect(host.querySelector("[data-column-lookup-panel]")).toBeNull();
+    expect(grid.value?.goToColumnToolbarCapability.active).toBe(false);
   });
 
   it("moves the lookup selection with arrows and chooses it with Enter", async () => {
@@ -294,7 +307,7 @@ describe("DataGrid go-to-column shortcut", () => {
     await settle();
 
     expect(enter.defaultPrevented).toBe(true);
-    expect(goToColumnButton(host).getAttribute("aria-expanded")).toBe("false");
+    expect(host.querySelector("[data-column-lookup-panel]")).not.toBeNull();
   });
 
   it("does not consume the configured shortcut without a displayable column", async () => {
@@ -309,7 +322,7 @@ describe("DataGrid go-to-column shortcut", () => {
 
     expect(event.defaultPrevented).toBe(false);
     expect(bubbled).toHaveBeenCalledOnce();
-    expect(goToColumnButton(host).getAttribute("aria-expanded")).toBe("false");
+    expect(host.querySelector("[data-column-lookup-panel]")).toBeNull();
   });
 
   it("does not trigger or consume shortcuts from editable targets", async () => {
@@ -330,7 +343,7 @@ describe("DataGrid go-to-column shortcut", () => {
     await settle();
 
     expect(bubbled).toHaveBeenCalledTimes(targets.length);
-    expect(goToColumnButton(host).getAttribute("aria-expanded")).toBe("false");
+    expect(host.querySelector("[data-column-lookup-panel]")).toBeNull();
   });
 
   it("leaves an unmatched root event untouched", async () => {
@@ -346,6 +359,6 @@ describe("DataGrid go-to-column shortcut", () => {
 
     expect(event.defaultPrevented).toBe(false);
     expect(bubbled).toHaveBeenCalledOnce();
-    expect(goToColumnButton(host).getAttribute("aria-expanded")).toBe("false");
+    expect(host.querySelector("[data-column-lookup-panel]")).toBeNull();
   });
 });

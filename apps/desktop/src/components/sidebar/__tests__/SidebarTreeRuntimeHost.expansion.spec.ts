@@ -12,6 +12,7 @@ import SidebarTreeRuntimeHost from "@/components/sidebar/SidebarTreeRuntimeHost.
 
 const connectionStore = {
   treeNodes: [] as TreeNode[],
+  selectedTreeNodeIds: [] as string[],
   sidebarSearchQuery: "",
   activeConnectionId: null as string | null,
   connectedIds: new Set<string>(),
@@ -64,11 +65,22 @@ vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast }) }));
 vi.mock("@/composables/useSqlHighlighter", () => ({ useSqlHighlighter: () => ({ highlight: vi.fn() }) }));
 vi.mock("@/composables/useSidebarDataOpenRuntime", () => ({ useSidebarDataOpenRuntime: () => ({ openData: vi.fn() }) }));
 vi.mock("@/composables/useDatabaseOptions", () => ({ useDatabaseOptions: () => ({ getDatabaseOptions: vi.fn() }) }));
-vi.mock("@/composables/useSidebarConnectionMutationRuntime", () => ({ useSidebarConnectionMutationRuntime: () => ({}) }));
-vi.mock("@/composables/useSidebarDatabaseSpecificMutationRuntime", () => ({ useSidebarDatabaseSpecificMutationRuntime: () => ({}) }));
+vi.mock("@/composables/useSidebarConnectionMutationRuntime", () => ({ useSidebarConnectionMutationRuntime: () => ({ isPinned: ref(false) }) }));
+vi.mock("@/composables/useSidebarDatabaseSpecificMutationRuntime", () => ({
+  useSidebarDatabaseSpecificMutationRuntime: () => ({
+    canManageMongoIndexes: ref(false),
+    canRenameMongoCollection: ref(false),
+    canCloneMongoCollection: ref(false),
+    canDropMongoCollection: ref(false),
+  }),
+}));
 vi.mock("@/composables/useSidebarTableMutationRuntime", () => ({ useSidebarTableMutationRuntime: () => ({}) }));
 vi.mock("@/composables/useSidebarTreeExportRuntime", () => ({ useSidebarTreeExportRuntime: () => ({}) }));
 vi.mock("@/composables/useSidebarTreeToolRuntime", () => ({ useSidebarTreeToolRuntime: () => ({}) }));
+vi.mock("@/lib/backend/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/backend/api")>();
+  return { ...actual, listPlugins: vi.fn().mockResolvedValue([]) };
+});
 
 const mountedApps: App[] = [];
 
@@ -208,6 +220,46 @@ describe("SidebarTreeRuntimeHost expansion", () => {
     expect(queryStore.createTab).not.toHaveBeenCalled();
     expect(queryStore.updateSql).not.toHaveBeenCalled();
     expect(queryStore.setTableMeta).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("opens the context-menu Mongo collection without changing expansion (%s)", async (isExpanded) => {
+    const collection: TreeNode = { id: "mongo:app:orders", label: "orders", type: "mongo-collection", connectionId: "mongo", database: "app", isExpanded, children: [] };
+    const otherCollection: TreeNode = { ...collection, id: "mongo:app:customers", label: "customers" };
+    connectionStore.getConfig.mockReturnValue({ db_type: "mongodb", name: "connection" });
+    queryStore.tabs = [
+      { id: "other-database", mode: "mongo", connectionId: "mongo", database: "other", tableMeta: { tableName: "orders" } },
+      { id: "other-connection", mode: "mongo", connectionId: "another-mongo", database: "app", tableMeta: { tableName: "orders" } },
+    ];
+    queryStore.createTab.mockReturnValueOnce("orders-tab");
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(defineComponent({ setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: otherCollection, depth: 0 }) }));
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    const action = host.value!.buildContextMenu(collection).find((item) => item.label === i18n.global.t("contextMenu.viewData"))?.action;
+    expect(action).toBeTypeOf("function");
+    await action!();
+
+    expect(queryStore.createTab).toHaveBeenCalledExactlyOnceWith("mongo", "app", "app.orders", "mongo");
+    expect(queryStore.updateSql).toHaveBeenCalledWith("orders-tab", "orders");
+    expect(queryStore.setTableMeta).toHaveBeenCalledWith("orders-tab", expect.objectContaining({ database: "app", tableName: "orders" }));
+    expect(queryStore.switchTab).not.toHaveBeenCalled();
+    expect(collection.isExpanded).toBe(isExpanded);
+
+    // Represent the created tab, including a user-renamed title, on the next invocation.
+    queryStore.tabs.push({ id: "orders-tab", mode: "mongo", connectionId: "mongo", database: "app", title: "My renamed collection", tableMeta: { tableName: "orders" } });
+    queryStore.updateSql.mockClear();
+    queryStore.setTableMeta.mockClear();
+    await action!();
+
+    expect(queryStore.switchTab).toHaveBeenCalledExactlyOnceWith("orders-tab");
+    expect(queryStore.createTab).toHaveBeenCalledOnce();
+    expect(queryStore.updateSql).not.toHaveBeenCalled();
+    expect(queryStore.setTableMeta).not.toHaveBeenCalled();
+    expect(collection.isExpanded).toBe(isExpanded);
   });
 
   it("keeps a searched database browse-and-expand activation current through the complete double-click sequence", async () => {

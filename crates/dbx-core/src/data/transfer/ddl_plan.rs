@@ -13,6 +13,7 @@ pub(super) struct PreparedTableDdl {
     pub ddl: String,
     pub reused_source_ddl: bool,
     pub deferred_fk_alters: Vec<String>,
+    pub deferred_fk_names: Vec<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -230,13 +231,18 @@ pub(super) async fn prepare_table_ddl(
     // metadata behind `foreign_keys` is trustworthy before anything is stripped.
     let mut ddl = ddl;
     let mut deferred_fk_alters = Vec::new();
+    let mut deferred_fk_names = Vec::new();
     if supports_deferred_mysql_foreign_keys(target_db_type) && !foreign_keys.is_empty() {
         ddl = strip_inline_foreign_key_constraint_lines(&ddl);
+        deferred_fk_names = group_foreign_keys_by_constraint_name(&foreign_keys)
+            .into_iter()
+            .map(|(name, _)| name.to_string())
+            .collect();
         deferred_fk_alters =
             generate_mysql_foreign_key_alter_statements(&foreign_keys, request, target_table, target_db_type);
     }
 
-    Ok(PreparedTableDdl { ddl, reused_source_ddl, deferred_fk_alters })
+    Ok(PreparedTableDdl { ddl, reused_source_ddl, deferred_fk_alters, deferred_fk_names })
 }
 
 #[cfg(test)]

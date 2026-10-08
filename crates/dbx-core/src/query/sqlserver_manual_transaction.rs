@@ -362,6 +362,8 @@ impl Drop for ExecutionGuard {
 
 /// TCP FIN alone need not stop a SQL2000 batch immediately. ATTENTION is
 /// best effort, never proof of rollback; callers always discard the connection.
+/// The wire call needs the vendored tiberius (dbx-driver-sqlserver feature
+/// `native-attention`); standalone crates.io builds no-op inside the client.
 async fn send_native_attention(conn: &mut TxnConnection) {
     if let TxnConnection::SqlServer { client: Some(client), .. } = conn {
         let attention = async { client.lock().await.send_attention().await };

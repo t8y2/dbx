@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { applyDdlStoragePreference } from "@/lib/sql/ddlStorage";
+import DatabaseActionsMenu from "@/components/objects/DatabaseActionsMenu.vue";
+import { useDatabaseBrowserMutation } from "@/lib/database/databaseBrowserActions";
 import DdlStorageToggle from "@/components/objects/DdlStorageToggle.vue";
 
 import { computed, createApp, nextTick, onActivated, onBeforeUnmount, ref, watch, type Component } from "vue";
@@ -3423,6 +3425,10 @@ async function reload(options?: { allowCachedObjects?: boolean; contextEpoch?: n
   await loadObjects({ allowCached: options?.allowCachedObjects, preserveExistingRows: options?.preserveExistingRows });
 }
 
+useDatabaseBrowserMutation(({ connectionId, database, operation }) => {
+  if (connectionId === props.connection.id && database === props.database && !props.catalog && operation !== "drop-database") refresh();
+});
+
 function refresh(): boolean {
   void reload({ preserveExistingRows: true });
   void refreshActiveTableInfo();
@@ -3830,6 +3836,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         <span v-if="selectedSchema && showDatabaseChip" class="inline-flex max-w-[14rem] min-w-0 items-center rounded border border-border bg-muted/30 px-2 py-0.5 text-xs text-muted-foreground truncate" :title="props.database">
           {{ props.database }}
         </span>
+        <DatabaseActionsMenu :connection="connection" :database="database" :catalog="catalog" />
       </div>
       <div class="flex flex-1 items-center gap-2">
         <div class="relative min-w-[6rem] flex-1">

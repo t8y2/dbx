@@ -18,7 +18,7 @@ import {
   type PluginWorkbenchContext,
   type PluginAiRecommendationHostUpdate,
 } from "@/lib/plugins/pluginHostBridge";
-import { getCachedPluginUiHtml, getOrLoadPluginUiHtml } from "@/lib/plugins/pluginUiHtmlCache";
+import { getCachedPluginUiHtml, getOrLoadPluginUiHtml, pluginUiAssetBaseUrl } from "@/lib/plugins/pluginUiHtmlCache";
 import { isPluginGraphicsEngineEnabled } from "@/lib/plugins/pluginGraphicsEngine";
 import { beginFloatingWindowDrag, closeFloatingWindows, endFloatingWindowDrag, openFloatingWindow, setFloatingWindowSize } from "@/lib/plugins/pluginFloatingWindow";
 import { isFloatingPluginWindow } from "@/lib/app/windowContext";
@@ -673,18 +673,6 @@ async function savePluginFile(request: PluginSaveFileRequest, data: Uint8Array):
   return { path: fileName };
 }
 
-/**
- * Base URL prefix for lazy-loaded plugin UI assets. wry serves custom schemes
- * natively on WKWebView/webkit2gtk but maps them onto http(s) subdomains on
- * WebView2, so the host page's own protocol picks the form the webview will
- * actually request. The web host has no plugin asset protocol.
- */
-function pluginUiBaseUrl(pluginId: string, entryDirectory: string): string | undefined {
-  if (!isTauriRuntime()) return undefined;
-  const origin = location.protocol === "http:" || location.protocol === "https:" ? `${location.protocol}//dbx-plugin.localhost/${pluginId}/` : `dbx-plugin://localhost/${pluginId}/`;
-  return entryDirectory ? `${origin}${entryDirectory}/` : origin;
-}
-
 async function loadWorkbench() {
   const generation = ++loadGeneration;
   // An identity rebuild swaps the plugin this component serves; retire the
@@ -720,7 +708,7 @@ async function loadWorkbench() {
       cachedHtml.sandboxDoc = {
         allowUnsafeEval,
         doc: pluginSandboxDocument(html, props.plugin.manifest.permissions, currentBridgeTheme(), {
-          baseUrl: pluginUiBaseUrl(props.plugin.manifest.id, entryDirectory),
+          baseUrl: pluginUiAssetBaseUrl(props.plugin.manifest.id, entryDirectory),
           allowUnsafeEval,
         }),
       };

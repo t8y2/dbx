@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 const workflow = readFileSync(new URL("../workflows/ci.yml", import.meta.url), "utf8");
@@ -83,10 +86,101 @@ test("every old Agent stage has an independent owner and Java packaging remains 
   for (const name of ["agent-rust", "agent-go", "agent-integration", "agent-java"]) assert.doesNotMatch(job(name), /continue-on-error: true/);
 });
 
-test("native Rust driver caches exclude failed build artifacts", () => {
-  const content = job("agent-rust");
-  assert.ok(content.includes("shared-key: ci-agent-rust-v2-${{ matrix.driver }}"));
-  assert.ok(content.includes("cache-on-failure: false"));
+test("shared Rust caches publish only complete builds outside the old cache namespace", () => {
+  for (const name of ["packages", "rust-fmt-clippy", "rust-test", "agent-rust", "agent-integration"]) {
+    const content = job(name);
+    assert.ok(content.includes("prefix-key: v1-rust-complete"), name);
+    assert.ok(content.includes("cache-on-failure: false"), name);
+    assert.doesNotMatch(content, /cache-on-failure: true/);
+    assert.ok(content.includes("save-if: ${{ github.ref == 'refs/heads/main'"), name);
+  }
+});
+
+test("main and fork Rust jobs use the same rust-cache fingerprint", () => {
+  const stableCacheEnvironment = /- name: Rust cache\s+env:\s+RUST_FEATURE_MODE: ""\s+RUST_TEST_GROUP: ""\s+uses: swatinem\/rust-cache@v2/;
+  for (const name of ["packages", "rust-fmt-clippy", "rust-test", "agent-rust"]) {
+    const content = job(name);
+    assert.match(content, stableCacheEnvironment);
+    assert.match(content, /^      RUSTC_WRAPPER: sccache$/m);
+    assert.ok(content.includes('version: "v0.16.0"'));
+    assert.doesNotMatch(content, /RUSTC_WRAPPER: ""|CC: ""|CXX: ""/);
+  }
+});
+
+test("S3 and secretless Rust jobs export identical compiler wrappers", (context) => {
+  const directory = mkdtempSync(path.join(tmpdir(), "dbx-ci-sccache-"));
+  context.after(() => rmSync(directory, { recursive: true, force: true }));
+  const compiler = "/opt/hostedtoolcache/sccache/0.16.0/x64/sccache";
+  const backend = {
+    SCCACHE_BUCKET: "test-bucket",
+    SCCACHE_ENDPOINT: "https://cache.example.test",
+    SCCACHE_REGION: "test-region",
+    SCCACHE_S3_KEY_PREFIX: "test-prefix",
+    SCCACHE_S3_USE_SSL: "true",
+    AWS_ACCESS_KEY_ID: "test-access-key",
+    AWS_SECRET_ACCESS_KEY: "test-secret-key",
+  };
+  for (const name of ["packages", "rust-fmt-clippy", "rust-test", "agent-rust"]) {
+    const setup = job(name).match(/- name: Configure sccache\n([\s\S]*?)(?=\n      - name: Rust cache)/)?.[1];
+    assert.ok(setup, name);
+    assert.doesNotMatch(setup, /^\s+if:/m);
+    const script = setup.match(/        run: \|\n([\s\S]*)/)[1].split("\n").map((line) => line.slice(10)).join("\n");
+    for (const remote of [true, false]) {
+      const output = path.join(directory, `${name}-${remote}.env`);
+      const result = spawnSync("bash", ["-e", "-o", "pipefail", "-c", script], {
+        encoding: "utf8",
+        env: {
+          PATH: process.env.PATH,
+          GITHUB_ENV: output,
+          SCCACHE_PATH: compiler,
+          CACHE_BUCKET: remote ? backend.SCCACHE_BUCKET : "",
+          CACHE_ENDPOINT: remote ? backend.SCCACHE_ENDPOINT : "",
+          CACHE_REGION: remote ? backend.SCCACHE_REGION : "",
+          CACHE_KEY_PREFIX: remote ? backend.SCCACHE_S3_KEY_PREFIX : "",
+          CACHE_ACCESS_KEY_ID: remote ? backend.AWS_ACCESS_KEY_ID : "",
+          CACHE_SECRET_ACCESS_KEY: remote ? backend.AWS_SECRET_ACCESS_KEY : "",
+        },
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout, "");
+      const exported = Object.fromEntries(readFileSync(output, "utf8").trim().split("\n").map((line) => {
+        const separator = line.indexOf("=");
+        return [line.slice(0, separator), line.slice(separator + 1)];
+      }));
+      assert.deepEqual(exported, {
+        ...(remote ? backend : {}),
+        SCCACHE_IDLE_TIMEOUT: "0",
+        CC: `${compiler} cc`,
+        CXX: `${compiler} c++`,
+      }, `${name}: ${remote ? "S3" : "local"}`);
+    }
+  }
+});
+
+test("Rust build timings remain available after failures without waiting for cancelled runs", () => {
+  for (const [name, artifact, location] of [
+    ["rust-fmt-clippy", "DBX-clippy-cargo-timings", "target/cargo-timings/"],
+    ["rust-test", "DBX-rust-${{ matrix.group }}-cargo-timings", "target/cargo-timings/"],
+    ["agent-rust", "DBX-agent-${{ matrix.driver }}-cargo-timings", "agents/drivers/${{ matrix.driver }}/target/cargo-timings/"],
+  ]) {
+    const content = job(name);
+    assert.match(content, /name: Upload Rust Cargo timings\s+if: always\(\) && !cancelled\(\)\s+uses: actions\/upload-artifact@v6/);
+    assert.ok(content.includes(`name: ${artifact}`));
+    assert.ok(content.includes(`path: ${location}`));
+    assert.ok(content.includes("retention-days: 3"));
+    assert.ok(content.includes("if-no-files-found: ignore"));
+  }
+  assert.ok(job("agent-rust").includes('--manifest-path "drivers/$DRIVER/Cargo.toml" --locked --no-fail-fast --timings'));
+});
+
+test("Linux Rust dependency installs bound apt mirror stalls", () => {
+  for (const name of ["packages", "rust-fmt-clippy", "rust-test", "agent-rust"]) {
+    const content = job(name);
+    assert.equal((content.match(/sudo timeout --kill-after=30s 10m apt-get/g) ?? []).length, 2);
+    for (const option of ["Acquire::Retries=3", "Acquire::http::Timeout=30", "Acquire::https::Timeout=30"]) {
+      assert.ok(content.includes(option));
+    }
+  }
 });
 
 test("Rust test jobs install pinned nextest and retain separate doctests", () => {

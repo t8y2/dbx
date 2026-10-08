@@ -1,6 +1,6 @@
 [package]
 name = "dbx-mcp"
-version = "0.4.107"
+version = "0.4.109"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -32,7 +32,7 @@ log = "0.4"
 mysql_async = { version = "0.37", default-features = false, features = ["default-rustls", "client_ed25519", "chrono", "rust_decimal"] }
 axum = "0.8"
 chrono = "0.4"
-rmcp = { version = "2.2.0", features = ["client", "transport-io", "transport-streamable-http-server"] }
+rmcp = { version = "3.5.1", features = ["client", "transport-io", "transport-streamable-http-server"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "socks"] }
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 schemars = "1"
@@ -49,7 +49,7 @@ url = "2"
 security-framework = { version = "3.7", optional = true }
 
 [dev-dependencies]
-rmcp = { version = "2.2.0", features = ["transport-streamable-http-client-reqwest"] }
+rmcp = { version = "3.5.1", features = ["transport-streamable-http-client-reqwest"] }
 rustls-pemfile = "2.2"
 tempfile = "3"
 tokio = { version = "1", features = ["net", "io-util"] }

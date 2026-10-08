@@ -13,7 +13,8 @@ import { copyToClipboard } from "@/lib/common/clipboard";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { joinExportedDdls } from "@/lib/export/ddlExport";
-import { autoRevealExportedPathIfConfigured, promptExportSavePath } from "@/lib/export/exportPath";
+import { promptExportSavePath } from "@/lib/export/exportPath";
+import { notifyExportComplete } from "@/lib/export/exportReveal";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { sidebarStructureExportTargets, sidebarTableDataExportTargets } from "@/lib/sidebar/sidebarExportRuntime";
 import { fetchTableDataForExport } from "@/lib/table/tableDataExport";
@@ -385,8 +386,14 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
       const outputPath = await resolveTableExportOutputPath(target, "json", outputDirectory);
       if (!outputPath) return false;
       await api.exportQueryResultJson(outputPath, result.columns, result.rows);
-      if (!suppressDoneToast) toast(t("grid.exported"));
-      void autoRevealExportedPathIfConfigured(outputPath);
+      if (!suppressDoneToast) {
+        notifyExportComplete({
+          filePath: outputPath,
+          message: t("grid.exported"),
+          openFolderLabel: t("exportProgress.openFolder"),
+          toast,
+        });
+      }
       return true;
     } catch (error: any) {
       toast(t("grid.exportFailed", { message: translateBackendError(t, error) }), 5000);
@@ -487,7 +494,14 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
         currentTask.status = "Done";
         currentTask.rowsExported = result.rows.length;
         currentTask.totalRows = result.rows.length;
-        if (!suppressDoneToast) toast(t("grid.exported"));
+        if (!suppressDoneToast) {
+          notifyExportComplete({
+            filePath: outputPath,
+            message: t("grid.exported"),
+            openFolderLabel: t("exportProgress.openFolder"),
+            toast,
+          });
+        }
         return true;
       }
       const columnComments =
@@ -528,7 +542,14 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
       await api.startTableExport(request, (progress) => {
         updateTableExportTask(currentTask.exportId, progress);
         if (progress.status === "Done") {
-          if (!suppressDoneToast) toast(t("grid.exported"));
+          if (!suppressDoneToast) {
+            notifyExportComplete({
+              filePath: request.filePath,
+              message: t("grid.exported"),
+              openFolderLabel: t("exportProgress.openFolder"),
+              toast,
+            });
+          }
         } else if (progress.status === "Error") toast(t("grid.exportFailed", { message: translateBackendError(t, progress.errorMessage || "") }), 5000);
       });
       return true;
@@ -584,7 +605,12 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
           } else if (progress.status === "cancelled") currentTask.status = "Cancelled";
         },
       );
-      toast(t("grid.exported"));
+      notifyExportComplete({
+        filePath: outputPath,
+        message: t("grid.exported"),
+        openFolderLabel: t("exportProgress.openFolder"),
+        toast,
+      });
     } catch (error: unknown) {
       if (task) {
         task.status = "Error";

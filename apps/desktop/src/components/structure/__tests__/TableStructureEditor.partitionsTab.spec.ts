@@ -378,7 +378,7 @@ beforeEach(() => {
   mocks.executeQuery.mockResolvedValue({ columns: [], rows: [] });
   mocks.executeBatch.mockResolvedValue({ rowsAffected: 0 });
   mocks.listDataTypes.mockResolvedValue([]);
-  mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: true, isPartition: false });
+  mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: true, isPartition: false, isForeign: false });
   mocks.buildTablePartitionOperationSql.mockResolvedValue({ statements: [], warnings: [] });
   mocks.buildCreatePartitionedTableSql.mockResolvedValue({ statements: [], warnings: [] });
   mocks.getTablePartitioning.mockResolvedValue({
@@ -510,6 +510,24 @@ describe("TableStructureEditor partitions tab", () => {
     expect(args.options.tableName).toBe("users");
   });
 
+  it("passes the foreign-table flag into the structure SQL preview", async () => {
+    mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: true, isPartition: false, isForeign: true });
+
+    const root = await mountStructureEditor({
+      initialTab: "partitions",
+      initialTabRequestId: 1,
+      draft: structureDraft({ tableComment: "港口资料", originalTableComment: "" }),
+    });
+    await settle();
+
+    // The SQL preview is debounced, so wait for the builder rather than
+    // assuming it ran within the microtask settle loop.
+    await vi.waitFor(() => expect(mocks.buildTableStructureChangeSql).toHaveBeenCalled(), { timeout: 3000 });
+    const options = mocks.buildTableStructureChangeSql.mock.calls.at(-1)?.[0] as { foreignTable?: boolean };
+    expect(options.foreignTable).toBe(true);
+    expect(root.textContent ?? "").not.toBe("");
+  });
+
   it("shows the Partitions tab for KingbaseES connections", async () => {
     // Regression: the status probe used to be gated on db_type === "postgres",
     // which hid the tab on every other PostgreSQL-family engine.
@@ -534,7 +552,7 @@ describe("TableStructureEditor partitions tab", () => {
   });
 
   it("hides the Partitions tab for a table that is not partitioned", async () => {
-    mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: false, isPartition: false });
+    mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: false, isPartition: false, isForeign: false });
     const root = await mountStructureEditor();
 
     await settle();

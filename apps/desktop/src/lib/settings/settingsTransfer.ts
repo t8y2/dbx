@@ -79,6 +79,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "executeAllOnBlankLine",
     "showExecutionTargetPicker",
     "showStatementRunButtons",
+    "locateCursorOnGutterExecute",
     "showLineNumbers",
     "showCurrentStatementFrame",
     "showInsertValueHints",

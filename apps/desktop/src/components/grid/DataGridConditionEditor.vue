@@ -5,6 +5,7 @@ import { completeDataGridConditionQuote, useDataGridConditionEditor, type DataGr
 import { tokenizeDataGridCondition, type DataGridConditionTokenType } from "@/lib/dataGrid/dataGridConditionHighlight";
 import { getDataGridConditionSuggestionPosition, getDataGridConditionSuggestionPreferredWidth } from "@/lib/dataGrid/dataGridConditionSuggestionPosition";
 import type { DataGridConditionHistoryKind, DataGridConditionHistoryScope } from "@/lib/dataGrid/dataGridConditionHistory";
+import type { DatabaseType } from "@/types/database";
 
 const props = withDefaults(
   defineProps<{
@@ -16,6 +17,7 @@ const props = withDefaults(
     historyEmptyText?: string;
     historyNoMatchesText?: string;
     identifierQuote?: string;
+    databaseType?: DatabaseType;
     suggestionProvider?: DataGridConditionSuggestionProvider;
     suggestionDebounceMs?: number;
     disabled?: boolean;
@@ -80,6 +82,7 @@ const editor = useDataGridConditionEditor({
   selectionStart,
   selectionEnd,
   identifierQuote: () => props.identifierQuote,
+  databaseType: () => props.databaseType,
   columns: () => props.columns,
   historyScope: () => props.historyScope,
   suggestionProvider: props.suggestionProvider,

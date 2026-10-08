@@ -140,9 +140,11 @@ Ask the MCP client to:
 
 ## Tools
 
+`dbx_list_connections` and `dbx://connections` include saved connection notes regardless of the sidebar display setting. Notes are visible to MCP clients that can access the connection; do not store passwords or other secrets in notes.
+
 | Tool | Description |
 | --- | --- |
-| `dbx_list_connections` | List connections visible to the MCP session |
+| `dbx_list_connections` | List connections visible to the MCP session, including saved notes |
 | `dbx_list_databases` | List databases available through a connection, respecting its MCP database scope |
 | `dbx_add_connection` | Add a connection to DBX storage |
 | `dbx_duplicate_connection` | Duplicate a DBX connection with its complete settings |

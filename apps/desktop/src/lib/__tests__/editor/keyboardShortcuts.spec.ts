@@ -4,6 +4,7 @@ import {
   eventToShortcut,
   isBrowserTaskManagerShortcut,
   isConvertNamingStyleShortcut,
+  isEditCellShortcut,
   isEditTableStructureShortcut,
   isExecuteSqlInNewResultTabShortcut,
   isGoToColumnShortcut,
@@ -213,6 +214,22 @@ describe("keyboard shortcut matching", () => {
     expect(isGoToColumnShortcut({ key: "g", ctrlKey: true })).toBe(false);
     expect(isGoToColumnShortcut({ key: "g", ctrlKey: true }, { goToColumn: "" })).toBe(false);
     expect(isGoToColumnShortcut({ key: "g", ctrlKey: true, isComposing: true }, { goToColumn: "Mod+G" })).toBe(false);
+  });
+
+  it("matches the edit-cell shortcut F2 by default on Windows and macOS", () => {
+    expect(isEditCellShortcut({ key: "F2" }, undefined, "Win32")).toBe(true);
+    expect(isEditCellShortcut({ key: "F2" }, undefined, "MacIntel")).toBe(true);
+    expect(isEditCellShortcut({ key: "F2", ctrlKey: true }, undefined, "Win32")).toBe(false);
+    expect(isEditCellShortcut({ key: "F2", shiftKey: true }, undefined, "Win32")).toBe(false);
+    expect(isEditCellShortcut({ key: "F2", altKey: true }, undefined, "Win32")).toBe(false);
+    expect(isEditCellShortcut({ key: "F3" }, undefined, "Win32")).toBe(false);
+  });
+
+  it("honors custom and disabled edit-cell shortcuts", () => {
+    expect(isEditCellShortcut({ key: "e", ctrlKey: true }, { editCell: "Mod+E" }, "Win32")).toBe(true);
+    expect(isEditCellShortcut({ key: "F2" }, { editCell: "Mod+E" }, "Win32")).toBe(false);
+    expect(isEditCellShortcut({ key: "F2" }, { editCell: "" }, "Win32")).toBe(false);
+    expect(isEditCellShortcut({ key: "F2", isComposing: true }, undefined, "Win32")).toBe(false);
   });
 
   it("matches the edit-table-structure shortcut on Windows and macOS", () => {

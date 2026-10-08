@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { TransferOwnershipPreview, TransferRequest } from "@/lib/backend/api";
-import { createTransferSubmission, hasTransferSqlPreview, transferPreviewSql, TRANSFER_STRUCTURE_PREVIEW_UNAVAILABLE } from "../transferStrategy";
+import { createTransferSubmission, hasTransferSqlPreview, transferPlanReviewText, transferPreviewSql, TRANSFER_STRUCTURE_PREVIEW_UNAVAILABLE } from "../transferStrategy";
 
 function structureRequest(overrides: Partial<TransferRequest> = {}): TransferRequest {
   return {
@@ -27,7 +27,7 @@ function structureRequest(overrides: Partial<TransferRequest> = {}): TransferReq
 }
 
 function structurePreview(sql = '-- orders -> reporting.orders\nCREATE TABLE "reporting"."orders" ("id" integer);'): TransferOwnershipPreview["structure"] {
-  return { sql, tables: [{ sourceTable: "orders", targetTable: "reporting.orders", preexisting: false, sql }] };
+  return { sql, tables: [{ sourceTable: "orders", targetTable: "reporting.orders", preexisting: false, sql }], operations: [] };
 }
 
 function preview(overrides: Partial<TransferOwnershipPreview> = {}): TransferOwnershipPreview {
@@ -68,6 +68,16 @@ describe("structure-only SQL preview", () => {
     expect(hasTransferSqlPreview(harness.reviewed[0]!.preview)).toBe(true);
     expect(harness.executions).toHaveLength(1);
     expect(harness.executions[0]?.content).toBe("structureOnly");
+  });
+
+  it("includes the operation summary before SQL in production review text", () => {
+    const plan = preview();
+    const reviewText = transferPlanReviewText("Keep existing tables", "Structure transfer plan\nPlanned operations\nCREATE table orders", plan);
+
+    expect(reviewText).toContain("Structure transfer plan");
+    expect(reviewText).toContain("CREATE table orders");
+    expect(reviewText).toContain('CREATE TABLE "reporting"."orders"');
+    expect(reviewText.indexOf("Structure transfer plan")).toBeLessThan(reviewText.indexOf("CREATE TABLE"));
   });
 
   it("does not execute when the SQL confirmation is cancelled", async () => {

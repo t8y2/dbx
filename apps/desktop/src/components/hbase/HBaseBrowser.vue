@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { Braces, DatabaseZap, ListFilter, Loader2, Plus, RefreshCw, ScanSearch, TableProperties, Trash2 } from "@lucide/vue";
+import { Braces, Columns3, DatabaseZap, ListFilter, Loader2, Plus, RefreshCw, ScanSearch, TableProperties, Trash2 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 
 import DataGrid from "@/components/grid/DataGrid.vue";
@@ -23,6 +23,8 @@ import { useQueryStore } from "@/stores/queryStore";
 import type { QueryResult } from "@/types/database";
 import type { HBaseCellInput, HBasePutRowInput, HBaseRow, HBaseTableSchema, HBaseValueEncoding } from "@/types/hbase";
 import { useTabUiState } from "@/lib/tabs/tabUiState";
+
+const dataGridRef = ref<InstanceType<typeof DataGrid>>();
 
 const props = defineProps<{
   tabId: string;
@@ -423,6 +425,19 @@ function errorMessage(value: unknown): string {
         {{ t("hbase.createTable") }}
       </Button>
       <Button
+        v-if="hasTable && dataGridRef?.goToColumnToolbarCapability?.visible"
+        variant="ghost"
+        size="icon-sm"
+        class="h-7 w-7"
+        :class="{ 'bg-accent': dataGridRef?.goToColumnToolbarCapability?.active }"
+        :title="dataGridRef?.goToColumnToolbarCapability?.label"
+        :aria-label="dataGridRef?.goToColumnToolbarCapability?.label"
+        :aria-pressed="dataGridRef?.goToColumnToolbarCapability?.active"
+        @click="dataGridRef?.goToColumnToolbarCapability?.onTrigger()"
+      >
+        <Columns3 class="h-3.5 w-3.5" />
+      </Button>
+      <Button
         v-if="hasTable && !readOnly"
         variant="ghost"
         size="icon-sm"
@@ -446,6 +461,7 @@ function errorMessage(value: unknown): string {
     <ErrorBanner v-if="error" :message="error" dismissible @dismiss="error = ''" />
     <DataGrid
       v-if="hasTable"
+      ref="dataGridRef"
       class="min-h-0 flex-1"
       :result="gridResult"
       context="results"

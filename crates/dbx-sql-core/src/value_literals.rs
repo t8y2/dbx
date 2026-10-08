@@ -159,6 +159,14 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn string_literal_quotes_normal_unicode_empty_and_apostrophe_values() {
+        assert_eq!(quote_string_literal("hello"), "'hello'");
+        assert_eq!(quote_string_literal("O'Reilly"), "'O''Reilly'");
+        assert_eq!(quote_string_literal(""), "''");
+        assert_eq!(quote_string_literal("中文注释"), "'中文注释'");
+    }
+
+    #[test]
     fn pg_array_literal_without_backslashes_stays_a_plain_string() {
         assert_eq!(format_pg_array_sql_literal(&[]), "'{}'");
         assert_eq!(format_pg_array_sql_literal(&[json!("a"), json!(null), json!(1)]), r#"'{"a",NULL,1}'"#);

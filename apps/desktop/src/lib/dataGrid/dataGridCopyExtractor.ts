@@ -29,7 +29,9 @@ export const DATA_GRID_DEFAULT_COPY_PREFERENCES: readonly DataGridCopyPreference
 ];
 
 export const DATA_GRID_EXTRACTOR_CONTRACT_VERSION = 1 as const;
-export const DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION = 1 as const;
+// v2：复制/导出 SQL 的「包含数据库名称」改为由提取器自身的勾选框决定，默认关闭（不带库名/模式名），
+// 历史持久化的 `true` 由 settingsStore 的迁移归位到新默认。
+export const DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION = 2 as const;
 
 export const DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS: Record<DataGridCopyExtractorId, { category: DataGridExtractorCategory; separatorBefore?: boolean }> = {
   raw: { category: "raw" },
@@ -151,7 +153,7 @@ export const DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS: DataGridExtractorOptions = {
     skipGeneratedColumns: true,
     insertMode: "merged",
     excludePrimaryKeysFromInsert: false,
-    includeDatabaseName: true,
+    includeDatabaseName: false,
     quoteIdentifiers: true,
     temporalFormat: "native",
   },
@@ -184,7 +186,7 @@ export function normalizeDataGridExtractorOptions(value: unknown): DataGridExtra
       skipGeneratedColumns: sql.skipGeneratedColumns !== false,
       insertMode: sql.insertMode === "row-by-row" ? "row-by-row" : "merged",
       excludePrimaryKeysFromInsert: sql.excludePrimaryKeysFromInsert === true,
-      includeDatabaseName: sql.includeDatabaseName !== false,
+      includeDatabaseName: sql.includeDatabaseName === true,
       quoteIdentifiers: sql.quoteIdentifiers !== false,
       temporalFormat: sql.temporalFormat === "string" ? "string" : "native",
     },

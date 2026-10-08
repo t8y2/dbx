@@ -186,6 +186,10 @@ test('Installer write failure diagnostics compile', { skip: !compilerAvailable }
   // Keep the production extraction policy, dialog code and exit handler intact.
   const fixtureDiagnostics = diagnostics
     .replace('Function DbxShowWriteError', 'Function DbxShowWriteErrorActual')
+    .replace('    Call DbxShowWriteError\n', '    Call DbxShowWriteError\n    WriteINIStr "$EXEDIR\\result.ini" "trace" "action" "$DbxWriteFailureAction"\n')
+    .replace('  StrCpy $DbxWriteFailureAction ${IDCANCEL}\n', '  StrCpy $DbxWriteFailureAction ${IDCANCEL}\n  WriteINIStr "$EXEDIR\\result.ini" "trace" "dialog" "entered"\n')
+    .replace('    Goto dbx_write_dialog_done\n', '    WriteINIStr "$EXEDIR\\result.ini" "trace" "silent" "1"\n    Goto dbx_write_dialog_done\n')
+    .replace('  dbx_write_dialog_done:\n', '  dbx_write_dialog_done:\n    WriteINIStr "$EXEDIR\\result.ini" "trace" "dialog" "returning"\n')
     .replace(`ExecShell "open" "$WINDIR\\explorer.exe" '/select,"$EXEPATH"'`,
       `WriteINIStr "$EXEDIR\\result.ini" "manual" "args" '/select,"$EXEPATH"'`)
   const dialogSelection = `Function DbxShowWriteError
@@ -264,18 +268,19 @@ SectionEnd
           t.diagnostic(`Windows extraction: language=${language}, action=${action}`)
           const locked = ['retry', 'cancel', 'manual'].includes(action)
           writeFileSync(path.join(target, 'dbx.exe'), 'original executable contents')
-          rmSync(report, { force: true })
+          // Win32 INI writes otherwise use the runner's ANSI code page.
+          writeFileSync(report, '\ufeff', 'utf16le')
           let exitCode = 0
           try {
             execFileSync(exe, ['/S', `/LANG=${language}`, ...(locked ? ['/LOCK'] : []), ...(action === 'manual' ? ['/MANUAL'] : []), ...(action === 'retry' ? ['/RETRY'] : []), ...(action === 'readonly' ? ['/READONLY'] : []), `/D=${target}`], { timeout: 15_000, windowsVerbatimArguments: true, argv0: `"${exe}"` })
           } catch (error) {
             if (typeof error.status !== 'number') {
-              const diagnostic = existsSync(report) ? readFileSync(report, 'utf8') : 'No fixture report'
+              const diagnostic = existsSync(report) ? readFileSync(report, 'utf16le') : 'No fixture report'
               throw new Error(`language=${language}, action=${action}: ${error.message}\n${diagnostic}`, { cause: error })
             }
             exitCode = error.status
           }
-          const output = readFileSync(report, 'utf8')
+          const output = readFileSync(report, 'utf16le')
           assert.ok(output.includes(exe), output)
           assert.ok(output.includes(target), output)
           assert.match(output, elevation)

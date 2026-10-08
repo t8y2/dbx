@@ -793,6 +793,13 @@ pub async fn execute_tool_scoped(
     } else {
         None
     };
+    // `use_skill` reports which skill it actually resolved. That identity leaves
+    // through the tool result's `explain_data`, which is frontend-only (the model
+    // sees `content` alone — see the follow-up message built in `agent_loop`), so
+    // the UI can record a load from the backend's own answer instead of
+    // re-deriving it from the call arguments, which describe an intent and not an
+    // outcome. Every other tool leaves this `None`.
+    let mut skill_explain: Option<serde_json::Value> = None;
     let result = match tool_call.name.as_str() {
         "list_databases" => execute_list_databases(tool_call, state, connection_id).await,
         "list_tables" => execute_list_tables(tool_call, state, connection_id, database, default_schema, db_type).await,
@@ -837,7 +844,13 @@ pub async fn execute_tool_scoped(
         // Skill tools are filesystem-only: `tool_uses_database` must keep
         // returning false for them, or they would serialize on a connection lock
         // they have no reason to hold (see the test below).
-        skill_tools::USE_SKILL_TOOL => skill_tools::execute_use_skill(tool_call, state).await,
+        skill_tools::USE_SKILL_TOOL => match skill_tools::execute_use_skill(tool_call, state).await {
+            Ok(outcome) => {
+                skill_explain = outcome.loaded_skill_id.map(|id| serde_json::json!({ "skillId": id }));
+                Ok(outcome.text)
+            }
+            Err(err) => Err(err),
+        },
         skill_tools::READ_SKILL_FILE_TOOL => skill_tools::execute_read_skill_file(tool_call, state).await,
         _ => Err(format!("Unknown tool: {}", tool_call.name)),
     };
@@ -848,7 +861,7 @@ pub async fn execute_tool_scoped(
             tool_name: tool_call.name.clone(),
             content,
             is_error: false,
-            explain_data: None,
+            explain_data: skill_explain,
         },
         Err(err) => ToolResult {
             tool_call_id: tool_call.id.clone(),

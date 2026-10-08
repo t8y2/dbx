@@ -1112,10 +1112,18 @@ describe("AiAssistant mount", () => {
     expect(errors.map(String)).toEqual([]);
   });
 
-  it("lights the chip from a use_skill tool event and keeps it after reopening the panel", async () => {
+  it("lights the chip from a completed use_skill call and keeps it after reopening the panel", async () => {
     configureSkillCatalog();
     aiAssistantMountApi.runAgentStream = async (onEvent) => {
-      onEvent({ type: "tool_call_start", tool_call_id: "call-1", tool_name: "use_skill", args: { skill: SKILL.name, source: "default" } });
+      // The id comes from the backend's own answer. Deriving it from the call
+      // arguments would light a chip even when the call loaded nothing.
+      onEvent({
+        type: "tool_call_end",
+        tool_call_id: "call-1",
+        tool_name: "use_skill",
+        result: { content: "skill body", explain_data: { skillId: SKILL.id } },
+        is_error: false,
+      });
       return "reviewed";
     };
     const first = await mountPanel(true, POSTGRES, configureAiPanel);
@@ -1142,6 +1150,51 @@ describe("AiAssistant mount", () => {
     await selectSkill(second.container);
     expect(skillChip(second.container)!.textContent).toContain(i18n.global.t("ai.skillsLoadedState"));
     expect(second.errors.map(String)).toEqual([]);
+  });
+
+  // A `use_skill` that ends in an error loaded nothing, so no chip may claim it
+  // did: a lit chip is a fact that later re-reads that skill's body into the
+  // prompt.
+  it("does not mark a skill loaded when the use_skill call ends in an error", async () => {
+    configureSkillCatalog();
+    aiAssistantMountApi.runAgentStream = async (onEvent) => {
+      onEvent({ type: "tool_call_start", tool_call_id: "call-1", tool_name: "use_skill", args: { skill: SKILL.name, source: "default" } });
+      // The ambiguity answer: two skills share the name, so nothing was loaded.
+      onEvent({
+        type: "tool_call_end",
+        tool_call_id: "call-1",
+        tool_name: "use_skill",
+        result: { content: "Several skills are named ..." },
+        is_error: true,
+      });
+      return "reviewed";
+    };
+    const { errors, container } = await mountPanel(true, POSTGRES, configureAiPanel);
+    await selectSkill(container);
+
+    await sendPrompt(container, "review this query");
+
+    expect(skillChip(container)).not.toBeNull();
+    expect(skillChip(container)!.textContent).not.toContain(i18n.global.t("ai.skillsLoadedState"));
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // Regression: the load used to be recorded on `tool_call_start`, before the
+  // tool had run, so an uncompleted call lit the chip.
+  it("does not mark a skill loaded from an in-flight tool_call_start", async () => {
+    configureSkillCatalog();
+    aiAssistantMountApi.runAgentStream = async (onEvent) => {
+      onEvent({ type: "tool_call_start", tool_call_id: "call-1", tool_name: "use_skill", args: { skill: SKILL.name, source: "default" } });
+      return "reviewed";
+    };
+    const { errors, container } = await mountPanel(true, POSTGRES, configureAiPanel);
+    await selectSkill(container);
+
+    await sendPrompt(container, "review this query");
+
+    expect(skillChip(container)).not.toBeNull();
+    expect(skillChip(container)!.textContent).not.toContain(i18n.global.t("ai.skillsLoadedState"));
+    expect(errors.map(String)).toEqual([]);
   });
 
   it("shows the one-time hint until a selected skill is loaded, and clicking it loads", async () => {

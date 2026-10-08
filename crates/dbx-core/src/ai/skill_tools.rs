@@ -160,10 +160,24 @@ fn required_argument(tool_call: &ToolCall, key: &str) -> Result<String, String> 
         .ok_or_else(|| format!("`{key}` is required"))
 }
 
-pub async fn execute_use_skill(tool_call: &ToolCall, state: &AppState) -> Result<String, String> {
+/// What `use_skill` resolved: the text the model reads, plus the identity the
+/// backend actually loaded.
+///
+/// `loaded_skill_id` exists so a caller never has to re-derive "which skill was
+/// loaded" from the call arguments. The arguments say what the model *asked*
+/// for, and an ambiguous or missing name loads nothing at all — re-deriving an
+/// id from them lights a chip, and later injects a body, for a skill that was
+/// never loaded.
+#[derive(Debug)]
+pub struct UseSkillOutcome {
+    pub text: String,
+    pub loaded_skill_id: Option<String>,
+}
+
+pub async fn execute_use_skill(tool_call: &ToolCall, state: &AppState) -> Result<UseSkillOutcome, String> {
     let target = SkillTarget::from_tool_call(tool_call)?;
     let roots = load_skill_roots(state).await;
-    run_blocking(move || Ok(use_skill_answer(&target, &roots))).await
+    run_blocking(move || use_skill_answer(&target, &roots)).await
 }
 
 pub async fn execute_read_skill_file(tool_call: &ToolCall, state: &AppState) -> Result<String, String> {
@@ -203,11 +217,17 @@ async fn load_skill_roots(state: &AppState) -> SkillRoots {
     }
 }
 
-fn use_skill_answer(target: &SkillTarget, roots: &SkillRoots) -> String {
+fn use_skill_answer(target: &SkillTarget, roots: &SkillRoots) -> Result<UseSkillOutcome, String> {
     match skills::read_skill_by_name(&target.name, target.source.as_deref(), roots) {
-        SkillLookup::Found(skill) => format_skill(&skill),
-        SkillLookup::Ambiguous(candidates) => ambiguous_answer(&target.name, &candidates),
-        SkillLookup::NotFound => not_found_answer(&target.name, roots),
+        SkillLookup::Found(skill) => {
+            let text = format_skill(&skill);
+            Ok(UseSkillOutcome { text, loaded_skill_id: Some(skill.id) })
+        }
+        // Err rather than a text answer: `is_error` on the tool result is the
+        // only thing that says "nothing was loaded". `read_skill_file` answers
+        // these two cases the same way, so one recovery instruction serves both.
+        SkillLookup::Ambiguous(candidates) => Err(ambiguous_answer(&target.name, &candidates)),
+        SkillLookup::NotFound => Err(not_found_answer(&target.name, roots)),
     }
 }
 
@@ -262,8 +282,14 @@ fn format_skill(skill: &ResolvedSkill) -> String {
 /// would be a silent wrong-skill answer, and skill names genuinely do live in
 /// both roots.
 fn ambiguous_answer(name: &str, candidates: &[SkillCandidate]) -> String {
-    let mut output =
-        format!("Several skills are named \"{name}\". Call this tool again with `source` set to one of:\n");
+    // Two skills in the *same* source cannot be told apart by `source`, so the
+    // usual "retry with a source" recovery would be impossible to follow. That
+    // collision is the user's to fix, so say what is true instead of sending the
+    // model in a circle. The `len() > 1` guard is not cosmetic: a lone candidate
+    // has nothing to be told apart from, and the wording below would be false.
+    let same_source = candidates.len() > 1
+        && candidates.first().is_some_and(|first| candidates.iter().all(|candidate| candidate.source == first.source));
+    let mut output = format!("Several skills are named \"{name}\":\n");
     for candidate in candidates {
         output.push_str(&format!(
             "- {} [{}]: {}\n",
@@ -272,6 +298,12 @@ fn ambiguous_answer(name: &str, candidates: &[SkillCandidate]) -> String {
             truncate_chars(&candidate.description, MAX_CANDIDATE_DESCRIPTION_CHARS)
         ));
     }
+    output.push_str(if same_source {
+        "\nThey all live in the same source, so `source` cannot tell them apart. Continue without this skill, or tell \
+         the user that two skills share this name.\n"
+    } else {
+        "\nCall this tool again with `source` set to one of the values above.\n"
+    });
     output
 }
 
@@ -406,13 +438,20 @@ mod tests {
         std::fs::write(dir.join("logo.png"), [0x89u8, b'P', 0, 1]).unwrap();
         let roots = roots_of(&root, None);
 
-        let answer = use_skill_answer(&target("sql-review", None), &roots);
+        let outcome = use_skill_answer(&target("sql-review", None), &roots).unwrap();
+        let answer = &outcome.text;
         assert!(answer.contains("Follow these rules."), "the body must be returned: {answer}");
         assert!(answer.contains("references/one.md (3 bytes) [text]"), "{answer}");
         assert!(answer.contains("script.py (8 bytes) [text]"), "{answer}");
         assert!(answer.contains("logo.png (4 bytes) [binary]"), "{answer}");
         assert!(answer.contains("read_skill_file"), "the answer must say how to read them");
-        assert_no_path_leak(&answer, &[&root]);
+        // The load names the skill it resolved; that id is what a caller records.
+        assert!(
+            outcome.loaded_skill_id.as_deref().is_some_and(|id| id.starts_with("d-")),
+            "{:?}",
+            outcome.loaded_skill_id
+        );
+        assert_no_path_leak(answer, &[&root]);
     }
 
     #[test]
@@ -424,7 +463,7 @@ mod tests {
         }
         let roots = roots_of(&root, None);
 
-        let answer = use_skill_answer(&target("many-files", None), &roots);
+        let answer = use_skill_answer(&target("many-files", None), &roots).unwrap().text;
         assert!(answer.contains("truncated"), "{answer}");
         // SKILL.md is one of the capped entries; every listed file here is text.
         assert_eq!(answer.matches(" bytes) [text]").count(), skills::SKILL_LISTING_MAX_ENTRIES, "{answer}");
@@ -438,7 +477,7 @@ mod tests {
         write_skill(&custom, "two", "shared", "second description");
         let roots = roots_of(&root, Some(&custom));
 
-        let answer = use_skill_answer(&target("shared", None), &roots);
+        let answer = use_skill_answer(&target("shared", None), &roots).unwrap_err();
         assert!(answer.contains("shared [default]: first description"), "{answer}");
         assert!(answer.contains("shared [custom]: second description"), "{answer}");
         assert!(answer.contains("`source`"), "the model must be told how to disambiguate: {answer}");
@@ -446,8 +485,27 @@ mod tests {
         assert_no_path_leak(&answer, &[&root, &custom]);
 
         // The retry with a source resolves it.
-        let chosen = use_skill_answer(&target("shared", Some("custom")), &roots);
+        let chosen = use_skill_answer(&target("shared", Some("custom")), &roots).unwrap().text;
         assert!(chosen.contains("# Skill: shared [custom]"), "{chosen}");
+    }
+
+    /// Two skills in ONE source are a dead end for this tool: `source` is the
+    /// documented discriminator and here both candidates carry the same one. The
+    /// answer must say that instead of telling the model to retry with a value
+    /// that cannot separate them.
+    #[test]
+    fn ambiguous_skills_in_one_source_do_not_pretend_source_can_separate_them() {
+        let root = temp_root("collision");
+        write_skill(&root, "one", "shared", "first description");
+        write_skill(&root, "two", "shared", "second description");
+        let roots = roots_of(&root, None);
+
+        let answer = use_skill_answer(&target("shared", None), &roots).unwrap_err();
+        assert!(answer.contains("shared [default]: first description"), "{answer}");
+        assert!(answer.contains("shared [default]: second description"), "{answer}");
+        assert!(!answer.contains("again with `source`"), "source cannot separate two entries in one root: {answer}");
+        assert!(answer.contains("cannot tell them apart"), "{answer}");
+        assert_no_path_leak(&answer, &[&root]);
     }
 
     #[test]
@@ -458,7 +516,7 @@ mod tests {
         write_skill(&custom, "beta", "team-rules", "team");
         let roots = roots_of(&root, Some(&custom));
 
-        let answer = use_skill_answer(&target("sql-reveiw", None), &roots);
+        let answer = use_skill_answer(&target("sql-reveiw", None), &roots).unwrap_err();
         assert!(answer.contains("- sql-review [default]"), "{answer}");
         assert!(answer.contains("- team-rules [custom]"), "{answer}");
         assert_no_path_leak(&answer, &[&root, &custom]);
@@ -466,7 +524,7 @@ mod tests {
         // No roots at all (default root missing, custom root disabled) is an
         // empty catalog, not a failure.
         let empty = SkillRoots { default: None, custom: None };
-        let answer = use_skill_answer(&target("sql-review", None), &empty);
+        let answer = use_skill_answer(&target("sql-review", None), &empty).unwrap_err();
         assert!(answer.contains("no skills are available"), "{answer}");
     }
 
@@ -541,7 +599,7 @@ mod tests {
         let error = read_skill_file_answer(&target("sql-review", None), "linkdir/secret.md", &roots).unwrap_err();
         assert!(error.contains("no such file"), "{error}");
 
-        let answer = use_skill_answer(&target("sql-review", None), &roots);
+        let answer = use_skill_answer(&target("sql-review", None), &roots).unwrap().text;
         assert!(!answer.contains("linkdir"), "the listing must not advertise a link that leaves the skill: {answer}");
     }
 

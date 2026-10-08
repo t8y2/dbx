@@ -703,21 +703,21 @@ const USE_SKILL_TOOL_NAME = "use_skill";
 const selectedSkillChips = computed(() => buildSelectedSkillChips(selectedSkillIds.value, (id) => userSkillStore.metaFor(id), loadedSkillIds.value));
 
 /**
- * A `use_skill` call addresses a skill by its listed name (and optionally its
- * source), never by the opaque id (ADR Decision 6 / Req 11), so only the catalog
- * can map a call back to a chip. A name the catalog no longer lists lights no
- * chip — it still reaches the model, which is what the loaded state describes.
+ * The skill a completed `use_skill` call actually loaded, as reported by the
+ * backend (`explain_data.skillId` — `crates/dbx-core/src/ai/skill_tools.rs`).
+ *
+ * Read from the tool *result*, never re-derived from the call arguments: the
+ * arguments say what the model asked for, and an ambiguous or missing name loads
+ * nothing at all. Mapping the arguments back through the catalog would light a
+ * chip for a body that never arrived, and the next send would then re-read and
+ * inject that wrong body into the prompt.
  */
-function skillIdFromToolArguments(args: Record<string, unknown> | undefined): string | undefined {
-  const name = typeof args?.skill === "string" ? args.skill.trim() : "";
-  if (!name) return undefined;
-  const source = args?.source === "custom" || args?.source === "default" ? args.source : undefined;
-  for (const group of userSkillStore.groupedSkills) {
-    for (const skill of group.skills) {
-      if (skill.name === name && (!source || group.source === source)) return skill.id;
-    }
-  }
-  return undefined;
+function loadedSkillIdFromToolResult(result: unknown): string | undefined {
+  if (!result || typeof result !== "object") return undefined;
+  const explain = (result as { explain_data?: unknown }).explain_data;
+  if (!explain || typeof explain !== "object") return undefined;
+  const id = (explain as { skillId?: unknown }).skillId;
+  return typeof id === "string" && id ? id : undefined;
 }
 
 /**
@@ -4212,8 +4212,12 @@ async function send() {
         // transcript, so the event stream is where this is observed — recorded
         // under the run's own conversation, which a background send may not be
         // showing.
-        if (event.type === "tool_call_start" && event.tool_name === USE_SKILL_TOOL_NAME) {
-          const loadedSkillId = skillIdFromToolArguments(event.args);
+        //
+        // Only a *completed, successful* call proves a load: `tool_call_start`
+        // fires before the tool runs, and an ambiguous or missing name ends as an
+        // error having loaded nothing.
+        if (event.type === "tool_call_end" && event.tool_name === USE_SKILL_TOOL_NAME && !event.is_error) {
+          const loadedSkillId = loadedSkillIdFromToolResult(event.result);
           if (loadedSkillId && runConversationId) recordConversationSkillLoad(runConversationId, loadedSkillId);
         }
         const msg = runMessages[assistantIdx];

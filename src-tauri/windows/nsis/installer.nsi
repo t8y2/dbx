@@ -1,4 +1,5 @@
 Unicode true
+XPStyle on
 ManifestDPIAware true
 ManifestSupportedOS all
 ; Add in `dpiAwareness` `PerMonitorV2` to manifest for Windows 10 1607+ (note this should not affect lower versions since they should be able to ignore this and pick up `dpiAware` `true` set by `ManifestDPIAware true`)
@@ -100,6 +101,8 @@ Var DbxIsAdmin
 Var DbxElevationStatus
 Var DbxFileProbeError
 Var DbxDirectoryProbeError
+Var DbxFailedFile
+Var DbxWriteFailureAction
 
 Name "${PRODUCTNAME}"
 BrandingText "${COPYRIGHT}"
@@ -511,6 +514,18 @@ LangString dbxInstallDiagnostics ${LANG_TRADCHINESE} "安裝套件：$EXEPATH$\r
 LangString dbxFileWriteErrorNoIgnore ${LANG_ENGLISH} "Unable to write this file:$\r$\n$0$\r$\n$\r$\n$(dbxInstallDiagnostics)$\r$\n$\r$\nClose DBX and retry. If it still fails, send a screenshot of this dialog.$\r$\nRetry tries again; Cancel stops installation. Required files cannot be skipped."
 LangString dbxFileWriteErrorNoIgnore ${LANG_SIMPCHINESE} "无法写入文件：$\r$\n$0$\r$\n$\r$\n$(dbxInstallDiagnostics)$\r$\n$\r$\n请关闭 DBX 后重试；若仍失败，请反馈此弹框截图。$\r$\n“重试”再次尝试；“取消”停止安装。必需文件不能跳过。"
 LangString dbxFileWriteErrorNoIgnore ${LANG_TRADCHINESE} "無法寫入檔案：$\r$\n$0$\r$\n$\r$\n$(dbxInstallDiagnostics)$\r$\n$\r$\n請關閉 DBX 後重試；若仍失敗，請回報此對話方塊截圖。$\r$\n「重試」再次嘗試；「取消」停止安裝。必要檔案不能略過。"
+LangString dbxFileWriteTitle ${LANG_ENGLISH} "Unable to write an installation file"
+LangString dbxFileWriteTitle ${LANG_SIMPCHINESE} "无法写入安装文件"
+LangString dbxFileWriteTitle ${LANG_TRADCHINESE} "無法寫入安裝檔案"
+LangString dbxManualInstall ${LANG_ENGLISH} "Manual installation"
+LangString dbxManualInstall ${LANG_SIMPCHINESE} "手动安装"
+LangString dbxManualInstall ${LANG_TRADCHINESE} "手動安裝"
+LangString dbxFileWriteError ${LANG_ENGLISH} "$DbxFailedFile$\r$\n$\r$\n$(dbxInstallDiagnostics)$\r$\n$\r$\nClose DBX and retry. Manual installation opens the installer folder, selects the installer, and exits this installation. No failed file can be skipped."
+LangString dbxFileWriteError ${LANG_SIMPCHINESE} "$DbxFailedFile$\r$\n$\r$\n$(dbxInstallDiagnostics)$\r$\n$\r$\n请关闭 DBX 后重试。“手动安装”将打开安装包所在目录、选中安装包，并退出当前安装。写入失败的文件不能跳过。"
+LangString dbxFileWriteError ${LANG_TRADCHINESE} "$DbxFailedFile$\r$\n$\r$\n$(dbxInstallDiagnostics)$\r$\n$\r$\n請關閉 DBX 後重試。「手動安裝」將開啟安裝套件所在目錄、選取安裝套件，並結束目前安裝。寫入失敗的檔案不能略過。"
+LangString dbxManualInstallFallback ${LANG_ENGLISH} "Yes: open the installer folder and exit. No: retry. Cancel: stop installation."
+LangString dbxManualInstallFallback ${LANG_SIMPCHINESE} "“是”：打开安装包目录并退出；“否”：重试；“取消”：停止安装。"
+LangString dbxManualInstallFallback ${LANG_TRADCHINESE} "「是」：開啟安裝套件目錄並結束；「否」：重試；「取消」：停止安裝。"
 LangString dbxWin7InstallerRequired ${LANG_ENGLISH} "This installer does not support Windows 7 or Windows Server 2012 R2.$\r$\n$\r$\nPlease use the dedicated Windows 7 / Server 2012 R2 package instead.$\r$\n$\r$\nOpen the download now?"
 LangString dbxWin7InstallerRequired ${LANG_SIMPCHINESE} "此安装包不支持 Windows 7 或 Windows Server 2012 R2。$\r$\n$\r$\n请改用 Windows 7 / Server 2012 R2 专用包。$\r$\n$\r$\n是否立即打开下载地址？"
 LangString dbxWin7InstallerRequired ${LANG_TRADCHINESE} "此安裝套件不支援 Windows 7 或 Windows Server 2012 R2。$\r$\n$\r$\n請改用 Windows 7 / Server 2012 R2 專用套件。$\r$\n$\r$\n是否立即開啟下載網址？"
@@ -556,6 +571,98 @@ Function DbxUpdateElevationStatus
   ${Else}
     StrCpy $DbxElevationStatus "$(dbxElevationNotRequested)"
   ${EndIf}
+FunctionEnd
+
+; Keep extraction failures under our control so a third action can open the
+; installer folder without ever continuing past a failed required-file write.
+!macro DbxExtractFile OPTIONS SOURCE DESTINATION
+  StrCpy $DbxFailedFile "${DESTINATION}"
+  ${Do}
+    Call DbxPrepareFileWrite
+    SetOverwrite try
+    ClearErrors
+    File ${OPTIONS} "${SOURCE}"
+    SetOverwrite on
+    ${IfNot} ${Errors}
+      ${ExitDo}
+    ${EndIf}
+    Call DbxShowWriteError
+    ${If} $DbxWriteFailureAction = ${IDRETRY}
+      ${Continue}
+    ${ElseIf} $DbxWriteFailureAction = 1001
+      Call DbxManualInstall
+    ${EndIf}
+    SetErrorLevel 2
+    Quit
+  ${Loop}
+!macroend
+
+Function DbxPrepareFileWrite
+  Push $0
+  Push $1
+  ; Preserve SetOverwrite on's handling of read-only files when using try to
+  ; capture errors. Keep every other existing file attribute intact.
+  System::Call 'kernel32::GetFileAttributesW(w "$DbxFailedFile") i .r0'
+  ${If} $0 != -1
+    IntOp $1 $0 & 1
+    ${If} $1 != 0
+      IntOp $0 $0 & 0xFFFFFFFE
+      System::Call 'kernel32::SetFileAttributesW(w "$DbxFailedFile", i r0)'
+    ${EndIf}
+  ${EndIf}
+  Pop $1
+  Pop $0
+FunctionEnd
+
+Function DbxShowWriteError
+  Push $0
+  Push $1
+  Push $2
+  Push $3
+  StrCpy $DbxWriteFailureAction ${IDCANCEL}
+  ; Unattended failures stop installation without opening Explorer or a dialog.
+  ${If} ${Silent}
+    Goto dbx_write_dialog_done
+  ${EndIf}
+
+  ; NSIS uses a 32-bit stub even for x64/arm64 application payloads.
+  ; TASKDIALOGCONFIG is 96 bytes; use the Windows Retry/Cancel buttons plus
+  ; a localized custom Manual installation button. Cancel is the default.
+  System::Call '*(i 1001, w "$(dbxManualInstall)") p .r1'
+  System::Call '*(i 96, p $HWNDPARENT, p 0, i 0x1008, i 0x18, w "$(^Name)", p 65534, w "$(dbxFileWriteTitle)", w "$(dbxFileWriteError)", i 1, p r1, i 2, i 0, p 0, i 0, p 0, p 0, p 0, p 0, p 0, p 0, p 0, p 0, i 0) p .r0'
+  StrCpy $3 -1
+  System::Call 'comctl32::TaskDialogIndirect(p r0, *i .r2, p 0, p 0) i .r3'
+  System::Free $0
+  System::Free $1
+  ${If} $3 = 0
+    StrCpy $DbxWriteFailureAction $2
+  ${Else}
+    ; A safe fallback if the system cannot create a task dialog.
+    MessageBox MB_YESNOCANCEL|MB_ICONSTOP|MB_DEFBUTTON3 "$(dbxFileWriteError)$\r$\n$\r$\n$(dbxManualInstallFallback)" /SD IDCANCEL IDYES dbx_write_manual IDNO dbx_write_retry
+    Goto dbx_write_dialog_done
+    dbx_write_manual:
+      StrCpy $DbxWriteFailureAction 1001
+      Goto dbx_write_dialog_done
+    dbx_write_retry:
+      StrCpy $DbxWriteFailureAction ${IDRETRY}
+  ${EndIf}
+
+  dbx_write_dialog_done:
+    Pop $3
+    Pop $2
+    Pop $1
+    Pop $0
+FunctionEnd
+
+Function DbxManualInstall
+  ClearErrors
+  ExecShell "open" "$WINDIR\explorer.exe" '/select,"$EXEPATH"'
+  ${If} ${Errors}
+    ExecShell "open" "$EXEDIR"
+  ${EndIf}
+  ; This is a failed installation, never a successful update or a skipped file.
+  SetErrorLevel 2
+  Quit
 FunctionEnd
 
 ; Probe without truncating the old executable. Only ACCESS_DENIED requests UAC;
@@ -755,7 +862,7 @@ Section WebView2
   ; installer so an existing stale runtime is upgraded without network access.
   !if "${INSTALLWEBVIEW2MODE}" == "offlineInstaller"
     Delete "$TEMP\MicrosoftEdgeWebView2RuntimeInstaller.exe"
-    File "/oname=$TEMP\MicrosoftEdgeWebView2RuntimeInstaller.exe" "${WEBVIEW2INSTALLERPATH}"
+    !insertmacro DbxExtractFile '"/oname=$TEMP\MicrosoftEdgeWebView2RuntimeInstaller.exe"' "${WEBVIEW2INSTALLERPATH}" "$TEMP\MicrosoftEdgeWebView2RuntimeInstaller.exe"
     DetailPrint "$(installingWebview2)"
     ExecWait '"$TEMP\MicrosoftEdgeWebView2RuntimeInstaller.exe" ${WEBVIEW2INSTALLERARGS} /install' $1
     Delete "$TEMP\MicrosoftEdgeWebView2RuntimeInstaller.exe"
@@ -804,7 +911,7 @@ Section WebView2
 
       !if "${INSTALLWEBVIEW2MODE}" == "embedBootstrapper"
         Delete "$TEMP\MicrosoftEdgeWebview2Setup.exe"
-        File "/oname=$TEMP\MicrosoftEdgeWebview2Setup.exe" "${WEBVIEW2BOOTSTRAPPERPATH}"
+        !insertmacro DbxExtractFile '"/oname=$TEMP\MicrosoftEdgeWebview2Setup.exe"' "${WEBVIEW2BOOTSTRAPPERPATH}" "$TEMP\MicrosoftEdgeWebview2Setup.exe"
         DetailPrint "$(installingWebview2)"
         StrCpy $6 "$TEMP\MicrosoftEdgeWebview2Setup.exe"
         Goto install_webview2
@@ -869,21 +976,21 @@ Section Install
   DetailPrint "$(dbxInstallDiagnostics)"
 
   ; Copy main executable
-  File "${MAINBINARYSRCPATH}"
+  !insertmacro DbxExtractFile "" "${MAINBINARYSRCPATH}" "$INSTDIR\${MAINBINARYNAME}.exe"
   ; MSVC links WebView2Loader statically, while GNU builds may emit a DLL next to the binary.
-  File /nonfatal /a "/oname=WebView2Loader.dll" "${WEBVIEW2LOADERSRCPATH}"
+  !insertmacro DbxExtractFile "/nonfatal /a /oname=WebView2Loader.dll" "${WEBVIEW2LOADERSRCPATH}" "$INSTDIR\WebView2Loader.dll"
 
   ; Copy resources
   {{#each resources_dirs}}
     CreateDirectory "$INSTDIR\\{{this}}"
   {{/each}}
   {{#each resources}}
-    File /a "/oname={{this.[1]}}" "{{no-escape @key}}"
+    !insertmacro DbxExtractFile '/a "/oname={{this.[1]}}"' "{{no-escape @key}}" "$INSTDIR\{{this.[1]}}"
   {{/each}}
 
   ; Copy external binaries
   {{#each binaries}}
-    File /a "/oname={{this}}" "{{no-escape @key}}"
+    !insertmacro DbxExtractFile '/a "/oname={{this}}"' "{{no-escape @key}}" "$INSTDIR\{{this}}"
   {{/each}}
 
   ; Create file associations

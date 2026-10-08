@@ -39,6 +39,7 @@ test('Windows installer access checks and elevation handoff', { skip: !available
   const binary = path.join(destination, 'dbx.exe')
   writeFileSync(binary, 'original executable contents')
   const script = `Unicode true
+XPStyle on
 !include MUI2.nsh
 !include FileFunc.nsh
 !define MAINBINARYNAME "dbx"
@@ -181,7 +182,25 @@ test('Installer write failure diagnostics compile', { skip: !compilerAvailable }
   const report = path.join(dir, 'result.ini')
   mkdirSync(target)
   writeFileSync(payload, 'new executable contents')
+  // Simulate only the user's Manual installation selection and Explorer launch.
+  // Keep the production extraction policy, dialog code and exit handler intact.
+  const fixtureDiagnostics = diagnostics
+    .replace('Function DbxShowWriteError', 'Function DbxShowWriteErrorActual')
+    .replace(`ExecShell "open" "$WINDIR\\explorer.exe" '/select,"$EXEPATH"'`,
+      `WriteINIStr "$EXEDIR\\result.ini" "manual" "args" '/select,"$EXEPATH"'`)
+  const dialogSelection = `Function DbxShowWriteError
+  \u0024{If} $TestManual = 1
+    StrCpy $DbxWriteFailureAction 1001
+  \u0024{ElseIf} $TestRetry = 1
+    StrCpy $TestRetry 0
+    System::Call 'kernel32::CloseHandle(p $TestHandle)'
+    StrCpy $DbxWriteFailureAction \u0024{IDRETRY}
+  \u0024{Else}
+    Call DbxShowWriteErrorActual
+  \u0024{EndIf}
+FunctionEnd`
   const script = `Unicode true
+XPStyle on
 !include MUI2.nsh
 !include FileFunc.nsh
 !define VERSION "1.0.1"
@@ -192,8 +211,11 @@ RequestExecutionLevel user
 SilentInstall silent
 ${diagnosticVariables}
 Var TestHandle
+Var TestManual
+Var TestRetry
 ${languages}
-${diagnostics}
+${fixtureDiagnostics}
+${dialogSelection}
 ${template.match(/Function DbxEnsureInstallAccess\r?\n[\s\S]*?FunctionEnd/)[0]}
 Function .onInit
 ${elevationInit}
@@ -204,13 +226,25 @@ ${elevationInit}
     System::Call 'kernel32::CreateFileW(w "$INSTDIR\\dbx.exe", i 0x80000000, i 0, p 0, i 3, i 0, p 0) p .s'
     Pop $TestHandle
   \u0024{EndIf}
+  \u0024{GetOptions} $CMDLINE "/MANUAL" $0
+  \u0024{IfNot} \u0024{Errors}
+    StrCpy $TestManual 1
+  \u0024{EndIf}
+  \u0024{GetOptions} $CMDLINE "/RETRY" $0
+  \u0024{IfNot} \u0024{Errors}
+    StrCpy $TestRetry 1
+  \u0024{EndIf}
   Call DbxEnsureInstallAccess
+  \u0024{GetOptions} $CMDLINE "/READONLY" $0
+  \u0024{IfNot} \u0024{Errors}
+    SetFileAttributes "$INSTDIR\\dbx.exe" READONLY
+  \u0024{EndIf}
   StrCpy $0 "$INSTDIR\\dbx.exe"
   WriteINIStr "$EXEDIR\\result.ini" "diagnostics" "dialog" "$(dbxFileWriteErrorNoIgnore)"
 FunctionEnd
 Section
   SetOutPath $INSTDIR
-  File /oname=dbx.exe "${payload}"
+  !insertmacro DbxExtractFile "/oname=dbx.exe" "${payload}" "$INSTDIR\\dbx.exe"
   WriteINIStr "$EXEDIR\\result.ini" "install" "complete" "1"
 SectionEnd
 `
@@ -224,12 +258,13 @@ SectionEnd
         ['2052', /未请求|启动时已有管理员权限/],
         ['1028', /未請求|啟動時已有系統管理員權限/],
       ]) {
-        for (const locked of [false, true]) {
+        for (const action of ['writable', 'readonly', 'retry', 'cancel', 'manual']) {
+          const locked = ['retry', 'cancel', 'manual'].includes(action)
           writeFileSync(path.join(target, 'dbx.exe'), 'original executable contents')
           rmSync(report, { force: true })
           let exitCode = 0
           try {
-            execFileSync(exe, [`/LANG=${language}`, ...(locked ? ['/LOCK'] : []), `/D=${target}`], { timeout: 15_000, windowsVerbatimArguments: true, argv0: `"${exe}"` })
+            execFileSync(exe, [`/LANG=${language}`, ...(locked ? ['/LOCK'] : []), ...(action === 'manual' ? ['/MANUAL'] : []), ...(action === 'retry' ? ['/RETRY'] : []), ...(action === 'readonly' ? ['/READONLY'] : []), `/D=${target}`], { timeout: 15_000, windowsVerbatimArguments: true, argv0: `"${exe}"` })
           } catch (error) {
             if (typeof error.status !== 'number') throw error
             exitCode = error.status
@@ -240,9 +275,11 @@ SectionEnd
           assert.match(output, elevation)
           assert.ok(output.includes('1.0.1'), output)
           assert.doesNotMatch(output, /Program Files|\$Dbx|\$EXEPATH|\$INSTDIR/)
-          if (locked) {
+          if (action === 'cancel' || action === 'manual') {
             assert.notEqual(exitCode, 0, 'A failed required-file write must fail installation')
             assert.doesNotMatch(output, /complete=1/)
+            if (action === 'manual') assert.ok(output.includes(`args=/select,"${exe}"`), output)
+            else assert.doesNotMatch(output, /\[manual\]/)
             assert.equal(readFileSync(path.join(target, 'dbx.exe'), 'utf8'), 'original executable contents')
           } else {
             assert.equal(exitCode, 0)

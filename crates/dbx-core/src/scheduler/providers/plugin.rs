@@ -170,6 +170,23 @@ impl PluginTaskExecutor {
         let Some(connection_id) = connection_id.filter(|id| !id.trim().is_empty()) else {
             return Ok(None);
         };
+        // A stored connection opens server-side (config hydrated, secrets stay
+        // in this process). An id the host does not store is a plugin-reserved
+        // alias (e.g. the files tasks' `local` plain-path side): forwarded
+        // as-is with no lifecycle params — the plugin's binding either
+        // synthesizes the connection or rejects the id, and no host state is
+        // consulted or leaked either way.
+        let stored = self
+            .state
+            .storage
+            .load_connections()
+            .await
+            .map_err(|error| TaskError::connection_missing(format!("Cannot read stored connections: {error}")))?
+            .iter()
+            .any(|config| config.id == connection_id);
+        if !stored {
+            return Ok(None);
+        }
         self.state.get_or_create_pool(connection_id, None).await.map_err(|error| {
             TaskError::connection_missing(format!("Cannot open connection {connection_id}: {error}"))
         })?;
@@ -385,9 +402,10 @@ impl TaskExecutor for PluginTaskExecutor {
 
 #[cfg(test)]
 mod tests {
-    use super::{combine_results, dispatch_targets, local_trigger_id};
+    use super::{combine_results, dispatch_targets, local_trigger_id, PluginTaskExecutor};
     use crate::scheduler::models::{TaskDefinition, TaskTarget};
     use dbx_plugin_runtime::plugins::PluginTaskExecuteResult;
+    use std::sync::Arc;
 
     fn task_with_config(provider_id: &str, config: serde_json::Value) -> TaskDefinition {
         serde_json::from_value(serde_json::json!({
@@ -448,6 +466,20 @@ mod tests {
     fn task_target_defaults_stay_valid() {
         let task = task_with_config("io.dbx.ssh.tasks", serde_json::json!({}));
         assert_eq!(task.target, TaskTarget::default());
+    }
+
+    #[tokio::test]
+    async fn plugin_reserved_connection_aliases_pass_through_without_a_pool() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("dbx.db")).await.unwrap();
+        let executor = PluginTaskExecutor::new(Arc::new(crate::connection::AppState::new(storage)));
+        // The files tasks' reserved `local` side is not a stored connection:
+        // it forwards to the plugin with no lifecycle params instead of
+        // failing with connection_missing (the plugin's binding synthesizes
+        // the local filesystem side itself).
+        assert!(executor.ensure_connection(Some("local")).await.unwrap().is_none());
+        assert!(executor.ensure_connection(None).await.unwrap().is_none());
+        assert!(executor.ensure_connection(Some("   ")).await.unwrap().is_none());
     }
 
     #[test]

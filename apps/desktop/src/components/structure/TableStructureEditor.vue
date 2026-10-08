@@ -14,7 +14,35 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { AlertTriangle, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ClipboardList, Copy, Database, Info, KeyRound, ListChevronsUpDown, Loader2, Maximize2, Pencil, Plus, RefreshCw, RotateCcw, Rows3, Save, Search, Settings, SlidersHorizontal, Trash2, UserRound, X } from "@lucide/vue";
+import {
+  AlertTriangle,
+  Check,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
+  ClipboardList,
+  Copy,
+  Database,
+  Info,
+  KeyRound,
+  ListChevronsUpDown,
+  Loader2,
+  Maximize2,
+  Pencil,
+  Plus,
+  RefreshCw,
+  RotateCcw,
+  Rows3,
+  Save,
+  Search,
+  Settings,
+  SlidersHorizontal,
+  SquareFunction,
+  Trash2,
+  UserRound,
+  X,
+} from "@lucide/vue";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -124,6 +152,7 @@ import {
   isSqlServerIdentityCompatibleDataType,
   mysqlEnumDataType,
   parseExtraToColumnExtra,
+  parseMysqlGeneratedColumnExtra,
   rehydrateColumnDraftsFromMetadata,
   resolveInsertColumnIndex,
   restoreCharacterLengthUnitsAfterSave,
@@ -520,6 +549,10 @@ const indexes = ref<EditableStructureIndex[]>([]);
 const isPartitionedParent = ref(false);
 // True when the edited table is itself a member partition of another table.
 const isTablePartition = ref(false);
+// True when the edited table is a PostgreSQL foreign table (relkind = 'f').
+// PostgreSQL requires `COMMENT ON FOREIGN TABLE` for these, so the SQL
+// preview must know which form to generate.
+const isForeignTable = ref(false);
 // The partition-status probe has settled (success or failure), so the tab can
 // be hidden without hiding it merely because the probe is still in flight.
 const partitionStatusResolved = ref(false);
@@ -535,6 +568,7 @@ async function probePartitionsTabVisibility() {
   if (!tableMetadataCapabilities.value.partitions || isCreateMode.value) {
     isPartitionedParent.value = false;
     isTablePartition.value = false;
+    isForeignTable.value = false;
     partitionStatusResolved.value = true;
     return;
   }
@@ -551,11 +585,13 @@ async function probePartitionsTabVisibility() {
     if (requestId !== partitionTabProbeRequestId) return;
     isPartitionedParent.value = status.isPartitionedParent;
     isTablePartition.value = status.isPartition;
+    isForeignTable.value = status.isForeign;
     partitionStatusResolved.value = true;
   } catch {
     if (requestId !== partitionTabProbeRequestId) return;
     isPartitionedParent.value = false;
     isTablePartition.value = false;
+    isForeignTable.value = false;
     // A failed probe leaves the concurrent-index availability unknown, so keep
     // the documented fail-closed behavior (disable Concurrent) instead of
     // assuming the table is a plain, non-partitioned one.
@@ -1869,6 +1905,50 @@ function setMysqlAutoIncrement(column: EditableStructureColumn, checked: boolean
     void loadMysqlAutoIncrementCounter(true);
   }
 }
+
+// MySQL generated columns (issue #11208). Tri-state mirrors the backend contract:
+// `undefined` inherits the original definition, an empty expression removes the
+// attribute, otherwise the clause renders from the edited values.
+function hasOriginalMysqlGeneratedColumn(column: EditableStructureColumn): boolean {
+  return structureDialect.value === "mysql" && !!column.original?.extra && !!parseMysqlGeneratedColumnExtra(column.original.extra);
+}
+
+function isMysqlGeneratedChecked(column: EditableStructureColumn): boolean {
+  return structureDialect.value === "mysql" && column.extra.generated !== undefined;
+}
+
+function isMysqlGeneratedActive(column: EditableStructureColumn): boolean {
+  return isMysqlGeneratedChecked(column) && (column.extra.generated?.expression.trim() ?? "") !== "";
+}
+
+function setMysqlGenerated(column: EditableStructureColumn, checked: boolean) {
+  // Only manage the generated flag here. Conflicting attributes (DEFAULT,
+  // AUTO_INCREMENT, ON UPDATE) stay in the draft: they are disabled in the UI
+  // while generated, and stripped from the SQL payload only while the
+  // generated attribute is active, so unchecking restores them untouched.
+  if (checked) {
+    // Re-checking after an accidental uncheck restores the original expression
+    // and storage instead of starting from a blank VIRTUAL draft.
+    const original = column.original?.extra ? parseMysqlGeneratedColumnExtra(column.original.extra) : undefined;
+    column.extra.generated = original ? { ...original } : { expression: "", storage: "STORED" };
+    return;
+  }
+  // Dropping the attribute must be explicit for a column that was generated,
+  // otherwise `undefined` would inherit the original definition back.
+  column.extra.generated = hasOriginalMysqlGeneratedColumn(column) ? { expression: "" } : undefined;
+}
+
+function updateMysqlGeneratedExpression(column: EditableStructureColumn, expression: string) {
+  if (column.extra.generated) {
+    column.extra.generated.expression = expression;
+  }
+}
+
+function updateMysqlGeneratedStorage(column: EditableStructureColumn, storage: string) {
+  if (column.extra.generated) {
+    column.extra.generated.storage = storage === "STORED" ? "STORED" : "VIRTUAL";
+  }
+}
 function isSqliteAutoIncrement(column: EditableStructureColumn): boolean {
   return structureDialect.value === "sqlite" && column.isPrimaryKey && isSqliteIntegerType(column.dataType) && column.extra.autoIncrement === true;
 }
@@ -2508,13 +2588,25 @@ function structureChangeOptions(): BuildTableStructureChangeSqlOptions {
     // User-entered names are normalized here so the preview and the executed
     // batch agree: MySQL rejects identifiers that end with a space (ERROR 1166),
     // while a metadata name the user never touched keeps its exact spelling.
-    columns: columns.value.map((column) => ({
-      ...column,
-      name: draftColumnNameForSql(column.name, column.original?.name),
-      // Do not let a draft created by an older build submit properties that the
-      // current database cannot represent (notably PostgreSQL-style identity on openGauss).
-      ...(showExtendedProperties.value ? {} : { extra: {} }),
-    })),
+    columns: columns.value.map((column) => {
+      const normalized = {
+        ...column,
+        name: draftColumnNameForSql(column.name, column.original?.name),
+        // Do not let a draft created by an older build submit properties that the
+        // current database cannot represent (notably PostgreSQL-style identity on openGauss).
+        ...(showExtendedProperties.value ? {} : { extra: {} }),
+      };
+      // MySQL generated columns cannot carry DEFAULT / AUTO_INCREMENT /
+      // ON UPDATE CURRENT_TIMESTAMP; drop them from the payload only while the
+      // generated attribute is active, so unchecking "virtual" leaves the
+      // draft (and the diff) exactly as the user last saw it.
+      if (isMysqlGeneratedActive(column) && normalized.extra) {
+        const { autoIncrement: _autoIncrement, onUpdateCurrentTimestamp: _onUpdate, ...restExtra } = normalized.extra;
+        normalized.extra = restExtra;
+        normalized.defaultValue = "";
+      }
+      return normalized;
+    }),
     indexes: sanitizeStructureIndexesForCapabilities(indexes.value, structureCapabilities.value),
     foreignKeys: foreignKeys.value,
     triggers: triggers.value,
@@ -2524,6 +2616,7 @@ function structureChangeOptions(): BuildTableStructureChangeSqlOptions {
     transwarpCreate: isCreateMode.value && databaseType.value === "transwarp" ? buildInceptorCreateOptions(physicalOptions.value, columns.value) : undefined,
     tableCollation: mysqlTableDefaultCollation.value || undefined,
     partitioned: isPartitionedParent.value,
+    foreignTable: isForeignTable.value,
     isGaussdbMMode: connection.value?.driver_profile?.toLowerCase() === "gaussdb-m",
   };
 }
@@ -2691,6 +2784,7 @@ function resetState() {
   secondaryMetadataErrors.value = {};
   isPartitionedParent.value = false;
   isTablePartition.value = false;
+  isForeignTable.value = false;
   partitionStatusResolved.value = false;
   partitionStatusKnown.value = true;
   concurrentAvailabilityInvalidated.value = false;
@@ -3005,8 +3099,8 @@ async function loadStructure(
             // status we cannot rule out a partitioned parent, so Concurrent is
             // treated as unavailable until a later reload re-runs the probe.
             .then((status) => ({ known: true, status }))
-            .catch(() => ({ known: false, status: { isPartitionedParent: false, isPartition: false } }))
-        : Promise.resolve({ known: true, status: { isPartitionedParent: false, isPartition: false } });
+            .catch(() => ({ known: false, status: { isPartitionedParent: false, isPartition: false, isForeign: false } }))
+        : Promise.resolve({ known: true, status: { isPartitionedParent: false, isPartition: false, isForeign: false } });
     const columnsLoad = effectiveScope.columns ? loadObjectMetadataFacet(metadataRequest, "columns", () => api.getColumns(connectionId, database, schema, tableName, catalog), { force: forceMetadata }) : undefined;
     const columnsPromise = columnsLoad
       ? columnsLoad.then((result) => {
@@ -3085,6 +3179,7 @@ async function loadStructure(
       partitionStatusKnown.value = partitionStatus.known;
       isPartitionedParent.value = partitionStatus.status.isPartitionedParent;
       isTablePartition.value = partitionStatus.status.isPartition;
+      isForeignTable.value = partitionStatus.status.isForeign;
       partitionStatusResolved.value = true;
       // Availability inputs changed: fail closed while the status is unknown,
       // but preserve the user's Concurrent intent so a later successful probe
@@ -4408,7 +4503,7 @@ function isColumnNullableDisabled(column: EditableStructureColumn): boolean {
 }
 
 function isColumnDefaultDisabled(column: EditableStructureColumn): boolean {
-  return column.markedForDrop || (!!column.original && !structureCapabilities.value.alterDefault);
+  return column.markedForDrop || (!!column.original && !structureCapabilities.value.alterDefault) || isMysqlGeneratedActive(column);
 }
 
 function isColumnCommentDisabled(column: EditableStructureColumn): boolean {
@@ -6008,8 +6103,44 @@ watch(
                               </label>
                             </template>
                             <template v-else-if="structureDialect === 'mysql'">
+                              <label :class="[structurePropertyLabelClass, 'shrink-0 pr-1']" :title="t('structureEditor.virtual')">
+                                <input :checked="isMysqlGeneratedChecked(column)" type="checkbox" :class="[structureCheckboxClass, 'shrink-0']" @change="setMysqlGenerated(column, ($event.target as HTMLInputElement).checked)" />
+                                <span>{{ t("structureEditor.virtual") }}</span>
+                              </label>
+                              <Popover v-if="isMysqlGeneratedChecked(column)">
+                                <PopoverTrigger as-child>
+                                  <Button variant="ghost" size="icon" :class="[structureIconButtonClass, 'mr-1 shrink-0']" :title="t('structureEditor.generatedExpression')" :aria-label="t('structureEditor.generatedExpression')" data-mysql-generated-expression-trigger>
+                                    <SquareFunction :class="structureIconClass" />
+                                  </Button>
+                                </PopoverTrigger>
+                                <PopoverContent align="start" class="w-96 space-y-2 p-3">
+                                  <label class="block text-xs font-medium text-foreground">{{ t("structureEditor.generatedExpression") }}</label>
+                                  <Input
+                                    :model-value="column.extra.generated?.expression ?? ''"
+                                    class="w-full font-mono"
+                                    :placeholder="t('structureEditor.generatedExpressionPlaceholder')"
+                                    data-mysql-generated-expression
+                                    :aria-label="t('structureEditor.generatedExpression')"
+                                    @update:model-value="(v) => updateMysqlGeneratedExpression(column, String(v ?? ''))"
+                                  />
+                                  <p v-if="!isMysqlGeneratedActive(column)" class="text-xs text-destructive">{{ t("structureEditor.generatedExpressionEmptyHint") }}</p>
+                                  <div class="flex items-center gap-2">
+                                    <label class="text-xs text-muted-foreground">{{ t("structureEditor.generatedStorage") }}</label>
+                                    <Select :model-value="column.extra.generated?.storage ?? 'VIRTUAL'" @update:model-value="(v) => updateMysqlGeneratedStorage(column, String(v ?? 'VIRTUAL'))">
+                                      <SelectTrigger class="h-[var(--structure-control-height)] w-28 rounded-[6px] px-[var(--structure-control-px)] text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25">
+                                        <SelectValue />
+                                      </SelectTrigger>
+                                      <SelectContent>
+                                        <SelectItem value="VIRTUAL">{{ t("structureEditor.generatedStorageVirtual") }}</SelectItem>
+                                        <SelectItem value="STORED">{{ t("structureEditor.generatedStorageStored") }}</SelectItem>
+                                      </SelectContent>
+                                    </Select>
+                                  </div>
+                                  <p class="text-xs leading-5 text-muted-foreground">{{ t("structureEditor.generatedExpressionHint") }}</p>
+                                </PopoverContent>
+                              </Popover>
                               <label :class="[structurePropertyLabelClass, 'shrink-0 pr-1']" :title="t('structureEditor.autoIncrement')">
-                                <input :checked="column.extra.autoIncrement" type="checkbox" :class="[structureCheckboxClass, 'shrink-0']" @change="setMysqlAutoIncrement(column, ($event.target as HTMLInputElement).checked)" />
+                                <input :checked="column.extra.autoIncrement" type="checkbox" :class="[structureCheckboxClass, 'shrink-0']" :disabled="isMysqlGeneratedActive(column)" @change="setMysqlAutoIncrement(column, ($event.target as HTMLInputElement).checked)" />
                                 <span>{{ t("structureEditor.autoIncrement") }}</span>
                               </label>
                               <Popover v-if="isMysqlAutoIncrementCounterColumn(column)">
@@ -6047,7 +6178,7 @@ watch(
                                 </PopoverContent>
                               </Popover>
                               <label :class="[structurePropertyLabelClass, 'flex-1 basis-0']" :title="t('structureEditor.onUpdateCurrentTimestamp')">
-                                <input v-model="column.extra.onUpdateCurrentTimestamp" type="checkbox" :class="[structureCheckboxClass, 'shrink-0']" />
+                                <input v-model="column.extra.onUpdateCurrentTimestamp" type="checkbox" :class="[structureCheckboxClass, 'shrink-0']" :disabled="isMysqlGeneratedActive(column)" />
                                 <span class="min-w-0 truncate">{{ t("structureEditor.onUpdateCurrentTimestamp") }}</span>
                               </label>
                             </template>

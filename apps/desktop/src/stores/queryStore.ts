@@ -74,6 +74,7 @@ import { refreshLoadedMongoIndexes } from "@/lib/mongo/mongoIndexMetadata";
 import { redisCommandResultToQueryResult } from "@/lib/redis/redisQueryResult";
 import { nextRedisCommandDb } from "@/lib/redis/redisCommandSession";
 import { isRedisMutatingCommand } from "@/lib/redis/redisCommandTable";
+import { extractGraphCells, graphResultRows, mergeGraphResults } from "@/lib/graph/graphResult";
 import { formatRedisConsoleValue } from "@/lib/redis/redisValuePresentation";
 import { usesAgentCursorForQuery, usesAgentCursorForTableData } from "@/lib/database/databaseDriverManifest";
 import { connectionIsDorisFamilyCatalogCapable, defaultAutoCommitForDbType, supportsClearableQuerySchema, supportsTransaction, usesOracleStickyTransactionState, usesProvenReadOnlyStickyTransactionState } from "@/lib/database/databaseFeatureSupport";
@@ -312,6 +313,7 @@ function droppedTableObjectSchemaCandidates(target: DroppedTableObjectTarget): S
 
 function markQueryResultRowsRaw(result: QueryResult): QueryResult {
   extractNeo4jNodeCells(result);
+  extractGraphCells(result);
   markRaw(result.rows);
   if (result.neo4j_node_cells) markRaw(result.neo4j_node_cells);
   if (result.large_value_cells) markRaw(result.large_value_cells);
@@ -334,6 +336,7 @@ function exactTotalFromIncompletePage(result: QueryResult, pageLimit: number | u
 }
 
 export function appendQueryResultSegment(previous: QueryResult, segment: QueryResult, maxRows: number): QueryResult {
+  markQueryResultRowsRaw(segment);
   if (segment.execution_error) {
     throw segment.error ? new BackendErrorException(segment.error) : new BackendErrorException(String(segment.rows[0]?.[0] ?? "Failed to load the next result segment"));
   }
@@ -367,6 +370,7 @@ export function appendQueryResultSegment(previous: QueryResult, segment: QueryRe
     appended_from_row_count: previous.rows.length,
     rows: [...previous.rows, ...segment.rows.slice(0, appendedRowCount)],
     neo4j_node_cells: appendNeo4jNodeCells(previous, segment, appendedRowCount),
+    graph_data: mergeGraphResults(previous.graph_data, graphResultRows(segment.graph_data, appendedRowCount), previous.rows.length),
     spatial_columns: spatial_columns.length > 0 ? spatial_columns : undefined,
     spatial_values: appendParallelValues(previous.spatial_values, segment.spatial_values),
     large_value_cells: appendLargeValueCells(previous.large_value_cells, segment.large_value_cells, previous.rows.length, appendedRowCount),
@@ -402,6 +406,7 @@ function markQueryResultRunsRowsRaw(resultRuns: NonNullable<QueryTab["resultRuns
 function releaseResultObjectPayload(result: QueryResult): void {
   result.columns = [];
   result.rows = [];
+  result.graph_data = undefined;
   result.column_types = undefined;
   result.column_sortables = undefined;
   result.spatial_columns = undefined;

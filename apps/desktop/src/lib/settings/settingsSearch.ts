@@ -288,6 +288,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "sync-webdav-username", category: "sync", titleKey: "settings.syncUsername", targetId: "sync-webdav", route: { syncMethodTab: "webdav" } },
   { id: "sync-webdav-password", category: "sync", titleKey: "settings.syncPassword", targetId: "sync-webdav", route: { syncMethodTab: "webdav" } },
   { id: "sync-webdav-remote-path", category: "sync", titleKey: "settings.syncRemotePath", targetId: "sync-webdav", route: { syncMethodTab: "webdav" } },
+  { id: "sync-webdav-user-agent", category: "sync", titleKey: "settings.syncUserAgent", targetId: "sync-webdav", route: { syncMethodTab: "webdav" } },
   { id: "sync-webdav-auto-upload", category: "sync", titleKey: "settings.syncAutoUploadInterval", targetId: "sync-webdav", route: { syncMethodTab: "webdav" } },
   { id: "sync-snippet", category: "sync", titleKey: "settings.syncSnippetTitle", descriptionKey: "settings.syncSnippetDescription", targetId: "sync-snippet", route: { syncMethodTab: "snippet" }, visible: desktopOnly },
   { id: "sync-snippet-provider", category: "sync", titleKey: "settings.syncSnippetProvider", targetId: "sync-snippet", route: { syncMethodTab: "snippet" }, visible: desktopOnly },

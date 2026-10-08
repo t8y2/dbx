@@ -1786,6 +1786,12 @@ public final class DbxJdbcPlugin {
         String statementId = "DBX_" + UUID.randomUUID().toString().replace("-", "").substring(0, 26);
         String statementSql = trimStatementSql(sql);
         StringBuilder plan = new StringBuilder();
+        // EXPLAIN PLAN and DBMS_XPLAN.DISPLAY are two separately autocommitted statements. A
+        // schema that ships its own PLAN_TABLE as GLOBAL TEMPORARY TABLE ... ON COMMIT DELETE
+        // ROWS loses the plan rows at the commit in between, so DISPLAY answers with
+        // "cannot fetch plan for statement_id '...'". Run both inside one transaction to keep
+        // the rows written by EXPLAIN PLAN visible for the read.
+        boolean explainTransaction = beginOracleExplainTransaction(connection);
         try {
             try (PreparedStatement explain = connection.prepareStatement(
                 "EXPLAIN PLAN SET STATEMENT_ID = '" + statementId + "' FOR " + statementSql
@@ -1815,6 +1821,46 @@ public final class DbxJdbcPlugin {
                 cleanup.setString(1, statementId);
                 cleanup.executeUpdate();
             } catch (SQLException ignored) {}
+            endOracleExplainTransaction(connection, explainTransaction);
+        }
+    }
+
+    /**
+     * Oracle JDBC commits each statement in auto-commit mode, which is exactly what discards
+     * plan rows held by a session plan table created as ON COMMIT DELETE ROWS. Switch the
+     * connection into a short-lived transaction so EXPLAIN PLAN and the DBMS_XPLAN read share
+     * one commit point. Skipped when the shared connection is already inside a manual
+     * transaction or holds an open query session, and when the driver cannot toggle
+     * auto-commit at all.
+     */
+    private static boolean beginOracleExplainTransaction(Connection connection) {
+        try {
+            if (
+                !connection.getAutoCommit()
+                    || connectionState().manualTransactionActive
+                    || hasActiveQuerySession(connection)
+            ) {
+                return false;
+            }
+            connection.setAutoCommit(false);
+            return true;
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            return false;
+        }
+    }
+
+    private static void endOracleExplainTransaction(Connection connection, boolean explainTransaction) {
+        if (!explainTransaction) {
+            return;
+        }
+        try {
+            // Commit instead of rollback so the plan-row cleanup above is not undone.
+            connection.commit();
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+        }
+        try {
+            connection.setAutoCommit(true);
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
         }
     }
 

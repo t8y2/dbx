@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { LandingNav } from "@/components/landing/LandingNav";
 import { LandingSelect } from "@/components/landing/LandingSelect";
-import { downloadLinksFor, formatSize, platformLabels, type AgentDownloadCatalog, type AgentRegistry, type DownloadSource, type JreDisplayEntry, type NativeAgentDisplayEntry, type OfflineBundleEntry } from "@/lib/agentRegistry";
+import { downloadLinksFor, formatSize, platformLabels, selectNativeAgentPlatform, type AgentDownloadCatalog, type AgentRegistry, type DownloadSource, type JreDisplayEntry, type NativeAgentDisplayEntry, type OfflineBundleEntry } from "@/lib/agentRegistry";
 import { assembleCustomBundle, buildCustomBundleOptions, cnbMirrorUrl, computeBundlePlan, CUSTOM_BUNDLE_PLATFORMS, proxyUrl, resolveBundleJre, type BundleProgress } from "@/lib/agentBundle";
 import { Archive, Cpu, Database, Download, ListChecks, Plug, Search, Terminal, X } from "lucide-react";
 import { resolveLang, type DocsLang } from "@/lib/i18n";
@@ -223,6 +223,7 @@ export function DriversClient({ initialCatalog, initialRegistry }: { initialCata
   const [activeTab, setActiveTab] = useState<ActiveTab>("bundles");
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedNativePlatforms, setSelectedNativePlatforms] = useState<Record<string, string>>({});
+  const nativePlatformTouchedRef = useRef(new Set<string>());
 
   const [bundlePlatform, setBundlePlatform] = useState("windows-x64");
   const [detectedPlatform, setDetectedPlatform] = useState<string | null>(null);
@@ -266,15 +267,15 @@ export function DriversClient({ initialCatalog, initialRegistry }: { initialCata
       const next = { ...current };
       let changed = false;
       for (const group of nativeGroups) {
-        if (group.options.length === 0) continue;
-        if (!next[group.key] || !group.options.some((option) => option.platformKey === next[group.key])) {
-          next[group.key] = group.options[0].platformKey;
+        const platform = selectNativeAgentPlatform(group.options, detectedPlatform, next[group.key], nativePlatformTouchedRef.current.has(group.key));
+        if (platform && platform !== next[group.key]) {
+          next[group.key] = platform;
           changed = true;
         }
       }
       return changed ? next : current;
     });
-  }, [nativeGroups]);
+  }, [nativeGroups, detectedPlatform]);
 
   const filteredNativeGroups = useMemo(
     () =>
@@ -824,7 +825,10 @@ export function DriversClient({ initialCatalog, initialRegistry }: { initialCata
                               <LandingSelect
                                 value={selectedAgent.platformKey}
                                 options={group.options.map((option) => ({ value: option.platformKey, label: option.platformLabel }))}
-                                onChange={(platformKey) => setSelectedNativePlatforms((current) => ({ ...current, [group.key]: platformKey }))}
+                                onChange={(platformKey) => {
+                                  nativePlatformTouchedRef.current.add(group.key);
+                                  setSelectedNativePlatforms((current) => ({ ...current, [group.key]: platformKey }));
+                                }}
                                 ariaLabel={`${group.label}: ${t.platform}`}
                                 className="min-w-[190px] max-[760px]:w-full"
                               />
@@ -864,6 +868,7 @@ export function DriversClient({ initialCatalog, initialRegistry }: { initialCata
                             <td className="min-w-0 px-5 py-3 font-medium text-landing-ink max-[760px]:px-0">
                               <div className="flex min-w-0 items-center gap-2">
                                 <span className="min-w-0 truncate">{j.platformLabel}</span>
+                                {j.platformKey === detectedPlatform && <span className="shrink-0 rounded-[5px] border border-landing-green/35 bg-landing-green/10 px-1.5 py-0.5 text-[11px] font-[650] text-landing-green">{t.currentPlatform}</span>}
                                 <span className="hidden shrink-0 rounded-[5px] border border-landing-green/35 bg-landing-green/10 px-1.5 py-0.5 font-mono text-[11px] text-landing-green max-[760px]:inline">JRE {j.jreKey}</span>
                               </div>
                             </td>

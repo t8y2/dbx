@@ -13,6 +13,7 @@ import AppToolbar from "@/components/layout/AppToolbar.vue";
 import AppTabBar from "@/components/layout/AppTabBar.vue";
 import { createGroupTabBarPortal, GROUP_TAB_BAR_PORTAL } from "@/components/layout/groupTabBarPortal";
 import PluginShortcutBar from "@/components/plugins/PluginShortcutBar.vue";
+import SidebarDangerDialogHost from "@/components/sidebar/SidebarDangerDialogHost.vue";
 import AppSidebar from "@/components/layout/AppSidebar.vue";
 import SqlEditorWorkspace from "@/components/layout/SqlEditorWorkspace.vue";
 import { EDITOR_TOOLBAR_ACTIONS } from "@/components/layout/editorToolbarActions";
@@ -116,6 +117,7 @@ import {
   isBrowserTaskManagerShortcut,
   isCloseOtherTabsShortcut,
   isCloseTabShortcut,
+  isDisconnectAllActiveConnectionsShortcut,
   isEditTableStructureShortcut,
   isExecuteSqlInNewResultTabShortcut,
   isExecuteSqlShortcut,
@@ -4299,6 +4301,12 @@ async function handleKeydown(e: KeyboardEvent) {
     appTabBarRef.value?.closeOtherActiveTabs();
     return;
   }
+  if (isDisconnectAllActiveConnectionsShortcut(e, shortcuts)) {
+    e.preventDefault();
+    e.stopPropagation();
+    void appSidebarRef.value?.disconnectAllActiveConnections();
+    return;
+  }
   if (isCloseTabShortcut(e, shortcuts)) {
     e.preventDefault();
     await closeActiveSurface();
@@ -4715,6 +4723,7 @@ onUnmounted(() => {
       <div class="h-full w-full" :style="appBackgroundImageStyle"></div>
     </div>
     <TooltipProvider :delay-duration="300">
+      <SidebarDangerDialogHost />
       <div data-app-shell class="h-screen w-screen max-w-full min-w-[760px] min-h-[600px] flex flex-col bg-background text-foreground overflow-hidden" :class="{ 'dbx-desktop-window-frame': drawDesktopWindowFrame }" :style="appUiFontFamilyStyle">
         <AppToolbar
           v-if="!isDetachedWindowContext"

@@ -327,7 +327,10 @@ watch(
         </DialogDescription>
       </DialogHeader>
 
-      <div v-if="current" class="min-h-0 flex-1 space-y-3 overflow-y-auto py-1">
+      <!-- px-1 leaves room for the 2px focus ring (focus:ring-2) of the inputs
+           below: `overflow-y-auto` clips the horizontal axis too, and without
+           padding the ring would be cut off on the left/right edges. -->
+      <div v-if="current" class="min-h-0 flex-1 space-y-3 overflow-y-auto px-1 py-1">
         <div v-if="isHostKeyChanged" class="space-y-3">
           <div class="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
             <TriangleAlert class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />

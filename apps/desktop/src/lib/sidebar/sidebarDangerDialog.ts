@@ -43,3 +43,17 @@ export interface SidebarDangerDialogRequest {
   cancelRunning?: () => void | Promise<void>;
   confirm: () => void | boolean | Promise<void | boolean>;
 }
+
+// One application-level host keeps requests alive when their originating tab closes.
+let dialogHost: ((request: SidebarDangerDialogRequest) => void) | undefined;
+
+export function registerSidebarDangerDialogHost(host: (request: SidebarDangerDialogRequest) => void): () => void {
+  dialogHost = host;
+  return () => {
+    if (dialogHost === host) dialogHost = undefined;
+  };
+}
+
+export function openSidebarDangerDialog(request: SidebarDangerDialogRequest): void {
+  dialogHost?.(request);
+}

@@ -85,6 +85,7 @@ export type ShortcutActionId =
   | "pasteSidebarSelection"
   | "editSidebarConnection"
   | "disconnectSidebarConnection"
+  | "disconnectAllActiveConnections"
   | "openDataInNewTab"
   | "viewTableDdl"
   | "sendSelectionToAi"
@@ -652,6 +653,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutToggleZenMode",
     scope: "global",
     defaultShortcut: "Shift+Mod+F12",
+  },
+  {
+    id: "disconnectAllActiveConnections",
+    labelKey: "sidebar.disconnectAllActiveConnections",
+    scope: "global",
+    defaultShortcut: "",
   },
   {
     id: "copySidebarSelection",

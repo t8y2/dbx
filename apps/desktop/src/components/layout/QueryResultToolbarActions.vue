@@ -8,7 +8,7 @@ import * as api from "@/lib/backend/api";
 import { createFrontendPluginRegistry, type PluginContributionEntry } from "@/lib/plugins/frontendPlugin";
 import type { InstalledPlugin, PluginResultViewContribution } from "@/types/database";
 
-type OutputView = "result" | "summary" | "explain" | "chart" | "messages" | "profile";
+type OutputView = "result" | "graph" | "summary" | "explain" | "chart" | "messages" | "profile";
 
 const props = withDefaults(
   defineProps<{

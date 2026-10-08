@@ -1,4 +1,5 @@
 import { ref, shallowRef } from "vue";
+import { notifyDatabaseBrowserMutation } from "@/lib/database/databaseBrowserActions";
 import { useI18n } from "vue-i18n";
 import { useToast } from "@/composables/useToast";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -180,6 +181,7 @@ export function useDatabaseTableEmpty(openDialog: (request: SidebarDangerDialogR
             await connections.refreshObjectListTreeNode(connectionId, database, undefined, target.catalog).catch((error) => {
               details.value += `\n${t("databaseEmpty.refreshFailed", { message: translateBackendError(t, error) })}`;
             });
+            notifyDatabaseBrowserMutation({ connectionId, database, operation: operation === "empty" ? "empty" : "drop-tables" });
           }
           return complete;
         } catch (error) {

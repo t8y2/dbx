@@ -74,6 +74,11 @@ export interface NativeAgentDisplayEntry {
   info: ArtifactInfo;
 }
 
+export function selectNativeAgentPlatform(options: ReadonlyArray<Pick<NativeAgentDisplayEntry, "platformKey">>, detectedPlatform: string | null, selectedPlatform?: string, manuallySelected = false): string | undefined {
+  if (manuallySelected && options.some((option) => option.platformKey === selectedPlatform)) return selectedPlatform;
+  return options.find((option) => option.platformKey === detectedPlatform)?.platformKey ?? options[0]?.platformKey;
+}
+
 export interface JdbcPluginDownloadEntry {
   label: string;
   filename: string;

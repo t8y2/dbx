@@ -1924,6 +1924,60 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void oracleExplainKeepsPlanRowsVisibleWhenThePlanTableDeletesRowsOnCommit() throws Exception {
+        // A schema whose PLAN_TABLE is GLOBAL TEMPORARY TABLE ... ON COMMIT DELETE ROWS drops
+        // the rows written by EXPLAIN PLAN at the auto-commit Oracle applies between two
+        // statements; DBMS_XPLAN.DISPLAY then reports "cannot fetch plan for statement_id".
+        // Both statements therefore have to share one transaction, and the cleanup DELETE must
+        // be committed rather than rolled back.
+        List<String> calls = new ArrayList<>();
+        OracleExplainDriver driver = new OracleExplainDriver(calls);
+        DriverManager.registerDriver(driver);
+        String connection = """
+            {
+              "connection_string": "jdbc:oracle:dbx-explain:test",
+              "username": "system",
+              "query_timeout_secs": 30
+            }
+            """;
+        try {
+            JsonNode response = request("getExplainInfo", """
+                {
+                  "connection": %s,
+                  "sql": "SELECT * FROM DUAL",
+                  "timeoutSecs": 30,
+                  "mode": "explain"
+                }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals("Plan hash value: 123\nTABLE ACCESS FULL DUAL", response.path("result").path("plan").asText());
+            int begin = callIndex(calls, call -> call.equals("setAutoCommit:false"));
+            int explain = callIndex(calls, call -> call.startsWith("prepare:EXPLAIN PLAN SET STATEMENT_ID = 'DBX_"));
+            int display = callIndex(calls, call -> call.startsWith("prepare:SELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY"));
+            int cleanup = callIndex(calls, call -> call.equals("prepare:DELETE FROM PLAN_TABLE WHERE STATEMENT_ID = ?"));
+            int commit = callIndex(calls, call -> call.equals("commit"));
+            int restore = callIndex(calls, call -> call.equals("setAutoCommit:true"));
+            assertTrue(begin >= 0 && begin < explain, calls.toString());
+            assertTrue(display > explain, calls.toString());
+            assertTrue(cleanup > display, calls.toString());
+            assertTrue(commit > cleanup, calls.toString());
+            assertTrue(restore > commit, calls.toString());
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    private static int callIndex(List<String> calls, java.util.function.Predicate<String> match) {
+        for (int index = 0; index < calls.size(); index++) {
+            if (match.test(calls.get(index))) {
+                return index;
+            }
+        }
+        return -1;
+    }
+
+    @Test
     void oracleExplainNullsBindPlaceholdersInsteadOfFailingWithMissingParameter() throws Exception {
         List<String> calls = new ArrayList<>();
         OracleExplainDriver driver = new OracleExplainDriver(calls);
@@ -4922,6 +4976,7 @@ final class DbxJdbcPluginTest {
     }
 
     private static Connection oracleExplainConnection(List<String> calls, boolean parameterMetadataSupported) {
+        boolean[] autoCommit = { true };
         return (Connection) Proxy.newProxyInstance(
             DbxJdbcPluginTest.class.getClassLoader(),
             new Class<?>[] { Connection.class },
@@ -4931,6 +4986,20 @@ final class DbxJdbcPluginTest {
                     calls,
                     parameterMetadataSupported
                 );
+                case "getAutoCommit" -> autoCommit[0];
+                case "setAutoCommit" -> {
+                    autoCommit[0] = (Boolean) args[0];
+                    calls.add("setAutoCommit:" + args[0]);
+                    yield null;
+                }
+                case "commit" -> {
+                    calls.add("commit");
+                    yield null;
+                }
+                case "rollback" -> {
+                    calls.add("rollback");
+                    yield null;
+                }
                 case "isClosed" -> false;
                 case "close" -> null;
                 default -> defaultValue(method.getReturnType());

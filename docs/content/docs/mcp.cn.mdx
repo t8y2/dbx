@@ -122,7 +122,7 @@ DBX MCP 当前提供以下工具（具体可用工具取决于构建功能及权
 
 | 工具 | 说明 |
 | --- | --- |
-| `dbx_list_connections` | 列出当前 MCP 会话可见的连接 |
+| `dbx_list_connections` | 列出当前 MCP 会话可见的连接，包括已保存的备注 |
 | `dbx_list_databases` | 列出连接中可通过 MCP 访问的数据库，并遵守该连接的数据库范围 |
 | `dbx_add_connection` | 添加连接到 DBX 存储 |
 | `dbx_duplicate_connection` | 复制一个连接及其完整配置 |
@@ -147,6 +147,8 @@ DBX MCP 当前提供以下工具（具体可用工具取决于构建功能及权
 | `dbx_send_message` | 向支持的消息队列 Topic 或队列发送消息 |
 | `dbx_open_table` | 在运行中的 DBX 桌面端打开表 |
 | `dbx_execute_and_show` | 执行查询并在 DBX 中展示结果 |
+
+`dbx_list_connections` 和 `dbx://connections` 会返回已保存的连接备注，不受侧边栏显示开关影响。可访问该连接的 MCP 客户端也能看到备注，请勿在备注中保存密码或其他敏感信息。
 
 `dbx_execute_query` 返回行数：
 

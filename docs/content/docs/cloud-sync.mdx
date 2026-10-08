@@ -163,6 +163,8 @@ Neither password can be recovered. An encrypted snippet cannot be restored witho
 
 Enter the WebDAV endpoint, username, application password, and remote snapshot path. The default path is `DBX/sync/snapshot.json`.
 
+Some WebDAV services (for example CSTCloud) only allow specific client applications and reject unknown clients based on the User-Agent. When you hit such a restriction, fill the User-Agent field with an identifier the service accepts (for example `Zotero/7.0.15`). It stays empty by default, which sends no User-Agent.
+
 In Web/Docker mode, the DBX server sends WebDAV requests, so browser CORS restrictions do not apply. WebDAV application passwords are encrypted in the current DBX instance and are never included in sync snapshots.
 
 WebDAV supports scheduled uploads while the corresponding DBX client remains open. Keep at least one DBX page open when using Web/Docker. Downloads always require confirmation to prevent accidental replacement of data in the current instance.

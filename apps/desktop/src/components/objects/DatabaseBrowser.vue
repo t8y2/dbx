@@ -7,6 +7,8 @@ import { DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuS
 import { Input } from "@/components/ui/input";
 import ToolbarOverflowMenu from "@/components/ui/ToolbarOverflowMenu.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
+import { openSidebarDangerDialog } from "@/lib/sidebar/sidebarDangerDialog";
+import { useDatabaseBrowserMutation } from "@/lib/database/databaseBrowserActions";
 import SidebarTreeRuntimeHost from "@/components/sidebar/SidebarTreeRuntimeHost.vue";
 import SidebarTreeItemDialogs from "@/components/sidebar/SidebarTreeItemDialogs.vue";
 import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
@@ -161,12 +163,13 @@ function removeUnsupportedDatabaseItems(items: ContextMenuItem[]): ContextMenuIt
   // visible-schemas item emits "open-visible-schemas" which only the sidebar
   // tree handles. The database browser wires neither, so do not expose menu
   // items that would otherwise be a silent no-op here.
-  return items.flatMap((item) => {
-    if (item.label.startsWith(t("contextMenu.addToAi")) || item.label === t("visibleSchemas.title") || item.variant === "destructive") return [];
+  const supported = items.flatMap((item) => {
+    if (item.label.startsWith(t("contextMenu.addToAi")) || item.label === t("visibleSchemas.title")) return [];
     if (!item.children) return [item];
     const children = removeUnsupportedDatabaseItems(item.children);
     return children.length ? [{ ...item, children }] : [];
   });
+  return supported.filter((item, index) => !item.separator || (index > 0 && index < supported.length - 1 && !supported[index - 1]?.separator));
 }
 
 function openDatabaseFromSidebar(node: TreeNode) {
@@ -342,6 +345,10 @@ watch(
   { immediate: true },
 );
 
+useDatabaseBrowserMutation(({ connectionId }) => {
+  if (connectionId === props.connection.id) void refresh();
+});
+
 onBeforeUnmount(() => stopColumnResize?.());
 
 defineExpose({ focusSearch, refresh });
@@ -485,7 +492,7 @@ defineExpose({ focusSearch, refresh });
         </div>
       </div>
     </div>
-    <SidebarTreeRuntimeHost ref="sidebarRuntimeHost" :node="sidebarRuntimeNode" :depth="0" @open-data="openDatabaseFromSidebar" @open-ddl="openDatabaseFromSidebar" @open-dialog-controller="sidebarDialogController = $event" />
+    <SidebarTreeRuntimeHost ref="sidebarRuntimeHost" :node="sidebarRuntimeNode" :depth="0" @open-danger-dialog="openSidebarDangerDialog" @open-data="openDatabaseFromSidebar" @open-ddl="openDatabaseFromSidebar" @open-dialog-controller="sidebarDialogController = $event" />
     <SidebarTreeItemDialogs v-if="sidebarDialogController" :controller="sidebarDialogController" @closed="sidebarDialogController = null" />
   </section>
 </template>

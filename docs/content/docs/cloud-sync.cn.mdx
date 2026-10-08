@@ -163,6 +163,8 @@ GitHub Gist、Gitee 和 GitLab 代码片段始终使用**代码片段加密密�
 
 填写 WebDAV 服务地址、用户名、应用密码和远端快照路径。默认路径为 `DBX/sync/snapshot.json`。
 
+部分 WebDAV 服务（如中国科技云）只允许特定客户端应用访问，会按 User-Agent 拦截未知客户端。遇到这类限制时，在 User-Agent 输入框填写服务允许的客户端标识（例如 `Zotero/7.0.15`）；默认留空，表示不发送 User-Agent。
+
 Web/Docker 模式下，WebDAV 请求由 DBX 服务端发起，因此不受浏览器 CORS 限制；WebDAV 应用密码会加密保存在当前 DBX 实例中，不会写入同步快照。
 
 WebDAV 支持定时自动上传。自动上传只在对应 DBX 客户端保持打开时执行；Web/Docker 使用时需保持至少一个 DBX 页面打开。下载始终需要手动确认，避免远端快照意外覆盖当前实例的数据。

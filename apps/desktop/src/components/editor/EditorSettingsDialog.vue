@@ -4432,6 +4432,7 @@ const webdavPassword = ref("");
 const webdavRememberPassword = ref(localStorage.getItem("dbx-webdav-remember-password") === "true");
 const webdavHasSavedPassword = ref(false);
 const webdavRemotePath = ref(localStorage.getItem("dbx-webdav-remote-path") || DEFAULT_WEB_DAV_REMOTE_PATH);
+const webdavUserAgent = ref(localStorage.getItem("dbx-webdav-user-agent") || "");
 const webdavSyncSecrets = ref(false);
 const webdavSecretsPassphrase = ref("");
 const webdavHasSavedSecretsPassphrase = ref(false);
@@ -4671,6 +4672,7 @@ function currentWebDavConfig(): WebDavConfig {
     username: webdavUsername.value.trim() || undefined,
     password: webdavPassword.value || undefined,
     remotePath: webdavRemotePath.value.trim() || DEFAULT_WEB_DAV_REMOTE_PATH,
+    userAgent: webdavUserAgent.value.trim() || undefined,
   };
 }
 
@@ -9763,6 +9765,13 @@ LIMIT 100;</pre
                       <Input id="webdav-remote-path" v-model="webdavRemotePath" autocomplete="off" />
                       <p class="text-xs text-muted-foreground">
                         {{ t("settings.syncRemotePathDescription") }}
+                      </p>
+                    </div>
+                    <div class="space-y-2 md:col-span-2">
+                      <Label for="webdav-user-agent">{{ t("settings.syncUserAgent") }}</Label>
+                      <Input id="webdav-user-agent" v-model="webdavUserAgent" autocomplete="off" placeholder="Zotero/7.0.15" />
+                      <p class="text-xs text-muted-foreground">
+                        {{ t("settings.syncUserAgentDescription") }}
                       </p>
                     </div>
                     <div class="settings-item space-y-2 md:col-span-2 rounded-md border bg-muted/20 px-3 py-3">

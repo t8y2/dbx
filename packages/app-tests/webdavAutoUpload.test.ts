@@ -110,6 +110,25 @@ test("reads normalized WebDAV auto-upload config from localStorage", () => {
     endpoint: "https://dav.example.com/",
     username: "alice",
     remotePath: "DBX/sync/snapshot.json",
+    userAgent: undefined,
+  });
+});
+
+test("reads configured WebDAV user agent for client-restricted gateways", () => {
+  localStorage.setItem("dbx-webdav-endpoint", "https://dav.example.com/");
+  localStorage.setItem("dbx-webdav-user-agent", " Zotero/7.0.15 ");
+  localStorage.setItem("dbx-webdav-auto-upload-enabled", "true");
+  localStorage.setItem("dbx-webdav-auto-upload-interval-minutes", "1");
+
+  const config = readWebDavAutoUploadConfig();
+
+  assert.equal(config.webDavConfig?.userAgent, "Zotero/7.0.15");
+
+  useWebDavAutoUpload();
+
+  return vi.advanceTimersByTimeAsync(60_000).then(() => {
+    assert.equal(webdavSyncUploadMock.mock.calls.length, 1);
+    assert.equal(webdavSyncUploadMock.mock.calls[0][0].userAgent, "Zotero/7.0.15");
   });
 });
 
@@ -127,6 +146,7 @@ test("keeps WebDAV auto-upload running outside the settings dialog", async () =>
     endpoint: "https://dav.example.com/",
     username: undefined,
     remotePath: "DBX/sync/snapshot.json",
+    userAgent: undefined,
   });
   assert.equal(webdavSyncUploadMock.mock.calls[0][3], false);
 

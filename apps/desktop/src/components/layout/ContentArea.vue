@@ -6,6 +6,8 @@ import { canReloadUnavailableDataTab, restoredDataTabReloadFilters } from "@/lib
 import { defaultViewForResult } from "@/lib/query/queryResultDefaultView";
 import { extractNeo4jNodeCells, projectNeo4jNodeResult } from "@/lib/neo4j/neo4jNodeResult";
 import { useNeo4jNodeTableResult } from "@/composables/useNeo4jNodeTableResult";
+import { extractGraphCells, type GraphEdge, type GraphNode, type GraphProperty, type GraphResult } from "@/lib/graph/graphResult";
+import { applyGraphPropertyToResult, buildNebulaGraphExpand, buildNebulaGraphPropertyUpdate, graphPropertyFromUpdateResult, graphPropertyMatchesValue } from "@/lib/graph/nebulaGraph";
 import { queryResultMessages } from "@/lib/query/queryResultMessages";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { hasQueryOutput as tabHasQueryOutput } from "@/lib/query/queryOutput";
@@ -145,8 +147,10 @@ const SolrAdmin = defineAsyncComponent(() => import("@/components/solr/SolrAdmin
 const PluginFilesystemTab = defineAsyncComponent(() => import("@/components/plugins/PluginFilesystemTab.vue"));
 const ExplainPlanViewer = defineAsyncComponent(() => import("@/components/explain/ExplainPlanViewer.vue"));
 const QueryChart = defineAsyncComponent(() => import("@/components/chart/QueryChart.vue"));
+const GraphResultView = defineAsyncComponent(() => import("@/components/graph/GraphResultView.vue"));
 import { useQueryStore } from "@/stores/queryStore";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import type { ContentAreaSurfaceEmits, ContentAreaSurfaceProps } from "@/components/layout/querySurfaces";
 import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore, type DataGridRowNumberMode, type DataGridSearchMode, type ResultRunDisplayMode } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
@@ -270,6 +274,7 @@ const emit = defineEmits<ContentAreaSurfaceEmits>();
 const { t } = useI18n();
 const queryStore = useQueryStore();
 const connectionStore = useConnectionStore();
+const productionSafetyStore = useProductionSafetyStore();
 /** Clear a consumed editor reveal request so a later normal tab re-visit doesn't re-jump. */
 function clearEditorRevealRequest(tab: { editorRevealRequest?: unknown }): void {
   if (tab.editorRevealRequest !== undefined) {
@@ -390,6 +395,7 @@ const activeResultErrorPosition = computed(() => {
 });
 const activeResultDatabase = computed(() => activeResultExecutionTarget.value?.database ?? props.activeTab.database);
 const activeResultSchema = computed(() => activeResultExecutionTarget.value?.schema ?? props.activeTab.schema);
+const graphViewKey = computed(() => JSON.stringify([props.activeTab.id, props.activeTab.resultViewGeneration, props.activeTab.activeResultRunId, props.activeTab.activeResultIndex, activeResultConnectionId.value, activeResultDatabase.value]));
 const activeEffectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(activeResultConnection.value));
 // 表数据工具箱的「导入数据」与侧边栏、对象浏览器共用同一条能力判断：未适配导入的引擎（如 HANA）不出现入口。
 const canOpenTableImport = computed(() => supportsTableImport(activeEffectiveDatabaseType.value));
@@ -739,6 +745,7 @@ const redisConsoleResults = computed(() => (props.activeTab.results?.length ? pr
 const canShowRedisConsoleOutput = computed(() => activeEffectiveDatabaseType.value === "redis" && (props.activeTab.isExecuting || redisConsoleResults.value.some((result) => result.execution_error === true || typeof result.redis_console_output === "string")));
 const redisResultViewMode = computed<RedisResultViewMode>(() => (activeEffectiveDatabaseType.value === "redis" ? (props.activeTab.uiState?.redisResultViewMode ?? "grid") : "grid"));
 const canShowResultOutput = computed(() => hasTabularResult.value || props.activeTab.isExecuting);
+const canShowGraphOutput = computed(() => activeEffectiveDatabaseType.value === "nebula" && !!props.activeTab.result?.graph_data?.nodes.length);
 const canShowExplainOutput = computed(() => !!props.activeTab.explainPlan || !!props.activeTab.explainError || !!props.activeTab.explainTableResult || !!props.activeTab.explainTableError || props.activeTab.isExplaining === true);
 // A batch can attach server messages to more than one statement result (for
 // example a `DO $$ RAISE NOTICE $$` block followed by a SELECT). The messages
@@ -753,6 +760,50 @@ const resultMessageCount = computed(() => resultMessages.value.length);
 const canShowMessagesOutput = computed(() => resultMessageCount.value > 0);
 const showStandaloneResultToolbar = computed(() => activeElasticsearchJsonResponse.value || props.activeOutputView !== "result" || (redisResultViewMode.value === "console" && canShowRedisConsoleOutput.value) || !props.activeTab.result || !hasTabularResult.value);
 const standaloneResultToolbarCompact = computed(() => isDataGridToolbarCompact(standaloneResultToolbarWidth.value, standaloneResultToolbarViewportWidth.value));
+
+async function saveNebulaGraphProperty(entity: GraphNode | GraphEdge, property: GraphProperty, value: string | boolean): Promise<GraphProperty | undefined> {
+  const connection = activeResultConnection.value;
+  if (activeEffectiveDatabaseType.value !== "nebula" || connectionIsEffectivelyReadOnly(connection)) throw new Error(t("graph.unavailable"));
+  const tab = props.activeTab;
+  const result = tab.result;
+  const connectionId = activeResultConnectionId.value;
+  const database = activeResultDatabase.value;
+  if (!result?.graph_data || !connectionId || !database) throw new Error(t("graph.resultChanged"));
+  const generation = tab.resultViewGeneration;
+  const sourceKey = graphViewKey.value;
+  const isCurrent = () => props.activeTab === tab && graphViewKey.value === sourceKey && (generation !== undefined ? !!tab.result?.graph_data : tab.result === result);
+  const statement = buildNebulaGraphPropertyUpdate(entity, property, value);
+  const production = productionContextForDatabase(connection, database);
+  if (production.active) {
+    const confirmed = await productionSafetyStore.requestConfirmation({ sql: statement, connectionName: connection?.name, database, productionDatabases: production.databases, source: t("graph.title") });
+    if (!confirmed) return undefined;
+  }
+  const currentConnection = connectionStore.getConfig(connectionId);
+  if (!isCurrent() || !currentConnection || connectionIsEffectivelyReadOnly(currentConnection)) throw new Error(t("graph.resultChanged"));
+  const response = await api.executeQuery(connectionId, database, statement, undefined, undefined, { maxRows: 1 });
+  if (!isCurrent()) return undefined;
+  if (response.execution_error) throw new Error(response.error?.detail ?? t("graph.updateFailed"));
+  if (response.rows.length === 0) throw new Error(t("graph.conflict"));
+  const updated = graphPropertyFromUpdateResult(response, property);
+  // A failed WHEN condition may still yield the stored value.
+  if (!graphPropertyMatchesValue(updated, value)) throw new Error(t("graph.conflict"));
+  applyGraphPropertyToResult(tab.result!, entity, property, updated);
+  return updated;
+}
+
+async function expandNebulaGraphNode(node: GraphNode): Promise<GraphResult | undefined> {
+  const tab = props.activeTab;
+  const result = tab.result;
+  const connectionId = activeResultConnectionId.value;
+  const database = activeResultDatabase.value;
+  const generation = tab.resultViewGeneration;
+  const sourceKey = graphViewKey.value;
+  if (activeEffectiveDatabaseType.value !== "nebula" || !connectionId || !database) return undefined;
+  const response = await api.executeQuery(connectionId, database, buildNebulaGraphExpand(node), undefined, undefined, { maxRows: 200 });
+  if (props.activeTab !== tab || graphViewKey.value !== sourceKey || (generation === undefined && tab.result !== result)) return undefined;
+  if (response.execution_error) throw new Error(response.error?.detail ?? t("graph.unavailable"));
+  return extractGraphCells(response).graph_data;
+}
 let standaloneResultToolbarResizeObserver: ResizeObserver | undefined;
 
 function updateStandaloneResultToolbarDimensions() {
@@ -1004,6 +1055,10 @@ watch(
     // view when its own tab finishes executing.
     if (props.editorOnly) return;
     if (props.activeTab.isExecuting) return;
+    if (props.activeOutputView === "graph" && !canShowGraphOutput.value) {
+      emit("update:activeOutputView", props.activeTab.id, "result");
+      return;
+    }
     if (hasExecutionSummary.value && (!hasTabularResult.value || props.activeTab.result?.server_message === true) && props.activeOutputView === "result") {
       const result = props.activeTab.result;
       emit("update:activeOutputView", props.activeTab.id, result ? defaultViewForResult(result) : "summary");
@@ -2364,6 +2419,7 @@ defineExpose({
                 :can-show-result="canShowResultOutput"
                 :can-show-summary="hasExecutionSummary"
                 :can-show-chart="hasNumericData && !activeElasticsearchJsonResponse"
+                :can-show-graph="canShowGraphOutput"
                 :can-show-messages="canShowMessagesOutput"
                 :can-show-redis-console="canShowRedisConsoleOutput"
                 :result-mode="redisResultViewMode"
@@ -2409,6 +2465,16 @@ defineExpose({
             <ElasticsearchProfilePanel v-else-if="activeOutputView === 'profile' && canShowProfile" class="flex-1 min-h-0" :body="activeElasticsearchProfileBody ?? ''" />
 
             <QueryChart v-else-if="activeOutputView === 'chart' && activeTab.result && !activeElasticsearchJsonResponse" class="flex-1 min-h-0" :result="activeTab.result" />
+            <GraphResultView
+              v-else-if="activeOutputView === 'graph' && activeTab.result?.graph_data"
+              :key="graphViewKey"
+              :graph="activeTab.result.graph_data"
+              :rows="activeTab.result.rows"
+              :columns="activeTab.result.columns"
+              :read-only="connectionIsEffectivelyReadOnly(activeResultConnection)"
+              :save-property="saveNebulaGraphProperty"
+              :expand-node="expandNebulaGraphNode"
+            />
 
             <div v-else-if="activeOutputView === 'summary'" class="flex flex-1 min-h-0 min-w-0 overflow-auto bg-background">
               <div v-if="summaryItems.length === 0" class="flex h-full items-center justify-center text-sm text-muted-foreground">
@@ -2621,6 +2687,7 @@ defineExpose({
                     :can-show-result="canShowResultOutput"
                     :can-show-summary="hasExecutionSummary"
                     :can-show-chart="hasNumericData && !activeElasticsearchJsonResponse"
+                    :can-show-graph="canShowGraphOutput"
                     :can-show-messages="canShowMessagesOutput"
                     :can-show-redis-console="canShowRedisConsoleOutput"
                     :result-mode="redisResultViewMode"

@@ -30,6 +30,7 @@ import {
   matchesCopySourceColumnSearch,
   mysqlEnumDataType,
   parseExtraToColumnExtra,
+  parseMysqlGeneratedColumnExtra,
   rehydrateColumnDraftsFromMetadata,
   resolveInsertColumnIndex,
   restoreCharacterLengthUnitsAfterSave,
@@ -531,6 +532,33 @@ describe("tableStructureEditorState", () => {
       identity: { generation: "ALWAYS" },
     });
     expect(parseExtraToColumnExtra("identity(1,1)", "postgres")).toEqual({});
+  });
+
+  it("parses mysql generated-column metadata into the editable extra", () => {
+    expect(parseExtraToColumnExtra("GENERATED ALWAYS AS (`price` * `quantity`) STORED", "mysql")).toEqual({
+      generated: { expression: "`price` * `quantity`", storage: "STORED" },
+    });
+    expect(parseExtraToColumnExtra("GENERATED ALWAYS AS (lower(`name`)) VIRTUAL", "mysql")).toEqual({
+      generated: { expression: "lower(`name`)", storage: "VIRTUAL" },
+    });
+    // MariaDB PERSISTENT normalizes to STORED, matching the backend introspection.
+    expect(parseExtraToColumnExtra("GENERATED ALWAYS AS (`a` + 1) PERSISTENT", "mysql")).toEqual({
+      generated: { expression: "`a` + 1", storage: "STORED" },
+    });
+    // Storage omitted: MySQL defaults to VIRTUAL.
+    expect(parseExtraToColumnExtra("GENERATED ALWAYS AS (json_extract(`doc`, '$.x'))", "mysql")).toEqual({
+      generated: { expression: "json_extract(`doc`, '$.x')", storage: "VIRTUAL" },
+    });
+    // Plain columns and identity columns stay untouched.
+    expect(parseMysqlGeneratedColumnExtra("auto_increment")).toBeUndefined();
+    expect(parseMysqlGeneratedColumnExtra("GENERATED ALWAYS AS IDENTITY")).toBeUndefined();
+    expect(parseMysqlGeneratedColumnExtra("")).toBeUndefined();
+    // Identity extras for postgres must not leak into the mysql branch.
+    expect(parseExtraToColumnExtra("GENERATED ALWAYS AS IDENTITY", "postgres")).toEqual({
+      identity: { generation: "ALWAYS" },
+    });
+    // Other dialects never parse mysql generated columns.
+    expect(parseExtraToColumnExtra("GENERATED ALWAYS AS (1) STORED", "sqlite")).toEqual({});
   });
 
   it("keeps mysql unsigned attributes in the editable base type", () => {

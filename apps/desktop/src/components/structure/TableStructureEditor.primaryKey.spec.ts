@@ -437,7 +437,7 @@ beforeEach(() => {
   // TableStructureEditor probes the partition status for PostgreSQL tables
   // (PR #6361); a resolved non-partitioned result keeps metadata loads on the
   // original facet expectations unchanged.
-  mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: false, isPartition: false });
+  mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: false, isPartition: false, isForeign: false });
 });
 
 afterEach(() => {

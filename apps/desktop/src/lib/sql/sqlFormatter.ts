@@ -28,6 +28,28 @@ function resolveClickHouseIdentifierSafeDialect(sqlFormatter: SqlFormatterModule
   return clickHouseIdentifierSafeDialect;
 }
 
+// sql-formatter's plsql dialect only registers a minimal subset of character
+// functions (e.g. SUBSTR, INSTR, LENGTH) and omits Oracle's byte/multibyte/code-point
+// variants. Register them as reserved function names so functionCase normalizes them.
+const ORACLE_EXTENDED_FUNCTION_NAMES = ["SUBSTRB", "SUBSTR2", "SUBSTR4", "SUBSTRC", "INSTRB", "INSTR2", "INSTR4", "INSTRC", "LENGTHB", "LENGTH2", "LENGTH4", "LENGTHC"];
+let oracleExtendedDialect: SqlFormatterModule["plsql"] | null = null;
+
+function resolveOracleExtendedDialect(sqlFormatter: SqlFormatterModule): SqlFormatterModule["plsql"] {
+  if (oracleExtendedDialect) return oracleExtendedDialect;
+
+  const existingFunctions = new Set(sqlFormatter.plsql.tokenizerOptions.reservedFunctionNames);
+  const extraFunctions = ORACLE_EXTENDED_FUNCTION_NAMES.filter((name) => !existingFunctions.has(name));
+
+  oracleExtendedDialect = {
+    ...sqlFormatter.plsql,
+    tokenizerOptions: {
+      ...sqlFormatter.plsql.tokenizerOptions,
+      reservedFunctionNames: [...sqlFormatter.plsql.tokenizerOptions.reservedFunctionNames, ...extraFunctions],
+    },
+  };
+  return oracleExtendedDialect;
+}
+
 export function canFormatSqlForDatabaseType(dbType: string | null | undefined): boolean {
   return dbType !== "redis" && dbType !== "victoriametrics";
 }
@@ -367,7 +389,7 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
           },
         }
       : options;
-  const resolvedDialect = dialect === "clickhouse" ? resolveClickHouseIdentifierSafeDialect(sqlFormatter) : undefined;
+  const resolvedDialect = dialect === "clickhouse" ? resolveClickHouseIdentifierSafeDialect(sqlFormatter) : dialect === "oracle" ? resolveOracleExtendedDialect(sqlFormatter) : undefined;
   const formatWithFallback = (input: string): string => {
     try {
       if (resolvedDialect) {

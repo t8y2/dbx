@@ -4845,7 +4845,13 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn agent_table_paging_supports_tdengine_and_default_oracle_only() {
+    fn agent_table_paging_supports_cache_tdengine_and_default_oracle() {
+        let mut cache = test_connection_config(DatabaseType::Iris);
+        assert!(!super::supports_agent_table_paging(&cache));
+        cache.driver_profile = Some("cache".to_string());
+        assert!(super::supports_agent_table_paging(&cache));
+        cache.driver_profile = Some("CACHE".to_string());
+        assert!(super::supports_agent_table_paging(&cache));
         assert!(super::supports_agent_table_paging(&test_connection_config(DatabaseType::Tdengine)));
         assert!(super::supports_agent_table_paging(&test_connection_config(DatabaseType::Oracle)));
         assert!(!super::supports_agent_table_paging(&test_connection_config(DatabaseType::Dameng)));
@@ -8641,6 +8647,11 @@ pub struct TablePartitionStatus {
     pub is_partitioned_parent: bool,
     /// The table is itself a partition of a parent (`pg_class.relispartition`).
     pub is_partition: bool,
+    /// The table is a foreign table (`pg_class.relkind = 'f'`). PostgreSQL
+    /// requires `COMMENT ON FOREIGN TABLE` (not `COMMENT ON TABLE`) for these,
+    /// so the structure editor needs this to generate a working statement.
+    #[serde(default)]
+    pub is_foreign: bool,
 }
 
 pub async fn table_partition_status_core(
@@ -8656,7 +8667,11 @@ pub async fn table_partition_status_core(
         match pool_handle.as_ref() {
             Some(PoolKind::Postgres(pool)) => {
                 let info = db::postgres::get_table_partition_info(pool, schema, table).await?;
-                Ok(TablePartitionStatus { is_partitioned_parent: info.key.is_some(), is_partition: info.is_partition })
+                Ok(TablePartitionStatus {
+                    is_partitioned_parent: info.key.is_some(),
+                    is_partition: info.is_partition,
+                    is_foreign: info.is_foreign,
+                })
             }
             Some(PoolKind::Agent(client)) => {
                 // Resolve the config once: it gates the arm and feeds the RPC
@@ -9734,7 +9749,9 @@ fn uses_oracle_metadata_object_source(config: Option<&ConnectionConfig>, object_
 
 fn supports_agent_table_paging(config: &ConnectionConfig) -> bool {
     // Keep paging opt-in until each legacy agent is known to apply metadata constraints server-side.
-    matches!(config.db_type, DatabaseType::Tdengine) || is_default_oracle_agent_config(config)
+    matches!(config.db_type, DatabaseType::Tdengine)
+        || crate::agent_catalog::agent_key(&config.db_type, config.driver_profile.as_deref()) == Some("cache")
+        || is_default_oracle_agent_config(config)
 }
 
 fn agent_paging_likely_applied(enabled: bool, limit: Option<usize>, returned_len: usize) -> bool {

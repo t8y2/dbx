@@ -64,6 +64,7 @@ async fn live_postgres_concurrent_index_builds_valid_index() {
         mysql_engine: None,
         transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -198,6 +199,7 @@ async fn live_postgres_partitioned_parent_concurrent_request_rejected() {
         mysql_engine: None,
         transwarp_create: None,
         partitioned: true,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });

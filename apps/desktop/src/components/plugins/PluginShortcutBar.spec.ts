@@ -5,11 +5,11 @@ import { OPEN_PLUGIN_SETTINGS } from "@/lib/plugins/pluginCenterNavigation";
 import PluginShortcutBar from "./PluginShortcutBar.vue";
 import { normalizePluginShortcutSettings, type PluginShortcutPosition } from "@/lib/plugins/pluginShortcuts";
 
-const mocks = vi.hoisted(() => ({ openSettings: vi.fn(), open: vi.fn(), save: vi.fn(), toast: vi.fn(), state: null as any, entries: null as any }));
+const mocks = vi.hoisted(() => ({ openSettings: vi.fn(), open: vi.fn(), save: vi.fn(), toast: vi.fn(), state: null as any, entries: null as any, allEntries: null as any }));
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => mocks.state }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
-vi.mock("@/composables/usePluginShortcuts", () => ({ usePluginShortcuts: () => ({ entries: mocks.entries, open: mocks.open, isActive: (entry: any) => entry.id === "b" }) }));
+vi.mock("@/composables/usePluginShortcuts", () => ({ usePluginShortcuts: () => ({ entries: mocks.entries, allEntries: mocks.allEntries, open: mocks.open, isActive: (entry: any) => entry.id === "b" }) }));
 vi.mock("./PluginIcon.vue", () => ({ default: { template: "<span />" } }));
 vi.mock("@/components/ui/LightTooltip.vue", () => ({ default: { props: ["text", "disabled"], template: "<span :data-tooltip='text'><slot /></span>" } }));
 
@@ -45,6 +45,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.state = reactive({ isEditorSettingsLoaded: true, editorSettings: { pluginShortcuts: normalizePluginShortcutSettings({ showSettingsEntry: false }) }, updateEditorSettingsAndPersist: mocks.save });
   mocks.entries = ref(["a", "b", "c"].map((id) => ({ id, pluginId: id, label: `Function ${id}`, pluginName: `Plugin ${id}`, kind: "workbench", targetId: id, disabled: false })));
+  mocks.allEntries = ref([...mocks.entries.value]);
   mocks.save.mockResolvedValue(undefined);
 });
 afterEach(() => {
@@ -54,6 +55,60 @@ afterEach(() => {
 });
 
 describe("plugin shortcut bar", () => {
+  it("keeps the visibility menu open for repeated toggles and reflects failed saves", async () => {
+    mocks.save.mockImplementation(async (patch: any) => {
+      mocks.state.editorSettings.pluginShortcuts = patch.pluginShortcuts;
+    });
+    mount("right-top");
+    container.querySelector("nav")!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+    await flush();
+    const buttons = () => [...document.querySelectorAll<HTMLButtonElement>("[data-dbx-context-menu] button")];
+    buttons()[0].click();
+    await flush();
+    expect(buttons()[0].getAttribute("aria-pressed")).toBe("false");
+    buttons()[1].click();
+    await flush();
+    expect(mocks.state.editorSettings.pluginShortcuts.hiddenPluginIds).toEqual(["a", "b"]);
+    buttons()[0].click();
+    await flush();
+    expect(buttons()[0].getAttribute("aria-pressed")).toBe("true");
+    expect(mocks.state.editorSettings.pluginShortcuts.hiddenPluginIds).toEqual(["b"]);
+    mocks.save.mockRejectedValueOnce(new Error("disk full"));
+    buttons()[1].click();
+    await flush();
+    expect(buttons()[1].getAttribute("aria-pressed")).toBe("false");
+    expect(mocks.toast).toHaveBeenCalledWith(expect.stringContaining("disk full"), 5000);
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await flush();
+    expect(buttons()).toHaveLength(0);
+  });
+
+  it("lists hidden plugins on blank-area right-click and restores them", async () => {
+    mocks.state.editorSettings.pluginShortcuts.hiddenPluginIds = ["b"];
+    mocks.entries.value = mocks.entries.value.filter((entry: any) => entry.pluginId !== "b");
+    mount("right-top");
+    container.querySelector("nav")!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+    await flush();
+    const buttons = [...document.querySelectorAll<HTMLButtonElement>("[data-dbx-context-menu] button")];
+    expect(buttons.map((button) => button.textContent?.trim())).toEqual(["Plugin a", "Plugin b", "Plugin c"]);
+    buttons[1].click();
+    await flush();
+    expect(mocks.save).toHaveBeenCalledWith({ pluginShortcuts: { ...mocks.state.editorSettings.pluginShortcuts, hiddenPluginIds: [] } });
+    expect(mocks.open).not.toHaveBeenCalled();
+  });
+
+  it("retains the context-menu surface when every plugin is hidden", async () => {
+    mount("right-top");
+    mocks.entries.value = [];
+    mocks.state.editorSettings.pluginShortcuts.hiddenPluginIds = ["a", "b", "c"];
+    await flush();
+    const bar = container.querySelector("nav")!;
+    expect(bar).not.toBeNull();
+    bar.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+    await flush();
+    expect(document.querySelectorAll("[data-dbx-context-menu] button")).toHaveLength(3);
+  });
+
   it.each(["left-top", "right-top", "sidebar-bottom"] as const)("keeps the measured preview inside both edges at %s", async (position) => {
     const original = HTMLElement.prototype.getBoundingClientRect;
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
@@ -92,6 +147,7 @@ describe("plugin shortcut bar", () => {
     button.click();
     expect(mocks.openSettings).toHaveBeenCalledOnce();
     mocks.entries.value = [];
+    mocks.allEntries.value = [];
     await flush();
     expect(container.querySelector("[data-plugin-shortcut-settings]")).toBeNull();
     expect(container.querySelector("nav")).toBeNull();
@@ -179,6 +235,7 @@ describe("plugin shortcut bar", () => {
     expect(container.querySelector("nav")).toBeNull();
     mocks.state.editorSettings.pluginShortcuts.enabled = true;
     mocks.entries.value = [];
+    mocks.allEntries.value = [];
     await nextTick();
     expect(container.querySelector("nav")).toBeNull();
   });

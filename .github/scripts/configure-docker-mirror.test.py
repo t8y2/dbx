@@ -20,6 +20,7 @@ class DockerMirrorTests(unittest.TestCase):
     def test_missing_config(self):
         module.configure(self.path)
         self.assertEqual(json.loads(self.path.read_text()), {"registry-mirrors": [module.MIRROR]})
+        self.assertEqual(list(self.path.parent.iterdir()), [self.path])
 
     def test_preserves_settings_and_existing_mirror_order(self):
         original = {"log-driver": "json-file", "features": {"containerd-snapshotter": True},

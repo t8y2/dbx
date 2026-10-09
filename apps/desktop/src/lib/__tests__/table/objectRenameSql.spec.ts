@@ -23,9 +23,12 @@ describe("StarRocks object rename", () => {
 });
 
 describe("OceanBase Oracle object rename", () => {
-  it("offers table rename without enabling other object renames", () => {
+  it("offers table and ordinary view rename without enabling unverified object types", () => {
     expect(supportsObjectRename("oceanbase-oracle", "TABLE")).toBe(true);
-    expect(supportsObjectRename("oceanbase-oracle", "VIEW")).toBe(false);
+    expect(supportsObjectRename("oceanbase-oracle", "VIEW")).toBe(true);
+    for (const objectType of ["MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "EVENT"] as const) {
+      expect(supportsObjectRename("oceanbase-oracle", objectType)).toBe(false);
+    }
   });
 });
 

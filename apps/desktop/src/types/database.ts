@@ -2228,6 +2228,8 @@ export interface QueryTab {
   };
   /** Opened to view object source, including objects without editable source metadata. */
   sourceView?: boolean;
+  /** Preserved source text whose object identity is no longer valid after rename. */
+  sourceSnapshot?: boolean;
   ddlViewer?: {
     schema?: string;
     tableName: string;

@@ -1943,6 +1943,7 @@ defineExpose({
       <Splitpanes horizontal class="query-output-splitpanes flex-1 min-h-0 overflow-hidden" @resize="onResultsSplitResize" @resized="onResultsResized">
         <Pane v-if="!resultOnly" class="min-h-0" :size="editorPaneSize" :min-size="resultsPaneOpen ? 15 : 100">
           <div class="h-full flex flex-col relative">
+            <p v-if="activeTab.sourceSnapshot" class="shrink-0 border-b px-3 py-2 text-sm text-muted-foreground">{{ t("contextMenu.renamedSourceSnapshot") }}</p>
             <div v-if="activeTab.ddlViewer" class="flex h-10 shrink-0 items-center gap-2 border-b px-3">
               <Button variant="outline" size="sm" :disabled="ddlRefreshInProgress" @click="refreshDdlViewer">
                 <RefreshCcw class="h-4 w-4" :class="ddlRefreshInProgress ? 'animate-spin' : ''" />
@@ -2004,8 +2005,8 @@ defineExpose({
               :initial-selection="activeTab.editorSelection"
               :reveal-request="activeTab.editorRevealRequest"
               :force-word-wrap="activeTab.forceWordWrap"
-              :read-only="!!activeTab.ddlViewer"
-              :hide-execution-controls="!!activeTab.ddlViewer"
+              :read-only="!!activeTab.ddlViewer || !!activeTab.sourceSnapshot"
+              :hide-execution-controls="!!activeTab.ddlViewer || !!activeTab.sourceSnapshot"
               enable-explain-shortcut
               :can-explain="!activeTab.isExecuting && !activeTab.isExplaining && !!executableSql.trim()"
               @update:model-value="emit('editorUpdate', activeTab.id, $event)"

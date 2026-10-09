@@ -27,6 +27,10 @@ pub struct RoutineRenameObjectSourceInput {
     pub name: String,
     pub new_name: String,
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_body_source: Option<String>,
+    #[serde(default)]
+    pub package_cleanup: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -70,6 +74,9 @@ pub fn supports_source_backed_routine_rename(
     let Some(database_type) = database_type else {
         return false;
     };
+    if database_type == DatabaseType::OceanbaseOracle {
+        return true;
+    }
     database_type != DatabaseType::SqlServer
         && (is_mysql_like(database_type) || is_postgres_like(database_type) || is_oracle_like(database_type))
 }
@@ -77,6 +84,15 @@ pub fn supports_source_backed_routine_rename(
 pub fn build_routine_rename_object_source_statements(
     input: RoutineRenameObjectSourceInput,
 ) -> Result<Vec<String>, String> {
+    if matches!(input.object_type, ObjectSourceKind::Package | ObjectSourceKind::PackageBody) {
+        if input.package_cleanup {
+            return crate::package_rename::build_package_cleanup_steps(&input);
+        }
+        return crate::package_rename::build_package_rename_steps(&input);
+    }
+    if input.database_type == DatabaseType::OceanbaseOracle {
+        return build_oceanbase_routine_rename_steps(&input);
+    }
     if !supports_source_backed_routine_rename(Some(input.database_type), input.object_type.clone()) {
         return Err(format!(
             "Renaming {:?} from source is not supported for {:?}.",
@@ -124,6 +140,208 @@ pub fn build_routine_rename_object_source_statements(
         name: input.name,
         source: renamed_source,
     })
+}
+
+/// Build the CREATE step of a guarded OceanBase routine rename. The caller must
+/// perform conflict/permission checks and validate compilation/grants before DROP.
+/// Plain CREATE deliberately refuses to overwrite a concurrently created target.
+pub fn build_oceanbase_renamed_routine_create(input: &RoutineRenameObjectSourceInput) -> Result<String, String> {
+    if input.database_type != DatabaseType::OceanbaseOracle
+        || !matches!(input.object_type, ObjectSourceKind::Function | ObjectSourceKind::Procedure)
+    {
+        return Err("Expected an OceanBase Oracle procedure or function.".to_string());
+    }
+    let schema = input
+        .schema
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "A target schema is required.".to_string())?;
+    if input.name.is_empty() || input.new_name.is_empty() || input.name == input.new_name {
+        return Err("The original and replacement routine names must be nonempty and different.".to_string());
+    }
+    let source = strip_standalone_trailing_slash(&input.source);
+    let trivia = Regex::new(r"(?s)\A(?:\s+|--[^\r\n]*(?:\r?\n|$)|/\*.*?\*/)").unwrap();
+    let identifier = Regex::new(r#"\A(?:"(?:""|[^"])+"|[\p{L}_][\p{L}\p{N}_$#]*)"#).unwrap();
+    let mut offset = 0;
+    let mut next = || -> Result<(usize, usize, String), String> {
+        while let Some(found) = trivia.find(&source[offset..]) {
+            offset += found.end();
+        }
+        let start = offset;
+        if source[offset..].starts_with('.') {
+            offset += 1;
+        } else if let Some(found) = identifier.find(&source[offset..]) {
+            offset += found.end();
+        } else {
+            return Err("Cannot read the routine declaration header.".to_string());
+        }
+        Ok((start, offset, source[start..offset].to_string()))
+    };
+    let keyword = |token: &(usize, usize, String), expected: &str| {
+        !token.2.starts_with('"') && token.2.eq_ignore_ascii_case(expected)
+    };
+    let normalized = |name: &str| {
+        if name.starts_with('"') {
+            name[1..name.len() - 1].replace("\"\"", "\"")
+        } else {
+            name.to_uppercase()
+        }
+    };
+    if !keyword(&next()?, "CREATE") {
+        return Err("Expected a complete CREATE routine definition.".to_string());
+    }
+    let mut token = next()?;
+    let mut replace_range = None;
+    if keyword(&token, "OR") {
+        let start = token.0;
+        let replace = next()?;
+        if !keyword(&replace, "REPLACE") {
+            return Err("Expected CREATE OR REPLACE.".to_string());
+        }
+        replace_range = Some(start..replace.1);
+        token = next()?;
+    }
+    if keyword(&token, "EDITIONABLE") || keyword(&token, "NONEDITIONABLE") {
+        token = next()?;
+    }
+    if !keyword(&token, object_type_keyword(&input.object_type)) {
+        return Err("The routine source kind does not match the selected object.".to_string());
+    }
+    let first = next()?;
+    if first.2 == "." {
+        return Err("Expected a routine identifier.".to_string());
+    }
+    let name_start = first.0;
+    let mut name_end = first.1;
+    let mut names = vec![normalized(&first.2)];
+    // Only inspect the declaration prefix. The body may contain dialect-specific
+    // literals which must remain byte-for-byte intact and need no tokenization.
+    let mut after = name_end;
+    while let Some(found) = trivia.find(&source[after..]) {
+        after += found.end();
+    }
+    if source[after..].starts_with('.') {
+        if next()?.2 != "." {
+            return Err("Invalid qualified routine name.".to_string());
+        }
+        let second = next()?;
+        if second.2 == "." {
+            return Err("Expected a routine identifier.".to_string());
+        }
+        name_end = second.1;
+        names.push(normalized(&second.2));
+    }
+    if names.last().map(String::as_str) != Some(input.name.as_str()) || (names.len() == 2 && names[0] != schema) {
+        return Err("The routine source identity does not match the selected object.".to_string());
+    }
+    let mut prefix = source[..name_start].to_string();
+    if let Some(range) = replace_range {
+        prefix.replace_range(range, "");
+    }
+    Ok(format!("{}{}{}", prefix, postgres_qualified_name(Some(schema), &input.new_name), &source[name_end..]))
+}
+
+fn build_oceanbase_routine_rename_steps(input: &RoutineRenameObjectSourceInput) -> Result<Vec<String>, String> {
+    let create = build_oceanbase_renamed_routine_create(input)?;
+    let schema = input.schema.as_deref().unwrap(); // Validated by the CREATE builder.
+    let literal = |value: &str| format!("'{}'", value.replace('\'', "''"));
+    let owner = literal(schema);
+    let old_name = literal(&input.name);
+    let new_name = literal(&input.new_name);
+    let kind = literal(object_type_keyword(&input.object_type));
+    let target = postgres_qualified_name(Some(schema), &input.new_name);
+    let old_target = postgres_qualified_name(Some(schema), &input.name);
+    let drop_old = literal(&format!("DROP {} {}", object_type_keyword(&input.object_type), old_target));
+    let grant_prefix = literal(&format!("GRANT EXECUTE ON {target} TO "));
+    let dependency_query = literal(&format!("SELECT COUNT(*) FROM SYS.DBA_DEPENDENCIES WHERE REFERENCED_OWNER = {owner} AND REFERENCED_NAME = {old_name} AND REFERENCED_TYPE = {kind}"));
+    let synonym_query = literal(&format!("SELECT COUNT(*) FROM SYS.DBA_SYNONYMS WHERE TABLE_OWNER = {owner} AND TABLE_NAME = {old_name} AND DB_LINK IS NULL"));
+    let grant_count_query =
+        literal(&format!("SELECT COUNT(*) FROM SYS.DBA_TAB_PRIVS WHERE OWNER = {owner} AND TABLE_NAME = {old_name}"));
+    let preflight = format!("-- Preflight only: no object is changed by this step.
+DECLARE
+  v_count PLS_INTEGER;
+BEGIN
+  IF SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') <> {owner} THEN
+    RAISE_APPLICATION_ERROR(-20011, 'DBX routine rename: execution schema does not match the selected owner.');
+  END IF;
+  SELECT COUNT(*) INTO v_count FROM SYS.ALL_OBJECTS WHERE OWNER = {owner} AND OBJECT_NAME = {old_name} AND OBJECT_TYPE = {kind};
+  IF v_count <> 1 THEN
+    RAISE_APPLICATION_ERROR(-20012, 'DBX routine rename: the original routine is missing or inaccessible.');
+  END IF;
+  SELECT COUNT(*) INTO v_count FROM SYS.ALL_OBJECTS WHERE OWNER = {owner} AND OBJECT_NAME = {new_name};
+  IF v_count <> 0 THEN
+    RAISE_APPLICATION_ERROR(-20013, 'DBX routine rename: the replacement name already exists. Nothing was changed.');
+  END IF;
+  IF SYS_CONTEXT('USERENV', 'SESSION_USER') NOT IN ({owner}, 'SYS') THEN
+    SELECT COUNT(DISTINCT PRIVILEGE) INTO v_count FROM SYS.USER_SYS_PRIVS WHERE PRIVILEGE IN ('CREATE ANY PROCEDURE', 'DROP ANY PROCEDURE');
+    IF v_count <> 2 THEN
+      RAISE_APPLICATION_ERROR(-20014, 'DBX routine rename: cross-owner operation requires direct CREATE ANY PROCEDURE and DROP ANY PROCEDURE grants; enabled role privileges cannot be verified.');
+    END IF;
+  END IF;
+END;");
+    let validate = format!("-- A successful CREATE response does not establish successful compilation.
+DECLARE
+  v_count PLS_INTEGER;
+  v_error VARCHAR2(1600);
+BEGIN
+  SELECT COUNT(*) INTO v_count FROM SYS.ALL_OBJECTS WHERE OWNER = {owner} AND OBJECT_NAME = {new_name} AND OBJECT_TYPE = {kind} AND STATUS = 'VALID';
+  IF v_count <> 1 THEN
+    SELECT MIN(SUBSTR(TEXT, 1, 1500)) INTO v_error FROM SYS.ALL_ERRORS WHERE OWNER = {owner} AND NAME = {new_name} AND TYPE = {kind};
+    RAISE_APPLICATION_ERROR(-20015, 'DBX routine rename: replacement is not VALID; original retained. Compile or remove the replacement before retrying. ' || v_error);
+  END IF;
+END;");
+    let grants = format!(
+        r#"-- Copy supported effective grants; any error retains the original object.
+DECLARE
+  v_count PLS_INTEGER;
+  v_total PLS_INTEGER;
+  v_sql VARCHAR2(4000);
+BEGIN
+  IF SYS_CONTEXT('USERENV', 'SESSION_USER') <> {owner} THEN
+    EXECUTE IMMEDIATE {grant_count_query} INTO v_total;
+    SELECT COUNT(*) INTO v_count FROM SYS.ALL_TAB_PRIVS WHERE TABLE_SCHEMA = {owner} AND TABLE_NAME = {old_name};
+    IF v_count <> v_total THEN
+      RAISE_APPLICATION_ERROR(-20016, 'DBX routine rename: grant metadata is incomplete; both objects retained.');
+    END IF;
+  END IF;
+  SELECT COUNT(*) INTO v_count FROM SYS.ALL_TAB_PRIVS WHERE TABLE_SCHEMA = {owner} AND TABLE_NAME = {old_name} AND (PRIVILEGE <> 'EXECUTE' OR HIERARCHY = 'YES');
+  IF v_count <> 0 THEN
+    RAISE_APPLICATION_ERROR(-20016, 'DBX routine rename: unsupported grant metadata; both objects retained. Migrate grants manually before removing either object.');
+  END IF;
+  FOR r IN (SELECT DISTINCT GRANTEE, GRANTABLE FROM SYS.ALL_TAB_PRIVS WHERE TABLE_SCHEMA = {owner} AND TABLE_NAME = {old_name} AND PRIVILEGE = 'EXECUTE') LOOP
+    v_sql := {grant_prefix} || CASE WHEN r.GRANTEE = 'PUBLIC' THEN 'PUBLIC' ELSE '"' || REPLACE(r.GRANTEE, '"', '""') || '"' END;
+    IF r.GRANTABLE = 'YES' THEN v_sql := v_sql || ' WITH GRANT OPTION'; END IF;
+    EXECUTE IMMEDIATE v_sql;
+  END LOOP;
+  SELECT COUNT(*) INTO v_count FROM SYS.ALL_TAB_PRIVS original WHERE original.TABLE_SCHEMA = {owner} AND original.TABLE_NAME = {old_name}
+    AND NOT EXISTS (SELECT 1 FROM SYS.ALL_TAB_PRIVS replacement WHERE replacement.TABLE_SCHEMA = {owner} AND replacement.TABLE_NAME = {new_name} AND replacement.GRANTEE = original.GRANTEE AND replacement.PRIVILEGE = original.PRIVILEGE AND (original.GRANTABLE = 'NO' OR replacement.GRANTABLE = 'YES'));
+  IF v_count <> 0 THEN
+    RAISE_APPLICATION_ERROR(-20017, 'DBX routine rename: grant verification failed; both objects retained.');
+  END IF;
+END;"#
+    );
+    let cleanup = format!("-- Final step only: retain the original if dependencies cannot be established.
+DECLARE
+  v_count PLS_INTEGER;
+  v_synonyms PLS_INTEGER;
+BEGIN
+  SELECT COUNT(*) INTO v_count FROM SYS.ALL_OBJECTS WHERE OWNER = {owner} AND OBJECT_NAME = {new_name} AND OBJECT_TYPE = {kind} AND STATUS = 'VALID';
+  IF v_count <> 1 THEN RAISE_APPLICATION_ERROR(-20015, 'DBX routine rename: replacement is no longer VALID; original retained.'); END IF;
+  BEGIN
+    EXECUTE IMMEDIATE {dependency_query} INTO v_count;
+    EXECUTE IMMEDIATE {synonym_query} INTO v_synonyms;
+  EXCEPTION WHEN OTHERS THEN
+    RAISE_APPLICATION_ERROR(-20018, 'DBX routine rename: complete dependency metadata is unavailable; both objects retained. Review dependencies and grants before removing the original.');
+  END;
+  IF v_count <> 0 OR v_synonyms <> 0 THEN
+    RAISE_APPLICATION_ERROR(-20019, 'DBX routine rename: callers or synonyms still reference the original; both objects retained. Rebind and validate them before removing the original.');
+  END IF;
+  SELECT COUNT(*) INTO v_count FROM SYS.ALL_TAB_PRIVS original WHERE original.TABLE_SCHEMA = {owner} AND original.TABLE_NAME = {old_name}
+    AND NOT EXISTS (SELECT 1 FROM SYS.ALL_TAB_PRIVS replacement WHERE replacement.TABLE_SCHEMA = {owner} AND replacement.TABLE_NAME = {new_name} AND replacement.GRANTEE = original.GRANTEE AND replacement.PRIVILEGE = original.PRIVILEGE AND (original.GRANTABLE = 'NO' OR replacement.GRANTABLE = 'YES'));
+  IF v_count <> 0 THEN RAISE_APPLICATION_ERROR(-20017, 'DBX routine rename: grants changed or could not be verified; original retained.'); END IF;
+  EXECUTE IMMEDIATE {drop_old};
+END;");
+    Ok(vec![preflight, create, validate, grants, cleanup])
 }
 
 pub fn build_executable_object_source_statements(input: EditableObjectSourceSqlInput) -> Result<Vec<String>, String> {
@@ -2397,8 +2615,97 @@ mod tests {
     }
 
     #[test]
+    fn oceanbase_rename_create_preserves_body_and_comments_without_replace() {
+        let source = "-- keep header\nCREATE /* keep */ OR REPLACE PROCEDURE \"APP\".\"Old Proc\" AS\nBEGIN\n  dbms_output.put_line(q'[Old Proc: O'Reilly]'); -- Old Proc\nEND;\n/";
+        let sql = build_oceanbase_renamed_routine_create(&RoutineRenameObjectSourceInput {
+            package_cleanup: false,
+            package_body_source: None,
+            database_type: DatabaseType::OceanbaseOracle,
+            object_type: ObjectSourceKind::Procedure,
+            schema: Some("APP".to_string()),
+            name: "Old Proc".to_string(),
+            new_name: "New Proc".to_string(),
+            source: source.to_string(),
+        })
+        .unwrap();
+        assert_eq!(sql, "-- keep header\nCREATE /* keep */  PROCEDURE \"APP\".\"New Proc\" AS\nBEGIN\n  dbms_output.put_line(q'[Old Proc: O'Reilly]'); -- Old Proc\nEND;");
+    }
+
+    #[test]
+    fn oceanbase_rename_create_rejects_source_identity_mismatch() {
+        for source in [
+            "CREATE PROCEDURE OTHER.P AS BEGIN NULL; END;",
+            "CREATE PROCEDURE APP.Q AS BEGIN NULL; END;",
+            "CREATE FUNCTION APP.P RETURN NUMBER AS BEGIN RETURN 1; END;",
+        ] {
+            assert!(build_oceanbase_renamed_routine_create(&RoutineRenameObjectSourceInput {
+                package_cleanup: false,
+                package_body_source: None,
+                database_type: DatabaseType::OceanbaseOracle,
+                object_type: ObjectSourceKind::Procedure,
+                schema: Some("APP".to_string()),
+                name: "P".to_string(),
+                new_name: "P2".to_string(),
+                source: source.to_string(),
+            })
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn oceanbase_routine_rename_never_drops_before_validation_grants_and_dependencies() {
+        for (object_type, keyword, body) in [
+            (ObjectSourceKind::Procedure, "PROCEDURE", "AS BEGIN NULL; END;"),
+            (ObjectSourceKind::Function, "FUNCTION", "RETURN NUMBER AS BEGIN RETURN 1; END;"),
+        ] {
+            let statements = build_routine_rename_object_source_statements(RoutineRenameObjectSourceInput {
+                package_cleanup: false,
+                package_body_source: None,
+                database_type: DatabaseType::OceanbaseOracle,
+                object_type,
+                schema: Some("APP".to_string()),
+                name: "OLD_ROUTINE".to_string(),
+                new_name: "NEW_ROUTINE".to_string(),
+                source: format!("CREATE OR REPLACE {keyword} APP.OLD_ROUTINE {body}"),
+            }).unwrap();
+            assert_eq!(statements.len(), 5);
+            assert!(statements[..4].iter().all(|sql| !sql.contains("EXECUTE IMMEDIATE 'DROP")));
+            assert!(statements[1].starts_with(&format!("CREATE  {keyword}")));
+            assert!(!statements[1].contains("OR REPLACE"));
+            assert!(statements[2].contains("STATUS = 'VALID'"));
+            assert!(statements[2].contains("SYS.ALL_ERRORS"));
+            assert!(statements[3].contains("WITH GRANT OPTION"));
+            let cleanup = &statements[4];
+            let drop_position = cleanup.find(&format!("EXECUTE IMMEDIATE 'DROP {keyword}")).unwrap();
+            for required in ["STATUS = 'VALID'", "SYS.DBA_DEPENDENCIES", "SYS.DBA_SYNONYMS", "RAISE_APPLICATION_ERROR(-20018", "RAISE_APPLICATION_ERROR(-20019", "RAISE_APPLICATION_ERROR(-20017"] {
+                assert!(cleanup.find(required).unwrap() < drop_position, "missing guard before DROP: {required}");
+            }
+        }
+    }
+
+    #[test]
+    fn oceanbase_routine_rename_quotes_identifiers_and_nested_metadata_literals() {
+        let statements = build_routine_rename_object_source_statements(RoutineRenameObjectSourceInput {
+            package_cleanup: false,
+            package_body_source: None,
+            database_type: DatabaseType::OceanbaseOracle,
+            object_type: ObjectSourceKind::Procedure,
+            schema: Some("O'Reilly".to_string()),
+            name: "Old \"Proc'".to_string(),
+            new_name: "New \"Proc'".to_string(),
+            source: "CREATE PROCEDURE \"O'Reilly\".\"Old \"\"Proc'\" AS BEGIN NULL; END;".to_string(),
+        }).unwrap();
+        assert!(statements[0].contains("OWNER = 'O''Reilly'"));
+        assert!(statements[1].contains("\"O'Reilly\".\"New \"\"Proc'\""));
+        assert!(statements[4].contains("REFERENCED_OWNER = ''O''''Reilly''"));
+        assert!(statements[4].contains("EXECUTE IMMEDIATE 'DROP PROCEDURE \"O''Reilly\".\"Old \"\"Proc''\"'"));
+    }
+
+    #[test]
     fn oracle_family_routine_rename_rewrites_source_and_drops_original() {
         let statements = build_routine_rename_object_source_statements(RoutineRenameObjectSourceInput {
+            package_cleanup: false,
+            package_body_source: None,
             database_type: DatabaseType::Dameng,
             object_type: ObjectSourceKind::Procedure,
             schema: Some("SYSDBA".to_string()),

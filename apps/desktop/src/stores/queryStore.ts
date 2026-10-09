@@ -2669,6 +2669,7 @@ export const useQueryStore = defineStore("query", () => {
       objectBrowser: t.objectBrowser,
       objectSource: t.objectSource,
       sourceView: t.sourceView,
+      sourceSnapshot: t.sourceSnapshot,
       tableMeta: t.tableMeta,
       mongoEditTarget: t.mongoEditTarget,
       resultEvicted: t.resultEvicted,
@@ -2954,6 +2955,15 @@ export const useQueryStore = defineStore("query", () => {
 
     const id = createTab(options.connectionId, options.database, options.title, "query", options.schema, options.sql, options.catalog, { forceNew: true, sourceView: true });
     setObjectSource(id, options.objectSource);
+    return id;
+  }
+
+  function openSourceRecoverySnapshot(options: Omit<OpenObjectSourceTabOptions, "objectSource">) {
+    // Always preserve the definition read for this attempt, independently of any
+    // editable tab and without stealing focus from the confirmation dialog.
+    const id = createTab(options.connectionId, options.database, options.title, "query", options.schema, options.sql, options.catalog, { forceNew: true, sourceView: true, activate: false });
+    const tab = tabs.value.find((candidate) => candidate.id === id);
+    if (tab) tab.sourceSnapshot = true;
     return id;
   }
 
@@ -4846,6 +4856,7 @@ export const useQueryStore = defineStore("query", () => {
       objectSource: original.objectSource ? { ...original.objectSource } : undefined,
       oracleTypeIdentity: original.oracleTypeIdentity ? { ...original.oracleTypeIdentity } : undefined,
       sourceView: original.sourceView,
+      sourceSnapshot: original.sourceSnapshot,
       tableMeta: original.tableMeta
         ? {
             ...original.tableMeta,
@@ -4993,6 +5004,30 @@ export const useQueryStore = defineStore("query", () => {
     // A dropped table-like object makes existing data/structure tabs stale; close
     // them immediately instead of letting the next refresh fail against a missing object.
     closeTabsWhere((tab) => tabMatchesDroppedTableObject(tab, target));
+  }
+
+  function invalidateRenamedViewTabs(target: DroppedTableObjectTarget) {
+    invalidateRenamedObjectTabs({ ...target, objectType: "VIEW" });
+  }
+
+  function invalidateRenamedObjectTabs(target: Omit<DroppedTableObjectTarget, "objectType"> & { objectType: "VIEW" | "PROCEDURE" | "FUNCTION" | "PACKAGE" | "PACKAGE_BODY" }) {
+    if (target.objectType === "VIEW") closeDroppedTableObjectTabs({ ...target, objectType: "VIEW" });
+    const schemas = droppedTableObjectSchemaCandidates({ ...target, objectType: undefined });
+    for (const tab of tabs.value) {
+      if (tab.connectionId !== target.connectionId || tab.database !== target.database) continue;
+      const source = tab.objectSource ?? tab.sourceLoad?.request;
+      const sourceMatches = source?.objectType === target.objectType && source.name === target.name && schemas.has(normalizeOptionalSchema(tab.objectSource?.schema ?? tab.schema));
+      const ddlMatches = tab.ddlViewer?.objectType === target.objectType && tab.ddlViewer.tableName === target.name && schemas.has(normalizeOptionalSchema(tab.ddlViewer.schema ?? tab.schema));
+      if (!sourceMatches && !ddlMatches) continue;
+      // Preserve unsaved text as a read-only snapshot. Removing load identities
+      // also prevents an in-flight response from restoring the old editable name.
+      tab.objectSource = undefined;
+      tab.sourceLoad = undefined;
+      tab.ddlViewer = undefined;
+      tab.ddlLoad = undefined;
+      tab.sourceView = true;
+      tab.sourceSnapshot = true;
+    }
   }
 
   async function refreshDataTabInternal(id: string, options?: { supersedeBusy?: boolean; propagateBuildError?: boolean }): Promise<boolean> {
@@ -6082,6 +6117,7 @@ export const useQueryStore = defineStore("query", () => {
     const executionTabId = options?.tabId ?? activeTabId.value;
     if (!executionTabId) return;
     const tab = tabs.value.find((item) => item.id === executionTabId);
+    if (tab?.sourceSnapshot) return false;
     if (tab && pendingResultRunPreparations.has(tab)) return false;
     const previousGridKey = tab ? resultGridInstanceKey(tab) : undefined;
     if (tab?.mode === "query") {
@@ -7085,6 +7121,7 @@ export const useQueryStore = defineStore("query", () => {
     assertUpdateAllowsInteraction();
     const tab = findExecutionTab(id);
     if (!tab || !sql.trim()) return;
+    if (tab.sourceSnapshot) return false;
     if (pendingResultRunPreparations.has(tab)) return false;
 
     const openInNewResultTab = tab.mode === "query" && options?.openInNewResultTab === true;
@@ -10066,6 +10103,9 @@ export const useQueryStore = defineStore("query", () => {
     closeConnectionTabs,
     closeDatabaseTabs,
     closeDroppedTableObjectTabs,
+    invalidateRenamedViewTabs,
+    invalidateRenamedObjectTabs,
+    openSourceRecoverySnapshot,
     refreshDataTab,
     refreshDataTabsForTable,
     releaseConnectionTabs,

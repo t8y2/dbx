@@ -70,6 +70,7 @@ export interface SavedOpenTab {
   objectSource?: QueryTab["objectSource"];
   oracleTypeIdentity?: QueryTab["oracleTypeIdentity"];
   sourceView?: boolean;
+  sourceSnapshot?: boolean;
   ddlViewer?: QueryTab["ddlViewer"];
   tableComment?: QueryTab["tableComment"];
   tableMeta?: QueryTab["tableMeta"];
@@ -219,6 +220,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     objectSource: tab.objectSource,
     ...(tab.oracleTypeIdentity ? { oracleTypeIdentity: { ...tab.oracleTypeIdentity } } : {}),
     ...(tab.sourceView ? { sourceView: true } : {}),
+    ...(tab.sourceSnapshot ? { sourceSnapshot: true } : {}),
     ...(tab.ddlViewer ? { ddlViewer: { ...tab.ddlViewer } } : {}),
     ...(tab.tableComment !== undefined ? { tableComment: tab.tableComment } : {}),
     tableMeta: tab.tableMeta,

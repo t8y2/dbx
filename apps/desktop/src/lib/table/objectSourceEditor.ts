@@ -11,6 +11,8 @@ export type BuildEditableObjectSourceSqlInput = {
 
 export type BuildRoutineRenameObjectSourceInput = BuildEditableObjectSourceSqlInput & {
   newName: string;
+  packageBodySource?: string | null;
+  packageCleanup?: boolean;
 };
 
 export type ObjectSourceSaveExecutionMode = "single" | "script";
@@ -45,11 +47,34 @@ export function formatObjectSourceSaveError(error: unknown, databaseType: Databa
 export function supportsSourceBackedRoutineRename(databaseType: DatabaseType | undefined, objectType: ObjectSourceKind): boolean {
   if (objectType !== "FUNCTION" && objectType !== "PROCEDURE") return false;
   if (!databaseType || databaseType === "sqlserver") return false;
-  return mysqlLikeRoutineRenameTypes.has(databaseType) || postgresLikeRoutineRenameTypes.has(databaseType) || oracleLikeRoutineRenameTypes.has(databaseType);
+  return databaseType === "oceanbase-oracle" || mysqlLikeRoutineRenameTypes.has(databaseType) || postgresLikeRoutineRenameTypes.has(databaseType) || oracleLikeRoutineRenameTypes.has(databaseType);
 }
 
 export function buildRoutineRenameObjectSourceStatements(input: BuildRoutineRenameObjectSourceInput): Promise<string[]> {
   return api.buildRoutineRenameObjectSourceStatements(input);
+}
+
+export class RoutineRenameStepError extends Error {
+  constructor(readonly step: number, cause: unknown) {
+    super(errorMessage(cause));
+    this.name = "RoutineRenameStepError";
+  }
+}
+
+/** Execute the guarded OceanBase plan in order; never continue after a failed step. */
+export async function executeOceanBaseRoutineRenameSteps(
+  statements: string[],
+  execute: (sql: string) => Promise<{ execution_error?: boolean; error?: { detail?: string } | null }>,
+): Promise<void> {
+  if (statements.length !== 5) throw new Error("Expected the complete five-step OceanBase routine rename plan.");
+  for (let index = 0; index < statements.length; index += 1) {
+    try {
+      const result = await execute(statements[index]);
+      if (result.execution_error) throw new Error(result.error?.detail || "The database reported an execution error.");
+    } catch (error) {
+      throw new RoutineRenameStepError(index + 1, error);
+    }
+  }
 }
 
 export function buildExecutableObjectSourceStatements(input: BuildEditableObjectSourceSqlInput): Promise<string[]> {

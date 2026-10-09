@@ -104,9 +104,10 @@ import {
 } from "@/lib/database/dbAdminSql";
 import { confirmOceanbaseTableClone, executeOceanbaseTableClone, showOceanbaseTableCloneFailure, OceanbaseTableCloneError } from "@/lib/database/oceanbaseTableClone";
 import { useToast } from "@/composables/useToast";
-import { buildExecutableObjectSourceStatements, buildRoutineRenameObjectSourceStatements, executeObjectSourceSave, formatObjectSourceSaveError, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
+import { buildExecutableObjectSourceStatements, buildRoutineRenameObjectSourceStatements, executeOceanBaseRoutineRenameSteps, RoutineRenameStepError, executeObjectSourceSave, formatObjectSourceSaveError, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
 import OracleTypeMetadataPanel from "@/components/objects/OracleTypeMetadataPanel.vue";
 import { buildRenameObjectSql, supportsObjectRename } from "@/lib/table/objectRenameSql";
+import { executePackageCleanup, executePackageRename, PackageRenameCleanupError, PackageRenameStepError, preparePackageRename, supportsPackageRename } from "@/lib/table/packageRename";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { autoRevealExportedPathIfConfigured, promptExportSavePath } from "@/lib/export/exportPath";
 import { generateDatabaseExportId } from "@/lib/export/databaseExport";
@@ -369,6 +370,7 @@ const renameTarget = ref<ObjectBrowserRow | null>(null);
 const renameInput = ref("");
 const renameError = ref("");
 const renamePreviewSqlText = ref("");
+const packageCleanupReviewed = ref(false);
 const showTruncateConfirm = ref(false);
 const truncateTarget = ref<ObjectBrowserRow | null>(null);
 const truncatePreviewSql = ref("");
@@ -1032,7 +1034,7 @@ function togglePartitionParent(row: ObjectBrowserRow) {
 }
 
 function canRename(row: ObjectBrowserRow) {
-  return supportsObjectRename(effectiveDatabaseType.value, row.type) || supportsSourceBackedRoutineRename(effectiveDatabaseType.value, row.type as ObjectSourceKind);
+  return supportsPackageRename(effectiveDatabaseType.value, row.type) || supportsObjectRename(effectiveDatabaseType.value, row.type) || supportsSourceBackedRoutineRename(effectiveDatabaseType.value, row.type as ObjectSourceKind);
 }
 
 function sourceTitle(row: ObjectBrowserRow | null) {
@@ -1785,6 +1787,7 @@ function requestDrop(row: ObjectBrowserRow) {
 }
 
 function requestRename(row: ObjectBrowserRow) {
+  packageCleanupReviewed.value = false;
   renameTarget.value = row;
   renameInput.value = row.name;
   renameError.value = "";
@@ -1802,8 +1805,31 @@ async function refreshRenamePreviewSql() {
     renamePreviewSqlText.value = "";
     return;
   }
+  if (supportsPackageRename(effectiveDatabaseType.value, row.type)) {
+    try {
+      const plan = await preparePackageRename({ connectionId: props.connection.id, database: props.database, databaseType: effectiveDatabaseType.value, schema: row.schema || selectedSchema.value || props.database, name: row.name, newName }, { cleanup: packageCleanupReviewed.value, callersMigrated: packageCleanupReviewed.value });
+      if (requestId === renamePreviewRequestId) renamePreviewSqlText.value = plan.statements.join("\n\n");
+    } catch (error: any) {
+      if (requestId === renamePreviewRequestId) { renamePreviewSqlText.value = ""; renameError.value = error?.message || String(error); }
+    }
+    return;
+  }
   if (supportsSourceBackedRoutineRename(effectiveDatabaseType.value, row.type as ObjectSourceKind)) {
-    renamePreviewSqlText.value = `-- Recreate ${row.type} from source, then drop the original object.`;
+    if (effectiveDatabaseType.value !== "oceanbase-oracle") {
+      renamePreviewSqlText.value = `-- Recreate ${row.type} from source, then drop the original object.`;
+      return;
+    }
+    try {
+      const schema = row.schema || selectedSchema.value || props.database;
+      const source = await api.getObjectSource(props.connection.id, props.database, schema, row.name, row.type as ObjectSourceKind, row.signature ?? undefined);
+      const steps = await buildRoutineRenameObjectSourceStatements({ databaseType: "oceanbase-oracle", objectType: row.type as ObjectSourceKind, schema, name: row.name, newName, source: source.source });
+      if (requestId === renamePreviewRequestId) renamePreviewSqlText.value = steps.join("\n\n");
+    } catch (error: any) {
+      if (requestId === renamePreviewRequestId) {
+        renamePreviewSqlText.value = "";
+        renameError.value = error?.message || String(error);
+      }
+    }
     return;
   }
   try {
@@ -1820,7 +1846,8 @@ async function refreshRenamePreviewSql() {
   }
 }
 
-watch([showRenameDialog, renameTarget, renameInput, selectedSchema], () => {
+watch([renameTarget, renameInput, selectedSchema], () => { packageCleanupReviewed.value = false; });
+watch([showRenameDialog, renameTarget, renameInput, selectedSchema, packageCleanupReviewed], () => {
   void refreshRenamePreviewSql();
 });
 
@@ -1832,8 +1859,47 @@ async function confirmRename() {
   const oldPinnedNode = pinnedTreeNodeForObjectBrowserRow(row);
   const oldLegacyPinnedNodes = legacyPinnedTreeNodesForObjectBrowserRow(row);
   let renameApplied = false;
+  const schema = row.schema || selectedSchema.value || props.database;
   try {
-    const schema = row.schema || selectedSchema.value || props.database;
+    if (supportsPackageRename(effectiveDatabaseType.value, row.type)) {
+      const cleanup = packageCleanupReviewed.value;
+      const plan = await preparePackageRename({ connectionId: props.connection.id, database: props.database, databaseType: effectiveDatabaseType.value, schema, name: row.name, newName }, { cleanup, callersMigrated: cleanup });
+      let recoveryId: string | undefined;
+      let attempted = false;
+      try {
+        const executed = await executeObjectBrowserSqlWithProductionGuard(plan.statements.join("\n\n"), async () => {
+          attempted = true;
+          const saveRecovery = (sql: string) => {
+            if (recoveryId) queryStore.updateSql(recoveryId, sql);
+            else recoveryId = queryStore.openSourceRecoverySnapshot({ connectionId: props.connection.id, database: props.database, schema, title: t("contextMenu.packageRenameRecoveryTitle", { name: row.name }), sql });
+          };
+          if (cleanup) await executePackageCleanup(plan, cleanup, saveRecovery);
+          else await executePackageRename(plan, saveRecovery);
+          return true;
+        });
+        if (!executed) return;
+        if (cleanup) {
+          renameApplied = true;
+          for (const objectType of ["PACKAGE", "PACKAGE_BODY"] as const) queryStore.invalidateRenamedObjectTabs({ connectionId: props.connection.id, database: props.database, schema, name: row.name, objectType });
+          if (sourceRow.value?.id === row.id) closeSource();
+        }
+        toast(t(cleanup ? "contextMenu.renameObjectSuccess" : "contextMenu.packageRenameIncomplete", { oldName: row.name, newName }));
+        showRenameDialog.value = false;
+      } finally {
+        if (attempted) {
+          invalidateObjectBrowserRowsCache({ connectionId: props.connection.id, database: props.database, schema });
+          await Promise.allSettled([row.name, newName].flatMap((tableName) => [invalidateObjectMetadataCache({ connectionId: props.connection.id, database: props.database, schema, tableName }), invalidateObjectDdl({ connectionId: props.connection.id, database: props.database, schema, tableName })]));
+          await Promise.allSettled([reload(), connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, schema)]);
+        }
+      }
+      if (cleanup && renameApplied) {
+        const renamedTarget = { ...oldPinnedNode, label: newName, objectName: newName, tableName: newName };
+        const renamedRow = rows.value.find((candidate) => objectBrowserRowMatchesPinnedTreeNode(candidate, treeNodePinIdentity(renamedTarget), objectBrowserPinnedTreeNodeContext()));
+        if (renamedRow) connectionStore.replacePinnedTreeNode(oldPinnedNode, pinnedTreeNodeForObjectBrowserRow(renamedRow), canonicalizeObjectBrowserPinnedIdentity, oldLegacyPinnedNodes.map((node) => node.id));
+        else connectionStore.removePinnedTreeNodes([oldPinnedNode, ...oldLegacyPinnedNodes], canonicalizeObjectBrowserPinnedIdentity);
+      }
+      return;
+    }
     if (supportsSourceBackedRoutineRename(effectiveDatabaseType.value, row.type as ObjectSourceKind)) {
       const source = await api.getObjectSource(props.connection.id, props.database, schema, row.name, row.type as ObjectSourceKind, row.signature ?? undefined);
       const statements = await buildRoutineRenameObjectSourceStatements({
@@ -1845,8 +1911,11 @@ async function confirmRename() {
         source: source.source,
       });
       const executed = await executeObjectBrowserSqlWithProductionGuard(statements.join(";\n"), async () => {
-        for (const sql of statements) {
-          await api.executeQuery(props.connection.id, props.database, sql, schema);
+        if (effectiveDatabaseType.value === "oceanbase-oracle") {
+          queryStore.openSourceRecoverySnapshot({ connectionId: props.connection.id, database: props.database, schema, title: t("contextMenu.routineRenameRecoveryTitle", { name: row.name }), sql: source.source });
+          await executeOceanBaseRoutineRenameSteps(statements, (sql) => api.executeQuery(props.connection.id, props.database, sql, schema));
+        } else {
+          for (const sql of statements) await api.executeQuery(props.connection.id, props.database, sql, schema);
         }
         return true;
       });
@@ -1863,6 +1932,15 @@ async function confirmRename() {
       if (!executed) return;
     }
     renameApplied = true;
+    if (effectiveDatabaseType.value === "oceanbase-oracle" && (row.type === "VIEW" || row.type === "PROCEDURE" || row.type === "FUNCTION")) {
+      queryStore.invalidateRenamedObjectTabs({ connectionId: props.connection.id, database: props.database, schema, name: row.name, objectType: row.type });
+      if (sourceRow.value?.id === row.id) closeSource();
+      invalidateObjectBrowserRowsCache({ connectionId: props.connection.id, database: props.database, schema });
+      await Promise.all([row.name, newName].flatMap((tableName) => [
+        invalidateObjectMetadataCache({ connectionId: props.connection.id, database: props.database, schema, tableName }),
+        invalidateObjectDdl({ connectionId: props.connection.id, database: props.database, schema, tableName }),
+      ]));
+    }
     toast(t("contextMenu.renameObjectSuccess", { oldName: row.name, newName }));
     showRenameDialog.value = false;
     if (sourceRow.value?.id === row.id) closeSource();
@@ -1888,7 +1966,32 @@ async function confirmRename() {
       // remove the old pin instead of allowing it to revive later.
       connectionStore.removePinnedTreeNodes([oldPinnedNode, ...oldLegacyPinnedNodes], canonicalizeObjectBrowserPinnedIdentity);
     }
-    renameError.value = e?.message || String(e);
+    if (e instanceof PackageRenameCleanupError && (e.oldObjects == null || e.oldObjects === 0)) {
+      for (const objectType of ["PACKAGE", "PACKAGE_BODY"] as const) queryStore.invalidateRenamedObjectTabs({ connectionId: props.connection.id, database: props.database, schema, name: row.name, objectType });
+      if (sourceRow.value?.id === row.id) closeSource();
+      if (e.oldObjects === 0) connectionStore.removePinnedTreeNodes([oldPinnedNode, ...oldLegacyPinnedNodes], canonicalizeObjectBrowserPinnedIdentity);
+    }
+    renameError.value = e instanceof PackageRenameCleanupError
+      ? t("contextMenu.packageCleanupFailed", { message: e.message, state: t(e.oldObjects == null ? "contextMenu.packageCleanupStateUnknown" : e.oldObjects === 0 ? "contextMenu.packageCleanupStateRemoved" : "contextMenu.packageCleanupStateRetained") })
+      : e instanceof PackageRenameStepError
+      ? t("contextMenu.packageRenameFailed", { step: e.step, message: e.message })
+      : e instanceof RoutineRenameStepError
+      ? t("contextMenu.routineRenameStepFailed", { step: e.step, oldName: row.name, newName, message: e.message }) + " " + t(e.step < 5 ? "contextMenu.routineRenameOriginalNotDropped" : "contextMenu.routineRenameFinalStateUnknown")
+      : e?.message || String(e);
+    if (e instanceof RoutineRenameStepError && e.step >= 2) {
+      // CREATE may have succeeded even if the response was lost. Refresh both
+      // identities without replacing the old pin or masking the original error.
+      if (e.step === 5 && (row.type === "PROCEDURE" || row.type === "FUNCTION")) {
+        queryStore.invalidateRenamedObjectTabs({ connectionId: props.connection.id, database: props.database, schema, name: row.name, objectType: row.type });
+        if (sourceRow.value?.id === row.id) closeSource();
+      }
+      invalidateObjectBrowserRowsCache({ connectionId: props.connection.id, database: props.database, schema });
+      await Promise.allSettled([row.name, newName].flatMap((tableName) => [
+        invalidateObjectMetadataCache({ connectionId: props.connection.id, database: props.database, schema, tableName }),
+        invalidateObjectDdl({ connectionId: props.connection.id, database: props.database, schema, tableName }),
+      ]));
+      await Promise.allSettled([reload(), connectionStore.refreshObjectListTreeNode(props.connection.id, props.database, schema)]);
+    }
   }
 }
 
@@ -4704,13 +4807,19 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       </DialogHeader>
       <div class="grid gap-3">
         <Input v-model="renameInput" :placeholder="t('contextMenu.renameObjectNamePlaceholder')" @keydown.enter.prevent="confirmRename" />
+        <label v-if="renameTarget && supportsPackageRename(effectiveDatabaseType, renameTarget.type)" class="flex items-start gap-2 text-sm">
+          <input v-model="packageCleanupReviewed" type="checkbox" class="mt-1" />
+          <span>{{ t("contextMenu.packageCleanupAcknowledgement", { oldName: renameTarget.name, newName: renameInput }) }}</span>
+        </label>
+        <p v-if="effectiveDatabaseType === 'oceanbase-oracle' && renameTarget?.type === 'VIEW'" class="text-sm text-muted-foreground">{{ t("contextMenu.oceanbaseViewRenameWarning") }}</p>
+        <p v-if="effectiveDatabaseType === 'oceanbase-oracle' && (renameTarget?.type === 'PROCEDURE' || renameTarget?.type === 'FUNCTION')" class="text-sm text-muted-foreground">{{ t("contextMenu.oceanbaseRoutineRenameWarning") }}</p>
         <pre v-if="renamePreviewSqlText" class="max-h-32 min-w-0 max-w-full overflow-auto rounded bg-muted p-3 text-xs whitespace-pre-wrap" v-html="highlight(renamePreviewSqlText)"></pre>
         <p v-if="renameError" class="min-w-0 max-w-full overflow-x-auto text-sm text-destructive">{{ renameError }}</p>
       </div>
       <DialogFooter>
         <Button variant="outline" @click="showRenameDialog = false">{{ t("dangerDialog.cancel") }}</Button>
         <Button :disabled="!renameInput.trim() || renameInput.trim() === renameTarget?.name" @click="confirmRename">
-          {{ t("contextMenu.renameObject") }}
+          {{ t(packageCleanupReviewed ? "contextMenu.packageCleanupAction" : "contextMenu.renameObject") }}
         </Button>
       </DialogFooter>
     </DialogContent>

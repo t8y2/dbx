@@ -6,10 +6,7 @@
 //!    lifecycle, the raw `state.db` (+ WAL), every persisted JSON column, the
 //!    run log files and every published event must be free of a planted
 //!    secret value.
-//! 2. Migration idempotency across three consecutive worker startups (the
-//!    release checklist's "连续启动 3 次" case), each start rebuilding the
-//!    store/migration objects the way the real worker does.
-//! 3. Log rotation produces a second segment with a contiguous `seq`, driven
+//! 2. Log rotation produces a second segment with a contiguous `seq`, driven
 //!    through the real 32 MiB threshold.
 //! 4. Artifacts belong to their run id (metadata in `task_artifacts`,
 //!    `artifacts_count` derived) while the artifact *body* never reaches
@@ -21,9 +18,7 @@ mod common;
 use std::sync::{Arc, Mutex};
 
 use common::{drive_until_terminal, engine, registry_with, save, temp_store, Behavior, TestExecutor};
-use dbx_core::scheduler::{
-    register_event_sink, SchedulerMigration, SchedulerStore, TaskDefinition, TaskRunStatus, TaskTrigger,
-};
+use dbx_core::scheduler::{register_event_sink, SchedulerStore, TaskDefinition, TaskRunStatus, TaskTrigger};
 use tempfile::TempDir;
 
 const SECRET_VALUE: &str = "QA-SUPERSECRET-do-not-persist-9f2c1ab7";
@@ -138,56 +133,6 @@ async fn secrets_never_reach_database_logs_or_events_across_a_full_lifecycle() {
 /// (acceptance item 13). Each start rebuilds the store + migration the way
 /// `background_scheduler::run_if_requested` does, so nothing but the data
 /// directory carries over.
-#[tokio::test]
-async fn legacy_backup_migration_is_a_no_op_across_three_consecutive_worker_starts() {
-    let dir = TempDir::new().unwrap();
-
-    // Legacy store with one schedule and one finished run.
-    let legacy = dbx_core::scheduled_backup::BackupStore::new(dir.path());
-    let schedule: dbx_core::scheduled_backup::BackupSchedule = serde_json::from_str(
-        r#"{
-            "id": "qa-sched-1", "name": "Nightly", "enabled": true, "connectionId": "conn-1", "databases": [],
-            "destinationDirectory": "/tmp/qa-backups", "includeStructure": true, "includeData": true,
-            "includeObjects": true, "frequency": "daily", "intervalHours": 1,
-            "timeOfDay": "02:30", "weekday": 0, "retentionCount": 3, "timeZone": "Asia/Shanghai",
-            "createdAt": "2026-01-01T00:00:00+00:00", "updatedAt": "2026-01-01T00:00:00+00:00",
-            "nextRunAt": "2026-10-06T02:30:00+00:00"
-        }"#,
-    )
-    .unwrap();
-    legacy.save_schedule(schedule).await.unwrap();
-
-    let marker = dbx_core::scheduler::migration::DATABASE_BACKUP_MIGRATION_KEY;
-    for startup in 1..=3 {
-        // Fresh objects per startup, exactly like the worker entrypoint.
-        let store = SchedulerStore::new(dir.path());
-        let migration = SchedulerMigration::new(store.clone());
-        let report = migration.migrate_legacy_database_backups(&legacy).await.unwrap();
-
-        let tasks = store.list_tasks().await.unwrap();
-        let runs = store.list_runs(None, 1000).await.unwrap();
-        match startup {
-            1 => {
-                assert_eq!(report.schedules, 1, "first start migrates the schedule");
-                assert_eq!(tasks.len(), 1);
-            }
-            _ => {
-                assert_eq!(report, Default::default(), "start {startup} must be a no-op");
-                assert_eq!(tasks.len(), 1, "start {startup} must not duplicate the task");
-            }
-        }
-        assert_eq!(runs.len(), 0, "start {startup} must not fabricate runs");
-        assert!(migration.is_applied(marker).await.unwrap(), "start {startup}: marker set");
-
-        // The legacy record is preserved on every start (rollback/audit basis).
-        let snapshot = legacy.snapshot().await.unwrap();
-        assert_eq!(snapshot.schedules.len(), 1, "legacy schedule preserved on start {startup}");
-        assert_eq!(tasks[0].id, "qa-sched-1", "old task id preserved");
-    }
-}
-
-/// 3. Log rotation: crossing the real 32 MiB threshold opens segment 2 and
-/// the `seq` stays contiguous across the boundary (acceptance item 15).
 #[tokio::test]
 async fn rotation_opens_the_next_segment_and_keeps_seq_monotonic() {
     let dir = TempDir::new().unwrap();

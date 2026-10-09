@@ -5,11 +5,9 @@
 export const schedulerEn = {
   title: "Scheduled Tasks",
   taskProviders: {
-    databaseBackup: "Database backup",
     cloudSync: "Configuration sync",
-    fieldEndpoint: "WebDAV endpoint",
-    fieldUsername: "WebDAV username",
-    fieldRemotePath: "Remote path",
+    fieldFilesConnection: "Files connection",
+    fieldStorageDir: "Storage directory",
     fieldSecrets: "Include secrets (requires the saved sync passphrase)",
   },
   tabs: {
@@ -244,11 +242,9 @@ export const schedulerEn = {
 export const schedulerZhCN = {
   title: "计划任务",
   taskProviders: {
-    databaseBackup: "数据库备份",
     cloudSync: "配置同步",
-    fieldEndpoint: "WebDAV 地址",
-    fieldUsername: "WebDAV 用户名",
-    fieldRemotePath: "远端路径",
+    fieldFilesConnection: "Files 连接",
+    fieldStorageDir: "存储目录",
     fieldSecrets: "包含敏感数据（需要已保存的同步口令）",
   },
   tabs: {
@@ -483,11 +479,9 @@ export const schedulerZhCN = {
 export const schedulerZhTW = {
   title: "排程任務",
   taskProviders: {
-    databaseBackup: "資料庫備份",
-    cloudSync: "配置同步",
-    fieldEndpoint: "WebDAV 位址",
-    fieldUsername: "WebDAV 使用者名稱",
-    fieldRemotePath: "遠端路徑",
+    cloudSync: "設定同步",
+    fieldFilesConnection: "Files 連線",
+    fieldStorageDir: "儲存目錄",
     fieldSecrets: "包含敏感資料（需要已儲存的同步口令）",
   },
   tabs: {

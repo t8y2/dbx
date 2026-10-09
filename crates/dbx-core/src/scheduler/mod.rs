@@ -13,7 +13,6 @@ pub mod events;
 pub mod executor;
 pub mod lease;
 pub mod logs;
-pub mod migration;
 pub mod models;
 pub mod policy;
 pub mod providers;
@@ -33,7 +32,6 @@ pub use executor::{
 };
 pub use lease::LeaseGuard;
 pub use logs::{TaskLogEntry, TaskLogPage, TaskLogQuery, TaskLogger};
-pub use migration::SchedulerMigration;
 pub use models::{
     TaskAuditAction, TaskAuditEntry, TaskBackoffStrategy, TaskConcurrencyPolicy, TaskDefinition, TaskExecutionMode,
     TaskExecutionPolicy, TaskMisfirePolicy, TaskProviderType, TaskRestartPolicy, TaskRetryPolicy, TaskRun,

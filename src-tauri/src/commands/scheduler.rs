@@ -7,9 +7,7 @@
 use std::sync::Arc;
 
 use dbx_core::connection::AppState;
-use dbx_core::scheduled_backup::BackupService;
 use dbx_core::scheduler::{
-    providers::{DatabaseBackupTaskExecutor, DATABASE_BACKUP_PROVIDER_ID},
     ResidentSession, SchedulerService, SchedulerStore, TaskArtifact, TaskDefinition, TaskError, TaskErrorKind,
     TaskExecutorRegistry, TaskLogPage, TaskLogQuery, TaskRun,
 };
@@ -30,8 +28,6 @@ const RUN_MAX_LIMIT: u32 = 1000;
 /// (validate/run), even though the worker could run it just fine.
 fn service(state: &Arc<AppState>) -> SchedulerService {
     let registry = Arc::new(TaskExecutorRegistry::new());
-    let backup = BackupService::new(state.clone(), state.storage.data_dir(), None);
-    registry.register_run(DATABASE_BACKUP_PROVIDER_ID, Arc::new(DatabaseBackupTaskExecutor::new(backup)));
     // Same as the worker: one executor serves every plugin task provider.
     registry.register_run("plugin", Arc::new(dbx_core::scheduler::providers::PluginTaskExecutor::new(state.clone())));
     registry.register_run(

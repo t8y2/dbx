@@ -93,7 +93,7 @@ export interface TaskDefinition {
   id: string;
   name: string;
   providerType: TaskProviderType;
-  /** Namespaced provider id, e.g. `dbx.database-backup`. */
+  /** Namespaced provider id, e.g. `io.dbx.ssh.tasks`. */
   providerId: string;
   target: TaskTarget;
   trigger: TaskTrigger;
@@ -245,7 +245,7 @@ export interface SchedulerTaskProviderDescriptor {
   allowMultipleConnections?: boolean;
   capabilities: PluginTaskCapability[];
   triggers: SchedulerTaskTriggerContribution[];
-  /** Host builtin (dbx.database-backup); not offered in the create dialog. */
+  /** Host builtin (dbx.cloud-sync). */
   builtin?: boolean;
 }
 

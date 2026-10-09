@@ -361,56 +361,6 @@ async fn artifacts_and_log_index_round_trip() {
 }
 
 #[tokio::test]
-async fn migration_marker_is_idempotent_and_rolls_back_on_failure() {
-    let (_dir, store) = temp_store();
-    let migration = dbx_core::scheduler::SchedulerMigration::new(store.clone());
-    assert!(!migration.is_applied("legacy-backup").await.unwrap());
-
-    let applied = migration
-        .apply("legacy-backup", |conn| {
-            conn.execute_batch("CREATE TABLE IF NOT EXISTS legacy_probe (id TEXT PRIMARY KEY)")?;
-            conn.execute("INSERT INTO legacy_probe(id) VALUES('row')", [])?;
-            Ok(())
-        })
-        .await
-        .unwrap();
-    assert!(applied, "first apply runs the body");
-    assert!(migration.is_applied("legacy-backup").await.unwrap());
-    let applied = migration.apply("legacy-backup", |_| Ok(())).await.unwrap();
-    assert!(!applied, "second apply is a no-op");
-
-    // A failing body must not write the marker; the migration can be retried.
-    let error = migration
-        .apply("failing", |conn| {
-            conn.execute_batch("CREATE TABLE failing_probe (id TEXT PRIMARY KEY)")?;
-            Err(dbx_core::scheduler::TaskError::internal("boom"))
-        })
-        .await
-        .unwrap_err();
-    assert_eq!(error.code, "internal");
-    assert!(!migration.is_applied("failing").await.unwrap());
-    let applied = migration
-        .apply("failing", |conn| {
-            let exists: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='failing_probe')",
-                [],
-                |row| row.get(0),
-            )?;
-            assert!(!exists, "failed migration must roll back its schema changes");
-            Ok(())
-        })
-        .await
-        .unwrap();
-    assert!(applied, "retry after failure runs the full body");
-}
-
-// The task-center page fires its first three reads concurrently, and before
-// the one-shot `ensure_schema` every connection re-ran
-// `PRAGMA journal_mode=WAL` — a pragma that fails immediately with
-// "database is locked" on contention (busy_timeout does not apply). This race
-// made the first page open fail intermittently, so pin it: N simultaneous
-// cold-start accesses to the same fresh directory must all succeed.
-#[tokio::test]
 async fn concurrent_cold_start_accesses_all_succeed() {
     let (_dir, store) = temp_store();
     let runtime = tokio::runtime::Handle::current();

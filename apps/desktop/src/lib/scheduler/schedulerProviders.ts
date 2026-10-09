@@ -8,7 +8,6 @@
 // ---------------------------------------------------------------------------
 
 import type { InstalledPlugin, PluginFormField } from "@/types/database";
-import { CONSISTENT_BACKUP_DATABASE_TYPES } from "@/lib/backup/scheduledDatabaseBackup";
 import type { SchedulerTaskProviderDescriptor, SchedulerTaskTriggerContribution, TaskDefinition, TaskHealth, TaskProviderType, TaskTrigger } from "./schedulerTypes";
 
 interface ContributionLike {
@@ -65,22 +64,17 @@ function normalizeCapabilities(raw: unknown): SchedulerTaskProviderDescriptor["c
  * plugins installed. Both are offered in the create dialog: the editors fill
  * the provider settings section.
  */
-export function builtinTaskProviders(labels: { databaseBackup: string; cloudSync: string; fieldEndpoint: string; fieldUsername: string; fieldRemotePath: string; fieldSecrets: string }): SchedulerTaskProviderDescriptor[] {
+export function builtinTaskProviders(labels: { cloudSync: string; fieldFilesConnection: string; fieldStorageDir: string; fieldSecrets: string }): SchedulerTaskProviderDescriptor[] {
   return [
     {
-      providerId: "dbx.database-backup",
-      label: labels.databaseBackup,
-      pluginId: "dbx",
-      connectionProviders: [...CONSISTENT_BACKUP_DATABASE_TYPES],
-      capabilities: ["run", "cancel", "logs", "progress", "artifacts"],
-      triggers: [{ id: "backup", label: labels.databaseBackup, mode: "run", risk: "low", fields: [] }],
-      builtin: true,
-    },
-    {
+      // Configuration sync is defined against the files-plugin surface: the
+      // connection select narrows to the declared files connections, and the
+      // directory rides the files sidecar picker. `pluginId` names that data
+      // plane (picker/browse RPCs target it) while execution stays builtin.
       providerId: "dbx.cloud-sync",
       label: labels.cloudSync,
-      pluginId: "dbx",
-      connectionProviders: [],
+      pluginId: "io.dbx.files",
+      connectionProviders: ["io.dbx.files.connection"],
       capabilities: ["run", "cancel", "logs"],
       triggers: [
         {
@@ -89,9 +83,14 @@ export function builtinTaskProviders(labels: { databaseBackup: string; cloudSync
           mode: "run",
           risk: "low",
           fields: [
-            { key: "webdavEndpoint", label: labels.fieldEndpoint, type: "text", required: true, placeholder: "https://dav.example.com/dbx/" },
-            { key: "webdavUsername", label: labels.fieldUsername, type: "text" },
-            { key: "webdavRemotePath", label: labels.fieldRemotePath, type: "text", placeholder: "DBX/sync/snapshot.json" },
+            { key: "filesConnectionId", label: labels.fieldFilesConnection, type: "text", required: true, options_action: "host/connections" },
+            {
+              key: "remoteDir",
+              label: labels.fieldStorageDir,
+              type: "text",
+              required: true,
+              picker: { kind: "directory", source: "plugin", action: "files/listDirs", connection_field: "filesConnectionId" },
+            },
             { key: "includeSecrets", label: labels.fieldSecrets, type: "boolean" },
           ],
         },

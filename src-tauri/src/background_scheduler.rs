@@ -25,11 +25,9 @@
 
 use dbx_core::{
     connection::AppState,
-    scheduled_backup::{worker_runtime, BackupService, BackupStore},
+    scheduled_backup::worker_runtime,
     scheduler::{
-        providers::{DatabaseBackupTaskExecutor, DATABASE_BACKUP_PROVIDER_ID},
-        register_event_sink, LeaseGuard, SchedulerEngine, SchedulerMigration, SchedulerStore, TaskExecutorRegistry,
-        SCHEDULER_LEASE,
+        providers::PluginResidentExecutor, register_event_sink, SchedulerEngine, SchedulerStore, TaskExecutorRegistry,
     },
     storage::Storage,
 };
@@ -46,7 +44,6 @@ const WORKER_ARG: &str = "--scheduler-worker";
 const ROLE_ENV: &str = "DBX_PROCESS_ROLE";
 const ROLE_VALUE: &str = "scheduler-worker";
 pub const BACKGROUND_FLAG_ENV: &str = "DBX_SCHEDULER_BACKGROUND_ENABLED";
-pub const GENERIC_FLAG_ENV: &str = "DBX_SCHEDULER_GENERIC_ENABLED";
 const POLL_SECONDS_ENV: &str = "DBX_SCHEDULER_POLL_SECONDS";
 const DEFAULT_POLL_SECONDS: u64 = 10;
 /// Desktop Tauri event name (ADR §7.4), same channel the API commands use.
@@ -97,12 +94,6 @@ fn env_enabled(value: Option<&str>) -> bool {
 
 pub fn background_enabled() -> bool {
     env_enabled(std::env::var(BACKGROUND_FLAG_ENV).ok().as_deref())
-}
-
-/// `scheduler.generic.enabled` (ADR §12): whether the generic scheduler owns
-/// the migrated legacy database backup schedules.
-pub fn generic_enabled() -> bool {
-    env_enabled(std::env::var(GENERIC_FLAG_ENV).ok().as_deref())
 }
 
 /// Engine poll interval — injected, never hard-coded into the engine loop
@@ -429,37 +420,6 @@ pub fn register_tauri_event_sink(app: tauri::AppHandle) {
     );
 }
 
-/// Wave 2 handoff A (ADR §8): migrate legacy scheduled database backups into
-/// the generic store after the lease attempt and before entering the engine
-/// loop. The migration itself is idempotent, atomic and restart-safe (ADR
-/// §8.3), and its marker protocol serializes racing attempts inside
-/// `BEGIN IMMEDIATE` — so a lost lease race against another live worker is
-/// still safe, and a skipped run is simply retried on the next startup.
-async fn run_legacy_migration_if_enabled(store: SchedulerStore, data_dir: &Path, enabled: bool) {
-    if !enabled {
-        return;
-    }
-    let worker_id = format!("scheduler-{}", uuid::Uuid::new_v4().simple());
-    // ADR §3.4 ordering: take the scheduler lease around the migration, then
-    // release it so SchedulerEngine::run re-acquires it for the main loop.
-    let lease_ttl = (poll_interval() * 5).max(Duration::from_secs(10));
-    let lease = LeaseGuard::acquire(&store, SCHEDULER_LEASE, &worker_id, lease_ttl).await.ok().flatten();
-    let legacy = BackupStore::new(data_dir);
-    match SchedulerMigration::new(store).migrate_legacy_database_backups(&legacy).await {
-        Ok(report) => {
-            log::info!("[scheduler] legacy backup migration: {} schedules, {} runs", report.schedules, report.runs)
-        }
-        // Non-fatal: the legacy scheduler keeps working and the next worker
-        // start retries the marker-guarded transaction (ADR §8.3).
-        Err(error) => log::error!("[scheduler] legacy backup migration failed: {error}"),
-    }
-    // LeaseGuard has no Drop release — the async release must be awaited, or
-    // the row lingers until TTL expiry and delays the engine's first acquire.
-    if let Some(lease) = lease {
-        lease.release().await;
-    }
-}
-
 struct WorkerLogger(std::sync::Mutex<std::fs::File>);
 
 impl log::Log for WorkerLogger {
@@ -543,8 +503,6 @@ pub fn run_if_requested() -> bool {
             let store = SchedulerStore::new(&dir);
 
             let registry = Arc::new(TaskExecutorRegistry::new());
-            let backup = BackupService::new(state.clone(), &dir, None);
-            registry.register_run(DATABASE_BACKUP_PROVIDER_ID, Arc::new(DatabaseBackupTaskExecutor::new(backup)));
             // One executor routes every plugin task provider over the frozen
             // task/* RPC contract; provider ids decide the plugin (ADR §22).
             registry.register_run(
@@ -553,16 +511,11 @@ pub fn run_if_requested() -> bool {
             );
             // Resident sessions are worker-owned (ADR §3.4): start/probe/stop
             // all ride the frozen task/start|stop|status RPC here.
-            registry.register_resident(
-                "plugin",
-                Arc::new(dbx_core::scheduler::providers::PluginResidentExecutor::new(state.clone())),
-            );
+            registry.register_resident("plugin", Arc::new(PluginResidentExecutor::new(state.clone())));
             registry.register_run(
                 dbx_core::scheduler::providers::CLOUD_SYNC_PROVIDER_ID,
                 Arc::new(dbx_core::scheduler::providers::CloudSyncTaskExecutor::new(state.clone())),
             );
-
-            run_legacy_migration_if_enabled(store.clone(), &dir, generic_enabled()).await;
 
             let worker_id = format!("scheduler-{}", uuid::Uuid::new_v4().simple());
             let engine = Arc::new(SchedulerEngine::new(store, registry, worker_id, poll_interval()));

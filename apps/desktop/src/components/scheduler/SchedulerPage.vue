@@ -48,11 +48,9 @@ const selectedRunId = ref("");
 
 const providers = computed<SchedulerTaskProviderDescriptor[]>(() => [
   ...builtinTaskProviders({
-    databaseBackup: t("scheduler.taskProviders.databaseBackup"),
     cloudSync: t("scheduler.taskProviders.cloudSync"),
-    fieldEndpoint: t("scheduler.taskProviders.fieldEndpoint"),
-    fieldUsername: t("scheduler.taskProviders.fieldUsername"),
-    fieldRemotePath: t("scheduler.taskProviders.fieldRemotePath"),
+    fieldFilesConnection: t("scheduler.taskProviders.fieldFilesConnection"),
+    fieldStorageDir: t("scheduler.taskProviders.fieldStorageDir"),
     fieldSecrets: t("scheduler.taskProviders.fieldSecrets"),
   }),
   ...discoverTaskProviders(plugins.value),

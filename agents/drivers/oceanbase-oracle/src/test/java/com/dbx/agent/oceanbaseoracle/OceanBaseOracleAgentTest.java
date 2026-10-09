@@ -38,6 +38,53 @@ import java.util.Locale;
 
 class OceanBaseOracleAgentTest {
     @Test
+    void readsFunctionIndexExpressionsAndQuotedCompositeKeysInDictionaryOrder() {
+        List<String> sql = new ArrayList<>();
+        List<String> params = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, objectSourceConnection(sql, params, resultSet(
+            new String[]{"INDEX_NAME", "COLUMN_NAME", "COLUMN_POSITION", "UNIQUENESS", "CONSTRAINT_TYPE", "INDEX_TYPE", "COLUMN_EXPRESSION"},
+            new Object[][]{
+                {"FnIndex", "SYS_NC1$", 1, "UNIQUE", null, "FUNCTION-BASED NORMAL", "LOWER(\"Name\")"},
+                {"FnIndex", "Mixed\"Column", 2, "UNIQUE", null, "FUNCTION-BASED NORMAL", null},
+                {"NormalIndex", "Name", 1, "NONUNIQUE", null, "NORMAL", null}
+            }
+        )));
+        var indexes = agent.listIndexes("APP", "ITEMS");
+        Assertions.assertEquals(List.of("LOWER(\"Name\")", "\"Mixed\"\"Column\""), indexes.get(0).getColumns());
+        Assertions.assertEquals(List.of(true, true), indexes.get(0).getKey_is_expression());
+        Assertions.assertTrue(indexes.get(0).getIs_unique());
+        Assertions.assertEquals(List.of("Name"), indexes.get(1).getColumns());
+        Assertions.assertEquals(List.of(false), indexes.get(1).getKey_is_expression());
+        Assertions.assertEquals(List.of("APP", "ITEMS"), params);
+        Assertions.assertTrue(sql.get(0).contains("ic.COLUMN_POSITION = e.COLUMN_POSITION"));
+        Assertions.assertTrue(sql.get(0).contains("ic.TABLE_OWNER = e.TABLE_OWNER"));
+        Assertions.assertTrue(sql.get(0).endsWith("ORDER BY i.INDEX_NAME, ic.COLUMN_POSITION"));
+    }
+
+    @Test
+    void missingFunctionExpressionIsNotReturnedAsAnEditableHiddenColumn() {
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, objectSourceConnection(new ArrayList<>(), new ArrayList<>(), resultSet(
+            new String[]{"INDEX_NAME", "COLUMN_NAME", "INDEX_TYPE", "COLUMN_EXPRESSION"},
+            new Object[][]{{"FnIndex", "SYS_NC1$", "FUNCTION-BASED NORMAL", null}}
+        )));
+        var failure = Assertions.assertThrows(RuntimeException.class, () -> agent.listIndexes("APP", "ITEMS"));
+        Assertions.assertTrue(failure.toString().contains("expressions are unavailable"));
+    }
+
+    @Test
+    void indexDictionaryPermissionFailureDoesNotBecomeUnsupportedOrEmptyMetadata() {
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, proxy(Connection.class, (method, args) -> {
+            if ("prepareStatement".equals(method.getName())) throw new SQLException("ORA-01031: insufficient privileges");
+            return defaultValue(method.getReturnType());
+        }));
+        var failure = Assertions.assertThrows(RuntimeException.class, () -> agent.listIndexes("APP", "ITEMS"));
+        Assertions.assertTrue(failure.toString().contains("ORA-01031"));
+    }
+
+    @Test
     void buildsOceanBaseJdbcUrl() {
         ConnectParams params = new ConnectParams();
         params.setHost("oceanbase.example.com");

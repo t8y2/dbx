@@ -238,6 +238,7 @@ mod tests {
             mysql_auto_increment_value: None,
             transwarp_create: None,
             partitioned: false,
+            database_version: None,
             is_gaussdb_m_mode: false,
             table_collation: None,
             foreign_table,

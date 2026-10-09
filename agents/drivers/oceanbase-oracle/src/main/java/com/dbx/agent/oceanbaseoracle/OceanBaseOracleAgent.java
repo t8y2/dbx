@@ -1709,13 +1709,17 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             String tableName = normalizeObjectName(table);
             String sql = """
                 SELECT i.INDEX_NAME, ic.COLUMN_NAME, ic.COLUMN_POSITION, i.UNIQUENESS,
-                    c.CONSTRAINT_TYPE, i.INDEX_TYPE
+                    c.CONSTRAINT_TYPE, i.INDEX_TYPE, e.COLUMN_EXPRESSION
                 FROM ALL_INDEXES i
                 JOIN ALL_IND_COLUMNS ic
                     ON i.INDEX_NAME = ic.INDEX_NAME
                     AND i.OWNER = ic.INDEX_OWNER
                     AND i.TABLE_OWNER = ic.TABLE_OWNER
                     AND i.TABLE_NAME = ic.TABLE_NAME
+                LEFT JOIN ALL_IND_EXPRESSIONS e
+                    ON ic.INDEX_OWNER = e.INDEX_OWNER AND ic.INDEX_NAME = e.INDEX_NAME
+                    AND ic.TABLE_OWNER = e.TABLE_OWNER AND ic.TABLE_NAME = e.TABLE_NAME
+                    AND ic.COLUMN_POSITION = e.COLUMN_POSITION
                 LEFT JOIN ALL_CONSTRAINTS c
                     ON i.INDEX_NAME = c.INDEX_NAME
                     AND i.TABLE_OWNER = c.OWNER
@@ -1729,6 +1733,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             Map<String, Boolean> uniqueByIndex = new LinkedHashMap<>();
             Map<String, Boolean> primaryByIndex = new LinkedHashMap<>();
             Map<String, String> typeByIndex = new LinkedHashMap<>();
+            Map<String, List<String>> expressionsByIndex = new LinkedHashMap<>();
             try (var stmt = requireConnection().prepareStatement(sql)) {
                 stmt.setString(1, owner);
                 stmt.setString(2, tableName);
@@ -1736,6 +1741,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                     while (rs.next()) {
                         String indexName = rs.getString("INDEX_NAME");
                         columnsByIndex.computeIfAbsent(indexName, ignored -> new ArrayList<>()).add(rs.getString("COLUMN_NAME"));
+                        expressionsByIndex.computeIfAbsent(indexName, ignored -> new ArrayList<>()).add(rs.getString("COLUMN_EXPRESSION"));
                         uniqueByIndex.put(indexName, "UNIQUE".equalsIgnoreCase(rs.getString("UNIQUENESS")));
                         primaryByIndex.put(indexName, "P".equalsIgnoreCase(rs.getString("CONSTRAINT_TYPE")));
                         typeByIndex.put(indexName, rs.getString("INDEX_TYPE"));
@@ -1746,15 +1752,33 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             List<IndexInfo> result = new ArrayList<>();
             for (Map.Entry<String, List<String>> entry : columnsByIndex.entrySet()) {
                 String name = entry.getKey();
+                List<String> expressions = expressionsByIndex.get(name);
+                boolean hasExpression = expressions.stream().anyMatch(value -> value != null && !value.isBlank());
+                String indexType = typeByIndex.get(name);
+                if ("FUNCTION-BASED NORMAL".equalsIgnoreCase(indexType) && !hasExpression) {
+                    throw new SQLException("Function index expressions are unavailable for " + name + "; refresh index metadata with sufficient dictionary privileges.");
+                }
+                List<String> keys = entry.getValue();
+                if (hasExpression) {
+                    List<String> terms = new ArrayList<>();
+                    for (int position = 0; position < keys.size(); position++) {
+                        String expression = expressions.get(position);
+                        terms.add(expression == null || expression.isBlank()
+                            ? "\"" + keys.get(position).replace("\"", "\"\"") + "\"" : expression);
+                    }
+                    keys = terms;
+                    indexType = "FUNCTION-BASED NORMAL";
+                }
                 result.add(new IndexInfo(
                     name,
-                    entry.getValue(),
+                    keys,
                     Boolean.TRUE.equals(uniqueByIndex.get(name)),
                     Boolean.TRUE.equals(primaryByIndex.get(name)),
                     null,
-                    typeByIndex.get(name),
+                    indexType,
                     null,
-                    null
+                    null,
+                    Collections.nCopies(keys.size(), hasExpression)
                 ));
             }
             return result;

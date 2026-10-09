@@ -66,6 +66,7 @@ fn structure_change_options(
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     }
@@ -357,9 +358,107 @@ fn index_change_options(
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     }
+}
+
+#[test]
+fn oceanbase_rejects_unsupported_index_types_before_any_change() {
+    for kind in ["BITMAP", "DOMAIN", "FUNCTION-BASED DOMAIN", "CLUSTER", "invented"] {
+        let mut draft = existing_index("IX", &["Name"], false);
+        draft.index_type = kind.into();
+        let mut options = index_change_options(DatabaseType::OceanbaseOracle, Some("App"), draft);
+        options.database_version = Some("4.2.5.7".into());
+        options.table_comment = Some("must not execute either".into());
+        let result = build_table_structure_change_sql(options.clone());
+        assert!(result.statements.is_empty(), "{kind}: {:?}", result.statements);
+        assert!(result.warnings.iter().any(|warning| warning.contains("does not support index type")));
+        options.columns = vec![column("Name")];
+        assert!(build_create_table_sql(options).statements.is_empty());
+    }
+}
+
+#[test]
+fn oceanbase_distinguishes_unknown_version_from_unsupported_type() {
+    for version in [None, Some(""), Some("4.3.5.1"), Some("4.2.50.1")] {
+        let mut draft = index("IX", &["LOWER(\"Name\")"]);
+        draft.index_type = "FUNCTION-BASED NORMAL".into();
+        let mut options = index_change_options(DatabaseType::OceanbaseOracle, None, draft);
+        options.database_version = version.map(str::to_owned);
+        let result = build_table_structure_change_sql(options);
+        assert!(result.statements.is_empty());
+        assert!(result.warnings.iter().any(|warning| warning.contains("not been verified")));
+        assert!(!result.warnings.iter().any(|warning| warning.contains("does not support")));
+    }
+}
+
+#[test]
+fn oceanbase_function_keys_preserve_quoted_terms_order_and_unique() {
+    let mut draft = index("Mixed\"Index", &["LOWER(\"Name\")", "\"Mixed\"\"Column\"", "SUBSTR(\"Code\", 1, 3)"]);
+    draft.index_type = "FUNCTION-BASED NORMAL".into();
+    draft.is_unique = true;
+    let mut options = index_change_options(DatabaseType::OceanbaseOracle, Some("App"), draft);
+    options.database_version = Some("4.2.5.7".into());
+    let result = build_table_structure_change_sql(options);
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    assert_eq!(result.statements, vec!["CREATE UNIQUE INDEX \"Mixed\"\"Index\" ON \"App\".\"USERS\" (\nLOWER(\"Name\")\n, \n\"Mixed\"\"Column\"\n, \nSUBSTR(\"Code\", 1, 3)\n);"]);
+}
+
+#[test]
+fn oceanbase_function_expression_cannot_escape_index_ddl() {
+    for expression in ["", "LOWER(\"Name\")); DROP TABLE USERS; --", "LOWER(\"Name\"), \"Code\"", "\"Name\" DESC"] {
+        let mut draft = index("IX", &[expression]);
+        draft.index_type = "FUNCTION-BASED NORMAL".into();
+        let mut options = index_change_options(DatabaseType::OceanbaseOracle, None, draft);
+        options.database_version = Some("4.2.5.7".into());
+        assert!(build_table_structure_change_sql(options).statements.is_empty(), "{expression}");
+    }
+}
+
+#[test]
+fn oceanbase_type_validation_cannot_be_bypassed_by_dialect_or_primary_flags() {
+    let mut draft = index("IX", &["Name"]);
+    draft.index_type = "BITMAP".into();
+    draft.is_primary = true;
+    let mut options = index_change_options(DatabaseType::OceanbaseOracle, None, draft);
+    options.database_version = Some("4.2.5.7".into());
+    assert!(build_table_structure_change_sql(options.clone()).statements.is_empty());
+    options.is_gaussdb_m_mode = true;
+    assert!(build_table_structure_change_sql(options.clone()).statements.is_empty());
+    options.columns = vec![column("Name")];
+    assert!(build_create_table_sql(options).statements.is_empty());
+}
+
+#[test]
+fn oceanbase_normal_unique_and_native_oracle_bitmap_keep_their_behavior() {
+    for unique in [false, true] {
+        let mut draft = index("IX", &["MixedCase", " Second ", "With\"Quote"]);
+        draft.is_unique = unique;
+        let result = build_table_structure_change_sql(index_change_options(DatabaseType::OceanbaseOracle, None, draft));
+        assert!(result.warnings.is_empty());
+        assert!(result.statements[0].ends_with("(\"MixedCase\", \" Second \", \"With\"\"Quote\");"));
+        assert_eq!(result.statements[0].starts_with("CREATE UNIQUE INDEX"), unique);
+    }
+    let mut draft = index("IX", &["Name"]);
+    draft.index_type = "BITMAP".into();
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Oracle, None, draft));
+    assert!(result.warnings.is_empty());
+    assert!(result.statements[0].starts_with("CREATE BITMAP INDEX"));
+}
+
+#[test]
+fn oceanbase_untouched_or_dropped_metadata_does_not_block_other_changes() {
+    let mut draft = existing_index("IX", &["LOWER(\"Name\")"], false);
+    draft.index_type = "FUNCTION-BASED NORMAL".into();
+    draft.original.as_mut().unwrap().index_type = Some(draft.index_type.clone());
+    let options = index_change_options(DatabaseType::OceanbaseOracle, None, draft.clone());
+    assert!(build_table_structure_change_sql(options).warnings.is_empty());
+    draft.marked_for_drop = true;
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::OceanbaseOracle, None, draft));
+    assert!(result.warnings.is_empty());
+    assert_eq!(result.statements, vec!["DROP INDEX \"IX\";"]);
 }
 
 fn foreign_key(name: &str, column: &str, ref_table: &str, ref_column: &str) -> EditableStructureForeignKey {
@@ -442,6 +541,7 @@ fn builds_mysql_column_and_index_changes() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -807,6 +907,7 @@ fn builds_xugu_type_change_with_native_syntax() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1076,6 +1177,7 @@ fn builds_mysql_unsigned_integer_column_with_length_before_attribute() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1116,6 +1218,7 @@ fn doris_table_editor_renames_column_without_mysql_change_syntax() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1181,6 +1284,7 @@ fn dameng_integer_column_omits_mysql_display_width() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1228,6 +1332,7 @@ fn builds_highgo_foreign_key_changes_with_postgres_syntax() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1306,6 +1411,7 @@ fn builds_informix_column_and_index_changes() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1367,6 +1473,7 @@ fn oracle_does_not_generate_drop_sql_for_all_columns() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1444,6 +1551,7 @@ fn oracle_create_table_places_default_before_not_null() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1515,6 +1623,7 @@ fn oracle_create_table_preserves_character_length_units() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1555,6 +1664,7 @@ fn oracle_create_table_uses_unquoted_identifiers_for_new_objects() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1596,6 +1706,7 @@ fn oracle_create_table_leaves_uppercase_regular_identifier_unquoted() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1636,6 +1747,7 @@ fn oracle_create_table_quotes_special_and_reserved_identifiers() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1679,6 +1791,7 @@ fn oracle_create_table_distinguishes_new_and_referenced_foreign_key_identifiers(
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1723,6 +1836,7 @@ fn oracle_create_table_extracts_single_line_trigger_source_into_the_body() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1759,6 +1873,7 @@ fn oracle_create_table_warns_instead_of_emitting_an_unparsed_trigger_declaration
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1799,6 +1914,7 @@ fn oracle_existing_quoted_identifiers_keep_exact_spelling() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1836,6 +1952,7 @@ fn oracle_new_identifier_formatting_does_not_change_other_dialects() {
             transwarp_create: None,
             partitioned: false,
             foreign_table: false,
+            database_version: None,
             is_gaussdb_m_mode: false,
             table_collation: None,
         });
@@ -1935,6 +2052,7 @@ fn iris_drop_index_includes_table_name() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1981,6 +2099,7 @@ fn iris_ignores_comment_changes_but_keeps_supported_column_alters() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2068,6 +2187,7 @@ fn oracle_compatible_databases_keep_comment_on_sql() {
             transwarp_create: None,
             partitioned: false,
             foreign_table: false,
+            database_version: None,
             is_gaussdb_m_mode: false,
             table_collation: None,
         });
@@ -2107,6 +2227,7 @@ fn mysql_create_index_with_comment() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2145,6 +2266,7 @@ fn manticoresearch_builds_create_table_sql_only() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2193,6 +2315,7 @@ fn manticoresearch_builds_add_and_drop_column_sql() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2266,6 +2389,7 @@ fn gbase8a_uses_limited_mysql_ddl() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2341,6 +2465,7 @@ fn gbase8a_allows_mysql_style_column_reorder() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2387,6 +2512,7 @@ fn gbase8s_uses_informix_ddl_not_mysql() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2425,6 +2551,7 @@ fn gbase_without_driver_profile_still_uses_mysql_ddl() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2465,6 +2592,7 @@ fn manticoresearch_does_not_drop_id_column() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2538,6 +2666,7 @@ fn manticoresearch_warns_when_existing_column_properties_change() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2578,6 +2707,7 @@ fn manticoresearch_ignores_mysql_column_options() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2621,6 +2751,7 @@ fn manticoresearch_builds_text_column_properties() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2656,6 +2787,7 @@ fn manticoresearch_builds_json_secondary_index_property() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2687,6 +2819,7 @@ fn mysql_create_unique_index_with_comment_and_btree() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2720,6 +2853,7 @@ fn mysql_create_functional_index_preserves_key_part_syntax() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2753,6 +2887,7 @@ fn mysql_add_timestamp_column_drops_invalid_precision() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2786,6 +2921,7 @@ fn mysql_add_timestamp_column_preserves_valid_precision() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2826,6 +2962,7 @@ fn builds_postgres_create_table_with_comments_and_index() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2863,6 +3000,7 @@ fn quotes_expression_like_new_index_columns_without_provenance() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2940,6 +3078,7 @@ fn create_table_trims_table_name_whitespace_for_all_statements() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2982,6 +3121,7 @@ fn warns_for_sqlite_unsafe_column_changes() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3030,6 +3170,7 @@ fn qualifies_attached_sqlite_table_and_index_changes() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3104,6 +3245,7 @@ fn builds_rqlite_changes_with_sqlite_dialect() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3139,6 +3281,7 @@ fn builds_kingbase_add_column_without_column_keyword() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3209,6 +3352,7 @@ fn builds_mysql_column_reorder_statements() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3270,6 +3414,7 @@ fn mysql_add_column_before_existing_column_does_not_reorder_shifted_column() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3338,6 +3483,7 @@ fn mysql_existing_column_reorder_does_not_reorder_columns_shifted_by_prior_move(
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3418,6 +3564,7 @@ fn mysql_moving_first_column_to_end_uses_single_reorder_statement() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3448,6 +3595,7 @@ fn builds_sql_server_quoted_column_and_index_statements() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3484,6 +3632,7 @@ fn sqlserver_strips_mysql_display_width_from_fixed_integer_types() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3514,6 +3663,7 @@ fn sqlserver_strips_scale_from_float() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3544,6 +3694,7 @@ fn sqlserver_preserves_float_mantissa_bits() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3599,6 +3750,7 @@ fn sqlserver_default_changes_drop_old_constraints_with_isolated_batches() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3821,6 +3973,7 @@ fn sqlserver_unchanged_foreign_key_does_not_warn_when_saving_other_changes() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3856,6 +4009,7 @@ fn sqlserver_add_column_with_identity() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3892,6 +4046,7 @@ fn sqlserver_legacy_column_comment_change_uses_legacy_extended_properties() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3930,6 +4085,7 @@ fn dameng_add_column_with_identity() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3959,6 +4115,7 @@ fn dameng_uppercases_lowercase_column_type() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3995,6 +4152,7 @@ fn dameng_rejects_identity_on_incompatible_type() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -4033,6 +4191,7 @@ fn sqlserver_rejects_identity_on_incompatible_type() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -4074,6 +4233,7 @@ fn sqlserver_changed_foreign_key_still_warns_as_unsupported() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -4120,6 +4280,7 @@ fn sqlserver_unchanged_identity_extra_does_not_mark_existing_column_changed() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -4166,6 +4327,7 @@ fn dameng_unchanged_identity_extra_does_not_mark_existing_column_changed() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -4425,6 +4587,7 @@ fn dameng_rejects_adding_second_identity_column() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -4483,6 +4646,7 @@ fn sqlserver_existing_column_identity_change_warns_without_unchanged_foreign_key
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -4520,6 +4684,7 @@ fn builds_duckdb_create_table_statements() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -4646,6 +4811,7 @@ fn builds_clickhouse_nullable_comment_and_reorder_statements() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -4698,6 +4864,7 @@ fn builds_h2_schema_qualified_existing_column_statements() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -5754,6 +5921,7 @@ fn mysql_create_table_with_auto_increment() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -5787,6 +5955,7 @@ fn mysql_create_table_keeps_column_charset_collation_and_comment() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -5824,6 +5993,7 @@ fn mysql_compatible_databases_do_not_emit_mysql_column_charset_clauses() {
             transwarp_create: None,
             partitioned: false,
             foreign_table: false,
+            database_version: None,
             is_gaussdb_m_mode: false,
             table_collation: None,
         });
@@ -5858,6 +6028,7 @@ fn mysql_create_table_with_on_update_current_timestamp() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6024,6 +6195,7 @@ fn postgres_create_table_with_identity() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6060,6 +6232,7 @@ fn dameng_create_table_with_identity() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6092,6 +6265,7 @@ fn dameng_create_table_preserves_character_length_units() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6132,6 +6306,7 @@ fn dameng_alter_column_preserves_character_length_unit() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6173,6 +6348,7 @@ fn dameng_rejects_multiple_identity_columns() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6207,6 +6383,7 @@ fn dameng_rejects_zero_identity_increment() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6242,6 +6419,7 @@ fn sqlserver_create_table_with_identity() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6272,6 +6450,7 @@ fn mysql_quotes_datetime_literal_default() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6302,6 +6481,7 @@ fn mysql_does_not_quote_current_timestamp() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6333,6 +6513,7 @@ fn mysql_does_not_quote_temporal_function_with_parens() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6363,6 +6544,7 @@ fn mysql_date_literal_default_is_quoted() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6393,6 +6575,7 @@ fn mysql_time_literal_default_is_quoted() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6423,6 +6606,7 @@ fn non_temporal_types_are_not_quoted() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6557,6 +6741,7 @@ fn builds_mysql_foreign_key_changes() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6592,6 +6777,7 @@ fn builds_mysql_composite_foreign_key() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6630,6 +6816,7 @@ fn builds_oracle_foreign_key_with_supported_actions() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6672,6 +6859,7 @@ fn builds_oracle_foreign_key_replacement() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6713,6 +6901,7 @@ fn builds_mysql_trigger_changes() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6745,6 +6934,7 @@ fn builds_sqlserver_trigger_with_multiple_events() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6793,6 +6983,7 @@ fn rebuilds_changed_sqlserver_trigger_from_complete_metadata_source() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6835,6 +7026,7 @@ fn sqlserver_trigger_edit_restores_disabled_state() {
         mysql_engine: None,
         mysql_auto_increment_value: None,
         transwarp_create: None,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6883,6 +7075,7 @@ fn unchanged_postgres_trigger_does_not_block_column_rename() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6918,6 +7111,7 @@ fn changed_postgres_trigger_remains_unsupported() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6990,6 +7184,7 @@ fn rejects_editing_existing_oracle_trigger_without_complete_source() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -7019,6 +7214,7 @@ fn builds_oracle_statement_trigger_without_row_clause() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -7060,6 +7256,7 @@ fn drops_existing_oracle_trigger_without_reconstructing_it() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -7086,6 +7283,7 @@ fn rejects_unsupported_oracle_compound_trigger_shape() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -7116,6 +7314,7 @@ fn mysql_varchar_default_is_quoted() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -7147,6 +7346,7 @@ fn mysql_char_default_is_quoted() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -7179,6 +7379,7 @@ fn mysql_text_default_is_quoted() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -7209,6 +7410,7 @@ fn mysql_enum_default_is_quoted() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -7239,6 +7441,7 @@ fn mysql_int_default_is_not_quoted() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -7379,6 +7582,7 @@ fn mysql_character_column_add_with_charset_collation() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -7499,6 +7703,7 @@ fn mysql_numeric_column_omits_charset_collation_in_column_definition() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -7547,6 +7752,7 @@ fn mysql_numeric_column_ignores_charset_collation_in_change_detection() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -7590,6 +7796,7 @@ fn mysql_character_column_detects_charset_collation_change() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -7638,6 +7845,7 @@ fn mysql_character_column_preserves_charset_collation_on_other_change() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -7719,6 +7927,7 @@ fn mysql_inherited_column_charset_is_omitted_from_generated_ddl() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: Some("utf8mb4_0900_ai_ci".to_string()),
     });
@@ -7768,6 +7977,7 @@ fn mysql_explicit_column_charset_survives_the_table_default_comparison() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: Some("utf8mb4_0900_ai_ci".to_string()),
     });
@@ -7818,6 +8028,7 @@ fn mysql_inherited_column_charset_does_not_register_as_a_change() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: Some("utf8mb4_0900_ai_ci".to_string()),
     });
@@ -7861,6 +8072,7 @@ fn mysql_collation_switched_away_from_the_table_default_is_emitted() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: Some("utf8mb4_0900_ai_ci".to_string()),
     });
@@ -7909,6 +8121,7 @@ fn mysql_column_charset_switched_to_the_table_default_drops_the_clause() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: Some("utf8mb4_0900_ai_ci".to_string()),
     });
@@ -7954,6 +8167,7 @@ fn mysql_column_charset_is_kept_when_the_table_default_is_unknown() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -7994,6 +8208,7 @@ fn mysql_create_table_omits_inherited_column_charset() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: Some("utf8mb4_0900_ai_ci".to_string()),
     });
@@ -8703,6 +8918,7 @@ fn mysql_create_table_with_generated_column() {
         mysql_auto_increment_value: None,
         transwarp_create: None,
         partitioned: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
         foreign_table: false,
@@ -8749,6 +8965,7 @@ fn oscar_create_table_with_primary_key_and_comments() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -8949,6 +9166,7 @@ fn oscar_drop_index_with_schema_qualifier() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -8975,6 +9193,7 @@ fn oscar_table_comment_uses_comment_on_table() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -9063,6 +9282,7 @@ fn postgres_partitioned_parent_concurrent_request_rejected() {
         transwarp_create: None,
         partitioned: true,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -9099,6 +9319,7 @@ fn postgres_partitioned_parent_plain_index_unchanged() {
         transwarp_create: None,
         partitioned: true,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -9147,6 +9368,7 @@ fn postgres_create_table_partitioned_concurrent_request_rejected() {
         transwarp_create: None,
         partitioned: true,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -9279,6 +9501,7 @@ fn postgres_create_table_concurrent_index() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -9400,6 +9623,7 @@ fn gaussdb_m_options(columns: Vec<EditableStructureColumn>) -> TableStructureSql
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: true,
         table_collation: None,
     }
@@ -9639,6 +9863,7 @@ fn gaussdb_m_rebuild_index_unchanged_type_does_not_rebuild() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: true,
         table_collation: None,
     };
@@ -9691,6 +9916,7 @@ fn mysql_create_table_nullable_timestamp_without_default_gets_explicit_null() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -9725,6 +9951,7 @@ fn mysql_create_table_nullable_timestamp_with_default_still_gets_explicit_null()
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -9757,6 +9984,7 @@ fn mysql_create_table_nullable_datetime_does_not_gain_null_keyword() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -9789,6 +10017,7 @@ fn mysql_add_column_nullable_timestamp_without_default_gets_explicit_null() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        database_version: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });

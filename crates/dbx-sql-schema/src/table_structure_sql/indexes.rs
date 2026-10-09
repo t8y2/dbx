@@ -459,8 +459,14 @@ pub(super) fn build_create_index_statements(
 ) -> Vec<String> {
     let capabilities = capabilities_for(database_type_for_dialect(dialect), None);
     let name = clean(&index.name);
-    let columns: Vec<String> =
-        index.columns.iter().map(|column| clean(column)).filter(|column| !column.is_empty()).collect();
+    let columns: Vec<String> = index
+        .columns
+        .iter()
+        .map(|column| {
+            if database_type == Some(DatabaseType::OceanbaseOracle) { column.clone() } else { clean(column) }
+        })
+        .filter(|column| !column.is_empty())
+        .collect();
     if name.is_empty() || columns.is_empty() {
         return Vec::new();
     }
@@ -477,11 +483,17 @@ pub(super) fn build_create_index_statements(
     let replace = if or_replace { "OR REPLACE " } else { "" };
     let key_is_expression = key_expression_flags(index, &columns);
     let key_opclasses = key_opclasses(index, &columns);
+    let oceanbase_expression = database_type == Some(DatabaseType::OceanbaseOracle)
+        && normalized_index_type(index) == "FUNCTION-BASED NORMAL";
     let cols = columns
         .iter()
         .enumerate()
         .map(|(i, column)| {
-            if dialect == StructureDialect::Mysql {
+            if oceanbase_expression {
+                // Each function-index key is a complete SQL expression. Newlines
+                // keep a trailing line comment from consuming the closing bracket.
+                format!("\n{column}\n")
+            } else if dialect == StructureDialect::Mysql {
                 mysql_index_column_sql(column)
             } else if dialect == StructureDialect::GaussdbM {
                 gaussdbm_index_column_sql(column, key_is_expression[i])

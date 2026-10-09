@@ -4,6 +4,8 @@ import { keymap as codeMirrorKeymap } from "@codemirror/view";
 import { applyDdlStoragePreference } from "@/lib/sql/ddlStorage";
 import DdlStorageToggle from "@/components/objects/DdlStorageToggle.vue";
 import StructureIndexColumnPicker from "./StructureIndexColumnPicker.vue";
+import OceanbaseIndexExpressions from "./OceanbaseIndexExpressions.vue";
+import { oceanbaseIndexCapabilities, oceanbasePhysicalIndexColumns, quoteOceanbaseIndexColumn } from "@/lib/table/oceanbaseIndexCapabilities";
 
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, shallowRef, watch } from "vue";
 import { uuid } from "@/lib/common/utils";
@@ -1390,8 +1392,10 @@ const indexTypesByDb: Record<string, string[]> = {
   sqlite: ["BTREE"],
   "gaussdb-m": ["UBTREE"],
 };
+const obIndexCapabilities = computed(() => oceanbaseIndexCapabilities(connection.value?.database_info?.productVersion));
 const indexTypeOptions = computed(() => {
   if (!structureCapabilities.value.indexType) return [];
+  if (databaseType.value === "oceanbase-oracle") return [...obIndexCapabilities.value.types];
   if (connection.value?.driver_profile?.toLowerCase() === "gaussdb-m") {
     return indexTypesByDb["gaussdb-m"];
   }
@@ -2601,6 +2605,7 @@ function scheduleSqlPreviewRefresh() {
 
 function structureChangeOptions(): BuildTableStructureChangeSqlOptions {
   return {
+    databaseVersion: connection.value?.database_info?.productVersion,
     databaseType: databaseType.value,
     driverProfile: connection.value?.driver_profile,
     schema: props.schema,
@@ -4689,6 +4694,7 @@ function canToggleIndexColumn(index: EditableStructureIndex, name: string): bool
 }
 
 function canAddColumnsToIndex(index: EditableStructureIndex, targets: EditableStructureColumn[]): boolean {
+  if (isOceanbaseFunctionIndex(index)) return false;
   const names = [...index.columns, ...targets.filter((column) => !indexContainsColumn(index, column)).map((column) => column.name.trim())];
   return !indexColumnsIssue(index, names);
 }
@@ -4702,9 +4708,25 @@ function onIndexUniqueChange(index: EditableStructureIndex, unique: boolean) {
 function onIndexTypeChange(index: EditableStructureIndex, value: unknown) {
   const type = String(value ?? "");
   if (!canEditIndexDraft(index) || indexColumnsIssue(index, index.columns, type, false)) return;
+  if (databaseType.value === "oceanbase-oracle") {
+    if (!indexTypeOptions.value.includes(type) || !canChangeOceanbaseIndexType(index, type)) return;
+    if (type === "FUNCTION-BASED NORMAL" && !isOceanbaseFunctionIndex(index)) {
+      index.columns = index.columns.map(quoteOceanbaseIndexColumn);
+    } else if (type === "NORMAL" && isOceanbaseFunctionIndex(index)) {
+      index.columns = oceanbasePhysicalIndexColumns(index.columns, availableColumnNames.value)!;
+    }
+  }
   index.indexType = type;
   if (structureIndexKind({ indexType: type }) === "fulltext" || structureIndexKind({ indexType: type }) === "spatial") index.isUnique = false;
   refreshAutoIndexName(index, true);
+}
+
+function isOceanbaseFunctionIndex(index: EditableStructureIndex): boolean {
+  return databaseType.value === "oceanbase-oracle" && index.indexType.trim().toUpperCase() === "FUNCTION-BASED NORMAL";
+}
+
+function canChangeOceanbaseIndexType(index: EditableStructureIndex, type: string): boolean {
+  return !isOceanbaseFunctionIndex(index) || type !== "NORMAL" || oceanbasePhysicalIndexColumns(index.columns, availableColumnNames.value) !== undefined;
 }
 
 function toggleIncludedColumn(index: EditableStructureIndex, col: string) {
@@ -4726,6 +4748,7 @@ function toggleDropIndex(index: EditableStructureIndex) {
 function canEditIndexDraft(index: EditableStructureIndex): boolean {
   if (indexesLoading.value) return false;
   if (index.markedForDrop || index.isPrimary) return false;
+  if (databaseType.value === "oceanbase-oracle" && index.indexType && !obIndexCapabilities.value.types.includes(index.indexType)) return false;
   if (!index.original) return structureCapabilities.value.createIndex;
   return structureCapabilities.value.rebuildIndex && structureCapabilities.value.createIndex && structureCapabilities.value.dropIndex;
 }
@@ -5419,6 +5442,7 @@ watch(
     () => props.connectionId,
     () => props.database,
     databaseType,
+    () => connection.value?.database_info?.productVersion,
     () => props.schema,
     () => props.tableName,
     newTableName,
@@ -6347,6 +6371,7 @@ watch(
           </TabsContent>
 
           <TabsContent ref="indexesScrollerRef" v-if="tableMetadataCapabilities.indexes" value="indexes" class="col-start-1 row-start-2 structure-table-scroller m-0 min-h-0 flex-1 overflow-auto p-0" @scroll.passive="onStructureContentScroll('indexes', $event)">
+            <p v-if="databaseType === 'oceanbase-oracle'" class="px-3 py-2 text-xs text-muted-foreground" data-oceanbase-index-capability>{{ t(`structureEditor.obIndexVersion_${obIndexCapabilities.status}`) }}</p>
             <div v-if="indexesLoading" class="flex items-center justify-center gap-2 py-10 text-muted-foreground">
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}
@@ -6401,7 +6426,8 @@ watch(
                     </div>
                   </td>
                   <td :class="[structureCellClass, 'overflow-hidden']">
-                    <StructureIndexColumnPicker v-if="canEditIndexDraft(index)" :selected="index.columns" :options="indexColumnPickerOptions(index)" :placeholder="t('structureEditor.indexColumnsPlaceholder')" :trigger-class="structureMonoControlClass" @toggle="toggleIndexColumn(index, $event)">
+                    <OceanbaseIndexExpressions v-if="canEditIndexDraft(index) && isOceanbaseFunctionIndex(index)" v-model="index.columns" />
+                    <StructureIndexColumnPicker v-else-if="canEditIndexDraft(index)" :selected="index.columns" :options="indexColumnPickerOptions(index)" :placeholder="t('structureEditor.indexColumnsPlaceholder')" :trigger-class="structureMonoControlClass" @toggle="toggleIndexColumn(index, $event)">
                       <template #type="{ column }">
                         <span :class="[structureDataTypeToneClass(column.dataType), 'structure-data-type-option']">{{ column.dataType }}</span>
                       </template>
@@ -6420,12 +6446,12 @@ watch(
                     />
                   </td>
                   <td :class="structureCellClass">
-                    <Select v-if="indexTypeOptions.length > 0" :model-value="index.indexType || 'BTREE'" :disabled="!canEditIndexDraft(index)" data-index-type @update:model-value="(value: unknown) => onIndexTypeChange(index, value)">
+                    <Select v-if="indexTypeOptions.length > 0" :model-value="index.indexType || (databaseType === 'oceanbase-oracle' ? 'NORMAL' : 'BTREE')" :disabled="!canEditIndexDraft(index)" data-index-type @update:model-value="(value: unknown) => onIndexTypeChange(index, value)">
                       <SelectTrigger class="structure-grid-control h-[var(--structure-control-height)] w-full rounded-[6px] px-[var(--structure-control-px)] font-mono text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem v-for="opt in indexTypeOptions" :key="opt" :value="opt" :disabled="!!indexColumnsIssue(index, index.columns, opt, false)">{{ opt }}</SelectItem>
+                        <SelectItem v-for="opt in indexTypeOptions" :key="opt" :value="opt" :disabled="!!indexColumnsIssue(index, index.columns, opt, false) || !canChangeOceanbaseIndexType(index, opt)">{{ opt }}</SelectItem>
                       </SelectContent>
                     </Select>
                     <Input v-else :model-value="index.indexType" :class="structureMonoControlClass" placeholder="BTREE" :disabled="!canEditIndexDraft(index) || !structureCapabilities.indexType" @update:model-value="(value: unknown) => onIndexTypeChange(index, value)" />

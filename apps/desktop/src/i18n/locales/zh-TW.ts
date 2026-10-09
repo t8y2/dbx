@@ -4387,6 +4387,15 @@ export default withEnglishFallback({
     apply: "執行已預覽計畫",
   },
   structureEditor: {
+    obIndexExpression: "索引運算式",
+    obIndexExpressionHint: "每個輸入框填寫一個 SQL 運算式，區分大小寫的欄名需加雙引號。切換一般索引前請清空運算式。",
+    obIndexMoveUp: "運算式上移",
+    obIndexMoveDown: "運算式下移",
+    obIndexRemoveExpression: "移除運算式",
+    obIndexAddExpression: "新增運算式",
+    obIndexVersion_documented: "OceanBase Oracle 4.2.5 支援 NORMAL 和 FUNCTION-BASED NORMAL，唯一性單獨勾選。BITMAP、DOMAIN 和 CLUSTER 不可用。具體函式和權限由資料庫檢查。",
+    obIndexVersion_unavailable: "未取得伺服器版本，僅開放一般和唯一索引編輯；函式索引支援情況未核實，請重新整理連線中繼資料。",
+    obIndexVersion_unverified: "目前伺服器版本的索引能力尚未核實，僅開放一般和唯一索引編輯。",
     mysqlDataTypeHelp: {
       tinyint: "1 位元組整數：有號範圍 -128 至 127；無號範圍 0 至 255。",
       smallint: "2 位元組整數：有號範圍 -32,768 至 32,767；無號範圍 0 至 65,535。",

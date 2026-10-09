@@ -1700,8 +1700,7 @@ mod tests {
             }),
         )
         .await
-        .err()
-        .expect("global policy must block update");
+        .expect_err("global policy must block update");
         assert!(blocked.message.contains("MCP_READ_ONLY"));
         state
             .app
@@ -1721,8 +1720,7 @@ mod tests {
             }),
         )
         .await
-        .err()
-        .expect("connection scope must block update");
+        .expect_err("connection scope must block update");
         assert!(blocked.message.contains("CONNECTION_OUT_OF_SCOPE"));
         let _ = std::fs::remove_dir_all(dir);
     }

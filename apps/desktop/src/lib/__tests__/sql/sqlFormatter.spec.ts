@@ -452,6 +452,28 @@ LIMIT 100;`);
     expect(formatted).toBe("SELECT `schema`.`odd``name` FROM `user`;");
   });
 
+  it("keeps backtick-quoted spans when MySQL falls back to the PostgreSQL formatter", async () => {
+    // sql-formatter's MySQL grammar treats REPLACE as the REPLACE INTO clause,
+    // so REPLACE(...) inside a CASE branch only formats through the fallback.
+    const sql = "SELECT CASE WHEN 1 THEN REPLACE('a','a','b') END AS `结果`;";
+
+    const formatted = await formatSqlForEditing(sql, "mysql");
+
+    expect(formatted).not.toBe(sql);
+    expect(formatted).toContain("REPLACE('a', 'a', 'b')");
+    expect(formatted).toContain("END AS `结果`;");
+  });
+
+  it("keeps a backtick-quoted view definer account intact in the PostgreSQL fallback", async () => {
+    const sql = "ALTER ALGORITHM=UNDEFINED DEFINER=`root`@`127.0.0.1` SQL SECURITY DEFINER VIEW `v_format_repro` AS SELECT CASE WHEN 1 THEN REPLACE('a','a','b') END AS `结果`;";
+
+    const formatted = await formatSqlForEditing(sql, "mysql");
+
+    expect(formatted).not.toBe(sql);
+    expect(formatted).toContain("DEFINER = `root`@`127.0.0.1` SQL SECURITY DEFINER");
+    expect(formatted).toContain("END AS `结果`;");
+  });
+
   it("keeps malformed PostgreSQL backtick input unchanged while editing", async () => {
     const sql = "select `id from user;";
 

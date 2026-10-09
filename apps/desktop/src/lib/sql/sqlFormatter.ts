@@ -375,20 +375,19 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
   const emptyLineProtection = normalizedSettings.preserveEmptyLines ? protectEmptyLines(sql) : null;
   const sqlWithProtectedEmptyLines = emptyLineProtection?.sql ?? sql;
   const protectedInput = dialect === "duckdb" ? protectDuckDbPrefixAliasSeparators(sqlWithProtectedEmptyLines) : { sql: sqlWithProtectedEmptyLines, marker: null };
-  const formatterOptions =
-    language === "postgresql"
-      ? {
-          ...options,
-          paramTypes: {
-            ...options.paramTypes,
-            // PostgreSQL itself uses double quotes, but users commonly format
-            // imported MySQL-style SQL before correcting it. Treat complete
-            // backtick spans as opaque tokens so the PostgreSQL lexer can keep
-            // formatting the surrounding statement without rewriting them.
-            custom: [...options.paramTypes.custom, { regex: "`(?:``|[^`])*`" }],
-          },
-        }
-      : options;
+  const postgresOptions = {
+    ...options,
+    paramTypes: {
+      ...options.paramTypes,
+      // PostgreSQL itself uses double quotes, but users commonly format
+      // imported MySQL-style SQL before correcting it. Treat complete
+      // backtick spans as opaque tokens so the PostgreSQL lexer can keep
+      // formatting the surrounding statement without rewriting them. A
+      // `user`@`host` account stays one token: MySQL rejects a space after `@`.
+      custom: [...options.paramTypes.custom, { regex: "`(?:``|[^`])*`(?:@`(?:``|[^`])*`)?" }],
+    },
+  };
+  const formatterOptions = language === "postgresql" ? postgresOptions : options;
   const resolvedDialect = dialect === "clickhouse" ? resolveClickHouseIdentifierSafeDialect(sqlFormatter) : dialect === "oracle" ? resolveOracleExtendedDialect(sqlFormatter) : undefined;
   const formatWithFallback = (input: string): string => {
     try {
@@ -403,7 +402,7 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
       // that tolerates most of these, before surfacing the failure.
       if (language !== "postgresql") {
         try {
-          return format(input, { language: "postgresql", ...options });
+          return format(input, { language: "postgresql", ...postgresOptions });
         } catch {
           // fall through to the original error below
         }

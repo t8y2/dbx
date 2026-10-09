@@ -447,7 +447,20 @@ pub async fn describe_local_sync_state(
     )
     .await?;
     let mut catalog = describe_sync_snapshot(&snapshot, None)?;
-    catalog.connection_secrets = catalog.connections.iter().map(|item| item.id.clone()).collect();
+    // Snapshot connections are already scrubbed, so reload the hydrated rows
+    // and count only connections that would actually carry a secret into the
+    // encrypted payload.  Otherwise the export dialog lists every connection
+    // as a credential candidate while a restore of that backup reports fewer.
+    let source_connections = storage.load_connections().await?;
+    let mut connection_secret_ids = Vec::new();
+    for config in &source_connections {
+        let mut secrets = Vec::new();
+        collect_connection_secrets(&mut secrets, config, true)?;
+        if !secrets.is_empty() {
+            connection_secret_ids.push(config.id.clone());
+        }
+    }
+    catalog.connection_secrets = connection_secret_ids;
     catalog.tunnel_secrets = catalog.tunnel_profiles.iter().map(|item| item.id.clone()).collect();
     catalog.ai_configs = storage
         .load_ai_configs()
@@ -2391,6 +2404,60 @@ async fn build_sensitive_payload(
     .await
 }
 
+/// Collects every secret a real export would place in the encrypted payload
+/// for a single connection. Shared with the export catalog so its credential
+/// counts match what a restore of that backup will report.
+fn collect_connection_secrets(
+    secrets: &mut Vec<ConnectionSecretSnapshot>,
+    config: &ConnectionConfig,
+    include_plugin_secrets: bool,
+) -> Result<(), String> {
+    // A transient password must not become durable through a sync snapshot.
+    if config.save_password {
+        push_secret(secrets, &config.id, "password", &config.password);
+    }
+    push_secret(secrets, &config.id, "init_script", config.init_script.as_deref().unwrap_or(""));
+    push_secret(secrets, &config.id, "url_params", config.url_params.as_deref().unwrap_or(""));
+    for (index, layer) in config.transport_layers.iter().enumerate() {
+        match layer {
+            TransportLayerConfig::Ssh(ssh) => {
+                push_secret(secrets, &config.id, &transport_layer_ssh_password_key(index, layer), &ssh.password);
+                push_secret(
+                    secrets,
+                    &config.id,
+                    &transport_layer_ssh_key_passphrase_key(index, layer),
+                    &ssh.key_passphrase,
+                );
+            }
+            TransportLayerConfig::Proxy(proxy) => {
+                push_secret(secrets, &config.id, &transport_layer_proxy_password_key(index, layer), &proxy.password);
+            }
+            TransportLayerConfig::HttpTunnel(http) => {
+                push_secret(secrets, &config.id, &transport_layer_http_tunnel_token_key(index, layer), &http.token);
+            }
+        }
+    }
+    push_secret(secrets, &config.id, "redis_sentinel_password", &config.redis_sentinel_password);
+    if let Some(connection_string) = &config.connection_string {
+        push_secret(secrets, &config.id, "connection_string", connection_string);
+    }
+    push_mq_external_config_secrets(secrets, config);
+    push_mqtt_external_config_secret(secrets, config);
+    push_cassandra_tls_secrets(secrets, config);
+    if config.save_password {
+        push_nacos_external_config_secrets(secrets, config);
+    }
+    // Plugin secrets are independent of the primary connection password.
+    // A plugin may persist a token while `save_password` is disabled, so
+    // gate these values only on the explicit plugin export option.
+    if include_plugin_secrets {
+        for (key, secret) in &config.connection_secrets {
+            push_secret(secrets, &config.id, &plugin_connection_secret_key(key)?, secret);
+        }
+    }
+    Ok(())
+}
+
 async fn build_sensitive_payload_with_options(
     storage: &Storage,
     connections: &[ConnectionConfig],
@@ -2399,64 +2466,7 @@ async fn build_sensitive_payload_with_options(
 ) -> Result<SensitiveSyncPayload, String> {
     let mut connection_secrets = Vec::new();
     for config in connections {
-        // A transient password must not become durable through a sync snapshot.
-        if config.save_password {
-            push_secret(&mut connection_secrets, &config.id, "password", &config.password);
-        }
-        push_secret(&mut connection_secrets, &config.id, "init_script", config.init_script.as_deref().unwrap_or(""));
-        push_secret(&mut connection_secrets, &config.id, "url_params", config.url_params.as_deref().unwrap_or(""));
-        for (index, layer) in config.transport_layers.iter().enumerate() {
-            match layer {
-                TransportLayerConfig::Ssh(ssh) => {
-                    push_secret(
-                        &mut connection_secrets,
-                        &config.id,
-                        &transport_layer_ssh_password_key(index, layer),
-                        &ssh.password,
-                    );
-                    push_secret(
-                        &mut connection_secrets,
-                        &config.id,
-                        &transport_layer_ssh_key_passphrase_key(index, layer),
-                        &ssh.key_passphrase,
-                    );
-                }
-                TransportLayerConfig::Proxy(proxy) => {
-                    push_secret(
-                        &mut connection_secrets,
-                        &config.id,
-                        &transport_layer_proxy_password_key(index, layer),
-                        &proxy.password,
-                    );
-                }
-                TransportLayerConfig::HttpTunnel(http) => {
-                    push_secret(
-                        &mut connection_secrets,
-                        &config.id,
-                        &transport_layer_http_tunnel_token_key(index, layer),
-                        &http.token,
-                    );
-                }
-            }
-        }
-        push_secret(&mut connection_secrets, &config.id, "redis_sentinel_password", &config.redis_sentinel_password);
-        if let Some(connection_string) = &config.connection_string {
-            push_secret(&mut connection_secrets, &config.id, "connection_string", connection_string);
-        }
-        push_mq_external_config_secrets(&mut connection_secrets, config);
-        push_mqtt_external_config_secret(&mut connection_secrets, config);
-        push_cassandra_tls_secrets(&mut connection_secrets, config);
-        if config.save_password {
-            push_nacos_external_config_secrets(&mut connection_secrets, config);
-        }
-        // Plugin secrets are independent of the primary connection password.
-        // A plugin may persist a token while `save_password` is disabled, so
-        // gate these values only on the explicit plugin export option.
-        if options.include_plugin_secrets {
-            for (key, secret) in &config.connection_secrets {
-                push_secret(&mut connection_secrets, &config.id, &plugin_connection_secret_key(key)?, secret);
-            }
-        }
+        collect_connection_secrets(&mut connection_secrets, config, options.include_plugin_secrets)?;
     }
 
     // Loading AI configurations includes decrypting their secret blobs.  A
@@ -3238,7 +3248,7 @@ mod tests {
     use super::{
         apply_sensitive_payload, apply_sync_snapshot, build_sensitive_payload, build_sync_snapshot,
         build_sync_snapshot_with_options, build_sync_snapshot_with_saved_secrets, decrypt_sensitive_payload,
-        encrypt_sensitive_payload, encrypt_snippet_snapshot, finalize_snippet_migration,
+        describe_local_sync_state, encrypt_sensitive_payload, encrypt_snippet_snapshot, finalize_snippet_migration,
         forget_webdav_sync_secrets_passphrase, gitee_snippet_payload, gitlab_instance_url, is_legacy_dbx_snapshot,
         normalized_remote_path, parent_collection_paths, parse_legacy_dbx_snapshot, parse_snippet_snapshot,
         prepare_legacy_snippet_snapshot, resolve_snippet_token, resolve_webdav_password,
@@ -5116,6 +5126,26 @@ mod tests {
 
         assert_eq!(target.get_secret("pg", "password").await.unwrap(), None);
         assert!(target.load_connections().await.unwrap()[0].password.is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_sync_catalog_lists_only_connections_with_exportable_secrets() {
+        let storage = crate::persistence::test_storage::open(&temp_db_path("sync-catalog-secret-count")).await.unwrap();
+        let mut unsaved = postgres_connection("unsaved", "transient-secret");
+        unsaved.save_password = false;
+        storage
+            .save_connections(&[
+                postgres_connection("with-secret", "db-secret"),
+                postgres_connection("no-secret", ""),
+                unsaved,
+            ])
+            .await
+            .unwrap();
+
+        let catalog = describe_local_sync_state(&storage, None, None).await.unwrap();
+
+        assert_eq!(catalog.connections.len(), 3);
+        assert_eq!(catalog.connection_secrets, vec!["with-secret".to_string()]);
     }
 
     #[tokio::test]

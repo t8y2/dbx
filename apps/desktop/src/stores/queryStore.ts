@@ -3721,6 +3721,13 @@ export const useQueryStore = defineStore("query", () => {
     return registerOpenTab({ id: uuid(), title: name ? `${t("tree.types")} - ${name}` : t("tree.types"), connectionId, database, sql: "", isExecuting: false, isCancelling: false, isExplaining: false, mode: "oracle-type-editor", oracleTypeIdentity: schema && name ? { schema, name, object_type: "TYPE" } : undefined });
   }
 
+  function openOracleJobs(connectionId: string) {
+    const existing = tabs.value.find((tab) => tab.mode === "oracle-jobs" && tab.connectionId === connectionId);
+    if (existing) { switchTab(existing.id); return existing.id; }
+    const connection = useConnectionStore().getConfig(connectionId);
+    return registerOpenTab({ id: uuid(), title: t("tree.schedulerJobs"), connectionId, database: connection?.database || "", sql: "", isExecuting: false, isCancelling: false, isExplaining: false, mode: "oracle-jobs" });
+  }
+
   function openDamengUsers(connectionId: string) {
     const existing = tabs.value.find((tab) => tab.mode === "dameng-users" && tab.connectionId === connectionId);
     if (existing) {
@@ -10102,6 +10109,7 @@ export const useQueryStore = defineStore("query", () => {
     openDamengRoles,
     openDamengJobAdmin,
     openOracleTypeEditor,
+    openOracleJobs,
     openMqAdmin,
     openMqttAdmin,
     openNacosAdmin,

@@ -2551,6 +2551,10 @@ export async function completeAppClose(_action: "quit" | "hide"): Promise<void> 
   return undefined;
 }
 
+export async function oracleJobs(connectionId: string, database: string, request: import("@/lib/database/oracleJobs").OracleJobsRequest): Promise<import("@/lib/database/oracleJobs").OracleJobsResponse> {
+  return post("/api/oracle-jobs", { connection_id: connectionId, database, request });
+}
+
 export async function requestAppClose(): Promise<void> {
   return undefined;
 }

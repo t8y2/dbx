@@ -55,6 +55,10 @@ function forward<K extends keyof Backend>(name: K): Backend[K] {
 
 // Connection
 export const testConnection = forward("testConnection");
+// Job actions and arguments are memory-only and must not enter diagnostic logs.
+export async function oracleJobs(...args: Parameters<Backend["oracleJobs"]>): ReturnType<Backend["oracleJobs"]> {
+  return (await getBackend()).oracleJobs(...args);
+}
 export const testSshTunnel = forward("testSshTunnel");
 export const testConnectionWithInfo = forward("testConnectionWithInfo");
 export const salesforceOauthBrowserAuthorize = forward("salesforceOauthBrowserAuthorize");

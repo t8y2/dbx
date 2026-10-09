@@ -1078,6 +1078,10 @@ export async function completeAppClose(action: "quit" | "hide"): Promise<void> {
   return invoke("complete_app_close", { action });
 }
 
+export async function oracleJobs(connectionId: string, database: string, request: import("@/lib/database/oracleJobs").OracleJobsRequest): Promise<import("@/lib/database/oracleJobs").OracleJobsResponse> {
+  return invoke("oracle_jobs", { connectionId, database, request });
+}
+
 export async function requestAppClose(): Promise<void> {
   return invoke("request_app_close_from_window_controls");
 }

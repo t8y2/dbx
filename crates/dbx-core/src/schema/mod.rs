@@ -3,6 +3,7 @@ pub mod oracle_constraint_change;
 mod oracle_routines;
 pub use oracle_routines::{validate_schema_diff_routines, RoutineValidation};
 pub mod oracle_types;
+pub mod oracle_jobs;
 
 pub use dbx_drivers::metadata::sqlite_ddl;
 

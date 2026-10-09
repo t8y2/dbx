@@ -143,6 +143,7 @@ const PostgresDashboard = defineAsyncComponent(() => import("@/components/admin/
 const XuguServerDashboard = defineAsyncComponent(() => import("@/components/admin/XuguServerDashboard.vue"));
 const DamengJobAdmin = defineAsyncComponent(() => import("@/components/admin/DamengJobAdmin.vue"));
 const OracleTypeEditor = defineAsyncComponent(() => import("@/components/admin/OracleTypeEditor.vue"));
+const OracleJobAdmin = defineAsyncComponent(() => import("@/components/admin/OracleJobAdmin.vue"));
 
 const DamengUserAdmin = defineAsyncComponent(() => import("@/components/admin/DamengUserAdmin.vue"));
 const DamengRoleAdmin = defineAsyncComponent(() => import("@/components/admin/DamengRoleAdmin.vue"));
@@ -3548,6 +3549,10 @@ defineExpose({
 
     <template v-else-if="activeTab.mode === 'oracle-type-editor' && activeConnection">
       <OracleTypeEditor :key="activeTab.id" :connection="activeConnection" :database="activeTab.database" :initial-schema="activeTab.oracleTypeIdentity?.schema" :initial-name="activeTab.oracleTypeIdentity?.name" />
+    </template>
+
+    <template v-else-if="activeTab.mode === 'oracle-jobs' && activeConnection">
+      <OracleJobAdmin :key="activeTab.id" :connection="activeConnection" :database="activeTab.database" />
     </template>
 
     <template v-else-if="activeTab.mode === 'dameng-jobs' && activeConnection">

@@ -418,11 +418,14 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
     return emptyLineProtection ? restoreProtectedEmptyLines(laidOut, emptyLineProtection.markers) : laidOut;
   };
 
-  // DBX's own layout printer produces the default style. It needs the AST and
-  // sql-formatter's internal layout machinery, so it can decline an input — an
-  // unparseable statement, an internal shape that moved. `null` means "use the
-  // public formatter", which is also what the tabular indent styles ask for:
-  // those are an alternative layout this printer deliberately does not reproduce.
+  // DBX's own layout printer produces the default `dbx` style. It needs the AST
+  // and sql-formatter's internal layout machinery, so it can decline an input —
+  // an unparseable statement, an internal shape that moved. `null` means "use
+  // the public formatter", which is also what the `classic` layout style asks
+  // for: that style is sql-formatter's own layout, i.e. the pre-v0.6.16 default,
+  // and the applySqlFormatterLayout post-passes exist to serve it. The tabular
+  // indent styles likewise are an alternative layout this printer deliberately
+  // does not reproduce.
   const layoutOptions: Partial<SqlLayoutOptions> = {
     lineWidth: normalizedSettings.expressionWidth,
     indentWidth: normalizedSettings.tabWidth,
@@ -433,7 +436,7 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
     logicalOperatorNewline: normalizedSettings.logicalOperatorNewline,
     commaPosition: normalizedSettings.commaPosition,
   };
-  const usesDefaultStyle = normalizedSettings.indentStyle === "standard";
+  const usesDefaultStyle = normalizedSettings.layoutStyle === "dbx" && normalizedSettings.indentStyle === "standard";
 
   const formatOnce = async (input: string): Promise<string> => {
     const laidOut = usesDefaultStyle ? await formatSqlLayout({ sql: input, language, dialectOptions: resolvedDialect, cfg: formatterOptions, options: layoutOptions }) : null;

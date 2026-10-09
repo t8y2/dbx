@@ -1,8 +1,14 @@
-export const SQL_FORMATTER_CONFIG_VERSION = 1;
+export const SQL_FORMATTER_CONFIG_VERSION = 2;
 export const SQL_FORMATTER_CONFIG_FORMATTER = "sql-formatter";
+
+// Version 1 shipped from v0.5.52 through v0.6.37 and predates `commaPosition`
+// and `layoutStyle`, so it must keep parsing: a file is a record of the user's
+// options, and rejecting it would silently discard their whole config.
+const SQL_FORMATTER_CONFIG_VERSIONS = new Set([1, 2]);
 
 const CASE_VALUES = ["preserve", "upper", "lower"] as const;
 const INDENT_STYLE_VALUES = ["standard", "tabularLeft", "tabularRight"] as const;
+const LAYOUT_STYLE_VALUES = ["dbx", "classic"] as const;
 const LOGICAL_OPERATOR_NEWLINE_VALUES = ["before", "after", "none"] as const;
 const COMMA_POSITION_VALUES = ["after", "before"] as const;
 const FROM_CLAUSE_LAYOUT_VALUES = ["newLine", "sameLine"] as const;
@@ -15,6 +21,7 @@ const SQL_FORMATTER_LEGACY_OPTION_KEYS = new Set(["params"]);
 
 export type SqlFormatterCase = (typeof CASE_VALUES)[number];
 export type SqlFormatterIndentStyle = (typeof INDENT_STYLE_VALUES)[number];
+export type SqlFormatterLayoutStyle = (typeof LAYOUT_STYLE_VALUES)[number];
 export type SqlFormatterLogicalOperatorNewline = (typeof LOGICAL_OPERATOR_NEWLINE_VALUES)[number];
 export type SqlFormatterCommaPosition = (typeof COMMA_POSITION_VALUES)[number];
 export type SqlFormatterFromClauseLayout = (typeof FROM_CLAUSE_LAYOUT_VALUES)[number];
@@ -40,6 +47,9 @@ export interface SqlFormatterParamTypes {
 }
 
 export interface SqlFormatterOptionSettings {
+  // DBX-private: selects which layout engine runs and never reaches
+  // sql-formatter itself (see sqlFormatterOptions).
+  layoutStyle: SqlFormatterLayoutStyle;
   keywordCase: SqlFormatterCase;
   dataTypeCase: SqlFormatterCase;
   functionCase: SqlFormatterCase;
@@ -69,6 +79,7 @@ export interface SqlFormatterConfigFile {
 export type SqlFormatterConfigParseResult = { ok: true; settings: SqlFormatterSettings } | { ok: false; message: string };
 
 export const DEFAULT_SQL_FORMATTER_SETTINGS: SqlFormatterSettings = {
+  layoutStyle: "dbx",
   keywordCase: "upper",
   dataTypeCase: "preserve",
   functionCase: "preserve",
@@ -87,7 +98,14 @@ export const DEFAULT_SQL_FORMATTER_SETTINGS: SqlFormatterSettings = {
   paramTypes: null,
 };
 
+// A new key is not done when it is added here: an older settings export
+// legitimately lacks it, so it must also be registered in
+// `SQL_FORMATTER_KEYS_ADDED_AFTER_TRANSFER_FORMAT`
+// (lib/settings/settingsTransfer.ts) or every pre-existing `dbx-settings-*.json`
+// stops importing wholesale, and given a row in the `expectedControls` list of
+// lib/settings/__tests__/settingsSearch.spec.ts so its search entry stays pinned.
 const SQL_FORMATTER_OPTION_KEYS = new Set<keyof SqlFormatterOptionSettings>([
+  "layoutStyle",
   "keywordCase",
   "dataTypeCase",
   "functionCase",
@@ -107,6 +125,7 @@ const SQL_FORMATTER_OPTION_KEYS = new Set<keyof SqlFormatterOptionSettings>([
 ]);
 
 const SQL_FORMATTER_OPTION_VALIDATORS: Record<keyof SqlFormatterOptionSettings, (value: unknown) => boolean> = {
+  layoutStyle: (value) => isStringChoice(value, LAYOUT_STYLE_VALUES),
   keywordCase: (value) => isStringChoice(value, CASE_VALUES),
   dataTypeCase: (value) => isStringChoice(value, CASE_VALUES),
   functionCase: (value) => isStringChoice(value, CASE_VALUES),
@@ -190,6 +209,7 @@ function normalizeParamTypes(value: unknown, fallback: SqlFormatterParamTypes | 
 export function sqlFormatterOptionSettings(settings: unknown): SqlFormatterOptionSettings {
   const input = isObject(settings) ? settings : {};
   return {
+    layoutStyle: normalizeChoice(input.layoutStyle, LAYOUT_STYLE_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.layoutStyle),
     keywordCase: normalizeChoice(input.keywordCase, CASE_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.keywordCase),
     dataTypeCase: normalizeChoice(input.dataTypeCase, CASE_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.dataTypeCase),
     functionCase: normalizeChoice(input.functionCase, CASE_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.functionCase),
@@ -252,7 +272,7 @@ export function parseSqlFormatterConfig(text: string): SqlFormatterConfigParseRe
   }
 
   if (!isObject(parsed)) return { ok: false, message: "Config must be a JSON object." };
-  if (parsed.version !== SQL_FORMATTER_CONFIG_VERSION) return { ok: false, message: "Unsupported config version." };
+  if (typeof parsed.version !== "number" || !SQL_FORMATTER_CONFIG_VERSIONS.has(parsed.version)) return { ok: false, message: "Unsupported config version." };
   if (parsed.formatter !== SQL_FORMATTER_CONFIG_FORMATTER) return { ok: false, message: "Unsupported formatter." };
   if (!isObject(parsed.options)) return { ok: false, message: "Config options must be a JSON object." };
 

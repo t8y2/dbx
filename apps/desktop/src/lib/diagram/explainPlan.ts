@@ -2,6 +2,8 @@ import type { DatabaseType, QueryResult } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import { supportsDatabaseFeature } from "@/lib/database/databaseDriverManifest";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
+import { parseDb2ExplainText } from "./db2ExplainPlan";
+export { parseDb2ExplainText } from "./db2ExplainPlan";
 import { parseXuguExplainResult } from "./xuguExplainPlan";
 
 export interface ExplainPlanNode {
@@ -13,7 +15,7 @@ export interface ExplainPlanNode {
   relation?: string;
   index?: string;
   cost?: string;
-  /** Suppress derived cost shares when the engine's cost accumulation is undocumented. */
+  /** Suppress derived cost shares when costs cannot be safely attributed to nodes. */
   costModel?: "unknown";
   rows?: string;
   width?: string;
@@ -22,7 +24,7 @@ export interface ExplainPlanNode {
   children: ExplainPlanNode[];
 }
 
-export type ExplainPlanDatabaseType = "mysql" | "postgres" | "dameng" | "questdb" | "doris" | "oracle" | "oceanbase-oracle" | "sqlserver" | "xugu";
+export type ExplainPlanDatabaseType = "mysql" | "postgres" | "dameng" | "questdb" | "doris" | "oracle" | "oceanbase-oracle" | "sqlserver" | "xugu" | "db2";
 
 export interface ParsedExplainPlan {
   databaseType: ExplainPlanDatabaseType;
@@ -37,7 +39,7 @@ export function formatExplainPlanDetails(node: ExplainPlanNode | undefined, esti
   return node.estimatedTimeUs === undefined ? node.details : [`${estimatedTimeLabel}: ${node.estimatedTimeUs} µs`, ...node.details];
 }
 
-const SUPPORTED_EXPLAIN_TYPES = new Set<DatabaseType>(["mysql", "postgres", "dameng", "questdb", "doris", "oracle", "oceanbase-oracle", "sqlserver", "xugu"]);
+const SUPPORTED_EXPLAIN_TYPES = new Set<DatabaseType>(["mysql", "postgres", "dameng", "questdb", "doris", "oracle", "oceanbase-oracle", "sqlserver", "xugu", "db2"]);
 export function supportsExplainPlan(databaseType?: DatabaseType): databaseType is ExplainPlanDatabaseType {
   return !!databaseType && supportsDatabaseFeature(databaseType, "sqlExplain") && SUPPORTED_EXPLAIN_TYPES.has(databaseType);
 }
@@ -48,7 +50,10 @@ export function buildExplainSql(databaseType: DatabaseType | undefined, sql: str
 }
 
 export function parseExplainResult(databaseType: ExplainPlanDatabaseType, result: QueryResult): ParsedExplainPlan {
-  if (databaseType === "xugu") {
+  if (databaseType === "db2") {
+    if (isQueryExecutionErrorResult(result)) throw new Error(String(result.rows[0]?.[0] ?? "DB2 EXPLAIN failed"));
+    return parseDb2ExplainText(String(result.rows[0]?.[0] ?? ""));
+  } else if (databaseType === "xugu") {
     return parseXuguExplainResult(result);
   } else if (databaseType === "dameng") {
     return parseDamengExplain(result);

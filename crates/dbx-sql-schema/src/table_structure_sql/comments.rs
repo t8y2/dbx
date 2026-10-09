@@ -235,6 +235,7 @@ mod tests {
             table_comment: Some("港口资料".to_string()),
             original_table_comment: None,
             mysql_engine: None,
+            mysql_auto_increment_value: None,
             transwarp_create: None,
             partitioned: false,
             is_gaussdb_m_mode: false,

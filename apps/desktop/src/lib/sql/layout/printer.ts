@@ -54,7 +54,7 @@ export type { SqlLayoutContext, SqlLayoutOptions } from "./primitives";
  * stay on one line when they are short enough.
  */
 function printClause(writer: Writer, clause: ClauseNode, baseColumn: number, ctx: SqlLayoutContext): void {
-  const keyword = keywordText(clause.nameKw.text, ctx);
+  const keyword = keywordText(clause.nameKw, ctx);
   const items = splitByComma(clause.children);
   const itemColumn = baseColumn + keyword.length + 1;
   const projection = isProjectionClauseName(clause.nameKw.text);
@@ -123,7 +123,7 @@ function alignedProjectionItems(items: AstNode[][], ctx: SqlLayoutContext, lineW
     const expression = renderInline(ctx, item.slice(0, asIndex), lineWidth);
     const alias = renderInline(ctx, item.slice(asIndex + 1), lineWidth);
     if (!expression || !alias) return null;
-    return { expression, alias, asKeyword: keywordText(asNode.text, ctx), aliasColumn: 0 };
+    return { expression, alias, asKeyword: keywordText(asNode, ctx), aliasColumn: 0 };
   });
 
   if (!parsed.some(Boolean)) return null;
@@ -135,7 +135,7 @@ function alignedProjectionItems(items: AstNode[][], ctx: SqlLayoutContext, lineW
 
 /** Emits a `LIMIT` clause, which sql-formatter renders as keyword + expressions. */
 function printLimitClause(writer: Writer, clause: LimitClauseNode, ctx: SqlLayoutContext): void {
-  const keyword = keywordText(clause.limitKw.text, ctx);
+  const keyword = keywordText(clause.limitKw, ctx);
   const children = limitChildren(clause);
   const flat = renderInline(ctx, children, ctx.options.lineWidth - writer.column - keyword.length - 1);
   if (flat) {
@@ -206,7 +206,7 @@ function writeParenthesis(writer: Writer, nodes: AstNode[], index: number, ctx: 
  * sibling-clause form (`SELECT ... UNION ALL SELECT ...`) puts it as well.
  */
 function printSetOperation(writer: Writer, node: SetOperationNode, baseColumn: number, ctx: SqlLayoutContext): void {
-  writer.write(keywordText(node.nameKw.text, ctx));
+  writer.write(keywordText(node.nameKw, ctx));
   if (node.children.length === 0) return;
   writer.newline(baseColumn);
   printSetOperationOperand(writer, node.children, ctx);
@@ -241,7 +241,7 @@ function printCondition(writer: Writer, operands: AstNode[][], baseColumn: numbe
       continue;
     }
 
-    const operator = keywordText(head.text, ctx);
+    const operator = keywordText(head, ctx);
     if (ctx.options.logicalOperatorNewline === "before") {
       writer.newline(column);
       writer.write(operator);
@@ -290,7 +290,7 @@ function printElement(writer: Writer, nodes: AstNode[], baseColumn: number, ctx:
     // A JOIN keyword opens a new line one "Join indent" in from the FROM clause.
     if (isJoinKeyword(node)) {
       writer.newline(baseColumn + ctx.options.joinIndentWidth);
-      writer.write(keywordText(node.text, ctx));
+      writer.write(keywordText(node, ctx));
       index += 1;
       continue;
     }

@@ -1598,7 +1598,13 @@ async fn execute_explain_query(
         }
     }
 
-    if *db_type == DatabaseType::Oracle {
+    let connection_config = state.configs.read().await.get(connection_id).cloned();
+    let explain_timeout_secs = agent_query_timeout_secs(
+        tool_call.arguments.get("timeout_secs").and_then(Value::as_u64),
+        connection_config.as_ref(),
+    );
+
+    if matches!(*db_type, DatabaseType::Oracle | DatabaseType::Db2) {
         return match crate::agent_explain::get_agent_explain_info_core(
             state,
             connection_id,
@@ -1606,7 +1612,7 @@ async fn execute_explain_query(
             default_schema,
             sql,
             Some("explain"),
-            None,
+            Some(explain_timeout_secs),
         )
         .await
         {
@@ -1632,18 +1638,9 @@ async fn execute_explain_query(
         }
     };
 
-    // Execute the EXPLAIN query. Timeout resolves like the execute path
-    // (per-call `timeout_secs` > connection effective timeout) so the global
-    // MCP timeout override covers EXPLAIN too.
-    let connection_config = state.configs.read().await.get(connection_id).cloned();
-    let options = QueryExecutionOptions {
-        max_rows: Some(100),
-        timeout_secs: Some(agent_query_timeout_secs(
-            tool_call.arguments.get("timeout_secs").and_then(Value::as_u64),
-            connection_config.as_ref(),
-        )),
-        ..Default::default()
-    };
+    // Both native and generated plans use the per-call timeout policy.
+    let options =
+        QueryExecutionOptions { max_rows: Some(100), timeout_secs: Some(explain_timeout_secs), ..Default::default() };
     let result = match crate::query::execute_sql_statement_with_options(
         state,
         connection_id,
@@ -2018,6 +2015,7 @@ for line in sys.stdin:
             visible_schemas: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
+            show_database_links: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,

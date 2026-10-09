@@ -12,6 +12,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr};
 
+mod webdav_snapshot;
+
 use crate::ai::AiConfigItem;
 use crate::connection_secrets::{
     plugin_connection_secret_key, CASSANDRA_KEYSTORE_PASSWORD_KEY, CASSANDRA_TRUSTSTORE_PASSWORD_KEY,
@@ -445,7 +447,23 @@ pub async fn describe_local_sync_state(
     )
     .await?;
     let mut catalog = describe_sync_snapshot(&snapshot, None)?;
-    catalog.connection_secrets = catalog.connections.iter().map(|item| item.id.clone()).collect();
+    // Snapshot connections are already scrubbed, so reload the hydrated rows
+    // and count only connections that would actually carry a secret into the
+    // encrypted payload.  Otherwise the export dialog lists every connection
+    // as a credential candidate while a restore of that backup reports fewer.
+    let source_connections = storage.load_connections().await?;
+    let mut connection_secret_ids = Vec::new();
+    for config in &source_connections {
+        let mut secrets = Vec::new();
+        // `true` mirrors every real export path: the Tauri/web commands tie
+        // include_plugin_secrets to include_secrets, so the catalog must count
+        // plugin-secret-only connections as credential candidates too.
+        collect_connection_secrets(&mut secrets, config, true)?;
+        if !secrets.is_empty() {
+            connection_secret_ids.push(config.id.clone());
+        }
+    }
+    catalog.connection_secrets = connection_secret_ids;
     catalog.tunnel_secrets = catalog.tunnel_profiles.iter().map(|item| item.id.clone()).collect();
     catalog.ai_configs = storage
         .load_ai_configs()
@@ -1819,22 +1837,23 @@ impl WebDavClient {
 
     pub async fn put_snapshot(&self, snapshot: &SyncSnapshot) -> Result<WebDavSyncSummary, String> {
         let remote_path = self.remote_path();
+        let (bytes, content_type) = webdav_snapshot::encode(snapshot, &remote_path)?;
+        let byte_count = bytes.len();
         self.ensure_parent_collections(&remote_path).await?;
-        let bytes = serde_json::to_vec_pretty(snapshot).map_err(|e| e.to_string())?;
         let response = self
             .request(Method::PUT, &remote_path)?
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(bytes.clone())
+            .header(header::CONTENT_TYPE, content_type)
+            .body(bytes)
             .send()
             .await
             .map_err(|e| e.to_string())?;
         let status = response.status();
         if !status.is_success() {
-            return Err(format!("WebDAV upload failed with HTTP {status}"));
+            return Err(webdav_snapshot::upload_error(status, content_type));
         }
         Ok(WebDavSyncSummary {
             remote_path,
-            bytes: bytes.len(),
+            bytes: byte_count,
             exported_at: Some(snapshot.exported_at.clone()),
             app_version: Some(snapshot.app_version.clone()),
         })
@@ -1847,8 +1866,8 @@ impl WebDavClient {
         if !status.is_success() {
             return Err(format!("WebDAV download failed with HTTP {status}"));
         }
-        let bytes = response.bytes().await.map_err(|e| e.to_string())?;
-        let snapshot: SyncSnapshot = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        let bytes = webdav_snapshot::read_response(response).await?;
+        let snapshot = webdav_snapshot::decode(&bytes)?;
         let summary = WebDavSyncSummary {
             remote_path,
             bytes: bytes.len(),
@@ -1929,6 +1948,17 @@ impl SnippetSyncClient {
         } else {
             Ok(format!("{}/{path}", self.api_base))
         }
+    }
+
+    fn gitlab_raw_file_url(&self, snippet_id: &str, reference: &str) -> Result<Url, String> {
+        let mut url = Url::parse(&self.snippet_url(Some(snippet_id))?).map_err(|e| e.to_string())?;
+        url.path_segments_mut().map_err(|_| "GitLab snippet URL cannot be a base URL".to_string())?.extend([
+            "files",
+            reference,
+            DEFAULT_SNIPPET_FILE_NAME,
+            "raw",
+        ]);
+        Ok(url)
     }
 
     pub async fn test(&self) -> Result<(), String> {
@@ -2089,20 +2119,19 @@ impl SnippetSyncClient {
                 .iter()
                 .find(|file| file.get("path").and_then(serde_json::Value::as_str) == Some(DEFAULT_SNIPPET_FILE_NAME))
                 .ok_or_else(|| format!("Snippet does not contain {DEFAULT_SNIPPET_FILE_NAME}"))?;
-            // Snippet repositories default to `main` on current instances but
-            // `master` on older ones; the per-file `raw_url` always carries the
-            // snippet's actual default branch, so prefer it over guessing.
-            let constructed_main = format!("{url}/files/main/{DEFAULT_SNIPPET_FILE_NAME}/raw");
-            let raw_url = file
+            // raw_url is a browser route and can use a different scheme or host.
+            // Read its ref, but send the token only to the configured instance API.
+            let reference = file
                 .get("raw_url")
                 .and_then(serde_json::Value::as_str)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| constructed_main.clone());
-            let response = self.request(Method::GET, &raw_url)?.send().await.map_err(|e| e.to_string())?;
-            if response.status() == StatusCode::NOT_FOUND && raw_url == constructed_main {
-                let master_url = format!("{url}/files/master/{DEFAULT_SNIPPET_FILE_NAME}/raw");
-                let response = self.request(Method::GET, &master_url)?.send().await.map_err(|e| e.to_string())?;
+                .and_then(|raw_url| gitlab_snippet_raw_ref(raw_url, snippet_id))
+                .unwrap_or_else(|| "main".to_string());
+            let raw_url = self.gitlab_raw_file_url(snippet_id, &reference)?;
+            let response = self.request(Method::GET, raw_url.as_str())?.send().await.map_err(|e| e.to_string())?;
+            if response.status() == StatusCode::NOT_FOUND && reference == "main" {
+                let master_url = self.gitlab_raw_file_url(snippet_id, "master")?;
+                let response =
+                    self.request(Method::GET, master_url.as_str())?.send().await.map_err(|e| e.to_string())?;
                 ensure_snippet_success(response.status(), "raw download")?;
                 return response.text().await.map_err(|e| e.to_string());
             }
@@ -2388,6 +2417,60 @@ async fn build_sensitive_payload(
     .await
 }
 
+/// Collects every secret a real export would place in the encrypted payload
+/// for a single connection. Shared with the export catalog so its credential
+/// counts match what a restore of that backup will report.
+fn collect_connection_secrets(
+    secrets: &mut Vec<ConnectionSecretSnapshot>,
+    config: &ConnectionConfig,
+    include_plugin_secrets: bool,
+) -> Result<(), String> {
+    // A transient password must not become durable through a sync snapshot.
+    if config.save_password {
+        push_secret(secrets, &config.id, "password", &config.password);
+    }
+    push_secret(secrets, &config.id, "init_script", config.init_script.as_deref().unwrap_or(""));
+    push_secret(secrets, &config.id, "url_params", config.url_params.as_deref().unwrap_or(""));
+    for (index, layer) in config.transport_layers.iter().enumerate() {
+        match layer {
+            TransportLayerConfig::Ssh(ssh) => {
+                push_secret(secrets, &config.id, &transport_layer_ssh_password_key(index, layer), &ssh.password);
+                push_secret(
+                    secrets,
+                    &config.id,
+                    &transport_layer_ssh_key_passphrase_key(index, layer),
+                    &ssh.key_passphrase,
+                );
+            }
+            TransportLayerConfig::Proxy(proxy) => {
+                push_secret(secrets, &config.id, &transport_layer_proxy_password_key(index, layer), &proxy.password);
+            }
+            TransportLayerConfig::HttpTunnel(http) => {
+                push_secret(secrets, &config.id, &transport_layer_http_tunnel_token_key(index, layer), &http.token);
+            }
+        }
+    }
+    push_secret(secrets, &config.id, "redis_sentinel_password", &config.redis_sentinel_password);
+    if let Some(connection_string) = &config.connection_string {
+        push_secret(secrets, &config.id, "connection_string", connection_string);
+    }
+    push_mq_external_config_secrets(secrets, config);
+    push_mqtt_external_config_secret(secrets, config);
+    push_cassandra_tls_secrets(secrets, config);
+    if config.save_password {
+        push_nacos_external_config_secrets(secrets, config);
+    }
+    // Plugin secrets are independent of the primary connection password.
+    // A plugin may persist a token while `save_password` is disabled, so
+    // gate these values only on the explicit plugin export option.
+    if include_plugin_secrets {
+        for (key, secret) in &config.connection_secrets {
+            push_secret(secrets, &config.id, &plugin_connection_secret_key(key)?, secret);
+        }
+    }
+    Ok(())
+}
+
 async fn build_sensitive_payload_with_options(
     storage: &Storage,
     connections: &[ConnectionConfig],
@@ -2396,64 +2479,7 @@ async fn build_sensitive_payload_with_options(
 ) -> Result<SensitiveSyncPayload, String> {
     let mut connection_secrets = Vec::new();
     for config in connections {
-        // A transient password must not become durable through a sync snapshot.
-        if config.save_password {
-            push_secret(&mut connection_secrets, &config.id, "password", &config.password);
-        }
-        push_secret(&mut connection_secrets, &config.id, "init_script", config.init_script.as_deref().unwrap_or(""));
-        push_secret(&mut connection_secrets, &config.id, "url_params", config.url_params.as_deref().unwrap_or(""));
-        for (index, layer) in config.transport_layers.iter().enumerate() {
-            match layer {
-                TransportLayerConfig::Ssh(ssh) => {
-                    push_secret(
-                        &mut connection_secrets,
-                        &config.id,
-                        &transport_layer_ssh_password_key(index, layer),
-                        &ssh.password,
-                    );
-                    push_secret(
-                        &mut connection_secrets,
-                        &config.id,
-                        &transport_layer_ssh_key_passphrase_key(index, layer),
-                        &ssh.key_passphrase,
-                    );
-                }
-                TransportLayerConfig::Proxy(proxy) => {
-                    push_secret(
-                        &mut connection_secrets,
-                        &config.id,
-                        &transport_layer_proxy_password_key(index, layer),
-                        &proxy.password,
-                    );
-                }
-                TransportLayerConfig::HttpTunnel(http) => {
-                    push_secret(
-                        &mut connection_secrets,
-                        &config.id,
-                        &transport_layer_http_tunnel_token_key(index, layer),
-                        &http.token,
-                    );
-                }
-            }
-        }
-        push_secret(&mut connection_secrets, &config.id, "redis_sentinel_password", &config.redis_sentinel_password);
-        if let Some(connection_string) = &config.connection_string {
-            push_secret(&mut connection_secrets, &config.id, "connection_string", connection_string);
-        }
-        push_mq_external_config_secrets(&mut connection_secrets, config);
-        push_mqtt_external_config_secret(&mut connection_secrets, config);
-        push_cassandra_tls_secrets(&mut connection_secrets, config);
-        if config.save_password {
-            push_nacos_external_config_secrets(&mut connection_secrets, config);
-        }
-        // Plugin secrets are independent of the primary connection password.
-        // A plugin may persist a token while `save_password` is disabled, so
-        // gate these values only on the explicit plugin export option.
-        if options.include_plugin_secrets {
-            for (key, secret) in &config.connection_secrets {
-                push_secret(&mut connection_secrets, &config.id, &plugin_connection_secret_key(key)?, secret);
-            }
-        }
+        collect_connection_secrets(&mut connection_secrets, config, options.include_plugin_secrets)?;
     }
 
     // Loading AI configurations includes decrypting their secret blobs.  A
@@ -3051,6 +3077,21 @@ fn required_sync_passphrase(passphrase: Option<&str>) -> Result<&str, String> {
     normalized_passphrase(passphrase).ok_or_else(|| "A sync password is required for snippet sync.".to_string())
 }
 
+fn gitlab_snippet_raw_ref(raw_url: &str, snippet_id: &str) -> Option<String> {
+    let url = Url::parse(raw_url).ok()?;
+    let segments: Vec<_> = url.path_segments()?.collect();
+    let reference = match segments.as_slice() {
+        [.., "snippets", id, "raw", reference, DEFAULT_SNIPPET_FILE_NAME] if *id == snippet_id => *reference,
+        [.., "snippets", id, "files", reference, DEFAULT_SNIPPET_FILE_NAME, "raw"] if *id == snippet_id => *reference,
+        _ => return None,
+    };
+    percent_encoding::percent_decode_str(reference)
+        .decode_utf8()
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(|value| value.into_owned())
+}
+
 fn gitlab_instance_url(value: Option<&str>) -> Result<String, String> {
     let value = value.unwrap_or(GITLAB_DEFAULT_INSTANCE).trim();
     let url = Url::parse(value).map_err(|_| "Enter a valid GitLab HTTPS instance URL".to_string())?;
@@ -3235,7 +3276,7 @@ mod tests {
     use super::{
         apply_sensitive_payload, apply_sync_snapshot, build_sensitive_payload, build_sync_snapshot,
         build_sync_snapshot_with_options, build_sync_snapshot_with_saved_secrets, decrypt_sensitive_payload,
-        encrypt_sensitive_payload, encrypt_snippet_snapshot, finalize_snippet_migration,
+        describe_local_sync_state, encrypt_sensitive_payload, encrypt_snippet_snapshot, finalize_snippet_migration,
         forget_webdav_sync_secrets_passphrase, gitee_snippet_payload, gitlab_instance_url, is_legacy_dbx_snapshot,
         normalized_remote_path, parent_collection_paths, parse_legacy_dbx_snapshot, parse_snippet_snapshot,
         prepare_legacy_snippet_snapshot, resolve_snippet_token, resolve_webdav_password,
@@ -3499,6 +3540,7 @@ mod tests {
             visible_schemas: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
+            show_database_links: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -3586,6 +3628,7 @@ mod tests {
             visible_schemas: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
+            show_database_links: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -3868,6 +3911,7 @@ mod tests {
             visible_schemas: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
+            show_database_links: None,
             attached_databases: Vec::new(),
             init_script: Some("CREATE SECRET (TYPE quack, TOKEN 'token-value');".to_string()),
             color: None,
@@ -4496,6 +4540,56 @@ mod tests {
         assert!(requests[1].starts_with("GET /api/v4/snippets/42/files/master/dbx-sync.json/raw HTTP/1.1"));
     }
 
+    #[test]
+    fn gitlab_raw_file_url_keeps_configured_https_instance() {
+        let client = SnippetSyncClient::new(SnippetSyncConfig {
+            provider: SnippetProvider::GitLab,
+            instance_url: Some("https://gitlab.example.com/gitlab".to_string()),
+            token: Some("test-token".to_string()),
+            snippet_id: Some("42".to_string()),
+            replace_legacy_snippet: false,
+        })
+        .unwrap();
+        assert_eq!(
+            client.gitlab_raw_file_url("42", "feature/sync").unwrap().as_str(),
+            "https://gitlab.example.com/gitlab/api/v4/snippets/42/files/feature%2Fsync/dbx-sync.json/raw"
+        );
+    }
+
+    #[tokio::test]
+    async fn gitlab_download_uses_instance_api_for_web_raw_urls() {
+        let storage = crate::persistence::test_storage::open(&temp_db_path("gitlab-web-raw-url")).await.unwrap();
+        let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
+        let encrypted = serde_json::to_string(&encrypt_snippet_snapshot(&snapshot, "password").unwrap()).unwrap();
+        for (raw_url, reference) in [
+            ("{SERVER_BASE}/-/snippets/42/raw/master/dbx-sync.json", "master"),
+            ("http://127.0.0.1:9/-/snippets/42/raw/custom/dbx-sync.json", "custom"),
+            ("{SERVER_BASE}/gitlab/-/snippets/42/raw/feature%2Fsync/dbx-sync.json", "feature%2Fsync"),
+            ("not-a-url", "main"),
+        ] {
+            let (base, server) = spawn_gitlab_server(vec![
+                serde_json::json!({"files": [{"path": "dbx-sync.json", "raw_url": raw_url}]}).to_string(),
+                encrypted.clone(),
+            ])
+            .await;
+            let client = SnippetSyncClient::new(SnippetSyncConfig {
+                provider: SnippetProvider::GitLab,
+                instance_url: Some(base.strip_suffix("/api/v4").unwrap().to_string()),
+                token: Some("test-token".to_string()),
+                snippet_id: Some("42".to_string()),
+                replace_legacy_snippet: false,
+            })
+            .unwrap();
+            let (restored, _) = client.get_snapshot(Some("password")).await.unwrap();
+            assert_eq!(restored.app_version, snapshot.app_version);
+            let requests = server.await.unwrap();
+            assert_eq!(requests.len(), 2);
+            assert!(requests[1]
+                .starts_with(&format!("GET /api/v4/snippets/42/files/{reference}/dbx-sync.json/raw HTTP/1.1")));
+            assert!(requests[1].to_ascii_lowercase().contains("private-token: test-token"));
+        }
+    }
+
     #[tokio::test]
     async fn gitlab_download_falls_back_to_master_when_main_raw_file_is_missing() {
         let storage = crate::persistence::test_storage::open(&temp_db_path("gitlab-master-fallback")).await.unwrap();
@@ -5113,6 +5207,26 @@ mod tests {
 
         assert_eq!(target.get_secret("pg", "password").await.unwrap(), None);
         assert!(target.load_connections().await.unwrap()[0].password.is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_sync_catalog_lists_only_connections_with_exportable_secrets() {
+        let storage = crate::persistence::test_storage::open(&temp_db_path("sync-catalog-secret-count")).await.unwrap();
+        let mut unsaved = postgres_connection("unsaved", "transient-secret");
+        unsaved.save_password = false;
+        storage
+            .save_connections(&[
+                postgres_connection("with-secret", "db-secret"),
+                postgres_connection("no-secret", ""),
+                unsaved,
+            ])
+            .await
+            .unwrap();
+
+        let catalog = describe_local_sync_state(&storage, None, None).await.unwrap();
+
+        assert_eq!(catalog.connections.len(), 3);
+        assert_eq!(catalog.connection_secrets, vec!["with-secret".to_string()]);
     }
 
     #[tokio::test]

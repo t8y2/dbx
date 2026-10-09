@@ -3846,6 +3846,7 @@ async function commitMcpPolicyDraft(): Promise<void> {
     await settingsStore.updateMcpGlobalPolicy({
       readOnly: snapshot.readOnly,
       allowDangerousSql: snapshot.allowDangerousSql,
+      promptHighRiskSql: snapshot.promptHighRiskSql,
       allowedConnectionIds: snapshot.allowedConnectionIds,
       allowedGroupIds: snapshot.allowedGroupIds,
       allowedToolNames: snapshot.allowedToolNames,
@@ -3864,7 +3865,7 @@ function onMcpExecutionModeChange(mode: McpExecutionMode) {
   if (mode === "high_risk_write" && !window.confirm(t("settings.mcpExecutionModeHighRiskConfirm"))) {
     return;
   }
-  stageMcpPolicy(mcpPolicyFieldsForExecutionMode(mode));
+  stageMcpPolicy({ ...mcpPolicyFieldsForExecutionMode(mode), promptHighRiskSql: mode === "safe_write" && mcpPolicyDraft.value.promptHighRiskSql });
 }
 
 function onMcpExecutionModeKeydown(event: KeyboardEvent, mode: McpExecutionMode) {
@@ -9845,7 +9846,7 @@ LIMIT 100;</pre
                     </div>
                     <div class="space-y-2 md:col-span-2">
                       <Label for="webdav-user-agent">{{ t("settings.syncUserAgent") }}</Label>
-                      <Input id="webdav-user-agent" v-model="webdavUserAgent" autocomplete="off" placeholder="Zotero/7.0.15" />
+                      <Input id="webdav-user-agent" v-model="webdavUserAgent" autocomplete="off" placeholder="Zotero/10.0.0" />
                       <p class="text-xs text-muted-foreground">
                         {{ t("settings.syncUserAgentDescription") }}
                       </p>
@@ -11245,6 +11246,10 @@ LIMIT 100;</pre
                             </Button>
                           </div>
                           <p class="text-[11px] text-muted-foreground">{{ t("settings.mcpPermissionGlobalDefaultHint") }}</p>
+                          <label class="flex items-center gap-2 text-xs">
+                            <input type="checkbox" :checked="mcpPolicyDraft.promptHighRiskSql" :disabled="mcpPolicyControlsDisabled || mcpExecutionMode !== 'safe_write'" @change="stageMcpPolicy({ promptHighRiskSql: ($event.target as HTMLInputElement).checked })" />
+                            {{ t("settings.mcpPromptHighRiskSql") }}
+                          </label>
                           <div class="space-y-2 border-t border-border/60 pt-3">
                             <div>
                               <p class="text-xs font-medium">{{ t("settings.mcpCapabilityTitle") }}</p>

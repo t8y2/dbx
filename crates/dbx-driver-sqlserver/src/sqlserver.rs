@@ -3446,10 +3446,10 @@ pub async fn list_constraints(
                 match_type: None,
                 on_update: row.get::<&str, _>(7).filter(|value| !value.is_empty()).map(str::to_string),
                 on_delete: row.get::<&str, _>(8).filter(|value| !value.is_empty()).map(str::to_string),
-                deferrable: false,
-                initially_deferred: false,
-                enabled: row.get::<bool, _>(9).unwrap_or(true),
-                valid: row.get::<bool, _>(10).unwrap_or(true),
+                deferrable: Some(false),
+                initially_deferred: Some(false),
+                enabled: Some(row.get::<bool, _>(9).unwrap_or(true)),
+                valid: Some(row.get::<bool, _>(10).unwrap_or(true)),
             }
         })
         .collect())

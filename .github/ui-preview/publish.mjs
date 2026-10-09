@@ -134,17 +134,21 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&l
 // the page the video plays on: GitHub shows no video it didn't host itself
 function player(sha, m) {
   const shots = m.scenes.flatMap((s) => s.shots.map((x) => ({ ...x, scene: s.title })));
+  const warned = m.errors?.length || shots.some((x) => x.warn);
   return `<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>#${pr} 界面预览 · ${short(sha)}</title>
 <style>:root{color-scheme:light dark;--bg:#f6f6f7;--fg:#1d1d1f;--muted:#6e6e73;--card:#fff;--line:#e5e5ea}
 @media (prefers-color-scheme:dark){:root{--bg:#111113;--fg:#f2f2f4;--muted:#9a9aa0;--card:#1c1c1f;--line:#2c2c30}}
 body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 -apple-system,"Segoe UI","PingFang SC","Noto Sans CJK SC",sans-serif}
 main{max-width:1200px;margin:0 auto;padding:28px 16px 60px}h1{font-size:20px;margin:0 0 4px}.m{color:var(--muted);font-size:13px;margin:0 0 20px}
+.warn{margin:0 0 20px;padding:10px 14px;border:1px solid #c0392b;border-radius:10px;background:rgba(192,57,43,.07);color:#c0392b;font-size:14px}
+figure.shaky img{border-color:#c0392b}
 video,img{display:block;width:100%;border-radius:10px;border:1px solid var(--line);background:var(--card)}figure{margin:0 0 28px}figcaption{color:var(--muted);font-size:13px;margin-top:8px}
 a{color:inherit}</style>
 <main><h1>#${pr} 界面预览</h1><p class="m">commit ${short(sha)} · <a href="https://github.com/${repo}/pull/${pr}">回到 PR</a>${m.summary ? " · " + esc(m.summary) : ""}</p>
-${m.video ? `<figure><video src="${m.video}" controls autoplay muted playsinline poster="${m.poster || ""}"></video><figcaption>红线是鼠标走过的轨迹，红色圆环是一次点击；底部文字是这一步在做什么。空格暂停，← → 逐段查看。</figcaption></figure>` : ""}
-${shots.map((x) => `<figure><img src="${esc(x.file)}" alt="${esc(x.caption)}"><figcaption>${esc(x.scene)} · ${esc(x.caption)}</figcaption></figure>`).join("\n")}
+${warned ? `<p class="warn">⚠️ 这次录制有 ${m.errors?.length || 0} 步没能按计划执行${shots.some((x) => x.warn) ? "；带 ⚠️ 的截图拍摄于步骤失败之后，画面未必是说明文字所描述的状态" : ""}。</p>` : ""}
+${m.video ? `<figure><video src="${m.video}" controls autoplay muted playsinline poster="${m.poster || ""}"></video><figcaption>红线是鼠标走过的轨迹，红色圆环是一次点击；底部文字是这一步在做什么。多个场景各自从应用初始状态开始。空格暂停，← → 逐段查看。</figcaption></figure>` : ""}
+${shots.map((x) => `<figure${x.warn ? ' class="shaky"' : ""}><img src="${esc(x.file)}" alt="${esc(x.caption)}"><figcaption>${x.warn ? "⚠️ " : ""}${esc(x.scene)} · ${esc(x.caption)}</figcaption></figure>`).join("\n")}
 </main></html>`;
 }
 
@@ -176,6 +180,7 @@ async function publish() {
   if (m.summary) md += `**改动**（按代码）：${m.summary}\n\n`;
   if (m.mismatch) md += `> [!WARNING]\n> **描述与代码不符**：${m.mismatch}\n\n`;
   if (m.unseen) md += `> [!NOTE]\n> **沙盒里看不到**：${m.unseen}\n\n`;
+  if (m.errors?.length) md += `<details><summary>⚠️ 有 ${m.errors.length} 步没能照计划执行</summary>\n\n${m.errors.map((e) => "- " + e).join("\n")}\n</details>\n\n`;
   if (m.video) {
     md += `[![播放录屏](${raw}${m.poster})](${site})\n\n`;
     md += `<sub>▶️ 点图打开录屏（可暂停、拖动）· [直接下载 mp4](${raw}${m.video}) · 红线是鼠标轨迹，红色圆环是点击</sub>\n\n`;
@@ -184,9 +189,8 @@ async function publish() {
     if (!s.shots.length) continue;
     md += `#### ${s.title}\n\n`;
     // shown at its own size (they're taken at 2x), a full page no wider than 760
-    for (const x of s.shots) md += `<img src="${raw}${x.file}" width="${Math.min(760, Math.round((x.width || 1520) / 2))}" alt="${esc(x.caption)}">\n\n${x.caption}\n\n`;
+    for (const x of s.shots) md += `<img src="${raw}${x.file}" width="${Math.min(760, Math.round((x.width || 1520) / 2))}" alt="${esc(x.caption)}">\n\n${x.warn ? "⚠️ " : ""}${x.caption}\n\n`;
   }
-  if (m.errors?.length) md += `<details><summary>⚠️ 有 ${m.errors.length} 步没能照计划执行</summary>\n\n${m.errors.map((e) => "- " + e).join("\n")}\n</details>\n`;
   await setBlock(md);
 }
 

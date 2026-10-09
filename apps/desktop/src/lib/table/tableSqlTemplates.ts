@@ -158,7 +158,42 @@ function columnPlaceholderValue(column: ColumnInfo, databaseType?: DatabaseType)
   if (typeLooksSpatial(dataType)) return "NULL";
   if (typeLooksArray(dataType)) return "'{}'";
 
-  return `'${colName}_value'`;
+  return stringPlaceholderValue(colName, column.character_maximum_length);
+}
+
+// Byte-aware budget so byte-length columns (Oracle VARCHAR2 N BYTE) stay safe
+// even when the column name carries multi-byte characters.
+function utf8Length(value: string): number {
+  let length = 0;
+  for (const char of value) {
+    const code = char.codePointAt(0)!;
+    length += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
+  }
+  return length;
+}
+
+/**
+ * `col_value` placeholder clipped to the column's declared length: the name
+ * part shrinks so the recognizable `_value` suffix survives; when even the
+ * suffix cannot fit, it degrades to a clipped suffix so the statement stays
+ * executable.
+ */
+function stringPlaceholderValue(colName: string, maxLength: number | null | undefined): string {
+  const value = `${colName}_value`;
+  const limit = typeof maxLength === "number" && Number.isFinite(maxLength) && maxLength > 0 ? maxLength : null;
+  if (limit === null || utf8Length(value) <= limit) return `'${value}'`;
+  const suffixLength = utf8Length("_value");
+  if (suffixLength > limit) return `'${"_value".slice(0, limit)}'`;
+  const nameBudget = limit - suffixLength;
+  let name = "";
+  let used = 0;
+  for (const char of colName) {
+    const charLength = utf8Length(char);
+    if (used + charLength > nameBudget) break;
+    name += char;
+    used += charLength;
+  }
+  return `'${name}_value'`;
 }
 
 function typeLooksNumeric(dataType: string): boolean {

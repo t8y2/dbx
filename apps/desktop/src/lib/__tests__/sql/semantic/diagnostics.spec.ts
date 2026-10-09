@@ -56,3 +56,45 @@ describe("buildSqlSemanticDiagnostics GROUP BY violations", () => {
     expect(diagnostics[0]?.severity).toBe("error");
   });
 });
+
+describe("buildSqlSemanticDiagnostics Oracle pseudo-columns", () => {
+  const buildAnalysis = (sql: string, token: string, options: { quoted?: boolean; qualifier?: string } = {}) => {
+    const tokenStart = sql.indexOf(token);
+    const start = options.quoted ? tokenStart - 1 : tokenStart;
+    const end = options.quoted ? tokenStart + token.length + 1 : tokenStart + token.length;
+    return {
+      tables: [{ name: "users", span: span(sql.indexOf("users") + 1, sql.indexOf("users") + "users".length) }],
+      columns: [{ name: token, qualifier: options.qualifier ?? null, span: span(start + 1, end) }],
+    };
+  };
+
+  it("accepts unqualified Oracle pseudo-columns missing from table metadata", () => {
+    const sql = "SELECT * FROM users WHERE ROWNUM < 10;";
+    const analysis = buildAnalysis(sql, "ROWNUM");
+
+    const diagnostics = buildSqlSemanticDiagnostics(analysis, {
+      tables: [{ name: "users" }],
+      columnsByTable: new Map([["users", [{ name: "id" }]]]),
+      loadedColumnTables: new Set(["users"]),
+      sql,
+      databaseType: "oracle",
+    });
+
+    expect(diagnostics).toEqual([]);
+  });
+
+  it("keeps validating quoted pseudo-column names as real columns", () => {
+    const sql = 'SELECT * FROM users WHERE "ROWNUM" < 10;';
+    const analysis = buildAnalysis(sql, "ROWNUM", { quoted: true });
+
+    const diagnostics = buildSqlSemanticDiagnostics(analysis, {
+      tables: [{ name: "users" }],
+      columnsByTable: new Map([["users", [{ name: "id" }]]]),
+      loadedColumnTables: new Set(["users"]),
+      sql,
+      databaseType: "oracle",
+    });
+
+    expect(diagnostics.map((diagnostic) => diagnostic.message)).toEqual(["Unknown column ROWNUM"]);
+  });
+});

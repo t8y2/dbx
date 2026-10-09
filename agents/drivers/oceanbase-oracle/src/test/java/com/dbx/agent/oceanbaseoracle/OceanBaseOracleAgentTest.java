@@ -430,9 +430,9 @@ class OceanBaseOracleAgentTest {
         List<String> sql = new ArrayList<>();
         OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
         TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
-            new String[]{"OBJECT_NAME", "OBJECT_TYPE"},
+            new String[]{"OBJECT_NAME", "OBJECT_TYPE", "COMMENTS"},
             new Object[][]{
-                {"FORMAT_USER", "FUNCTION"}
+                {"FORMAT_USER", "FUNCTION", null}
             }
         )));
 

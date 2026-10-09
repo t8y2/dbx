@@ -199,14 +199,18 @@ export function endsWithLineComment(nodes: AstNode[]): boolean {
  * The keyword a node opens its line with, or `null` for a node that is part of
  * an expression. Clauses, set operations and limit clauses each start a line.
  */
-export function bodyKeyword(node: AstNode): string | null {
+export function bodyKeywordNode(node: AstNode): KeywordNode | null {
   if (node.type === "clause" || node.type === "set_operation") {
-    return (node as ClauseNode | SetOperationNode).nameKw.text;
+    return (node as ClauseNode | SetOperationNode).nameKw;
   }
   if (node.type === "limit_clause") {
-    return (node as LimitClauseNode).limitKw.text;
+    return (node as LimitClauseNode).limitKw;
   }
   return null;
+}
+
+export function bodyKeyword(node: AstNode): string | null {
+  return bodyKeywordNode(node)?.text ?? null;
 }
 
 export function isBodyNode(node: AstNode): boolean {
@@ -238,14 +242,17 @@ export function limitChildren(node: LimitClauseNode): AstNode[] {
   return node.offset ? [...node.offset, LIMIT_SEPARATOR, ...node.count] : [...node.count];
 }
 
-export function keywordText(text: string, ctx: SqlLayoutContext): string {
+export function keywordText(token: AstNode | string, ctx: SqlLayoutContext): string {
+  const text = typeof token === "string" ? token : (token as KeywordNode).text;
+  const raw = typeof token === "object" && token && "raw" in token && typeof (token as KeywordNode).raw === "string" ? (token as KeywordNode).raw : undefined;
   switch (ctx.options.keywordCase) {
     case "upper":
       return text.toUpperCase();
     case "lower":
       return text.toLowerCase();
+    case "preserve":
     default:
-      return text;
+      return raw ? raw.replace(/\s+/g, " ") : text;
   }
 }
 
@@ -273,7 +280,7 @@ function containsComments(value: unknown, seen = new Set<object>()): boolean {
 function renderCompactCaseExpression(ctx: SqlLayoutContext, node: CaseExpressionNode, width: number): string | null {
   if (containsComments(node)) return null;
 
-  const parts: string[] = [keywordText(node.caseKw.text, ctx)];
+  const parts: string[] = [keywordText(node.caseKw, ctx)];
   const append = (text: string | null): boolean => {
     if (!text) return false;
     parts.push(text);
@@ -284,17 +291,17 @@ function renderCompactCaseExpression(ctx: SqlLayoutContext, node: CaseExpression
 
   for (const clause of node.clauses) {
     if (clause.type === "case_when") {
-      if (!append(keywordText(clause.whenKw.text, ctx))) return null;
+      if (!append(keywordText(clause.whenKw, ctx))) return null;
       if (!append(renderInline(collapsedContext(ctx), clause.condition, width))) return null;
-      if (!append(keywordText(clause.thenKw.text, ctx))) return null;
+      if (!append(keywordText(clause.thenKw, ctx))) return null;
       if (!append(renderInline(collapsedContext(ctx), clause.result, width))) return null;
     } else {
-      if (!append(keywordText(clause.elseKw.text, ctx))) return null;
+      if (!append(keywordText(clause.elseKw, ctx))) return null;
       if (!append(renderInline(collapsedContext(ctx), clause.result, width))) return null;
     }
   }
 
-  if (!append(keywordText(node.endKw.text, ctx))) return null;
+  if (!append(keywordText(node.endKw, ctx))) return null;
   return parts.join(" ");
 }
 
@@ -460,15 +467,16 @@ export function renderInline(ctx: SqlLayoutContext, nodes: AstNode[], width: num
   const parts: string[] = [];
   let used = 0;
   for (const node of nodes) {
-    const keyword = bodyKeyword(node);
-    if (!keyword) return null;
+    const kwNode = bodyKeywordNode(node);
+    if (!kwNode) return null;
     const childCtx = node.type === "limit_clause" ? ctx : clauseChildContext(ctx, node as ClauseNode);
     const children = node.type === "limit_clause" ? limitChildren(node as LimitClauseNode) : (node as ClauseNode).children;
-    const text = renderInline(childCtx, children, width - used - keyword.length - 2);
+    const kwText = keywordText(kwNode, ctx);
+    const text = renderInline(childCtx, children, width - used - kwText.length - 2);
     if (!text) return null;
-    used += (parts.length > 0 ? 1 : 0) + keyword.length + 1 + text.length;
+    used += (parts.length > 0 ? 1 : 0) + kwText.length + 1 + text.length;
     if (used > width) return null;
-    parts.push(`${keywordText(keyword, ctx)} ${text}`);
+    parts.push(`${kwText} ${text}`);
   }
   return parts.join(" ");
 }
@@ -580,7 +588,7 @@ function renderLogicalJoin(ctx: SqlLayoutContext, nodes: AstNode[], width: numbe
       continue;
     }
     if (!flush()) return null;
-    const operator = keywordText(node.text, ctx);
+    const operator = keywordText(node, ctx);
     used += operator.length + 1;
     parts.push(operator);
   }

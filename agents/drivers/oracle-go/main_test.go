@@ -4421,3 +4421,40 @@ func TestOracleTnsAliasName(t *testing.T) {
 		}
 	}
 }
+
+func TestOraclePlanTableNamePrefersSessionUserTable(t *testing.T) {
+	cases := []struct {
+		name                      string
+		sessionOwner, sessionName string
+		publicOwner, publicName   string
+		want                      string
+	}{
+		{
+			name:         "session user table shadows the public synonym",
+			sessionOwner: "U_BROKEN", sessionName: "PLAN_TABLE",
+			publicOwner: "SYS", publicName: "PLAN_TABLE$",
+			want: `"U_BROKEN"."PLAN_TABLE"`,
+		},
+		{
+			name:        "public synonym target when the schema has no own table",
+			publicOwner: "SYS", publicName: "PLAN_TABLE$",
+			want: `"SYS"."PLAN_TABLE$"`,
+		},
+		{
+			name: "bare name when nothing resolves",
+			want: "PLAN_TABLE",
+		},
+		{
+			name:         "quoted mixed case object is escaped",
+			sessionOwner: "user_1", sessionName: `plan"table`,
+			want: `"user_1"."plan""table"`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := oraclePlanTableName(tc.sessionOwner, tc.sessionName, tc.publicOwner, tc.publicName); got != tc.want {
+				t.Fatalf("oraclePlanTableName() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

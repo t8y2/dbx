@@ -9,7 +9,7 @@
 import type { SqlTextSpan } from "@/types/database";
 import type { SqlSemanticDiagnostic } from "@/lib/sql/semantic/diagnostics";
 import { findMatchingParen, hasUnclosedMongoDelimiters, trimMongoOuterComments } from "@dbx-app/mongo-shell";
-import { bulkWriteFilters, describeMongoCommandParseFailure, mongoFilterIsEffectivelyUnbounded, parseMongoCommand, splitMongoCommandTextRanges, type MongoCommand, type MongoTextRange } from "@/lib/mongo/mongoShellCommand";
+import { bulkWriteFilters, describeMongoCommandParseFailure, isMongoCommandText, mongoFilterIsEffectivelyUnbounded, parseMongoCommand, splitMongoCommandTextRanges, type MongoCommand, type MongoTextRange } from "@/lib/mongo/mongoShellCommand";
 
 const UNCLOSED_MESSAGE = "MongoDB command has unclosed parentheses, brackets, braces, or strings.";
 
@@ -24,10 +24,15 @@ export function buildMongoSyntaxDiagnostics(source: string, cursor = -1): SqlSem
   const diagnostics: SqlSemanticDiagnostic[] = [];
   const segments = splitMongoCommandTextRanges(source);
   const current = segmentAtCursor(segments, cursor, source.length);
+  // Shell users keep JS helper statements between commands (`var ids = [...]` feeding a
+  // later `$in`). Those lines are not commands dbx can validate, and trying to diagnose
+  // them is what made the command above them carry a bogus "Unexpected text after find(...)".
+  const hasCommand = segments.some((segment) => isMongoCommandText(trimMongoOuterComments(segment.text)));
 
   for (const segment of segments) {
     const text = trimMongoOuterComments(segment.text).trim().replace(/;$/, "").trim();
     if (!text) continue;
+    if (hasCommand && !isMongoCommandText(text)) continue;
 
     if (hasUnclosedMongoDelimiters(text)) {
       // A command still being typed under the cursor is not an error yet.

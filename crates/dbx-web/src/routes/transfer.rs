@@ -95,11 +95,13 @@ pub async fn start_transfer(
         )));
     }
 
+    let source_db_type = transfer::get_db_type(&state.app, &req.source_connection_id).await.map_err(AppError::from)?;
+    let target_db_type = transfer::get_db_type(&state.app, &req.target_connection_id).await.map_err(AppError::from)?;
+    transfer::validate_transfer_database_pair(&req, &source_db_type, &target_db_type).map_err(AppError::from)?;
+
     // `drop_target_before_create` rebuilds target tables. Gate it before responding so the
     // caller sees the error code rather than a progress stream that fails later.
     if req.drop_target_before_create {
-        let target_db_type =
-            transfer::get_db_type(&state.app, &req.target_connection_id).await.map_err(AppError::from)?;
         dbx_core::transfer_rebuild::ensure_drop_target_allowed(
             &state.app,
             &req.target_connection_id,
@@ -135,23 +137,6 @@ pub async fn start_transfer(
     let state_clone = state.clone();
 
     tokio::spawn(async move {
-        let source_db_type = match transfer::get_db_type(&app, &req.source_connection_id).await {
-            Ok(t) => t,
-            Err(e) => {
-                send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, e));
-                finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
-                return;
-            }
-        };
-        let target_db_type = match transfer::get_db_type(&app, &req.target_connection_id).await {
-            Ok(t) => t,
-            Err(e) => {
-                send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, e));
-                finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
-                return;
-            }
-        };
-
         // Cross-family object transfers are validated inside transfer_schema_objects:
         // only mechanically rewriteable kinds (views, sequences) are allowed; any
         // other selection fails with a descriptive error. Structure-only data
@@ -660,6 +645,7 @@ pub async fn preview_transfer_ownership(
     transfer::validate_transfer_request(&req).map_err(AppError::from)?;
     let source_db_type = transfer::get_db_type(&state.app, &req.source_connection_id).await.map_err(AppError::from)?;
     let target_db_type = transfer::get_db_type(&state.app, &req.target_connection_id).await.map_err(AppError::from)?;
+    transfer::validate_transfer_database_pair(&req, &source_db_type, &target_db_type).map_err(AppError::from)?;
     let source_pool_key = transfer::ensure_transfer_pool(
         &state.app,
         &req.source_connection_id,
@@ -774,6 +760,7 @@ mod tests {
             visible_schemas: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
+            show_database_links: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,

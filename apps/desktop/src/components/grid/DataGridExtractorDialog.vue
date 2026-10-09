@@ -167,6 +167,8 @@ function save() {
             </Select>
           </div>
 
+          <p v-if="draftExtractor === 'raw'" class="text-xs text-muted-foreground">{{ t("grid.copyExtractorRawHint") }}</p>
+
           <template v-if="isDsv">
             <div v-if="draftExtractor === 'dsv'" class="space-y-1.5">
               <Label>{{ t("grid.copyExtractorColumnSeparator") }}</Label>

@@ -75,6 +75,7 @@ fn live_sqlserver_config(id: &str, database: &str) -> ConnectionConfig {
         production_databases: vec![],
         show_system_schemas: false,
         sidebar_auto_load_all_tables: false,
+        show_database_links: None,
         database_info: None,
     }
 }

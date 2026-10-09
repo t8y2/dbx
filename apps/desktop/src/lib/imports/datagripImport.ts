@@ -10,6 +10,7 @@ type PartialConnection = Omit<ConnectionConfig, "id">;
 export type DataGripImportResult = {
   connections: ConnectionConfig[];
   layout?: SidebarLayout;
+  fallbackUsernamesCount?: number;
 };
 
 export type DataGripImportPayload = {
@@ -26,6 +27,7 @@ type DataSourceFragment = {
   jdbcUrl: string;
   driverClass: string;
   username: string;
+  password?: string;
   product: string;
   groupName?: string;
 };
@@ -134,14 +136,23 @@ function parseJdbcUrl(jdbcUrl: string): {
   host: string;
   port: number;
   database: string;
+  username?: string;
+  password?: string;
   oracleConnectionType?: "service_name" | "sid";
 } {
   const url = jdbcUrl.replace(/^jdbc:/i, "").trim();
-  const result = {
+  const result: {
+    host: string;
+    port: number;
+    database: string;
+    username?: string;
+    password?: string;
+    oracleConnectionType?: "service_name" | "sid";
+  } = {
     host: "",
     port: 0,
     database: "",
-    oracleConnectionType: undefined as "service_name" | "sid" | undefined,
+    oracleConnectionType: undefined,
   };
 
   // SQL Server: jdbc:sqlserver://host[:port][;key=value]
@@ -151,13 +162,26 @@ function parseJdbcUrl(jdbcUrl: string): {
     result.port = getNumber(sqlServerMatch[2]);
     for (const part of (sqlServerMatch[3] || "").split(";")) {
       const [key, ...rest] = part.split("=");
-      if (/^(databasename|database)$/i.test(key)) result.database = rest.join("=");
+      const val = rest.join("=");
+      if (/^(databasename|database)$/i.test(key)) result.database = val;
+      else if (/^(user|username|uid)$/i.test(key)) result.username = val;
+      else if (/^(password|pwd)$/i.test(key)) result.password = val;
     }
     return result;
   }
 
+  // Oracle thin: optional user[:password]@ or user/password@ before @// or @host
+  let oracleUrl = url;
+  const oracleAuthMatch = url.match(/^oracle:thin:([^/@:]+)(?::([^@]+)|\/([^@]+))?@/i);
+  if (oracleAuthMatch) {
+    result.username = safeDecodeURIComponent(oracleAuthMatch[1]);
+    const pass = oracleAuthMatch[2] || oracleAuthMatch[3];
+    if (pass) result.password = safeDecodeURIComponent(pass);
+    oracleUrl = "oracle:thin:@" + url.slice(oracleAuthMatch[0].length);
+  }
+
   // Oracle thin with service_name: jdbc:oracle:thin:@//host:port/service
-  const oracleService = url.match(/^oracle:thin:@\/\/([^:/]+)(?::(\d+))?\/([^?]+)/i);
+  const oracleService = oracleUrl.match(/^oracle:thin:@\/\/([^:/]+)(?::(\d+))?\/([^?]+)/i);
   if (oracleService) {
     result.host = oracleService[1];
     result.port = getNumber(oracleService[2]);
@@ -167,7 +191,7 @@ function parseJdbcUrl(jdbcUrl: string): {
   }
 
   // Oracle thin with SID: jdbc:oracle:thin:@host:port:sid
-  const oracleSid = url.match(/^oracle:thin:@([^:/]+)(?::(\d+))?:([^?]+)/i);
+  const oracleSid = oracleUrl.match(/^oracle:thin:@([^:/]+)(?::(\d+))?:([^?]+)/i);
   if (oracleSid) {
     result.host = oracleSid[1];
     result.port = getNumber(oracleSid[2]);
@@ -202,11 +226,46 @@ function parseJdbcUrl(jdbcUrl: string): {
   if (schemeEnd === -1) return result;
 
   let remainder = url.slice(schemeEnd + 3);
-  remainder = remainder.split("?")[0];
+  let queryParams = "";
+  const queryIndex = remainder.indexOf("?");
+  if (queryIndex >= 0) {
+    queryParams = remainder.slice(queryIndex + 1);
+    remainder = remainder.slice(0, queryIndex);
+  }
 
   const slashIndex = remainder.indexOf("/");
-  const authority = (slashIndex >= 0 ? remainder.slice(0, slashIndex) : remainder).split("@").pop() || "";
+  const authorityWithAuth = slashIndex >= 0 ? remainder.slice(0, slashIndex) : remainder;
   const database = slashIndex >= 0 ? remainder.slice(slashIndex + 1) : "";
+
+  let authority = authorityWithAuth;
+  const atIndex = authorityWithAuth.lastIndexOf("@");
+  if (atIndex >= 0) {
+    const authPart = authorityWithAuth.slice(0, atIndex);
+    authority = authorityWithAuth.slice(atIndex + 1);
+    const colonIndex = authPart.indexOf(":");
+    if (colonIndex >= 0) {
+      result.username = safeDecodeURIComponent(authPart.slice(0, colonIndex));
+      result.password = safeDecodeURIComponent(authPart.slice(colonIndex + 1));
+    } else {
+      result.username = safeDecodeURIComponent(authPart);
+    }
+  }
+
+  if (queryParams) {
+    try {
+      const searchParams = new URLSearchParams(queryParams);
+      const user = searchParams.get("user") || searchParams.get("username") || searchParams.get("user-name") || searchParams.get("userName") || searchParams.get("uid");
+      if (user && !result.username) {
+        result.username = user;
+      }
+      const pass = searchParams.get("password") || searchParams.get("pwd");
+      if (pass && !result.password) {
+        result.password = pass;
+      }
+    } catch {
+      // ignore query parsing errors
+    }
+  }
 
   const firstHost = authority.split(",")[0] || authority;
   if (firstHost.startsWith("[")) {
@@ -273,6 +332,57 @@ function inferProfile(driverRef: string, subprotocol: string, driverClass: strin
 
 // --- XML parsing ---
 
+function extractUserName(element: Element): string {
+  // 1. Common direct text elements: <user-name>, <username>, <user>
+  for (const tag of ["user-name", "username", "user"]) {
+    const val = getText(element, tag);
+    if (val) return val;
+  }
+
+  // 2. Direct XML attributes on <data-source>: user-name, username, user
+  for (const attr of ["user-name", "username", "user"]) {
+    const val = element.getAttribute(attr)?.trim();
+    if (val) return val;
+  }
+
+  // 3. Child <property name="..." value="..." /> tags
+  const properties = element.getElementsByTagName("property");
+  for (const prop of Array.from(properties)) {
+    const name = prop.getAttribute("name")?.toLowerCase().trim();
+    if (name === "user" || name === "username" || name === "user-name" || name === "user_name") {
+      const val = prop.getAttribute("value")?.trim() || prop.getAttribute("text")?.trim() || prop.textContent?.trim();
+      if (val) return val;
+    }
+  }
+
+  // 4. Nested elements in <database-info>, <auth>, <credentials>, <auth-provider>
+  for (const containerTag of ["database-info", "auth", "credentials", "auth-provider"]) {
+    const container = element.getElementsByTagName(containerTag)[0];
+    if (container) {
+      for (const attr of ["user-name", "username", "user"]) {
+        const val = container.getAttribute(attr)?.trim();
+        if (val) return val;
+      }
+      for (const tag of ["user-name", "username", "user"]) {
+        const val = getText(container, tag);
+        if (val) return val;
+      }
+    }
+  }
+
+  return "";
+}
+
+// Real DataGrip passwords can contain literal `%` sequences that are not valid
+// percent-encoding; decoding must never abort the whole import for those.
+function safeDecodeURIComponent(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 function parseDataSourcesXml(xml: string): Map<string, Partial<DataSourceFragment>> {
   const doc = new DOMParser().parseFromString(xml, "application/xml");
   if (doc.querySelector("parsererror")) return new Map();
@@ -298,7 +408,7 @@ function parseDataSourcesXml(xml: string): Map<string, Partial<DataSourceFragmen
     const driverClass = getText(element, "jdbc-driver");
     if (driverClass) fragment.driverClass = driverClass;
 
-    const userName = getText(element, "user-name");
+    const userName = extractUserName(element);
     if (userName) fragment.username = userName;
 
     // DataGrip stores the folder grouping as a `group` attribute on each
@@ -328,7 +438,7 @@ function parseDataSourcesLocalXml(xml: string): Map<string, Partial<DataSourceFr
       name: element.getAttribute("name") || undefined,
     };
 
-    const userName = getText(element, "user-name");
+    const userName = extractUserName(element);
     if (userName) fragment.username = userName;
 
     // Extract product from <database-info product="...">
@@ -415,6 +525,8 @@ function mergeFragments(shared: Map<string, Partial<DataSourceFragment>>, local:
       driverRef: existing.driverRef || localFrag.driverRef,
       jdbcUrl: existing.jdbcUrl || localFrag.jdbcUrl,
       driverClass: existing.driverClass || localFrag.driverClass,
+      username: localFrag.username || existing.username,
+      password: localFrag.password || existing.password,
       groupName: existing.groupName || localFrag.groupName,
     });
   }
@@ -430,6 +542,7 @@ function mergeFragments(shared: Map<string, Partial<DataSourceFragment>>, local:
       jdbcUrl: frag.jdbcUrl,
       driverClass: frag.driverClass || "",
       username: frag.username || "",
+      password: frag.password || "",
       product: frag.product || "",
       groupName: frag.groupName,
     });
@@ -438,7 +551,7 @@ function mergeFragments(shared: Map<string, Partial<DataSourceFragment>>, local:
   return resolved;
 }
 
-function buildConnection(fragment: DataSourceFragment): ConnectionConfig {
+function buildConnection(fragment: DataSourceFragment): { connection: ConnectionConfig; usernameFallback: boolean } {
   const subprotocol = extractSubprotocol(fragment.jdbcUrl);
   const profile = inferProfile(fragment.driverRef, subprotocol, fragment.driverClass, fragment.product);
   const parsed = parseJdbcUrl(fragment.jdbcUrl);
@@ -446,7 +559,10 @@ function buildConnection(fragment: DataSourceFragment): ConnectionConfig {
   const host = parsed.host || (profile.dbType === "sqlite" ? "" : "127.0.0.1");
   const port = parsed.port || profile.port;
   const database = parsed.database || undefined;
-  const username = fragment.username || profile.user;
+  const explicitUsername = fragment.username || parsed.username;
+  const usernameFallback = !explicitUsername && Boolean(profile.user);
+  const username = explicitUsername || profile.user;
+  const password = fragment.password || parsed.password || "";
   const name = fragment.name || database || host || profile.label;
 
   const partial: PartialConnection = {
@@ -458,7 +574,7 @@ function buildConnection(fragment: DataSourceFragment): ConnectionConfig {
     host,
     port,
     username,
-    password: "",
+    password,
     database,
     color: "",
     transport_layers: [],
@@ -471,7 +587,7 @@ function buildConnection(fragment: DataSourceFragment): ConnectionConfig {
     jdbc_driver_paths: [],
   };
 
-  return { ...partial, id: uuid() };
+  return { connection: { ...partial, id: uuid() }, usernameFallback };
 }
 
 // --- Public API ---
@@ -494,9 +610,10 @@ export function parseDataGripImport(payload: DataGripImportPayload): DataGripImp
   const configs: ConnectionConfig[] = [];
   const connectionGroupPaths = new Map<string, string>();
   const seen = new Set<string>();
+  let fallbackUsernamesCount = 0;
 
   for (const fragment of fragments) {
-    const config = buildConnection(fragment);
+    const { connection: config, usernameFallback } = buildConnection(fragment);
     // Custom-driver sources without a <driver-ref> are kept only when a concrete
     // database type is recognised. DataGrip ships no built-in Kingbase driver, so
     // every Kingbase connection is custom (configured by URL, no driver-ref).
@@ -508,6 +625,7 @@ export function parseDataGripImport(payload: DataGripImportPayload): DataGripImp
     if (seen.has(key)) continue;
     seen.add(key);
     configs.push(config);
+    if (usernameFallback) fallbackUsernamesCount++;
     const groupPath = forestGroupPaths.get(fragment.uuid) || fragment.groupName;
     if (groupPath) connectionGroupPaths.set(config.id, groupPath);
   }
@@ -519,7 +637,7 @@ export function parseDataGripImport(payload: DataGripImportPayload): DataGripImp
     new Set(connectionGroupPaths.values()),
     connectionGroupPaths,
   );
-  return { connections: configs, layout };
+  return { connections: configs, layout, fallbackUsernamesCount };
 }
 
 export function parseDataGripConnections(payload: DataGripImportPayload): ConnectionConfig[] {

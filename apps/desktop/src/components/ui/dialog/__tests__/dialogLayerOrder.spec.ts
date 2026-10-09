@@ -317,3 +317,53 @@ describe("dialog layer order", () => {
     expect(getComputedStyle(popperWrapper!).zIndex).toContain("80");
   });
 });
+
+describe("non-modal floating dialogs", () => {
+  it("leaves the background interactive and stays open when it receives focus", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const state = reactive({ open: true, clicks: 0 });
+    const app = createApp(
+      defineComponent({
+        setup: () => () => [
+          h("button", { id: "background-action", onClick: () => state.clicks++ }, "Background"),
+          h(
+            Dialog,
+            {
+              open: state.open,
+              modal: false,
+              "onUpdate:open": (value: boolean) => {
+                state.open = value;
+              },
+            },
+            {
+              default: () =>
+                h(
+                  DialogContent,
+                  { onInteractOutside: (event: Event) => event.preventDefault() },
+                  {
+                    default: () => h(DialogTitle, null, { default: () => "Floating export" }),
+                  },
+                ),
+            },
+          ),
+        ],
+      }),
+    );
+    app.use(createI18n({ legacy: false, locale: "en", messages: { en: {} } }));
+    app.mount(host);
+    mountedApps.push({ unmount: () => app.unmount(), host });
+    await flush();
+    expect(document.querySelector('[data-slot="dialog-overlay"]')).toBeNull();
+    expect(document.body.style.pointerEvents).not.toBe("none");
+    const button = host.querySelector<HTMLButtonElement>("#background-action")!;
+    expect(button.closest('[aria-hidden="true"]')).toBeNull();
+    button.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "mouse" }));
+    button.focus();
+    button.click();
+    await flush();
+    expect(state.open).toBe(true);
+    expect(state.clicks).toBe(1);
+    expect(document.activeElement).toBe(button);
+  });
+});

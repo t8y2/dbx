@@ -8,6 +8,10 @@
 
 use super::*;
 
+fn xugu_table_ddl_is_unavailable(sql: &str) -> bool {
+    sql.trim().is_empty() || sql.contains("XuguDB did not expose enough metadata to reconstruct")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct PreparedTableDdl {
     pub ddl: String,
@@ -147,9 +151,21 @@ pub(super) async fn prepare_table_ddl(
             )
             .await
             {
+                Ok(ddl)
+                    if matches!((source_db_type, target_db_type), (DatabaseType::Xugu, DatabaseType::Xugu))
+                        && xugu_table_ddl_is_unavailable(&ddl) =>
+                {
+                    return Err(format!(
+                        "Cannot transfer Xugu table '{table}': the source Agent could not return complete table DDL. \
+                         Check metadata privileges and retry; generating a reduced table definition could lose identity, \
+                         constraints, indexes, or partitioning."
+                    ));
+                }
                 Ok(ddl) => (ddl, true),
                 Err(e)
-                    if rebuild || matches!((source_db_type, target_db_type), (DatabaseType::H2, DatabaseType::H2)) =>
+                    if rebuild
+                        || matches!((source_db_type, target_db_type), (DatabaseType::H2, DatabaseType::H2))
+                        || matches!((source_db_type, target_db_type), (DatabaseType::Xugu, DatabaseType::Xugu)) =>
                 {
                     // Rebuilds and H2-to-H2 transfers must not silently discard source
                     // constraints or generated columns when native DDL cannot be read.
@@ -462,5 +478,14 @@ mod tests {
             .await;
             assert!(result.is_err(), "incomplete source metadata must fail before any target DDL: {result:?}");
         }
+    }
+
+    #[test]
+    fn xugu_native_ddl_placeholder_or_empty_text_is_not_treated_as_a_valid_table_definition() {
+        assert!(xugu_table_ddl_is_unavailable("  "));
+        assert!(xugu_table_ddl_is_unavailable(
+            "-- XuguDB did not expose enough metadata to reconstruct APP.T.\n-- grant access"
+        ));
+        assert!(!xugu_table_ddl_is_unavailable("CREATE TABLE \"APP\".\"T\" (\"ID\" INTEGER)"));
     }
 }

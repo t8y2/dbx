@@ -57,6 +57,41 @@ export function clearLastExportDirectory(): void {
   }
 }
 
+/**
+ * 数据库备份专用 key。备份目录通常和「数据导出」目录不同（常是挂载盘或专用备份盘），
+ * 因此与 LAST_EXPORT_DIRECTORY_STORAGE_KEY 分开存储，避免两者互相覆盖。
+ */
+export const LAST_BACKUP_DIRECTORY_STORAGE_KEY = "dbx-last-backup-directory";
+
+/** 读取上次使用过的数据库备份目录，未记录时返回空串。 */
+export function getLastBackupDirectory(): string {
+  try {
+    return safeLocalStorageGet(LAST_BACKUP_DIRECTORY_STORAGE_KEY)?.trim() || "";
+  } catch {
+    return "";
+  }
+}
+
+/** 记住数据库备份目录，供下次新建备份时作为默认值（issue #11317）。 */
+export function setLastBackupDirectory(directory: string): void {
+  const trimmed = directory.trim();
+  if (!trimmed) return;
+  try {
+    safeLocalStorageSet(LAST_BACKUP_DIRECTORY_STORAGE_KEY, trimmed);
+  } catch {
+    // Ignore storage write errors
+  }
+}
+
+/** 清除已记录的备份目录。 */
+export function clearLastBackupDirectory(): void {
+  try {
+    safeLocalStorageRemove(LAST_BACKUP_DIRECTORY_STORAGE_KEY);
+  } catch {
+    // Ignore storage errors
+  }
+}
+
 export function resolveExportDefaultPath(fileName: string, options?: { preferredPath?: string }): string {
   const trimmedName = fileName.trim();
   if (isAbsolutePath(trimmedName)) {

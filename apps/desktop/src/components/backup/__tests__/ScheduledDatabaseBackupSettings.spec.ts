@@ -5,9 +5,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "../../../i18n";
 import ScheduledDatabaseBackupSettings from "../ScheduledDatabaseBackupSettings.vue";
 import type { DatabaseBackupRun, DatabaseBackupSchedule } from "../../../lib/backup/scheduledDatabaseBackup";
+import { LAST_BACKUP_DIRECTORY_STORAGE_KEY } from "../../../lib/export/exportPath";
 
 const mocks = vi.hoisted(() => ({
   desktop: true,
+  preferredExportPath: "",
   sqlFileSource: null as any,
   prepareDatabaseBackupRestore: vi.fn(),
   connections: [] as Array<{ id: string; name: string; db_type: string }>,
@@ -33,6 +35,7 @@ const mocks = vi.hoisted(() => ({
   renameRun: vi.fn(),
   runSchedule: vi.fn(),
   runOneShot: vi.fn(),
+  runOneShotBatch: vi.fn(),
   cancelRun: vi.fn(),
 }));
 
@@ -51,6 +54,10 @@ vi.mock("@/stores/connectionStore", () => ({
   }),
 }));
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => mocks.desktop }));
+
+vi.mock("@/stores/settingsStore", () => ({
+  useSettingsStore: () => ({ editorSettings: { preferredExportPath: mocks.preferredExportPath } }),
+}));
 
 vi.mock("@/composables/useScheduledDatabaseBackups", () => ({
   useScheduledDatabaseBackups: () => ({
@@ -71,6 +78,7 @@ vi.mock("@/composables/useScheduledDatabaseBackups", () => ({
     renameRun: mocks.renameRun,
     runSchedule: mocks.runSchedule,
     runOneShot: mocks.runOneShot,
+    runOneShotBatch: mocks.runOneShotBatch,
     cancelRun: mocks.cancelRun,
   }),
 }));
@@ -140,6 +148,12 @@ function currentDialog(): HTMLElement {
   return dialog;
 }
 
+function destinationInput(): HTMLInputElement {
+  const input = currentDialog().querySelector<HTMLInputElement>(".backup-destination-field input");
+  if (!input) throw new Error("Backup destination input not found");
+  return input;
+}
+
 async function selectDialogOption(triggerIndex: number, optionText: string) {
   const trigger = currentDialog().querySelectorAll<HTMLButtonElement>('[data-slot="select-trigger"]')[triggerIndex];
   if (!trigger) throw new Error(`Select trigger not found: ${triggerIndex}`);
@@ -175,6 +189,29 @@ async function selectBackupConnection(connectionName: string) {
   if (!option) throw new Error(`Backup connection option not found: ${connectionName}`);
   option.click();
   await flush();
+}
+
+/** Toggles connections in the one-shot multi-select picker; the popover stays open between clicks. */
+async function toggleBackupConnections(...connectionNames: string[]) {
+  const trigger = currentDialog().querySelector<HTMLButtonElement>("[data-backup-connection-picker]");
+  if (!trigger) throw new Error("Backup connection picker not found");
+  trigger.click();
+  await flush();
+  for (const connectionName of connectionNames) {
+    const option = Array.from(document.body.querySelectorAll<HTMLButtonElement>('button[role="checkbox"]')).find((item) => item.textContent?.trim() === connectionName);
+    if (!option) throw new Error(`Backup connection option not found: ${connectionName}`);
+    option.click();
+    await flush();
+  }
+  trigger.click();
+  await flush();
+}
+
+function startBackupButton(): HTMLButtonElement {
+  const label = String(i18n.global.t("databaseBackup.startBackup"));
+  const button = Array.from(currentDialog().querySelectorAll<HTMLButtonElement>("button")).find((item) => item.textContent?.trim() === label);
+  if (!button) throw new Error("Start backup button not found");
+  return button;
 }
 
 async function selectHistoryConnection(connectionName: string) {
@@ -279,6 +316,9 @@ afterEach(() => {
   for (const app of mountedApps.splice(0)) app.unmount();
   document.body.innerHTML = "";
   mocks.desktop = true;
+  mocks.preferredExportPath = "";
+  // 上次备份目录存于 localStorage，需在用例间清理，避免互相污染
+  window.localStorage.clear();
   mocks.sqlFileSource = null;
   mocks.prepareDatabaseBackupRestore.mockReset();
   mocks.connections.splice(0);
@@ -312,6 +352,8 @@ afterEach(() => {
   mocks.runSchedule.mockResolvedValue(null);
   mocks.runOneShot.mockReset();
   mocks.runOneShot.mockResolvedValue(null);
+  mocks.runOneShotBatch.mockReset();
+  mocks.runOneShotBatch.mockResolvedValue({ runs: [], enqueueErrors: [] });
 });
 
 describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
@@ -607,6 +649,50 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
     expect(mocks.runOneShot).toHaveBeenCalledWith(expect.objectContaining({ connectionId: "mysql-1", destinationDirectory: "/backups", databases: [] }), String(i18n.global.t("databaseBackup.oneShotName")));
   });
 
+  it("defaults a new backup directory to the last used backup directory", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    window.localStorage.setItem(LAST_BACKUP_DIRECTORY_STORAGE_KEY, "/previous/backups");
+    await mountSettings();
+
+    buttonWithText(String(i18n.global.t("databaseBackup.oneShotBackup"))).click();
+    await flush();
+
+    expect(destinationInput().value).toBe("/previous/backups");
+  });
+
+  it("falls back to the preferred export path when no backup directory was used yet", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    mocks.preferredExportPath = "/preferred/exports";
+    await mountSettings();
+
+    buttonWithText(String(i18n.global.t("databaseBackup.oneShotBackup"))).click();
+    await flush();
+
+    expect(destinationInput().value).toBe("/preferred/exports");
+  });
+
+  it("opens the picker at the current directory and remembers the choice", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    window.localStorage.setItem(LAST_BACKUP_DIRECTORY_STORAGE_KEY, "/previous/backups");
+    await mountSettings();
+
+    buttonWithText(String(i18n.global.t("databaseBackup.oneShotBackup"))).click();
+    await flush();
+    buttonWithTitle(String(i18n.global.t("databaseBackup.selectDestination"))).click();
+    await flush();
+
+    expect(mocks.openDirectory).toHaveBeenCalledWith(expect.objectContaining({ directory: true, defaultPath: "/previous/backups" }));
+    expect(window.localStorage.getItem(LAST_BACKUP_DIRECTORY_STORAGE_KEY)).toBe("/backups");
+
+    // 重新挂载后再次打开「立即备份」，默认目录应为上次选择的 /backups
+    for (const app of mountedApps.splice(0)) app.unmount();
+    document.body.innerHTML = "";
+    await mountSettings();
+    buttonWithText(String(i18n.global.t("databaseBackup.oneShotBackup"))).click();
+    await flush();
+    expect(destinationInput().value).toBe("/backups");
+  });
+
   it("sends an exact one-shot table whitelist and prevents an empty selection from starting", async () => {
     mocks.connections.push({ id: "pg-1", name: "Local PostgreSQL", db_type: "postgres" });
     await mountSettings();
@@ -657,7 +743,9 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
     await flush();
     await showDatabaseOptions();
     await vi.waitFor(() => expect(mocks.listDatabases).toHaveBeenCalledWith("mysql-a"));
-    await selectBackupConnection("MySQL B");
+    // The one-shot picker is a multi-select: add B, then drop A to end up with B only.
+    await toggleBackupConnections("MySQL B", "MySQL A");
+    await showDatabaseOptions();
     await vi.waitFor(() => expect(mocks.listDatabases).toHaveBeenCalledWith("mysql-b"));
 
     secondLoad.resolve([{ name: "new_database" }]);
@@ -691,6 +779,138 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
     expect(currentDialog().textContent).toContain("billing");
     expect(currentDialog().textContent).not.toContain("analytics");
     expect(currentDialog().textContent).not.toContain("application");
+  });
+
+  it("queues one backup per selected connection, always for all databases", async () => {
+    mocks.connections.push({ id: "mysql-a", name: "MySQL A", db_type: "mysql" }, { id: "mysql-b", name: "MySQL B", db_type: "mysql" }, { id: "pg-c", name: "PostgreSQL C", db_type: "postgres" });
+    mocks.runOneShotBatch.mockResolvedValueOnce({
+      runs: [
+        { id: "run-a", status: "success", files: [] },
+        { id: "run-b", status: "failed", files: [], error: "boom" },
+      ],
+      enqueueErrors: [],
+    });
+    await mountSettings();
+    buttonWithText(String(i18n.global.t("databaseBackup.oneShotBackup"))).click();
+    await flush();
+    buttonWithTitle(String(i18n.global.t("databaseBackup.selectDestination"))).click();
+    await flush();
+
+    await toggleBackupConnections("PostgreSQL C");
+    expect(currentDialog().querySelector("[data-backup-connection-picker]")?.textContent).toContain(String(i18n.global.t("databaseBackup.connectionsSelected", { count: 2 })));
+    expect(startBackupButton().disabled).toBe(false);
+    startBackupButton().click();
+    await flush();
+
+    expect(mocks.runOneShot).not.toHaveBeenCalled();
+    expect(mocks.runOneShotBatch).toHaveBeenCalledTimes(1);
+    const [configs, displayName] = mocks.runOneShotBatch.mock.calls[0]!;
+    expect(displayName).toBe(String(i18n.global.t("databaseBackup.oneShotName")));
+    expect(configs).toHaveLength(2);
+    expect(configs.map((config: { connectionId: string }) => config.connectionId)).toEqual(["mysql-a", "pg-c"]);
+    expect(configs).toEqual([expect.objectContaining({ databases: [], destinationDirectory: "/backups" }), expect.objectContaining({ databases: [], destinationDirectory: "/backups" })]);
+    expect(mocks.toast).toHaveBeenLastCalledWith(String(i18n.global.t("databaseBackup.batchRunSummary", { success: 1, failed: 1, cancelled: 0 })), 5000);
+    expect(document.body.querySelector('[data-slot="dialog-content"]')).toBeNull();
+  });
+
+  it("limits several connections to all databases and run-id file names", async () => {
+    mocks.connections.push({ id: "pg-a", name: "PostgreSQL A", db_type: "postgres" }, { id: "pg-b", name: "PostgreSQL B", db_type: "postgres" });
+    await mountSettings();
+    buttonWithText(String(i18n.global.t("databaseBackup.oneShotBackup"))).click();
+    await flush();
+    buttonWithTitle(String(i18n.global.t("databaseBackup.selectDestination"))).click();
+    await flush();
+    await showDatabaseOptions();
+    const database = Array.from(currentDialog().querySelectorAll<HTMLInputElement>('input[type="checkbox"]')).find((item) => item.parentElement?.textContent?.trim() === "app")!;
+    database.checked = true;
+    database.dispatchEvent(new Event("change", { bubbles: true }));
+    await selectDialogOption(0, String(i18n.global.t("databaseBackup.exactTables")));
+    await flush();
+    expect(currentDialog().querySelector("[data-backup-table-selector]")).not.toBeNull();
+
+    await toggleBackupConnections("PostgreSQL B");
+
+    // Per-connection scope is dropped and can no longer be chosen.
+    expect(currentDialog().querySelector("[data-backup-multi-connection-hint]")?.textContent).toContain(String(i18n.global.t("databaseBackup.multiConnectionScopeHint")));
+    expect(currentDialog().querySelector("[data-backup-database-search]")).toBeNull();
+    expect(currentDialog().querySelector("[data-backup-table-selector]")).toBeNull();
+    expect(startBackupButton().disabled).toBe(false);
+    const trigger = currentDialog().querySelectorAll<HTMLButtonElement>('[data-slot="select-trigger"]')[0]!;
+    trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+    await flush();
+    const options = Array.from(document.body.querySelectorAll<HTMLElement>('[role="option"]')).map((item) => item.textContent?.trim());
+    expect(options).not.toContain(String(i18n.global.t("databaseBackup.exactTables")));
+    expect(options).toContain(String(i18n.global.t("databaseBackup.includeTables")));
+    document.body.querySelector<HTMLElement>('[role="option"]')?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    await flush();
+
+    // Backups started together share a timestamp, so the file name must stay unique per run.
+    const pattern = currentDialog().querySelector<HTMLInputElement>("[data-backup-file-name-pattern]")!;
+    pattern.value = "{database}";
+    pattern.dispatchEvent(new Event("input", { bubbles: true }));
+    await flush();
+    expect(currentDialog().querySelector("[data-backup-file-name-run-id-required]")).not.toBeNull();
+    expect(startBackupButton().disabled).toBe(true);
+    pattern.value = "{database}-{runId}";
+    pattern.dispatchEvent(new Event("input", { bubbles: true }));
+    await flush();
+    expect(currentDialog().querySelector("[data-backup-file-name-run-id-required]")).toBeNull();
+    expect(startBackupButton().disabled).toBe(false);
+
+    // Back to one connection restores the per-connection options, and a missing {runId} is fine again.
+    pattern.value = "{database}";
+    pattern.dispatchEvent(new Event("input", { bubbles: true }));
+    await toggleBackupConnections("PostgreSQL A");
+    expect(currentDialog().querySelector("[data-backup-multi-connection-hint]")).toBeNull();
+    expect(currentDialog().querySelector("[data-backup-database-search]")).toBeNull(); // still "all databases"
+    expect(currentDialog().textContent).toContain(String(i18n.global.t("databaseBackup.allDatabases")));
+    expect(startBackupButton().disabled).toBe(false);
+  });
+
+  it("cancels every run of a multi-connection backup", async () => {
+    mocks.connections.push({ id: "mysql-a", name: "MySQL A", db_type: "mysql" }, { id: "mysql-b", name: "MySQL B", db_type: "mysql" });
+    const runs = ["run-a", "run-b"].map((id, index) => ({ id, scheduleName: "One-time backup", connectionId: index ? "mysql-b" : "mysql-a", connectionName: "", trigger: "manual", source: "one-shot", status: "running", startedAt: "2026-08-18T00:00:00.000Z", files: [] }) satisfies DatabaseBackupRun);
+    const pendingBatch = deferred<{ runs: DatabaseBackupRun[]; enqueueErrors: unknown[] }>();
+    mocks.runOneShotBatch.mockImplementationOnce((_configs: unknown, _name: string, onQueued: (run: DatabaseBackupRun) => void) => {
+      runs.forEach(onQueued);
+      return pendingBatch.promise;
+    });
+    mocks.cancelRun.mockResolvedValue(true);
+    await mountSettings();
+    buttonWithText(String(i18n.global.t("databaseBackup.oneShotBackup"))).click();
+    await flush();
+    buttonWithTitle(String(i18n.global.t("databaseBackup.selectDestination"))).click();
+    await flush();
+    await toggleBackupConnections("MySQL B");
+    // The mocked activeRuns ref is not reactive, so the runs must be active before the batch starts.
+    mocks.activeRuns.push(...runs);
+    mocks.runs.push(...runs);
+    startBackupButton().click();
+    await flush();
+
+    const cancelButton = Array.from(currentDialog().querySelectorAll<HTMLButtonElement>("button")).find((item) => item.title === String(i18n.global.t("databaseBackup.cancel")));
+    expect(cancelButton?.disabled).toBe(false);
+    cancelButton?.click();
+    await flush();
+
+    expect(mocks.cancelRun.mock.calls.map(([id]) => id).sort()).toEqual(["run-a", "run-b"]);
+    pendingBatch.resolve({ runs: runs.map((run) => ({ ...run, status: "cancelled" as const })), enqueueErrors: [] });
+    await flush();
+    expect(mocks.toast).toHaveBeenLastCalledWith(String(i18n.global.t("databaseBackup.batchRunSummary", { success: 0, failed: 0, cancelled: 2 })), 5000);
+  });
+
+  it("keeps the schedule connection picker single-select", async () => {
+    mocks.connections.push({ id: "mysql-a", name: "MySQL A", db_type: "mysql" }, { id: "mysql-b", name: "MySQL B", db_type: "mysql" });
+    await mountSettings();
+    addScheduleButton().click();
+    await flush();
+
+    await selectBackupConnection("MySQL B");
+
+    const trigger = currentDialog().querySelector("[data-backup-connection-picker]");
+    expect(trigger?.textContent).toContain("MySQL B");
+    expect(document.body.querySelector("[data-backup-connection-search]")).toBeNull(); // picker closed after one pick
+    expect(document.body.querySelector('button[role="checkbox"]')).toBeNull();
   });
 
   it("does not let a closed one-shot request clear a schedule draft", async () => {

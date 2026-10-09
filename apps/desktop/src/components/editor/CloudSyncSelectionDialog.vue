@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { ChevronDown, ChevronRight, FoldVertical, FolderOpen, ListChecks, ListX, UnfoldVertical } from "@lucide/vue";
+import { ChevronDown, ChevronRight, FoldVertical, FolderOpen, ListChecks, ListX, Lock, UnfoldVertical } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import type { PluginUiStorageItemRef, SyncCatalogItem, SyncSelection, SyncSnapshotCatalog } from "@/lib/backend/api";
@@ -28,9 +28,11 @@ const emit = defineEmits<{
 }>();
 
 const selection = ref<SyncSelection>(emptySelection());
-const secretsPassphraseRequired = ref(false);
 const localExportPathRequired = ref(false);
 const isRestore = computed(() => props.mode === "restore");
+// Without a passphrase no encrypted item can be selected, so the dialog hides the secret
+// checkboxes entirely and shows a persistent hint inside the affected groups instead.
+const secretsUnavailable = computed(() => props.secretsPassphraseAvailable === false);
 
 const SYNC_GROUP_IDS = ["connections", "tunnels", "savedSql", "settings", "secrets", "workspace"] as const;
 type SyncGroupId = (typeof SYNC_GROUP_IDS)[number];
@@ -41,6 +43,13 @@ function toggleGroup(id: SyncGroupId) {
   const next = new Set(collapsedGroups.value);
   if (next.has(id)) next.delete(id);
   else next.add(id);
+  collapsedGroups.value = next;
+}
+
+function expandGroup(id: SyncGroupId) {
+  if (!collapsedGroups.value.has(id)) return;
+  const next = new Set(collapsedGroups.value);
+  next.delete(id);
   collapsedGroups.value = next;
 }
 
@@ -202,6 +211,18 @@ const secretsSummary = computed(() => {
   return { selected, total };
 });
 
+// Connection/tunnel credentials render per-item under their own groups; the aggregate rows inside
+// the encrypted group exist so the group header count adds up to its visible children.
+const connectionSecretsSummary = computed(() => ({
+  selected: props.catalog?.connectionSecrets.filter((id) => selection.value.connectionSecrets?.includes(id)).length ?? 0,
+  total: props.catalog?.connectionSecrets.length ?? 0,
+}));
+
+const tunnelSecretsSummary = computed(() => ({
+  selected: props.catalog?.tunnelSecrets.filter((id) => selection.value.tunnelSecrets?.includes(id)).length ?? 0,
+  total: props.catalog?.tunnelSecrets.length ?? 0,
+}));
+
 const workspaceSummary = computed(() => {
   const catalog = props.catalog;
   if (!catalog) return { selected: 0, total: 0 };
@@ -240,26 +261,28 @@ function resetFromCatalog() {
   const catalog = props.catalog;
   if (!catalog) return;
   const saved = catalog.selection;
+  const secretsAvailable = !secretsUnavailable.value;
   const desktopSettings = selectableDesktopSettings(catalog);
   const editorSettings = selectableEditorSettings(catalog);
   selection.value = {
     ...emptySelection(),
     connections: saved?.connections ?? catalog.connections.map((item) => item.id),
-    connectionSecrets: saved?.connectionSecrets ?? (catalog.hasEncryptedSecrets ? catalog.connectionSecrets : []),
+    connectionSecrets: secretsAvailable ? (saved?.connectionSecrets ?? (catalog.hasEncryptedSecrets ? catalog.connectionSecrets : [])) : [],
     tunnelProfiles: saved?.tunnelProfiles ?? catalog.tunnelProfiles.map((item) => item.id),
-    tunnelSecrets: saved?.tunnelSecrets ?? (catalog.hasEncryptedSecrets ? catalog.tunnelSecrets : []),
+    tunnelSecrets: secretsAvailable ? (saved?.tunnelSecrets ?? (catalog.hasEncryptedSecrets ? catalog.tunnelSecrets : [])) : [],
     savedSqlFolders: saved?.savedSqlFolders ?? catalog.savedSqlFolders.map((item) => item.id),
     savedSqlFiles: saved?.savedSqlFiles ?? catalog.savedSqlFiles.map((item) => item.id),
     desktopSettings: selectedSettings(saved?.desktopSettings, desktopSettings),
     editorSettings: selectedSettings(saved?.editorSettings, editorSettings),
-    aiConfigs: saved?.aiConfigs ?? (catalog.aiConfigsLocked ? undefined : catalog.aiConfigs.map((item) => item.id)),
+    aiConfigs: secretsAvailable ? (saved?.aiConfigs ?? (catalog.aiConfigsLocked ? undefined : catalog.aiConfigs.map((item) => item.id))) : [],
     // While locked the plugin items cannot be enumerated, so the selection is an aggregate "include all" flag.
     // The encrypted blob only contains what the saved selection covered, so `undefined` restores the same data.
-    pluginUiStorage: catalog.pluginUiStorageLocked ? undefined : (saved?.pluginUiStorage ?? catalog.pluginUiStorage),
+    // `[]` (not `undefined`) when no passphrase is available: `undefined` would mean "include all".
+    pluginUiStorage: secretsAvailable ? (catalog.pluginUiStorageLocked ? undefined : (saved?.pluginUiStorage ?? catalog.pluginUiStorage)) : [],
     sidebarLayout: saved?.sidebarLayout ?? catalog.hasSidebarLayout,
     pinnedTreeNodeIds: saved?.pinnedTreeNodeIds ?? catalog.hasPinnedTreeNodeIds,
-    includeSecrets: props.secretsPassphraseAvailable === false ? false : (saved?.includeSecrets ?? (isRestore.value ? catalog.hasEncryptedSecrets : !!props.defaultIncludeSecrets)),
-    syncCredentials: saved?.syncCredentials ?? (isRestore.value ? catalog.hasEncryptedSecrets : !!props.defaultIncludeSecrets),
+    includeSecrets: secretsAvailable && (saved?.includeSecrets ?? (isRestore.value ? catalog.hasEncryptedSecrets : !!props.defaultIncludeSecrets)),
+    syncCredentials: secretsAvailable && (saved?.syncCredentials ?? (isRestore.value ? catalog.hasEncryptedSecrets : !!props.defaultIncludeSecrets)),
   };
   if (selection.value.includeSecrets && !saved) fillMissingSecrets();
 }
@@ -268,7 +291,6 @@ watch(
   () => [props.open, props.catalog] as const,
   ([open]) => {
     if (open) {
-      secretsPassphraseRequired.value = false;
       localExportPathRequired.value = false;
       collapsedGroups.value = new Set(SYNC_GROUP_IDS);
       resetFromCatalog();
@@ -342,15 +364,30 @@ function pluginGroupState(group: { items: PluginUiStorageItemRef[] }): Selection
   return selected === 0 ? "none" : selected === group.items.length ? "all" : "partial";
 }
 
+// Deselecting a connection/tunnel also drops its credentials: a kept secret id would stay counted
+// in the encrypted aggregate even though its owner is no longer part of the backup.
+function pruneOrphanSecrets(key: "connections" | "tunnelProfiles") {
+  const secretsKey = key === "connections" ? "connectionSecrets" : "tunnelSecrets";
+  const owners = new Set(ids(key));
+  const kept = ids(secretsKey).filter((id) => owners.has(id));
+  if (kept.length !== ids(secretsKey).length) {
+    selection.value[secretsKey] = kept;
+    syncIncludeSecrets();
+  }
+}
+
 function toggleId(key: "connections" | "connectionSecrets" | "tunnelProfiles" | "tunnelSecrets" | "savedSqlFolders" | "savedSqlFiles" | "desktopSettings" | "editorSettings" | "aiConfigs", id: string) {
   const current = ids(key);
-  selection.value[key] = current.includes(id) ? current.filter((item) => item !== id) : [...current, id];
+  const removing = current.includes(id);
+  selection.value[key] = removing ? current.filter((item) => item !== id) : [...current, id];
+  if (removing && (key === "connections" || key === "tunnelProfiles")) pruneOrphanSecrets(key);
 }
 
 function toggleAll(key: "connections" | "tunnelProfiles" | "savedSqlFolders" | "savedSqlFiles" | "desktopSettings" | "editorSettings" | "aiConfigs", items: SyncCatalogItem[]) {
   const current = ids(key);
   const isAllSelected = items.length > 0 && items.every((item) => current.includes(item.id));
   selection.value[key] = isAllSelected ? [] : items.map((item) => item.id);
+  if (isAllSelected && (key === "connections" || key === "tunnelProfiles")) pruneOrphanSecrets(key);
 }
 
 function toggleSavedSql() {
@@ -447,6 +484,27 @@ function toggleAllAiConfigs() {
   syncIncludeSecrets();
 }
 
+// The aggregate credential rows toggle every connection/tunnel secret id at once, under the same
+// passphrase gate as the other encrypted items.
+function toggleSecretIdsAll(key: "connectionSecrets" | "tunnelSecrets", event: Event) {
+  const catalogIds = (key === "connectionSecrets" ? props.catalog?.connectionSecrets : props.catalog?.tunnelSecrets) ?? [];
+  // Credentials of deselected connections/tunnels are filtered out server-side (metadata_ids),
+  // so the aggregate row must only select ids whose owner row is still selected.
+  const ownerIds = ids(key === "connectionSecrets" ? "connections" : "tunnelProfiles");
+  const selectableIds = catalogIds.filter((id) => ownerIds.includes(id));
+  const current = ids(key);
+  const allSelected = selectableIds.length > 0 && selectableIds.every((id) => current.includes(id));
+  if (!allSelected && !ensureSecretsEnabled()) {
+    // State did not change, so Vue will not re-sync the checkbox the user just flipped; revert it manually.
+    const input = event.target as HTMLInputElement;
+    input.checked = false;
+    input.indeterminate = summaryState(key === "connectionSecrets" ? connectionSecretsSummary.value : tunnelSecretsSummary.value) === "partial";
+    return;
+  }
+  selection.value[key] = allSelected ? [] : [...selectableIds];
+  syncIncludeSecrets();
+}
+
 // The encrypted group checkbox is an aggregate over its items: locked `undefined` selections count as "include all".
 function secretsLeafSelected(): boolean {
   const s = selection.value;
@@ -489,9 +547,14 @@ function fillMissingSecrets() {
 
 function onSecretsGroupChanged(event: Event) {
   const input = event.target as HTMLInputElement;
+  if (secretsUnavailable.value) {
+    // Nothing inside can be selected without a passphrase; open the group so the hint explains why.
+    input.checked = false;
+    expandGroup("secrets");
+    return;
+  }
   if (summaryState(secretsSummary.value) === "all") {
     clearAllSecretsItems();
-    secretsPassphraseRequired.value = false;
     return;
   }
   if (!ensureSecretsEnabled()) {
@@ -507,11 +570,7 @@ function onSecretsGroupChanged(event: Event) {
 // (same passphrase guard as the master checkbox), while unchecking stays allowed.
 function ensureSecretsEnabled(): boolean {
   if (selection.value.includeSecrets) return true;
-  if (props.secretsPassphraseAvailable === false) {
-    secretsPassphraseRequired.value = true;
-    return false;
-  }
-  secretsPassphraseRequired.value = false;
+  if (secretsUnavailable.value) return false;
   selection.value.includeSecrets = true;
   return true;
 }
@@ -560,10 +619,10 @@ function selectAllItems() {
   const catalog = props.catalog;
   if (!catalog) return;
   // Encrypted items only make sense when the snapshot has them (restore) and the passphrase is available;
-  // otherwise surface the same passphrase hint the encrypted checkbox would show.
+  // otherwise expand the encrypted group so its hint explains what was skipped.
   const wantsSecrets = !isRestore.value || catalog.hasEncryptedSecrets;
   const secretsAvailable = wantsSecrets && props.secretsPassphraseAvailable !== false;
-  secretsPassphraseRequired.value = wantsSecrets && !secretsAvailable;
+  if (wantsSecrets && !secretsAvailable) expandGroup("secrets");
   selection.value = {
     connections: catalog.connections.map((item) => item.id),
     connectionSecrets: secretsAvailable ? [...catalog.connectionSecrets] : [],
@@ -584,7 +643,6 @@ function selectAllItems() {
 }
 
 function deselectAllItems() {
-  secretsPassphraseRequired.value = false;
   selection.value = emptySelection();
 }
 
@@ -667,12 +725,15 @@ function confirmSelection() {
             <ChevronRight v-else class="size-4 shrink-0 text-muted-foreground" />
           </summary>
           <div class="ml-6 space-y-1 pb-2">
+            <p v-if="secretsUnavailable && catalog.connectionSecrets.length" class="py-1 text-xs text-destructive">
+              {{ t("settings.localBackupSecretsPassphraseRequiredHint") }}
+            </p>
             <div v-for="item in catalog.connections" :key="item.id" class="py-1">
               <label class="flex min-h-7 items-center gap-2 text-sm">
                 <input :checked="checked('connections', item.id)" type="checkbox" class="size-4 accent-primary" @change="toggleId('connections', item.id)" />
                 <span class="min-w-0 truncate">{{ item.label || item.id }}</span>
               </label>
-              <label v-if="catalog.connectionSecrets.includes(item.id)" class="ml-6 flex min-h-7 items-center gap-2 text-xs text-muted-foreground">
+              <label v-if="!secretsUnavailable && catalog.connectionSecrets.includes(item.id)" class="ml-6 flex min-h-7 items-center gap-2 text-xs text-muted-foreground">
                 <input :checked="checked('connectionSecrets', item.id)" :disabled="!selection.connections?.includes(item.id)" type="checkbox" class="size-3.5 accent-primary" @change="toggleSecretId('connectionSecrets', item.id, $event)" />
                 <span>{{ t("settings.syncSelectionConnectionSecrets") }}</span>
               </label>
@@ -698,12 +759,15 @@ function confirmSelection() {
             <ChevronRight v-else class="size-4 shrink-0 text-muted-foreground" />
           </summary>
           <div class="ml-6 space-y-1 pb-2">
+            <p v-if="secretsUnavailable && catalog.tunnelSecrets.length" class="py-1 text-xs text-destructive">
+              {{ t("settings.localBackupSecretsPassphraseRequiredHint") }}
+            </p>
             <div v-for="item in catalog.tunnelProfiles" :key="item.id" class="py-1">
               <label class="flex min-h-7 items-center gap-2 text-sm">
                 <input :checked="checked('tunnelProfiles', item.id)" type="checkbox" class="size-4 accent-primary" @change="toggleId('tunnelProfiles', item.id)" />
                 <span class="min-w-0 truncate">{{ item.label || item.id }}</span>
               </label>
-              <label v-if="catalog.tunnelSecrets.includes(item.id)" class="ml-6 flex min-h-7 items-center gap-2 text-xs text-muted-foreground">
+              <label v-if="!secretsUnavailable && catalog.tunnelSecrets.includes(item.id)" class="ml-6 flex min-h-7 items-center gap-2 text-xs text-muted-foreground">
                 <input :checked="checked('tunnelSecrets', item.id)" :disabled="!selection.tunnelProfiles?.includes(item.id)" type="checkbox" class="size-3.5 accent-primary" @change="toggleSecretId('tunnelSecrets', item.id, $event)" />
                 <span>{{ t("settings.syncSelectionTunnelSecrets") }}</span>
               </label>
@@ -779,58 +843,81 @@ function confirmSelection() {
           <summary class="flex cursor-pointer list-none items-center gap-2 py-2 text-sm font-medium" @click.prevent="toggleGroup('secrets')">
             <input :checked="summaryState(secretsSummary) === 'all'" :indeterminate="summaryState(secretsSummary) === 'partial'" type="checkbox" class="size-4 accent-primary" @click.stop @change="onSecretsGroupChanged($event)" />
             <span>{{ t("settings.syncSelectionEncrypted") }}</span>
+            <Lock v-if="secretsUnavailable" class="size-3.5 shrink-0 text-muted-foreground" />
             <span class="ml-auto text-xs text-muted-foreground">{{ secretsSummary.selected }}/{{ secretsSummary.total }}</span>
             <ChevronDown v-if="!collapsedGroups.has('secrets')" class="size-4 shrink-0 text-muted-foreground" />
             <ChevronRight v-else class="size-4 shrink-0 text-muted-foreground" />
           </summary>
           <div class="ml-6 space-y-2 pb-2">
-            <p v-if="secretsPassphraseRequired" role="alert" class="text-xs text-destructive">
-              {{ t("settings.localBackupSecretsPassphraseRequiredHint") }}
-            </p>
-            <label class="flex min-h-7 items-center gap-2 text-sm">
-              <input :checked="selection.syncCredentials" type="checkbox" class="size-4 accent-primary" @change="onSyncCredentialsChanged($event)" />
-              <span>{{ t("settings.syncSelectionSyncCredentials") }}</span>
-            </label>
-            <div>
-              <label v-if="catalog.aiConfigsLocked" class="flex min-h-7 items-center gap-2 text-sm">
-                <input :checked="selection.aiConfigs === undefined" type="checkbox" class="size-4 accent-primary" @change="onAiConfigsToggleAll($event)" />
-                <span>{{ t("settings.syncSelectionAiLocked") }}</span>
+            <template v-if="secretsUnavailable">
+              <p v-if="isRestore && !catalog.hasEncryptedSecrets" class="text-xs text-muted-foreground">
+                {{ t("settings.syncSelectionNoEncrypted") }}
+              </p>
+              <p v-else role="alert" class="text-xs text-destructive">
+                {{ t("settings.localBackupSecretsPassphraseRequiredHint") }}
+              </p>
+            </template>
+            <template v-else>
+              <label class="flex min-h-7 items-center gap-2 text-sm">
+                <input :checked="selection.syncCredentials" type="checkbox" class="size-4 accent-primary" @change="onSyncCredentialsChanged($event)" />
+                <span>{{ t("settings.syncSelectionSyncCredentials") }}</span>
               </label>
-              <template v-else>
-                <label class="mb-1 flex items-center gap-2 text-xs font-medium text-muted-foreground hover:text-foreground">
-                  <input :checked="aiConfigsState === 'all'" :indeterminate="aiConfigsState === 'partial'" :disabled="!catalog.aiConfigs.length" type="checkbox" class="size-3.5 accent-primary" @change="onAiConfigsToggleAll($event)" />
-                  <span>{{ t("settings.syncSelectionAiConfigs") }} ({{ selection.aiConfigs?.length ?? 0 }}/{{ catalog.aiConfigs.length }})</span>
-                </label>
-                <label v-for="item in catalog.aiConfigs" :key="item.id" class="flex min-h-7 items-center gap-2 text-sm">
-                  <input :checked="checked('aiConfigs', item.id)" type="checkbox" class="size-4 accent-primary" @change="toggleSecretId('aiConfigs', item.id, $event)" />
-                  <span class="min-w-0 truncate">{{ item.label || item.id }}</span>
-                </label>
-              </template>
-            </div>
-            <div>
-              <label v-if="catalog.pluginUiStorageLocked" class="flex min-h-7 items-center gap-2 text-sm">
-                <input :checked="selection.pluginUiStorage === undefined" type="checkbox" class="size-4 accent-primary" @change="onPluginToggleAll($event)" />
-                <span>{{ t("settings.syncSelectionPluginLocked") }}</span>
+              <label class="flex min-h-7 items-center gap-2 text-sm">
+                <input
+                  :checked="summaryState(connectionSecretsSummary) === 'all'"
+                  :indeterminate="summaryState(connectionSecretsSummary) === 'partial'"
+                  :disabled="!connectionSecretsSummary.total"
+                  type="checkbox"
+                  class="size-4 accent-primary"
+                  @change="toggleSecretIdsAll('connectionSecrets', $event)"
+                />
+                <span>{{ t("settings.syncSelectionConnectionCredentials") }} ({{ connectionSecretsSummary.selected }}/{{ connectionSecretsSummary.total }})</span>
               </label>
-              <template v-else>
-                <label class="mb-1 flex items-center gap-2 text-xs font-medium text-muted-foreground hover:text-foreground">
-                  <input :checked="pluginUiStorageState === 'all'" :indeterminate="pluginUiStorageState === 'partial'" :disabled="!catalog.pluginUiStorage.length" type="checkbox" class="size-3.5 accent-primary" @change="onPluginToggleAll($event)" />
-                  <span>{{ t("settings.syncSelectionPluginData") }} ({{ selection.pluginUiStorage?.length ?? 0 }}/{{ catalog.pluginUiStorage.length }})</span>
+              <label class="flex min-h-7 items-center gap-2 text-sm">
+                <input :checked="summaryState(tunnelSecretsSummary) === 'all'" :indeterminate="summaryState(tunnelSecretsSummary) === 'partial'" :disabled="!tunnelSecretsSummary.total" type="checkbox" class="size-4 accent-primary" @change="toggleSecretIdsAll('tunnelSecrets', $event)" />
+                <span>{{ t("settings.syncSelectionTunnelSecrets") }} ({{ tunnelSecretsSummary.selected }}/{{ tunnelSecretsSummary.total }})</span>
+              </label>
+              <div>
+                <label v-if="catalog.aiConfigsLocked" class="flex min-h-7 items-center gap-2 text-sm">
+                  <input :checked="selection.aiConfigs === undefined" type="checkbox" class="size-4 accent-primary" @change="onAiConfigsToggleAll($event)" />
+                  <span>{{ t("settings.syncSelectionAiLocked") }}</span>
                 </label>
-                <div v-for="group in pluginUiGroups" :key="group.pluginId" class="pl-1">
+                <template v-else>
                   <label class="mb-1 flex items-center gap-2 text-xs font-medium text-muted-foreground hover:text-foreground">
-                    <input :checked="pluginGroupState(group) === 'all'" :indeterminate="pluginGroupState(group) === 'partial'" type="checkbox" class="size-3.5 accent-primary" @change="togglePluginGroup(group.pluginId, $event)" />
-                    <span class="min-w-0 truncate">{{ group.name }} ({{ pluginGroupSelected(group) }}/{{ group.items.length }})</span>
+                    <input :checked="aiConfigsState === 'all'" :indeterminate="aiConfigsState === 'partial'" :disabled="!catalog.aiConfigs.length" type="checkbox" class="size-3.5 accent-primary" @change="onAiConfigsToggleAll($event)" />
+                    <span>{{ t("settings.syncSelectionAiConfigs") }} ({{ selection.aiConfigs?.length ?? 0 }}/{{ catalog.aiConfigs.length }})</span>
                   </label>
-                  <label v-for="item in group.items" :key="item.key" class="flex min-h-7 items-center gap-2 pl-3 text-sm">
-                    <input :checked="selection.pluginUiStorage?.some((entry) => entry.pluginId === item.pluginId && entry.key === item.key)" type="checkbox" class="size-4 accent-primary" @change="togglePluginItem(item.pluginId, item.key, $event)" />
-                    <span class="min-w-0 truncate">{{ item.key }}</span>
+                  <label v-for="item in catalog.aiConfigs" :key="item.id" class="flex min-h-7 items-center gap-2 text-sm">
+                    <input :checked="checked('aiConfigs', item.id)" type="checkbox" class="size-4 accent-primary" @change="toggleSecretId('aiConfigs', item.id, $event)" />
+                    <span class="min-w-0 truncate">{{ item.label || item.id }}</span>
                   </label>
-                </div>
-                <p v-if="!catalog.pluginUiStorage.length" class="text-xs text-muted-foreground">{{ t("settings.syncSelectionNoPluginData") }}</p>
-              </template>
-            </div>
-            <p v-if="!catalog.hasEncryptedSecrets && isRestore" class="text-xs text-muted-foreground">{{ t("settings.syncSelectionNoEncrypted") }}</p>
+                </template>
+              </div>
+              <div>
+                <label v-if="catalog.pluginUiStorageLocked" class="flex min-h-7 items-center gap-2 text-sm">
+                  <input :checked="selection.pluginUiStorage === undefined" type="checkbox" class="size-4 accent-primary" @change="onPluginToggleAll($event)" />
+                  <span>{{ t("settings.syncSelectionPluginLocked") }}</span>
+                </label>
+                <template v-else>
+                  <label class="mb-1 flex items-center gap-2 text-xs font-medium text-muted-foreground hover:text-foreground">
+                    <input :checked="pluginUiStorageState === 'all'" :indeterminate="pluginUiStorageState === 'partial'" :disabled="!catalog.pluginUiStorage.length" type="checkbox" class="size-3.5 accent-primary" @change="onPluginToggleAll($event)" />
+                    <span>{{ t("settings.syncSelectionPluginData") }} ({{ selection.pluginUiStorage?.length ?? 0 }}/{{ catalog.pluginUiStorage.length }})</span>
+                  </label>
+                  <div v-for="group in pluginUiGroups" :key="group.pluginId" class="pl-1">
+                    <label class="mb-1 flex items-center gap-2 text-xs font-medium text-muted-foreground hover:text-foreground">
+                      <input :checked="pluginGroupState(group) === 'all'" :indeterminate="pluginGroupState(group) === 'partial'" type="checkbox" class="size-3.5 accent-primary" @change="togglePluginGroup(group.pluginId, $event)" />
+                      <span class="min-w-0 truncate">{{ group.name }} ({{ pluginGroupSelected(group) }}/{{ group.items.length }})</span>
+                    </label>
+                    <label v-for="item in group.items" :key="item.key" class="flex min-h-7 items-center gap-2 pl-3 text-sm">
+                      <input :checked="selection.pluginUiStorage?.some((entry) => entry.pluginId === item.pluginId && entry.key === item.key)" type="checkbox" class="size-4 accent-primary" @change="togglePluginItem(item.pluginId, item.key, $event)" />
+                      <span class="min-w-0 truncate">{{ item.key }}</span>
+                    </label>
+                  </div>
+                  <p v-if="!catalog.pluginUiStorage.length" class="text-xs text-muted-foreground">{{ t("settings.syncSelectionNoPluginData") }}</p>
+                </template>
+              </div>
+              <p v-if="!catalog.hasEncryptedSecrets && isRestore" class="text-xs text-muted-foreground">{{ t("settings.syncSelectionNoEncrypted") }}</p>
+            </template>
           </div>
         </details>
 

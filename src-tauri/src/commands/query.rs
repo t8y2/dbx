@@ -986,15 +986,18 @@ pub async fn get_explain_info(
     schema: Option<String>,
     sql: String,
     mode: Option<String>,
+    execution_id: Option<String>,
+    timeout_secs: Option<u64>,
 ) -> Result<String, String> {
-    dbx_core::agent_explain::get_agent_explain_info_core(
+    dbx_core::agent_explain::get_agent_explain_info_core_with_execution_id(
         &state,
         &connection_id,
         database.as_deref(),
         schema.as_deref(),
         &sql,
         mode.as_deref(),
-        None,
+        timeout_secs,
+        execution_id.as_deref(),
     )
     .await
 }

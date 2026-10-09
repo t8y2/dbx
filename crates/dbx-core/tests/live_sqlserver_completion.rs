@@ -83,6 +83,7 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         production_databases: vec![],
         show_system_schemas: false,
         sidebar_auto_load_all_tables: false,
+        show_database_links: None,
         database_info: None,
     }
 }
@@ -1021,6 +1022,7 @@ async fn live_sqlserver_table_structure_default_changes_drop_existing_constraint
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        mysql_auto_increment_value: None,
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,

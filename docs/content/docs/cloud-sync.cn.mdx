@@ -163,7 +163,11 @@ GitHub Gist、Gitee 和 GitLab 代码片段始终使用**代码片段加密密�
 
 填写 WebDAV 服务地址、用户名、应用密码和远端快照路径。默认路径为 `DBX/sync/snapshot.json`。
 
-部分 WebDAV 服务（如中国科技云）只允许特定客户端应用访问，会按 User-Agent 拦截未知客户端。遇到这类限制时，在 User-Agent 输入框填写服务允许的客户端标识（例如 `Zotero/7.0.15`）；默认留空，表示不发送 User-Agent。
+将远端快照路径改为 `DBX/sync/snapshot.zip` 可启用 ZIP 快照：DBX 会将同一份 JSON 快照压缩为仅包含 `snapshot.json` 的 ZIP 文件，并以 `application/zip` 上传。其他路径仍上传 JSON。下载按文件内容识别 JSON 或 ZIP，因此也能读取旧版本写入 `.zip` 路径的 JSON 快照。ZIP 文件及解压后的 JSON 均不得超过 100 MiB，且不会解压到本地文件系统。压缩不等于加密，敏感信息仍遵循原有同步加密设置。
+
+部分 WebDAV 服务（如中国科技云数据胶囊）会同时限制客户端应用和上传文件类型。遇到客户端限制时，在 User-Agent 输入框填写服务允许的客户端标识（例如 `Zotero/10.0.0`）；默认留空，表示不发送 User-Agent。Zotero 专用接口还可能仅允许 `.zip` / `.prop` 上传，仅修改 User-Agent 无法让 JSON 上传通过，此时可尝试 ZIP 快照。上传返回 403、405 或 415 时，也应核对账号写权限和服务端策略；ZIP 格式不会绕过权限检查。
+
+切换格式会使用新的远端路径，不会删除原 JSON 快照。所有同步设备需配置同一路径；启用 ZIP 前请先升级所有设备到支持 ZIP 快照的 DBX 版本，旧版本仍需使用 JSON 路径。请使用 DBX 独立目录，不要与 Zotero 自身的同步目录混用。
 
 Web/Docker 模式下，WebDAV 请求由 DBX 服务端发起，因此不受浏览器 CORS 限制；WebDAV 应用密码会加密保存在当前 DBX 实例中，不会写入同步快照。
 

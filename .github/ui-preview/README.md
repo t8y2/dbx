@@ -24,8 +24,12 @@ carries the `ui-preview` label), the workflow does this:
    - has it plan scenes: what to click, double-click, hover, type and capture;
    - walks the plan in Chromium with `cursor.js` drawing the pointer, its trail and each
      click. It always takes screenshots. When the plan interacts, it also records an mp4,
-     never a GIF. A failed step is re-planned from the page as it is (up to three times);
-   what still fails is listed honestly in the PR block.
+     never a GIF — each scene on a page of its own, its load trimmed off and the takes
+     joined, so scene changes read as cuts rather than the app reloading. A failed step
+     is re-planned from the page as it is (up to three times),
+     after an Escape clears anything the failure left open (a menu, a dialog); what still
+     fails is listed honestly in the PR block, and shots taken after a failure in their
+     scene are marked ⚠️ both there and on the Pages player.
 4. **publish.mjs publish** puts the files under `pr-<n>/<sha>/` on the `ui-previews` branch,
    which GitHub Pages serves, and rewrites the block in the description: the video's poster
    links to the player page (GitHub won't embed a video it didn't host), the screenshots are
@@ -34,8 +38,11 @@ carries the `ui-preview` label), the workflow does this:
 
 Security: the recording job runs the PR's code without asking anyone — its frontend build
 scripts, and in the rust lane the PR's backend itself. Any PR's code can therefore read
-`DEEPSEEK_API_KEY` (environment `ui-preview`), so the key there should have a low spending
-limit. That job has no write access, and the job that writes never runs the PR's code.
+the planner's API key (`PLAN_API_KEY`, environment `ui-preview`), so the key there should
+have a low spending limit. That job has no write access, and the job that writes never
+runs the PR's code. The planner talks to any OpenAI-compatible endpoint
+(`PLAN_API_URL`, default AtlasCloud; `PLAN_MODEL`, overridable via the
+`UI_PREVIEW_PLAN_MODEL` repo variable).
 
 Known limits: the recording is of the web build, so desktop-shell behaviour (detached tabs,
 OS dialogs) is not covered; in the web lane the backend is the released dbx-web, so a PR
@@ -47,7 +54,7 @@ the starting):
 
 ```sh
 cd .github/ui-preview && npm install && npx playwright install chromium
-DBX_URL=http://127.0.0.1:4280 DEEPSEEK_API_KEY=… DIFF_FILE=pr.diff PR_TITLE=… \
+DBX_URL=http://127.0.0.1:4280 PLAN_API_KEY=… DIFF_FILE=pr.diff PR_TITLE=… \
   OUT_DIR=/tmp/out SRC_DIR=../.. node record.mjs          # a plan from DeepSeek
 PLAN_FILE=plan.json DBX_URL=… … node record.mjs           # or a hand-written plan
 ```

@@ -1,3 +1,4 @@
+import type { BackendErrorTranslate } from "@/i18n/backend-errors";
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { supportsNativeMysqlAutoIncrement, type MysqlAutoIncrementSqlOptions } from "@/lib/database/dbAdminSql";
 import type { EditableStructureColumn } from "@/lib/table/tableStructureEditorSql";
@@ -18,8 +19,8 @@ export function refreshMysqlAutoIncrementCounterDraft(serverValue: string | null
   return { value: current.value, originalValue: server.originalValue };
 }
 
-export function canEditMysqlAutoIncrementCounter(connection: Pick<ConnectionConfig, "db_type" | "driver_profile"> | undefined, isCreateMode: boolean, columns: readonly EditableStructureColumn[]): boolean {
-  if (isCreateMode || !supportsNativeMysqlAutoIncrement(connection)) return false;
+export function canEditMysqlAutoIncrementCounter(connection: Pick<ConnectionConfig, "db_type" | "driver_profile"> | undefined, _isCreateMode: boolean, columns: readonly EditableStructureColumn[]): boolean {
+  if (!supportsNativeMysqlAutoIncrement(connection)) return false;
   return columns.some((column) => !column.markedForDrop && column.extra.autoIncrement === true);
 }
 
@@ -37,4 +38,17 @@ export async function buildMysqlAutoIncrementCounterStatement({ enabled, origina
     return undefined;
   }
   return buildSql({ ...options, databaseType, value });
+}
+
+/** Translate only recognized structure warnings; preserve other backend diagnostics. */
+export function translateMysqlAutoIncrementWarning(t: BackendErrorTranslate, warning: string): string {
+  if (warning === "MySQL allows only one AUTO_INCREMENT column per table.") {
+    return t("structureEditor.mysqlAutoIncrementSingleColumn");
+  }
+  if (warning === "AUTO_INCREMENT requires a native MySQL auto-increment column.") {
+    return t("structureEditor.mysqlAutoIncrementRequiresNativeColumn");
+  }
+  const missingIndex = /^AUTO_INCREMENT column "([\s\S]*)" requires a supporting index \(first key column for InnoDB\)\.$/.exec(warning);
+  if (missingIndex) return t("structureEditor.mysqlAutoIncrementRequiresIndex", { column: missingIndex[1] });
+  return warning;
 }

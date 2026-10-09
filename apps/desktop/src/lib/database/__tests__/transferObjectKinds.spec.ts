@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { transferObjectFamily, transferObjectKindsForDatabase, isSameTransferFamily, crossFamilyTransferableKinds, TransferObjectFamily } from "@/lib/database/transferObjectKinds";
+import { transferObjectFamily, transferObjectKindsForDatabase, isSameTransferFamily, crossFamilyTransferableKinds, isTransferPairSupported, TransferObjectFamily } from "@/lib/database/transferObjectKinds";
 import { manifestDatabaseTypes } from "@/lib/database/databaseDriverManifest";
 import { supportsTransfer } from "@/lib/database/databaseFeatureSupport";
 import type { DatabaseType } from "@/types/database";
 
-const TABLE_ONLY_TRANSFER_DATABASES: DatabaseType[] = ["sqlite", "rqlite", "turso", "cloudflare-d1", "duckdb", "clickhouse", "mongodb", "highgo", "vastbase", "goldendb", "yashandb", "questdb", "h2", "hive", "argo", "transwarp", "kyuubi", "impala", "db2", "iris", "spark"];
+const TABLE_ONLY_TRANSFER_DATABASES: DatabaseType[] = ["sqlite", "rqlite", "turso", "cloudflare-d1", "duckdb", "clickhouse", "mongodb", "highgo", "vastbase", "goldendb", "yashandb", "questdb", "h2", "hive", "argo", "transwarp", "kyuubi", "impala", "db2", "iris", "spark", "xugu"];
 
 describe("transferObjectKinds", () => {
   it("groups databases into transfer families", () => {
@@ -27,7 +27,8 @@ describe("transferObjectKinds", () => {
   });
 
   it("covers every transfer-capable database outside the richer object families", () => {
-    expect(manifestDatabaseTypes().filter((dbType) => supportsTransfer(dbType) && !transferObjectFamily(dbType))).toEqual(TABLE_ONLY_TRANSFER_DATABASES);
+    const manifestTypes = manifestDatabaseTypes().filter((dbType) => supportsTransfer(dbType) && !transferObjectFamily(dbType));
+    expect([...manifestTypes].sort()).toEqual([...TABLE_ONLY_TRANSFER_DATABASES].sort());
   });
 
   it("does not expose objects for databases without transfer support", () => {
@@ -42,6 +43,14 @@ describe("transferObjectKinds", () => {
     expect(isSameTransferFamily("postgres", "sqlite")).toBe(false);
     expect(isSameTransferFamily("sqlserver", "sqlserver")).toBe(true);
     expect(isSameTransferFamily("sqlserver", "mysql")).toBe(false);
+  });
+
+  it("allows Xugu transfer only between two Xugu connections", () => {
+    expect(isTransferPairSupported("xugu", "xugu")).toBe(true);
+    expect(isTransferPairSupported("xugu", "postgres")).toBe(false);
+    expect(isTransferPairSupported("mysql", "xugu")).toBe(false);
+    expect(isTransferPairSupported("mysql", "postgres")).toBe(true);
+    expect(isTransferPairSupported(undefined, "xugu")).toBe(true);
   });
 
   it("limits cross-family transferable kinds to sequences only", () => {

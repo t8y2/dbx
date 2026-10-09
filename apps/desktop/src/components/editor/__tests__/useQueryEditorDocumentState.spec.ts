@@ -132,6 +132,28 @@ describe("QueryEditor document and viewport ownership", () => {
     expect(currentView.scrollDOM.scrollLeft).toBe(0);
   });
 
+  it("does not synchronize selection or viewport between cached tabs when switching", async () => {
+    const { currentView, activate } = createHarness();
+    const docA = "SELECT 1;\n".repeat(100);
+    const docB = "SELECT 2;\n".repeat(100);
+
+    await activate("tab-a", docA);
+    expect(currentView.state.selection.main.head).toBe(0);
+    expect(currentView.scrollDOM.scrollTop).toBe(0);
+
+    await activate("tab-b", docB);
+    currentView.dispatch({ selection: { anchor: 400, head: 400 } });
+    currentView.scrollDOM.scrollTop = 500;
+
+    await activate("tab-a", docA);
+    expect(currentView.state.selection.main.head).toBe(0);
+    expect(currentView.scrollDOM.scrollTop).toBe(0);
+
+    await activate("tab-b", docB);
+    expect(currentView.state.selection.main.head).toBe(400);
+    expect(currentView.scrollDOM.scrollTop).toBe(500);
+  });
+
   it("flushes a deferred viewport with its outgoing tab owner and deduplicates emissions", async () => {
     const { state, currentView, activate, emit } = createHarness();
     currentView.scrollDOM.scrollTop = 240;

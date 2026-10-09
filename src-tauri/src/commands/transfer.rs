@@ -39,6 +39,7 @@ pub async fn start_transfer(
     let source_db_type = get_db_type(&state, &request.source_connection_id).await?;
     let target_db_type = get_db_type(&state, &request.target_connection_id).await?;
     dbx_core::transfer::validate_transfer_request(&request)?;
+    dbx_core::transfer::validate_transfer_database_pair(&request, &source_db_type, &target_db_type)?;
 
     // `drop_target_before_create` rebuilds target tables; gate the dialect and require an
     // explicit confirmation for production databases.
@@ -587,6 +588,7 @@ pub async fn preview_transfer_ownership(
     let source_db_type = get_db_type(&state, &request.source_connection_id).await?;
     let target_db_type = get_db_type(&state, &request.target_connection_id).await?;
     dbx_core::transfer::validate_transfer_request(&request)?;
+    dbx_core::transfer::validate_transfer_database_pair(&request, &source_db_type, &target_db_type)?;
     let source_pool_key = dbx_core::transfer::ensure_transfer_pool(
         &state,
         &request.source_connection_id,

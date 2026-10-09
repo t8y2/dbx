@@ -659,6 +659,7 @@ export const useConnectionStore = defineStore("connection", () => {
   } | null>(null);
   const sidebarLayout = ref<SidebarLayout>(emptyLayout());
   const tableVGroupLayouts = ref<Record<string, TableVGroupLayout>>({});
+  const lastDataGripFallbackUsernamesCount = ref(0);
   const dirtyTableVGroupScopeKeys = new Set<string>();
   let tableVGroupPersistTimer: ReturnType<typeof setTimeout> | null = null;
   const connectionGroupPaths = computed(() => buildConnectionGroupPathMap(sidebarLayout.value));
@@ -9989,12 +9990,22 @@ export const useConnectionStore = defineStore("connection", () => {
       if (picked.local) {
         dataSourcesLocal = await readTextFile(picked.local);
       } else {
-        console.warn("[DataGrip Import] dataSources.local.xml not selected; usernames will fall back to defaults");
+        try {
+          const siblingLocal = picked.dataSources.replace(/[^\\/]+$/, "dataSources.local.xml");
+          dataSourcesLocal = await readTextFile(siblingLocal);
+        } catch {
+          console.warn("[DataGrip Import] dataSources.local.xml not selected or readable; usernames will fall back to defaults");
+        }
       }
       if (picked.forest) {
         dbForestConfig = await readTextFile(picked.forest);
       } else {
-        console.warn("[DataGrip Import] db-forest-config.xml not selected; legacy group tree skipped");
+        try {
+          const siblingForest = picked.dataSources.replace(/[^\\/]+$/, "db-forest-config.xml");
+          dbForestConfig = await readTextFile(siblingForest);
+        } catch {
+          console.warn("[DataGrip Import] db-forest-config.xml not selected or readable; legacy group tree skipped");
+        }
       }
     } else {
       const files = await new Promise<FileList>((resolve, reject) => {
@@ -10097,6 +10108,7 @@ export const useConnectionStore = defineStore("connection", () => {
         };
         pendingDataGripPayload = payload;
         const result = parseDataGripImport(payload);
+        lastDataGripFallbackUsernamesCount.value = result.fallbackUsernamesCount || 0;
         return { connections: result.connections, layout: result.layout };
       }
       if (isDbeaverImportPayload(content)) {
@@ -10456,6 +10468,7 @@ export const useConnectionStore = defineStore("connection", () => {
     applyConnectionsImport,
     importConnectionsFromFile,
     applyDataGripKeychainPasswords,
+    lastDataGripFallbackUsernamesCount,
     applySidebarLayout,
     transferSource,
     schemaDiffSource,

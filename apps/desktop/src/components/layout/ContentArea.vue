@@ -104,6 +104,7 @@ function preloadDataGridComponent() {
 
 const QueryEditor = defineAsyncComponent({ loader: () => import("@/components/editor/QueryEditor.vue"), loadingComponent: QueryLoadingState, delay: 0 });
 const DataGrid = defineAsyncComponent(loadDataGridComponent);
+const QueryResultTransferDialog = defineAsyncComponent(() => import("@/components/transfer/QueryResultTransferDialog.vue"));
 const RedisKeyBrowser = defineAsyncComponent(() => import("@/components/redis/RedisKeyBrowser.vue"));
 const RedisQueryConsoleOutput = defineAsyncComponent(() => import("@/components/redis/RedisQueryConsoleOutput.vue"));
 const RedisDashboard = defineAsyncComponent(() => import("@/components/redis/RedisDashboard.vue"));
@@ -199,6 +200,8 @@ import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
 import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
+import { analyzeEditableQuery } from "@/lib/sql/sqlAnalysis";
+import { loadQueryResultTransferSourceDdl } from "@/components/transfer/queryResultTransferSource";
 import { formatDdlForDisplay } from "@/lib/sql/ddlDisplay";
 import { sqlObjectNavigationTypeFromTableType } from "@/lib/sql/sqlNavigation";
 import type { CustomSaveHandler } from "@/composables/useDataGridEditor";
@@ -638,16 +641,44 @@ function sortQueryGrid(column: string, columnIndex: number, direction: "asc" | "
   else emit("sort", props.activeTab.id, column, columnIndex, direction, whereInput, mode, effectiveOrderBy);
 }
 
-async function fetchGridResultForExport(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) {
+async function fetchGridResultForExport(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void, probeRowLimit = false, tabId = props.activeTab.id) {
   const isNeo4j = activeEffectiveDatabaseType.value === "neo4j";
-  const result = await queryStore.fetchTabResultForExport(props.activeTab.id, onProgress);
+  const result = await queryStore.fetchTabResultForExport(tabId, onProgress, probeRowLimit);
   if (!result || !isNeo4j) return result;
   extractNeo4jNodeCells(result);
   extractGraphCells(result);
   return projectNeo4jNodeResult(result);
 }
+async function loadQueryResultSourceDdl(): Promise<string | undefined> {
+  if (props.activeTab.mode !== "query") return undefined;
+  return loadQueryResultTransferSourceDdl({
+    sql: activeResultExportSql.value,
+    databaseType: activeEffectiveDatabaseType.value,
+    connectionId: activeResultConnectionId.value,
+    database: activeResultDatabase.value,
+    schema: activeResultSchema.value,
+    catalog: props.activeTab.catalog,
+    clientSessionId: props.activeTab.resultClientSessionId ?? props.activeTab.id,
+    txnSessionId: props.activeTab.autoCommit === false ? props.activeTab.txnSessionId : undefined,
+  });
+}
+function openQueryResultTransfer() {
+  if (props.activeTab.result) {
+    queryResultTransferSourceTabId.value = props.activeTab.id;
+    queryResultTransferOpen.value = true;
+  }
+}
+function loadQueryResultForTransfer(): Promise<QueryResult | undefined> {
+  return queryResultTransferSourceTabId.value === props.activeTab.id ? fetchGridResultForExport(undefined, true, queryResultTransferSourceTabId.value) : Promise.resolve(undefined);
+}
 const activeResultSql = computed(() => resultSqlForGrid(props.activeTab));
 const activeResultExportSql = computed(() => queryResultExecutionSql(props.activeTab));
+const activeResultSourceAnalysis = computed(() => analyzeEditableQuery(activeResultExportSql.value));
+const activeResultSourceTable = computed(() => {
+  const analysis = activeResultSourceAnalysis.value;
+  return analysis?.selectStar && !analysis.sources?.length ? analysis.tableName : undefined;
+});
+const activeResultSourceSchema = computed(() => activeResultSourceAnalysis.value?.schema ?? activeResultSchema.value);
 const activeStatementExecutionMarkers = computed(() =>
   statementExecutionMarkers(
     props.activeTab.sql,
@@ -681,6 +712,18 @@ watch(
   },
 );
 const resultArchiveExporting = ref(false);
+const queryResultTransferOpen = ref(false);
+const queryResultTransferSourceTabId = ref<string>();
+watch(
+  () => props.activeTab.id,
+  () => {
+    // The dialog reads the active tab's result and DDL lazily. Close it when
+    // the active tab changes so a pending transfer can never target a
+    // different result than the one the user opened it from.
+    if (queryResultTransferOpen.value) queryResultTransferOpen.value = false;
+    queryResultTransferSourceTabId.value = undefined;
+  },
+);
 const canExportResultArchive = computed(() => props.activeTab.mode === "query" && (!!props.activeTab.result || !!props.activeTab.results?.length || !!props.activeTab.resultRuns?.length));
 const resultAutoSave = computed(() => props.activeTab.resultAutoSave === true);
 const activeResultRunItem = computed(() => resultRuns.value.find((run) => run.active));
@@ -2066,7 +2109,7 @@ defineExpose({
                     </div>
                   </div>
                 </div>
-                <div v-else-if="showResultRunSelector" class="min-w-0 flex-1">
+                <div v-else-if="showResultRunSelector" class="min-w-0" :class="{ 'flex-1': visibleResultItems.length === 0 }">
                   <DropdownMenu>
                     <DropdownMenuTrigger as-child>
                       <Button variant="ghost" size="sm" class="h-6 max-w-48 gap-1 px-2 text-xs">
@@ -2105,6 +2148,7 @@ defineExpose({
                   :can-export-xlsx="activeOutputView === 'result' && redisResultViewMode === 'grid' && !!activeTab.result && hasTabularResult && !activeElasticsearchJsonResponse"
                   :active-index="activeTab.activeResultIndex ?? 0"
                   :active="activeOutputView === 'result'"
+                  :display-mode="resultRunDisplayMode"
                   @select="selectResultItem"
                   @copy-sql="copySelectedResultSql"
                   @copy-query-sql="copySelectedResultQueries"
@@ -2316,7 +2360,7 @@ defineExpose({
                         <span>{{ t("grid.transposeMultiRowToggle") }}</span>
                       </div>
                       <LightTooltip :text="t('grid.transposeMultiRowHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
-                        <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                        <div class="grid min-w-40 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
                           <button
                             type="button"
                             class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
@@ -2657,6 +2701,7 @@ defineExpose({
                 :page-jump-progress="activeTab.resultPageJumpProgress"
                 :on-execute-sql="async (sql: string) => emit('executeSql', activeTab.id, sql)"
                 :full-export-result="fetchGridResultForExport"
+                :transfer-query-result="openQueryResultTransfer"
                 :query-result-export-request="
                   hasNeo4jNodes
                     ? undefined
@@ -3016,7 +3061,7 @@ defineExpose({
                   <span>{{ t("grid.transposeMultiRowToggle") }}</span>
                 </div>
                 <LightTooltip :text="t('grid.transposeMultiRowHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
-                  <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                  <div class="grid min-w-40 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
                     <button
                       type="button"
                       class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
@@ -3522,6 +3567,19 @@ defineExpose({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+    <QueryResultTransferDialog
+      v-if="activeTab.result"
+      v-model:open="queryResultTransferOpen"
+      :source-connection-id="activeResultConnectionId"
+      :source-database="activeResultDatabase"
+      :source-schema="activeResultSourceSchema"
+      :source-table="activeResultSourceTable"
+      :source-sql="activeResultExportSql"
+      :source-database-type="activeEffectiveDatabaseType"
+      :result="activeTab.result"
+      :load-result="loadQueryResultForTransfer"
+      :load-source-ddl="loadQueryResultSourceDdl"
+    />
   </div>
 </template>
 

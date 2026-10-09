@@ -329,18 +329,149 @@ describe.each(["restore", "upload"] as const)("CloudSyncSelectionDialog %s group
     expect(secretChild.checked).toBe(false);
   });
 
-  it("keeps the secrets child off and shows the passphrase hint when no passphrase is available", async () => {
-    await mount({ connectionSecrets: ["connection-1"] }, { secretsPassphraseAvailable: false });
+  it("hides unselectable secret checkboxes and shows the passphrase hint when no passphrase is available", async () => {
+    await mount(
+      {
+        hasEncryptedSecrets: true,
+        connectionSecrets: ["connection-1"],
+        tunnelProfiles: [{ id: "tunnel-1", label: "Tunnel" }],
+        tunnelSecrets: ["tunnel-1"],
+        aiConfigs: [{ id: "ai-1", label: "AI" }],
+        pluginUiStorage: [{ pluginId: "devtools", key: "devtools:favorites", pluginName: "Dev Tools" }],
+      },
+      { secretsPassphraseAvailable: false },
+    );
     const sections = Array.from(root!.querySelectorAll("details"));
     const secretsMaster = sections[4].querySelector<HTMLInputElement>("summary input")!;
-    const secretChild = sections[0].querySelectorAll<HTMLInputElement>("input")[2];
-    expect(secretsMaster.checked).toBe(false);
 
-    secretChild.click();
+    // Nothing encrypted is pre-selected, so the group stays fully unchecked.
+    expect(secretsMaster.checked).toBe(false);
+    expect(secretsMaster.indeterminate).toBe(false);
+    expect(sections[4].querySelector("summary")!.textContent).toContain("0/5");
+
+    // Per-item credential rows are removed from the connection/tunnel groups; each shows the hint instead.
+    expect(sections[0].querySelectorAll("input")).toHaveLength(2);
+    expect(sections[0].textContent).toContain("settings.localBackupSecretsPassphraseRequiredHint");
+    expect(sections[1].querySelectorAll("input")).toHaveLength(2);
+    expect(sections[1].textContent).toContain("settings.localBackupSecretsPassphraseRequiredHint");
+
+    // The encrypted group lists only the hint; clicking its master checkbox just expands the group.
+    expect(sections[4].querySelectorAll("label input")).toHaveLength(0);
+    expect(sections[4].textContent).toContain("settings.localBackupSecretsPassphraseRequiredHint");
+    expect(sections[4].open).toBe(false);
+    secretsMaster.click();
     await nextTick();
     expect(secretsMaster.checked).toBe(false);
-    expect(secretChild.checked).toBe(false);
-    expect(sections[4].textContent).toContain("settings.localBackupSecretsPassphraseRequiredHint");
+    expect(sections[4].open).toBe(true);
+  });
+
+  it("keeps encrypted items deselected by default when no passphrase is available", async () => {
+    await mount(
+      {
+        connectionSecrets: ["connection-1"],
+        aiConfigs: [{ id: "ai-1", label: "AI" }],
+        pluginUiStorage: [{ pluginId: "devtools", key: "devtools:favorites", pluginName: "Dev Tools" }],
+      },
+      { secretsPassphraseAvailable: false },
+    );
+    const secretsSummaryText = Array.from(root!.querySelectorAll("details"))[4].querySelector("summary")!.textContent;
+    expect(secretsSummaryText).toContain("0/4");
+  });
+
+  it("offers aggregate credential rows inside the encrypted group", async () => {
+    await mount(
+      {
+        connections: [
+          { id: "connection-1", label: "Primary" },
+          { id: "connection-2", label: "Secondary" },
+        ],
+        connectionSecrets: ["connection-1", "connection-2"],
+        tunnelProfiles: [{ id: "tunnel-1", label: "Tunnel" }],
+        tunnelSecrets: ["tunnel-1"],
+      },
+      { secretsPassphraseAvailable: true },
+    );
+    const secretsSection = Array.from(root!.querySelectorAll("details"))[4];
+    const rows = Array.from(secretsSection.querySelectorAll("label"));
+    const connectionRow = rows.find((label) => label.textContent?.includes("settings.syncSelectionConnectionCredentials"))!;
+    const tunnelRow = rows.find((label) => label.textContent?.includes("settings.syncSelectionTunnelSecrets"))!;
+
+    expect(connectionRow.textContent).toContain("(0/2)");
+    expect(tunnelRow.textContent).toContain("(0/1)");
+    // The header total equals the sum of the visible rows: sync credentials 1 + credentials 2 + tunnel 1.
+    expect(secretsSection.querySelector("summary")!.textContent).toContain("0/4");
+
+    connectionRow.querySelector("input")!.click();
+    await nextTick();
+    expect(connectionRow.textContent).toContain("(2/2)");
+    expect(secretsSection.querySelector("summary")!.textContent).toContain("2/4");
+
+    // The aggregate selects the same ids as the per-connection checkboxes under the connections group.
+    const connectionsSection = Array.from(root!.querySelectorAll("details"))[0];
+    const credentialBoxes = Array.from(connectionsSection.querySelectorAll<HTMLInputElement>("label input")).filter((_, index) => index % 2 === 1);
+    expect(credentialBoxes.every((input) => input.checked)).toBe(true);
+
+    tunnelRow.querySelector("input")!.click();
+    await nextTick();
+    expect(secretsSection.querySelector("summary")!.textContent).toContain("3/4");
+  });
+
+  it("drops a credential selection when its connection is deselected", async () => {
+    await mount(
+      {
+        connections: [
+          { id: "connection-1", label: "Primary" },
+          { id: "connection-2", label: "Secondary" },
+        ],
+        connectionSecrets: ["connection-1", "connection-2"],
+        selection: {
+          connections: ["connection-1", "connection-2"],
+          connectionSecrets: ["connection-1", "connection-2"],
+          includeSecrets: true,
+          syncCredentials: true,
+        },
+      },
+      { secretsPassphraseAvailable: true },
+    );
+    const sections = Array.from(root!.querySelectorAll("details"));
+    expect(sections[4].querySelector("summary")!.textContent).toContain("3/3");
+
+    const connectionRow = sections[0].querySelectorAll<HTMLInputElement>("label input")[0];
+    connectionRow.click();
+    await nextTick();
+    // Deselecting connection-1 removes its credential too, so only connection-2's remains selected.
+    expect(sections[4].querySelector("summary")!.textContent).toContain("2/3");
+    const credentialBoxes = Array.from(sections[0].querySelectorAll<HTMLInputElement>("label input")).filter((_, index) => index % 2 === 1);
+    expect(credentialBoxes[0].checked).toBe(false);
+    expect(credentialBoxes[0].disabled).toBe(true);
+    expect(credentialBoxes[1].checked).toBe(true);
+  });
+
+  it("only selects credentials of still-selected owners on the aggregate row", async () => {
+    await mount(
+      {
+        connections: [
+          { id: "connection-1", label: "Primary" },
+          { id: "connection-2", label: "Secondary" },
+        ],
+        connectionSecrets: ["connection-1", "connection-2"],
+        tunnelProfiles: [{ id: "tunnel-1", label: "Tunnel" }],
+        tunnelSecrets: ["tunnel-1"],
+        selection: { connections: ["connection-2"] },
+      },
+      { secretsPassphraseAvailable: true },
+    );
+    const secretsSection = Array.from(root!.querySelectorAll("details"))[4];
+    const rows = Array.from(secretsSection.querySelectorAll("label"));
+    const connectionRow = rows.find((label) => label.textContent?.includes("settings.syncSelectionConnectionCredentials"))!;
+    expect(connectionRow.textContent).toContain("(0/2)");
+
+    connectionRow.querySelector("input")!.click();
+    await nextTick();
+    // connection-1 is deselected, so its credential cannot be aggregated in even though the
+    // catalog lists it; only connection-2's credential is selected.
+    expect(connectionRow.textContent).toContain("(1/2)");
+    expect(secretsSection.querySelector("summary")!.textContent).toContain("1/4");
   });
 
   it("disables the confirm action while nothing is selected", async () => {

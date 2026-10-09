@@ -1,3 +1,4 @@
+import { hasShortDataGridSqlPage } from "@/lib/dataGrid/dataGridPagination";
 import { createQueryRequestTiming } from "@/lib/queryRequestTiming";
 import { appendNeo4jNodeCells, extractNeo4jNodeCells } from "@/lib/neo4j/neo4jNodeResult";
 import { UPDATE_RESTORE_KEY, assertUpdateAllowsInteraction } from "@/lib/app/updatePreparation";
@@ -31,7 +32,7 @@ import type {
 import { orderPinnedFirst } from "@/lib/app/pinnedItems";
 import { canCancelQueryExecution } from "@/lib/sql/queryExecutionState";
 import { isSqlErrorPositionDebugEnabled, logSqlErrorPosition, sqlErrorHasMessagePosition, sqlErrorMessageText } from "@/lib/sql/errorPosition";
-import { buildExplainSql, parseExplainResult, parseDamengExplainText, parseOracleExplainText, sqlServerExplainResult, type BuildExplainSqlResult, type ExplainPlanDatabaseType } from "@/lib/diagram/explainPlan";
+import { buildExplainSql, parseExplainResult, parseDamengExplainText, parseOracleExplainText, parseDb2ExplainText, sqlServerExplainResult, type BuildExplainSqlResult, type ExplainPlanDatabaseType } from "@/lib/diagram/explainPlan";
 import { mysqlExplainCompatibilityHint } from "@/lib/diagram/mysqlExplainCompatibility";
 import {
   allEditableColumnsWriteable,
@@ -902,11 +903,14 @@ function bindColumnsForSource(
       if (!column.sourceName) return column;
       if (column.sourceKey) {
         if (column.sourceKey !== source.key) return column;
-        if (dbType === "oracle" && !column.sourceNameQuoted && column.sourceName.toUpperCase() === "ROWID") return column;
+        if ((dbType === "oracle" || dbType === "oceanbase-oracle") && !column.sourceNameQuoted && column.sourceName.toUpperCase() === "ROWID") return column;
         const canonicalName = resolveSourceColumnName(dbType, column.sourceName, column.sourceNameQuoted, tableColumns);
         return { ...column, sourceName: canonicalName };
       }
       if (column.sourceQualifier) return column;
+      if (dbType === "oceanbase-oracle" && !column.sourceNameQuoted && column.sourceName.toUpperCase() === "ROWID" && editableQuerySources(analysis).length === 1) {
+        return { ...column, sourceKey: source.key };
+      }
       const matchingSources = allSourceColumns.flatMap((entry) => {
         const canonicalName = resolveSourceColumnName(dbType, column.sourceName!, column.sourceNameQuoted, entry.columns);
         return canonicalName ? [{ source: entry.source, canonicalName }] : [];
@@ -5400,10 +5404,12 @@ export const useQueryStore = defineStore("query", () => {
       pendingSqlServerTransactionEnds.set(id, ending);
       return ending;
     }
+    const sessionId = tab.txnSessionId;
     try {
-      await api.commitManualTransaction(tab.txnSessionId);
+      await api.commitManualTransaction(sessionId);
     } finally {
-      clearManualTransactionSession(tab);
+      // A mode or target switch may have started a replacement transaction.
+      if (tab.txnSessionId === sessionId) clearManualTransactionSession(tab);
     }
   }
 
@@ -5762,6 +5768,7 @@ export const useQueryStore = defineStore("query", () => {
   function updateDatabase(id: string, database: string, options: UpdateExecutionTargetOptions = {}) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab || tab.database === database) return;
+    if (tab.isExplaining) void cancelTabExplain(id);
     rollbackTabTransaction(tab);
     void closeResultSession(tab);
     void closeClientConnectionSession(tab);
@@ -5794,6 +5801,7 @@ export const useQueryStore = defineStore("query", () => {
   function updateCatalog(id: string, catalog: string | undefined, database: string, options: UpdateExecutionTargetOptions = {}) {
     const tab = tabs.value.find((candidate) => candidate.id === id);
     if (!tab || (tab.catalog === catalog && tab.database === database)) return;
+    if (tab.isExplaining) void cancelTabExplain(id);
     rollbackTabTransaction(tab);
     void closeResultSession(tab);
     void closeClientConnectionSession(tab);
@@ -5813,6 +5821,10 @@ export const useQueryStore = defineStore("query", () => {
   function updateSchema(id: string, schema: string | undefined, options: UpdateExecutionTargetOptions = {}) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab || tab.schema === schema) return;
+    if (tab.isExplaining) {
+      void cancelTabExplain(id);
+      clearExplain(tab);
+    }
     rollbackTabTransaction(tab);
     const clearsQuerySchema = tab.mode === "query" && tab.schema && !schema && supportsClearableQuerySchema(useConnectionStore().getConfig(tab.connectionId)?.db_type);
     if (clearsQuerySchema) {
@@ -5831,6 +5843,7 @@ export const useQueryStore = defineStore("query", () => {
   function updateConnection(id: string, connectionId: string, database = "", options: UpdateExecutionTargetOptions = {}) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab || tab.connectionId === connectionId) return;
+    if (tab.isExplaining) void cancelTabExplain(id);
     rollbackTabTransaction(tab, { resetAutoCommit: true, resetAutoCommitDbType: useConnectionStore().getConfig(connectionId)?.db_type });
     void closeResultSession(tab);
     void closeClientConnectionSession(tab);
@@ -6319,7 +6332,7 @@ export const useQueryStore = defineStore("query", () => {
     const selectedColumns = new Set(
       analysis.columns.flatMap((column) => {
         if (!column.sourceName || column.sourceKey !== sourceKey) return [];
-        if (databaseType === "oracle" && !column.sourceNameQuoted && column.sourceName.toUpperCase() === "ROWID") return [DBX_ROWID_COLUMN, column.sourceName];
+        if ((databaseType === "oracle" || databaseType === "oceanbase-oracle") && !column.sourceNameQuoted && column.sourceName.toUpperCase() === "ROWID") return [DBX_ROWID_COLUMN, column.sourceName];
         return [column.sourceName];
       }),
     );
@@ -6345,9 +6358,9 @@ export const useQueryStore = defineStore("query", () => {
   async function resolveOracleRowIdSafety(tab: QueryTab, loaded: LoadedEditableSource, databaseType: DatabaseType): Promise<boolean> {
     if (oracleRowIdIsSafeForQuery(tab, loaded)) return true;
     if (loaded.tableMeta.tableType?.trim()) return false;
-    // Never enumerate an Oracle schema on the query execution path: large
+    // Never enumerate an Oracle/OB schema on the query execution path: large
     // schemas can make this optional editability check take minutes (#8462).
-    if (databaseType === "oracle") return false;
+    if (databaseType === "oracle" || databaseType === "oceanbase-oracle") return false;
 
     const connection = useConnectionStore().getConfig(tab.connectionId!);
     const schema = loaded.tableMeta.schema?.trim() || tab.schema?.trim() || connection?.default_schema?.trim() || "";
@@ -6382,7 +6395,9 @@ export const useQueryStore = defineStore("query", () => {
     const unchanged = { sql, metadataSql: sql, hiddenPrimaryKeys: [], largeValuePreview };
     const missingPrimaryKeys =
       declaredPrimaryKeys.length === 0
-        ? primaryKeys.filter((primaryKey) => !(databaseType === "oracle" && primaryKey === DBX_ROWID_COLUMN && metadataAnalysis.columns.some((column) => column.sourceKey === loaded.source.key && !column.sourceNameQuoted && column.sourceName?.toUpperCase() === "ROWID")))
+        ? primaryKeys.filter(
+            (primaryKey) => !((databaseType === "oracle" || databaseType === "oceanbase-oracle") && primaryKey === DBX_ROWID_COLUMN && metadataAnalysis.columns.some((column) => column.sourceKey === loaded.source.key && !column.sourceNameQuoted && column.sourceName?.toUpperCase() === "ROWID")),
+          )
         : missingPrimaryKeysForSource(databaseType, primaryKeys, metadataAnalysis, loaded.source.key);
     if (missingPrimaryKeys.length === 0) return unchanged;
     const primaryKeySet = new Set(primaryKeys);
@@ -6394,7 +6409,7 @@ export const useQueryStore = defineStore("query", () => {
       databaseType,
       primaryKeys: missingPrimaryKeys,
       existingResultNames: metadataAnalysis.selectStar ? loaded.tableMeta.columns.map((column) => column.name) : metadataAnalysis.columns.map((column) => column.resultName),
-      sourceExpressions: missingPrimaryKeys.includes(DBX_ROWID_COLUMN) && (databaseType === "oracle" || databaseType === "xugu") ? { [DBX_ROWID_COLUMN]: databaseType === "oracle" ? "ROWIDTOCHAR(ROWID)" : "ROWID" } : undefined,
+      sourceExpressions: missingPrimaryKeys.includes(DBX_ROWID_COLUMN) && (databaseType === "oracle" || databaseType === "oceanbase-oracle" || databaseType === "xugu") ? { [DBX_ROWID_COLUMN]: databaseType === "xugu" ? "ROWID" : "ROWIDTOCHAR(ROWID)" } : undefined,
     });
     if (!rewritten) return unchanged;
     queryExecutionLog("info", "hidden-primary-keys", {
@@ -6437,6 +6452,14 @@ export const useQueryStore = defineStore("query", () => {
           traceLogger: (event) => queryExecutionLog("debug", "metadata:table-trace", { sourceTraceId: traceId, ...event }),
         });
         void fullMetadataPromise.catch((error) => queryExecutionLog("warn", "metadata:table-prefetch:failed", { traceId, error, elapsed: elapsed() }));
+        // Synonyms and views often have no directly reported primary index.
+        // Bound the full metadata wait as well, including named projections,
+        // and start its deadline before waiting for indexes so both share it.
+        // Manual transactions still need their first-run type/LOB metadata.
+        const preparedMetadata = tab.autoCommit !== false ? waitForQueryMetadataPreflight(fullMetadataPromise) : fullMetadataPromise;
+        // The primary-index shortcut can return before this promise is awaited;
+        // the original prefetch already records errors in that background path.
+        void preparedMetadata.catch(() => undefined);
         const wholeSourceAutoCommit = projectsAllColumnsForSource(target.analysis, target.source.key) && tab.autoCommit !== false;
         if (wholeSourceAutoCommit) {
           const indexes = await waitForQueryMetadataPreflight(loadTableIndexes(target.request));
@@ -6451,7 +6474,17 @@ export const useQueryStore = defineStore("query", () => {
           }
           if (primaryKeyIndex(indexes)) return unchanged;
         }
-        loaded = loadedEditableSourceFromMetadata(target, (await fullMetadataPromise).metadata);
+        const metadata = await preparedMetadata;
+        if (metadata === QUERY_METADATA_PREFLIGHT_TIMEOUT) {
+          queryExecutionLog("info", "metadata:preflight:timeout", {
+            traceId,
+            table: target.request.tableName,
+            budgetMs: QUERY_METADATA_PREFLIGHT_BUDGET_MS,
+            elapsed: elapsed(),
+          });
+          return unchanged;
+        }
+        loaded = loadedEditableSourceFromMetadata(target, metadata.metadata);
       }
 
       if (!loaded) {
@@ -6474,9 +6507,9 @@ export const useQueryStore = defineStore("query", () => {
       if (loaded.tableMeta.columns.length === 0) return unchanged;
       if (loaded.tableMeta.tableType?.toUpperCase().includes("VIEW")) return unchanged;
       const primaryKeys = loaded.tableMeta.primaryKeys;
-      const syntheticRowId = (databaseType === "oracle" || databaseType === "xugu") && usesSyntheticRowIdKey(databaseType, primaryKeys, loaded.tableMeta.tableType);
+      const syntheticRowId = (databaseType === "oracle" || databaseType === "oceanbase-oracle" || databaseType === "xugu") && usesSyntheticRowIdKey(databaseType, primaryKeys, loaded.tableMeta.tableType);
       // Base tables without a natural identifier use the same ROWID identity
-      // as table-data tabs (Oracle and Xugu). Confirm the object is a base
+      // as table-data tabs (Oracle, OceanBase Oracle and Xugu). Confirm the object is a base
       // table because selecting ROWID from a view can fail with ORA-01445.
       if (syntheticRowId && !(await resolveOracleRowIdSafety(tab, loaded, databaseType))) return unchanged;
       const declaredPrimaryKeys = syntheticRowId ? [] : primaryKeys;
@@ -8327,7 +8360,10 @@ export const useQueryStore = defineStore("query", () => {
           current.resultTotalRowCount = undefined;
         }
         const resultRowCount = current.result?.rows.length ?? 0;
-        const resultLimitReached = !!current.result && queryResultLimitReached(pageOffset, resultRowCount, queryResultMaxRows);
+        // Appends already include all earlier rows. Measure the merged result
+        // from its logical start, not from the offset of the latest tail page.
+        const resultStartOffset = shouldAppendResult ? current.resultPageOffset : pageOffset;
+        const resultLimitReached = !!current.result && queryResultLimitReached(resultStartOffset, resultRowCount, queryResultMaxRows);
         if (resultLimitReached && current.result) {
           current.result.has_more = false;
           current.result.truncated = true;
@@ -8599,10 +8635,52 @@ export const useQueryStore = defineStore("query", () => {
       await waitForTabSessionReset(id);
     } catch (e: any) {
       // Do not start an explain with a session whose schema reset did not complete.
-      tab.isExplaining = false;
-      tab.explainExecutionId = undefined;
-      tab.explainError = String(e?.message || e);
-      return { ok: false as const, reason: tab.explainError };
+      const reason = String(e?.message || e);
+      const current = tabs.value.find((t) => t.id === id);
+      if (current?.explainExecutionId === executionId) {
+        current.isExplaining = false;
+        current.explainExecutionId = undefined;
+        current.explainError = reason;
+      }
+      return { ok: false as const, reason };
+    }
+
+    // DB2 writes Explain tables on an isolated backend session and returns native JSON.
+    if (databaseType === "db2") {
+      if (tabs.value.find((t) => t.id === id)?.explainExecutionId !== executionId) return { ok: true as const, sql: "" };
+      const { connectionId, database, schema } = tab;
+      let explainSql = sql;
+      try {
+        const built = await buildExplainSql(databaseType, sql);
+        const current = tabs.value.find((t) => t.id === id);
+        if (current?.explainExecutionId !== executionId) return built;
+        if (!built.ok) {
+          current.explainError = built.reason;
+          return built;
+        }
+        explainSql = built.sql;
+        current.explainSql = explainSql;
+        // Always request an estimate, even if an unrelated UI supplies autotrace.
+        const planText = await api.getExplainInfo(connectionId, database, schema, sql, "explain", executionId, queryTimeoutSecs);
+        const target = tabs.value.find((t) => t.id === id);
+        if (target?.explainExecutionId === executionId) {
+          if (typeof planText === "string" && planText.trim()) target.explainPlan = parseDb2ExplainText(planText);
+          else target.explainError = "No explain plan returned";
+        }
+      } catch (error) {
+        const current = tabs.value.find((t) => t.id === id);
+        if (current?.explainExecutionId === executionId) {
+          current.explainPlan = undefined;
+          current.explainError = formatError(error);
+        }
+      } finally {
+        const current = tabs.value.find((t) => t.id === id);
+        if (current?.explainExecutionId === executionId) {
+          current.isExplaining = false;
+          current.explainExecutionId = undefined;
+        }
+      }
+      return { ok: true as const, sql: explainSql };
     }
 
     // DM and Oracle agents expose native text plans. DM also supports autotrace.
@@ -9334,7 +9412,7 @@ export const useQueryStore = defineStore("query", () => {
     });
   }
 
-  async function fetchTabResultForExport(id: string, onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void): Promise<QueryResult | undefined> {
+  async function fetchTabResultForExport(id: string, onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void, probeRowLimit = false): Promise<QueryResult | undefined> {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab?.result) return undefined;
 
@@ -9450,8 +9528,71 @@ export const useQueryStore = defineStore("query", () => {
 
     if (tab.mode !== "query") return tab.result;
 
+    const sourceResult = probeRowLimit
+      ? { ...tab.result, columns: [...tab.result.columns], column_types: tab.result.column_types ? [...tab.result.column_types] : undefined, hidden_column_indexes: tab.result.hidden_column_indexes ? [...tab.result.hidden_column_indexes] : undefined, rows: tab.result.rows.map((row) => [...row]) }
+      : tab.result;
+    const sourcePageOffset = tab.resultPageOffset ?? 0;
+    const sourceTotalRows = tab.resultTotalRowCount;
+    const sourceClientSessionId = tab.resultClientSessionId ?? tabClientSessionId(tab);
+    const sourcePageLimit = tab.resultExecutedPageLimit ?? tab.resultPageLimit;
+    const sourceLastPageOffset = tab.resultExecutedPageOffset ?? sourcePageOffset;
+    // Native drivers also report has_more=false for SELECT ... LIMIT n: it
+    // exhausts that SQL statement, not the original query. resultPageSql records
+    // a rewritten SQL page; cursors execute the original query and clear their
+    // session_id on exhaustion. A SQL page needs a short tail: background COUNT
+    // can use another session and see a different table behind a temporary name.
+    // Appended segments retain resultPageOffset=0, so inspect their last page.
+    const sourceSnapshotComplete =
+      sourceResult.has_more === false &&
+      !sourceResult.truncated &&
+      !sourceResult.large_value_cells?.length &&
+      !sourceResult.execution_error &&
+      sourcePageOffset === 0 &&
+      (typeof sourceTotalRows !== "number" || sourceTotalRows <= sourceResult.rows.length) &&
+      (!tab.resultPageSql || hasShortDataGridSqlPage({ rowCount: sourceResult.rows.length, pageOffset: sourcePageOffset, executedPageOffset: sourceLastPageOffset, executedPageLimit: sourcePageLimit }));
+    const sourceHiddenNames = new Set((sourceResult.hidden_column_indexes ?? []).map((index) => sourceResult.columns[index]).filter((name): name is string => name !== undefined && sourceResult.columns.filter((column) => column === name).length === 1));
+    const resultForTransfer = (result: QueryResult): QueryResult => {
+      if (!probeRowLimit) return result;
+      const hidden = new Set(result.hidden_column_indexes ?? []);
+      result.columns.forEach((name, index) => {
+        if (sourceHiddenNames.has(name)) hidden.add(index);
+      });
+      if (hidden.size === 0) return result;
+      const indexes = result.columns.map((_, index) => index).filter((index) => !hidden.has(index));
+      const indexMap = new Map(indexes.map((index, ordinal) => [index, ordinal]));
+      return {
+        ...result,
+        columns: indexes.map((index) => result.columns[index]!),
+        column_types: result.column_types ? indexes.map((index) => result.column_types?.[index] ?? "") : undefined,
+        column_sortables: result.column_sortables ? indexes.map((index) => result.column_sortables?.[index] ?? true) : undefined,
+        rows: result.rows.map((row) => indexes.map((index) => row[index])),
+        spatial_values: result.spatial_values?.map((row) => indexes.map((index) => row[index] ?? null)),
+        spatial_columns: result.spatial_columns?.filter((column) => indexMap.has(column.column_index)).map((column) => ({ ...column, column_index: indexMap.get(column.column_index)! })),
+        neo4j_node_cells: result.neo4j_node_cells?.filter((cell) => indexMap.has(cell.column_index)).map((cell) => ({ ...cell, column_index: indexMap.get(cell.column_index)! })),
+        hidden_column_indexes: undefined,
+      };
+    };
+    const cachedResultForExport = (): QueryResult => {
+      // A last page (has_more=false) is not a complete result. Nor is a LOB
+      // preview safe to write as if it were the underlying value.
+      if (probeRowLimit && !sourceSnapshotComplete) {
+        throw new Error(i18n.global.t("grid.exportDatabaseIncomplete"));
+      }
+      return resultForTransfer(sourceResult);
+    };
+    // Reuse a result explicitly known to be complete. Re-executing it on the
+    // export session can lose temporary tables, session settings or uncommitted
+    // values, and would no longer transfer the snapshot shown to the user.
+    if (probeRowLimit && sourceSnapshotComplete) return resultForTransfer(sourceResult);
+    // A separate execution cannot see this transaction's uncommitted values.
+    // Keep its writes and cursor untouched; only a fully loaded snapshot is
+    // safe to transfer without re-entering the manual transaction protocol.
+    // An Agent timeout cancels every cursor on its client session. Do not
+    // borrow that session while the grid still owns a live cursor either.
+    if (probeRowLimit && ((tab.autoCommit === false && tab.txnSessionId) || tab.resultSessionId || sourceResult.session_id)) throw new Error(i18n.global.t("grid.exportDatabaseLoadComplete"));
     const sql = queryResultExecutionSql(tab);
-    if (!sql.trim()) return tab.result;
+    const baseSql = queryResultBaseSql(tab);
+    if (!sql.trim()) return cachedResultForExport();
 
     const location = queryResultExecutionLocation(tab);
     const connStore = useConnectionStore();
@@ -9459,14 +9600,23 @@ export const useQueryStore = defineStore("query", () => {
     const conn = connStore.getConfig(location.connectionId);
     const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
     const executableSql = effectiveDbType === "mysql" ? stripMysqlClientDisplayCommand(sql) : sql;
+    if (probeRowLimit && effectiveDbType !== "mongodb") {
+      const assessment = classifySqlRisk(executableSql, { dialect: effectiveDbType });
+      const statement = assessment.statements[0];
+      // CALL and DML RETURNING/OUTPUT may return rows, but exporting them must
+      // never repeat their source-side mutations just to obtain those rows.
+      if (assessment.risk !== "read" || assessment.statements.length !== 1 || (statement?.firstKeyword !== "select" && statement?.firstKeyword !== "with")) return cachedResultForExport();
+    }
     const executionDatabase = location.database;
     // main 引入全局查询超时：queryTimeoutSecsForConnection 现需传入全局默认值；
     // settingsStore 取 defineStore 顶层声明的实例（本函数无局部覆盖）。
     const queryTimeoutSecs = queryTimeoutSecsForConnection(conn, settingsStore.editorSettings.globalQueryTimeoutSecs);
     const useAgentCursor = usesAgentCursorForQuery(conn?.db_type, conn?.driver_profile);
-    const queryBaseSql = effectiveDbType === "mysql" ? stripMysqlClientDisplayCommand(queryResultBaseSql(tab)) : queryResultBaseSql(tab);
+    const queryBaseSql = effectiveDbType === "mysql" ? stripMysqlClientDisplayCommand(baseSql) : baseSql;
     const exportSettings = useSettingsStore().editorSettings;
-    const exportRowLimit = exportSettings.exportRowLimitEnabled ? exportSettings.exportRowLimit : Number.POSITIVE_INFINITY;
+    // Database transfers read one extra row to distinguish a complete result at
+    // the limit from a partial export, without relying on a cached COUNT.
+    const exportRowLimit = exportSettings.exportRowLimitEnabled ? exportSettings.exportRowLimit + (probeRowLimit ? 1 : 0) : Number.POSITIVE_INFINITY;
 
     if (effectiveDbType === "mongodb") {
       let mongoCommand;
@@ -9528,28 +9678,33 @@ export const useQueryStore = defineStore("query", () => {
       // BSON-faithful cell encoding.
       const result = mongoDocumentsToQueryResult(documents, performance.now() - exportStartedAt, totalRows ?? documents.length, copyDocuments, totalRows !== null, { documentGridValues: false });
       if (result.columns.length === 0) {
-        result.columns = tab.result.columns;
-        result.column_types = tab.result.column_types;
+        result.columns = sourceResult.columns;
+        result.column_types = sourceResult.column_types;
       }
       result.affected_rows = documents.length;
       result.truncated = false;
       result.has_more = false;
-      return result;
+      return resultForTransfer(result);
     }
 
-    const agentExportMaxRows = exportSettings.exportRowLimitEnabled ? exportSettings.exportRowLimit : 2_147_483_647;
+    const agentExportMaxRows = Math.min(exportRowLimit, 2_147_483_647);
     // Use the already-computed total row count as a progress estimate so the
     // export dialog shows a moving bar instead of a stuck 0 while paginating.
     const totalRows = typeof tab.resultTotalRowCount === "number" ? Math.min(tab.resultTotalRowCount, exportRowLimit) : null;
     const pageLimit = Math.max(tab.resultPageLimit ?? 0, TABLE_DATA_EXPORT_PAGE_SIZE);
     const rows: QueryResult["rows"] = [];
     let columns: string[] = [];
+    let columnTypes: string[] = [];
     let executionTimeMs = 0;
     let offset = 0;
     let sessionId: string | undefined;
-    const clientSessionId = tabClientSessionId(tab, "export");
+    // A database transfer must retain session-local tables and settings. The
+    // file-export path owns a separate client session; this path borrows the
+    // source session and must not close it when exporting finishes.
+    const clientSessionId = probeRowLimit ? sourceClientSessionId : tabClientSessionId(tab, "export");
     const exportExecutionId = uuid();
 
+    let incomplete = false;
     try {
       while (rows.length < exportRowLimit) {
         const remaining = exportRowLimit - rows.length;
@@ -9562,7 +9717,8 @@ export const useQueryStore = defineStore("query", () => {
           useAgentCursor,
           firstPageUsesActualSql: true,
         });
-        if (typeof plan.pageLimit !== "number" || typeof plan.pageOffset !== "number") return tab.result;
+        if (probeRowLimit && plan.paginationError) throw new Error(plan.paginationError);
+        if (typeof plan.pageLimit !== "number" || typeof plan.pageOffset !== "number") return cachedResultForExport();
         const executionOptions = plan.useAgentResultSession
           ? {
               maxRows: agentExportMaxRows,
@@ -9575,30 +9731,53 @@ export const useQueryStore = defineStore("query", () => {
             }
           : { maxRows: plan.pageLimit, fetchSize: plan.pageLimit, clientSessionId, catalog: location.catalog, timeoutSecs: queryTimeoutSecs };
         const results = await api.executeMulti(location.connectionId, executionDatabase, plan.sqlToExecute, location.schema, exportExecutionId, executionOptions);
-        if (!results[0]) break;
+        if (!results[0]) {
+          if (probeRowLimit) throw new Error(i18n.global.t("grid.exportDatabaseIncomplete"));
+          break;
+        }
         const result = stripPaginationRowNumber(results[0], plan.paginationRowNumberColumn);
+        // Capture ownership before validating the page. A first page with a
+        // preview/error still owns a new cursor that must be closed without
+        // closing the borrowed source client session.
+        const nextSessionId = result.session_id?.trim() || sessionId;
+        sessionId = nextSessionId;
+        if (probeRowLimit && (result.execution_error || result.server_message || result.large_value_cells?.length)) throw new Error(i18n.global.t("grid.exportDatabaseIncomplete"));
+        if (probeRowLimit && columns.length > 0 && (result.columns.length !== columns.length || result.columns.some((column, index) => column !== columns[index]))) throw new Error(i18n.global.t("grid.exportDatabaseIncomplete"));
+        if (probeRowLimit && columnTypes.length > 0 && result.column_types?.length && (columnTypes.length !== result.column_types.length || result.column_types.some((type, index) => type !== columnTypes[index]))) throw new Error(i18n.global.t("grid.exportDatabaseIncomplete"));
+        if (probeRowLimit && plan.useAgentResultSession && (typeof result.has_more !== "boolean" || (result.has_more && (!nextSessionId || result.rows.length === 0)))) throw new Error(i18n.global.t("grid.exportDatabaseIncomplete"));
+        if (probeRowLimit && result.has_more && result.rows.length === 0) throw new Error(i18n.global.t("grid.exportDatabaseIncomplete"));
+        // `has_more` only describes the current page. It is expected to be true
+        // for every page except the last one, so it must not be accumulated as
+        // an incomplete-export marker.
+        incomplete = incomplete || result.truncated === true;
         if (columns.length === 0) columns = result.columns;
+        if (columnTypes.length === 0 && result.column_types?.length) columnTypes = result.column_types;
         rows.push(...result.rows);
         executionTimeMs += result.execution_time_ms ?? 0;
         onProgress?.({ rowsExported: rows.length, totalRows });
-        sessionId = result.session_id ?? undefined;
-        const shouldFetchNextPage = plan.useAgentResultSession ? result.has_more === true : result.rows.length >= plan.pageLimit;
+        const shouldFetchNextPage = plan.useAgentResultSession ? result.has_more === true : result.rows.length >= plan.pageLimit || (probeRowLimit && result.has_more === true);
         if (!shouldFetchNextPage || rows.length >= exportRowLimit) break;
         offset += result.rows.length;
       }
     } finally {
-      if (sessionId) void api.closeQuerySession(location.connectionId, location.database, sessionId, clientSessionId, location.catalog);
-      void closeClientSessionId(location.connectionId, location.database, clientSessionId, location.catalog, { tabId: tab.id });
+      try {
+        if (sessionId) await api.closeQuerySession(location.connectionId, location.database, sessionId, clientSessionId, location.catalog);
+      } catch (error) {
+        queryExecutionLog("warn", "query-export-session-close:error", { sessionId, error });
+      } finally {
+        if (!probeRowLimit) void closeClientSessionId(location.connectionId, location.database, clientSessionId, location.catalog, { tabId: tab.id });
+      }
     }
 
-    return {
-      columns: columns.length ? columns : tab.result.columns,
+    return resultForTransfer({
+      columns: columns.length ? columns : sourceResult.columns,
+      column_types: columnTypes.length ? columnTypes : sourceResult.column_types,
       rows,
       affected_rows: 0,
       execution_time_ms: executionTimeMs,
-      truncated: false,
-      has_more: false,
-    };
+      truncated: probeRowLimit && (incomplete || (exportSettings.exportRowLimitEnabled && rows.length > exportSettings.exportRowLimit)),
+      has_more: probeRowLimit && (incomplete || (exportSettings.exportRowLimitEnabled && rows.length > exportSettings.exportRowLimit)),
+    });
   }
 
   async function buildQueryResultExportRequest(id: string, options: BuildQueryResultExportRequestOptions) {

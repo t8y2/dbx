@@ -313,7 +313,7 @@ describe("DataGridConditionEditor quote completion", () => {
     expect(value.value).toBe("name");
   });
 
-  it("keeps the first WHERE field suggestion unselected and only applies on Enter", async () => {
+  it("selects the first WHERE field suggestion with Enter", async () => {
     const { value, input } = mountEditor("where", "", { columns: ["customer_id", "customer_name"] });
     input.focus();
     input.value = "cus";
@@ -321,12 +321,11 @@ describe("DataGridConditionEditor quote completion", () => {
     input.dispatchEvent(new Event("input", { bubbles: true }));
 
     await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(2));
-    // 不再默认高亮：回车只用于应用筛选，不会把列名写进输入框（issue #10595）
-    expect(document.querySelector('[role="option"][aria-selected="true"]')).toBeNull();
+    expect(document.querySelector('[role="option"][aria-selected="true"]')?.textContent).toContain("customer_id");
 
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
     await nextTick();
-    expect(value.value).toBe("cus");
+    expect(value.value).toBe("customer_id");
     expect(document.querySelector('[role="listbox"]')).toBeNull();
   });
 

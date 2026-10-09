@@ -74,7 +74,7 @@ fn text(row: &[serde_json::Value], index: usize) -> String {
 }
 async fn metadata(state: &AppState, pool: &str, sql: &str) -> Result<db::QueryResult, String> {
     let result = execute_read_on_pool(state, pool, sql).await.map_err(|_| "DBLINK_METADATA_UNAVAILABLE")?;
-    if result.truncated { return Err("DBLINK_METADATA_TRUNCATED".into()); }
+    if result.truncated || result.has_more { return Err("DBLINK_METADATA_TRUNCATED".into()); }
     Ok(result)
 }
 async fn login(state: &AppState, pool: &str) -> Result<String, String> {
@@ -149,8 +149,8 @@ fn endpoint_version_supported(kind: &DatabaseType, version: &str) -> bool {
         _ => false,
     }
 }
-async fn privileges(state: &AppState, pool: &str, scope: &str, replace: bool) -> Result<(), String> {
-    let privileges: Vec<_> = metadata(state, pool, "SELECT PRIVILEGE FROM SESSION_PRIVS").await?.rows.iter().map(|r| text(r, 0)).collect();
+async fn privileges(state: &AppState, pool: &str, database_type: DatabaseType, scope: &str, replace: bool) -> Result<(), String> {
+    let privileges: Vec<_> = metadata(state, pool, oracle_packages::creation_privileges_sql(database_type)).await?.rows.iter().map(|r| text(r, 0)).collect();
     let create = if scope == "public" { "CREATE PUBLIC DATABASE LINK" } else { "CREATE DATABASE LINK" };
     if !privileges.iter().any(|p| p == create) || (scope == "public" && replace && !privileges.iter().any(|p| p == "DROP PUBLIC DATABASE LINK")) { return Err("DBLINK_TARGET_PRIVILEGE_REQUIRED".into()); }
     Ok(())
@@ -183,7 +183,7 @@ async fn build_plan(state: &AppState, request: &TransferRequest, source: &str, t
             if entry.existing.is_some() { entry.item.action = if request.object_conflict_policy == TransferObjectConflictPolicy::Skip { "skip" } else { "replace" }.into(); }
             if entry.item.action != "skip" {
                 if executing { credential(request, kind, &name)?; } else if !config.credential_available { return Err("DBLINK_TARGET_CREDENTIAL_REQUIRED".into()); }
-                privileges(state, target, &config.target_scope, entry.item.action == "replace").await?;
+                privileges(state, target, target_type, &config.target_scope, entry.item.action == "replace").await?;
                 let capability = secure_rpc(state, target, "database_link_secure_v1_info", serde_json::json!({})).await.map_err(|_| "DBLINK_SECURE_AGENT_CAPABILITY_UNAVAILABLE")?;
                 if capability.get("supported").and_then(|v| v.as_bool()) != Some(true) { return Err("DBLINK_SECURE_AGENT_UNSUPPORTED".into()); }
             } else { entry.item.credential_required = Some(false); }

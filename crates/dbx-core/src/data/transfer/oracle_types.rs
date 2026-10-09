@@ -299,7 +299,8 @@ async fn build_plan(state: &AppState, request: &TransferRequest, source_pool: &s
                 entry.original = Some(source(state, &request.target_connection_id, &request.target_database, &target_owner, name, *kind).await?);
                 if *kind == TransferObjectKind::Type && target_details.paired_object.is_some() { entry.original_body = Some(source(state, &request.target_connection_id, &request.target_database, &target_owner, name, TransferObjectKind::TypeBody).await?); }
             }
-            let privileges = metadata(state, target_pool, "SELECT PRIVILEGE FROM SESSION_PRIVS").await?.rows;
+            let target_type = get_db_type(state, &request.target_connection_id).await?;
+            let privileges = metadata(state, target_pool, oracle_packages::creation_privileges_sql(target_type)).await?.rows;
             let login_rows = metadata(state, target_pool, "SELECT USER FROM DUAL").await?.rows;
             let login = login_rows.first().map(|r| text(r, 0)).transpose()?.ok_or("Target login is unknown")?;
             let required = if login == target_owner { "CREATE TYPE" } else { "CREATE ANY TYPE" };

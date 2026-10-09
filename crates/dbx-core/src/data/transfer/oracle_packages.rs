@@ -3,6 +3,20 @@
 use super::*;
 use std::io::Write;
 
+#[cfg(all(test, unix))]
+#[path = "oracle_transfer_agent_tests.rs"]
+mod agent_tests;
+
+pub(super) fn creation_privileges_sql(database_type: DatabaseType) -> &'static str {
+    if database_type == DatabaseType::OceanbaseOracle {
+        // OB 4.2.5 has no SESSION_PRIVS. Only grants directly assigned to the
+        // executing session user are confirmed; role grants do not prove permission.
+        "SELECT PRIVILEGE FROM SYS.USER_SYS_PRIVS WHERE USERNAME = SYS_CONTEXT('USERENV', 'SESSION_USER')"
+    } else {
+        "SELECT PRIVILEGE FROM SESSION_PRIVS"
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum TransferObjectConflictPolicy {
@@ -243,7 +257,7 @@ fn text(row: &[serde_json::Value], index: usize) -> String {
 
 async fn read_metadata(state: &AppState, pool: &str, sql: &str) -> Result<db::QueryResult, String> {
     let result = execute_read_on_pool(state, pool, sql).await?;
-    if result.truncated {
+    if result.truncated || result.has_more {
         return Err("Package metadata was truncated; a complete preflight/readback is required".into());
     }
     Ok(result)
@@ -768,7 +782,7 @@ pub(super) async fn execute<F: FnMut(TransferProgress)>(
                 result.recovery = Some(format!("Complete target definition backup retained at {path}"));
             }
             if let Err(error) = written {
-                // Keep the failed definition's status, even if recovery restores a VALID one.
+                // Keep the failed write/readback status with the retained backup.
                 result.compile_status = object_status(
                     state, target_pool, &item.target_schema, &item.name, dictionary_kind(item.object_type),
                 ).await.ok().flatten();
@@ -781,33 +795,13 @@ pub(super) async fn execute<F: FnMut(TransferProgress)>(
                         backup_path.map_or(String::new(), |path| format!("Existing definitions backed up at {path}"))
                     ));
                 } else if let Some(path) = backup_path {
-                    let mut restored = true;
-                    for (kind, ddl) in &backup.definitions {
-                        if item.object_type == TransferObjectKind::PackageBody && kind == "PACKAGE" {
-                            continue;
-                        }
-                        let kind = if kind == "PACKAGE BODY" {
-                            TransferObjectKind::PackageBody
-                        } else {
-                            TransferObjectKind::Package
-                        };
-                        let ddl = map_header(ddl, kind, &item.name, &item.target_schema)?;
-                        if execute_on_pool(state, target_pool, &ddl).await.is_err() {
-                            restored = false;
-                            continue;
-                        }
-                        let recovery_item = TransferSchemaObjectItem { object_type: kind, ddl, ..item.clone() };
-                        if verify(state, request, target_pool, &recovery_item).await.is_err() {
-                            restored = false;
-                        }
-                    }
+                    // A successful DDL response and matching dictionary readback cannot
+                    // exclude another session writing between that read and a recovery DDL.
+                    // Timeouts/cancellation also leave the write outcome uncertain. There
+                    // is no atomic compare-and-restore primitive here, so never replay old
+                    // definitions over the current target (including an unselected body).
                     result.recovery = Some(format!(
-                        "{}; backup retained at {path}",
-                        if restored {
-                            "Target definitions restored and verified"
-                        } else {
-                            "Automatic restoration incomplete; manual recovery required"
-                        }
+                        "Automatic restoration was not attempted because concurrent changes or an unknown write outcome cannot be excluded. Complete specification/body backup retained at {path}. Manual recovery: wait for in-flight or cancelled DDL to finish; read current target source and status and compare with the backup; explicitly select which definitions to restore on the recorded target connection/schema (specification before body, never implicitly restore an unselected body); then verify VALID status, ALL_ERRORS and complete source/signature readback."
                     ));
                 } else {
                     result.recovery =
@@ -1025,7 +1019,7 @@ mod tests {
                 compile_status: Some("INVALID".into()),
                 source_verified: Some(false),
                 error: Some("Compilation status INVALID".into()),
-                recovery: Some("Target definitions restored and verified".into()),
+                recovery: Some("Complete target definitions backed up; manual recovery required".into()),
             }),
         };
         let value = serde_json::to_value(progress).unwrap();
@@ -1034,6 +1028,6 @@ mod tests {
         assert_eq!(value["objectResult"]["sourceVerified"], false);
         assert_eq!(value["objectResult"]["status"], "failed");
         assert_eq!(value["terminal"], false);
-        assert!(value["objectResult"]["recovery"].as_str().unwrap().contains("restored"));
+        assert!(value["objectResult"]["recovery"].as_str().unwrap().contains("manual recovery"));
     }
 }

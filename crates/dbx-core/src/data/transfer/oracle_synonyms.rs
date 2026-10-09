@@ -63,7 +63,7 @@ fn owner_filter(schema: &str) -> String {
 
 async fn metadata(state: &AppState, pool: &str, sql: &str) -> Result<db::QueryResult, String> {
     let result = execute_read_on_pool(state, pool, sql).await?;
-    if result.truncated {
+    if result.truncated || result.has_more {
         return Err("Synonym metadata is truncated; complete preflight/readback is required".into());
     }
     Ok(result)
@@ -182,8 +182,8 @@ async fn local_object(state: &AppState, pool: &str, schema: &str, name: &str) ->
     Ok(!result.rows.is_empty())
 }
 
-async fn privileges(state: &AppState, pool: &str, definition: &Definition) -> Result<(), String> {
-    let result = metadata(state, pool, "SELECT PRIVILEGE FROM SESSION_PRIVS").await?;
+async fn privileges(state: &AppState, pool: &str, database_type: DatabaseType, definition: &Definition) -> Result<(), String> {
+    let result = metadata(state, pool, oracle_packages::creation_privileges_sql(database_type)).await?;
     let granted: HashSet<String> = result.rows.iter().map(|row| text(row, 0)).collect();
     if public(&definition.owner) {
         if !granted.contains("CREATE PUBLIC SYNONYM") {
@@ -347,7 +347,7 @@ async fn build_plan(
                 } else { "replace" }.into();
             }
             if entry.item.action != "skip" {
-                privileges(state, target_pool, &definition).await?;
+                privileges(state, target_pool, target_type, &definition).await?;
             }
             let shadow_owner = if public(&target_schema) {
                 resolve_oracle_schema(&request.target_schema, &request.target_database)
@@ -523,7 +523,7 @@ pub(super) async fn execute<F: FnMut(TransferProgress)>(
             if existing.is_some() && request.object_conflict_policy != TransferObjectConflictPolicy::Replace {
                 return Err("Target synonym appeared after planning; replacement is not authorized".into());
             }
-            privileges(state, target_pool, definition).await?;
+            privileges(state, target_pool, get_db_type(state, &request.target_connection_id).await?, definition).await?;
             let dependencies =
                 dependency_chain(state, target_pool, request, definition, &HashMap::new(), false).await?;
             if dependencies.iter().any(|dependency| !dependency.available) {

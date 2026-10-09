@@ -2828,7 +2828,7 @@ async function confirmPasteTable() {
           identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
           ...dataCopyColumnOptions,
         });
-        const executed = await executeObjectBrowserSqlWithProductionGuard(dataSql, () => api.executeQuery(props.connection.id, props.database, dataSql, schema));
+        const executed = await executeObjectBrowserSqlWithProductionGuard(dataSql, () => api.executeQuery(props.connection.id, props.database, dataSql, schema, undefined, { timeoutSecs: 0 }));
         if (!executed) {
           pasteCancelled = true;
           break;

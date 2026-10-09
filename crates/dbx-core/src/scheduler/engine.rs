@@ -29,7 +29,7 @@ use super::models::{TaskExecutionMode, TaskRestartPolicy, TaskRunStatus, TaskRun
 use super::policy;
 use super::queue::RunQueue;
 use super::resident::{ResidentSession, ResidentState};
-use super::store::{RunJob, SchedulerStore, SCHEDULER_LEASE};
+use super::store::{RunJob, RunRetentionPolicy, SchedulerStore, SCHEDULER_LEASE};
 use super::trigger::TaskTrigger;
 use super::TaskError;
 
@@ -43,6 +43,10 @@ const CANCEL_GRACE: Duration = Duration::from_secs(30);
 /// keep manual-trigger latency well under a second.
 const WAKE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
+/// How often the engine prunes finished runs past the retention policy
+/// (see [`RunRetentionPolicy`]). The first tick after startup prunes.
+const PRUNE_EVERY: Duration = Duration::from_secs(3600);
+
 #[derive(Debug)]
 pub struct SchedulerEngine {
     store: SchedulerStore,
@@ -53,6 +57,7 @@ pub struct SchedulerEngine {
     lease_ttl: Duration,
     resident_heartbeat_timeout: Duration,
     queue: RunQueue,
+    next_prune: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 impl SchedulerEngine {
@@ -72,6 +77,7 @@ impl SchedulerEngine {
             lease_ttl,
             resident_heartbeat_timeout: Duration::from_secs(60),
             queue: RunQueue::new(),
+            next_prune: std::sync::Mutex::new(None),
         }
     }
 
@@ -198,7 +204,35 @@ impl SchedulerEngine {
         }
         self.reap().await;
         self.reconcile_residents().await;
+        self.maybe_prune().await;
         Ok(())
+    }
+
+    /// Run-retention housekeeping, at most once per hour (the first tick
+    /// prunes). Deletes finished runs past the retention policy; failures
+    /// are logged and isolated like every tick side effect.
+    async fn maybe_prune(&self) {
+        // The guard is confined to this block: it must be gone before the
+        // prune await below or the loop future stops being Send.
+        let due = {
+            let mut next = self.next_prune.lock().expect("prune guard");
+            let due = match *next {
+                Some(at) => std::time::Instant::now() >= at,
+                None => true,
+            };
+            if due {
+                *next = Some(std::time::Instant::now() + PRUNE_EVERY);
+            }
+            due
+        };
+        if !due {
+            return;
+        }
+        match self.store.prune_finished_runs(&RunRetentionPolicy::default()).await {
+            Ok(0) => {}
+            Ok(count) => log::info!("[scheduler] pruned {count} finished run(s) past retention"),
+            Err(error) => log::warn!("[scheduler] run retention prune failed: {error}"),
+        }
     }
 
     /// `startup` triggers fire once on every (re)start of the worker for

@@ -42,5 +42,5 @@ pub use models::{
 pub use queue::RunQueue;
 pub use resident::{ResidentSession, ResidentState, ResidentStatus};
 pub use service::SchedulerService;
-pub use store::{RecoveryReport, RunJob, SchedulerStore, SCHEDULER_LEASE};
+pub use store::{RecoveryReport, RunJob, RunRetentionPolicy, SchedulerStore, SCHEDULER_LEASE};
 pub use trigger::TaskTrigger;

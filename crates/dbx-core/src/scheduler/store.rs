@@ -234,6 +234,27 @@ pub struct SchedulerStore {
     directory: PathBuf,
 }
 
+/// Retention policy for finished runs (ADR §2.6 housekeeping). Terminal runs
+/// are deleted when older than [`RunRetentionPolicy::older_than_days`] AND,
+/// per task, beyond the newest [`RunRetentionPolicy::keep_per_task`] terminal
+/// runs — whichever hits first. Active runs (queued/starting/running) are
+/// never touched, and the audit trail is out of scope (it is the operation
+/// history, not run bulk).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunRetentionPolicy {
+    pub older_than_days: u32,
+    pub keep_per_task: u32,
+}
+
+impl Default for RunRetentionPolicy {
+    fn default() -> Self {
+        // An hourly task writes ~720 runs and log directories a month; 30
+        // days / 500 per task bounds both without clipping typical
+        // inspection windows.
+        Self { older_than_days: 30, keep_per_task: 500 }
+    }
+}
+
 impl SchedulerStore {
     /// `data_dir` is the DBX data directory; the scheduler database lives in
     /// its own `scheduler/` subtree (never inside `database-backups/`).
@@ -1276,6 +1297,77 @@ impl SchedulerStore {
             Ok(artifact)
         })
         .await
+    }
+
+    /// Retention policy for finished runs (ADR §2.6 housekeeping). Terminal
+    /// runs are deleted when older than [`RunRetentionPolicy::older_than_days`] AND, per
+    /// task, beyond the newest [`RunRetentionPolicy::keep_per_task`] terminal runs —
+    /// whichever hits first. Active runs (queued/starting/running) are never
+    /// touched, and the audit trail is out of scope (it is the operation
+    /// history, not run bulk).
+    pub async fn prune_finished_runs(&self, policy: &RunRetentionPolicy) -> Result<usize, TaskError> {
+        let cutoff = rfc3339(Utc::now() - chrono::Duration::days(i64::from(policy.older_than_days.max(1))));
+        let keep = i64::from(policy.keep_per_task.max(1));
+        let (count, removed) = self
+            .access(move |conn| {
+                let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                const TERMINAL: &str = "status NOT IN ('queued','starting','running')";
+                tx.execute("CREATE TEMP TABLE IF NOT EXISTS prune_ids(id TEXT PRIMARY KEY)", [])?;
+                tx.execute("DELETE FROM prune_ids", [])?;
+                tx.execute(
+                    &format!("INSERT INTO prune_ids SELECT id FROM task_runs WHERE {TERMINAL} AND created_at < ?1"),
+                    params![cutoff],
+                )?;
+                tx.execute(
+                    &format!(
+                        "INSERT INTO prune_ids SELECT r.id FROM task_runs r WHERE r.{TERMINAL}
+                         AND (SELECT COUNT(*) FROM task_runs n WHERE n.task_id = r.task_id
+                              AND n.{TERMINAL} AND n.created_at > r.created_at) >= ?1"
+                    ),
+                    params![keep],
+                )?;
+                let mut removed = Vec::new();
+                let mut rows =
+                    tx.prepare("SELECT p.id, r.created_at FROM prune_ids p JOIN task_runs r ON r.id = p.id")?;
+                let listed = rows.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+                for row in listed {
+                    removed.push(row?);
+                }
+                drop(rows);
+                tx.execute("DELETE FROM task_artifacts WHERE run_id IN (SELECT id FROM prune_ids)", [])?;
+                tx.execute("DELETE FROM task_log_index WHERE run_id IN (SELECT id FROM prune_ids)", [])?;
+                tx.execute("DELETE FROM task_runs WHERE id IN (SELECT id FROM prune_ids)", [])?;
+                tx.execute("DELETE FROM prune_ids", [])?;
+                tx.commit()?;
+                Ok((removed.len(), removed))
+            })
+            .await?;
+        // Disk traces go after the commit: store rows are the source of
+        // truth, a leftover directory must never fail the prune.
+        for (run_id, created_at) in removed {
+            self.remove_run_log_dir(&created_at, &run_id);
+        }
+        Ok(count)
+    }
+
+    /// Best-effort removal of one run's log directory plus the now-empty
+    /// `%Y/%m/%d` parent chain. Never touches anything above `logs_root`.
+    fn remove_run_log_dir(&self, created_at: &str, run_id: &str) {
+        let Some(date) = chrono::DateTime::parse_from_rfc3339(created_at)
+            .ok()
+            .map(|time| time.with_timezone(&Utc).format("%Y/%m/%d").to_string())
+        else {
+            return;
+        };
+        let day = self.logs_root().join(date);
+        let _ = std::fs::remove_dir_all(day.join(run_id));
+        let _ = std::fs::remove_dir(&day);
+        if let Some(month) = day.parent() {
+            let _ = std::fs::remove_dir(month);
+            if let Some(year) = month.parent() {
+                let _ = std::fs::remove_dir(year);
+            }
+        }
     }
 
     pub async fn list_artifacts(&self, run_id: String) -> Result<Vec<TaskArtifact>, TaskError> {

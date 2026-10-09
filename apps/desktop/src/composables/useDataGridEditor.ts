@@ -2258,8 +2258,24 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
         return;
       }
     }
+    // Anonymous PL/SQL reports zero for an unknown JDBC update count; its
+    // SQL%ROWCOUNT guard owns concurrency checks. Only compare plain DELETEs.
+    const rowIdDeleteCountKnown =
+      (resolvedDatabaseType.value === "oracle" || resolvedDatabaseType.value === "oceanbase-oracle") &&
+      usesSyntheticRowIdKey(resolvedDatabaseType.value, stmtOptions?.tableMeta.primaryKeys ?? []) &&
+      !joinedWriteTargets.value?.length &&
+      snapshot.dirtyRows.size === 0 &&
+      snapshot.newRows.length === 0 &&
+      snapshot.deletedRows.size > 0 &&
+      stmts.length === snapshot.deletedRows.size &&
+      stmts.every((statement) => /^\s*DELETE\s+FROM\b/i.test(statement));
+    const actualDeletedRows = apiResult?.affected_rows;
+    const deleteConflict =
+      rowIdDeleteCountKnown && typeof actualDeletedRows === "number" && Number.isInteger(actualDeletedRows) && actualDeletedRows >= 0 && actualDeletedRows < snapshot.deletedRows.size
+        ? i18n.global.t("grid.rowIdDeleteConflict", { actual: actualDeletedRows, expected: snapshot.deletedRows.size })
+        : undefined;
     try {
-      await recordDataGridHistory(stmts, rollbackStmts, Date.now() - start, snapshot, apiResult);
+      await recordDataGridHistory(stmts, rollbackStmts, Date.now() - start, snapshot, deleteConflict ? { ...apiResult, success: false, error: deleteConflict } : apiResult);
     } catch (e) {
       console.warn("[DBX] failed to record data grid history", e);
     }
@@ -2285,6 +2301,9 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       reloadCurrentData();
     }
     await finishSaveChanges(snapshot);
+    // These deletes reached a terminal result. Refresh and report the mismatch
+    // instead of leaving a missing ROWID queued for an impossible retry.
+    if (deleteConflict) saveError.value = deleteConflict;
   }
 
   function discardChanges() {

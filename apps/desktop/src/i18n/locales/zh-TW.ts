@@ -2543,6 +2543,7 @@ export default withEnglishFallback({
     layerPreviewCustomBasemapApply: "套用",
     layerPreviewCustomBasemapInvalid: "請輸入名稱和有效的 HTTP(S) XYZ 圖磚位址，並包含 {z}、{x}、{y} 佔位符。",
     insertRowsNotSupported: "目前的儲存目標不支援新增資料列。",
+    rowIdDeleteConflict: "本次刪除影響 {actual}/{expected} 列。部分目標可能已被其他工作階段刪除或不再符合。已清除本次待刪除標記並重新整理，請核對目前資料。",
     zoomIn: "放大",
     zoomOut: "縮小",
     fitImage: "適合顯示區域",

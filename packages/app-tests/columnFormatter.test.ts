@@ -81,6 +81,15 @@ test("formats only typed temporal cells for export", async () => {
   assert.deepEqual(rows, [[1, "2024/02/25 05:02:15.000+00:00", "2024-02-25T05:02:15Z", "2024/02/25 05:02:15.123+08:00", "2024/02/25 13:02:15.987+08:00"]]);
 });
 
+test("preserves temporal nulls and literal NULL text when formatting exports", async () => {
+  const { formatTemporalRowsForExport } = await import("../../apps/desktop/src/lib/dataGrid/columnFormatter.ts");
+  const types = ["DATE", "TIMESTAMP(6)", "TIMESTAMP WITH TIME ZONE", "TIMESTAMP WITH LOCAL TIME ZONE", "VARCHAR2"];
+  const rows = [[null, null, null, null, "NULL"], ["NULL", "NULL", "NULL", "NULL", null]];
+  assert.deepEqual(formatTemporalRowsForExport(rows, types, "YYYY/MM/DD HH:mm:ss.SSSZ"), rows);
+  assert.deepEqual(formatTemporalRowsForExport(rows, types, ""), rows);
+  assert.deepEqual(rows, [[null, null, null, null, "NULL"], ["NULL", "NULL", "NULL", "NULL", null]]);
+});
+
 test("formats Oracle timestamp fractional precision in the data grid", () => {
   assert.equal(applyColumnFormatter("2024-02-25 13:02:15.123456", { kind: "datetime", unit: "auto", pattern: "YYYY/MM/DD HH:mm:ss.SSS", timezone: undefined }), "2024/02/25 13:02:15.123");
 });

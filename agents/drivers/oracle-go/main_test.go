@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -3534,7 +3535,7 @@ func (c *oracleViewSourceConn) QueryContext(
 	for index, arg := range args {
 		values[index] = arg.Value
 	}
-	if !reflect.DeepEqual(values, step.args) {
+	if (len(values) > 0 || len(step.args) > 0) && !reflect.DeepEqual(values, step.args) {
 		return nil, errors.New("unexpected query arguments")
 	}
 	if step.err != nil {
@@ -3613,12 +3614,14 @@ func (r *oracleViewSourceRows) Next(dest []driver.Value) error {
 	return nil
 }
 
+var oracleViewSourceTestDriverSequence atomic.Uint64
+
 func openOracleViewSourceTestDB(
 	t *testing.T,
 	steps []oracleViewSourceQueryStep,
 ) (*sql.DB, *oracleViewSourceDriver) {
 	t.Helper()
-	driverName := "oracle-test-view-source-" + strings.ReplaceAll(t.Name(), "/", "-") + "-" + time.Now().Format("150405.000000000")
+	driverName := fmt.Sprintf("oracle-test-view-source-%s-%d", strings.ReplaceAll(t.Name(), "/", "-"), oracleViewSourceTestDriverSequence.Add(1))
 	scripted := &oracleViewSourceDriver{steps: steps}
 	sql.Register(driverName, scripted)
 	db, err := sql.Open(driverName, "")

@@ -36,6 +36,8 @@
     "execute_query_page",
     "fetch_query_page",
     "close_query_session",
+    "read_large_value_chunk",
+    "release_large_value",
     "start_table_read",
     "fetch_table_read_page",
     "close_table_read_session",

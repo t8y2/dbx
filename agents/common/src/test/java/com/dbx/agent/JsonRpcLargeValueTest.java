@@ -4,6 +4,7 @@ import com.google.gson.JsonParser;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 import java.lang.reflect.Proxy;
+import java.lang.reflect.InvocationHandler;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -21,7 +22,7 @@ class JsonRpcLargeValueTest {
                     return Map.of("status", "ok", "data", "中文😀", "next_offset", 703L, "eof", false, "value_kind", "text");
                 }
                 if (method.getName().equals("releaseLargeValue")) { calls.add("release"); assertEquals("opaque-original", args[0]); return true; }
-                return null;
+                return method.isDefault() ? InvocationHandler.invokeDefault(object, method, args) : null;
             });
         JsonRpcServer server = new JsonRpcServer(agent);
         Object result = server.dispatchForRuntime(AgentProtocol.METHOD_READ_LARGE_VALUE_CHUNK,
@@ -40,7 +41,7 @@ class JsonRpcLargeValueTest {
                 if (method.getName().equals("supportsQueryTiming")) return false;
                 if (method.getName().equals("invalidateLargeValues")) { calls.add("invalidate"); return null; }
                 if (method.getName().equals("commitManualTransaction")) { calls.add("commit"); return Map.of("ok", true); }
-                return null;
+                return method.isDefault() ? InvocationHandler.invokeDefault(object, method, args) : null;
             });
         new JsonRpcServer(agent).dispatchForRuntime(AgentProtocol.METHOD_COMMIT_MANUAL_TRANSACTION,
             JsonParser.parseString("{}").getAsJsonObject());
@@ -56,7 +57,7 @@ class JsonRpcLargeValueTest {
                 if (method.getName().equals("invalidateLargeValues")) { calls.add("invalidate"); return null; }
                 if (method.getName().equals("executeBatch")) { calls.add("write"); throw new java.sql.SQLException("concurrent row removed"); }
                 if (method.getName().equals("rollbackManualTransaction")) { calls.add("rollback"); return Map.of("ok", true); }
-                return null;
+                return method.isDefault() ? InvocationHandler.invokeDefault(object, method, args) : null;
             });
         JsonRpcServer server = new JsonRpcServer(agent);
         assertThrows(Exception.class, () -> server.dispatchForRuntime(AgentProtocol.METHOD_EXECUTE_BATCH,

@@ -23,7 +23,10 @@ use crate::{
 /// HTTP-only wrapper: all protocol requests retain their admission permit
 /// until the operation finishes and are canceled at the authenticated deadline.
 /// Stdio behavior and the core DBX permission gates remain unchanged.
-struct BoundedHttpService { template: DbxMcpServer, principals: Arc<PrincipalStates> }
+struct BoundedHttpService {
+    template: DbxMcpServer,
+    principals: Arc<PrincipalStates>,
+}
 
 impl BoundedHttpService {
     async fn bounded_request<T, F, Fut>(
@@ -61,16 +64,21 @@ impl BoundedHttpService {
         &self,
         context: rmcp::service::NotificationContext<rmcp::RoleServer>,
         dispatch: F,
-    )
-    where
+    ) where
         F: FnOnce(DbxMcpServer, rmcp::service::NotificationContext<rmcp::RoleServer>) -> Fut + Send,
         Fut: std::future::Future<Output = ()> + Send,
     {
-        let Some(deadline) = context.extensions.get::<axum::http::request::Parts>()
-            .and_then(|parts| parts.extensions.get::<crate::http_auth::HttpRequestDeadline>()).cloned() else {
+        let Some(deadline) = context
+            .extensions
+            .get::<axum::http::request::Parts>()
+            .and_then(|parts| parts.extensions.get::<crate::http_auth::HttpRequestDeadline>())
+            .cloned()
+        else {
             return;
         };
-        let Ok(principal) = self.principals.acquire(&deadline.principal) else { return; };
+        let Ok(principal) = self.principals.acquire(&deadline.principal) else {
+            return;
+        };
         tokio::select! {
             biased;
             _ = principal.cancellation.cancelled() => {},
@@ -85,17 +93,26 @@ impl BoundedHttpService {
 // Every application request still enters the same lease and deadline boundary.
 macro_rules! bounded_request_method {
     ($method:ident, $input:ty, $output:ty) => {
-        async fn $method(&self, request: $input, context: rmcp::service::RequestContext<rmcp::RoleServer>) -> Result<$output, rmcp::ErrorData> {
+        async fn $method(
+            &self,
+            request: $input,
+            context: rmcp::service::RequestContext<rmcp::RoleServer>,
+        ) -> Result<$output, rmcp::ErrorData> {
             self.bounded_request(context, move |server, context| async move {
                 rmcp::ServerHandler::$method(&server, request, context).await
-            }).await
+            })
+            .await
         }
     };
     ($method:ident => $output:ty) => {
-        async fn $method(&self, context: rmcp::service::RequestContext<rmcp::RoleServer>) -> Result<$output, rmcp::ErrorData> {
+        async fn $method(
+            &self,
+            context: rmcp::service::RequestContext<rmcp::RoleServer>,
+        ) -> Result<$output, rmcp::ErrorData> {
             self.bounded_request(context, |server, context| async move {
                 rmcp::ServerHandler::$method(&server, context).await
-            }).await
+            })
+            .await
         }
     };
 }
@@ -105,14 +122,16 @@ macro_rules! bounded_notification_method {
         async fn $method(&self, notification: $input, context: rmcp::service::NotificationContext<rmcp::RoleServer>) {
             self.bounded_notification(context, move |server, context| async move {
                 rmcp::ServerHandler::$method(&server, notification, context).await
-            }).await;
+            })
+            .await;
         }
     };
     ($method:ident) => {
         async fn $method(&self, context: rmcp::service::NotificationContext<rmcp::RoleServer>) {
             self.bounded_notification(context, |server, context| async move {
                 rmcp::ServerHandler::$method(&server, context).await
-            }).await;
+            })
+            .await;
         }
     };
 }
@@ -126,8 +145,16 @@ impl rmcp::ServerHandler for BoundedHttpService {
     bounded_request_method!(set_level, rmcp::model::SetLevelRequestParams, ());
     bounded_request_method!(get_prompt, rmcp::model::GetPromptRequestParams, rmcp::model::GetPromptResponse);
     bounded_request_method!(list_prompts, Option<rmcp::model::PaginatedRequestParams>, rmcp::model::ListPromptsResult);
-    bounded_request_method!(list_resources, Option<rmcp::model::PaginatedRequestParams>, rmcp::model::ListResourcesResult);
-    bounded_request_method!(list_resource_templates, Option<rmcp::model::PaginatedRequestParams>, rmcp::model::ListResourceTemplatesResult);
+    bounded_request_method!(
+        list_resources,
+        Option<rmcp::model::PaginatedRequestParams>,
+        rmcp::model::ListResourcesResult
+    );
+    bounded_request_method!(
+        list_resource_templates,
+        Option<rmcp::model::PaginatedRequestParams>,
+        rmcp::model::ListResourceTemplatesResult
+    );
     bounded_request_method!(read_resource, rmcp::model::ReadResourceRequestParams, rmcp::model::ReadResourceResponse);
     bounded_request_method!(subscribe, rmcp::model::SubscribeRequestParams, ());
     bounded_request_method!(unsubscribe, rmcp::model::UnsubscribeRequestParams, ());
@@ -166,8 +193,18 @@ pub fn streamable_http_router(
     allowed_hosts: Vec<String>,
     web_mode: bool,
 ) -> Result<Router, String> {
-    let principals = PrincipalStates::new(DbxMcpServer::with_runtime_options(backend.clone(), McpScope::from_env(), web_mode));
-    build_streamable_http_router(backend, path, auth, allowed_hosts, web_mode, None, Arc::new(http_session_manager()), principals)
+    let principals =
+        PrincipalStates::new(DbxMcpServer::with_runtime_options(backend.clone(), McpScope::from_env(), web_mode));
+    build_streamable_http_router(
+        backend,
+        path,
+        auth,
+        allowed_hosts,
+        web_mode,
+        None,
+        Arc::new(http_session_manager()),
+        principals,
+    )
 }
 
 fn http_session_manager() -> LocalSessionManager {
@@ -227,8 +264,14 @@ fn build_streamable_http_router(
     let service: StreamableHttpService<BoundedHttpService, LocalSessionManager> = StreamableHttpService::new(
         move || {
             Ok(BoundedHttpService {
-                template: DbxMcpServer::with_shared_state(server_backend.clone(), scope.clone(), web_mode,
-                    plugin_tools_mode, McpSessionStore::new(), PendingSalesforceWrites::new(SALESFORCE_WRITE_CONFIRM_TTL)),
+                template: DbxMcpServer::with_shared_state(
+                    server_backend.clone(),
+                    scope.clone(),
+                    web_mode,
+                    plugin_tools_mode,
+                    McpSessionStore::new(),
+                    PendingSalesforceWrites::new(SALESFORCE_WRITE_CONFIRM_TTL),
+                ),
                 principals: principals.clone(),
             })
         },
@@ -300,7 +343,8 @@ pub async fn serve_streamable_http_on_listener(
     listener: tokio::net::TcpListener,
 ) -> io::Result<()> {
     let session_manager = Arc::new(http_session_manager());
-    let principals = PrincipalStates::new(DbxMcpServer::with_runtime_options(backend.clone(), McpScope::from_env(), false));
+    let principals =
+        PrincipalStates::new(DbxMcpServer::with_runtime_options(backend.clone(), McpScope::from_env(), false));
     let mcp_router = build_streamable_http_router(
         backend.clone(),
         &config.path,
@@ -338,10 +382,7 @@ pub async fn serve_streamable_http_on_listener(
 
 /// Cancel principal handlers before closing transports, then roll back all
 /// remaining inner sessions only after their in-flight handler leases drain.
-async fn close_http_sessions_bounded(
-    session_manager: &Arc<LocalSessionManager>,
-    principals: &Arc<PrincipalStates>,
-) {
+async fn close_http_sessions_bounded(session_manager: &Arc<LocalSessionManager>, principals: &Arc<PrincipalStates>) {
     let owners = principals.clone();
     let cleanup_owners = tokio::spawn(async move { owners.shutdown().await });
     let cleanup = async {
@@ -569,7 +610,8 @@ mod tests {
         local_manager.session_config = session_config;
         let manager = Arc::new(local_manager);
         let cancellation = CancellationToken::new();
-        let principals = PrincipalStates::new(DbxMcpServer::with_runtime_options(backend.clone(), McpScope::from_env(), false));
+        let principals =
+            PrincipalStates::new(DbxMcpServer::with_runtime_options(backend.clone(), McpScope::from_env(), false));
         let router = build_streamable_http_router(
             backend.clone(),
             "/mcp",
@@ -1026,11 +1068,8 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let backend = Arc::new(HttpTestBackend::new());
         let manager = Arc::new(http_session_manager());
-        let principals = PrincipalStates::new(DbxMcpServer::with_runtime_options(
-            backend.clone(),
-            McpScope::from_env(),
-            false,
-        ));
+        let principals =
+            PrincipalStates::new(DbxMcpServer::with_runtime_options(backend.clone(), McpScope::from_env(), false));
         let cancellation = CancellationToken::new();
         let router = build_streamable_http_router(
             backend.clone(),
@@ -1047,10 +1086,7 @@ mod tests {
         let shutdown_manager = manager.clone();
         let shutdown_principals = principals.clone();
         let server_task = tokio::spawn(async move {
-            axum::serve(listener, router)
-                .with_graceful_shutdown(async move { stop.cancelled().await })
-                .await
-                .unwrap();
+            axum::serve(listener, router).with_graceful_shutdown(async move { stop.cancelled().await }).await.unwrap();
             close_http_sessions_bounded(&shutdown_manager, &shutdown_principals).await;
         });
         let url = format!("http://{address}/mcp");
@@ -1093,7 +1129,9 @@ mod tests {
                 ("dbx_close_session", json!({"session_id": session_id})),
             ] {
                 let rejected = client
-                    .call_tool(CallToolRequestParams::new(tool).with_arguments(serde_json::from_value(arguments).unwrap()))
+                    .call_tool(
+                        CallToolRequestParams::new(tool).with_arguments(serde_json::from_value(arguments).unwrap()),
+                    )
                     .await
                     .unwrap();
                 assert_eq!(rejected.is_error, Some(true), "owner B {generation} {tool} resolved A's session");
@@ -1104,7 +1142,12 @@ mod tests {
             }
         }
         assert_eq!(backend.disconnects.load(Ordering::SeqCst), 0, "B must not close A's backend owner");
-        assert!(backend.sql.lock().unwrap().iter().all(|sql| sql != "SELECT 1" && sql != "COMMIT" && sql != "ROLLBACK"));
+        assert!(backend
+            .sql
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|sql| sql != "SELECT 1" && sql != "COMMIT" && sql != "ROLLBACK"));
 
         // A refreshed JWT is a different credential for the same (iss, sub).
         // A new stateless client must resume the original legacy transaction.

@@ -373,11 +373,7 @@ mod tests {
 
     impl BlockingCleanupBackend {
         async fn wait_for_cleanup(&self) {
-            tokio::time::timeout(Duration::from_secs(5), self.close_started.acquire())
-                .await
-                .unwrap()
-                .unwrap()
-                .forget();
+            tokio::time::timeout(Duration::from_secs(5), self.close_started.acquire()).await.unwrap().unwrap().forget();
         }
     }
 

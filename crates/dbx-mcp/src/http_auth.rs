@@ -277,7 +277,13 @@ pub async fn authorize_request(State(auth): State<HttpAuth>, mut request: Reques
                         return unauthorized(Some(oauth));
                     };
                     (
-                        format!("oauth:{:x}", Sha256::digest(serde_json::to_vec(&(principal.issuer, principal.subject)).expect("string tuple serializes"))),
+                        format!(
+                            "oauth:{:x}",
+                            Sha256::digest(
+                                serde_json::to_vec(&(principal.issuer, principal.subject))
+                                    .expect("string tuple serializes")
+                            )
+                        ),
                         tokio::time::Instant::now() + remaining.min(Duration::from_secs(300)),
                     )
                 }

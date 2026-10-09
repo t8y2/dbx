@@ -9246,10 +9246,8 @@ mod tests {
         let principal_a_sessions = McpSessionStore::new();
         let principal_a_writes = PendingSalesforceWrites::new(SALESFORCE_WRITE_CONFIRM_TTL);
         let principal_a = template.with_isolated_state(principal_a_sessions.clone(), principal_a_writes.clone());
-        let principal_b = template.with_isolated_state(
-            McpSessionStore::new(),
-            PendingSalesforceWrites::new(SALESFORCE_WRITE_CONFIRM_TTL),
-        );
+        let principal_b = template
+            .with_isolated_state(McpSessionStore::new(), PendingSalesforceWrites::new(SALESFORCE_WRITE_CONFIRM_TTL));
         let prepared = principal_a
             .salesforce_prepare_write(prepare_request("update", "Account", Some("001x"), Some(json!({"Name": "Acme"}))))
             .await;
@@ -9277,9 +9275,8 @@ mod tests {
         assert_eq!(recorded[0].0, "execute_query");
         assert_eq!(recorded[0].1["sql"].as_str(), Some(statement.as_str()));
 
-        let replayed = principal_a
-            .salesforce_apply_write(Parameters(SalesforceApplyWriteRequest { confirm_token: token }))
-            .await;
+        let replayed =
+            principal_a.salesforce_apply_write(Parameters(SalesforceApplyWriteRequest { confirm_token: token })).await;
         assert_eq!(replayed.is_error, Some(true));
         assert!(result_text(&replayed).contains("CONFIRM_TOKEN_INVALID"), "{replayed:?}");
         assert_eq!(backend.recorded_arguments.lock().unwrap().len(), 1, "a replayed token must not write again");

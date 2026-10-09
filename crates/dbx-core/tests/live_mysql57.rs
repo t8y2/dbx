@@ -837,6 +837,67 @@ DROP PROCEDURE IF EXISTS {procedure};"
 }
 
 #[tokio::test]
+#[ignore = "requires DBX_LIVE_SQL_FILE_MYSQL_* env vars pointing at a writable MySQL connection"]
+async fn live_mysql_repeated_delimiter_executes_original_user_script() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let config = live_mysql_sql_file_config(&format!("live-mysql-repeated-delimiter-{suffix}"));
+    let (state, db_path) = app_state_with_config(config.clone()).await;
+    let database = format!("dbx_repeated_delimiter_{suffix}");
+    let sql = "\
+DELIMITER ;;
+drop procedure if exists p_ludp_data_table_scripts;;
+delimiter ;;
+create procedure p_ludp_data_table_scripts()
+begin
+    -- 定义变量,存储表及字段存在状态
+   declare filedExist INT DEFAULT 0;
+   declare currentDatabaseName VARCHAR(200) DEFAULT '';
+   declare tableCount INT DEFAULT 0;
+
+end ;;
+call p_ludp_data_table_scripts();";
+
+    let execution = async {
+        execute_sql_statement(&state, &config.id, "", &format!("CREATE DATABASE `{database}`"), None, None).await?;
+        let results = execute_multi_core(&state, &config.id, &database, sql, None, None).await?;
+        assert_eq!(results.len(), 3);
+        for result in &results {
+            assert_ne!(result.columns, vec!["Error"], "script failed: {result:?}");
+        }
+
+        let source = execute_sql_statement(
+            &state,
+            &config.id,
+            &database,
+            "SHOW CREATE PROCEDURE p_ludp_data_table_scripts",
+            None,
+            None,
+        )
+        .await?;
+        assert_eq!(source.rows.len(), 1);
+
+        // Exercise the same UTF-16 cursor lookup used by the desktop command,
+        // then execute the extracted routine against the live server.
+        let cursor = sql[..sql.find("declare currentDatabaseName").unwrap()].encode_utf16().count();
+        let current = dbx_core::sql::find_statement_at_cursor_for_database(sql, cursor, DatabaseType::Mysql);
+        assert!(current.starts_with("create procedure"));
+        execute_sql_statement(&state, &config.id, &database, "DROP PROCEDURE p_ludp_data_table_scripts", None, None)
+            .await?;
+        execute_sql_statement(&state, &config.id, &database, &current, None, None).await?;
+        execute_sql_statement(&state, &config.id, &database, "CALL p_ludp_data_table_scripts()", None, None).await?;
+        Ok::<_, String>(())
+    }
+    .await;
+
+    let cleanup =
+        execute_sql_statement(&state, &config.id, "", &format!("DROP DATABASE IF EXISTS `{database}`"), None, None)
+            .await;
+    let _ = std::fs::remove_file(db_path);
+    cleanup.expect("remove isolated test database");
+    execution.expect("original repeated DELIMITER script and cursor execution should succeed");
+}
+
+#[tokio::test]
 #[ignore = "requires a remote OceanBase MySQL-compatible endpoint"]
 async fn live_oceanbase_mysql_setup_applies_query_timeout() {
     let url = std::env::var("DBX_LIVE_OCEANBASE_MYSQL_URL").expect("DBX_LIVE_OCEANBASE_MYSQL_URL");

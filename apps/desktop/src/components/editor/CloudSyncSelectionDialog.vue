@@ -858,19 +858,19 @@ function confirmSelection() {
                 <input :checked="selection.syncCredentials" type="checkbox" class="size-4 accent-primary" @change="onSyncCredentialsChanged($event)" />
                 <span>{{ t("settings.syncSelectionSyncCredentials") }}</span>
               </label>
-              <label class="flex items-center gap-2 text-xs font-medium text-muted-foreground hover:text-foreground">
+              <label class="flex min-h-7 items-center gap-2 text-sm">
                 <input
                   :checked="summaryState(connectionSecretsSummary) === 'all'"
                   :indeterminate="summaryState(connectionSecretsSummary) === 'partial'"
                   :disabled="!connectionSecretsSummary.total"
                   type="checkbox"
-                  class="size-3.5 accent-primary"
+                  class="size-4 accent-primary"
                   @change="toggleSecretIdsAll('connectionSecrets', $event)"
                 />
                 <span>{{ t("settings.syncSelectionConnectionCredentials") }} ({{ connectionSecretsSummary.selected }}/{{ connectionSecretsSummary.total }})</span>
               </label>
-              <label class="flex items-center gap-2 text-xs font-medium text-muted-foreground hover:text-foreground">
-                <input :checked="summaryState(tunnelSecretsSummary) === 'all'" :indeterminate="summaryState(tunnelSecretsSummary) === 'partial'" :disabled="!tunnelSecretsSummary.total" type="checkbox" class="size-3.5 accent-primary" @change="toggleSecretIdsAll('tunnelSecrets', $event)" />
+              <label class="flex min-h-7 items-center gap-2 text-sm">
+                <input :checked="summaryState(tunnelSecretsSummary) === 'all'" :indeterminate="summaryState(tunnelSecretsSummary) === 'partial'" :disabled="!tunnelSecretsSummary.total" type="checkbox" class="size-4 accent-primary" @change="toggleSecretIdsAll('tunnelSecrets', $event)" />
                 <span>{{ t("settings.syncSelectionTunnelSecrets") }} ({{ tunnelSecretsSummary.selected }}/{{ tunnelSecretsSummary.total }})</span>
               </label>
               <div>

@@ -3167,6 +3167,7 @@ export default withEnglishFallback({
     copied: "已复制",
     copyFailed: "复制失败：{message}",
     estimatedTime: "预计耗时",
+    estimatedTitle: "估算执行计划",
     title: "执行计划",
     standardTable: "标准表格",
     tree: "树",
@@ -3204,7 +3205,7 @@ export default withEnglishFallback({
     catOther: "其他",
     unsupported: "当前数据库暂不支持执行计划",
     emptySql: "当前没有可分析的 SQL",
-    unsafe: "第一版执行计划仅支持 SELECT / WITH / TABLE / VALUES",
+    unsafe: "无法安全分析此 SQL 的执行计划，请使用单条受支持的语句",
   },
   profile: {
     title: "查询剖析",

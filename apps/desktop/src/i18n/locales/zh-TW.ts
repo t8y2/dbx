@@ -2993,6 +2993,7 @@ export default withEnglishFallback({
     copied: "已複製",
     copyFailed: "複製失敗：{message}",
     estimatedTime: "預估耗時",
+    estimatedTitle: "預估執行計畫",
     title: "執行計畫",
     standardTable: "標準表格",
     tree: "樹狀",
@@ -3030,7 +3031,7 @@ export default withEnglishFallback({
     catOther: "其他",
     unsupported: "目前資料庫暫不支援執行計畫",
     emptySql: "目前沒有可分析的 SQL",
-    unsafe: "第一版執行計畫僅支援 SELECT / WITH / TABLE / VALUES",
+    unsafe: "無法安全分析此 SQL 的執行計畫，請使用單一受支援的陳述式",
   },
   profile: {
     title: "查詢剖析",

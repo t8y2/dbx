@@ -2939,6 +2939,7 @@ export default withEnglishFallback({
     copied: "복사됨",
     copyFailed: "복사 실패: {message}",
     estimatedTime: "예상 시간",
+    estimatedTitle: "예상 실행 계획",
     title: "실행 계획",
     standardTable: "표",
     tree: "트리",
@@ -2976,7 +2977,7 @@ export default withEnglishFallback({
     catOther: "기타",
     unsupported: "이 데이터베이스에서는 아직 실행 계획을 지원하지 않습니다",
     emptySql: "실행 계획을 볼 SQL이 없습니다",
-    unsafe: "이 첫 번째 버전은 SELECT / WITH / TABLE / VALUES 구문만 지원합니다",
+    unsafe: "이 SQL의 실행 계획을 안전하게 분석할 수 없습니다. 지원되는 단일 구문을 사용하세요.",
   },
   profile: {
     title: "프로파일러",

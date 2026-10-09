@@ -8953,7 +8953,21 @@ export const useQueryStore = defineStore("query", () => {
     }
 
     const postgresAnalyze = databaseType === "postgres" && explainMode === "autotrace";
-    const built = postgresAnalyze ? await buildExplainSql(databaseType, sql, "json", true) : await buildExplainSql(databaseType, sql);
+    let built: BuildExplainSqlResult;
+    try {
+      built = postgresAnalyze ? await buildExplainSql(databaseType, sql, "json", true) : await buildExplainSql(databaseType, sql);
+    } catch (e: any) {
+      const current = tabs.value.find((t) => t.id === id);
+      if (current?.explainExecutionId === executionId) {
+        current.isExplaining = false;
+        current.explainExecutionId = undefined;
+        current.explainError = String(e?.message || e);
+      }
+      return { ok: true as const, sql: "" };
+    }
+    if (tabs.value.find((t) => t.id === id)?.explainExecutionId !== executionId) {
+      return { ok: true as const, sql: built.ok ? built.sql : "" };
+    }
     if (!built.ok) {
       tab.explainPlan = undefined;
       tab.explainError = built.reason;

@@ -11,6 +11,8 @@ import { createQueryEditorExecutionViewportOwnership } from "@/lib/editor/queryE
 import * as objectMetadataCache from "@/lib/metadata/objectMetadataCache";
 import type { ConnectionConfig, QueryTab } from "@/types/database";
 import type { SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
+import { substituteSqlParameters } from "@/lib/sql/sqlParameters";
+import * as api from "@/lib/backend/api";
 
 vi.mock("vue-i18n", () => ({
   createI18n: () => ({ global: { locale: { value: "en" }, setLocaleMessage: vi.fn() } }),
@@ -23,6 +25,10 @@ vi.mock("@/lib/backend/api", () => ({
   unlockConnectionWrites: vi.fn(),
   lockConnectionWrites: vi.fn(),
   connectionWriteUnlockState: vi.fn().mockResolvedValue(0),
+  buildExplainSql: vi.fn(),
+  executeQuery: vi.fn(),
+  executeMulti: vi.fn(),
+  closeClientConnectionSession: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@/lib/metadata/objectMetadataCache", async (importOriginal) => {
@@ -1435,6 +1441,143 @@ SELECT @value AS Message;`;
     await execution.tryExplain();
 
     expect(explainTabSql).toHaveBeenCalledWith("tab-1", sql, "oracle", "explain");
+  });
+
+  it.each([
+    ["INSERT INTO O14_TEST (ID, NOTE) VALUES (:id, :note)", "INSERT INTO O14_TEST (ID, NOTE) VALUES (7, 'O''Reilly; -- value')", "INSERT"],
+    ["UPDATE O14_TEST SET NOTE = :note WHERE ID = :id", "UPDATE O14_TEST SET NOTE = 'O''Reilly; -- value' WHERE ID = 7", "UPDATE"],
+    ["DELETE FROM O14_TEST WHERE ID = :id AND NOTE = :note", "DELETE FROM O14_TEST WHERE ID = 7 AND NOTE = 'O''Reilly; -- value'", "DELETE"],
+    ["MERGE INTO O14_TEST T USING (SELECT :id ID, :note NOTE FROM DUAL) S ON (T.ID = S.ID) WHEN MATCHED THEN UPDATE SET T.NOTE = S.NOTE", "MERGE INTO O14_TEST T USING (SELECT 7 ID, 'O''Reilly; -- value' NOTE FROM DUAL) S ON (T.ID = S.ID) WHEN MATCHED THEN UPDATE SET T.NOTE = S.NOTE", "MERGE"],
+  ])("keeps parameterized OceanBase DML on the JSON plan path: %s", async (sql, resolvedSql, operator) => {
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("oceanbase-oracle"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    queryStore.tabs.push(activeTab.value!);
+    vi.mocked(api.executeQuery)
+      .mockReset()
+      .mockResolvedValue({ columns: ["Query Plan"], rows: [[JSON.stringify({ ID: 0, OPERATOR: operator, "EST.ROWS": 1 })]], affected_rows: 0, execution_time_ms: 1 });
+    vi.mocked(api.executeMulti).mockClear();
+    vi.mocked(api.buildExplainSql)
+      .mockReset()
+      .mockResolvedValue({ ok: true, sql: `EXPLAIN FORMAT=JSON ${resolvedSql}` });
+    const execution = useSqlExecution({ activeTab: computed(() => activeTab.value), activeConnection: computed(() => activeConnection.value), executableSql: computed(() => sql), activeOutputView });
+
+    await execution.tryExplain();
+    expect(execution.showSqlParameterDialog.value).toBe(true);
+    expect(api.executeQuery).not.toHaveBeenCalled();
+    const values = Object.fromEntries(execution.sqlParameterNames.value.map((parameter) => [parameter.key, parameter.name === "id" ? { kind: "number" as const, value: "7" } : { kind: "string" as const, value: "O'Reilly; -- value" }]));
+    const substituted = substituteSqlParameters(execution.sqlParameterSourceSql.value, values, { databaseType: execution.sqlParameterDatabaseType.value, enabledSyntaxes: execution.sqlParameterEnabledSyntaxes.value });
+    expect(substituted).toBe(resolvedSql);
+    await execution.onSqlParametersConfirm(substituted);
+
+    expect(api.buildExplainSql).toHaveBeenCalledWith({ databaseType: "oceanbase-oracle", sql: resolvedSql, format: "json", analyze: undefined });
+    expect(api.executeQuery).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(api.executeQuery).mock.calls[0]?.[2]).toBe(`EXPLAIN FORMAT=JSON ${resolvedSql}`);
+    expect(api.executeMulti).not.toHaveBeenCalled();
+    expect(queryStore.tabs[0].explainPlan?.nodes[0].nodeType).toBe(operator);
+    expect(activeOutputView.value).toBe("explain");
+    expect(execution.showDangerDialog.value).toBe(false);
+  });
+
+  it.each(["q'[O'Reilly; :hidden]'", "nq'{O'Reilly; :hidden}'"])("preserves %s through the OceanBase DML plan parameter flow", async (literal) => {
+    const sql = `UPDATE O14_TEST SET NOTE = ${literal} WHERE ID = :id`;
+    const resolvedSql = `UPDATE O14_TEST SET NOTE = ${literal} WHERE ID = 7`;
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
+    const queryStore = useQueryStore();
+    queryStore.tabs.push(activeTab.value!);
+    vi.mocked(api.buildExplainSql)
+      .mockReset()
+      .mockResolvedValue({ ok: true, sql: `EXPLAIN FORMAT=JSON ${resolvedSql}` });
+    vi.mocked(api.executeQuery)
+      .mockReset()
+      .mockResolvedValue({ columns: ["Query Plan"], rows: [[JSON.stringify({ ID: 0, OPERATOR: "UPDATE", "EST.ROWS": 1 })]], affected_rows: 0, execution_time_ms: 1 });
+    vi.mocked(api.executeMulti).mockClear();
+    const execution = useSqlExecution({ activeTab: computed(() => activeTab.value), activeConnection: computed(() => connection("oceanbase-oracle")), executableSql: computed(() => sql), activeOutputView: ref("result") });
+
+    await execution.tryExplain();
+    expect(execution.sqlParameterNames.value.map((parameter) => parameter.name)).toEqual(["id"]);
+    const substituted = substituteSqlParameters(execution.sqlParameterSourceSql.value, { id: { kind: "number", value: "7" } }, { databaseType: execution.sqlParameterDatabaseType.value, enabledSyntaxes: execution.sqlParameterEnabledSyntaxes.value });
+    expect(substituted).toBe(resolvedSql);
+    await execution.onSqlParametersConfirm(substituted);
+
+    expect(api.buildExplainSql).toHaveBeenCalledWith({ databaseType: "oceanbase-oracle", sql: resolvedSql, format: "json", analyze: undefined });
+    expect(api.executeQuery).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(api.executeQuery).mock.calls[0]?.[2]).toBe(`EXPLAIN FORMAT=JSON ${resolvedSql}`);
+    expect(api.executeMulti).not.toHaveBeenCalled();
+    expect(queryStore.tabs[0].explainPlan?.nodes[0].nodeType).toBe("UPDATE");
+  });
+
+  it("cancels the OceanBase DML parameter dialog without sending SQL", async () => {
+    const sql = "DELETE FROM O14_TEST WHERE ID = :id";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
+    const queryStore = useQueryStore();
+    queryStore.tabs.push(activeTab.value!);
+    vi.mocked(api.buildExplainSql).mockClear();
+    vi.mocked(api.executeQuery).mockClear();
+    vi.mocked(api.executeMulti).mockClear();
+    const execution = useSqlExecution({ activeTab: computed(() => activeTab.value), activeConnection: computed(() => connection("oceanbase-oracle")), executableSql: computed(() => sql), activeOutputView: ref("result") });
+
+    await execution.tryExplain();
+    execution.showSqlParameterDialog.value = false;
+    await nextTick();
+
+    expect(execution.sqlParameterSourceSql.value).toBe("");
+    expect(api.buildExplainSql).not.toHaveBeenCalled();
+    expect(api.executeQuery).not.toHaveBeenCalled();
+    expect(api.executeMulti).not.toHaveBeenCalled();
+    expect(execution.showDangerDialog.value).toBe(false);
+  });
+
+  it("keeps a rejected multi-statement raw parameter on the OceanBase plan path", async () => {
+    vi.stubGlobal("window", { setTimeout: vi.fn() });
+    const sql = "DELETE FROM O14_TEST WHERE ID = :id";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
+    const queryStore = useQueryStore();
+    queryStore.tabs.push(activeTab.value!);
+    vi.mocked(api.buildExplainSql).mockReset().mockResolvedValue({ ok: false, reason: "unsafe" });
+    vi.mocked(api.executeQuery).mockClear();
+    vi.mocked(api.executeMulti).mockClear();
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const execution = useSqlExecution({ activeTab: computed(() => activeTab.value), activeConnection: computed(() => connection("oceanbase-oracle")), executableSql: computed(() => sql), activeOutputView });
+
+    await execution.tryExplain();
+    const substituted = substituteSqlParameters(execution.sqlParameterSourceSql.value, { id: { kind: "raw", value: "7; UPDATE O14_TEST SET NOTE = 'unexpected'" } }, { databaseType: execution.sqlParameterDatabaseType.value, enabledSyntaxes: execution.sqlParameterEnabledSyntaxes.value });
+    expect(substituted).toBe("DELETE FROM O14_TEST WHERE ID = 7; UPDATE O14_TEST SET NOTE = 'unexpected'");
+    await execution.onSqlParametersConfirm(substituted);
+
+    expect(api.buildExplainSql).toHaveBeenCalledWith({ databaseType: "oceanbase-oracle", sql: substituted, format: "json", analyze: undefined });
+    expect(api.executeQuery).not.toHaveBeenCalled();
+    expect(api.executeMulti).not.toHaveBeenCalled();
+    expect(queryStore.tabs[0]).toMatchObject({ isExplaining: false, explainPlan: undefined, explainError: "unsafe" });
+    expect(execution.showDangerDialog.value).toBe(false);
+    expect(activeOutputView.value).toBe("explain");
+  });
+
+  it("keeps a selected OceanBase DML plan error in the plan view without executing adjacent SQL", async () => {
+    vi.stubGlobal("window", { setTimeout: vi.fn() });
+    const sql = "UPDATE O14_TEST SET NOTE = 'selected' WHERE ID = 7";
+    const fullSql = `SELECT 1 FROM DUAL;\n${sql};\nDELETE FROM O14_TEST`;
+    const selectionFrom = fullSql.indexOf(sql);
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql: fullSql });
+    const queryStore = useQueryStore();
+    queryStore.tabs.push(activeTab.value!);
+    vi.mocked(api.buildExplainSql)
+      .mockReset()
+      .mockResolvedValue({ ok: true, sql: `EXPLAIN FORMAT=JSON ${sql}` });
+    vi.mocked(api.executeQuery).mockReset().mockRejectedValue(new Error("ORA-00942: table or view does not exist"));
+    vi.mocked(api.executeMulti).mockClear();
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const execution = useSqlExecution({ activeTab: computed(() => activeTab.value), activeConnection: computed(() => connection("oceanbase-oracle")), executableSql: computed(() => fullSql), activeOutputView });
+
+    await execution.tryExplain({ fullSql, selectedSql: sql, cursorPos: selectionFrom, selectionFrom, selectionTo: selectionFrom + sql.length });
+
+    expect(api.buildExplainSql).toHaveBeenCalledWith({ databaseType: "oceanbase-oracle", sql, format: "json", analyze: undefined });
+    expect(api.executeQuery).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(api.executeQuery).mock.calls[0]?.[2]).toBe(`EXPLAIN FORMAT=JSON ${sql}`);
+    expect(api.executeMulti).not.toHaveBeenCalled();
+    expect(queryStore.tabs[0]).toMatchObject({ isExplaining: false, explainPlan: undefined, explainError: "ORA-00942: table or view does not exist" });
+    expect(activeOutputView.value).toBe("explain");
   });
 
   it("explains the resolved PostgreSQL statement after SQL parameter input", async () => {

@@ -2986,6 +2986,7 @@ export default withEnglishFallback({
     copied: "Copiato",
     copyFailed: "Copia non riuscita: {message}",
     estimatedTime: "Tempo stimato",
+    estimatedTitle: "Piano di esecuzione stimato",
     title: "Piano di Spiegazione",
     standardTable: "Tabella",
     tree: "Albero",
@@ -3023,7 +3024,7 @@ export default withEnglishFallback({
     catOther: "Altro",
     unsupported: "Il piano di spiegazione non è ancora supportato per questo database",
     emptySql: "Nessun SQL da spiegare",
-    unsafe: "Questa prima versione spiega solo istruzioni SELECT / WITH / TABLE / VALUES",
+    unsafe: "Impossibile analizzare questo SQL in sicurezza. Usa una singola istruzione supportata.",
   },
   profile: {
     title: "Profilo",

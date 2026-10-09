@@ -259,6 +259,25 @@ pub fn is_safe_explain_sql_for_database(sql: &str, database_type: Option<Databas
         return is_safe_db2_explain_sql(sql);
     }
     let source = strip_trailing_semicolons(sql.trim());
+    if database_type == Some(DatabaseType::OceanbaseOracle) {
+        // Use the Oracle lexer for statement boundaries: # and dollar quotes
+        // are not comments/literals here, while q'...' can contain semicolons.
+        if crate::sql::split_sql_statements_for_database(&source, DatabaseType::OceanbaseOracle).len() != 1 {
+            return false;
+        }
+        if crate::sql::starts_with_executable_sql_keyword_for_database(
+            &source,
+            &["INSERT", "UPDATE", "DELETE", "MERGE"],
+            DatabaseType::OceanbaseOracle,
+        ) {
+            return true;
+        }
+        return crate::sql::starts_with_executable_sql_keyword_for_database(
+            &source,
+            &["SELECT", "WITH"],
+            DatabaseType::OceanbaseOracle,
+        ) && !contains_dangerous_sql_keyword(&source);
+    }
     if source.is_empty() || has_extra_statement_after_semicolon(&source) {
         return false;
     }
@@ -2250,14 +2269,70 @@ mod tests {
         });
         assert_eq!(result.sql.as_deref(), Some("EXPLAIN FORMAT=JSON SELECT * FROM events"));
         assert!(result.ok);
+    }
 
-        let unsafe_result = build_explain_sql(ExplainSqlOptions {
-            database_type: Some(DatabaseType::OceanbaseOracle),
-            format: None,
-            analyze: None,
-            sql: "DELETE FROM events".to_string(),
-        });
-        assert_eq!(unsafe_result.reason.as_deref(), Some("unsafe"));
+    #[test]
+    fn builds_oceanbase_oracle_dml_estimates_without_analyze() {
+        for sql in [
+            "INSERT INTO events (id) VALUES (:id)",
+            "UPDATE events SET id = :id WHERE id = :old_id",
+            "DELETE FROM events WHERE id = :id",
+            "MERGE INTO events t USING source s ON (t.id = s.id) WHEN MATCHED THEN UPDATE SET t.name = s.name",
+        ] {
+            let result = build_explain_sql(ExplainSqlOptions {
+                database_type: Some(DatabaseType::OceanbaseOracle),
+                format: Some(ExplainFormat::Standard),
+                analyze: Some(true),
+                sql: sql.to_string(),
+            });
+            assert!(result.ok, "{sql}: {result:?}");
+            assert_eq!(result.sql.as_deref(), Some(format!("EXPLAIN FORMAT=JSON {sql}").as_str()));
+        }
+    }
+
+    #[test]
+    fn oceanbase_oracle_explain_checks_its_own_statement_boundaries() {
+        for (sql, expected_safe) in [
+            ("/* plan */ UPDATE events SET name = 'it''s; DELETE' WHERE id = 1", true),
+            ("UPDATE events SET name = q'[it's; DELETE FROM events; --]'", true),
+            ("UPDATE events SET name = nq'{it's; DELETE FROM events; --}'", true),
+            ("UPDATE events SET \"name;column\" = :value; -- trailing comment", true),
+            ("UPDATE events SET name = 'x'; /* tail */", true),
+            ("UPDATE events SET id = 2; DELETE FROM events", false),
+            ("UPDATE events SET id#part = 2; DELETE FROM events", false),
+            ("UPDATE events SET name = $$; DELETE FROM events; $$", false),
+            ("UPDATE events SET name = `x; DELETE FROM events;`", false),
+            (r"UPDATE events SET name = 'a\'; DELETE FROM events; --'", false),
+            ("DELIMITER $$\nUPDATE events SET id = 2$$\nDELETE FROM events$$", false),
+            ("UPDATE events SET name = q'[it's]'; DELETE FROM events; --'", false),
+            ("UPDATE events SET name = nq'[it's]'; DELETE FROM events; --'", false),
+            ("SELECT * FROM events; UPDATE events SET id = 2", false),
+            ("DELETE FROM events; /* another statement */ COMMIT", false),
+            ("WITH x AS (SELECT 1 id FROM dual) SELECT id FROM x", true),
+            ("# not an Oracle comment\nUPDATE events SET id = 2", false),
+            ("BEGIN DELETE FROM events; END;", false),
+            ("DECLARE x NUMBER; BEGIN NULL; END;", false),
+            ("WITH FUNCTION f RETURN NUMBER IS BEGIN RETURN 1; END; SELECT f FROM dual", false),
+            ("CREATE TABLE events (id NUMBER)", false),
+            ("TRUNCATE TABLE events", false),
+            ("CALL mutate_events()", false),
+            ("EXPLAIN FORMAT=JSON DELETE FROM events", false),
+            ("REPLACE INTO events VALUES (1)", false),
+            ("TABLE events", false),
+            ("VALUES (1)", false),
+        ] {
+            let result = build_explain_sql(ExplainSqlOptions {
+                database_type: Some(DatabaseType::OceanbaseOracle),
+                format: None,
+                analyze: None,
+                sql: sql.to_string(),
+            });
+            assert_eq!(result.ok, expected_safe, "{sql}: {result:?}");
+            if !expected_safe {
+                assert_eq!(result.reason.as_deref(), Some("unsafe"), "{sql}");
+                assert!(result.sql.is_none(), "{sql}");
+            }
+        }
     }
 
     #[test]

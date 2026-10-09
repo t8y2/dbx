@@ -72,6 +72,7 @@ const ORACLE_PARAMETER_PREFIX_KEYWORDS = new Set([
   "case",
   "close",
   "collate",
+  "connect_by_root",
   "continue",
   "elsif",
   "escape",

@@ -3011,6 +3011,7 @@ export default withEnglishFallback({
     copied: "コピーしました",
     copyFailed: "コピーに失敗しました: {message}",
     estimatedTime: "推定時間",
+    estimatedTitle: "推定実行計画",
     title: "実行計画",
     standardTable: "標準テーブル",
     tree: "ツリー",
@@ -3048,7 +3049,7 @@ export default withEnglishFallback({
     catOther: "その他",
     unsupported: "このデータベースではまだ実行計画をサポートしていません",
     emptySql: "実行計画を表示するSQLがありません",
-    unsafe: "この最初のバージョンではSELECT / WITH / TABLE / VALUES文のみの実行計画を表示します",
+    unsafe: "この SQL の実行計画を安全に取得できません。対応する単一の文を使用してください。",
   },
   profile: {
     title: "プロファイラ",

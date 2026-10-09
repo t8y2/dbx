@@ -2711,6 +2711,7 @@ export default withEnglishFallback({
     copied: "Kopyalandı",
     copyFailed: "Kopyalama başarısız: {message}",
     estimatedTime: "Tahmini süre",
+    estimatedTitle: "Tahmini yürütme planı",
     title: "Yürütme Planı",
     standardTable: "Tablo",
     tree: "Ağaç",
@@ -2747,7 +2748,7 @@ export default withEnglishFallback({
     catOther: "Diğer",
     unsupported: "Yürütme planı bu veritabanı için henüz desteklenmiyor",
     emptySql: "Açıklanacak SQL yok",
-    unsafe: "Bu ilk sürüm yalnızca SELECT / WITH / TABLE / VALUES ifadelerini açıklar",
+    unsafe: "Bu SQL için plan güvenli biçimde alınamıyor. Desteklenen tek bir ifade kullanın.",
   },
   profile: {
     title: "Profil",

@@ -2,6 +2,18 @@ import { describe, expect, it } from "vitest";
 import { extractSqlParameterDescriptors, extractSqlParameters, readSqlBracedParameterAt, sqlParameterLiteral, substituteSqlParameters } from "@/lib/sql/sqlParameters";
 
 describe("extractSqlParameters", () => {
+  it.each(["oracle", "oceanbase-oracle"] as const)("keeps CONNECT_BY_ROOT expression parameters for %s", (databaseType) => {
+    const sql = "INSERT INTO target (root_id) SELECT CONNECT_BY_ROOT @rootValue FROM source START WITH id = :id CONNECT BY PRIOR id = parent_id";
+    expect(extractSqlParameters(sql, { databaseType })).toEqual(["rootValue", "id"]);
+    expect(substituteSqlParameters(sql, { rootValue: { kind: "number", value: "7" }, id: { kind: "number", value: "9" } }, { databaseType })).toBe("INSERT INTO target (root_id) SELECT CONNECT_BY_ROOT 7 FROM source START WITH id = 9 CONNECT BY PRIOR id = parent_id");
+  });
+
+  it.each(["oracle", "oceanbase-oracle"] as const)("preserves CONNECT_BY_ROOT as an object before a DBLink for %s", (databaseType) => {
+    const sql = "SELECT * FROM CONNECT_BY_ROOT /* separator */ @LINK WHERE id = :id";
+    expect(extractSqlParameters(sql, { databaseType })).toEqual(["id"]);
+    expect(substituteSqlParameters(sql, { LINK: { kind: "number", value: "99" }, id: { kind: "number", value: "7" } }, { databaseType })).toBe("SELECT * FROM CONNECT_BY_ROOT /* separator */ @LINK WHERE id = 7");
+  });
+
   it("shares strict braced-placeholder validation", () => {
     expect(readSqlBracedParameterAt("#{month}", 0)?.name).toBe("month");
     expect(readSqlBracedParameterAt("#{1month}", 0)).toBeNull();

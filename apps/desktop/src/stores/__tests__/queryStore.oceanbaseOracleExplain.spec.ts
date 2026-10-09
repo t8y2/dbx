@@ -5,18 +5,18 @@ const mocks = vi.hoisted(() => ({
   buildExplainSql: vi.fn(),
   executeQuery: vi.fn(),
   getExplainInfo: vi.fn(),
+  cancelQuery: vi.fn(),
+  closeClientConnectionSession: vi.fn(),
   saveOpenTabsState: vi.fn(),
   getConfig: vi.fn(),
 }));
 
-vi.mock("@/lib/diagram/explainPlan", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/diagram/explainPlan")>()),
-  buildExplainSql: mocks.buildExplainSql,
-}));
-
 vi.mock("@/lib/backend/api", () => ({
+  buildExplainSql: mocks.buildExplainSql,
   executeQuery: mocks.executeQuery,
   getExplainInfo: mocks.getExplainInfo,
+  cancelQuery: mocks.cancelQuery,
+  closeClientConnectionSession: mocks.closeClientConnectionSession,
   saveOpenTabsState: mocks.saveOpenTabsState,
 }));
 
@@ -42,6 +42,8 @@ describe("queryStore OceanBase Oracle explain", () => {
       execution_time_ms: 1,
     });
     mocks.saveOpenTabsState.mockResolvedValue(undefined);
+    mocks.cancelQuery.mockResolvedValue(false);
+    mocks.closeClientConnectionSession.mockResolvedValue(undefined);
   });
 
   it("executes the JSON explain SQL and routes its rows to the OceanBase parser", async () => {
@@ -58,6 +60,44 @@ describe("queryStore OceanBase Oracle explain", () => {
       explainError: undefined,
       explainSql: "EXPLAIN FORMAT=JSON SELECT 1 FROM DUAL",
       explainPlan: { databaseType: "oceanbase-oracle", nodes: [{ id: "0", nodeType: "EXPRESSION", rows: "1", estimatedTimeUs: "1", details: [] }] },
+    });
+  });
+
+  it("does not dispatch a DML explain after cancellation while its safety check is pending", async () => {
+    let finishBuild!: (result: { ok: true; sql: string }) => void;
+    mocks.buildExplainSql.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishBuild = resolve;
+      }),
+    );
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("ob-1", "test", "Query", "query", "APP");
+    const explain = store.explainTabSql(tabId, "DELETE FROM O14_TEST WHERE ID = 1", "oceanbase-oracle");
+
+    await vi.waitFor(() => expect(mocks.buildExplainSql).toHaveBeenCalled());
+    await store.cancelTabExplain(tabId);
+    finishBuild({ ok: true, sql: "EXPLAIN FORMAT=JSON DELETE FROM O14_TEST WHERE ID = 1" });
+    await explain;
+
+    expect(mocks.executeQuery).not.toHaveBeenCalled();
+    expect(store.tabs.find((tab) => tab.id === tabId)).toMatchObject({ isExplaining: false, explainExecutionId: undefined, explainPlan: undefined });
+  });
+
+  it("shows safety-check failures without leaving DML explain running or executing the source SQL", async () => {
+    mocks.buildExplainSql.mockRejectedValueOnce(new Error("Plan safety check unavailable"));
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("ob-1", "test", "Query", "query", "APP");
+
+    await expect(store.explainTabSql(tabId, "UPDATE O14_TEST SET VALUE = 2", "oceanbase-oracle")).resolves.toEqual({ ok: true, sql: "" });
+
+    expect(mocks.executeQuery).not.toHaveBeenCalled();
+    expect(store.tabs.find((tab) => tab.id === tabId)).toMatchObject({
+      isExplaining: false,
+      explainExecutionId: undefined,
+      explainPlan: undefined,
+      explainError: "Plan safety check unavailable",
     });
   });
 });

@@ -3037,6 +3037,7 @@ export default withEnglishFallback({
     copied: "Disalin",
     copyFailed: "Gagal menyalin: {message}",
     estimatedTime: "Perkiraan waktu",
+    estimatedTitle: "Perkiraan rencana eksekusi",
     title: "Explain Plan",
     standardTable: "Tabel",
     tree: "Pohon",
@@ -3073,7 +3074,7 @@ export default withEnglishFallback({
     catOther: "Lainnya",
     unsupported: "Explain plan belum didukung untuk database ini",
     emptySql: "Tidak ada SQL untuk dijelaskan",
-    unsafe: "Versi pertama ini hanya menjelaskan pernyataan SELECT / WITH / TABLE / VALUES",
+    unsafe: "Rencana SQL ini tidak dapat dianalisis dengan aman. Gunakan satu pernyataan yang didukung.",
   },
   profile: {
     title: "Profil",

@@ -105,10 +105,12 @@ function handlePageInputKeydown(event: KeyboardEvent) {
 <template>
   <div class="flex min-w-max items-center justify-end gap-1">
     <div v-if="selectionSummary" class="flex shrink-0 items-center gap-3 tabular-nums">
-      <span class="shrink-0" :class="selectionSummaryValueClass" :title="selectionSummaryPending ? undefined : t('grid.copyValue')" data-selection-summary-sum @click="copySelectionSummaryValue(selectionSummarySumText)">{{ t("grid.selectionSum", { value: selectionSummarySumText }) }}</span>
-      <span class="shrink-0" :class="selectionSummaryValueClass" :title="selectionSummaryPending ? undefined : t('grid.copyValue')" data-selection-summary-average @click="copySelectionSummaryValue(selectionSummaryAverageText)">{{
-        t("grid.selectionAverage", { value: selectionSummaryAverageText })
-      }}</span>
+      <button type="button" class="shrink-0 text-left" :class="selectionSummaryValueClass" :title="selectionSummaryPending ? undefined : t('grid.copyValue')" :disabled="selectionSummaryPending" data-selection-summary-sum @click="copySelectionSummaryValue(selectionSummarySumText)">
+        <span v-if="!selectionSummaryPending" class="sr-only">{{ t("grid.copyValue") }}: </span>{{ t("grid.selectionSum", { value: selectionSummarySumText }) }}
+      </button>
+      <button type="button" class="shrink-0 text-left" :class="selectionSummaryValueClass" :title="selectionSummaryPending ? undefined : t('grid.copyValue')" :disabled="selectionSummaryPending" data-selection-summary-average @click="copySelectionSummaryValue(selectionSummaryAverageText)">
+        <span v-if="!selectionSummaryPending" class="sr-only">{{ t("grid.copyValue") }}: </span>{{ t("grid.selectionAverage", { value: selectionSummaryAverageText }) }}
+      </button>
       <div class="flex shrink-0 items-center gap-1">
         <span class="shrink-0">{{ t("grid.selectionCells", { count: selectionSummary.cellCount }) }}</span>
         <span class="shrink-0">{{ t("grid.rows", { count: selectionSummary.rowCount }) }}</span>

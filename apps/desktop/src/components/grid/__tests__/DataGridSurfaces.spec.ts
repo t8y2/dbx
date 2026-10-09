@@ -483,9 +483,12 @@ describe("DataGridPagination", () => {
 
     const sum = findOne(mounted.root, (node) => node.props["data-selection-summary-sum"] === "");
     const average = findOne(mounted.root, (node) => node.props["data-selection-summary-average"] === "");
-    // The hover hint is the user-visible half of the affordance. The cursor/hover
-    // classes flip with the same prop, so asserting them would pin Tailwind naming.
+    // Native buttons provide tab focus plus Enter/Space activation without recreating
+    // the complete button interaction model on a clickable text span.
+    expect(sum.type).toBe("button");
+    expect(average.type).toBe("button");
     expect(sum.props.title).toBe("grid.copyValue");
+    expect(hostText(sum)).toContain("grid.copyValue");
 
     dispatch(sum, "click");
     expect(copySelectionSummary).toHaveBeenCalledWith("10");
@@ -516,8 +519,9 @@ describe("DataGridPagination", () => {
     });
 
     const sum = findOne(mounted.root, (node) => node.props["data-selection-summary-sum"] === "");
-    // Same contract as the copyable case: no hint, and a click copies nothing.
+    // Pending aggregate placeholders retain their layout but expose no copy action.
     expect(sum.props.title).toBeUndefined();
+    expect(sum.props.disabled).toBe(true);
 
     dispatch(sum, "click");
     expect(copySelectionSummary).not.toHaveBeenCalled();

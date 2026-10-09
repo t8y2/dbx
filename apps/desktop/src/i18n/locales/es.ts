@@ -1375,6 +1375,7 @@ export default withEnglishFallback({
     globalQueryTimeoutHint: "Rango: de 0 a 3600 segundos. Establece 0 para no aplicar límite.",
     useConnectionQueryTimeout: "Conexión",
     idleTimeout: "Tiempo de espera inactivo (segundos)",
+    idleTimeoutHint: "Se aplica a la recuperación de conexiones inactivas dentro del grupo de conexiones.",
     keepaliveInterval: "Intervalo de keepalive (segundos)",
     readOnly: "Solo lectura",
     readOnlyHint: "Bloquear todas las operaciones de escritura (INSERT, UPDATE, DELETE, etc.)",

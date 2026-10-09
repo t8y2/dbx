@@ -24,7 +24,10 @@ mod iris_tests;
 
 mod db2;
 mod ddl_plan;
+mod overwrite_clear;
 mod structure_plan;
+
+pub use overwrite_clear::clear_foreign_key_linked_overwrite_targets;
 
 use crate::connection::{config_for_pool_key, AppState, PoolKind};
 use crate::db;
@@ -11094,6 +11097,7 @@ async fn transfer_table_inner<F, C>(
     known_foreign_keys: &HashMap<String, Vec<db::ForeignKeyInfo>>,
     pending_fk_alters: &mut Vec<(String, String)>,
     preexisting_backup_names: Option<&HashMap<String, String>>,
+    target_cleared: bool,
     mut progress_callback: F,
     mut source_count_callback: C,
 ) -> Result<TransferTableResult, String>
@@ -11539,8 +11543,9 @@ where
 
     // Truncate target if overwrite mode (only when not rebuilding the table).
     // When drop_target_before_create is true, the target table was just created
-    // and is already empty, so TRUNCATE is unnecessary.
-    if request.mode == TransferMode::Overwrite && !request.drop_target_before_create {
+    // and is already empty, so TRUNCATE is unnecessary. `target_cleared` means
+    // `clear_foreign_key_linked_overwrite_targets` already emptied it children first.
+    if request.mode == TransferMode::Overwrite && !request.drop_target_before_create && !target_cleared {
         let truncate_sql = transfer_clear_table_sql(
             &target_table,
             &request.target_schema,
@@ -12330,6 +12335,7 @@ where
         known_foreign_keys,
         pending_fk_alters,
         preexisting_backup_names,
+        false,
         progress_callback,
         |_| {},
     )
@@ -12337,6 +12343,8 @@ where
     .map(|result| result.moved_rows)
 }
 
+/// Pass `target_cleared = true` for tables that [`clear_foreign_key_linked_overwrite_targets`]
+/// already emptied, so the overwrite clear is not repeated.
 #[allow(clippy::too_many_arguments)]
 pub async fn transfer_table_with_result<F, C>(
     state: &Arc<AppState>,
@@ -12350,6 +12358,7 @@ pub async fn transfer_table_with_result<F, C>(
     known_foreign_keys: &HashMap<String, Vec<db::ForeignKeyInfo>>,
     pending_fk_alters: &mut Vec<(String, String)>,
     preexisting_backup_names: Option<&HashMap<String, String>>,
+    target_cleared: bool,
     mut progress_callback: F,
     mut source_count_callback: C,
 ) -> Result<TransferTableResult, String>
@@ -12395,6 +12404,7 @@ where
             &known_foreign_keys,
             &mut task_pending_fk_alters,
             preexisting_backup_names.as_ref(),
+            target_cleared,
             move |progress| {
                 try_send_transfer_progress(&progress_tx, progress);
             },

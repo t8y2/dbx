@@ -1286,6 +1286,7 @@ export default withEnglishFallback({
     globalQueryTimeoutHint: "Aralıq: 0–3600 saniyə. Vaxt limitini ləğv etmək üçün 0 təyin edin.",
     useConnectionQueryTimeout: "Əlaqə",
     idleTimeout: "Boşdayanma vaxt limiti (saniyə)",
+    idleTimeoutHint: "Bağlantı hovuzundakı boşda qalan bağlantıların geri qaytarılmasına tətbiq edilir.",
     keepaliveInterval: "Əlaqənin canlı saxlanma intervalı (saniyə)",
     readOnly: "Yalnız oxuma",
     readOnlyHint: "Bütün yazma əməliyyatlarını blokla (INSERT, UPDATE, DELETE və s.)",

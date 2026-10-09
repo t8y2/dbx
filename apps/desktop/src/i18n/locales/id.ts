@@ -1523,6 +1523,7 @@ export default withEnglishFallback({
     globalQueryTimeoutHint: "Rentang: 0 hingga 3600 detik. Tetapkan ke 0 untuk tanpa timeout.",
     useConnectionQueryTimeout: "Koneksi",
     idleTimeout: "Timeout Idle (detik)",
+    idleTimeoutHint: "Berlaku untuk pemulihan koneksi idle dalam connection pool.",
     keepaliveInterval: "Interval Keepalive (detik)",
     readOnly: "Read Only",
     readOnlyHint: "Blokir semua operasi tulis (INSERT, UPDATE, DELETE, dll.)",

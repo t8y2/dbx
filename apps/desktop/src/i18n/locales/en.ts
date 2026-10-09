@@ -1631,6 +1631,7 @@ export default {
     globalQueryTimeoutHint: "Range: 0 to 3600 seconds. Set to 0 for no timeout.",
     useConnectionQueryTimeout: "Connection",
     idleTimeout: "Idle Timeout (seconds)",
+    idleTimeoutHint: "Applies to idle connection reclamation within the connection pool.",
     keepaliveInterval: "Keepalive Interval (seconds)",
     readOnly: "Read Only",
     readOnlyHint: "Block all write operations (INSERT, UPDATE, DELETE, etc.)",

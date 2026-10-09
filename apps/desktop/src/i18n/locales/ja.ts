@@ -1267,6 +1267,7 @@ export default withEnglishFallback({
     globalQueryTimeoutHint: "0～3600 秒の範囲で指定します。0 はタイムアウトなしです。",
     useConnectionQueryTimeout: "接続",
     idleTimeout: "アイドルタイムアウト（秒）",
+    idleTimeoutHint: "コネクションプール内のアイドル接続の回収・解放に適用されます。",
     keepaliveInterval: "Keepalive 間隔（秒）",
     readOnly: "読み取り専用",
     readOnlyHint: "すべての書き込み操作（INSERT, UPDATE, DELETEなど）をブロックします",

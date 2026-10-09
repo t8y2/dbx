@@ -1452,6 +1452,7 @@ export default withEnglishFallback({
     globalQueryTimeoutHint: "범위: 0~3600초. 0으로 설정하면 제한이 없습니다.",
     useConnectionQueryTimeout: "연결",
     idleTimeout: "유휴 제한 시간 (초)",
+    idleTimeoutHint: "연결 풀 내 유휴 연결의 회수 및 해제에 적용됩니다.",
     keepaliveInterval: "킵얼라이브 간격 (초)",
     readOnly: "읽기 전용",
     readOnlyHint: "모든 쓰기 작업 차단 (INSERT, UPDATE, DELETE 등)",

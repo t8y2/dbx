@@ -24,7 +24,10 @@ mod iris_tests;
 
 mod db2;
 mod ddl_plan;
+mod overwrite_clear;
 mod structure_plan;
+
+pub use overwrite_clear::clear_foreign_key_linked_overwrite_targets;
 
 use crate::connection::{config_for_pool_key, AppState, PoolKind};
 use crate::db;
@@ -1025,6 +1028,35 @@ pub fn validate_transfer_request(request: &TransferRequest) -> Result<(), String
     Ok(())
 }
 
+/// Validate the deliberately narrow first-phase Xugu transfer contract. The
+/// generic transfer engine remains available to every other database pair;
+/// Xugu is only admitted when both endpoints use its native driver path.
+pub fn validate_transfer_database_pair(
+    request: &TransferRequest,
+    source_db_type: &DatabaseType,
+    target_db_type: &DatabaseType,
+) -> Result<(), String> {
+    if !matches!(source_db_type, DatabaseType::Xugu) && !matches!(target_db_type, DatabaseType::Xugu) {
+        return Ok(());
+    }
+    if !matches!((source_db_type, target_db_type), (DatabaseType::Xugu, DatabaseType::Xugu)) {
+        return Err("虚谷数据传输当前仅支持虚谷到虚谷".to_string());
+    }
+    if request.objects.as_ref().is_some_and(|objects| !objects.is_empty()) {
+        return Err("虚谷数据传输当前仅支持表对象".to_string());
+    }
+    if request.mode == TransferMode::Upsert || request.drop_target_before_create {
+        return Err("虚谷数据传输当前仅支持追加或覆盖，暂不支持更新插入或重建".to_string());
+    }
+    if request.create_table
+        && !matches!(request.content, TransferContent::DataOnly)
+        && request.target_table_name_case != TransferTableNameCase::Preserve
+    {
+        return Err("虚谷结构传输当前要求保留源表名大小写，以避免外键引用错位".to_string());
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResolvedTransferTargetTable {
     name: String,
@@ -1834,6 +1866,19 @@ fn is_sqlserver_non_insertable_transfer_column(
         && is_sqlserver_rowversion_type(&column.data_type)
 }
 
+fn is_xugu_rowversion_type(data_type: &str) -> bool {
+    normalize_xugu_type_name(data_type) == "ROWVERSION"
+}
+
+fn is_xugu_non_insertable_transfer_column(
+    column: &db::ColumnInfo,
+    source_db_type: &DatabaseType,
+    target_db_type: &DatabaseType,
+) -> bool {
+    matches!((source_db_type, target_db_type), (DatabaseType::Xugu, DatabaseType::Xugu))
+        && is_xugu_rowversion_type(&column.data_type)
+}
+
 fn is_mysql_non_insertable_transfer_column(column: &db::ColumnInfo, source_db_type: &DatabaseType) -> bool {
     *source_db_type == DatabaseType::Mysql && is_mysql_generated_column_extra(column.extra.as_deref())
 }
@@ -1847,6 +1892,7 @@ fn writable_transfer_columns(
         .iter()
         .filter(|column| {
             !is_sqlserver_non_insertable_transfer_column(column, source_db_type, target_db_type)
+                && !is_xugu_non_insertable_transfer_column(column, source_db_type, target_db_type)
                 && !is_mysql_non_insertable_transfer_column(column, source_db_type)
         })
         .cloned()
@@ -1861,6 +1907,16 @@ fn mysql_generated_only_transfer(
     matches!((source_db_type, target_db_type), (DatabaseType::Mysql, DatabaseType::Mysql))
         && !columns.is_empty()
         && columns.iter().all(|column| is_mysql_generated_column_extra(column.extra.as_deref()))
+}
+
+fn xugu_rowversion_only_transfer(
+    columns: &[db::ColumnInfo],
+    source_db_type: &DatabaseType,
+    target_db_type: &DatabaseType,
+) -> bool {
+    matches!((source_db_type, target_db_type), (DatabaseType::Xugu, DatabaseType::Xugu))
+        && !columns.is_empty()
+        && columns.iter().all(|column| is_xugu_rowversion_type(&column.data_type))
 }
 
 fn transfer_column_names_match(
@@ -2785,6 +2841,149 @@ fn generate_postgres_sequence_sync_sql(columns: &[db::ColumnInfo], table: &str, 
         .collect()
 }
 
+/// Explicit identity values do not advance Xugu's backing sequence. Resolve the
+/// sequence through SERIAL_ID rather than relying on its generated name, which
+/// belongs to SYSDBA even when the table lives in another schema.
+fn xugu_identity_sequences_sql(schema: &str, table: &str) -> String {
+    xugu_identity_sequences_query(schema, table, true)
+}
+
+/// Case-insensitive fallback used only after the exact catalog spelling misses.
+/// Extra columns identify the matched table so two differently cased objects
+/// are not both advanced.
+fn xugu_identity_sequences_sql_case_insensitive(schema: &str, table: &str) -> String {
+    xugu_identity_sequences_query(schema, table, false)
+}
+
+fn xugu_identity_sequences_query(schema: &str, table: &str, exact: bool) -> String {
+    let (schema_predicate, table_predicate) = if exact {
+        (
+            format!("s.SCHEMA_NAME={}", quote_string_literal(schema)),
+            format!("t.TABLE_NAME={}", quote_string_literal(table)),
+        )
+    } else {
+        (
+            format!("UPPER(s.SCHEMA_NAME)=UPPER({})", quote_string_literal(schema)),
+            format!("UPPER(t.TABLE_NAME)=UPPER({})", quote_string_literal(table)),
+        )
+    };
+    format!(
+        "SELECT c.COL_NAME, q.SEQ_NAME, ss.SCHEMA_NAME, q.STEP_VAL, s.SCHEMA_NAME, t.TABLE_NAME \
+         FROM ALL_COLUMNS c \
+         JOIN ALL_TABLES t ON c.DB_ID=t.DB_ID AND c.TABLE_ID=t.TABLE_ID \
+         JOIN ALL_SCHEMAS s ON t.DB_ID=s.DB_ID AND t.SCHEMA_ID=s.SCHEMA_ID \
+         JOIN ALL_SEQUENCES q ON c.DB_ID=q.DB_ID AND c.SERIAL_ID=q.SEQ_ID \
+         JOIN ALL_SCHEMAS ss ON q.DB_ID=ss.DB_ID AND q.SCHEMA_ID=ss.SCHEMA_ID \
+         WHERE s.DB_ID=CURRENT_DB_ID AND {schema_predicate} \
+         AND {table_predicate} AND c.IS_SERIAL=TRUE AND q.IS_SYS=TRUE"
+    )
+}
+
+/// Value passed to `ALTER SEQUENCE ... START WITH`.
+///
+/// `NEXTVAL` is the only reliable probe of an existing sequence: catalog
+/// `CURR_VAL` is a reserved cache boundary. That probe consumes one value, so
+/// when the sequence is already ahead of the imported rows the consumed value
+/// is put back. A new table, or a sequence that is still behind the imported
+/// maximum, restarts at `last + step`.
+fn xugu_identity_start_with(step: i64, last: i64, preexisting_probe: Option<i64>) -> Option<i64> {
+    if let Some(probe) = preexisting_probe {
+        if (step > 0 && probe > last) || (step < 0 && probe < last) {
+            return Some(probe);
+        }
+    }
+    last.checked_add(step)
+}
+
+async fn sync_xugu_identity_sequences(
+    state: &Arc<AppState>,
+    target_pool_key: &str,
+    table: &str,
+    schema: &str,
+    explicitly_written_columns: &[String],
+    target_table_preexisting: bool,
+) -> Result<(), String> {
+    let exact = execute_on_pool(state, target_pool_key, &xugu_identity_sequences_sql(schema, table))
+        .await
+        .map_err(|e| format!("Failed to inspect Xugu identity sequences for {schema}.{table}: {e}"))?;
+    let rows = if !exact.rows.is_empty() {
+        exact.rows
+    } else {
+        let folded =
+            execute_on_pool(state, target_pool_key, &xugu_identity_sequences_sql_case_insensitive(schema, table))
+                .await
+                .map_err(|e| format!("Failed to inspect Xugu identity sequences for {schema}.{table}: {e}"))?;
+        let mut matched_tables = std::collections::HashSet::new();
+        for row in &folded.rows {
+            if let (Some(matched_schema), Some(matched_table)) =
+                (row.get(4).and_then(json_scalar_to_string), row.get(5).and_then(json_scalar_to_string))
+            {
+                matched_tables.insert((matched_schema, matched_table));
+            }
+        }
+        if matched_tables.len() > 1 {
+            return Err(format!(
+                "虚谷标识列同步匹配到多个仅大小写不同的表 {schema}.{table}，请使用数据字典中的模式名和表名"
+            ));
+        }
+        folded.rows
+    };
+    for row in rows {
+        let (Some(column), Some(sequence), Some(sequence_schema), Some(step)) = (
+            row.first().and_then(json_scalar_to_string),
+            row.get(1).and_then(json_scalar_to_string),
+            row.get(2).and_then(json_scalar_to_string),
+            row.get(3).and_then(json_scalar_to_string).and_then(|value| value.parse::<i64>().ok()),
+        ) else {
+            return Err(format!("Incomplete Xugu identity metadata for {schema}.{table}"));
+        };
+        if !explicitly_written_columns.iter().any(|name| name.eq_ignore_ascii_case(&column)) {
+            continue;
+        }
+        if step == 0 {
+            return Err(format!("Invalid Xugu identity step for {schema}.{table}.{column}"));
+        }
+        let table_name = qualified_table(table, schema, &DatabaseType::Xugu, None);
+        let column_name = quote_identifier(&column, &DatabaseType::Xugu);
+        let extremum = if step > 0 { "MAX" } else { "MIN" };
+        let value_sql = format!("SELECT {extremum}({column_name}) FROM {table_name}");
+        let value = execute_on_pool(state, target_pool_key, &value_sql)
+            .await
+            .map_err(|e| format!("Failed to inspect Xugu identity values for {schema}.{table}.{column}: {e}"))?
+            .rows
+            .first()
+            .and_then(|row| row.first())
+            .and_then(json_scalar_to_string);
+        let Some(value) = value else { continue };
+        let last: i64 =
+            value.parse().map_err(|_| format!("Invalid Xugu identity value for {schema}.{table}.{column}: {value}"))?;
+        let sequence_name = qualified_table(&sequence, &sequence_schema, &DatabaseType::Xugu, None);
+        let preexisting_probe = if target_table_preexisting {
+            let probe_sql = format!("SELECT {sequence_name}.NEXTVAL FROM DUAL");
+            let probe = execute_on_pool(state, target_pool_key, &probe_sql)
+                .await
+                .map_err(|e| format!("Failed to inspect Xugu identity next value for {schema}.{table}: {e}"))?
+                .rows
+                .first()
+                .and_then(|row| row.first())
+                .and_then(json_scalar_to_string)
+                .ok_or_else(|| format!("Missing Xugu identity next value for {schema}.{table}"))?;
+            let probe: i64 =
+                probe.parse().map_err(|_| format!("Invalid Xugu identity next value for {schema}.{table}: {probe}"))?;
+            Some(probe)
+        } else {
+            None
+        };
+        let next = xugu_identity_start_with(step, last, preexisting_probe)
+            .ok_or_else(|| format!("Xugu identity overflow for {schema}.{table}.{column}"))?;
+        let alter_sql = format!("ALTER SEQUENCE {sequence_name} START WITH {next}");
+        execute_on_pool(state, target_pool_key, &alter_sql)
+            .await
+            .map_err(|e| format!("Failed to sync Xugu identity for {schema}.{table}.{column}: {e}"))?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 struct PostgresOwnedSequence {
     name: String,
@@ -3146,6 +3345,9 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
             if *db_type == DatabaseType::Db2 {
                 return db2::string_literal(s, column_type);
             }
+            if let Some(xugu_literal) = format_xugu_typed_sql_literal(s, db_type, column_type) {
+                return xugu_literal;
+            }
             if let Some(json_array_literal) = format_starrocks_json_array_sql_literal(s, db_type, column_type) {
                 return json_array_literal;
             }
@@ -3350,11 +3552,200 @@ fn format_xugu_binary_sql_literal(value: &str, db_type: &DatabaseType, column_ty
     }
 
     let hex = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X"))?;
-    if hex.is_empty() || hex.len() % 2 != 0 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if hex.len() % 2 != 0 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
 
-    Some(format!("HEXTORAW('{hex}')"))
+    // Xugu's SQL hex literal also represents an empty binary value as X''.
+    // Keeping binary bytes out of string literals avoids accidental charset
+    // conversion while transferring BINARY/BLOB columns through the Agent.
+    Some(format!("X'{hex}'"))
+}
+
+fn format_xugu_typed_sql_literal(value: &str, db_type: &DatabaseType, column_type: Option<&str>) -> Option<String> {
+    if !matches!(db_type, DatabaseType::Xugu) {
+        return None;
+    }
+    let column_type = column_type?;
+    let normalized = normalize_xugu_type_name(column_type);
+
+    if matches!(normalized.as_str(), "GEOMETRY" | "GEOGRAPHY" | "BOX2D" | "BOX3D") {
+        let hex = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X"))?;
+        if hex.is_empty() || hex.len() % 2 != 0 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+        // Source-side EWKB retains SRID and Z/M coordinates, unlike the
+        // driver's generic WKT decoding. BOX values travel as their geometry
+        // representation and are cast back to the original target type.
+        let geometry = format!("ST_GeomFromEWKB(HEXTORAW('{hex}'))");
+        return Some(if normalized == "GEOMETRY" { geometry } else { format!("CAST({geometry} AS {normalized})") });
+    }
+
+    if matches!(normalized.as_str(), "BIT" | "VARBIT" | "BIT VARYING") {
+        if value.bytes().all(|byte| matches!(byte, b'0' | b'1')) {
+            return Some(format!("B'{}'", value));
+        }
+        return None;
+    }
+
+    if let Some(interval_type) = xugu_interval_literal_type(column_type) {
+        let interval_value = normalize_xugu_interval_literal_value(value, &normalized);
+        return Some(format!("INTERVAL {} {}", quote_string_literal(&interval_value), interval_type));
+    }
+
+    if normalized == "TIME" {
+        // Xugu accepts TIME input through an explicit cast, but does not
+        // accept the standard SQL `TIME '...'` literal form.
+        return Some(format!("CAST({} AS TIME)", quote_string_literal(value)));
+    }
+
+    // Unlike Oracle/PostgreSQL, Xugu does not accept SQL-standard typed
+    // literals for its timezone-aware temporal types. Its SQL layer accepts
+    // these values through ordinary string-to-column conversion (verified on
+    // Xugu 12.0); returning None lets the common formatter emit that string.
+    // Keep this fallback Xugu-only so other database dialects are unchanged.
+    None
+}
+
+fn normalize_xugu_type_name(column_type: &str) -> String {
+    let upper = column_type.trim().to_ascii_uppercase();
+    let upper = upper.strip_prefix("INTERVAL ").unwrap_or(&upper);
+    let mut normalized = String::with_capacity(upper.len());
+    let mut in_precision = false;
+    for character in upper.chars() {
+        match character {
+            '(' => in_precision = true,
+            ')' => in_precision = false,
+            _ if !in_precision => normalized.push(character),
+            _ => {}
+        }
+    }
+    normalized.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn xugu_interval_literal_type(column_type: &str) -> Option<String> {
+    let upper = column_type.trim().to_ascii_uppercase();
+    let interval_type = upper.strip_prefix("INTERVAL ")?;
+    let normalized = normalize_xugu_type_name(column_type);
+    let supported = [
+        "YEAR",
+        "YEAR TO MONTH",
+        "MONTH",
+        "DAY",
+        "DAY TO HOUR",
+        "HOUR",
+        "DAY TO MINUTE",
+        "HOUR TO MINUTE",
+        "MINUTE",
+        "DAY TO SECOND",
+        "HOUR TO SECOND",
+        "MINUTE TO SECOND",
+        "SECOND",
+    ];
+    if !supported.contains(&normalized.as_str()) {
+        return None;
+    }
+    // Keep source precision clauses when present (for example SECOND(6) or
+    // DAY(3) TO SECOND(6)); the literal's leading and trailing fields must
+    // match the declared Xugu interval type.
+    Some(interval_type.to_string())
+}
+
+fn normalize_xugu_interval_literal_value(value: &str, interval_type: &str) -> String {
+    // Xugu CAST(... AS VARCHAR) expands intervals into year-month or
+    // hour-minute-second fields even for narrower qualifiers. Convert back
+    // to the declared literal form without dropping nonzero trailing fields.
+    let value = value.trim();
+    match interval_type {
+        "YEAR" => normalize_xugu_year_month_value(value, true).unwrap_or_else(|| value.to_string()),
+        "MONTH" => normalize_xugu_year_month_value(value, false).unwrap_or_else(|| value.to_string()),
+        "DAY" | "DAY TO HOUR" | "DAY TO MINUTE" | "DAY TO SECOND" => {
+            normalize_xugu_day_time_value(value, interval_type).unwrap_or_else(|| value.to_string())
+        }
+        "HOUR" | "HOUR TO MINUTE" | "HOUR TO SECOND" | "MINUTE" | "MINUTE TO SECOND" | "SECOND" => {
+            normalize_xugu_time_value(value, interval_type).unwrap_or_else(|| value.to_string())
+        }
+        _ => value.to_string(),
+    }
+}
+
+fn split_xugu_interval_sign(value: &str) -> (&str, &str) {
+    if let Some(value) = value.strip_prefix('-') {
+        ("-", value)
+    } else if let Some(value) = value.strip_prefix('+') {
+        ("+", value)
+    } else {
+        ("", value)
+    }
+}
+
+fn normalize_xugu_year_month_value(value: &str, year_only: bool) -> Option<String> {
+    let (sign, unsigned) = split_xugu_interval_sign(value);
+    let (years, months) = unsigned.split_once('-')?;
+    let years = years.parse::<u64>().ok()?;
+    let months = months.parse::<u64>().ok()?;
+    if year_only {
+        (months == 0).then(|| format!("{sign}{years}"))
+    } else {
+        Some(format!("{}{total_months}", sign, total_months = years.checked_mul(12)?.checked_add(months)?))
+    }
+}
+
+fn parse_xugu_interval_seconds(value: &str) -> Option<(u64, &str)> {
+    let (whole, fraction) = match value.split_once('.') {
+        Some((whole, fraction)) if !fraction.is_empty() && fraction.bytes().all(|byte| byte.is_ascii_digit()) => {
+            (whole, fraction)
+        }
+        Some(_) => return None,
+        None => (value, ""),
+    };
+    Some((whole.parse().ok()?, fraction))
+}
+
+fn parse_xugu_interval_hms(value: &str) -> Option<(u64, u64, u64, &str)> {
+    let mut fields = value.split(':');
+    let hours = fields.next()?.parse().ok()?;
+    let minutes = fields.next()?.parse().ok()?;
+    let (seconds, fraction) = parse_xugu_interval_seconds(fields.next()?)?;
+    fields.next().is_none().then_some((hours, minutes, seconds, fraction))
+}
+
+fn normalize_xugu_day_time_value(value: &str, interval_type: &str) -> Option<String> {
+    let (sign, unsigned) = split_xugu_interval_sign(value);
+    let (days, time) = unsigned.split_once(' ')?;
+    let days = days.parse::<u64>().ok()?;
+    let (hours, minutes, seconds, fraction) = parse_xugu_interval_hms(time)?;
+    match interval_type {
+        "DAY" if hours == 0 && minutes == 0 && seconds == 0 && fraction.is_empty() => Some(format!("{sign}{days}")),
+        "DAY TO HOUR" if minutes == 0 && seconds == 0 && fraction.is_empty() => Some(format!("{sign}{days} {hours}")),
+        "DAY TO MINUTE" if seconds == 0 && fraction.is_empty() => Some(format!("{sign}{days} {hours}:{minutes:02}")),
+        "DAY TO SECOND" => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn normalize_xugu_time_value(value: &str, interval_type: &str) -> Option<String> {
+    let (sign, unsigned) = split_xugu_interval_sign(value);
+    let (hours, minutes, seconds, fraction) = parse_xugu_interval_hms(unsigned)?;
+    match interval_type {
+        "HOUR" if minutes == 0 && seconds == 0 && fraction.is_empty() => Some(format!("{sign}{hours}")),
+        "HOUR TO MINUTE" if seconds == 0 && fraction.is_empty() => Some(format!("{sign}{hours}:{minutes:02}")),
+        "HOUR TO SECOND" => Some(value.to_string()),
+        "MINUTE" if seconds == 0 && fraction.is_empty() => {
+            Some(format!("{sign}{}", hours.checked_mul(60)?.checked_add(minutes)?))
+        }
+        "MINUTE TO SECOND" => Some(format!(
+            "{sign}{}:{seconds:02}{fractional}",
+            hours.checked_mul(60)?.checked_add(minutes)?,
+            fractional = if fraction.is_empty() { String::new() } else { format!(".{fraction}") },
+        )),
+        "SECOND" => Some(format!(
+            "{sign}{total_seconds}{fractional}",
+            total_seconds = hours.checked_mul(3600)?.checked_add(minutes.checked_mul(60)?)?.checked_add(seconds)?,
+            fractional = if fraction.is_empty() { String::new() } else { format!(".{fraction}") },
+        )),
+        _ => None,
+    }
 }
 
 fn format_oracle_temporal_sql_literal(
@@ -4870,6 +5261,12 @@ fn rewrite_transfer_source_table_ddl(
         } else {
             rewrite_mysql_create_table_name(sql, target_table)
         }
+    } else if matches!((source_db_type, target_db_type), (DatabaseType::Xugu, DatabaseType::Xugu)) {
+        // Xugu's Agent DDL contains quoted schema-qualified CREATE/ALTER/INDEX
+        // statements. Rewrite only code spans so schema names inside comments
+        // and string literals remain untouched; table casing is validated as
+        // Preserve for structure transfers.
+        Some(rewrite_double_quoted_schema_qualifier(sql, source_schema, target_schema))
     } else {
         Some(sql.to_string())
     }
@@ -5261,6 +5658,15 @@ fn generate_insert_typed_sql_batches_for_transfer(
 ) -> Result<Vec<(String, usize)>, String> {
     if rows.is_empty() {
         return Ok(Vec::new());
+    }
+
+    if columns.is_empty() && *db_type == DatabaseType::Xugu {
+        // ROWVERSION is generated and immutable in XuguDB. A table containing
+        // only that column still needs one default row per source row; Xugu's
+        // `DEFAULT VALUES` form is single-row, so keep these statements
+        // separate instead of emitting invalid empty-column VALUES tuples.
+        let target = qualified_table(table, schema, db_type, catalog);
+        return Ok(rows.iter().map(|_| (format!("INSERT INTO {target} DEFAULT VALUES"), 1)).collect());
     }
 
     let value_rows = value_rows_sql(rows, column_types, db_type, mysql_spatial_markers);
@@ -6913,7 +7319,7 @@ fn transfer_ddl_statements(sql: &str, db_type: &DatabaseType) -> Vec<String> {
                 })
                 .collect()
         }
-    } else if matches!(db_type, DatabaseType::Dameng) {
+    } else if matches!(db_type, DatabaseType::Dameng | DatabaseType::Xugu) {
         let statements = split_sql_statements_for_database(sql, *db_type);
         if statements.is_empty() {
             vec![sql.trim().to_string()]
@@ -9227,6 +9633,7 @@ pub async fn preview_transfer_ownership(
     source_pool_key: &str,
     target_pool_key: &str,
 ) -> Result<TransferOwnershipPreview, String> {
+    validate_transfer_database_pair(request, source_db_type, target_db_type)?;
     // PostgreSQL-compatible transfers report role ownership gaps for the confirmation flow.
     let (missing_owners, target_owner) =
         if request.create_table && is_postgres_compat_transfer(source_db_type, target_db_type) {
@@ -9874,7 +10281,7 @@ where
 }
 
 #[derive(Default)]
-struct HiveServerTransferCursor {
+struct AgentTransferCursor {
     started: bool,
     session_id: Option<String>,
 }
@@ -9930,8 +10337,142 @@ fn transfer_cursor_sql(
     format!("SELECT {col_list} FROM {full_table}")
 }
 
+const XUGU_SPATIAL_PROBE_SQL: &str = "SELECT ST_AsEWKB(ST_GeomFromText('POINT(0 0)')) FROM DUAL";
+
+fn is_xugu_spatial_column_type(data_type: &str) -> bool {
+    matches!(normalize_xugu_type_name(data_type).as_str(), "GEOMETRY" | "GEOGRAPHY" | "BOX2D" | "BOX3D")
+}
+
+fn xugu_columns_include_spatial(columns: &[db::ColumnInfo]) -> bool {
+    columns.iter().any(|column| is_xugu_spatial_column_type(&column.data_type))
+}
+
+/// Spatial Xugu can transfer geometry to spatial Xugu. A build without the
+/// spatial functions must fail before CREATE or INSERT rather than halfway
+/// through a mixed pair.
+async fn ensure_xugu_spatial_transfer_supported(
+    state: &AppState,
+    columns: &[db::ColumnInfo],
+    source_db_type: &DatabaseType,
+    target_db_type: &DatabaseType,
+    source_pool_key: &str,
+    target_pool_key: &str,
+    table: &str,
+) -> Result<(), String> {
+    if !matches!((source_db_type, target_db_type), (DatabaseType::Xugu, DatabaseType::Xugu))
+        || !xugu_columns_include_spatial(columns)
+    {
+        return Ok(());
+    }
+    let source_error = execute_on_pool(state, source_pool_key, XUGU_SPATIAL_PROBE_SQL).await.err();
+    let target_error = if source_pool_key == target_pool_key {
+        source_error.clone()
+    } else {
+        execute_on_pool(state, target_pool_key, XUGU_SPATIAL_PROBE_SQL).await.err()
+    };
+    match (source_error, target_error) {
+        (None, None) => Ok(()),
+        (Some(error), None) => {
+            Err(format!("虚谷空间表 {table} 需要源库支持空间函数 ST_GeomFromText/ST_AsEWKB：{error}"))
+        }
+        (None, Some(error)) => {
+            Err(format!("虚谷空间表 {table} 需要目标库支持空间函数 ST_GeomFromText/ST_AsEWKB：{error}"))
+        }
+        (Some(source), Some(target)) => Err(format!(
+            "虚谷空间表 {table} 需要源和目标都支持空间函数 ST_GeomFromText/ST_AsEWKB。源：{source} 目标：{target}"
+        )),
+    }
+}
+
+/// A Xugu agent session has one server connection. Holding a read cursor open
+/// while writing through that same session blocks once the first page returns.
+/// Page with LIMIT/OFFSET instead; two connections keep the streaming cursor.
+fn xugu_transfer_shares_agent_session(
+    source_db_type: &DatabaseType,
+    source_pool_key: &str,
+    target_pool_key: &str,
+) -> bool {
+    *source_db_type == DatabaseType::Xugu && source_pool_key == target_pool_key
+}
+
+fn xugu_transfer_page_sql(
+    columns: &[db::ColumnInfo],
+    table: &str,
+    schema: &str,
+    catalog: Option<&str>,
+    primary_keys: &[String],
+    offset: u64,
+    limit: usize,
+) -> String {
+    // Re-running LIMIT/OFFSET pages is unstable for tables without a unique key
+    // (rows can be skipped or repeated), so order by the primary key when present.
+    let order = postgres_order_by_expression(primary_keys, &DatabaseType::Xugu)
+        .map(|expression| format!(" ORDER BY {expression}"))
+        .unwrap_or_default();
+    format!("{}{order} LIMIT {limit} OFFSET {offset}", xugu_transfer_cursor_sql(columns, table, schema, catalog))
+}
+
+/// Build a source-side projection for Xugu transfer rows whose wire values are
+/// not safely represented by the Go driver's generic `database/sql` values.
+/// This stays on the Xugu path only; the returned strings are still formatted
+/// against the original column metadata when INSERT statements are generated.
+fn xugu_transfer_cursor_sql(columns: &[db::ColumnInfo], table: &str, schema: &str, catalog: Option<&str>) -> String {
+    let db_type = DatabaseType::Xugu;
+    let full_table = qualified_table(table, schema, &db_type, catalog);
+    let projection = columns
+        .iter()
+        .map(|column| {
+            let identifier = quote_identifier(&column.name, &db_type);
+            let normalized = normalize_xugu_type_name(&column.data_type);
+            let expression = if matches!(normalized.as_str(), "GEOMETRY" | "GEOGRAPHY" | "BOX2D" | "BOX3D") {
+                let geometry = if normalized == "GEOMETRY" {
+                    identifier.clone()
+                } else {
+                    format!("CAST({identifier} AS GEOMETRY)")
+                };
+                // Hex text bypasses lossy WKT decoding and raw BOX bytes.
+                // Keep SQL NULL distinct from an empty geometry's EWKB.
+                format!("CASE WHEN {identifier} IS NULL THEN NULL ELSE '0x'||RAWTOHEX(ST_AsEWKB({geometry})) END")
+            } else if is_binary_transfer_column_type(&column.data_type) {
+                // Preserve NULL separately from an empty BLOB/BINARY value.
+                format!("CASE WHEN {identifier} IS NULL THEN NULL ELSE '0x'||RAWTOHEX({identifier}) END")
+            } else if matches!(normalized.as_str(), "BIT" | "VARBIT" | "BIT VARYING") {
+                let length = column.character_maximum_length.filter(|length| *length > 0).unwrap_or(32_767).min(32_767);
+                // Xugu pads BIT/VARBIT text casts to the declared bit width.
+                // Remove that padding so the B'...' target literal contains
+                // only the original 0/1 digits.
+                format!("RTRIM(CAST({identifier} AS VARCHAR({length})))")
+            } else if normalized == "TIME" {
+                // The Go driver materializes Xugu TIME as a timestamp-like
+                // value with a synthetic date. Project it as text so target
+                // inserts receive only the original time-of-day value.
+                format!("CAST({identifier} AS VARCHAR(64))")
+            } else if matches!(normalized.as_str(), "TIME WITH TIME ZONE" | "TIMEZONE" | "TIMETZ")
+                || matches!(
+                    normalized.as_str(),
+                    "DATETIME WITH TIME ZONE" | "DATETIME TIMEZONE" | "TIMESTAMP WITH TIME ZONE" | "TIMESTAMP_TZ"
+                )
+                || xugu_interval_literal_type(&column.data_type).is_some()
+            {
+                // The driver currently decodes TIMETZ into a time.Time without
+                // retaining the source offset. Intervals also need their exact
+                // Xugu text form for a typed target literal.
+                format!("CAST({identifier} AS VARCHAR(256))")
+            } else {
+                identifier.clone()
+            };
+            format!("{expression} AS {identifier}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("SELECT {projection} FROM {full_table}")
+}
+
 fn uses_agent_transfer_cursor(db_type: &DatabaseType) -> bool {
-    matches!(db_type, DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Transwarp | DatabaseType::Db2)
+    matches!(
+        db_type,
+        DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Transwarp | DatabaseType::Db2 | DatabaseType::Xugu
+    )
 }
 
 fn transfer_upsert_falls_back_to_append(db_type: &DatabaseType) -> bool {
@@ -9956,13 +10497,13 @@ fn transfer_clear_table_sql(table: &str, schema: &str, db_type: &DatabaseType, c
     }
 }
 
-async fn fetch_hive_server_transfer_batch(
+async fn fetch_agent_transfer_batch(
     state: &AppState,
     pool_key: &str,
     request: &TransferRequest,
     sql: &str,
     batch_size: usize,
-    cursor: &mut HiveServerTransferCursor,
+    cursor: &mut AgentTransferCursor,
 ) -> Result<db::QueryResult, String> {
     let query_timeout_secs = if cursor.started {
         0
@@ -9979,7 +10520,7 @@ async fn fetch_hive_server_transfer_batch(
     let mut client = client.lock().await;
     let result = if cursor.started {
         let session_id =
-            cursor.session_id.as_deref().ok_or("Impala transfer cursor ended before the next page was requested")?;
+            cursor.session_id.as_deref().ok_or("Agent transfer cursor ended before the next page was requested")?;
         client.fetch_table_read_page::<db::QueryResult>(session_id, batch_size).await?
     } else {
         cursor.started = true;
@@ -9999,7 +10540,7 @@ async fn fetch_hive_server_transfer_batch(
     if result.has_more {
         cursor.session_id = result.session_id.clone().or_else(|| cursor.session_id.clone());
         if cursor.session_id.is_none() {
-            return Err("Impala transfer cursor did not return a session id for additional rows".to_string());
+            return Err("Agent transfer cursor did not return a session id for additional rows".to_string());
         }
     } else {
         cursor.session_id = None;
@@ -10007,7 +10548,7 @@ async fn fetch_hive_server_transfer_batch(
     Ok(result)
 }
 
-async fn close_hive_server_transfer_cursor(state: &AppState, pool_key: &str, cursor: &mut HiveServerTransferCursor) {
+async fn close_agent_transfer_cursor(state: &AppState, pool_key: &str, cursor: &mut AgentTransferCursor) {
     let Some(session_id) = cursor.session_id.take() else {
         return;
     };
@@ -10018,7 +10559,7 @@ async fn close_hive_server_transfer_cursor(state: &AppState, pool_key: &str, cur
     let client = client.clone();
     let mut client = client.lock().await;
     if let Err(error) = client.close_table_read_session::<bool>(&session_id).await {
-        log::warn!("[transfer] failed to close Impala transfer cursor: {error}");
+        log::warn!("[transfer] failed to close Agent transfer cursor: {error}");
     }
 }
 
@@ -10556,6 +11097,7 @@ async fn transfer_table_inner<F, C>(
     known_foreign_keys: &HashMap<String, Vec<db::ForeignKeyInfo>>,
     pending_fk_alters: &mut Vec<(String, String)>,
     preexisting_backup_names: Option<&HashMap<String, String>>,
+    target_cleared: bool,
     mut progress_callback: F,
     mut source_count_callback: C,
 ) -> Result<TransferTableResult, String>
@@ -10719,9 +11261,20 @@ where
             .is_some_and(|config| db::doris::is_native_profile(&config.db_type, config.driver_profile.as_deref()))
     };
     ensure_transfer_columns_supported(request, is_doris_source, table, &columns)?;
+    ensure_xugu_spatial_transfer_supported(
+        state,
+        &columns,
+        source_db_type,
+        target_db_type,
+        source_pool_key,
+        target_pool_key,
+        table,
+    )
+    .await?;
 
     let writable_columns = writable_transfer_columns(&columns, source_db_type, target_db_type);
-    let default_rows_only = mysql_generated_only_transfer(&columns, source_db_type, target_db_type);
+    let default_rows_only = mysql_generated_only_transfer(&columns, source_db_type, target_db_type)
+        || xugu_rowversion_only_transfer(&columns, source_db_type, target_db_type);
     if writable_columns.is_empty() && !default_rows_only {
         return Err(format!("No writable columns found for table {table}"));
     }
@@ -10912,7 +11465,9 @@ where
     // Empty-column INSERTs are safe only when the target also computes every
     // value. Reject incompatible data-only targets before an overwrite truncates
     // them; otherwise ordinary columns could silently receive defaults instead.
-    if default_rows_only && !mysql_generated_only_transfer(&target_columns, target_db_type, target_db_type) {
+    let target_default_rows_only = mysql_generated_only_transfer(&target_columns, target_db_type, target_db_type)
+        || xugu_rowversion_only_transfer(&target_columns, target_db_type, target_db_type);
+    if default_rows_only && !target_default_rows_only {
         return Err(format!(
             "Target table '{target_table}' must contain only generated columns for default-row transfer"
         ));
@@ -10988,8 +11543,9 @@ where
 
     // Truncate target if overwrite mode (only when not rebuilding the table).
     // When drop_target_before_create is true, the target table was just created
-    // and is already empty, so TRUNCATE is unnecessary.
-    if request.mode == TransferMode::Overwrite && !request.drop_target_before_create {
+    // and is already empty, so TRUNCATE is unnecessary. `target_cleared` means
+    // `clear_foreign_key_linked_overwrite_targets` already emptied it children first.
+    if request.mode == TransferMode::Overwrite && !request.drop_target_before_create && !target_cleared {
         let truncate_sql = transfer_clear_table_sql(
             &target_table,
             &request.target_schema,
@@ -11148,20 +11704,36 @@ where
         transfer_keyset_column_indexes(&writable_columns, &primary_key_columns, source_db_type)
     };
     let mut keyset_cursor: Vec<serde_json::Value> = Vec::new();
-    // A single Agent cursor keeps Hive-family rows in one query execution. Inceptor
-    // rejects the generic LIMIT/OFFSET form, just like the other Agent cursor paths.
-    // Re-running LIMIT/OFFSET pages is unstable for tables without a unique key.
-    let use_hive_server_cursor = table_filter.is_none() && uses_agent_transfer_cursor(source_db_type);
-    let hive_server_transfer_sql = use_hive_server_cursor.then(|| {
-        transfer_cursor_sql(
-            &col_names,
-            table,
-            &request.source_schema,
-            source_db_type,
-            request.source_catalog.as_deref(),
-        )
+    // A single Agent cursor keeps Xugu/Hive-family rows in one query execution.
+    // Inceptor rejects the generic LIMIT/OFFSET form, and re-running LIMIT/OFFSET
+    // pages is unstable for tables without a unique key. A row filter stays on
+    // the filtered page SQL. The Xugu agent keeps that cursor on its only server
+    // connection, so a transfer inside one session pages instead of holding the
+    // cursor open across target writes.
+    let xugu_same_session = xugu_transfer_shares_agent_session(source_db_type, source_pool_key, target_pool_key);
+    let use_agent_cursor = table_filter.is_none()
+        && uses_agent_transfer_cursor(source_db_type)
+        && !default_rows_only
+        && !xugu_same_session;
+    let agent_transfer_sql = use_agent_cursor.then(|| {
+        if *source_db_type == DatabaseType::Xugu {
+            xugu_transfer_cursor_sql(
+                &writable_columns,
+                table,
+                &request.source_schema,
+                request.source_catalog.as_deref(),
+            )
+        } else {
+            transfer_cursor_sql(
+                &col_names,
+                table,
+                &request.source_schema,
+                source_db_type,
+                request.source_catalog.as_deref(),
+            )
+        }
     });
-    let mut hive_server_cursor = HiveServerTransferCursor::default();
+    let mut agent_cursor = AgentTransferCursor::default();
     // Key-less PostgreSQL heaps page by `ctid` windows instead of OFFSET: an
     // OFFSET page re-reads every row before it, so a ten-million-row table gets
     // slower as it runs and never finishes. Tables with a usable key keep the
@@ -11206,19 +11778,23 @@ where
                 return Err("Cancelled".to_string());
             }
 
-            let (mut result, mysql_spatial_markers) = if let Some(sql) = hive_server_transfer_sql.as_deref() {
+            let (mut result, mysql_spatial_markers) = if let Some(sql) = agent_transfer_sql.as_deref() {
                 (
-                    fetch_hive_server_transfer_batch(
-                        state,
-                        source_pool_key,
-                        request,
-                        sql,
-                        batch_size,
-                        &mut hive_server_cursor,
-                    )
-                    .await?,
+                    fetch_agent_transfer_batch(state, source_pool_key, request, sql, batch_size, &mut agent_cursor)
+                        .await?,
                     false,
                 )
+            } else if xugu_same_session && !default_rows_only {
+                let sql = xugu_transfer_page_sql(
+                    &writable_columns,
+                    table,
+                    &request.source_schema,
+                    request.source_catalog.as_deref(),
+                    &primary_key_columns,
+                    offset,
+                    batch_size,
+                );
+                (execute_on_pool_with_max_rows(state, source_pool_key, &sql, Some(batch_size)).await?, false)
             } else if let Some(pager) = ctid_pager.as_ref() {
                 let sql = pager.page_sql(&col_names, table, &request.source_schema, batch_size);
                 (execute_on_pool_with_max_rows(state, source_pool_key, &sql, Some(batch_size)).await?, false)
@@ -11388,15 +11964,27 @@ where
                 if ctid_scan_finished == Some(true) {
                     break;
                 }
-            } else if (use_hive_server_cursor && !has_more) || (!use_hive_server_cursor && row_count < batch_size) {
+            } else if (use_agent_cursor && !has_more) || (!use_agent_cursor && row_count < batch_size) {
                 break;
             }
         }
         Ok(())
     }
     .await;
-    close_hive_server_transfer_cursor(state, source_pool_key, &mut hive_server_cursor).await;
+    close_agent_transfer_cursor(state, source_pool_key, &mut agent_cursor).await;
     transfer_result?;
+
+    if *target_db_type == DatabaseType::Xugu && total_transferred > 0 {
+        sync_xugu_identity_sequences(
+            state,
+            target_pool_key,
+            &target_table,
+            &request.target_schema,
+            &write_col_names,
+            target_table_preexisting,
+        )
+        .await?;
+    }
 
     if pg_compat_transfer {
         for statement in generate_postgres_sequence_sync_sql(&columns, &target_table, &request.target_schema) {
@@ -11747,6 +12335,7 @@ where
         known_foreign_keys,
         pending_fk_alters,
         preexisting_backup_names,
+        false,
         progress_callback,
         |_| {},
     )
@@ -11754,6 +12343,8 @@ where
     .map(|result| result.moved_rows)
 }
 
+/// Pass `target_cleared = true` for tables that [`clear_foreign_key_linked_overwrite_targets`]
+/// already emptied, so the overwrite clear is not repeated.
 #[allow(clippy::too_many_arguments)]
 pub async fn transfer_table_with_result<F, C>(
     state: &Arc<AppState>,
@@ -11767,6 +12358,7 @@ pub async fn transfer_table_with_result<F, C>(
     known_foreign_keys: &HashMap<String, Vec<db::ForeignKeyInfo>>,
     pending_fk_alters: &mut Vec<(String, String)>,
     preexisting_backup_names: Option<&HashMap<String, String>>,
+    target_cleared: bool,
     mut progress_callback: F,
     mut source_count_callback: C,
 ) -> Result<TransferTableResult, String>
@@ -11774,6 +12366,7 @@ where
     F: FnMut(TransferProgress),
     C: FnMut(Option<u64>),
 {
+    validate_transfer_database_pair(request, source_db_type, target_db_type)?;
     let state = state.clone();
     let request = request.clone();
     let table = table.to_string();
@@ -11811,6 +12404,7 @@ where
             &known_foreign_keys,
             &mut task_pending_fk_alters,
             preexisting_backup_names.as_ref(),
+            target_cleared,
             move |progress| {
                 try_send_transfer_progress(&progress_tx, progress);
             },
@@ -12706,6 +13300,7 @@ for line in sys.stdin:
             visible_schemas: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
+            show_database_links: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -13389,6 +13984,76 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
 
     mod transfer_validation_tests {
         use super::*;
+
+        fn base_request() -> TransferRequest {
+            TransferRequest {
+                transfer_id: "xugu-transfer-test".into(),
+                source_connection_id: "source".into(),
+                source_database: "SOURCE_DB".into(),
+                source_schema: "SOURCE_SCHEMA".into(),
+                source_catalog: None,
+                target_connection_id: "target".into(),
+                target_database: "TARGET_DB".into(),
+                target_schema: "TARGET_SCHEMA".into(),
+                target_catalog: None,
+                tables: vec!["ORDERS".into()],
+                create_table: true,
+                content: TransferContent::StructureAndData,
+                objects: None,
+                mode: TransferMode::Append,
+                target_table_name_case: TransferTableNameCase::Preserve,
+                quote_target_column_names: true,
+                ownership_policy: TransferOwnershipPolicy::Preserve,
+                batch_size: 1000,
+                table_filters: std::collections::HashMap::new(),
+                drop_target_before_create: false,
+                drop_target_confirmed: false,
+            }
+        }
+
+        #[test]
+        fn xugu_transfer_is_same_engine_table_only_and_append_or_overwrite() {
+            let request = base_request();
+            assert!(validate_transfer_database_pair(&request, &DatabaseType::Xugu, &DatabaseType::Xugu).is_ok());
+            // Existing non-Xugu transfer combinations retain their prior policy.
+            assert!(validate_transfer_database_pair(&request, &DatabaseType::Postgres, &DatabaseType::Mysql).is_ok());
+
+            let err =
+                validate_transfer_database_pair(&request, &DatabaseType::Xugu, &DatabaseType::Postgres).unwrap_err();
+            assert!(err.contains("虚谷到虚谷"), "{err}");
+            let err = validate_transfer_database_pair(&request, &DatabaseType::Mysql, &DatabaseType::Xugu).unwrap_err();
+            assert!(err.contains("虚谷到虚谷"), "{err}");
+
+            for mode in [TransferMode::Append, TransferMode::Overwrite] {
+                let request = TransferRequest { mode, ..request.clone() };
+                assert!(validate_transfer_database_pair(&request, &DatabaseType::Xugu, &DatabaseType::Xugu).is_ok());
+            }
+            let upsert = TransferRequest { mode: TransferMode::Upsert, ..request.clone() };
+            assert!(validate_transfer_database_pair(&upsert, &DatabaseType::Xugu, &DatabaseType::Xugu)
+                .unwrap_err()
+                .contains("追加或覆盖"));
+            let rebuild = TransferRequest { drop_target_before_create: true, ..request.clone() };
+            assert!(validate_transfer_database_pair(&rebuild, &DatabaseType::Xugu, &DatabaseType::Xugu).is_err());
+        }
+
+        #[test]
+        fn xugu_structure_transfer_rejects_renamed_tables_and_non_table_objects() {
+            let request = TransferRequest { target_table_name_case: TransferTableNameCase::Upper, ..base_request() };
+            assert!(validate_transfer_database_pair(&request, &DatabaseType::Xugu, &DatabaseType::Xugu)
+                .unwrap_err()
+                .contains("保留源表名"));
+
+            let request = TransferRequest {
+                objects: Some(vec![TransferObjectSelection {
+                    object_type: TransferObjectKind::View,
+                    names: vec!["V_ORDERS".into()],
+                }]),
+                ..base_request()
+            };
+            assert!(validate_transfer_database_pair(&request, &DatabaseType::Xugu, &DatabaseType::Xugu)
+                .unwrap_err()
+                .contains("仅支持表对象"));
+        }
 
         #[test]
         fn validates_content_and_object_rules() {
@@ -14801,6 +15466,114 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
     }
 
     #[test]
+    fn xugu_writable_transfer_columns_regenerate_rowversion_values() {
+        let columns =
+            vec![test_column("ID", "INTEGER"), test_column("RV", "ROWVERSION"), test_column("NOTE", "VARCHAR(40)")];
+
+        let writable = writable_transfer_columns(&columns, &DatabaseType::Xugu, &DatabaseType::Xugu);
+
+        assert_eq!(writable.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(), vec!["ID", "NOTE"]);
+        assert!(is_xugu_non_insertable_transfer_column(&columns[1], &DatabaseType::Xugu, &DatabaseType::Xugu));
+        assert!(!is_xugu_non_insertable_transfer_column(&columns[1], &DatabaseType::Xugu, &DatabaseType::Postgres));
+        assert!(xugu_rowversion_only_transfer(&[columns[1].clone()], &DatabaseType::Xugu, &DatabaseType::Xugu));
+        assert!(!xugu_rowversion_only_transfer(&columns, &DatabaseType::Xugu, &DatabaseType::Xugu));
+    }
+
+    #[test]
+    fn xugu_identity_lookup_uses_serial_id_and_scopes_the_target_database() {
+        let sql = xugu_identity_sequences_sql("GUE'ST", "T'1");
+        assert!(sql.contains("c.SERIAL_ID=q.SEQ_ID"));
+        assert!(sql.contains("s.DB_ID=CURRENT_DB_ID"));
+        assert!(sql.contains("s.SCHEMA_NAME='GUE''ST'"));
+        assert!(sql.contains("t.TABLE_NAME='T''1'"));
+        assert!(sql.contains("c.IS_SERIAL=TRUE AND q.IS_SYS=TRUE"));
+        assert!(!sql.contains("UPPER("));
+    }
+
+    #[test]
+    fn xugu_identity_lookup_folds_case_only_as_a_fallback() {
+        let sql = xugu_identity_sequences_sql_case_insensitive("App", "Items");
+        assert!(sql.contains("UPPER(s.SCHEMA_NAME)=UPPER('App')"));
+        assert!(sql.contains("UPPER(t.TABLE_NAME)=UPPER('Items')"));
+        assert!(sql.contains("s.SCHEMA_NAME, t.TABLE_NAME"));
+    }
+
+    #[test]
+    fn xugu_identity_restart_restores_a_consumed_nextval_when_the_sequence_is_ahead() {
+        assert_eq!(xugu_identity_start_with(1, 50, None), Some(51));
+        assert_eq!(xugu_identity_start_with(1, 50, Some(20)), Some(51));
+        assert_eq!(xugu_identity_start_with(1, 50, Some(50)), Some(51));
+        assert_eq!(xugu_identity_start_with(1, 50, Some(100)), Some(100));
+        assert_eq!(xugu_identity_start_with(10, 100, Some(105)), Some(105));
+        assert_eq!(xugu_identity_start_with(-1, -5, Some(-10)), Some(-10));
+        assert_eq!(xugu_identity_start_with(-1, -5, Some(-3)), Some(-6));
+        assert_eq!(xugu_identity_start_with(1, i64::MAX, None), None);
+    }
+
+    #[test]
+    fn xugu_spatial_columns_cover_geometry_modifiers_but_not_ordinary_types() {
+        assert!(is_xugu_spatial_column_type("GEOMETRY"));
+        assert!(is_xugu_spatial_column_type("geometry(PointZ,4326)"));
+        assert!(is_xugu_spatial_column_type("GEOGRAPHY"));
+        assert!(is_xugu_spatial_column_type("BOX2D"));
+        assert!(is_xugu_spatial_column_type("BOX3D"));
+        assert!(!is_xugu_spatial_column_type("VARCHAR(40)"));
+        assert!(!is_xugu_spatial_column_type("BLOB"));
+        let columns = vec![test_column("ID", "INTEGER"), test_column("G", "geometry(Point,3857)")];
+        assert!(xugu_columns_include_spatial(&columns));
+        assert!(!xugu_columns_include_spatial(&[test_column("ID", "INTEGER")]));
+    }
+
+    #[test]
+    fn xugu_same_session_pages_without_holding_the_agent_cursor() {
+        assert!(xugu_transfer_shares_agent_session(&DatabaseType::Xugu, "conn:SYSTEM", "conn:SYSTEM"));
+        assert!(!xugu_transfer_shares_agent_session(&DatabaseType::Xugu, "conn:SYSTEM", "conn:GIS"));
+        assert!(!xugu_transfer_shares_agent_session(&DatabaseType::Postgres, "conn", "conn"));
+        let sql = xugu_transfer_page_sql(&[test_column("G", "GEOMETRY")], "SHAPES", "APP", None, &[], 1000, 1000);
+        assert!(sql.contains("ST_AsEWKB(\"G\")"));
+        assert!(sql.ends_with("LIMIT 1000 OFFSET 1000"));
+
+        // A primary key makes LIMIT/OFFSET paging deterministic; without one the
+        // plain projection keeps the previous behavior.
+        let keyed = xugu_transfer_page_sql(
+            &[test_column("ID", "INTEGER"), test_column("G", "GEOMETRY")],
+            "SHAPES",
+            "APP",
+            None,
+            &["ID".to_string()],
+            2000,
+            1000,
+        );
+        assert!(keyed.contains(" ORDER BY \"ID\" LIMIT 1000 OFFSET 2000"));
+    }
+
+    #[test]
+    fn xugu_rowversion_only_transfer_inserts_default_rows() {
+        let batches = generate_insert_typed_sql_batches_for_transfer(
+            &[],
+            &[],
+            &[Vec::new(), Vec::new()],
+            "VERSIONS",
+            "APP",
+            &DatabaseType::Xugu,
+            None,
+            SqlBatchLimits { max_rows: 100, target_sql_bytes: 1024, hard_sql_bytes: None },
+            false,
+            false,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(
+            batches,
+            vec![
+                ("INSERT INTO \"APP\".\"VERSIONS\" DEFAULT VALUES".into(), 1),
+                ("INSERT INTO \"APP\".\"VERSIONS\" DEFAULT VALUES".into(), 1),
+            ]
+        );
+    }
+
+    #[test]
     fn mysql_generated_only_transfer_requires_nonempty_same_engine_generated_metadata() {
         let generated = vec![
             db::ColumnInfo { extra: Some("STORED GENERATED".into()), ..test_column("a", "int") },
@@ -15715,6 +16488,188 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
                 "COMMENT ON COLUMN \"APP\".\"ITEMS\".\"NOTE\" IS 'line; two'".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn xugu_transfer_ddl_splits_table_constraints_indexes_and_comments() {
+        let ddl = "CREATE TABLE \"APP\".\"ITEMS\" (\"ID\" INTEGER, \"NOTE\" VARCHAR(100));\n\
+                   ALTER TABLE \"APP\".\"ITEMS\" ADD CONSTRAINT \"ITEMS_PK\" PRIMARY KEY (\"ID\");\n\
+                   CREATE INDEX \"ITEMS_NOTE_IDX\" ON \"APP\".\"ITEMS\" (\"NOTE\");\n\
+                   COMMENT ON TABLE \"APP\".\"ITEMS\" IS 'semi;colon';";
+        let statements = transfer_ddl_statements(ddl, &DatabaseType::Xugu);
+        assert_eq!(statements.len(), 4, "{statements:#?}");
+        assert!(statements[0].starts_with("CREATE TABLE"));
+        assert!(statements[1].starts_with("ALTER TABLE"));
+        assert!(statements[2].starts_with("CREATE INDEX"));
+        assert_eq!(statements[3], "COMMENT ON TABLE \"APP\".\"ITEMS\" IS 'semi;colon'");
+    }
+
+    #[test]
+    fn xugu_reused_ddl_rewrites_schema_only_in_code_spans() {
+        let ddl = "CREATE TABLE \"SRC\".\"ITEMS\" (\"NOTE\" VARCHAR(100) DEFAULT '\"SRC\".ITEMS');\n\
+                    ALTER TABLE \"SRC\".\"ITEMS\" ADD CONSTRAINT \"ITEMS_PK\" PRIMARY KEY (\"ID\");\n\
+                    CREATE INDEX \"ITEMS_NOTE_IDX\" ON \"SRC\".\"ITEMS\" (\"NOTE\");\n\
+                    -- \"SRC\".\"ITEMS\" remains in this comment";
+        let rewritten = rewrite_transfer_source_table_ddl(
+            ddl,
+            "SRC",
+            "DST",
+            &DatabaseType::Xugu,
+            &DatabaseType::Xugu,
+            "ITEMS",
+            "ITEMS",
+        )
+        .unwrap();
+        assert!(rewritten.contains("CREATE TABLE \"DST\".\"ITEMS\""));
+        assert!(rewritten.contains("ALTER TABLE \"DST\".\"ITEMS\""));
+        assert!(rewritten.contains("ON \"DST\".\"ITEMS\""));
+        assert!(rewritten.contains("DEFAULT '\"SRC\".ITEMS'"));
+        assert!(rewritten.contains("-- \"SRC\".\"ITEMS\" remains in this comment"));
+        assert!(can_reuse_source_table_ddl(&DatabaseType::Xugu, &DatabaseType::Xugu, None, None, true));
+        assert!(!can_reuse_source_table_ddl(&DatabaseType::Xugu, &DatabaseType::Xugu, None, None, false));
+    }
+
+    #[test]
+    fn xugu_transfer_reads_source_rows_through_agent_cursor() {
+        assert!(uses_agent_transfer_cursor(&DatabaseType::Xugu));
+        assert!(!uses_agent_transfer_cursor(&DatabaseType::Postgres));
+        assert!(!uses_agent_transfer_cursor(&DatabaseType::Mysql));
+    }
+
+    #[test]
+    fn xugu_transfer_cursor_projects_lossy_driver_types_as_text_or_hex() {
+        let columns = vec![
+            test_column("ID", "INTEGER"),
+            test_column("BLOB_C", "BLOB"),
+            db::ColumnInfo { character_maximum_length: Some(8), ..test_column("BIT_C", "BIT(8)") },
+            test_column("VARBIT_C", "VARBIT"),
+            test_column("TIME_C", "TIME"),
+            test_column("TIME_TZ_C", "TIME WITH TIME ZONE"),
+            test_column("IV_YM_C", "INTERVAL YEAR TO MONTH"),
+            test_column("NOTE", "VARCHAR(40)"),
+        ];
+
+        assert_eq!(
+            xugu_transfer_cursor_sql(&columns, "ITEMS", "APP", None),
+            r#"SELECT "ID" AS "ID", CASE WHEN "BLOB_C" IS NULL THEN NULL ELSE '0x'||RAWTOHEX("BLOB_C") END AS "BLOB_C", RTRIM(CAST("BIT_C" AS VARCHAR(8))) AS "BIT_C", RTRIM(CAST("VARBIT_C" AS VARCHAR(32767))) AS "VARBIT_C", CAST("TIME_C" AS VARCHAR(64)) AS "TIME_C", CAST("TIME_TZ_C" AS VARCHAR(256)) AS "TIME_TZ_C", CAST("IV_YM_C" AS VARCHAR(256)) AS "IV_YM_C", "NOTE" AS "NOTE" FROM "APP"."ITEMS""#
+        );
+    }
+
+    #[test]
+    fn xugu_transfer_cursor_preserves_spatial_srid_dimensions_and_box_values() {
+        let columns = vec![
+            test_column("G", "geometry(PointZ,4326)"),
+            test_column("GG", "GEOGRAPHY"),
+            test_column("B2", "BOX2D"),
+            test_column("B3", "BOX3D"),
+        ];
+        assert_eq!(
+            xugu_transfer_cursor_sql(&columns, "SHAPES", "APP", None),
+            r#"SELECT CASE WHEN "G" IS NULL THEN NULL ELSE '0x'||RAWTOHEX(ST_AsEWKB("G")) END AS "G", CASE WHEN "GG" IS NULL THEN NULL ELSE '0x'||RAWTOHEX(ST_AsEWKB(CAST("GG" AS GEOMETRY))) END AS "GG", CASE WHEN "B2" IS NULL THEN NULL ELSE '0x'||RAWTOHEX(ST_AsEWKB(CAST("B2" AS GEOMETRY))) END AS "B2", CASE WHEN "B3" IS NULL THEN NULL ELSE '0x'||RAWTOHEX(ST_AsEWKB(CAST("B3" AS GEOMETRY))) END AS "B3" FROM "APP"."SHAPES""#
+        );
+    }
+
+    #[test]
+    fn xugu_spatial_insert_restores_ewkb_only_for_valid_typed_hex_values() {
+        let hex = "0101000020110F0000000000000000F03F0000000000000040";
+        let geometry = format!("ST_GeomFromEWKB(HEXTORAW('{hex}'))");
+        for column_type in ["GEOMETRY", "geometry(Point,3857)"] {
+            assert_eq!(
+                escape_value_typed(&json!(format!("0x{hex}")), &DatabaseType::Xugu, Some(column_type)),
+                geometry
+            );
+        }
+        for column_type in ["GEOGRAPHY", "BOX2D", "BOX3D"] {
+            assert_eq!(
+                escape_value_typed(&json!(format!("0X{hex}")), &DatabaseType::Xugu, Some(column_type)),
+                format!("CAST({geometry} AS {column_type})")
+            );
+            assert_eq!(escape_value_typed(&json!(null), &DatabaseType::Xugu, Some(column_type)), "NULL");
+        }
+        for value in ["0x", "0x123", "0xZZ", "0x00');DROP TABLE T;--", "POINT(1 2)"] {
+            assert_eq!(format_xugu_typed_sql_literal(value, &DatabaseType::Xugu, Some("GEOMETRY")), None);
+        }
+        assert_eq!(
+            escape_value_typed(&json!("0x00');DROP TABLE T;--"), &DatabaseType::Xugu, Some("BOX3D")),
+            "'0x00'');DROP TABLE T;--'"
+        );
+        // No spatial SQL specialization leaks into another database or a
+        // non-spatial Xugu column containing the same text.
+        assert_eq!(format_xugu_typed_sql_literal(&format!("0x{hex}"), &DatabaseType::Postgres, Some("GEOMETRY")), None);
+        assert_eq!(escape_value_typed(&json!("0x00"), &DatabaseType::Xugu, Some("VARCHAR(10)")), "'0x00'");
+    }
+
+    #[test]
+    fn xugu_insert_uses_typed_literals_only_for_bit_interval_and_plain_time_values() {
+        assert_eq!(escape_value_typed(&json!("10101010"), &DatabaseType::Xugu, Some("BIT(8)")), "B'10101010'");
+        assert_eq!(escape_value_typed(&json!("101101"), &DatabaseType::Xugu, Some("VARBIT")), "B'101101'");
+        assert_eq!(escape_value_typed(&json!(""), &DatabaseType::Xugu, Some("BIT VARYING")), "B''");
+        assert_eq!(
+            escape_value_typed(&json!("5-7"), &DatabaseType::Xugu, Some("INTERVAL YEAR TO MONTH")),
+            "INTERVAL '5-7' YEAR TO MONTH"
+        );
+        assert_eq!(
+            escape_value_typed(&json!("2 3:04:05.123"), &DatabaseType::Xugu, Some("INTERVAL DAY(3) TO SECOND(6)")),
+            "INTERVAL '2 3:04:05.123' DAY(3) TO SECOND(6)"
+        );
+        assert_eq!(
+            escape_value_typed(&json!("17:30:29+08:00"), &DatabaseType::Xugu, Some("TIME WITH TIME ZONE")),
+            "'17:30:29+08:00'"
+        );
+        assert_eq!(
+            escape_value_typed(&json!("23:59:59.123"), &DatabaseType::Xugu, Some("TIME")),
+            "CAST('23:59:59.123' AS TIME)"
+        );
+        assert_eq!(
+            escape_value_typed(
+                &json!("2026-10-08 17:30:29+08:00"),
+                &DatabaseType::Xugu,
+                Some("DATETIME WITH TIME ZONE")
+            ),
+            "'2026-10-08 17:30:29+08:00'"
+        );
+        assert_eq!(
+            escape_value_typed(&json!("2026-10-08 17:30:29"), &DatabaseType::Xugu, Some("DATETIME")),
+            "'2026-10-08 17:30:29'"
+        );
+        // These SQL literal specializations are intentionally Xugu-only.
+        assert_eq!(escape_value_typed(&json!("10101010"), &DatabaseType::Postgres, Some("BIT(8)")), "'10101010'");
+        assert_eq!(escape_value_typed(&json!("23:59:59.123"), &DatabaseType::Postgres, Some("TIME")), "'23:59:59.123'");
+    }
+
+    #[test]
+    fn xugu_interval_cast_values_are_normalized_to_the_declared_qualifier() {
+        let cases = [
+            ("5-0", "INTERVAL YEAR", "INTERVAL '5' YEAR"),
+            ("5-7", "INTERVAL YEAR TO MONTH", "INTERVAL '5-7' YEAR TO MONTH"),
+            ("0-8", "INTERVAL MONTH", "INTERVAL '8' MONTH"),
+            ("12 0:00:00", "INTERVAL DAY", "INTERVAL '12' DAY"),
+            ("1 2:00:00", "INTERVAL DAY TO HOUR", "INTERVAL '1 2' DAY TO HOUR"),
+            ("1 2:03:00", "INTERVAL DAY TO MINUTE", "INTERVAL '1 2:03' DAY TO MINUTE"),
+            ("1 02:03:04.123000", "INTERVAL DAY TO SECOND", "INTERVAL '1 02:03:04.123000' DAY TO SECOND"),
+            ("50:00:00", "INTERVAL HOUR", "INTERVAL '50' HOUR"),
+            ("50:03:00", "INTERVAL HOUR TO MINUTE", "INTERVAL '50:03' HOUR TO MINUTE"),
+            ("50:03:04.123000", "INTERVAL HOUR TO SECOND", "INTERVAL '50:03:04.123000' HOUR TO SECOND"),
+            ("1:40:00", "INTERVAL MINUTE", "INTERVAL '100' MINUTE"),
+            ("1:40:03.123000", "INTERVAL MINUTE TO SECOND", "INTERVAL '100:03.123000' MINUTE TO SECOND"),
+            ("0:00:45.123000", "INTERVAL SECOND", "INTERVAL '45.123000' SECOND"),
+            ("-5-0", "INTERVAL YEAR", "INTERVAL '-5' YEAR"),
+            ("-2-8", "INTERVAL MONTH", "INTERVAL '-32' MONTH"),
+            ("+0-0", "INTERVAL MONTH", "INTERVAL '+0' MONTH"),
+            ("-50:03:00", "INTERVAL MINUTE", "INTERVAL '-3003' MINUTE"),
+            ("-1:40:03.123000", "INTERVAL MINUTE TO SECOND", "INTERVAL '-100:03.123000' MINUTE TO SECOND"),
+            ("50:03:04.123000", "INTERVAL SECOND(6)", "INTERVAL '180184.123000' SECOND(6)"),
+            ("5-7", "INTERVAL YEAR", "INTERVAL '5-7' YEAR"),
+            ("1:40:03", "INTERVAL MINUTE", "INTERVAL '1:40:03' MINUTE"),
+        ];
+
+        for (value, column_type, expected) in cases {
+            assert_eq!(
+                escape_value_typed(&json!(value), &DatabaseType::Xugu, Some(column_type)),
+                expected,
+                "{column_type}"
+            );
+        }
     }
 
     #[test]
@@ -18266,14 +19221,21 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
     #[test]
     fn xugu_insert_formats_prefixed_hex_for_binary_and_blob() {
         let sql = generate_insert_typed(
-            &[String::from("id"), String::from("binary_payload"), String::from("blob_payload"), String::from("note")],
+            &[
+                String::from("id"),
+                String::from("binary_payload"),
+                String::from("blob_payload"),
+                String::from("empty_blob"),
+                String::from("note"),
+            ],
             &[
                 Some(String::from("integer")),
                 Some(String::from("BINARY")),
                 Some(String::from("BLOB")),
+                Some(String::from("BLOB")),
                 Some(String::from("varchar(64)")),
             ],
-            &[vec![json!(1), json!("0x0001ABff"), json!("0X1020"), json!("0x0001ABff")]],
+            &[vec![json!(1), json!("0x0001ABff"), json!("0X1020"), json!("0x"), json!("0x0001ABff")]],
             "files",
             "AppSchema",
             &DatabaseType::Xugu,
@@ -18282,8 +19244,8 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
 
         assert_eq!(
             sql,
-            r#"INSERT INTO "AppSchema"."files" ("id", "binary_payload", "blob_payload", "note") VALUES
-(1, HEXTORAW('0001ABff'), HEXTORAW('1020'), '0x0001ABff')"#
+            r#"INSERT INTO "AppSchema"."files" ("id", "binary_payload", "blob_payload", "empty_blob", "note") VALUES
+(1, X'0001ABff', X'1020', X'', '0x0001ABff')"#
         );
     }
 
@@ -19234,6 +20196,7 @@ SELECT 1 FROM dual"#
             visible_schemas: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
+            show_database_links: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,

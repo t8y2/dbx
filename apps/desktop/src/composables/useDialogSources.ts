@@ -429,6 +429,9 @@ export function useDialogSources() {
       keychainFilled = await connectionStore.applyDataGripKeychainPasswords();
     }
     toast(importSuccessMessage(source, count, keychainFilled), source === "dbx" ? 2000 : 4000);
+    if (source === "datagrip" && (connectionStore.lastDataGripFallbackUsernamesCount ?? 0) > 0) {
+      toast(t("configExport.importDatagripUsernamesFallbackWarning"), 5000);
+    }
     if (hasSidebarLayoutEntries(layout)) {
       pendingImportLayout.value = layout;
       showImportLayoutConfirm.value = true;

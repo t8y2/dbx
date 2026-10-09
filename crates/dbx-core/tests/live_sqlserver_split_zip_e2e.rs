@@ -88,6 +88,7 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         show_system_schemas: false,
         database_info: None,
         sidebar_auto_load_all_tables: false,
+        show_database_links: None,
     }
 }
 

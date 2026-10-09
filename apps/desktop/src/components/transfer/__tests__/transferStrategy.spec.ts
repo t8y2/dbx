@@ -70,12 +70,13 @@ describe("transfer strategies", () => {
     expect(resolveTransferStrategy({})).toBe("append");
   });
 
-  it("does not expose unimplemented DB2 upsert or rebuild strategies", () => {
+  it("does not expose unimplemented DB2 or Xugu upsert or rebuild strategies", () => {
     expect(supportsTransferUpsert("db2")).toBe(false);
     expect(rebuildUnavailableReason("structureAndData", "db2")).toBe("unsupported");
     expect(rebuildUnavailableReason("structureOnly", "db2")).toBe("unsupported");
     expect(supportsTransferUpsert("postgres")).toBe(true);
     expect(supportsTransferUpsert("mysql")).toBe(true);
+    expect(supportsTransferUpsert("xugu")).toBe(false);
     expect(supportsTransferUpsert(undefined)).toBe(true);
   });
 

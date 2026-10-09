@@ -272,9 +272,26 @@ type connectConfiguration struct {
 	BrowserResponseTimeout     time.Duration
 	BrowserDisableSSLCheck     bool
 	WaitForNonQueryCompletion  bool
+	IdentifierQuote            string
 	// Maximum length of the data in bytes. Used for SASL.
 	MaxSize        uint32
 	MaxMessageSize int32
+}
+
+func (c *connectConfiguration) identifierQuote() string {
+	if c != nil && c.IdentifierQuote != "" {
+		return c.IdentifierQuote
+	}
+	if c != nil && c.HiveConfiguration != nil {
+		for k, v := range c.HiveConfiguration {
+			cleanKey := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(k), "set:hivevar:"), "set:hiveconf:")
+			cleanKey = strings.TrimPrefix(cleanKey, "#")
+			if strings.EqualFold(cleanKey, "kyuubi.engine.type") && strings.EqualFold(strings.TrimSpace(v), "TRINO") {
+				return "\""
+			}
+		}
+	}
+	return "`"
 }
 
 // newConnectConfiguration returns a connect configuration, all with empty fields
@@ -652,7 +669,7 @@ func innerConnect(ctx context.Context, host string, port int, auth string,
 	if configuration.Database != "" {
 		cursor := conn.cursor()
 		defer cursor.close(ctx)
-		cursor.exec(ctx, "USE "+quoteHiveIdentifier(configuration.Database))
+		cursor.exec(ctx, "USE "+quoteIdentifier(configuration.Database, configuration.identifierQuote()))
 		if cursor.Err != nil {
 			return nil, cursor.Err
 		}
@@ -1693,7 +1710,14 @@ func usesHTTPBasicAuth(auth string) bool {
 }
 
 func quoteHiveIdentifier(value string) string {
-	return "`" + strings.ReplaceAll(value, "`", "``") + "`"
+	return quoteIdentifier(value, "`")
+}
+
+func quoteIdentifier(value, quote string) string {
+	if quote == "" {
+		quote = "`"
+	}
+	return quote + strings.ReplaceAll(value, quote, quote+quote) + quote
 }
 
 var DEFAULT_SQL_STATE = ""

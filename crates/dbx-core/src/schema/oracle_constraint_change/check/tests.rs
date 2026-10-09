@@ -12,6 +12,7 @@ struct Fixture {
     violations: bool,
     readback_error: bool,
     privilege: bool,
+    nonnullable: bool,
 }
 struct Session {
     engine: Engine,
@@ -54,6 +55,7 @@ fn session(engine: Engine, request: &CheckChange) -> Session {
             violations: false,
             readback_error: false,
             privilege: true,
+            nonnullable: false,
         }),
     }
 }
@@ -98,7 +100,7 @@ impl ConstraintSession for Session {
             return Ok(rows(vec![vec![json!(1)]]));
         }
         if sql.contains("FROM ALL_TAB_COLUMNS") {
-            return Ok(rows(vec![]));
+            return Ok(rows(if fixture.nonnullable { vec![vec![json!("amount")]] } else { vec![] }));
         }
         if sql.contains("FROM ALL_CONSTRAINTS") {
             return Ok(rows(vec![vec![json!(u64::from(
@@ -149,6 +151,22 @@ fn expression_boundary_preserves_strings_comments_q_literals_and_rejects_stateme
         "",
     ] {
         assert!(expression_boundary(expression).is_err(), "{expression}");
+    }
+}
+
+#[tokio::test]
+async fn not_null_constraints_are_refused_without_blocking_ordinary_checks() {
+    for engine in [Engine::Oracle, Engine::OceanBaseOracle] {
+        let request = request();
+        let session = session(engine, &request);
+        session.fixture.lock().unwrap().nonnullable = true;
+        assert!(preview_check(&session, &request).await.is_ok());
+        session.fixture.lock().unwrap().current.as_mut().unwrap().expression = "(\"amount\" IS NOT NULL)".into();
+        let error = preview_check(&session, &request).await.unwrap_err();
+        assert!(error.contains("Edit column nullability instead"));
+        let fixture = session.fixture.lock().unwrap();
+        assert!(fixture.writes.is_empty());
+        assert!(fixture.current.is_some());
     }
 }
 

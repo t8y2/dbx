@@ -4,6 +4,9 @@ mod oracle_routines;
 pub use oracle_routines::{validate_schema_diff_routines, RoutineValidation};
 pub mod oracle_types;
 pub mod oracle_jobs;
+mod oracle_security_write;
+pub mod oracle_user_admin;
+pub mod oracle_role_admin;
 
 pub use dbx_drivers::metadata::sqlite_ddl;
 

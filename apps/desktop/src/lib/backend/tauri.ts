@@ -1780,6 +1780,14 @@ export async function getObjectSource(connectionId: string, database: string, sc
   });
 }
 
+export async function oracleUserAdmin(connectionId: string, database: string, request: import("@/lib/database/oracleUserAdmin").OracleUserRequest): Promise<import("@/lib/database/oracleUserAdmin").OracleUserResponse> {
+  return invoke("oracle_user_admin", { connectionId, database, request });
+}
+
+export async function oracleRoleAdmin(connectionId: string, database: string, request: import("@/lib/database/oracleRoleAdmin").OracleRoleRequest): Promise<import("@/lib/database/oracleRoleAdmin").OracleRoleResponse> {
+  return invoke("oracle_role_admin", { connectionId, database, request });
+}
+
 export async function getEventInfo(connectionId: string, database: string, schema: string, name: string): Promise<MysqlEventInfo> {
   return invoke("get_event_info", { connectionId, database, schema, name });
 }

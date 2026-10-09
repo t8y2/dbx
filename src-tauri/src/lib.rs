@@ -2059,6 +2059,8 @@ pub fn run() {
             commands::plugins::uninstall_jdbc_plugin,
             commands::schema_diff::prepare_schema_diff,
             commands::oracle_jobs::oracle_jobs,
+            commands::oracle_user_admin::oracle_user_admin,
+            commands::oracle_role_admin::oracle_role_admin,
             commands::schema_diff::generate_schema_sync_sql,
             commands::schema_diff::generate_schema_sync_plan,
             commands::schema_diff::validate_schema_diff_routines,

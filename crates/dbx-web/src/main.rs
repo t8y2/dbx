@@ -754,6 +754,8 @@ async fn serve() -> Result<(), String> {
         .route("/schema/custom-type-details", get(routes::schema::get_custom_type_details))
         .route("/schema/oracle-type-details", get(routes::schema::get_oracle_type_details))
         .route("/oracle-jobs", post(routes::oracle_jobs::oracle_jobs))
+        .route("/oracle-user-admin", post(routes::oracle_user_admin::oracle_user_admin))
+        .route("/oracle-role-admin", post(routes::oracle_role_admin::oracle_role_admin))
         .route("/schema/columns", get(routes::schema::list_columns))
         .route("/plugin/table-metadata", post(routes::schema::get_plugin_table_metadata))
         .route("/schema/all-columns", get(routes::schema::get_all_columns))

@@ -135,6 +135,7 @@ const ObjectBrowser = defineAsyncComponent(() => import("@/components/objects/Ob
 const OracleTypeMetadataPanel = defineAsyncComponent(() => import("@/components/objects/OracleTypeMetadataPanel.vue"));
 const TableStructureEditor = defineAsyncComponent(() => import("@/components/structure/TableStructureEditor.vue"));
 const DatabaseUserAdmin = defineAsyncComponent(() => import("@/components/admin/DatabaseUserAdmin.vue"));
+const OracleSecurityAdmin = defineAsyncComponent(() => import("@/components/admin/OracleSecurityAdmin.vue"));
 const XuguUserPermissions = defineAsyncComponent(() => import("@/components/admin/XuguUserPermissions.vue"));
 const ProcessListPanel = defineAsyncComponent(() => import("@/components/admin/ProcessListPanel.vue"));
 const SqlServerActivityTracePanel = defineAsyncComponent(() => import("@/components/admin/SqlServerActivityTracePanel.vue"));
@@ -3497,7 +3498,8 @@ defineExpose({
     </template>
 
     <template v-else-if="activeTab.mode === 'users' && activeConnection">
-      <DatabaseUserAdmin :key="activeTab.id" :connection="activeConnection" />
+      <OracleSecurityAdmin v-if="activeEffectiveDatabaseType === 'oracle' || activeEffectiveDatabaseType === 'oceanbase-oracle'" :key="activeTab.id" :connection="activeConnection" />
+      <DatabaseUserAdmin v-else :key="activeTab.id" :connection="activeConnection" />
     </template>
 
     <template v-else-if="activeTab.mode === 'xugu-users' && activeConnection">

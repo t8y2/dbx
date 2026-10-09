@@ -8,6 +8,7 @@ import OceanbaseIndexExpressions from "./OceanbaseIndexExpressions.vue";
 import { oceanbaseIndexCapabilities, oceanbasePhysicalIndexColumns, quoteOceanbaseIndexColumn } from "@/lib/table/oceanbaseIndexCapabilities";
 import OracleTriggerDefinitionDialog from "./OracleTriggerDefinitionDialog.vue";
 import { oracleTriggerOwner } from "@/lib/table/oracleTriggerDefinition";
+import OracleObjectGrantsButton from "@/components/admin/OracleObjectGrantsButton.vue";
 
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, shallowRef, watch } from "vue";
 import { uuid } from "@/lib/common/utils";
@@ -5709,6 +5710,7 @@ watch(
               <TabsTrigger v-if="showPartitionsTab" value="partitions">{{ t("structureEditor.partitions") }}</TabsTrigger>
             </TabsList>
             <div class="flex shrink-0 items-center gap-1.5">
+              <OracleObjectGrantsButton v-if="!isCreateMode" :connection="connection" :owner="metadataSchema" :object-name="tableName" />
               <Button v-if="!isCreateMode" size="sm" variant="outline" :class="structureToolbarButtonClass" data-structure-view-data @click="emit('viewData')">
                 <Rows3 :class="structureIconClass" />
                 {{ t("contextMenu.viewData") }}

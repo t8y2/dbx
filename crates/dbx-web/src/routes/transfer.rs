@@ -91,10 +91,7 @@ pub async fn start_transfer(
     // carry the requested connections, and the spawned task reports failures as
     // terminal progress events instead of HTTP errors.
     let (source_db_type, target_db_type) = if state.demo_mode {
-        (
-            dbx_core::models::connection::DatabaseType::Sqlite,
-            dbx_core::models::connection::DatabaseType::Sqlite,
-        )
+        (dbx_core::models::connection::DatabaseType::Sqlite, dbx_core::models::connection::DatabaseType::Sqlite)
     } else {
         // Reject transfer early if the target connection is read-only
         if let Some(name) = dbx_core::query::connection_readonly_name(&state.app, &req.target_connection_id).await {
@@ -104,8 +101,10 @@ pub async fn start_transfer(
             )));
         }
 
-        let source_db_type = transfer::get_db_type(&state.app, &req.source_connection_id).await.map_err(AppError::from)?;
-        let target_db_type = transfer::get_db_type(&state.app, &req.target_connection_id).await.map_err(AppError::from)?;
+        let source_db_type =
+            transfer::get_db_type(&state.app, &req.source_connection_id).await.map_err(AppError::from)?;
+        let target_db_type =
+            transfer::get_db_type(&state.app, &req.target_connection_id).await.map_err(AppError::from)?;
         transfer::validate_transfer_database_pair(&req, &source_db_type, &target_db_type).map_err(AppError::from)?;
 
         // `drop_target_before_create` rebuilds target tables. Gate it before responding so the

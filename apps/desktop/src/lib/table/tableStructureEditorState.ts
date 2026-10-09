@@ -1471,7 +1471,7 @@ function normalizedDataTypeName(rawDataType: string): string {
 }
 
 export function getDataTypeLengthUnitOptions(dbType: DatabaseType | undefined, rawDataType: string): readonly DataTypeLengthUnit[] {
-  if (dbType !== "dameng" && dbType !== "oracle") return [];
+  if (dbType !== "dameng" && dbType !== "oracle" && dbType !== "oceanbase-oracle") return [];
   return CHARACTER_LENGTH_UNIT_TYPES.has(normalizedDataTypeName(rawDataType)) ? CHARACTER_LENGTH_UNITS : [];
 }
 

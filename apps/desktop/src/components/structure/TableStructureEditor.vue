@@ -1368,7 +1368,7 @@ const usesNativeMysqlIndexNames = computed(() => {
   const profile = connection.value?.driver_profile?.trim().toLowerCase();
   return databaseType.value === "mysql" && connection.value?.db_type === "mysql" && (!profile || profile === "mysql");
 });
-const supportsCharacterLengthUnits = computed(() => databaseType.value === "dameng" || databaseType.value === "oracle");
+const supportsCharacterLengthUnits = computed(() => databaseType.value === "dameng" || databaseType.value === "oracle" || databaseType.value === "oceanbase-oracle");
 const usesMysql8SafeDefaults = computed(() => databaseType.value === "mysql" && connection.value?.db_type === "mysql" && connection.value.driver_profile === "mysql");
 const structureCapabilities = computed(() => getTableStructureCapabilities(databaseType.value, connection.value?.db_type, connection.value?.database_info?.productVersion));
 const tableMetadataCapabilities = computed(() => getTableMetadataCapabilities(databaseType.value));

@@ -3412,13 +3412,13 @@ mod tests {
     #[test]
     fn oceanbase_view_rename_uses_current_schema_rename_syntax() {
         let sql = build_rename_object_sql(RenameObjectSqlOptions {
-                database_type: Some(DatabaseType::OceanbaseOracle),
-                object_type: DatabaseObjectType::View,
-                schema: Some("App'Owner".to_string()),
-                old_name: "Old 'View".to_string(),
-                new_name: "New \"View\"".to_string(),
-            })
-            .unwrap();
+            database_type: Some(DatabaseType::OceanbaseOracle),
+            object_type: DatabaseObjectType::View,
+            schema: Some("App'Owner".to_string()),
+            old_name: "Old 'View".to_string(),
+            new_name: "New \"View\"".to_string(),
+        })
+        .unwrap();
         assert!(sql.starts_with("DECLARE\n"));
         assert!(sql.contains("SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') <> 'App''Owner'"));
         assert!(sql.contains("EXECUTE IMMEDIATE 'RENAME \"Old ''View\" TO \"New \"\"View\"\"\"'"));

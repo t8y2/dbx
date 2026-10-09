@@ -2667,7 +2667,8 @@ mod tests {
                 name: "OLD_ROUTINE".to_string(),
                 new_name: "NEW_ROUTINE".to_string(),
                 source: format!("CREATE OR REPLACE {keyword} APP.OLD_ROUTINE {body}"),
-            }).unwrap();
+            })
+            .unwrap();
             assert_eq!(statements.len(), 5);
             assert!(statements[..4].iter().all(|sql| !sql.contains("EXECUTE IMMEDIATE 'DROP")));
             assert!(statements[1].starts_with(&format!("CREATE  {keyword}")));
@@ -2677,7 +2678,14 @@ mod tests {
             assert!(statements[3].contains("WITH GRANT OPTION"));
             let cleanup = &statements[4];
             let drop_position = cleanup.find(&format!("EXECUTE IMMEDIATE 'DROP {keyword}")).unwrap();
-            for required in ["STATUS = 'VALID'", "SYS.DBA_DEPENDENCIES", "SYS.DBA_SYNONYMS", "RAISE_APPLICATION_ERROR(-20018", "RAISE_APPLICATION_ERROR(-20019", "RAISE_APPLICATION_ERROR(-20017"] {
+            for required in [
+                "STATUS = 'VALID'",
+                "SYS.DBA_DEPENDENCIES",
+                "SYS.DBA_SYNONYMS",
+                "RAISE_APPLICATION_ERROR(-20018",
+                "RAISE_APPLICATION_ERROR(-20019",
+                "RAISE_APPLICATION_ERROR(-20017",
+            ] {
                 assert!(cleanup.find(required).unwrap() < drop_position, "missing guard before DROP: {required}");
             }
         }
@@ -2694,7 +2702,8 @@ mod tests {
             name: "Old \"Proc'".to_string(),
             new_name: "New \"Proc'".to_string(),
             source: "CREATE PROCEDURE \"O'Reilly\".\"Old \"\"Proc'\" AS BEGIN NULL; END;".to_string(),
-        }).unwrap();
+        })
+        .unwrap();
         assert!(statements[0].contains("OWNER = 'O''Reilly'"));
         assert!(statements[1].contains("\"O'Reilly\".\"New \"\"Proc'\""));
         assert!(statements[4].contains("REFERENCED_OWNER = ''O''''Reilly''"));

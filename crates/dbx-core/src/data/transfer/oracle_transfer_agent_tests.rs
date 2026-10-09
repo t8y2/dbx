@@ -13,19 +13,24 @@ struct Fixture {
     target_pool: String,
 }
 
-const SOURCE_SPEC: &str = "CREATE OR REPLACE PACKAGE \"SRC\".\"P\" AS PROCEDURE run; marker VARCHAR2(40) := q'[SRC.source-marker]'; END;";
+const SOURCE_SPEC: &str =
+    "CREATE OR REPLACE PACKAGE \"SRC\".\"P\" AS PROCEDURE run; marker VARCHAR2(40) := q'[SRC.source-marker]'; END;";
 const SOURCE_BODY: &str = "CREATE OR REPLACE PACKAGE BODY \"SRC\".\"P\" AS PROCEDURE run IS BEGIN NULL; END; END;";
 const OLD_SPEC: &str = "CREATE OR REPLACE PACKAGE \"DST\".\"P\" AS PROCEDURE old_run; marker VARCHAR2(40) := q'[DST.original-marker]'; END;";
 const OLD_BODY: &str = "CREATE OR REPLACE PACKAGE BODY \"DST\".\"P\" AS PROCEDURE old_run IS BEGIN NULL; END; END;";
 const CONCURRENT_SPEC: &str = "CREATE OR REPLACE PACKAGE \"DST\".\"P\" AS PROCEDURE concurrent_run; END;";
-const CONCURRENT_BODY: &str = "CREATE OR REPLACE PACKAGE BODY \"DST\".\"P\" AS PROCEDURE concurrent_run IS BEGIN NULL; END; END;";
+const CONCURRENT_BODY: &str =
+    "CREATE OR REPLACE PACKAGE BODY \"DST\".\"P\" AS PROCEDURE concurrent_run IS BEGIN NULL; END; END;";
 
 impl Fixture {
     async fn new(database_type: DatabaseType, mut mode: Value) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
         let state = Arc::new(AppState::new_with_plugin_and_agent_dir_and_app_version(
-            storage, directory.path().join("plugins"), directory.path().join("agents"), "test",
+            storage,
+            directory.path().join("plugins"),
+            directory.path().join("agents"),
+            "test",
         ));
         let key = crate::database_capabilities::agent_key(&database_type, None).unwrap();
         let executable = state.agent_manager.driver_native_path(key);
@@ -39,7 +44,8 @@ impl Fixture {
                 "port":listener.local_addr().unwrap().port(), "username":user, "password":"",
                 "database":database, "connect_timeout_secs":2, "query_timeout_secs":2,
                 "keepalive_interval_secs":0, "idle_timeout_secs":0
-            })).unwrap();
+            }))
+            .unwrap();
             state.configs.write().await.insert(id.into(), config);
         }
         mode["engine"] = json!(if database_type == DatabaseType::OceanbaseOracle { "oceanbase" } else { "oracle" });
@@ -57,17 +63,26 @@ impl Fixture {
 
     fn requests(&self) -> Vec<Value> {
         std::fs::read_to_string(self.state.agent_manager.base_dir().join("requests.jsonl"))
-            .unwrap_or_default().lines().map(|line| serde_json::from_str(line).unwrap()).collect()
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
     }
 
     fn writes(&self) -> Vec<String> {
-        self.requests().iter().filter_map(|r| r["params"]["sql"].as_str())
-            .filter(|sql| sql.starts_with("CREATE ") || sql.starts_with("DROP ")).map(str::to_string).collect()
+        self.requests()
+            .iter()
+            .filter_map(|r| r["params"]["sql"].as_str())
+            .filter(|sql| sql.starts_with("CREATE ") || sql.starts_with("DROP "))
+            .map(str::to_string)
+            .collect()
     }
 
     fn backups(&self) -> Vec<Value> {
-        std::fs::read_dir(self.state.storage.data_dir().join("transfer-object-backups")).unwrap()
-            .map(|entry| serde_json::from_slice(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap()).collect()
+        std::fs::read_dir(self.state.storage.data_dir().join("transfer-object-backups"))
+            .unwrap()
+            .map(|entry| serde_json::from_slice(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap())
+            .collect()
     }
 
     async fn shutdown(self) {
@@ -82,7 +97,8 @@ fn request(kind: &str, name: &str) -> TransferRequest {
         "sourceDatabase":"SOURCE_DB", "sourceSchema":"SRC", "targetConnectionId":"target",
         "targetDatabase":"TARGET_DB", "targetSchema":"DST", "tables":[], "createTable":false,
         "batchSize":10, "objectConflictPolicy":"replace", "objects":[{"objectType":kind,"names":[name]}]
-    })).unwrap()
+    }))
+    .unwrap()
 }
 
 async fn package_outcome(fixture: &Fixture, request: &TransferRequest) -> TransferObjectOutcome {
@@ -106,7 +122,7 @@ fn assert_manual_package_recovery(fixture: &Fixture, outcome: &TransferObjectOut
     assert_eq!(backups[0]["connection_id"], "target");
     assert_eq!(backups[0]["schema"], "DST");
     assert_eq!(backups[0]["name"], "P");
-    assert_eq!(backups[0]["definitions"], json!([["PACKAGE",OLD_SPEC],["PACKAGE BODY",OLD_BODY]]));
+    assert_eq!(backups[0]["definitions"], json!([["PACKAGE", OLD_SPEC], ["PACKAGE BODY", OLD_BODY]]));
     assert!(!recovery.contains("original-marker"), "Public progress must not expose source literals");
 }
 
@@ -120,10 +136,16 @@ async fn package_concurrent_save_is_not_overwritten_and_unselected_body_is_not_r
         let outcome = package_outcome(&fixture, &request(kind, "P")).await;
         assert_manual_package_recovery(&fixture, &outcome, selected_kind);
         assert_eq!(outcome.object_results[0].source_verified, Some(false));
-        let current: Value = serde_json::from_slice(&std::fs::read(fixture.state.agent_manager.base_dir().join("target-package.json")).unwrap()).unwrap();
+        let current: Value = serde_json::from_slice(
+            &std::fs::read(fixture.state.agent_manager.base_dir().join("target-package.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(current[key], concurrent);
-        if selected_kind == TransferObjectKind::Package { assert_eq!(current["body"], OLD_BODY); }
-        else { assert_eq!(current["spec"], OLD_SPEC); }
+        if selected_kind == TransferObjectKind::Package {
+            assert_eq!(current["body"], OLD_BODY);
+        } else {
+            assert_eq!(current["spec"], OLD_SPEC);
+        }
         fixture.shutdown().await;
     }
 }
@@ -133,7 +155,10 @@ async fn package_lost_write_response_preserves_backup_without_replaying_old_defi
     let fixture = Fixture::new(DatabaseType::OceanbaseOracle, json!({"package_fault":"lost-response"})).await;
     let outcome = package_outcome(&fixture, &request("PACKAGE", "P")).await;
     assert_manual_package_recovery(&fixture, &outcome, TransferObjectKind::Package);
-    let current: Value = serde_json::from_slice(&std::fs::read(fixture.state.agent_manager.base_dir().join("target-package.json")).unwrap()).unwrap();
+    let current: Value = serde_json::from_slice(
+        &std::fs::read(fixture.state.agent_manager.base_dir().join("target-package.json")).unwrap(),
+    )
+    .unwrap();
     assert!(current["spec"].as_str().unwrap().contains("SRC.source-marker"));
     assert_eq!(current["body"], OLD_BODY);
     assert!(outcome.object_results[0].error.as_deref().unwrap().contains("Package DDL failed"));
@@ -165,7 +190,9 @@ async fn package_cancelled_unknown_write_never_replays_the_saved_body_or_specifi
         while !fixture.state.agent_manager.base_dir().join("package-written").exists() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     set_cancelled(&request.transfer_id).await;
     std::fs::write(fixture.state.agent_manager.base_dir().join("cancel-confirmed"), "done").unwrap();
     let outcome = task.await.unwrap();
@@ -188,22 +215,43 @@ async fn package_success_still_verifies_selected_definition_without_implicit_bod
 }
 
 async fn permission_plan(fixture: &Fixture, kind: &str, database_type: DatabaseType) -> TransferSchemaObjectPlan {
-    let name = match kind { "TYPE" => "T", "SYNONYM" => "S", _ => "L" };
+    let name = match kind {
+        "TYPE" => "T",
+        "SYNONYM" => "S",
+        _ => "L",
+    };
     let mut request = request(kind, name);
     if kind == "DB_LINK" {
-        request.database_links.push(serde_json::from_value(json!({
-            "objectType":"DB_LINK", "name":"L", "sourceOwner":"SRC", "targetName":"L",
-            "targetScope":if database_type == DatabaseType::OceanbaseOracle { "tenant" } else { "private" },
-            "authentication":"fixedUser", "username":"REMOTE_USER", "host":"remote-service",
-            "protocol":if database_type == DatabaseType::OceanbaseOracle { Some("OB") } else { None },
-            "tenant":if database_type == DatabaseType::OceanbaseOracle { Some("remoteTenant") } else { None },
-            "credentialAvailable":true
-        })).unwrap());
+        request.database_links.push(
+            serde_json::from_value(json!({
+                "objectType":"DB_LINK", "name":"L", "sourceOwner":"SRC", "targetName":"L",
+                "targetScope":if database_type == DatabaseType::OceanbaseOracle { "tenant" } else { "private" },
+                "authentication":"fixedUser", "username":"REMOTE_USER", "host":"remote-service",
+                "protocol":if database_type == DatabaseType::OceanbaseOracle { Some("OB") } else { None },
+                "tenant":if database_type == DatabaseType::OceanbaseOracle { Some("remoteTenant") } else { None },
+                "credentialAvailable":true
+            }))
+            .unwrap(),
+        );
     }
     let plan = match kind {
-        "TYPE" => super::super::oracle_types::preview(&fixture.state, &request, &fixture.source_pool, &fixture.target_pool).await,
-        "SYNONYM" => super::super::oracle_synonyms::preview(&fixture.state, &request, &fixture.source_pool, &fixture.target_pool).await,
-        _ => super::super::oracle_database_links::preview(&fixture.state, &request, &fixture.source_pool, &fixture.target_pool).await,
+        "TYPE" => {
+            super::super::oracle_types::preview(&fixture.state, &request, &fixture.source_pool, &fixture.target_pool)
+                .await
+        }
+        "SYNONYM" => {
+            super::super::oracle_synonyms::preview(&fixture.state, &request, &fixture.source_pool, &fixture.target_pool)
+                .await
+        }
+        _ => {
+            super::super::oracle_database_links::preview(
+                &fixture.state,
+                &request,
+                &fixture.source_pool,
+                &fixture.target_pool,
+            )
+            .await
+        }
     };
     plan.unwrap().unwrap()
 }
@@ -211,11 +259,20 @@ async fn permission_plan(fixture: &Fixture, kind: &str, database_type: DatabaseT
 #[tokio::test]
 async fn object_transfer_privileges_use_oracle_session_or_oceanbase_direct_grants_only() {
     for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
-        for (kind, grant) in [("TYPE","CREATE TYPE"), ("SYNONYM","CREATE SYNONYM"), ("DB_LINK","CREATE DATABASE LINK")] {
+        for (kind, grant) in
+            [("TYPE", "CREATE TYPE"), ("SYNONYM", "CREATE SYNONYM"), ("DB_LINK", "CREATE DATABASE LINK")]
+        {
             for direct in [true, false] {
-                let fixture = Fixture::new(database_type, json!({"direct":if direct { vec![grant] } else { Vec::new() }})).await;
+                let fixture =
+                    Fixture::new(database_type, json!({"direct":if direct { vec![grant] } else { Vec::new() }})).await;
                 if database_type == DatabaseType::OceanbaseOracle && direct {
-                    let unavailable = execute_read_on_pool(&fixture.state, &fixture.target_pool, "SELECT PRIVILEGE FROM SESSION_PRIVS").await.unwrap_err();
+                    let unavailable = execute_read_on_pool(
+                        &fixture.state,
+                        &fixture.target_pool,
+                        "SELECT PRIVILEGE FROM SESSION_PRIVS",
+                    )
+                    .await
+                    .unwrap_err();
                     assert!(unavailable.contains("ORA-00942"));
                 }
                 let before_plan = fixture.requests().len();

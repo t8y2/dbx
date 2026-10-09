@@ -3151,7 +3151,12 @@ impl OraclePlSqlBlock {
             }
             // Only PACKAGE specs lack BEGIN; plain TYPE objects are ordinary SQL.
             [object, ..] if object.is_word("PACKAGE") => Some(OraclePlSqlCreateObjectKind::Spec),
-            [object, ..] if object.is_word("TRIGGER") && tokens.windows(2).any(|pair| pair[0].is_word("COMPOUND") && pair[1].is_word("TRIGGER")) => Some(OraclePlSqlCreateObjectKind::Body),
+            [object, ..]
+                if object.is_word("TRIGGER")
+                    && tokens.windows(2).any(|pair| pair[0].is_word("COMPOUND") && pair[1].is_word("TRIGGER")) =>
+            {
+                Some(OraclePlSqlCreateObjectKind::Body)
+            }
             _ => None,
         }
     }
@@ -4831,11 +4836,15 @@ SELECT 2 FROM DUMMY;";
         for database in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
             assert_eq!(split_sql_statements_for_database(trigger, database), vec![trigger.to_string()]);
             assert_eq!(
-                split_sql_statements_for_database(&format!("{trigger}\n/\n{state};\nCREATE TABLE t2 (id NUMBER);"), database),
+                split_sql_statements_for_database(
+                    &format!("{trigger}\n/\n{state};\nCREATE TABLE t2 (id NUMBER);"),
+                    database
+                ),
                 vec![trigger.to_string(), state.to_string(), "CREATE TABLE t2 (id NUMBER)".to_string()]
             );
             let execution_units = [trigger.to_string(), format!("{state};")];
-            let split_units: Vec<_> = execution_units.iter().flat_map(|unit| split_sql_statements_for_database(unit, database)).collect();
+            let split_units: Vec<_> =
+                execution_units.iter().flat_map(|unit| split_sql_statements_for_database(unit, database)).collect();
             assert_eq!(split_units, vec![trigger.to_string(), state.to_string()]);
         }
     }

@@ -91,24 +91,48 @@ pub async fn start_transfer(
     };
 
     tokio::spawn(async move {
-        let prerequisites = dbx_core::transfer::transfer_schema_prerequisites(&state, &request, &source_pool_key, &target_pool_key, |progress| emit_progress(&app, progress)).await;
+        let prerequisites = dbx_core::transfer::transfer_schema_prerequisites(
+            &state,
+            &request,
+            &source_pool_key,
+            &target_pool_key,
+            |progress| emit_progress(&app, progress),
+        )
+        .await;
         let mut prerequisite_outcome = dbx_core::transfer::TransferObjectOutcome::default();
         let prerequisite_error = match prerequisites {
             Ok(outcome) => {
-                if let Some(journal) = history.as_ref() { journal.record_object_outcome(&outcome).await; }
-                let error = if outcome.failed.is_empty() { None } else { Some("Type prerequisite failed; tables and dependent programs were not executed".to_string()) };
+                if let Some(journal) = history.as_ref() {
+                    journal.record_object_outcome(&outcome).await;
+                }
+                let error = if outcome.failed.is_empty() {
+                    None
+                } else {
+                    Some("Type prerequisite failed; tables and dependent programs were not executed".to_string())
+                };
                 prerequisite_outcome = outcome;
                 error
             }
             Err(error) => Some(error),
         };
         if let Some(error) = prerequisite_error {
-            emit_terminal_progress(&app, history.as_ref(), TransferProgress {
-                transfer_id: transfer_id.clone(), table: "type prerequisites".into(),
-                table_index: 0, total_tables: request.tables.len(), rows_transferred: 0,
-                total_rows: None, status: if error == "Cancelled" { TransferStatus::Cancelled } else { TransferStatus::Error },
-                error: Some(error), terminal: true, object_result: None,
-            }).await;
+            emit_terminal_progress(
+                &app,
+                history.as_ref(),
+                TransferProgress {
+                    transfer_id: transfer_id.clone(),
+                    table: "type prerequisites".into(),
+                    table_index: 0,
+                    total_tables: request.tables.len(),
+                    rows_transferred: 0,
+                    total_rows: None,
+                    status: if error == "Cancelled" { TransferStatus::Cancelled } else { TransferStatus::Error },
+                    error: Some(error),
+                    terminal: true,
+                    object_result: None,
+                },
+            )
+            .await;
             dbx_core::transfer::clear_cancelled(&transfer_id).await;
             return;
         }
@@ -479,16 +503,20 @@ pub async fn start_transfer(
         // transfers schema objects; PG→PG keeps the legacy empty-selection
         // default only when structure participates in the transfer.
         let mut object_outcome = prerequisite_outcome;
-        let schema_objects = if dbx_core::transfer::has_transfer_type_prerequisites(&request) && !failed_tables.is_empty() {
-            Err("Selected table transfer failed; dependent programs and deferred TYPE BODY were not executed".to_string())
-        } else { dbx_core::transfer::transfer_schema_objects(
-            &state,
-            &request,
-            &source_pool_key,
-            &target_pool_key,
-            |progress| emit_progress(&app, progress),
-        )
-        .await };
+        let schema_objects =
+            if dbx_core::transfer::has_transfer_type_prerequisites(&request) && !failed_tables.is_empty() {
+                Err("Selected table transfer failed; dependent programs and deferred TYPE BODY were not executed"
+                    .to_string())
+            } else {
+                dbx_core::transfer::transfer_schema_objects(
+                    &state,
+                    &request,
+                    &source_pool_key,
+                    &target_pool_key,
+                    |progress| emit_progress(&app, progress),
+                )
+                .await
+            };
         match schema_objects {
             Ok(outcome) => {
                 if let Some(journal) = history.as_ref() {

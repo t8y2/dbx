@@ -218,19 +218,30 @@ pub async fn start_transfer(
             return;
         }
 
-        let prerequisites = match transfer::transfer_schema_prerequisites(&app, &req, &source_pool_key, &target_pool_key, |progress| {
-            send_transfer_progress(&progress_channel, &progress);
-        }).await {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, error));
-                finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
-                return;
-            }
-        };
-        if let Some(journal) = history.as_ref() { journal.record_object_outcome(&prerequisites).await; }
+        let prerequisites =
+            match transfer::transfer_schema_prerequisites(&app, &req, &source_pool_key, &target_pool_key, |progress| {
+                send_transfer_progress(&progress_channel, &progress);
+            })
+            .await
+            {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, error));
+                    finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
+                    return;
+                }
+            };
+        if let Some(journal) = history.as_ref() {
+            journal.record_object_outcome(&prerequisites).await;
+        }
         if !prerequisites.failed.is_empty() {
-            send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, "Type prerequisite failed; tables and dependent programs were not executed"));
+            send_transfer_progress(
+                &progress_channel,
+                &terminal_transfer_error(
+                    &req,
+                    "Type prerequisite failed; tables and dependent programs were not executed",
+                ),
+            );
             finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
             return;
         }
@@ -569,11 +580,14 @@ pub async fn start_transfer(
         let mut object_outcome = prerequisites;
         let progress_channel_clone = progress_channel.clone();
         let schema_objects = if transfer::has_transfer_type_prerequisites(&req) && !failed_tables.is_empty() {
-            Err("Selected table transfer failed; dependent programs and deferred TYPE BODY were not executed".to_string())
-        } else { transfer::transfer_schema_objects(&app, &req, &source_pool_key, &target_pool_key, |progress| {
-            send_transfer_progress(&progress_channel_clone, &progress);
-        })
-        .await };
+            Err("Selected table transfer failed; dependent programs and deferred TYPE BODY were not executed"
+                .to_string())
+        } else {
+            transfer::transfer_schema_objects(&app, &req, &source_pool_key, &target_pool_key, |progress| {
+                send_transfer_progress(&progress_channel_clone, &progress);
+            })
+            .await
+        };
         match schema_objects {
             Ok(outcome) => {
                 if let Some(journal) = history.as_ref() {
@@ -917,12 +931,20 @@ mod tests {
 
         let req = transfer_request("src", "dst", &dir);
         let transfer_id = req.transfer_id.clone();
-        let response = start_transfer(State(state.clone()), Json(StartTransferRequest { request: req, database_link_credentials: Vec::new() })).await.unwrap();
+        let response = start_transfer(
+            State(state.clone()),
+            Json(StartTransferRequest { request: req, database_link_credentials: Vec::new() }),
+        )
+        .await
+        .unwrap();
         let _ = response.into_response();
 
         let duplicate = start_transfer(
             State(state.clone()),
-            Json(StartTransferRequest { request: transfer_request("src", "dst", &dir), database_link_credentials: Vec::new() }),
+            Json(StartTransferRequest {
+                request: transfer_request("src", "dst", &dir),
+                database_link_credentials: Vec::new(),
+            }),
         )
         .await
         .unwrap_err();
@@ -992,7 +1014,12 @@ mod tests {
         Arc::get_mut(&mut state).unwrap().demo_mode = true;
         let req = transfer_request("src", "dst", &dir);
         let transfer_id = req.transfer_id.clone();
-        let _ = start_transfer(State(state.clone()), Json(StartTransferRequest { request: req, database_link_credentials: Vec::new() })).await.unwrap();
+        let _ = start_transfer(
+            State(state.clone()),
+            Json(StartTransferRequest { request: req, database_link_credentials: Vec::new() }),
+        )
+        .await
+        .unwrap();
         let channel = {
             let channels = state.transfer_progress_channels.read().await;
             channels.get(&transfer_id).cloned().expect("transfer channel registered")

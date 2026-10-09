@@ -1,12 +1,14 @@
-pub mod table_structure_sql;
 pub mod oracle_constraint_change;
 mod oracle_routines;
-pub use oracle_routines::{prepare_schema_diff_core, schema_diff_routine_context, validate_schema_diff_routines, RoutineValidation};
-pub mod oracle_types;
+pub mod table_structure_sql;
+pub use oracle_routines::{
+    prepare_schema_diff_core, schema_diff_routine_context, validate_schema_diff_routines, RoutineValidation,
+};
 pub mod oracle_jobs;
-mod oracle_security_write;
-pub mod oracle_user_admin;
 pub mod oracle_role_admin;
+mod oracle_security_write;
+pub mod oracle_types;
+pub mod oracle_user_admin;
 
 pub use dbx_drivers::metadata::sqlite_ddl;
 
@@ -32,8 +34,8 @@ mod agent_pg_sequences;
 mod external_table_filter_tests;
 mod kingbase;
 mod mongodb_columns;
-mod oceanbase_oracle_statistics;
 mod oceanbase_oracle_space;
+mod oceanbase_oracle_statistics;
 pub mod plugin_metadata;
 #[cfg(test)]
 mod plugin_metadata_tests;
@@ -5501,11 +5503,13 @@ for line in sys.stdin:
     fn routine_completion_wire_distinguishes_legacy_agents_from_empty_searches() {
         let legacy: super::AgentCompletionAssistantResponse = serde_json::from_value(serde_json::json!({
             "candidates": [], "incomplete": false, "fallback_used": false
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(!legacy.routine_search_supported);
         let current: super::AgentCompletionAssistantResponse = serde_json::from_value(serde_json::json!({
             "candidates": [], "incomplete": false, "fallback_used": false, "routine_search_supported": true
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(current.routine_search_supported);
         assert!(current.response.candidates.is_empty());
         assert!(!current.response.incomplete);
@@ -5925,11 +5929,20 @@ for line in sys.stdin:
             ("NUMBER", Some(10), Some(-2), "NUMBER(10,-2)"),
             ("NUMBER", None, None, "NUMBER"),
         ] {
-            let result = oracle_current_schema_result(&[], vec![vec![
-                serde_json::json!("VALUE"), serde_json::json!(data_type), serde_json::json!("Y"),
-                serde_json::Value::Null, serde_json::json!(22), serde_json::json!(precision),
-                serde_json::json!(scale), serde_json::Value::Null, serde_json::json!(0),
-            ]]);
+            let result = oracle_current_schema_result(
+                &[],
+                vec![vec![
+                    serde_json::json!("VALUE"),
+                    serde_json::json!(data_type),
+                    serde_json::json!("Y"),
+                    serde_json::Value::Null,
+                    serde_json::json!(22),
+                    serde_json::json!(precision),
+                    serde_json::json!(scale),
+                    serde_json::Value::Null,
+                    serde_json::json!(0),
+                ]],
+            );
             let columns = oracle_columns_from_query_result(result);
             assert_eq!(columns[0].data_type, expected);
             assert_eq!(columns[0].numeric_precision, precision);
@@ -6769,7 +6782,10 @@ pub async fn completion_assistant_search_core(
                         {
                             // Older JDBC agents return a successful empty list for routine requests.
                             // Let the frontend retain its existing schema-list fallback only there.
-                            return Err("OceanBase agent does not support filtered routine completion; update the agent".to_string());
+                            return Err(
+                                "OceanBase agent does not support filtered routine completion; update the agent"
+                                    .to_string(),
+                            );
                         }
                         let mut response = agent_response.response;
                         response.fallback_used = false;
@@ -7091,7 +7107,13 @@ async fn list_object_statistics_once(
             return crate::mongo_ops::mongo_agent_list_object_statistics(&client, database).await;
         }
         if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OceanbaseOracle) {
-            return oceanbase_oracle_space::load_statistics(client, database, schema, agent_metadata_timeout(db_config.as_ref())).await;
+            return oceanbase_oracle_space::load_statistics(
+                client,
+                database,
+                schema,
+                agent_metadata_timeout(db_config.as_ref()),
+            )
+            .await;
         }
         if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Oracle) {
             return oracle_agent_list_object_statistics(
@@ -8971,9 +8993,10 @@ pub async fn list_functions_core(
     database: &str,
     schema: &str,
 ) -> Result<Vec<db::FunctionInfo>, String> {
-    if connection_config(state, connection_id).await.is_some_and(|config| {
-        crate::schema_diff::is_oracle_routine_database(config.db_type)
-    }) {
+    if connection_config(state, connection_id)
+        .await
+        .is_some_and(|config| crate::schema_diff::is_oracle_routine_database(config.db_type))
+    {
         return oracle_routines::list_routines(state, connection_id, database, schema).await;
     }
     let postgres_functions = retry_metadata_connection(state, connection_id, Some(database), || async {
@@ -9093,7 +9116,11 @@ async fn load_function_info_via_object(
     };
 
     Some(db::FunctionInfo {
-        type_info: None, trigger: None, dependency_objects: Vec::new(), incoming_dependencies: Vec::new(), paired_object_present: None,
+        type_info: None,
+        trigger: None,
+        dependency_objects: Vec::new(),
+        incoming_dependencies: Vec::new(),
+        paired_object_present: None,
         schema: None,
         status: None,
         dependencies: Vec::new(),
@@ -11141,10 +11168,20 @@ async fn get_object_source_once(
             }
             first_string_cell(result?)?
         } else if let Some(client) = extract_pool!(pool_handle.as_ref(), Agent) {
-            if db_config.as_ref().is_some_and(|config| matches!(config.db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle))
+            if db_config
+                .as_ref()
+                .is_some_and(|config| matches!(config.db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle))
                 && matches!(object_type, db::ObjectSourceKind::Type | db::ObjectSourceKind::TypeBody)
             {
-                return oracle_types::source(client, database, schema, name, &object_type, agent_metadata_timeout(db_config.as_ref())).await;
+                return oracle_types::source(
+                    client,
+                    database,
+                    schema,
+                    name,
+                    &object_type,
+                    agent_metadata_timeout(db_config.as_ref()),
+                )
+                .await;
             } else if uses_oracle_metadata_object_source(db_config.as_ref(), &object_type) {
                 oracle_agent_object_source(
                     client,

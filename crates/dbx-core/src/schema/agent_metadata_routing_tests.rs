@@ -1,6 +1,6 @@
 use super::{
-    completion_assistant_search_core, get_table_ddl_core, list_databases_core, list_object_statistics_core, AppState, ConnectionConfig, DatabaseType,
-    PoolKind,
+    completion_assistant_search_core, get_table_ddl_core, list_databases_core, list_object_statistics_core, AppState,
+    ConnectionConfig, DatabaseType, PoolKind,
 };
 use crate::db::agent_driver::{AgentDriverClient, PooledAgentClient};
 use serde_json::{json, Value};
@@ -89,7 +89,14 @@ async fn oceanbase_statistics_route_space_over_agent_without_oracle_segments() {
         assert_eq!(requests.len(), 3);
         let sql = requests[2]["params"]["sql"].as_str().unwrap();
         assert!(sql.starts_with("WITH loc AS"), "Oracle CTEs must stay outside the paging subquery: {sql}");
-        for required in ["DATABASE_NAME = 'Mixed Owner'", "l.ROLE = 'LEADER'", "r.SVR_PORT = l.SVR_PORT", "r.SVR_IP = l.SVR_IP", "r.LS_ID = l.LS_ID", "r.TABLET_ID = l.TABLET_ID"] {
+        for required in [
+            "DATABASE_NAME = 'Mixed Owner'",
+            "l.ROLE = 'LEADER'",
+            "r.SVR_PORT = l.SVR_PORT",
+            "r.SVR_IP = l.SVR_IP",
+            "r.LS_ID = l.LS_ID",
+            "r.TABLET_ID = l.TABLET_ID",
+        ] {
             assert!(sql.contains(required), "{sql}");
         }
         assert!(!requests.iter().any(|request| request["params"]["sql"].as_str().unwrap().contains("SEGMENTS")));
@@ -345,7 +352,8 @@ fn completion_request() -> crate::db::CompletionAssistantRequest {
         "global_search":false, "max_results":2, "search_in_comments":false,
         "search_in_definitions":false, "parent_schema":"Mixed.Owner",
         "parent_name":null, "match_mode":"prefix"
-    })).unwrap()
+    }))
+    .unwrap()
 }
 
 fn completion_candidate(kind: &str, identity: &str, signature: Value) -> Value {
@@ -365,19 +373,27 @@ fn completion_reply(fixture: &AgentFixture, reply: Value) {
 async fn completion_forwards_oracle_and_oceanbase_routine_filters_through_the_metadata_agent() {
     for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
         let fixture = AgentFixture::new(database_type).await;
-        for (index, (kind, mode, case_sensitive)) in [("procedure", "prefix", true), ("function", "contains", false)].into_iter().enumerate() {
+        for (index, (kind, mode, case_sensitive)) in
+            [("procedure", "prefix", true), ("function", "contains", false)].into_iter().enumerate()
+        {
             let mut request = serde_json::to_value(completion_request()).unwrap();
             request["object_kinds"] = json!([kind]);
             request["match_mode"] = json!(mode);
             request["case_sensitive"] = json!(case_sensitive);
             request["global_search"] = json!(index == 1);
             let expected = completion_candidate(kind, "Mixed.Owner:101:1", json!(""));
-            completion_reply(&fixture, json!({"result":{
-                "candidates":[expected.clone()], "incomplete":true, "fallback_used":true,
-                "routine_search_supported":true
-            }}));
+            completion_reply(
+                &fixture,
+                json!({"result":{
+                    "candidates":[expected.clone()], "incomplete":true, "fallback_used":true,
+                    "routine_search_supported":true
+                }}),
+            );
 
-            let response = completion_assistant_search_core(&fixture.state, serde_json::from_value(request.clone()).unwrap()).await.unwrap();
+            let response =
+                completion_assistant_search_core(&fixture.state, serde_json::from_value(request.clone()).unwrap())
+                    .await
+                    .unwrap();
 
             assert_eq!(serde_json::to_value(&response.candidates).unwrap(), json!([expected]));
             assert!(response.incomplete);
@@ -392,7 +408,10 @@ async fn completion_forwards_oracle_and_oceanbase_routine_filters_through_the_me
             assert_eq!(opens[0]["params"]["sessionRole"], "metadata");
             assert_eq!(calls[index]["params"]["agentSessionId"], opens[0]["params"]["agentSessionId"]);
             assert!(fixture.requests("list_objects").is_empty());
-            assert!(fixture.requests("execute_query").is_empty(), "Core must not replace filtered completion with a catalog scan");
+            assert!(
+                fixture.requests("execute_query").is_empty(),
+                "Core must not replace filtered completion with a catalog scan"
+            );
         }
         fixture.shutdown().await;
     }
@@ -407,16 +426,23 @@ async fn completion_preserves_quoted_package_identity_overloads_and_unknown_para
         request.max_results = Some(3);
         let mut candidates = vec![
             completion_candidate("procedure", "Mixed.Owner:101:1", json!("")),
-            completion_candidate("function", "Mixed.Owner:101:2", json!("INPUT IN NUMBER DEFAULT, RESULT IN/OUT PL/SQL RECORD")),
+            completion_candidate(
+                "function",
+                "Mixed.Owner:101:2",
+                json!("INPUT IN NUMBER DEFAULT, RESULT IN/OUT PL/SQL RECORD"),
+            ),
             completion_candidate("function", "Mixed.Owner:101:3", Value::Null),
         ];
         for candidate in &mut candidates {
             candidate["parent_schema"] = json!("Mixed.Owner");
             candidate["parent_name"] = json!("Mixed.Package");
         }
-        completion_reply(&fixture, json!({"result":{
-            "candidates":candidates, "incomplete":true, "fallback_used":false, "routine_search_supported":true
-        }}));
+        completion_reply(
+            &fixture,
+            json!({"result":{
+                "candidates":candidates, "incomplete":true, "fallback_used":false, "routine_search_supported":true
+            }}),
+        );
 
         let response = completion_assistant_search_core(&fixture.state, request.clone()).await.unwrap();
 
@@ -448,9 +474,12 @@ async fn completion_rejects_legacy_oceanbase_capability_but_accepts_a_current_em
         let error = completion_assistant_search_core(&fixture.state, request.clone()).await.unwrap_err();
 
         assert!(error.contains("does not support filtered routine completion"), "{error}");
-        completion_reply(&fixture, json!({"result":{
-            "candidates":[], "incomplete":false, "fallback_used":false, "routine_search_supported":true
-        }}));
+        completion_reply(
+            &fixture,
+            json!({"result":{
+                "candidates":[], "incomplete":false, "fallback_used":false, "routine_search_supported":true
+            }}),
+        );
         let response = completion_assistant_search_core(&fixture.state, request).await.unwrap();
         assert!(response.candidates.is_empty());
         assert!(!response.incomplete);
@@ -465,7 +494,10 @@ async fn completion_rejects_legacy_oceanbase_capability_but_accepts_a_current_em
 async fn completion_does_not_require_the_oceanbase_capability_from_existing_oracle_agents() {
     let fixture = AgentFixture::new(DatabaseType::Oracle).await;
     let candidate = completion_candidate("procedure", "101:1", json!(""));
-    completion_reply(&fixture, json!({"result":{"candidates":[candidate.clone()], "incomplete":false, "fallback_used":false}}));
+    completion_reply(
+        &fixture,
+        json!({"result":{"candidates":[candidate.clone()], "incomplete":false, "fallback_used":false}}),
+    );
 
     let response = completion_assistant_search_core(&fixture.state, completion_request()).await.unwrap();
 
@@ -482,16 +514,25 @@ async fn completion_marks_missing_assistant_methods_as_fallback_without_fabricat
         for parent_name in [None, Some("Mixed.Package".to_string())] {
             let mut request = completion_request();
             request.parent_name = parent_name;
-            completion_reply(&fixture, json!({"error":{"code":-32601, "message":"unknown method: completion_assistant_search_v1"}}));
+            completion_reply(
+                &fixture,
+                json!({"error":{"code":-32601, "message":"unknown method: completion_assistant_search_v1"}}),
+            );
 
             let response = completion_assistant_search_core(&fixture.state, request).await.unwrap();
 
-            assert!(response.fallback_used, "the frontend must distinguish an unsupported Agent from a legitimate empty search");
+            assert!(
+                response.fallback_used,
+                "the frontend must distinguish an unsupported Agent from a legitimate empty search"
+            );
             assert!(response.candidates.is_empty());
             assert!(!response.incomplete);
         }
         assert_eq!(fixture.requests("completion_assistant_search_v1").len(), 2);
-        assert!(fixture.requests("list_objects").is_empty(), "Core has no routine catalog fallback; the frontend owns the standalone fallback");
+        assert!(
+            fixture.requests("list_objects").is_empty(),
+            "Core has no routine catalog fallback; the frontend owns the standalone fallback"
+        );
         fixture.shutdown().await;
     }
 }
@@ -513,7 +554,11 @@ async fn completion_propagates_agent_permission_errors_without_empty_success_or_
 
             assert!(error.contains("metadata permission denied"), "{error}");
         }
-        assert_eq!(fixture.requests("completion_assistant_search_v1").len(), 2, "SQL errors must not be retried or converted to successful empty results");
+        assert_eq!(
+            fixture.requests("completion_assistant_search_v1").len(),
+            2,
+            "SQL errors must not be retried or converted to successful empty results"
+        );
         assert!(fixture.requests("list_objects").is_empty());
         assert!(fixture.requests("execute_query").is_empty());
         fixture.shutdown().await;
@@ -531,7 +576,8 @@ ALTER TRIGGER \"APP\".\"AUDIT\" DISABLE;";
     std::fs::write(fixture.control_path("table-ddl"), ddl).unwrap();
     assert_eq!(get_table_ddl_core(&fixture.state, "conn", "configured", "APP", "EVENTS", None).await.unwrap(), ddl);
     assert!(fixture.requests("execute_query").is_empty(), "DDL retrieval must not execute the exported script");
-    std::fs::write(fixture.control_path("table-ddl-error"), "Table DDL export incomplete: insufficient privileges").unwrap();
+    std::fs::write(fixture.control_path("table-ddl-error"), "Table DDL export incomplete: insufficient privileges")
+        .unwrap();
     let error = get_table_ddl_core(&fixture.state, "conn", "configured", "APP", "EVENTS", None).await.unwrap_err();
     assert!(error.contains("export incomplete"), "{error}");
     assert!(error.contains("insufficient privileges"), "{error}");

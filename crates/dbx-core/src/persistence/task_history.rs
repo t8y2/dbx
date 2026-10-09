@@ -975,14 +975,37 @@ mod tests {
             "createTable": true, "batchSize": 10, "content": "structureOnly",
             "objects": [{"objectType": "SYNONYM", "names": ["SAME"]}, {"objectType": "PUBLIC_SYNONYM", "names": ["SAME"]}]
         })).unwrap();
-        let journal = TransferTaskJournal::accept(&storage, &app, &request, TaskLifecycleOwner::Web).await.unwrap().unwrap();
-        journal.record_object_outcome(&TransferObjectOutcome {
-            transferred: vec!["Synonym:SAME".into()], skipped: Vec::new(), failed: vec!["PublicSynonym:SAME".into()],
-            object_results: vec![
-                crate::transfer::TransferSchemaObjectResult { object_type: crate::transfer::TransferObjectKind::Synonym, name: "SAME".into(), schema: "T".into(), status: "transferred".into(), compile_status: None, source_verified: Some(true), error: None, recovery: None },
-                crate::transfer::TransferSchemaObjectResult { object_type: crate::transfer::TransferObjectKind::PublicSynonym, name: "SAME".into(), schema: "PUBLIC".into(), status: "failed".into(), compile_status: None, source_verified: Some(false), error: Some("raw_synonym_driver_secret".into()), recovery: Some("Target synonym restored and verified".into()) },
-            ],
-        }).await;
+        let journal =
+            TransferTaskJournal::accept(&storage, &app, &request, TaskLifecycleOwner::Web).await.unwrap().unwrap();
+        journal
+            .record_object_outcome(&TransferObjectOutcome {
+                transferred: vec!["Synonym:SAME".into()],
+                skipped: Vec::new(),
+                failed: vec!["PublicSynonym:SAME".into()],
+                object_results: vec![
+                    crate::transfer::TransferSchemaObjectResult {
+                        object_type: crate::transfer::TransferObjectKind::Synonym,
+                        name: "SAME".into(),
+                        schema: "T".into(),
+                        status: "transferred".into(),
+                        compile_status: None,
+                        source_verified: Some(true),
+                        error: None,
+                        recovery: None,
+                    },
+                    crate::transfer::TransferSchemaObjectResult {
+                        object_type: crate::transfer::TransferObjectKind::PublicSynonym,
+                        name: "SAME".into(),
+                        schema: "PUBLIC".into(),
+                        status: "failed".into(),
+                        compile_status: None,
+                        source_verified: Some(false),
+                        error: Some("raw_synonym_driver_secret".into()),
+                        recovery: Some("Target synonym restored and verified".into()),
+                    },
+                ],
+            })
+            .await;
         let items = storage.list_task_run_items(&request.transfer_id, TaskRunItemsQuery::default()).await.unwrap();
         assert_eq!(items.items.len(), 2);
         assert_eq!(items.items[0].item_kind, TaskItemKind::Synonym);
@@ -1041,33 +1064,35 @@ mod tests {
         journal.observe_source_count(0, None);
         journal.observe_table_progress(0, 2);
         journal.finish_table(0, TaskItemStatus::Failed, None, None).await;
-        journal.record_object_outcome(&TransferObjectOutcome {
-            transferred: vec!["Package:P".into()],
-            skipped: Vec::new(),
-            failed: vec!["PackageBody:P".into()],
-            object_results: vec![
-                crate::transfer::TransferSchemaObjectResult {
-                    object_type: crate::transfer::TransferObjectKind::Package,
-                    name: "P".into(),
-                    schema: "main".into(),
-                    status: "transferred".into(),
-                    compile_status: Some("VALID".into()),
-                    source_verified: Some(true),
-                    error: None,
-                    recovery: None,
-                },
-                crate::transfer::TransferSchemaObjectResult {
-                    object_type: crate::transfer::TransferObjectKind::PackageBody,
-                    name: "P".into(),
-                    schema: "main".into(),
-                    status: "failed".into(),
-                    compile_status: Some("INVALID".into()),
-                    source_verified: Some(false),
-                    error: Some(driver_secret.into()),
-                    recovery: Some("Target definitions restored and verified".into()),
-                },
-            ],
-        }).await;
+        journal
+            .record_object_outcome(&TransferObjectOutcome {
+                transferred: vec!["Package:P".into()],
+                skipped: Vec::new(),
+                failed: vec!["PackageBody:P".into()],
+                object_results: vec![
+                    crate::transfer::TransferSchemaObjectResult {
+                        object_type: crate::transfer::TransferObjectKind::Package,
+                        name: "P".into(),
+                        schema: "main".into(),
+                        status: "transferred".into(),
+                        compile_status: Some("VALID".into()),
+                        source_verified: Some(true),
+                        error: None,
+                        recovery: None,
+                    },
+                    crate::transfer::TransferSchemaObjectResult {
+                        object_type: crate::transfer::TransferObjectKind::PackageBody,
+                        name: "P".into(),
+                        schema: "main".into(),
+                        status: "failed".into(),
+                        compile_status: Some("INVALID".into()),
+                        source_verified: Some(false),
+                        error: Some(driver_secret.into()),
+                        recovery: Some("Target definitions restored and verified".into()),
+                    },
+                ],
+            })
+            .await;
         journal
             .finish(&TransferProgress {
                 transfer_id: request.transfer_id.clone(),

@@ -53,37 +53,103 @@ pub async fn schema_diff_routine_context(
     removed_objects: &[db::FunctionInfo],
     target_objects: &[db::FunctionInfo],
 ) -> Result<Option<dbx_sql::oracle_program_compatibility::OracleProgramContext>, String> {
-    if (source_objects.is_empty() && removed_objects.is_empty() && target_objects.is_empty()) || !crate::schema_diff::is_oracle_routine_database(target_type) || !source_type.is_some_and(crate::schema_diff::is_oracle_routine_database) { return Ok(None); }
+    if (source_objects.is_empty() && removed_objects.is_empty() && target_objects.is_empty())
+        || !crate::schema_diff::is_oracle_routine_database(target_type)
+        || !source_type.is_some_and(crate::schema_diff::is_oracle_routine_database)
+    {
+        return Ok(None);
+    }
     let Some(endpoints) = endpoints else { return Ok(None) };
     let source_schema = source_schema.filter(|s| !s.is_empty()).ok_or("Explicit source schema is required")?;
     let target_schema = target_schema.filter(|s| !s.is_empty()).ok_or("Explicit target schema is required")?;
-    let source_config = connection_config(state, &endpoints.source_connection_id).await.ok_or("Source connection not found")?;
-    let target_config = connection_config(state, &endpoints.target_connection_id).await.ok_or("Target connection not found")?;
-    if Some(source_config.db_type) != source_type || target_config.db_type != target_type { return Err("Routine endpoint engines disagree with comparison metadata".into()); }
-    if endpoints.recovery && (endpoints.source_connection_id != endpoints.target_connection_id || endpoints.source_database != endpoints.target_database || source_schema != target_schema || source_type != Some(target_type)) { return Err("Routine recovery must use the saved target schema and the same target connection".into()); }
-    let version_sql = |kind: DatabaseType| if kind == DatabaseType::Oracle { "SELECT BANNER FROM V$VERSION WHERE BANNER LIKE 'Oracle Database%'" } else { "SELECT OB_VERSION() FROM DUAL" };
-    let from = dictionary_query(state, &endpoints.source_connection_id, &endpoints.source_database, source_schema, version_sql(source_config.db_type)).await?;
-    let to = dictionary_query(state, &endpoints.target_connection_id, &endpoints.target_database, target_schema, version_sql(target_type)).await?;
-    if from.rows.len() != 1 || to.rows.len() != 1 { return Err("Routine source/target version is missing or ambiguous".into()); }
+    let source_config =
+        connection_config(state, &endpoints.source_connection_id).await.ok_or("Source connection not found")?;
+    let target_config =
+        connection_config(state, &endpoints.target_connection_id).await.ok_or("Target connection not found")?;
+    if Some(source_config.db_type) != source_type || target_config.db_type != target_type {
+        return Err("Routine endpoint engines disagree with comparison metadata".into());
+    }
+    if endpoints.recovery
+        && (endpoints.source_connection_id != endpoints.target_connection_id
+            || endpoints.source_database != endpoints.target_database
+            || source_schema != target_schema
+            || source_type != Some(target_type))
+    {
+        return Err("Routine recovery must use the saved target schema and the same target connection".into());
+    }
+    let version_sql = |kind: DatabaseType| {
+        if kind == DatabaseType::Oracle {
+            "SELECT BANNER FROM V$VERSION WHERE BANNER LIKE 'Oracle Database%'"
+        } else {
+            "SELECT OB_VERSION() FROM DUAL"
+        }
+    };
+    let from = dictionary_query(
+        state,
+        &endpoints.source_connection_id,
+        &endpoints.source_database,
+        source_schema,
+        version_sql(source_config.db_type),
+    )
+    .await?;
+    let to = dictionary_query(
+        state,
+        &endpoints.target_connection_id,
+        &endpoints.target_database,
+        target_schema,
+        version_sql(target_type),
+    )
+    .await?;
+    if from.rows.len() != 1 || to.rows.len() != 1 {
+        return Err("Routine source/target version is missing or ambiguous".into());
+    }
     let mut context = dbx_sql::oracle_program_compatibility::OracleProgramContext {
-        source_version: cell(&from.rows[0], 0), target_version: cell(&to.rows[0], 0),
-        target_editions_disabled: target_type != DatabaseType::Oracle, non_editioned_source_objects: Vec::new(), target_dependencies: Vec::new(), blocked_types: Vec::new(), blocked_bodies: Vec::new(),
+        source_version: cell(&from.rows[0], 0),
+        target_version: cell(&to.rows[0], 0),
+        target_editions_disabled: target_type != DatabaseType::Oracle,
+        non_editioned_source_objects: Vec::new(),
+        target_dependencies: Vec::new(),
+        blocked_types: Vec::new(),
+        blocked_bodies: Vec::new(),
     };
     if target_type == DatabaseType::Oracle {
-        let rows = dictionary_query(state, &endpoints.target_connection_id, &endpoints.target_database, target_schema, &format!("SELECT EDITIONS_ENABLED FROM ALL_USERS WHERE USERNAME={}", literal(target_schema))).await?.rows;
+        let rows = dictionary_query(
+            state,
+            &endpoints.target_connection_id,
+            &endpoints.target_database,
+            target_schema,
+            &format!("SELECT EDITIONS_ENABLED FROM ALL_USERS WHERE USERNAME={}", literal(target_schema)),
+        )
+        .await?
+        .rows;
         context.target_editions_disabled = rows.len() == 1 && cell(&rows[0], 0) == "N";
     }
     if source_config.db_type == DatabaseType::Oracle {
         for info in source_objects {
-            if info.schema.as_deref() != Some(source_schema) { return Err("Type source owner differs from comparison schema".into()); }
-            let kinds = match info.function_type.as_str() { "TYPE" | "TYPE BODY" => "'TYPE','TYPE BODY'".to_string(), "PACKAGE" | "PACKAGE BODY" => "'PACKAGE','PACKAGE BODY'".to_string(), kind => literal(kind) };
+            if info.schema.as_deref() != Some(source_schema) {
+                return Err("Type source owner differs from comparison schema".into());
+            }
+            let kinds = match info.function_type.as_str() {
+                "TYPE" | "TYPE BODY" => "'TYPE','TYPE BODY'".to_string(),
+                "PACKAGE" | "PACKAGE BODY" => "'PACKAGE','PACKAGE BODY'".to_string(),
+                kind => literal(kind),
+            };
             let rows = dictionary_query(state, &endpoints.source_connection_id, &endpoints.source_database, source_schema, &format!("SELECT OBJECT_TYPE, EDITION_NAME FROM ALL_OBJECTS WHERE OWNER={} AND OBJECT_NAME={} AND OBJECT_TYPE IN ({kinds})", literal(source_schema), literal(&info.name))).await?.rows;
             if !rows.is_empty() && rows.iter().all(|row| row.get(1).is_some_and(serde_json::Value::is_null)) {
-                for row in rows { let identity = (info.name.clone(), cell(&row, 0)); if !context.non_editioned_source_objects.contains(&identity) { context.non_editioned_source_objects.push(identity); } }
+                for row in rows {
+                    let identity = (info.name.clone(), cell(&row, 0));
+                    if !context.non_editioned_source_objects.contains(&identity) {
+                        context.non_editioned_source_objects.push(identity);
+                    }
+                }
             }
         }
     }
-    for info in source_objects.iter().chain(removed_objects).filter(|info| matches!(info.function_type.as_str(), "TYPE" | "TYPE BODY")) {
+    for info in source_objects
+        .iter()
+        .chain(removed_objects)
+        .filter(|info| matches!(info.function_type.as_str(), "TYPE" | "TYPE BODY"))
+    {
         if matches!(info.function_type.as_str(), "TYPE" | "TYPE BODY") {
             // ALL_* cannot prove absence of references from another schema.
             let incoming = dictionary_query(state, &endpoints.target_connection_id, &endpoints.target_database, target_schema, &format!("SELECT OWNER, NAME, TYPE FROM DBA_DEPENDENCIES WHERE REFERENCED_OWNER={} AND REFERENCED_NAME={} AND REFERENCED_TYPE={}", literal(target_schema), literal(&info.name), literal(&info.function_type))).await?;
@@ -91,88 +157,304 @@ pub async fn schema_diff_routine_context(
                 let columns = dictionary_query(state, &endpoints.target_connection_id, &endpoints.target_database, target_schema, &format!("SELECT OWNER, TABLE_NAME, COLUMN_NAME FROM DBA_TAB_COLUMNS WHERE DATA_TYPE_OWNER={} AND DATA_TYPE={}", literal(target_schema), literal(&info.name))).await?;
                 let object_table = if target_type == DatabaseType::Oracle {
                     !dictionary_query(state, &endpoints.target_connection_id, &endpoints.target_database, target_schema, &format!("SELECT OWNER, TABLE_NAME FROM DBA_OBJECT_TABLES WHERE TABLE_TYPE_OWNER={} AND TABLE_TYPE={}", literal(target_schema), literal(&info.name))).await?.rows.is_empty()
-                } else { false };
-                if !columns.rows.is_empty() || object_table || incoming.rows.iter().any(|row| matches!(cell(row, 2).as_str(), "TABLE" | "MATERIALIZED VIEW" | "TYPE")) {
+                } else {
+                    false
+                };
+                if !columns.rows.is_empty()
+                    || object_table
+                    || incoming
+                        .rows
+                        .iter()
+                        .any(|row| matches!(cell(row, 2).as_str(), "TABLE" | "MATERIALIZED VIEW" | "TYPE"))
+                {
                     context.blocked_types.push((info.name.clone(), "Target global type references include stored data or dependent types; a data-preserving evolution plan is required".into()));
                 }
-                if removed_objects.iter().any(|removed| removed.name == info.name && removed.function_type == "TYPE") && dependency_rows(&incoming.rows)?.iter().any(|dependency| !removed_objects.iter().any(|removed| removed.schema.as_deref() == Some(dependency.owner.as_str()) && removed.name == dependency.name && removed.function_type == dependency.object_type)) {
-                    context.blocked_types.push((info.name.clone(), "Unselected global dependent objects prevent target TYPE deletion".into()));
+                if removed_objects.iter().any(|removed| removed.name == info.name && removed.function_type == "TYPE")
+                    && dependency_rows(&incoming.rows)?.iter().any(|dependency| {
+                        !removed_objects.iter().any(|removed| {
+                            removed.schema.as_deref() == Some(dependency.owner.as_str())
+                                && removed.name == dependency.name
+                                && removed.function_type == dependency.object_type
+                        })
+                    })
+                {
+                    context.blocked_types.push((
+                        info.name.clone(),
+                        "Unselected global dependent objects prevent target TYPE deletion".into(),
+                    ));
                 }
             }
         }
     }
     for info in source_objects {
-        if info.schema.as_deref() != Some(source_schema) { return Err("Routine source owner differs from comparison schema".into()); }
+        if info.schema.as_deref() != Some(source_schema) {
+            return Err("Routine source owner differs from comparison schema".into());
+        }
         // Recovery source is the saved target definition, not the post-execution dictionary.
         // Current target definitions and global data dependencies are still checked below.
         if !endpoints.recovery {
-            if status(state, &endpoints.source_connection_id, &endpoints.source_database, source_schema, &info.name, &info.function_type).await? != info.status { return Err("Routine source status changed; reload comparison".into()); }
-            let current = source(state, &endpoints.source_connection_id, &endpoints.source_database, source_schema, &info.name, &info.function_type).await?;
-            if comparable_oracle_routine(&current) != comparable_oracle_routine(&info.definition) { return Err("Routine source changed; reload comparison".into()); }
+            if status(
+                state,
+                &endpoints.source_connection_id,
+                &endpoints.source_database,
+                source_schema,
+                &info.name,
+                &info.function_type,
+            )
+            .await?
+                != info.status
+            {
+                return Err("Routine source status changed; reload comparison".into());
+            }
+            let current = source(
+                state,
+                &endpoints.source_connection_id,
+                &endpoints.source_database,
+                source_schema,
+                &info.name,
+                &info.function_type,
+            )
+            .await?;
+            if comparable_oracle_routine(&current) != comparable_oracle_routine(&info.definition) {
+                return Err("Routine source changed; reload comparison".into());
+            }
         }
         if !target_objects.iter().any(|target| target.name == info.name && target.function_type == info.function_type)
-            && status(state, &endpoints.target_connection_id, &endpoints.target_database, target_schema, &info.name, &info.function_type).await?.is_some() {
+            && status(
+                state,
+                &endpoints.target_connection_id,
+                &endpoints.target_database,
+                target_schema,
+                &info.name,
+                &info.function_type,
+            )
+            .await?
+            .is_some()
+        {
             return Err("A target routine appeared after comparison; reload before replacement".into());
         }
         for dependency in info.dependency_objects.iter().filter(|dependency| dependency.object_type == "TYPE") {
             let owner = if dependency.owner == source_schema { target_schema } else { &dependency.owner };
-            if status(state, &endpoints.target_connection_id, &endpoints.target_database, owner, &dependency.name, "TYPE").await?.as_deref() == Some("VALID") {
+            if status(
+                state,
+                &endpoints.target_connection_id,
+                &endpoints.target_database,
+                owner,
+                &dependency.name,
+                "TYPE",
+            )
+            .await?
+            .as_deref()
+                == Some("VALID")
+            {
                 let identity = (owner.to_string(), dependency.name.clone(), "TYPE".to_string());
-                if !context.target_dependencies.contains(&identity) { context.target_dependencies.push(identity); }
+                if !context.target_dependencies.contains(&identity) {
+                    context.target_dependencies.push(identity);
+                }
             }
         }
-        if info.function_type == "TYPE BODY" && !source_objects.iter().any(|spec| spec.function_type == "TYPE" && spec.name == info.name) {
-            if status(state, &endpoints.target_connection_id, &endpoints.target_database, target_schema, &info.name, "TYPE").await?.as_deref() == Some("VALID") {
-                let compatible = if endpoints.recovery { true } else {
-                    let expected = source(state, &endpoints.source_connection_id, &endpoints.source_database, source_schema, &info.name, "TYPE").await?;
+        if info.function_type == "TYPE BODY"
+            && !source_objects.iter().any(|spec| spec.function_type == "TYPE" && spec.name == info.name)
+        {
+            if status(
+                state,
+                &endpoints.target_connection_id,
+                &endpoints.target_database,
+                target_schema,
+                &info.name,
+                "TYPE",
+            )
+            .await?
+            .as_deref()
+                == Some("VALID")
+            {
+                let compatible = if endpoints.recovery {
+                    true
+                } else {
+                    let expected = source(
+                        state,
+                        &endpoints.source_connection_id,
+                        &endpoints.source_database,
+                        source_schema,
+                        &info.name,
+                        "TYPE",
+                    )
+                    .await?;
                     let expected = if source_config.db_type != target_type {
-                        let details = oracle_types::get_oracle_type_details_core(state, &endpoints.source_connection_id, &endpoints.source_database, source_schema, &info.name, "TYPE").await?;
-                        if details.status.as_deref() != Some("VALID") { return Err("Paired source TYPE is not confirmed VALID".into()); }
-                        if !matches!(details.dependencies.state, oracle_types::OracleMetadataReadState::Available | oracle_types::OracleMetadataReadState::Empty) || details.dependencies.rows.iter().any(|dependency| dependency.referenced_schema.is_none() || dependency.referenced_link.is_some()) { return Err("Paired source TYPE dependency metadata is incomplete".into()); }
-                        let dependencies = details.dependencies.rows.iter().map(|dependency| db::RoutineDependency { owner: dependency.referenced_schema.clone().unwrap_or_default(), name: dependency.referenced_name.clone(), object_type: dependency.referenced_type.replace('_', " ") }).collect::<Vec<_>>();
-                        let mut definition = dbx_sql::oracle_program_compatibility::conversion_source(&expected, "TYPE", &info.name, source_config.db_type, target_type, &context)?;
-                        dbx_sql::oracle_program_compatibility::compatible_type_source(&definition, "TYPE", &dependencies)?;
-                        for dependency in dependencies.iter().filter(|dependency| dependency.owner == source_schema && dependency.object_type == "TYPE") { definition = dbx_sql::oracle_program_compatibility::map_reference(&definition, source_schema, &dependency.name, target_schema)?; }
+                        let details = oracle_types::get_oracle_type_details_core(
+                            state,
+                            &endpoints.source_connection_id,
+                            &endpoints.source_database,
+                            source_schema,
+                            &info.name,
+                            "TYPE",
+                        )
+                        .await?;
+                        if details.status.as_deref() != Some("VALID") {
+                            return Err("Paired source TYPE is not confirmed VALID".into());
+                        }
+                        if !matches!(
+                            details.dependencies.state,
+                            oracle_types::OracleMetadataReadState::Available
+                                | oracle_types::OracleMetadataReadState::Empty
+                        ) || details.dependencies.rows.iter().any(|dependency| {
+                            dependency.referenced_schema.is_none() || dependency.referenced_link.is_some()
+                        }) {
+                            return Err("Paired source TYPE dependency metadata is incomplete".into());
+                        }
+                        let dependencies = details
+                            .dependencies
+                            .rows
+                            .iter()
+                            .map(|dependency| db::RoutineDependency {
+                                owner: dependency.referenced_schema.clone().unwrap_or_default(),
+                                name: dependency.referenced_name.clone(),
+                                object_type: dependency.referenced_type.replace('_', " "),
+                            })
+                            .collect::<Vec<_>>();
+                        let mut definition = dbx_sql::oracle_program_compatibility::conversion_source(
+                            &expected,
+                            "TYPE",
+                            &info.name,
+                            source_config.db_type,
+                            target_type,
+                            &context,
+                        )?;
+                        dbx_sql::oracle_program_compatibility::compatible_type_source(
+                            &definition,
+                            "TYPE",
+                            &dependencies,
+                        )?;
+                        for dependency in dependencies
+                            .iter()
+                            .filter(|dependency| dependency.owner == source_schema && dependency.object_type == "TYPE")
+                        {
+                            definition = dbx_sql::oracle_program_compatibility::map_reference(
+                                &definition,
+                                source_schema,
+                                &dependency.name,
+                                target_schema,
+                            )?;
+                        }
                         definition
-                    } else { expected };
-                    let mut actual = source(state, &endpoints.target_connection_id, &endpoints.target_database, target_schema, &info.name, "TYPE").await?;
-                    if source_config.db_type != target_type && target_type == DatabaseType::Oracle && context.target_editions_disabled {
+                    } else {
+                        expected
+                    };
+                    let mut actual = source(
+                        state,
+                        &endpoints.target_connection_id,
+                        &endpoints.target_database,
+                        target_schema,
+                        &info.name,
+                        "TYPE",
+                    )
+                    .await?;
+                    if source_config.db_type != target_type
+                        && target_type == DatabaseType::Oracle
+                        && context.target_editions_disabled
+                    {
                         let mut reverse = context.clone();
-                        reverse.source_version = context.target_version.clone(); reverse.target_version = context.source_version.clone();
-                        reverse.non_editioned_source_objects = vec![(info.name.clone(), "TYPE".into())]; reverse.target_editions_disabled = true;
-                        actual = dbx_sql::oracle_program_compatibility::conversion_source(&actual, "TYPE", &info.name, target_type, source_config.db_type, &reverse)?;
+                        reverse.source_version = context.target_version.clone();
+                        reverse.target_version = context.source_version.clone();
+                        reverse.non_editioned_source_objects = vec![(info.name.clone(), "TYPE".into())];
+                        reverse.target_editions_disabled = true;
+                        actual = dbx_sql::oracle_program_compatibility::conversion_source(
+                            &actual,
+                            "TYPE",
+                            &info.name,
+                            target_type,
+                            source_config.db_type,
+                            &reverse,
+                        )?;
                     }
                     comparable_oracle_routine(&expected) == comparable_oracle_routine(&actual)
                 };
-                if compatible { context.target_dependencies.push((target_schema.to_string(), info.name.clone(), "TYPE".into())); }
-                else { context.blocked_bodies.push((info.name.clone(), "The target TYPE specification differs from the source; explicitly include its definition before converting the body".into())); }
+                if compatible {
+                    context.target_dependencies.push((target_schema.to_string(), info.name.clone(), "TYPE".into()));
+                } else {
+                    context.blocked_bodies.push((info.name.clone(), "The target TYPE specification differs from the source; explicitly include its definition before converting the body".into()));
+                }
             } else {
                 context.blocked_bodies.push((info.name.clone(), "Target TYPE specification is missing or INVALID; explicitly include its definition before its body".into()));
             }
         }
         if let Some(trigger) = &info.trigger {
             let owner = if trigger.table_owner == source_schema { target_schema } else { &trigger.table_owner };
-            if status(state, &endpoints.target_connection_id, &endpoints.target_database, owner, &trigger.table_name, &trigger.base_object_type).await?.as_deref() == Some("VALID") {
-                context.target_dependencies.push((owner.to_string(), trigger.table_name.clone(), trigger.base_object_type.clone()));
+            if status(
+                state,
+                &endpoints.target_connection_id,
+                &endpoints.target_database,
+                owner,
+                &trigger.table_name,
+                &trigger.base_object_type,
+            )
+            .await?
+            .as_deref()
+                == Some("VALID")
+            {
+                context.target_dependencies.push((
+                    owner.to_string(),
+                    trigger.table_name.clone(),
+                    trigger.base_object_type.clone(),
+                ));
             }
         }
     }
     for info in target_objects {
-        if info.schema.as_deref() != Some(target_schema) || status(state, &endpoints.target_connection_id, &endpoints.target_database, target_schema, &info.name, &info.function_type).await? != info.status {
+        if info.schema.as_deref() != Some(target_schema)
+            || status(
+                state,
+                &endpoints.target_connection_id,
+                &endpoints.target_database,
+                target_schema,
+                &info.name,
+                &info.function_type,
+            )
+            .await?
+                != info.status
+        {
             return Err("Routine target owner/status changed; reload comparison".into());
         }
-        let current = source(state, &endpoints.target_connection_id, &endpoints.target_database, target_schema, &info.name, &info.function_type).await?;
-        if comparable_oracle_routine(&current) != comparable_oracle_routine(&info.definition) { return Err("Routine target source changed; reload comparison before replacing the saved definition".into()); }
+        let current = source(
+            state,
+            &endpoints.target_connection_id,
+            &endpoints.target_database,
+            target_schema,
+            &info.name,
+            &info.function_type,
+        )
+        .await?;
+        if comparable_oracle_routine(&current) != comparable_oracle_routine(&info.definition) {
+            return Err("Routine target source changed; reload comparison before replacing the saved definition".into());
+        }
     }
     Ok(Some(context))
 }
 
-pub async fn prepare_schema_diff_core(state: &AppState, mut options: crate::schema_diff::SchemaDiffPreparationOptions) -> Result<crate::schema_diff::SchemaDiffPreparation, String> {
+pub async fn prepare_schema_diff_core(
+    state: &AppState,
+    mut options: crate::schema_diff::SchemaDiffPreparationOptions,
+) -> Result<crate::schema_diff::SchemaDiffPreparation, String> {
     let diffs = crate::schema_diff::diff_functions(&options.source_functions, &options.target_functions);
     let source = diffs.iter().filter_map(|diff| diff.source.clone()).collect::<Vec<_>>();
     let target = diffs.iter().filter_map(|diff| diff.target.clone()).collect::<Vec<_>>();
-    let removed = diffs.iter().filter(|diff| diff.diff_type == "removed").filter_map(|diff| diff.target.clone()).collect::<Vec<_>>();
-    options.routine_context = schema_diff_routine_context(state, options.routine_endpoints.as_ref(), options.source_database_type, options.database_type, options.source_schema.as_deref(), options.target_schema.as_deref(), &source, &removed, &target).await?;
+    let removed = diffs
+        .iter()
+        .filter(|diff| diff.diff_type == "removed")
+        .filter_map(|diff| diff.target.clone())
+        .collect::<Vec<_>>();
+    options.routine_context = schema_diff_routine_context(
+        state,
+        options.routine_endpoints.as_ref(),
+        options.source_database_type,
+        options.database_type,
+        options.source_schema.as_deref(),
+        options.target_schema.as_deref(),
+        &source,
+        &removed,
+        &target,
+    )
+    .await?;
     Ok(crate::schema_diff::prepare_schema_diff(options))
 }
 async fn status(
@@ -313,44 +595,105 @@ pub(super) async fn list_routines(
             return Err("Type inventory owner differs from the selected schema".into());
         }
         let (kind, _) = schema_diff_routine_kind(&object.object_type).ok_or("Unexpected type inventory kind")?;
-        let details = oracle_types::get_oracle_type_details_core(state, connection, database, schema, &object.name, &object.object_type).await?;
+        let details = oracle_types::get_oracle_type_details_core(
+            state,
+            connection,
+            database,
+            schema,
+            &object.name,
+            &object.object_type,
+        )
+        .await?;
         let definition = source(state, connection, database, schema, &object.name, kind).await?;
         let incoming = dictionary_query(state, connection, database, schema, &format!("SELECT OWNER, NAME, TYPE FROM ALL_DEPENDENCIES WHERE REFERENCED_OWNER = {} AND REFERENCED_NAME = {} AND REFERENCED_TYPE = {} ORDER BY OWNER, NAME, TYPE", literal(schema), literal(&object.name), literal(kind))).await?;
         let incoming_dependencies = dependency_rows(&incoming.rows)?;
         let columns = if kind == "TYPE" {
             dictionary_query(state, connection, database, schema, &format!("SELECT OWNER, TABLE_NAME, COLUMN_NAME FROM ALL_TAB_COLUMNS WHERE DATA_TYPE_OWNER = {} AND DATA_TYPE = {} ORDER BY OWNER, TABLE_NAME, COLUMN_ID", literal(schema), literal(&object.name))).await?.rows
-        } else { Vec::new() };
-        let referenced_columns = columns.iter().map(|row| {
-            let column = db::RoutineColumnDependency { owner: cell(row, 0), table_name: cell(row, 1), column_name: cell(row, 2) };
-            if column.owner.is_empty() || column.table_name.is_empty() || column.column_name.is_empty() { return Err("Incomplete type column dependency metadata".to_string()); }
-            Ok(column)
-        }).collect::<Result<Vec<_>, _>>()?;
+        } else {
+            Vec::new()
+        };
+        let referenced_columns = columns
+            .iter()
+            .map(|row| {
+                let column = db::RoutineColumnDependency {
+                    owner: cell(row, 0),
+                    table_name: cell(row, 1),
+                    column_name: cell(row, 2),
+                };
+                if column.owner.is_empty() || column.table_name.is_empty() || column.column_name.is_empty() {
+                    return Err("Incomplete type column dependency metadata".to_string());
+                }
+                Ok(column)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut dependency_state = details.dependencies.state.clone();
         let mut metadata_message = details.dependencies.message.clone();
         let mut dependency_objects = Vec::new();
         for dependency in details.dependencies.rows {
-            if dependency.referenced_schema.as_deref().is_none_or(str::is_empty) || dependency.referenced_link.is_some() {
+            if dependency.referenced_schema.as_deref().is_none_or(str::is_empty) || dependency.referenced_link.is_some()
+            {
                 dependency_state = oracle_types::OracleMetadataReadState::Unknown;
-                let message = format!("Type dependency {}.{} ({}) via {} cannot be mapped automatically", dependency.referenced_schema.as_deref().unwrap_or("UNKNOWN"), dependency.referenced_name, dependency.referenced_type, dependency.referenced_link.as_deref().unwrap_or("unknown owner"));
-                metadata_message = Some(match metadata_message { Some(previous) => format!("{previous}\n{message}"), None => message });
+                let message = format!(
+                    "Type dependency {}.{} ({}) via {} cannot be mapped automatically",
+                    dependency.referenced_schema.as_deref().unwrap_or("UNKNOWN"),
+                    dependency.referenced_name,
+                    dependency.referenced_type,
+                    dependency.referenced_link.as_deref().unwrap_or("unknown owner")
+                );
+                metadata_message = Some(match metadata_message {
+                    Some(previous) => format!("{previous}\n{message}"),
+                    None => message,
+                });
                 continue;
             }
-            dependency_objects.push(db::RoutineDependency { owner: dependency.referenced_schema.unwrap(), name: dependency.referenced_name, object_type: dependency.referenced_type.replace('_', " ") });
+            dependency_objects.push(db::RoutineDependency {
+                owner: dependency.referenced_schema.unwrap(),
+                name: dependency.referenced_name,
+                object_type: dependency.referenced_type.replace('_', " "),
+            });
         }
         let paired_object_present = match &details.pairing_state {
             oracle_types::OracleMetadataReadState::Available => Some(details.paired_object.is_some()),
             oracle_types::OracleMetadataReadState::Empty => Some(false),
             _ => None,
         };
-        let incoming_state = if incoming_dependencies.is_empty() && referenced_columns.is_empty() { oracle_types::OracleMetadataReadState::Empty } else { oracle_types::OracleMetadataReadState::Available };
+        let incoming_state = if incoming_dependencies.is_empty() && referenced_columns.is_empty() {
+            oracle_types::OracleMetadataReadState::Empty
+        } else {
+            oracle_types::OracleMetadataReadState::Available
+        };
         if status(state, connection, database, schema, &object.name, kind).await? != details.status {
             return Err(format!("{schema}.{} ({kind}) changed during type metadata collection", object.name));
         }
         routines.push(db::FunctionInfo {
-            name: object.name, function_type: kind.to_string(), data_type: String::new(), definition, arguments: String::new(), schema: Some(schema.to_string()), status: details.status,
-            dependencies: dependency_objects.iter().map(|dependency| format!("\"{}\".\"{}\"", dependency.owner.replace('"', "\"\""), dependency.name.replace('"', "\"\""))).collect(),
-            dependency_objects, incoming_dependencies, paired_object_present, trigger: None,
-            type_info: Some(db::RoutineTypeInfo { pairing_state: details.pairing_state, dependency_state, incoming_state, referenced_columns, metadata_message }),
+            name: object.name,
+            function_type: kind.to_string(),
+            data_type: String::new(),
+            definition,
+            arguments: String::new(),
+            schema: Some(schema.to_string()),
+            status: details.status,
+            dependencies: dependency_objects
+                .iter()
+                .map(|dependency| {
+                    format!(
+                        "\"{}\".\"{}\"",
+                        dependency.owner.replace('"', "\"\""),
+                        dependency.name.replace('"', "\"\"")
+                    )
+                })
+                .collect(),
+            dependency_objects,
+            incoming_dependencies,
+            paired_object_present,
+            trigger: None,
+            type_info: Some(db::RoutineTypeInfo {
+                pairing_state: details.pairing_state,
+                dependency_state,
+                incoming_state,
+                referenced_columns,
+                metadata_message,
+            }),
         });
     }
     Ok(routines)
@@ -367,10 +710,13 @@ pub struct RoutineValidation {
     pub trigger: Option<db::RoutineTriggerInfo>,
 }
 fn target_callers(expected: &[FunctionDiff], schema: &str) -> Vec<db::RoutineDependency> {
-    let selected: Vec<_> = expected.iter().filter_map(|diff| {
-        let info = if diff.diff_type == "removed" { diff.target.as_ref() } else { diff.source.as_ref() }?;
-        Some((schema.to_string(), diff.name.clone(), info.function_type.clone()))
-    }).collect();
+    let selected: Vec<_> = expected
+        .iter()
+        .filter_map(|diff| {
+            let info = if diff.diff_type == "removed" { diff.target.as_ref() } else { diff.source.as_ref() }?;
+            Some((schema.to_string(), diff.name.clone(), info.function_type.clone()))
+        })
+        .collect();
     let mut callers = Vec::new();
     for info in expected.iter().filter_map(|diff| diff.target.as_ref()) {
         for dependency in &info.incoming_dependencies {
@@ -403,7 +749,15 @@ pub async fn validate_schema_diff_routines(
         if matches!(info.function_type.as_str(), "TYPE" | "TYPE BODY") {
             let rows = dictionary_query(state, connection, database, schema, &format!("SELECT OWNER, NAME, TYPE FROM DBA_DEPENDENCIES WHERE REFERENCED_OWNER={} AND REFERENCED_NAME={} AND REFERENCED_TYPE={}", literal(schema), literal(&diff.name), literal(&info.function_type))).await?.rows;
             for caller in dependency_rows(&rows)? {
-                if !expected.iter().any(|selected| selected.name == caller.name && selected.source.as_ref().or(selected.target.as_ref()).is_some_and(|selected| caller.owner == schema && selected.function_type == caller.object_type)) && !callers.contains(&caller) { callers.push(caller); }
+                if !expected.iter().any(|selected| {
+                    selected.name == caller.name
+                        && selected.source.as_ref().or(selected.target.as_ref()).is_some_and(|selected| {
+                            caller.owner == schema && selected.function_type == caller.object_type
+                        })
+                }) && !callers.contains(&caller)
+                {
+                    callers.push(caller);
+                }
             }
         }
     }
@@ -457,13 +811,20 @@ pub async fn validate_schema_diff_routines(
         });
     }
     for caller in callers {
-        let current_status = status(state, connection, database, &caller.owner, &caller.name, &caller.object_type).await?;
+        let current_status =
+            status(state, connection, database, &caller.owner, &caller.name, &caller.object_type).await?;
         results.push(RoutineValidation {
             name: caller.name.clone(),
             schema: caller.owner.clone(),
             routine_type: caller.object_type.clone(),
             success: current_status.as_deref() == Some("VALID"),
-            message: format!("Dependent object {}.{} ({}): {}", caller.owner, caller.name, caller.object_type, current_status.as_deref().unwrap_or("MISSING")),
+            message: format!(
+                "Dependent object {}.{} ({}): {}",
+                caller.owner,
+                caller.name,
+                caller.object_type,
+                current_status.as_deref().unwrap_or("MISSING")
+            ),
             trigger: None,
         });
     }
@@ -483,17 +844,40 @@ mod tests {
                 { "owner": "TARGET", "name": "caller", "objectType": "PROCEDURE" },
                 { "owner": "OTHER", "name": "p", "objectType": "PACKAGE" }
             ]
-        })).unwrap();
-        let body = db::FunctionInfo { function_type: "PACKAGE BODY".into(), incoming_dependencies: Vec::new(), ..info.clone() };
+        }))
+        .unwrap();
+        let body = db::FunctionInfo {
+            function_type: "PACKAGE BODY".into(),
+            incoming_dependencies: Vec::new(),
+            ..info.clone()
+        };
         let diffs = vec![
-            FunctionDiff { name: "p".into(), diff_type: "modified".into(), source: Some(info.clone()), target: Some(info.clone()), changes: Vec::new() },
-            FunctionDiff { name: "p".into(), diff_type: "removed".into(), source: None, target: Some(body), changes: Vec::new() },
+            FunctionDiff {
+                name: "p".into(),
+                diff_type: "modified".into(),
+                source: Some(info.clone()),
+                target: Some(info.clone()),
+                changes: Vec::new(),
+            },
+            FunctionDiff {
+                name: "p".into(),
+                diff_type: "removed".into(),
+                source: None,
+                target: Some(body),
+                changes: Vec::new(),
+            },
         ];
         let callers = target_callers(&diffs, "TARGET");
         assert_eq!(callers.len(), 2);
         assert_eq!((&callers[0].owner, &callers[0].name), (&"TARGET".to_string(), &"caller".to_string()));
         assert_eq!((&callers[1].owner, &callers[1].object_type), (&"OTHER".to_string(), &"PACKAGE".to_string()));
-        let added = FunctionDiff { name: "p".into(), diff_type: "added".into(), source: Some(info), target: None, changes: Vec::new() };
+        let added = FunctionDiff {
+            name: "p".into(),
+            diff_type: "added".into(),
+            source: Some(info),
+            target: None,
+            changes: Vec::new(),
+        };
         assert!(target_callers(&[added], "TARGET").is_empty());
     }
 }

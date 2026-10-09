@@ -192,22 +192,44 @@ struct PermissionSession {
 }
 impl PermissionSession {
     fn new(engine: Engine, request: &ForeignKeyChange) -> Self {
-        Self { inner: session(engine, request), object_grant: Ok(0), system_grant: Ok(0), granted_roles: Ok(0), role_alter: Ok(0), queries: Mutex::new(vec![]) }
+        Self {
+            inner: session(engine, request),
+            object_grant: Ok(0),
+            system_grant: Ok(0),
+            granted_roles: Ok(0),
+            role_alter: Ok(0),
+            queries: Mutex::new(vec![]),
+        }
     }
 }
 #[async_trait]
 impl ConstraintSession for PermissionSession {
-    fn engine(&self) -> Engine { self.inner.engine }
+    fn engine(&self) -> Engine {
+        self.inner.engine
+    }
     async fn query(&self, sql: &str) -> Result<db::QueryResult, String> {
         self.queries.lock().unwrap().push(sql.into());
-        if sql == "SELECT USER FROM DUAL" { return Ok(rows(vec![vec![json!("Visitor")]])); }
+        if sql == "SELECT USER FROM DUAL" {
+            return Ok(rows(vec![vec![json!("Visitor")]]));
+        }
         let grant = if sql.contains("SESSION_PRIVS") || sql.contains("SESSION_ROLES") {
-            if self.engine() == Engine::OceanBaseOracle { return Err("ORA-00942: SESSION dictionary view does not exist".into()); }
-            if sql.contains("SESSION_ROLES") { self.role_alter } else { self.system_grant }
-        } else if sql.contains("SYS.USER_SYS_PRIVS") { self.system_grant
-        } else if sql.contains("SYS.USER_ROLE_PRIVS") { self.granted_roles
-        } else if sql.contains("SYS.ALL_TAB_PRIVS") && sql.contains("PRIVILEGE='ALTER'") { self.object_grant
-        } else { return self.inner.query(sql).await; };
+            if self.engine() == Engine::OceanBaseOracle {
+                return Err("ORA-00942: SESSION dictionary view does not exist".into());
+            }
+            if sql.contains("SESSION_ROLES") {
+                self.role_alter
+            } else {
+                self.system_grant
+            }
+        } else if sql.contains("SYS.USER_SYS_PRIVS") {
+            self.system_grant
+        } else if sql.contains("SYS.USER_ROLE_PRIVS") {
+            self.granted_roles
+        } else if sql.contains("SYS.ALL_TAB_PRIVS") && sql.contains("PRIVILEGE='ALTER'") {
+            self.object_grant
+        } else {
+            return self.inner.query(sql).await;
+        };
         grant.map(|value| rows(vec![vec![json!(value)]])).map_err(str::to_owned)
     }
 }
@@ -217,11 +239,20 @@ async fn oceanbase_cross_owner_direct_alter_grants_reach_real_foreign_key_plan_w
     for system in [false, true] {
         let request = change();
         let mut session = PermissionSession::new(Engine::OceanBaseOracle, &request);
-        if system { session.system_grant = Ok(1); } else { session.object_grant = Ok(1); }
+        if system {
+            session.system_grant = Ok(1);
+        } else {
+            session.object_grant = Ok(1);
+        }
         let plan = preview_foreign_key(&session, &request).await.unwrap();
         assert!(apply_foreign_key(&session, &request, &plan.revision).await.unwrap().success);
         assert_eq!(session.inner.fixture.lock().unwrap().writes.len(), 2);
-        assert!(!session.queries.lock().unwrap().iter().any(|query| query.contains("SESSION_PRIVS") || query.contains("SESSION_ROLES")));
+        assert!(!session
+            .queries
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|query| query.contains("SESSION_PRIVS") || query.contains("SESSION_ROLES")));
     }
 }
 
@@ -259,7 +290,11 @@ async fn native_oracle_cross_owner_effective_system_and_active_object_role_grant
     for system in [false, true] {
         let request = change();
         let mut session = PermissionSession::new(Engine::Oracle, &request);
-        if system { session.system_grant = Ok(1); } else { session.role_alter = Ok(1); }
+        if system {
+            session.system_grant = Ok(1);
+        } else {
+            session.role_alter = Ok(1);
+        }
         let plan = preview_foreign_key(&session, &request).await.unwrap();
         assert!(apply_foreign_key(&session, &request, &plan.revision).await.unwrap().success);
         assert!(session.queries.lock().unwrap().iter().any(|query| query.contains("SYS.SESSION_PRIVS")));

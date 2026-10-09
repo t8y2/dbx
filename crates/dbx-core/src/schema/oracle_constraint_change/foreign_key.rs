@@ -204,7 +204,10 @@ pub(super) async fn require_alter(
     // confirms direct system grants, as in the existing OB view-rename guard.
     let system_sql = match session.engine() {
         Engine::Oracle => "SELECT COUNT(*) FROM SYS.SESSION_PRIVS WHERE PRIVILEGE='ALTER ANY TABLE'".to_string(),
-        Engine::OceanBaseOracle => format!("SELECT COUNT(*) FROM SYS.USER_SYS_PRIVS WHERE USERNAME={} AND PRIVILEGE='ALTER ANY TABLE'", literal(user)),
+        Engine::OceanBaseOracle => format!(
+            "SELECT COUNT(*) FROM SYS.USER_SYS_PRIVS WHERE USERNAME={} AND PRIVILEGE='ALTER ANY TABLE'",
+            literal(user)
+        ),
     };
     let system_grant = count(session, &system_sql).await;
     if system_grant.as_ref().is_ok_and(|count| *count > 0) {
@@ -212,17 +215,25 @@ pub(super) async fn require_alter(
     }
     // A positive independently verified grant is sufficient; failed catalogs
     // cannot be used to establish absence when neither grant was confirmed.
-    table_grant.map_err(|error| format!("ALTER permission is unknown: object privilege dictionary unavailable: {error}"))?;
-    system_grant.map_err(|error| format!("ALTER permission is unknown: system privilege dictionary unavailable: {error}"))?;
+    table_grant
+        .map_err(|error| format!("ALTER permission is unknown: object privilege dictionary unavailable: {error}"))?;
+    system_grant
+        .map_err(|error| format!("ALTER permission is unknown: system privilege dictionary unavailable: {error}"))?;
     match session.engine() {
         Engine::Oracle => {
             let role_grant = count(session, &format!("SELECT COUNT(*) FROM SYS.ALL_TAB_PRIVS WHERE TABLE_SCHEMA={} AND TABLE_NAME={} AND PRIVILEGE='ALTER' AND GRANTEE IN (SELECT ROLE FROM SYS.SESSION_ROLES)", literal(owner), literal(table_name))).await
                 .map_err(|error| format!("ALTER permission is unknown: active role dictionary unavailable: {error}"))?;
-            if role_grant > 0 { return Ok(()); }
+            if role_grant > 0 {
+                return Ok(());
+            }
         }
         Engine::OceanBaseOracle => {
-            let roles = count(session, &format!("SELECT COUNT(*) FROM SYS.USER_ROLE_PRIVS WHERE GRANTEE IN ({},'PUBLIC')", literal(user))).await
-                .map_err(|error| format!("ALTER permission is unknown: granted role dictionary unavailable: {error}"))?;
+            let roles = count(
+                session,
+                &format!("SELECT COUNT(*) FROM SYS.USER_ROLE_PRIVS WHERE GRANTEE IN ({},'PUBLIC')", literal(user)),
+            )
+            .await
+            .map_err(|error| format!("ALTER permission is unknown: granted role dictionary unavailable: {error}"))?;
             if roles > 0 {
                 return Err("ALTER permission is unknown: OceanBase effective role privileges cannot be verified; use a direct ALTER grant or direct ALTER ANY TABLE grant.".into());
             }

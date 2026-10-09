@@ -478,10 +478,12 @@ pub fn build_data_grid_copy_update_statements(options: DataGridCopyUpdateStateme
     if writable_indexes.is_empty() {
         return Vec::new();
     }
-    if options.rows.iter().any(|row| writable_indexes.iter().any(|(_, index, info)| {
-        is_oceanbase_blob_column(options.database_type, *info)
-            && row.get(*index).is_some_and(|value| !value.is_null() && oceanbase_blob_hex(value).is_none())
-    })) {
+    if options.rows.iter().any(|row| {
+        writable_indexes.iter().any(|(_, index, info)| {
+            is_oceanbase_blob_column(options.database_type, *info)
+                && row.get(*index).is_some_and(|value| !value.is_null() && oceanbase_blob_hex(value).is_none())
+        })
+    }) {
         return Vec::new();
     }
 
@@ -603,10 +605,12 @@ pub(crate) fn build_data_grid_copy_insert_statement_with_formatters(
     if insert_columns.is_empty() || options.rows.is_empty() {
         return None;
     }
-    if options.rows.iter().any(|row| insert_columns.iter().any(|(_, index, info)| {
-        is_oceanbase_blob_column(options.database_type, info.as_ref())
-            && row.get(*index).is_some_and(|value| !value.is_null() && oceanbase_blob_hex(value).is_none())
-    })) {
+    if options.rows.iter().any(|row| {
+        insert_columns.iter().any(|(_, index, info)| {
+            is_oceanbase_blob_column(options.database_type, info.as_ref())
+                && row.get(*index).is_some_and(|value| !value.is_null() && oceanbase_blob_hex(value).is_none())
+        })
+    }) {
         return None;
     }
 
@@ -700,14 +704,17 @@ pub(crate) fn build_data_grid_copy_insert_statement_with_formatters(
     let statements = if options.insert_mode == DataGridCopyInsertMode::RowByRow
         || options.database_type.is_some_and(uses_single_row_insert_statements)
     {
-        value_rows.iter().map(|values| {
-            let sql = format!("INSERT INTO {table} ({columns}) VALUES {values}");
-            if options.database_type == Some(DatabaseType::OceanbaseOracle) {
-                data_grid_statement(options.database_type, sql)
-            } else {
-                format!("{sql};")
-            }
-        }).collect::<Vec<_>>()
+        value_rows
+            .iter()
+            .map(|values| {
+                let sql = format!("INSERT INTO {table} ({columns}) VALUES {values}");
+                if options.database_type == Some(DatabaseType::OceanbaseOracle) {
+                    data_grid_statement(options.database_type, sql)
+                } else {
+                    format!("{sql};")
+                }
+            })
+            .collect::<Vec<_>>()
     } else {
         vec![format!(
             "INSERT INTO {table} ({columns}) VALUES{}{};",
@@ -1723,7 +1730,11 @@ fn build_data_grid_save_statements(
             options.identifier_quote.as_deref(),
         );
         let guarded_lob = append_oceanbase_lob_save_guards(
-            options, &save_columns, row, changes.iter().map(|(index, _)| *index), &mut where_clause,
+            options,
+            &save_columns,
+            row,
+            changes.iter().map(|(index, _)| *index),
+            &mut where_clause,
         );
         guard_predicate(&where_clause, &mut guarded_predicates);
         if batch_mysql_writes {
@@ -1763,9 +1774,8 @@ fn build_data_grid_save_statements(
             column_info,
             options.identifier_quote.as_deref(),
         );
-        let guarded_lob = append_oceanbase_lob_save_guards(
-            options, &save_columns, row, 0..save_columns.len(), &mut where_clause,
-        );
+        let guarded_lob =
+            append_oceanbase_lob_save_guards(options, &save_columns, row, 0..save_columns.len(), &mut where_clause);
         guard_predicate(&where_clause, &mut guarded_predicates);
         if batch_mysql_writes {
             delete_predicates.push(where_clause);
@@ -2466,7 +2476,9 @@ fn format_grid_assignment_sql_literal(
     identifier_quote: Option<&str>,
 ) -> String {
     if is_oceanbase_blob_column(database_type, column_info) {
-        if value.is_null() { return "NULL".to_string(); }
+        if value.is_null() {
+            return "NULL".to_string();
+        }
         if let Some(hex) = oceanbase_blob_hex(value) {
             return if hex.is_empty() { "EMPTY_BLOB()".to_string() } else { format!("TO_BLOB(HEXTORAW('{hex}'))") };
         }
@@ -3492,12 +3504,20 @@ fn oceanbase_lob_predicate(
     column_info: Option<&DataGridColumnInfo>,
 ) -> Option<String> {
     if is_oceanbase_blob_column(database_type, column_info) {
-        if value.is_null() { return Some(format!("{ident} IS NULL")); }
-        let Some(hex) = oceanbase_blob_hex(value) else { return Some("1 = 0".to_string()); };
+        if value.is_null() {
+            return Some(format!("{ident} IS NULL"));
+        }
+        let Some(hex) = oceanbase_blob_hex(value) else {
+            return Some("1 = 0".to_string());
+        };
         let mut predicates = vec![format!("DBMS_LOB.GETLENGTH({ident}) = {}", hex.len() / 2)];
         for (index, chunk) in hex.as_bytes().chunks(2000).enumerate() {
             let chunk = std::str::from_utf8(chunk).expect("validated ASCII hex");
-            predicates.push(format!("DBMS_LOB.SUBSTR({ident}, {}, {}) = HEXTORAW('{chunk}')", chunk.len() / 2, index * 1000 + 1));
+            predicates.push(format!(
+                "DBMS_LOB.SUBSTR({ident}, {}, {}) = HEXTORAW('{chunk}')",
+                chunk.len() / 2,
+                index * 1000 + 1
+            ));
         }
         return Some(format!("({})", predicates.join(" AND ")));
     }
@@ -3516,7 +3536,9 @@ fn oceanbase_lob_predicate(
     let mut count = 0;
     for ch in text.chars() {
         if chunk.len() + oracle_sql_literal_char_len(ch) > 2000 {
-            predicates.push(format!("UTL_RAW.CAST_TO_RAW(DBMS_LOB.SUBSTR({ident}, {count}, {offset})) = UTL_RAW.CAST_TO_RAW('{chunk}')"));
+            predicates.push(format!(
+                "UTL_RAW.CAST_TO_RAW(DBMS_LOB.SUBSTR({ident}, {count}, {offset})) = UTL_RAW.CAST_TO_RAW('{chunk}')"
+            ));
             offset += count;
             chunk.clear();
             count = 0;
@@ -3525,7 +3547,9 @@ fn oceanbase_lob_predicate(
         count += 1;
     }
     if count > 0 {
-        predicates.push(format!("UTL_RAW.CAST_TO_RAW(DBMS_LOB.SUBSTR({ident}, {count}, {offset})) = UTL_RAW.CAST_TO_RAW('{chunk}')"));
+        predicates.push(format!(
+            "UTL_RAW.CAST_TO_RAW(DBMS_LOB.SUBSTR({ident}, {count}, {offset})) = UTL_RAW.CAST_TO_RAW('{chunk}')"
+        ));
     }
     Some(format!("({})", predicates.join(" AND ")))
 }
@@ -3545,7 +3569,10 @@ fn append_oceanbase_lob_save_guards(
         };
         let ident = predicate_ident(options.database_type, column, options.identifier_quote.as_deref());
         if let Some(predicate) = oceanbase_lob_predicate(
-            options.database_type, &ident, row.get(index).unwrap_or(&Value::Null), column_info_for(column_info, column),
+            options.database_type,
+            &ident,
+            row.get(index).unwrap_or(&Value::Null),
+            column_info_for(column_info, column),
         ) {
             if !where_clause.is_empty() {
                 where_clause.push_str(" AND ");
@@ -3620,16 +3647,26 @@ fn oceanbase_blob_hex(value: &Value) -> Option<&str> {
 }
 
 fn validate_oceanbase_blob_save(options: &DataGridSaveStatementOptions) -> Option<String> {
-    if options.database_type != Some(DatabaseType::OceanbaseOracle) { return None; }
+    if options.database_type != Some(DatabaseType::OceanbaseOracle) {
+        return None;
+    }
     let columns = effective_columns(options);
     let info = options.table_meta.columns.as_deref().unwrap_or(&[]);
     let valid = |index: usize, value: &Value| {
-        !is_oceanbase_blob_column(options.database_type, columns.get(index).and_then(|column| column.as_deref()).and_then(|column| column_info_for(info, column)))
-            || value.is_null() || oceanbase_blob_hex(value).is_some()
+        !is_oceanbase_blob_column(
+            options.database_type,
+            columns.get(index).and_then(|column| column.as_deref()).and_then(|column| column_info_for(info, column)),
+        ) || value.is_null()
+            || oceanbase_blob_hex(value).is_some()
     };
     for (row_index, changes) in &options.dirty_rows {
         for (index, value) in changes {
-            if !valid(*index, value) || options.rows.get(*row_index).is_some_and(|row| !valid(*index, row.get(*index).unwrap_or(&Value::Null))) {
+            if !valid(*index, value)
+                || options
+                    .rows
+                    .get(*row_index)
+                    .is_some_and(|row| !valid(*index, row.get(*index).unwrap_or(&Value::Null)))
+            {
                 return Some("OceanBase BLOB values must be NULL or 0x followed by complete hexadecimal byte pairs; reload the original value before saving.".to_string());
             }
         }
@@ -3682,12 +3719,16 @@ fn oceanbase_blob_statement(sql: &str, guard_row_count: bool) -> Option<String> 
             }
         }
     }
-    if blobs.is_empty() { return None; }
+    if blobs.is_empty() {
+        return None;
+    }
     let mut statement = "DECLARE\ndbx_sql CLOB;\n".to_string();
     let mut cleanup = String::new();
     for index in 0..blobs.len() {
         statement.push_str(&format!("dbx_lob_{index} BLOB;\n"));
-        cleanup.push_str(&format!("IF DBMS_LOB.ISTEMPORARY(dbx_lob_{index}) = 1 THEN DBMS_LOB.FREETEMPORARY(dbx_lob_{index}); END IF;\n"));
+        cleanup.push_str(&format!(
+            "IF DBMS_LOB.ISTEMPORARY(dbx_lob_{index}) = 1 THEN DBMS_LOB.FREETEMPORARY(dbx_lob_{index}); END IF;\n"
+        ));
     }
     statement.push_str("BEGIN\ndbx_sql := ");
     statement.push_str(&format_oracle_lob_assignment_literal(&rewritten, "TO_CLOB"));
@@ -3696,10 +3737,16 @@ fn oceanbase_blob_statement(sql: &str, guard_row_count: bool) -> Option<String> 
         statement.push_str(&format!("DBMS_LOB.CREATETEMPORARY(dbx_lob_{index}, TRUE, DBMS_LOB.CALL);\n"));
         for chunk in hex.as_bytes().chunks(2000) {
             let chunk = std::str::from_utf8(chunk).expect("validated ASCII hex");
-            statement.push_str(&format!("DBMS_LOB.WRITEAPPEND(dbx_lob_{index}, {}, HEXTORAW('{chunk}'));\n", chunk.len() / 2));
+            statement.push_str(&format!(
+                "DBMS_LOB.WRITEAPPEND(dbx_lob_{index}, {}, HEXTORAW('{chunk}'));\n",
+                chunk.len() / 2
+            ));
         }
     }
-    statement.push_str(&format!("EXECUTE IMMEDIATE dbx_sql USING {};\n", (0..blobs.len()).map(|index| format!("dbx_lob_{index}")).collect::<Vec<_>>().join(", ")));
+    statement.push_str(&format!(
+        "EXECUTE IMMEDIATE dbx_sql USING {};\n",
+        (0..blobs.len()).map(|index| format!("dbx_lob_{index}")).collect::<Vec<_>>().join(", ")
+    ));
     if guard_row_count {
         statement.push_str("IF SQL%ROWCOUNT <> 1 THEN RAISE_APPLICATION_ERROR(-20001, 'LOB target changed or missing; reload before saving'); END IF;\n");
     }
@@ -7378,19 +7425,35 @@ mod tests {
         let database_type = Some(DatabaseType::OceanbaseOracle);
         assert_eq!(format_grid_assignment_sql_literal(&json!("0x"), database_type, Some(&blob), None), "EMPTY_BLOB()");
         assert_eq!(format_grid_assignment_sql_literal(&Value::Null, database_type, Some(&blob), None), "NULL");
-        assert_eq!(format_grid_assignment_sql_literal(&json!("0x00ff"), database_type, Some(&blob), None), "TO_BLOB(HEXTORAW('00ff'))");
-        assert_eq!(build_column_predicate(database_type, "CONTENT", &json!("0x"), Some(&blob), true, None), "(DBMS_LOB.GETLENGTH(\"CONTENT\") = 0)");
+        assert_eq!(
+            format_grid_assignment_sql_literal(&json!("0x00ff"), database_type, Some(&blob), None),
+            "TO_BLOB(HEXTORAW('00ff'))"
+        );
+        assert_eq!(
+            build_column_predicate(database_type, "CONTENT", &json!("0x"), Some(&blob), true, None),
+            "(DBMS_LOB.GETLENGTH(\"CONTENT\") = 0)"
+        );
         let original = format!("0x{}ff", "00".repeat(1000));
         let new_value = format!("0x{}80", "00ff".repeat(1500));
         let mut options = DataGridSaveStatementOptions {
-            database_type, identifier_quote: None, server_version: None,
+            database_type,
+            identifier_quote: None,
+            server_version: None,
             table_meta: DataGridTableMeta {
-                catalog: None, database: None, schema: Some("APP".into()), table_name: "FILES".into(),
-                primary_keys: vec!["ID".into()], columns: Some(vec![column("ID", "NUMBER", false, None), blob]),
+                catalog: None,
+                database: None,
+                schema: Some("APP".into()),
+                table_name: "FILES".into(),
+                primary_keys: vec!["ID".into()],
+                columns: Some(vec![column("ID", "NUMBER", false, None), blob]),
             },
-            columns: vec!["ID".into(), "CONTENT".into()], source_columns: None,
-            rows: vec![vec![json!(1), json!(original)]], dirty_rows: vec![(0, vec![(1, json!(new_value))])],
-            deleted_rows: vec![], new_rows: vec![], include_database_name: false,
+            columns: vec!["ID".into(), "CONTENT".into()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!(original)]],
+            dirty_rows: vec![(0, vec![(1, json!(new_value))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+            include_database_name: false,
         };
         let prepared = prepare_data_grid_save(options.clone());
         assert_eq!(prepared.validation_error, None);
@@ -7420,7 +7483,10 @@ mod tests {
         assert!(!statement.contains("dbx_lob_1"));
         assert!(!statement.contains("SQL%ROWCOUNT <> 1"));
         assert_eq!(oceanbase_blob_statement("UPDATE T SET B = TO_BLOB(HEXTORAW('00ff'))", false), None);
-        assert_eq!(oceanbase_blob_statement(&format!("UPDATE T SET TXT = 'TO_BLOB(HEXTORAW(''{hex}''))'"), false), None);
+        assert_eq!(
+            oceanbase_blob_statement(&format!("UPDATE T SET TXT = 'TO_BLOB(HEXTORAW(''{hex}''))'"), false),
+            None
+        );
     }
 
     #[test]
@@ -7428,10 +7494,14 @@ mod tests {
         let clob = column("BODY", "CLOB", true, None);
         let database_type = Some(DatabaseType::OceanbaseOracle);
         assert_eq!(format_grid_assignment_sql_literal(&json!(""), database_type, Some(&clob), None), "EMPTY_CLOB()");
-        assert_eq!(build_column_predicate(database_type, "BODY", &json!(""), Some(&clob), true, None),
-            "(DBMS_LOB.GETLENGTH(\"BODY\") = 0)");
-        assert_eq!(build_column_predicate(database_type, "BODY", &Value::Null, Some(&clob), true, None),
-            "\"BODY\" IS NULL");
+        assert_eq!(
+            build_column_predicate(database_type, "BODY", &json!(""), Some(&clob), true, None),
+            "(DBMS_LOB.GETLENGTH(\"BODY\") = 0)"
+        );
+        assert_eq!(
+            build_column_predicate(database_type, "BODY", &Value::Null, Some(&clob), true, None),
+            "\"BODY\" IS NULL"
+        );
         let text = format!("{}'尾", "😀".repeat(501));
         let predicate = build_column_predicate(database_type, "BODY", &json!(text), Some(&clob), true, None);
         assert!(predicate.contains("GETLENGTH(\"BODY\") = 503"));
@@ -7441,14 +7511,24 @@ mod tests {
         assert!(!predicate.contains("DBMS_LOB.COMPARE"));
 
         let result = prepare_data_grid_save(DataGridSaveStatementOptions {
-            database_type, identifier_quote: None, server_version: None,
+            database_type,
+            identifier_quote: None,
+            server_version: None,
             table_meta: DataGridTableMeta {
-                catalog: None, database: None, schema: Some("APP".into()), table_name: "DOCS".into(),
-                primary_keys: vec!["ID".into()], columns: Some(vec![column("ID", "NUMBER", false, None), clob]),
+                catalog: None,
+                database: None,
+                schema: Some("APP".into()),
+                table_name: "DOCS".into(),
+                primary_keys: vec!["ID".into()],
+                columns: Some(vec![column("ID", "NUMBER", false, None), clob]),
             },
-            columns: vec!["ID".into(), "BODY".into()], source_columns: None,
-            rows: vec![vec![json!(1), json!("original")]], dirty_rows: vec![(0, vec![(1, json!("edited"))])],
-            deleted_rows: vec![], new_rows: vec![], include_database_name: false,
+            columns: vec!["ID".into(), "BODY".into()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("original")]],
+            dirty_rows: vec![(0, vec![(1, json!("edited"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+            include_database_name: false,
         });
         assert_eq!(result.validation_error, None);
         assert!(result.statements[0].contains("\"BODY\" = 'edited'"));
@@ -8712,7 +8792,13 @@ mod tests {
             ],
             source_columns: None,
             rows: vec![
-                vec![json!("*AAABk1AAEAAAAAgAAA"), json!("task-1"), json!("response"), json!("0x0011"), json!("archive")],
+                vec![
+                    json!("*AAABk1AAEAAAAAgAAA"),
+                    json!("task-1"),
+                    json!("response"),
+                    json!("0x0011"),
+                    json!("archive"),
+                ],
                 vec![json!("*AAABk1AAEAAAAAgAAB"), json!("task-2"), Value::Null, Value::Null, Value::Null],
             ],
             dirty_rows: vec![],

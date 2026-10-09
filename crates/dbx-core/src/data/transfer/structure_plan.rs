@@ -516,7 +516,13 @@ fn unexpanded_schema_object_notes(
     for selection in selections {
         if matches!(
             selection.object_type,
-            TransferObjectKind::Table | TransferObjectKind::Package | TransferObjectKind::PackageBody | TransferObjectKind::Synonym | TransferObjectKind::PublicSynonym | TransferObjectKind::DbLink | TransferObjectKind::PublicDbLink
+            TransferObjectKind::Table
+                | TransferObjectKind::Package
+                | TransferObjectKind::PackageBody
+                | TransferObjectKind::Synonym
+                | TransferObjectKind::PublicSynonym
+                | TransferObjectKind::DbLink
+                | TransferObjectKind::PublicDbLink
         ) || selection.names.is_empty()
         {
             continue;

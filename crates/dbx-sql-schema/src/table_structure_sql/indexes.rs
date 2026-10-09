@@ -462,9 +462,7 @@ pub(super) fn build_create_index_statements(
     let columns: Vec<String> = index
         .columns
         .iter()
-        .map(|column| {
-            if database_type == Some(DatabaseType::OceanbaseOracle) { column.clone() } else { clean(column) }
-        })
+        .map(|column| if database_type == Some(DatabaseType::OceanbaseOracle) { column.clone() } else { clean(column) })
         .filter(|column| !column.is_empty())
         .collect();
     if name.is_empty() || columns.is_empty() {
@@ -483,8 +481,8 @@ pub(super) fn build_create_index_statements(
     let replace = if or_replace { "OR REPLACE " } else { "" };
     let key_is_expression = key_expression_flags(index, &columns);
     let key_opclasses = key_opclasses(index, &columns);
-    let oceanbase_expression = database_type == Some(DatabaseType::OceanbaseOracle)
-        && normalized_index_type(index) == "FUNCTION-BASED NORMAL";
+    let oceanbase_expression =
+        database_type == Some(DatabaseType::OceanbaseOracle) && normalized_index_type(index) == "FUNCTION-BASED NORMAL";
     let cols = columns
         .iter()
         .enumerate()

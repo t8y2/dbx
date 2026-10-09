@@ -105,8 +105,12 @@ pub(super) fn selected(request: &TransferRequest) -> Vec<(TransferObjectKind, St
 }
 
 fn dictionary_kind(kind: TransferObjectKind) -> &'static str {
-    if kind == TransferObjectKind::Type { return "TYPE"; }
-    if kind == TransferObjectKind::TypeBody { return "TYPE BODY"; }
+    if kind == TransferObjectKind::Type {
+        return "TYPE";
+    }
+    if kind == TransferObjectKind::TypeBody {
+        return "TYPE BODY";
+    }
     if kind == TransferObjectKind::PackageBody {
         "PACKAGE BODY"
     } else {
@@ -130,12 +134,14 @@ fn ident(name: &str) -> String {
 /// literals, comments, explicit schema references and quoted identifiers in the body.
 pub(super) fn declaration(source: &str, kind: TransferObjectKind) -> Result<(String, String, String), String> {
     let identifier = r#"(?:"(?:[^"]|"")*"|[\p{L}][\p{L}\p{N}_$#]*)"#;
-    let keyword = if matches!(kind, TransferObjectKind::Type | TransferObjectKind::TypeBody) { "TYPE" } else { "PACKAGE" };
+    let keyword =
+        if matches!(kind, TransferObjectKind::Type | TransferObjectKind::TypeBody) { "TYPE" } else { "PACKAGE" };
     let re = Regex::new(&format!(
         r#"(?is)\A\s*(?:(?:/\*.*?\*/|--[^\r\n]*(?:\r?\n|$))\s*)*(?:CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:NON)?EDITIONABLE\s+)?)?{keyword}\s+(?P<body>BODY\s+)?(?P<name>{identifier}(?:\s*\.\s*{identifier})?)(?P<tail>.+)\z"#
     )).map_err(|e| e.to_string())?;
     let captures = re.captures(source).ok_or("Cannot parse the complete package declaration")?;
-    if captures.name("body").is_some() != matches!(kind, TransferObjectKind::PackageBody | TransferObjectKind::TypeBody) {
+    if captures.name("body").is_some() != matches!(kind, TransferObjectKind::PackageBody | TransferObjectKind::TypeBody)
+    {
         return Err("Package specification/body source kind does not match the selection".into());
     }
     let name = captures.name("name").unwrap();
@@ -170,12 +176,18 @@ fn declared_name(name: &str) -> String {
     unquote(&name[start..])
 }
 
-pub(super) fn map_header(source: &str, kind: TransferObjectKind, name: &str, target_schema: &str) -> Result<String, String> {
+pub(super) fn map_header(
+    source: &str,
+    kind: TransferObjectKind,
+    name: &str,
+    target_schema: &str,
+) -> Result<String, String> {
     let (prefix, declared, tail) = declaration(source, kind)?;
     if declared_name(&declared) != name {
         return Err("Source declaration name does not match the selected object".into());
     }
-    let keyword = if matches!(kind, TransferObjectKind::Type | TransferObjectKind::TypeBody) { "TYPE" } else { "PACKAGE" };
+    let keyword =
+        if matches!(kind, TransferObjectKind::Type | TransferObjectKind::TypeBody) { "TYPE" } else { "PACKAGE" };
     let header = Regex::new(&format!(
         r"(?is)(?:CREATE\s+(?:OR\s+REPLACE\s+)?(?P<edition>(?:NON)?EDITIONABLE\s+)?)?{keyword}\s+(?:BODY\s+)?$",
     ))
@@ -285,27 +297,46 @@ async fn dependencies(
         let object_type = text(&row, 2);
         let link = text(&row, 3);
         if !link.is_empty() {
-            let available = oracle_database_links::dependency_available(state, request, target_pool, &target_schema, &link, true).await?;
-            result.push(TransferSchemaObjectDependency { owner: target_schema.clone(), name: link, object_type: "DATABASE LINK (remote object unverified)".into(), available });
+            let available =
+                oracle_database_links::dependency_available(state, request, target_pool, &target_schema, &link, true)
+                    .await?;
+            result.push(TransferSchemaObjectDependency {
+                owner: target_schema.clone(),
+                name: link,
+                object_type: "DATABASE LINK (remote object unverified)".into(),
+                available,
+            });
             continue;
         }
         // The definition header moves into the selected target schema. Other schemas stay intact.
         let words = sql_words(&declaration(original, kind)?.2);
-        let explicit = words.windows(3).any(|part| identifier_word(&part[0]) == owner && part[1] == "." && identifier_word(&part[2]) == dependency);
-        let selected_type = owner == source_schema && object_type == "TYPE" && request.object_selection_mode().selections().iter().any(|selection| selection.object_type == TransferObjectKind::Type && selection.names.contains(&dependency));
-        if selected_type { *ddl = oracle_types::map_reference(ddl, &source_schema, &dependency, &target_schema)?; }
-        let target_owner = if owner == source_schema && (!explicit || selected_type) { target_schema.clone() } else { owner };
+        let explicit = words.windows(3).any(|part| {
+            identifier_word(&part[0]) == owner && part[1] == "." && identifier_word(&part[2]) == dependency
+        });
+        let selected_type = owner == source_schema
+            && object_type == "TYPE"
+            && request.object_selection_mode().selections().iter().any(|selection| {
+                selection.object_type == TransferObjectKind::Type && selection.names.contains(&dependency)
+            });
+        if selected_type {
+            *ddl = oracle_types::map_reference(ddl, &source_schema, &dependency, &target_schema)?;
+        }
+        let target_owner =
+            if owner == source_schema && (!explicit || selected_type) { target_schema.clone() } else { owner };
         let planned = target_owner == target_schema
             && ((object_type == "PACKAGE" && selected.contains(&(TransferObjectKind::Package, dependency.clone())))
-                || (object_type == "TYPE" && request.object_selection_mode().selections().iter().any(|selection| selection.object_type == TransferObjectKind::Type && selection.names.contains(&dependency)))
+                || (object_type == "TYPE"
+                    && request.object_selection_mode().selections().iter().any(|selection| {
+                        selection.object_type == TransferObjectKind::Type && selection.names.contains(&dependency)
+                    }))
                 || (object_type == "TABLE" && request.create_table && request.tables.contains(&dependency)));
         let status = if link.is_empty() {
             object_status(state, target_pool, &target_owner, &dependency, &object_type).await?
         } else {
             None
         };
-        let available = link.is_empty()
-            && dependency_available(planned, status.as_deref(), request.object_conflict_policy);
+        let available =
+            link.is_empty() && dependency_available(planned, status.as_deref(), request.object_conflict_policy);
         result.push(TransferSchemaObjectDependency {
             owner: target_owner,
             name: dependency,
@@ -377,7 +408,8 @@ async fn build_plan(
     let mut items = Vec::new();
     for (kind, name) in &selections {
         let mut item = TransferSchemaObjectItem {
-            execution_phase: None, credential_required: None,
+            execution_phase: None,
+            credential_required: None,
             object_type: *kind,
             name: name.clone(),
             source_schema: source_schema.clone(),
@@ -545,12 +577,18 @@ fn explicit_owner_reference(source: &str, schema: &str) -> bool {
 }
 
 pub(super) fn identifier_word(word: &str) -> String {
-    if word.starts_with('"') { unquote(word) } else { word.to_string() }
+    if word.starts_with('"') {
+        unquote(word)
+    } else {
+        word.to_string()
+    }
 }
 
 fn validate_version_clauses(source: &str, database_type: DatabaseType, banner: &str) -> Result<(), String> {
     let version = Regex::new(r"\b(\d+)\.(\d+)").unwrap();
-    let captures = version.captures(banner).ok_or("Target database version could not be read; version-specific package syntax has not been checked")?;
+    let captures = version
+        .captures(banner)
+        .ok_or("Target database version could not be read; version-specific package syntax has not been checked")?;
     let major: u32 = captures[1].parse().map_err(|_| "Invalid target version")?;
     let minor: u32 = captures[2].parse().map_err(|_| "Invalid target version")?;
     let words = sql_words(source);
@@ -559,9 +597,13 @@ fn validate_version_clauses(source: &str, database_type: DatabaseType, banner: &
     let incompatible = if database_type == DatabaseType::OceanbaseOracle {
         edition || has("ACCESSIBLE") || has("SHARING")
     } else {
-        (edition && (major, minor) < (11, 2)) || (has("ACCESSIBLE") && major < 12) || (has("SHARING") && (major, minor) < (12, 2))
+        (edition && (major, minor) < (11, 2))
+            || (has("ACCESSIBLE") && major < 12)
+            || (has("SHARING") && (major, minor) < (12, 2))
     };
-    if incompatible { return Err("Package edition/accessibility/sharing syntax requires a reviewed target-version conversion".into()); }
+    if incompatible {
+        return Err("Package edition/accessibility/sharing syntax requires a reviewed target-version conversion".into());
+    }
     Ok(())
 }
 
@@ -819,11 +861,16 @@ pub(super) async fn execute<F: FnMut(TransferProgress)>(
         if let Err(error) = execution {
             result.error = Some(error);
             if result.compile_status.is_none() {
-                result.compile_status =
-                object_status(state, target_pool, &item.target_schema, &item.name, dictionary_kind(item.object_type))
-                    .await
-                    .ok()
-                    .flatten();
+                result.compile_status = object_status(
+                    state,
+                    target_pool,
+                    &item.target_schema,
+                    &item.name,
+                    dictionary_kind(item.object_type),
+                )
+                .await
+                .ok()
+                .flatten();
             }
             failed.insert((
                 item.target_schema.clone(),
@@ -891,7 +938,8 @@ mod tests {
 
     fn plan_item(kind: TransferObjectKind, name: &str, dependencies: &[&str]) -> TransferSchemaObjectItem {
         TransferSchemaObjectItem {
-            execution_phase: None, credential_required: None,
+            execution_phase: None,
+            credential_required: None,
             object_type: kind,
             name: name.into(),
             source_schema: "S".into(),

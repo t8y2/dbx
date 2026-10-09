@@ -199,7 +199,8 @@ impl ConstraintSession for Session {
                 let definition = fixture.desired.clone().unwrap();
                 let index_name = if self.engine == Engine::OceanBaseOracle {
                     definition.name.clone()
-                } else if sql.contains(" RENAME CONSTRAINT ") || sql.contains(&qualified("Owner", &fixture.index_name)?) {
+                } else if sql.contains(" RENAME CONSTRAINT ") || sql.contains(&qualified("Owner", &fixture.index_name)?)
+                {
                     fixture.index_name.clone()
                 } else {
                     "Replacement Index".into()

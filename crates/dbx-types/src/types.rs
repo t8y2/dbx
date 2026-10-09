@@ -1229,7 +1229,9 @@ mod tests {
     fn agent_object_validity_remains_optional_across_core_serialization() {
         for expected in [Some(true), Some(false), None] {
             let mut wire = serde_json::json!({"name":"PKG", "object_type":"PACKAGE", "schema":"APP"});
-            if let Some(valid) = expected { wire["valid"] = serde_json::json!(valid); }
+            if let Some(valid) = expected {
+                wire["valid"] = serde_json::json!(valid);
+            }
             let object: ObjectInfo = serde_json::from_value(wire).unwrap();
             assert_eq!(object.valid, expected);
             let forwarded = serde_json::to_value(object).unwrap();

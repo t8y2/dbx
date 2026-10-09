@@ -4,11 +4,8 @@ use super::*;
 // through the read itself: an absent view/column must not become a zero estimate.
 // Only TABLE rows represent global statistics; never add partition estimates.
 fn sql(schema: &str, after: Option<&str>) -> String {
-    let owner = if schema.is_empty() {
-        "SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')".to_string()
-    } else {
-        sql_string(schema)
-    };
+    let owner =
+        if schema.is_empty() { "SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')".to_string() } else { sql_string(schema) };
     let cursor = after.map(|name| format!(" AND TABLE_NAME > {}", sql_string(name))).unwrap_or_default();
     format!(
         "SELECT * FROM (SELECT TABLE_NAME, OWNER, NUM_ROWS, \
@@ -28,9 +25,14 @@ pub(super) async fn load(
     let mut rows = Vec::new();
     let mut after = None;
     loop {
-        let result =
-            agent_object_statistics_query(&mut client, database, schema, &sql(schema, after.as_deref()), timeout_duration)
-                .await?;
+        let result = agent_object_statistics_query(
+            &mut client,
+            database,
+            schema,
+            &sql(schema, after.as_deref()),
+            timeout_duration,
+        )
+        .await?;
         if result.truncated || result.has_more {
             return Err("OceanBase statistics response was truncated".into());
         }

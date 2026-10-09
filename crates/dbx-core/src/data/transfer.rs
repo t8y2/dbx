@@ -24,10 +24,10 @@ mod iris_tests;
 
 mod db2;
 mod ddl_plan;
+mod oracle_database_links;
 mod oracle_packages;
 mod oracle_synonyms;
 mod oracle_types;
-mod oracle_database_links;
 pub use oracle_database_links::{TransferDatabaseLinkConfig, TransferDatabaseLinkCredential};
 #[path = "transfer/oceanbase_source.rs"]
 pub(crate) mod oceanbase_source;
@@ -272,7 +272,12 @@ pub fn transfer_object_kinds_for_family(family: &TransferObjectFamily) -> Vec<Tr
 pub fn transfer_object_kinds(db_type: &DatabaseType) -> Vec<TransferObjectKind> {
     if matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle) {
         let mut kinds = transfer_object_kinds_for_family(&TransferObjectFamily::Oracle);
-        kinds.extend([TransferObjectKind::Package, TransferObjectKind::PackageBody, TransferObjectKind::Synonym, TransferObjectKind::PublicSynonym]);
+        kinds.extend([
+            TransferObjectKind::Package,
+            TransferObjectKind::PackageBody,
+            TransferObjectKind::Synonym,
+            TransferObjectKind::PublicSynonym,
+        ]);
         kinds.extend([TransferObjectKind::DbLink, TransferObjectKind::PublicDbLink]);
         kinds.extend([TransferObjectKind::Type, TransferObjectKind::TypeBody]);
         return kinds;
@@ -8209,20 +8214,38 @@ pub async fn ensure_transfer_schema_objects_ready(
 /// Explicit type specifications and independent bodies must exist before selected
 /// table DDL/data. Bodies depending on selected tables/programs run after those objects.
 pub async fn transfer_schema_prerequisites<F: FnMut(TransferProgress)>(
-    state: &AppState, request: &TransferRequest, source_pool_key: &str,
-    target_pool_key: &str, mut progress: F,
+    state: &AppState,
+    request: &TransferRequest,
+    source_pool_key: &str,
+    target_pool_key: &str,
+    mut progress: F,
 ) -> Result<TransferObjectOutcome, String> {
-    if !oracle_types::has_selection(request) { return Ok(TransferObjectOutcome::default()); }
-    let mut outcome = oracle_database_links::execute(state, request, source_pool_key, target_pool_key, &mut progress).await?;
-    if !outcome.failed.is_empty() { return Ok(outcome); }
-    let types = oracle_types::execute(state, request, source_pool_key, target_pool_key, oracle_types::Phase::BeforeTables, &mut progress).await?;
+    if !oracle_types::has_selection(request) {
+        return Ok(TransferObjectOutcome::default());
+    }
+    let mut outcome =
+        oracle_database_links::execute(state, request, source_pool_key, target_pool_key, &mut progress).await?;
+    if !outcome.failed.is_empty() {
+        return Ok(outcome);
+    }
+    let types = oracle_types::execute(
+        state,
+        request,
+        source_pool_key,
+        target_pool_key,
+        oracle_types::Phase::BeforeTables,
+        &mut progress,
+    )
+    .await?;
     outcome.transferred.extend(types.transferred);
     outcome.skipped.extend(types.skipped);
     outcome.failed.extend(types.failed);
     outcome.object_results.extend(types.object_results);
     Ok(outcome)
 }
-pub fn has_transfer_type_prerequisites(request: &TransferRequest) -> bool { oracle_types::has_selection(request) }
+pub fn has_transfer_type_prerequisites(request: &TransferRequest) -> bool {
+    oracle_types::has_selection(request)
+}
 
 async fn transfer_mysql_schema_objects<F>(
     state: &AppState,
@@ -8307,12 +8330,16 @@ async fn transfer_oracle_schema_objects<F>(
 where
     F: FnMut(TransferProgress),
 {
-    let mut outcome = if oracle_types::has_selection(request) { TransferObjectOutcome::default() }
-        else { oracle_database_links::execute(state, request, source_pool_key, target_pool_key, &mut progress_callback).await? };
+    let mut outcome = if oracle_types::has_selection(request) {
+        TransferObjectOutcome::default()
+    } else {
+        oracle_database_links::execute(state, request, source_pool_key, target_pool_key, &mut progress_callback).await?
+    };
     if !outcome.failed.is_empty() {
         return Ok(outcome);
     }
-    let packages = oracle_packages::execute(state, request, source_pool_key, target_pool_key, &mut progress_callback).await?;
+    let packages =
+        oracle_packages::execute(state, request, source_pool_key, target_pool_key, &mut progress_callback).await?;
     outcome.transferred.extend(packages.transferred);
     outcome.skipped.extend(packages.skipped);
     outcome.failed.extend(packages.failed);
@@ -8321,13 +8348,24 @@ where
     let source_schema = resolve_oracle_schema(&request.source_schema, &request.source_database);
     let order = ordered_transfer_object_kinds(
         request.object_selection_mode().selections().iter().map(|s| s.object_type).collect(),
-    ).into_iter().filter(|kind| !matches!(kind,
-        TransferObjectKind::Package | TransferObjectKind::PackageBody | TransferObjectKind::Synonym
-        | TransferObjectKind::PublicSynonym | TransferObjectKind::DbLink | TransferObjectKind::PublicDbLink
-        | TransferObjectKind::Type | TransferObjectKind::TypeBody
-    )).collect::<Vec<_>>();
-    let has_source_objects = order.iter().any(|kind|
-        !selected_object_names(request.object_selection_mode().selections(), kind).is_empty());
+    )
+    .into_iter()
+    .filter(|kind| {
+        !matches!(
+            kind,
+            TransferObjectKind::Package
+                | TransferObjectKind::PackageBody
+                | TransferObjectKind::Synonym
+                | TransferObjectKind::PublicSynonym
+                | TransferObjectKind::DbLink
+                | TransferObjectKind::PublicDbLink
+                | TransferObjectKind::Type
+                | TransferObjectKind::TypeBody
+        )
+    })
+    .collect::<Vec<_>>();
+    let has_source_objects =
+        order.iter().any(|kind| !selected_object_names(request.object_selection_mode().selections(), kind).is_empty());
     let target_schema = if oceanbase_source && has_source_objects && request.target_schema.trim().is_empty() {
         let result =
             execute_on_pool(state, target_pool_key, "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL")
@@ -8412,13 +8450,24 @@ where
             }
         }
     }
-    let synonyms = oracle_synonyms::execute(state, request, source_pool_key, target_pool_key, &mut progress_callback).await?;
+    let synonyms =
+        oracle_synonyms::execute(state, request, source_pool_key, target_pool_key, &mut progress_callback).await?;
     outcome.transferred.extend(synonyms.transferred);
     outcome.skipped.extend(synonyms.skipped);
     outcome.failed.extend(synonyms.failed);
     outcome.object_results.extend(synonyms.object_results);
-    if !outcome.failed.is_empty() { return Ok(outcome); }
-    let types = oracle_types::execute(state, request, source_pool_key, target_pool_key, oracle_types::Phase::AfterObjects, &mut progress_callback).await?;
+    if !outcome.failed.is_empty() {
+        return Ok(outcome);
+    }
+    let types = oracle_types::execute(
+        state,
+        request,
+        source_pool_key,
+        target_pool_key,
+        oracle_types::Phase::AfterObjects,
+        &mut progress_callback,
+    )
+    .await?;
     outcome.transferred.extend(types.transferred);
     outcome.skipped.extend(types.skipped);
     outcome.failed.extend(types.failed);
@@ -9424,7 +9473,10 @@ pub async fn preview_transfer_ownership(
 
     let mut schema_objects = oracle_packages::preview(state, request, source_pool_key, target_pool_key).await?;
     if let Some(mut types) = oracle_types::preview(state, request, source_pool_key, target_pool_key).await? {
-        if let Some(objects) = schema_objects.take() { types.can_execute &= objects.can_execute; types.items.extend(objects.items); }
+        if let Some(objects) = schema_objects.take() {
+            types.can_execute &= objects.can_execute;
+            types.items.extend(objects.items);
+        }
         schema_objects = Some(types);
     }
     if let Some(mut links) = oracle_database_links::preview(state, request, source_pool_key, target_pool_key).await? {
@@ -9442,7 +9494,9 @@ pub async fn preview_transfer_ownership(
             schema_objects = Some(synonyms);
         }
     }
-    if let Some(objects) = &mut schema_objects { oracle_types::order_preview_phases(objects, request); }
+    if let Some(objects) = &mut schema_objects {
+        oracle_types::order_preview_phases(objects, request);
+    }
     Ok(TransferOwnershipPreview { missing_owners, target_owner, rebuild, structure, schema_objects })
 }
 

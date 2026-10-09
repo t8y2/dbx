@@ -182,7 +182,12 @@ async fn local_object(state: &AppState, pool: &str, schema: &str, name: &str) ->
     Ok(!result.rows.is_empty())
 }
 
-async fn privileges(state: &AppState, pool: &str, database_type: DatabaseType, definition: &Definition) -> Result<(), String> {
+async fn privileges(
+    state: &AppState,
+    pool: &str,
+    database_type: DatabaseType,
+    definition: &Definition,
+) -> Result<(), String> {
     let result = metadata(state, pool, oracle_packages::creation_privileges_sql(database_type)).await?;
     let granted: HashSet<String> = result.rows.iter().map(|row| text(row, 0)).collect();
     if public(&definition.owner) {
@@ -214,7 +219,15 @@ async fn dependency_chain(
         if !current.db_link.is_empty() {
             let target_context = resolve_oracle_schema(&request.target_schema, &request.target_database);
             let link_owner = if public(&current.owner) { target_context.as_str() } else { current.owner.as_str() };
-            let available = oracle_database_links::dependency_available(state, request, pool, link_owner, &current.db_link, allow_planned_objects).await?;
+            let available = oracle_database_links::dependency_available(
+                state,
+                request,
+                pool,
+                link_owner,
+                &current.db_link,
+                allow_planned_objects,
+            )
+            .await?;
             dependencies.push(TransferSchemaObjectDependency {
                 owner: link_owner.into(),
                 name: current.db_link,
@@ -304,7 +317,8 @@ async fn build_plan(
         };
         let mut entry = Planned {
             item: TransferSchemaObjectItem {
-                execution_phase: None, credential_required: None,
+                execution_phase: None,
+                credential_required: None,
                 object_type: kind,
                 name: name.clone(),
                 source_schema: source_schema.clone(),
@@ -523,7 +537,8 @@ pub(super) async fn execute<F: FnMut(TransferProgress)>(
             if existing.is_some() && request.object_conflict_policy != TransferObjectConflictPolicy::Replace {
                 return Err("Target synonym appeared after planning; replacement is not authorized".into());
             }
-            privileges(state, target_pool, get_db_type(state, &request.target_connection_id).await?, definition).await?;
+            privileges(state, target_pool, get_db_type(state, &request.target_connection_id).await?, definition)
+                .await?;
             let dependencies =
                 dependency_chain(state, target_pool, request, definition, &HashMap::new(), false).await?;
             if dependencies.iter().any(|dependency| !dependency.available) {
@@ -673,7 +688,8 @@ mod tests {
     fn planned(name: &str, schema: &str, dependencies: &[(&str, &str)]) -> Planned {
         Planned {
             item: TransferSchemaObjectItem {
-                execution_phase: None, credential_required: None,
+                execution_phase: None,
+                credential_required: None,
                 object_type: if public(schema) {
                     TransferObjectKind::PublicSynonym
                 } else {

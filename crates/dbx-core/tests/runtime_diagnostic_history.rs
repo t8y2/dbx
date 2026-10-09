@@ -21,13 +21,20 @@ async fn diagnostic_evidence_survives_storage_reopen_without_sql_or_credentials(
         "execution_time_ms": 0, "success": true, "error": null,
         "source": "other", "activity_kind": "query", "operation": "runtime_diagnostic",
         "target": "0123456789abc", "details_json": evidence.to_string()
-    })).unwrap();
+    }))
+    .unwrap();
     storage.save_history_entry(&entry).await.unwrap();
     drop(storage);
     let reopened = test_storage::open(&path).await.unwrap();
-    let page = reopened.search_history_entries(HistorySearchRequest { source: Some("other".into()), limit: 100, ..Default::default() }).await.unwrap();
+    let page = reopened
+        .search_history_entries(HistorySearchRequest { source: Some("other".into()), limit: 100, ..Default::default() })
+        .await
+        .unwrap();
     assert_eq!(page.entries.len(), 1);
     assert_eq!(page.entries[0].sql, "");
     assert_eq!(page.entries[0].operation, "runtime_diagnostic");
-    assert_eq!(serde_json::from_str::<serde_json::Value>(page.entries[0].details_json.as_ref().unwrap()).unwrap(), evidence);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(page.entries[0].details_json.as_ref().unwrap()).unwrap(),
+        evidence
+    );
 }

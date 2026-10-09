@@ -438,10 +438,19 @@ pub async fn get_oracle_type_details(
         Some(dbx_core::db::ObjectSourceKind::TypeBody) => "TYPE_BODY",
         _ => return Err(AppError::from("Expected TYPE or TYPE_BODY".to_string())),
     };
-    let result = run_cancellable(&state, q.execution_id, dbx_core::schema::oracle_types::get_oracle_type_details_core(
-        &state.app, &q.connection_id, q.database.as_deref().unwrap_or(""),
-        q.schema.as_deref().unwrap_or(""), q.table.as_deref().unwrap_or(""), kind,
-    )).await?;
+    let result = run_cancellable(
+        &state,
+        q.execution_id,
+        dbx_core::schema::oracle_types::get_oracle_type_details_core(
+            &state.app,
+            &q.connection_id,
+            q.database.as_deref().unwrap_or(""),
+            q.schema.as_deref().unwrap_or(""),
+            q.table.as_deref().unwrap_or(""),
+            kind,
+        ),
+    )
+    .await?;
     Ok(Json(result))
 }
 

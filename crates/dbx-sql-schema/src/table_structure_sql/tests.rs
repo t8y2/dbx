@@ -75,19 +75,38 @@ fn structure_change_options(
 #[test]
 fn oracle_numeric_parameters_survive_create_add_and_alter() {
     for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
-        for data_type in ["FLOAT(1)", "FLOAT(24)", "FLOAT(126)", "NUMBER(*,0)", "NUMBER(*,-2)", "NUMBER(10,-2)", "FLOAT(127)"] {
+        for data_type in
+            ["FLOAT(1)", "FLOAT(24)", "FLOAT(126)", "NUMBER(*,0)", "NUMBER(*,-2)", "NUMBER(10,-2)", "FLOAT(127)"]
+        {
             let mut new_column = column("VALUE");
             new_column.id = "new:value".to_string();
             new_column.data_type = data_type.to_string();
             let options = structure_change_options(database_type.clone(), Some("APP"), "NUMBERS", vec![new_column]);
             let created = build_create_table_sql(options.clone());
-            assert!(created.statements.iter().any(|sql| sql.contains(&format!("\"VALUE\" {data_type}"))), "{:?}", created.statements);
+            assert!(
+                created.statements.iter().any(|sql| sql.contains(&format!("\"VALUE\" {data_type}"))),
+                "{:?}",
+                created.statements
+            );
             let added = build_table_structure_change_sql(options);
-            assert!(added.statements.iter().any(|sql| sql.contains(&format!("\"VALUE\" {data_type}"))), "{:?}", added.statements);
+            assert!(
+                added.statements.iter().any(|sql| sql.contains(&format!("\"VALUE\" {data_type}"))),
+                "{:?}",
+                added.statements
+            );
             let mut existing = existing_pk_column("VALUE", "NUMBER", false, false);
             existing.data_type = data_type.to_string();
-            let altered = build_table_structure_change_sql(structure_change_options(database_type.clone(), Some("APP"), "NUMBERS", vec![existing]));
-            assert!(altered.statements.iter().any(|sql| sql.contains(&format!("\"VALUE\" {data_type}"))), "{:?}", altered.statements);
+            let altered = build_table_structure_change_sql(structure_change_options(
+                database_type.clone(),
+                Some("APP"),
+                "NUMBERS",
+                vec![existing],
+            ));
+            assert!(
+                altered.statements.iter().any(|sql| sql.contains(&format!("\"VALUE\" {data_type}"))),
+                "{:?}",
+                altered.statements
+            );
         }
     }
 }

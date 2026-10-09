@@ -163,23 +163,20 @@ impl SchedulerService {
     // Resident actions
     // ------------------------------------------------------------------
 
-    /// Stops a resident session through its executor, then finalizes the run.
+    /// Requests a resident session stop. The session lives in the worker's
+    /// plugin backend (the UI owns no lifecycle, ADR §1): flip the row to
+    /// `stopping` and wake the engine — its reconcile delivers the stop
+    /// through the worker's executor and settles the row. If no worker runs,
+    /// the session's plugin backend died with it and the next worker start
+    /// settles the row the same way.
     pub async fn resident_stop(&self, session_id: &str) -> Result<(), TaskError> {
         let session = self.find_session(session_id).await?;
-        if let Some(executor) = self.registry.resident_executor(&session.plugin_id) {
-            executor.stop(&session).await?;
+        if !session.state.is_active() {
+            return Ok(());
         }
-        self.store.update_session_state(session_id.to_owned(), ResidentState::Stopped, session.restart_count).await?;
-        self.store
-            .finish_run(
-                session.run_id.clone(),
-                TaskRunStatus::Cancelled,
-                None,
-                Some("cancelled".into()),
-                Some("Resident session stopped".into()),
-            )
-            .await?;
+        self.store.update_session_state(session_id.to_owned(), ResidentState::Stopping, session.restart_count).await?;
         self.audit(&session.task_id, TaskAuditAction::ResidentStop, json!({"sessionId": session_id})).await;
+        self.store.touch_wake();
         Ok(())
     }
 
@@ -187,10 +184,10 @@ impl SchedulerService {
     /// the restart budget of the session (attempt = restart_count + 1).
     pub async fn resident_restart(&self, session_id: &str) -> Result<TaskRun, TaskError> {
         let session = self.find_session(session_id).await?;
-        if let Some(executor) = self.registry.resident_executor(&session.plugin_id) {
-            let _ = executor.stop(&session).await;
-        }
-        self.store.update_session_state(session_id.to_owned(), ResidentState::Stopped, session.restart_count).await?;
+        // Same delivery split as `resident_stop`: hand the old session's stop
+        // to the worker's reconcile (`stopping` + wake); the restart run
+        // below starts the fresh plugin session.
+        self.store.update_session_state(session_id.to_owned(), ResidentState::Stopping, session.restart_count).await?;
         self.store
             .finish_run(
                 session.run_id.clone(),
@@ -216,7 +213,8 @@ impl SchedulerService {
         )
         .await;
         // Same latency contract as a manual run: the restart run must be
-        // claimed now, not on the worker's next poll.
+        // claimed now, not on the worker's next poll. The wake also delivers
+        // the old session's stop (see above).
         self.store.touch_wake();
         Ok(run)
     }

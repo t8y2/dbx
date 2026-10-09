@@ -133,15 +133,21 @@ async fn service_resident_stop_and_restart() {
     assert_eq!(sessions.len(), 1);
     let session_id = sessions[0].id.clone();
 
-    // Manual stop: executor.stop called, session stopped, run cancelled.
+    // Manual stop: the service flips the row to `stopping` and wakes the
+    // engine; reconcile delivers executor.stop and settles the row.
     service.resident_stop(&session_id).await.unwrap();
-    assert_eq!(resident.stops(), vec![sessions[0].session_id.clone()]);
     let sessions = store.list_sessions().await.unwrap();
-    assert_eq!(sessions[0].state, ResidentState::Stopped);
+    assert_eq!(sessions[0].state, ResidentState::Stopping, "stop is delivered by the engine, not the service");
+    drive_until(&engine, || async {
+        store.list_sessions().await.map(|s| s.iter().any(|s| s.state == ResidentState::Stopped)).unwrap_or(false)
+    })
+    .await;
+    assert_eq!(resident.stops(), vec![sessions[0].session_id.clone()]);
     let stopped_run = store.get_run(run.id).await.unwrap();
     assert_eq!(stopped_run.status, TaskRunStatus::Cancelled);
 
-    // Manual restart: schedules a restart run (fresh plugin session).
+    // Manual restart: hands the old session's stop to reconcile and
+    // schedules a restart run (fresh plugin session).
     let restart = service.resident_restart(&session_id).await.unwrap();
     assert_eq!(restart.trigger, TaskRunTrigger::Restart);
     // The restart's session must come up before it can be stopped again.

@@ -151,7 +151,13 @@ impl TaskExecutorRegistry {
     }
 
     pub fn resident_executor(&self, provider_id: &str) -> Option<Arc<dyn ResidentExecutor>> {
-        self.resident_executors.read().expect("executor registry poisoned").get(provider_id).cloned()
+        let guard = self.resident_executors.read().expect("executor registry poisoned");
+        if let Some(executor) = guard.get(provider_id).cloned() {
+            return Some(executor);
+        }
+        // Same "plugin" fallback as `task_executor`: one adapter serves every
+        // plugin task provider over the frozen task/start|stop|status RPC.
+        guard.get("plugin").cloned()
     }
 
     pub fn provider_ids(&self) -> Vec<String> {
@@ -167,5 +173,45 @@ impl TaskExecutorRegistry {
 impl std::fmt::Debug for TaskExecutorRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TaskExecutorRegistry").field("providers", &self.provider_ids()).finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The "plugin" key routes unknown provider ids for both registries —
+    /// that is how the shared plugin adapters serve every
+    /// `io.dbx.*.tasks` provider without per-plugin registration.
+    #[test]
+    fn the_plugin_key_falls_back_for_unknown_provider_ids() {
+        struct Stub;
+        #[async_trait::async_trait]
+        impl TaskExecutor for Stub {
+            async fn validate(&self, _task: &TaskDefinition) -> Result<(), TaskError> {
+                Ok(())
+            }
+            async fn execute(&self, _context: TaskExecutionContext) -> Result<TaskExecutionResult, TaskError> {
+                Ok(TaskExecutionResult::default())
+            }
+        }
+        #[async_trait::async_trait]
+        impl ResidentExecutor for Stub {
+            async fn start(&self, _context: TaskExecutionContext) -> Result<ResidentSession, TaskError> {
+                Err(TaskError::invalid_config("unused"))
+            }
+            async fn stop(&self, _session: &ResidentSession) -> Result<(), TaskError> {
+                Ok(())
+            }
+            async fn status(&self, _session: &ResidentSession) -> Result<ResidentStatus, TaskError> {
+                Err(TaskError::invalid_config("unused"))
+            }
+        }
+
+        let registry = TaskExecutorRegistry::new();
+        let resident: Arc<dyn ResidentExecutor> = Arc::new(Stub);
+        registry.register_resident("plugin", resident);
+        assert!(registry.resident_executor("io.dbx.ssh.tasks").is_some(), "fallback serves plugin providers");
+        assert!(registry.resident_executor("dbx.database-backup").is_some(), "fallback answers unknown ids too");
     }
 }

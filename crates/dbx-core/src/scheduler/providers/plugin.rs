@@ -16,13 +16,76 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
+use super::super::resident::{ResidentSession, ResidentStatus};
 use super::super::{
     artifacts::TaskArtifact,
-    executor::{TaskExecutionContext, TaskExecutionResult, TaskExecutor},
+    executor::{ResidentExecutor, TaskExecutionContext, TaskExecutionResult, TaskExecutor},
     models::{TaskDefinition, TaskProviderType, TaskTarget},
     TaskError,
 };
 use crate::connection::{AppState, PoolKind};
+
+/// The owning plugin id of a namespaced task provider id
+/// (`io.dbx.ssh.tasks` → `io.dbx.ssh`).
+fn provider_plugin_id(provider_id: &str) -> String {
+    match provider_id.rsplit_once('.') {
+        // `io.dbx.ssh.tasks` → `io.dbx.ssh`; a label-less id is its own plugin.
+        Some((plugin, last)) if !plugin.is_empty() && !last.is_empty() => plugin.to_owned(),
+        _ => provider_id.to_owned(),
+    }
+}
+
+/// Splits a task into its owning plugin id and provider id. The explicit
+/// `target.pluginId` wins; otherwise the provider id's first two labels name
+/// the plugin (`io.dbx.ssh.tasks` → `io.dbx.ssh`).
+fn split_task_provider(task: &TaskDefinition) -> Result<(String, String), TaskError> {
+    let plugin_id = task.target.plugin_id.clone().unwrap_or_else(|| provider_plugin_id(&task.provider_id));
+    if plugin_id.trim().is_empty() || plugin_id.ends_with('.') {
+        return Err(TaskError::provider_not_found(format!("Task {} does not name its plugin", task.id)));
+    }
+    Ok((plugin_id, task.provider_id.clone()))
+}
+
+/// Opens (or reuses) the plugin connection and returns its lifecycle params
+/// as the request's `runtime` (secrets stay in this process). Shared by the
+/// run and resident adapters. A stored connection opens server-side (config
+/// hydrated); an id the host does not store is a plugin-reserved alias
+/// (e.g. the files tasks' `local` plain-path side): forwarded as-is with no
+/// lifecycle params — the plugin's binding either synthesizes the connection
+/// or rejects the id, and no host state is consulted or leaked either way.
+async fn ensure_plugin_connection(
+    state: &Arc<AppState>,
+    connection_id: Option<&str>,
+) -> Result<Option<serde_json::Value>, TaskError> {
+    let Some(connection_id) = connection_id.filter(|id| !id.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let stored = state
+        .storage
+        .load_connections()
+        .await
+        .map_err(|error| TaskError::connection_missing(format!("Cannot read stored connections: {error}")))?
+        .iter()
+        .any(|config| config.id == connection_id);
+    if !stored {
+        return Ok(None);
+    }
+    state
+        .get_or_create_pool(connection_id, None)
+        .await
+        .map_err(|error| TaskError::connection_missing(format!("Cannot open connection {connection_id}: {error}")))?;
+    let lifecycle = state
+        .with_connection_pools(|pools| {
+            pools.values().find_map(|pool| match pool {
+                PoolKind::PluginConnection(handle) if handle.connection_id == connection_id && handle.is_running() => {
+                    Some(handle.lifecycle_params().clone())
+                }
+                _ => None,
+            })
+        })
+        .await;
+    Ok(lifecycle)
+}
 
 /// Resolves the provider-local trigger id a plugin RPC expects.
 ///
@@ -165,6 +228,11 @@ fn config_connection_keys(
 /// forever.
 const DEFAULT_TASK_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
+/// Deadline for the `task/start` phase of a resident session when the task
+/// declares no timeout (ADR §2.5: the timeout bounds only the start phase;
+/// the session itself is long-lived).
+const RESIDENT_START_DEFAULT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
 pub struct PluginTaskExecutor {
     state: Arc<AppState>,
 }
@@ -175,61 +243,11 @@ impl PluginTaskExecutor {
     }
 
     fn split_provider(task: &TaskDefinition) -> Result<(String, String), TaskError> {
-        let plugin_id = task
-            .target
-            .plugin_id
-            .clone()
-            .or_else(|| {
-                task.provider_id
-                    .split('.')
-                    .next()
-                    .map(|first| format!("{first}.{}", task.provider_id.split('.').nth(1).unwrap_or_default()))
-            })
-            .unwrap_or_default();
-        if plugin_id.is_empty() {
-            return Err(TaskError::provider_not_found(format!("Task {} does not name its plugin", task.id)));
-        }
-        Ok((plugin_id, task.provider_id.clone()))
+        split_task_provider(task)
     }
 
     async fn ensure_connection(&self, connection_id: Option<&str>) -> Result<Option<serde_json::Value>, TaskError> {
-        let Some(connection_id) = connection_id.filter(|id| !id.trim().is_empty()) else {
-            return Ok(None);
-        };
-        // A stored connection opens server-side (config hydrated, secrets stay
-        // in this process). An id the host does not store is a plugin-reserved
-        // alias (e.g. the files tasks' `local` plain-path side): forwarded
-        // as-is with no lifecycle params — the plugin's binding either
-        // synthesizes the connection or rejects the id, and no host state is
-        // consulted or leaked either way.
-        let stored = self
-            .state
-            .storage
-            .load_connections()
-            .await
-            .map_err(|error| TaskError::connection_missing(format!("Cannot read stored connections: {error}")))?
-            .iter()
-            .any(|config| config.id == connection_id);
-        if !stored {
-            return Ok(None);
-        }
-        self.state.get_or_create_pool(connection_id, None).await.map_err(|error| {
-            TaskError::connection_missing(format!("Cannot open connection {connection_id}: {error}"))
-        })?;
-        let lifecycle = self
-            .state
-            .with_connection_pools(|pools| {
-                pools.values().find_map(|pool| match pool {
-                    PoolKind::PluginConnection(handle)
-                        if handle.connection_id == connection_id && handle.is_running() =>
-                    {
-                        Some(handle.lifecycle_params().clone())
-                    }
-                    _ => None,
-                })
-            })
-            .await;
-        Ok(lifecycle)
+        ensure_plugin_connection(&self.state, connection_id).await
     }
 
     fn run_request(
@@ -447,9 +465,144 @@ impl TaskExecutor for PluginTaskExecutor {
     }
 }
 
+/// Resident-mode adapter over the frozen `task/start|stop|status` RPC
+/// (ADR §2.7, §6.2). Like [`PluginTaskExecutor`], one instance serves every
+/// plugin task provider — no per-plugin registration exists. Resident
+/// sessions live in the plugin backend instance owned by the process that
+/// started them, so this executor is registered only in the worker
+/// (supervision and delivery are the worker's job, ADR §3.4/§405); the UI
+/// requests stops by flipping the session row to `stopping` and waking the
+/// engine, whose reconcile lands here.
+pub struct PluginResidentExecutor {
+    state: Arc<AppState>,
+}
+
+impl PluginResidentExecutor {
+    pub fn new(state: Arc<AppState>) -> Self {
+        Self { state }
+    }
+}
+
+/// `PluginTaskSessionState` and `ResidentState` are the same frozen state
+/// machine (ADR §2.7) spelled in two crates; this is the whole mapping.
+fn map_session_state(
+    state: dbx_plugin_runtime::plugins::PluginTaskSessionState,
+) -> super::super::resident::ResidentState {
+    use dbx_plugin_runtime::plugins::PluginTaskSessionState as Plugin;
+    match state {
+        Plugin::Stopped => super::super::resident::ResidentState::Stopped,
+        Plugin::Starting => super::super::resident::ResidentState::Starting,
+        Plugin::Running => super::super::resident::ResidentState::Running,
+        Plugin::Stopping => super::super::resident::ResidentState::Stopping,
+        Plugin::Crashed => super::super::resident::ResidentState::Crashed,
+        Plugin::Degraded => super::super::resident::ResidentState::Degraded,
+    }
+}
+
+#[async_trait]
+impl ResidentExecutor for PluginResidentExecutor {
+    async fn start(&self, context: TaskExecutionContext) -> Result<ResidentSession, TaskError> {
+        let task = context.task.clone();
+        if task.provider_type != TaskProviderType::Plugin {
+            return Err(TaskError::invalid_config(format!(
+                "Plugin resident executor cannot run {:?} provider {}",
+                task.provider_type, task.provider_id
+            )));
+        }
+        let (plugin_id, provider_id) = split_task_provider(&task)?;
+        // `task/start` enforces the resident capability and trigger mode;
+        // the connection rides the same primary-only rule as run mode
+        // (additional ids are a run-batch concept).
+        let runtime = ensure_plugin_connection(&self.state, task.target.connection_id.as_deref()).await?;
+        let config =
+            serde_json::to_value(&task.config).map_err(|error| TaskError::invalid_config(error.to_string()))?;
+        let request = dbx_plugin_runtime::plugins::PluginTaskRunRequest {
+            task: dbx_plugin_runtime::plugins::PluginTaskRunTask {
+                task_id: task.id.clone(),
+                run_id: context.run.id.clone(),
+                trigger_id: local_trigger_id(&task),
+                connection_id: task.target.connection_id.clone(),
+                config_version: task.config_version.max(1) as u32,
+                config,
+            },
+            run: dbx_plugin_runtime::plugins::PluginTaskRunRef {
+                run_id: context.run.id.clone(),
+                attempt: context.run.attempt.max(1) as u64,
+            },
+            connection: None,
+            runtime,
+        };
+        // ADR §2.5: the timeout bounds only the start phase. The engine
+        // additionally bounds it with its own select + cancellation.
+        let timeout = task
+            .execution
+            .timeout_seconds
+            .filter(|seconds| *seconds > 0)
+            .map(Duration::from_secs)
+            .unwrap_or(RESIDENT_START_DEFAULT_TIMEOUT);
+        let started = self
+            .state
+            .plugin_host
+            .start_task(&plugin_id, &provider_id, request, Some(timeout))
+            .await
+            .map_err(|error| TaskError::invalid_config(error))?;
+        Ok(ResidentSession {
+            id: String::new(),
+            task_id: task.id,
+            run_id: context.run.id,
+            plugin_id: provider_id,
+            session_id: started.session_id,
+            state: map_session_state(started.state),
+            heartbeat_at: None,
+            restart_count: 0,
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+    }
+
+    async fn stop(&self, session: &ResidentSession) -> Result<(), TaskError> {
+        let plugin_id = provider_plugin_id(&session.plugin_id);
+        let request = dbx_plugin_runtime::plugins::PluginTaskStopRequest {
+            task_id: session.task_id.clone(),
+            run_id: None,
+            session_id: Some(session.session_id.clone()),
+            reason: Some("host requested stop".into()),
+        };
+        self.state
+            .plugin_host
+            .stop_task(&plugin_id, &session.plugin_id, request)
+            .await
+            .map_err(|error| TaskError::unavailable(format!("Cannot stop resident session: {error}")))?;
+        Ok(())
+    }
+
+    async fn status(&self, session: &ResidentSession) -> Result<ResidentStatus, TaskError> {
+        let plugin_id = provider_plugin_id(&session.plugin_id);
+        let request = dbx_plugin_runtime::plugins::PluginTaskStatusRequest {
+            task_id: session.task_id.clone(),
+            run_id: None,
+            session_id: Some(session.session_id.clone()),
+        };
+        let result = self
+            .state
+            .plugin_host
+            .task_status(&plugin_id, &session.plugin_id, request)
+            .await
+            .map_err(|error| TaskError::unavailable(format!("Cannot probe resident session: {error}")))?;
+        Ok(ResidentStatus {
+            state: map_session_state(result.state),
+            heartbeat_at: result.heartbeat_at,
+            restart_count: u32::try_from(result.restart_count).unwrap_or(u32::MAX),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{combine_results, config_connection_keys, dispatch_targets, local_trigger_id, PluginTaskExecutor};
+    use super::{
+        combine_results, config_connection_keys, dispatch_targets, local_trigger_id, map_session_state,
+        provider_plugin_id, PluginTaskExecutor,
+    };
     use crate::scheduler::models::{TaskDefinition, TaskTarget};
     use dbx_plugin_runtime::plugins::{PluginTaskExecuteResult, PluginTaskProviderContribution};
     use std::sync::Arc;
@@ -507,6 +660,28 @@ mod tests {
     fn keeps_an_already_local_trigger_id() {
         let task = task_with_config("io.dbx.ssh.tasks", serde_json::json!({ "__triggerId": "execute" }));
         assert_eq!(local_trigger_id(&task), "execute");
+    }
+
+    #[test]
+    fn provider_ids_derive_their_owning_plugin() {
+        assert_eq!(provider_plugin_id("io.dbx.ssh.tasks"), "io.dbx.ssh");
+        assert_eq!(provider_plugin_id("io.dbx.files.tasks"), "io.dbx.files");
+        assert_eq!(provider_plugin_id("bare"), "bare");
+    }
+
+    #[test]
+    fn session_states_map_one_to_one() {
+        use dbx_plugin_runtime::plugins::PluginTaskSessionState as Plugin;
+        for (plugin, resident) in [
+            (Plugin::Stopped, super::super::super::resident::ResidentState::Stopped),
+            (Plugin::Starting, super::super::super::resident::ResidentState::Starting),
+            (Plugin::Running, super::super::super::resident::ResidentState::Running),
+            (Plugin::Stopping, super::super::super::resident::ResidentState::Stopping),
+            (Plugin::Crashed, super::super::super::resident::ResidentState::Crashed),
+            (Plugin::Degraded, super::super::super::resident::ResidentState::Degraded),
+        ] {
+            assert_eq!(map_session_state(plugin), resident);
+        }
     }
 
     #[test]

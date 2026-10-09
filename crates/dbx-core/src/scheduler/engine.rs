@@ -637,12 +637,40 @@ impl SchedulerEngine {
         for session in sessions {
             match session.state {
                 ResidentState::Crashed => self.clone().handle_resident_crash(session).await,
-                ResidentState::Starting | ResidentState::Running | ResidentState::Stopping => {
+                // `stopping` is a host-requested stop (the UI owns no plugin
+                // backend): deliver the stop here and settle the row.
+                ResidentState::Stopping => self.stop_and_settle_resident(session).await,
+                ResidentState::Starting | ResidentState::Running => {
                     self.probe_resident(session, now).await;
                 }
                 ResidentState::Stopped | ResidentState::Degraded => {}
             }
         }
+    }
+
+    /// Delivers a host-requested resident stop: the service flipped the
+    /// session row to `stopping` and woke the engine; the worker — which owns
+    /// the plugin session — stops it here and settles the row. Idempotent: a
+    /// session whose plugin side already died just settles (stop errors are
+    /// tolerated).
+    async fn stop_and_settle_resident(self: &Arc<Self>, session: ResidentSession) {
+        if let Some(executor) = self.registry.resident_executor(&session.plugin_id) {
+            if let Err(error) = executor.stop(&session).await {
+                log::warn!("[scheduler] resident stop delivery failed for {}: {error}", session.session_id);
+            }
+        }
+        let _ =
+            self.store.update_session_state(session.id.clone(), ResidentState::Stopped, session.restart_count).await;
+        let _ = self
+            .store
+            .finish_run(
+                session.run_id.clone(),
+                TaskRunStatus::Cancelled,
+                None,
+                Some("cancelled".into()),
+                Some("Resident session stopped".into()),
+            )
+            .await;
     }
 
     async fn probe_resident(self: &Arc<Self>, session: ResidentSession, now: chrono::DateTime<Utc>) {

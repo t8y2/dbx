@@ -551,6 +551,12 @@ pub fn run_if_requested() -> bool {
                 "plugin",
                 Arc::new(dbx_core::scheduler::providers::PluginTaskExecutor::new(state.clone())),
             );
+            // Resident sessions are worker-owned (ADR §3.4): start/probe/stop
+            // all ride the frozen task/start|stop|status RPC here.
+            registry.register_resident(
+                "plugin",
+                Arc::new(dbx_core::scheduler::providers::PluginResidentExecutor::new(state.clone())),
+            );
             registry.register_run(
                 dbx_core::scheduler::providers::CLOUD_SYNC_PROVIDER_ID,
                 Arc::new(dbx_core::scheduler::providers::CloudSyncTaskExecutor::new(state.clone())),

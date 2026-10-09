@@ -6911,8 +6911,6 @@ export default withEnglishFallback({
     sqlFormatterLayoutStyle: "Düzen biçemi",
     sqlFormatterLayoutStyleDbx: "DBX (varsayılan)",
     sqlFormatterLayoutStyleClassic: "Klasik",
-    sqlFormatterApplyClassicPreset: "Klasik düzen parametrelerini uygula",
-    sqlFormatterClassicPresetHint: "İfade genişliğini 50, FROM yan tümcesi düzenini yeni satır olarak ayarlar.",
     sqlFormatterLogicalOperatorNewline: "Mantıksal işleçte satır sonu",
     sqlFormatterLogicalBefore: "İşleçten önce",
     sqlFormatterLogicalAfter: "İşleçten sonra",

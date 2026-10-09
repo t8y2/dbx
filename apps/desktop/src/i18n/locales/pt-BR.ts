@@ -7087,8 +7087,6 @@ export default withEnglishFallback({
     sqlFormatterLayoutStyle: "Estilo de layout",
     sqlFormatterLayoutStyleDbx: "DBX (padrão)",
     sqlFormatterLayoutStyleClassic: "Clássico",
-    sqlFormatterApplyClassicPreset: "Aplicar parâmetros de layout clássico",
-    sqlFormatterClassicPresetHint: "Define a largura da expressão como 50 e o layout da cláusula FROM em nova linha.",
     sqlFormatterLogicalOperatorNewline: "Quebra de linha no operador lógico",
     sqlFormatterLogicalBefore: "Antes do operador",
     sqlFormatterLogicalAfter: "Depois do operador",

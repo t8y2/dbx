@@ -7030,8 +7030,6 @@ export default withEnglishFallback({
     sqlFormatterLayoutStyle: "Düzən üslubu",
     sqlFormatterLayoutStyleDbx: "DBX (standart)",
     sqlFormatterLayoutStyleClassic: "Klassik",
-    sqlFormatterApplyClassicPreset: "Klassik düzən parametrlərini tətbiq et",
-    sqlFormatterClassicPresetHint: "İfadə genişliyini 50, FROM bəndinin düzənini yeni sətir olaraq təyin edir.",
     sqlFormatterLogicalOperatorNewline: "Məntiqi operator üçün yeni sətir",
     sqlFormatterLogicalBefore: "Operatordan əvvəl",
     sqlFormatterLogicalAfter: "Operatordan sonra",

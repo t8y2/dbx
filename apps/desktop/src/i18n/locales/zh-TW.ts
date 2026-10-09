@@ -6441,8 +6441,6 @@ export default withEnglishFallback({
     sqlFormatterLayoutStyle: "排版風格",
     sqlFormatterLayoutStyleDbx: "DBX（預設）",
     sqlFormatterLayoutStyleClassic: "經典",
-    sqlFormatterApplyClassicPreset: "套用經典排版參數",
-    sqlFormatterClassicPresetHint: "會設定運算式寬度為 50、FROM 子句版面為換行。",
     sqlFormatterLogicalOperatorNewline: "邏輯運算子換行",
     sqlFormatterLogicalBefore: "運算子前換行",
     sqlFormatterLogicalAfter: "運算子後換行",

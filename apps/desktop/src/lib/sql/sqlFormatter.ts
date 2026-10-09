@@ -1,4 +1,4 @@
-import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, sqlFormatterOptions, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
+import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, sqlFormatterOptions, type SqlFormatterIndentStyle, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
 import { formatSqlLayout, type SqlLayoutOptions } from "@/lib/sql/layout";
 import { looksLikeXml } from "@/lib/sql/autoFormat";
 import { compressCypherText, formatCypherText } from "@/lib/sql/cypherFormatter";
@@ -670,7 +670,7 @@ function normalizeLikeOperatorCase(sql: string, settings: SqlFormatterSettings, 
   return restoreSpans(normalized, spans);
 }
 
-function keepFromClauseAndFirstSourceOnSameLine(sql: string): string {
+function keepFromClauseAndFirstSourceOnSameLine(sql: string, indentStyle: SqlFormatterIndentStyle): string {
   const lines = sql.split("\n");
   for (let index = 0; index < lines.length - 1; index += 1) {
     const clauseMatch = lines[index].match(/^(\s*)FROM\s*$/i);
@@ -686,7 +686,13 @@ function keepFromClauseAndFirstSourceOnSameLine(sql: string): string {
 
     const clauseIndent = clauseMatch[1];
     const sourceIndent = sourceMatch[1];
-    const separator = sourceIndent.startsWith(clauseIndent) ? sourceIndent.slice(clauseIndent.length) : " ";
+    // The source line's indent is the gap to reuse only for the tabular styles:
+    // there it is the column sql-formatter aligned every clause to, and
+    // collapsing it would destroy that alignment (`FROM      t`). Under the
+    // standard indent the same indent is just the clause body's step, so reusing
+    // it doubles the gap (`FROM  t`) — the upstream one-line form is a single
+    // space, and that is what merging is supposed to produce.
+    const separator = indentStyle === "standard" ? " " : sourceIndent.startsWith(clauseIndent) ? sourceIndent.slice(clauseIndent.length) : " ";
     lines[index] = `${lines[index]}${separator || " "}${source}`;
     lines.splice(index + 1, 1);
     index -= 1;
@@ -759,7 +765,7 @@ function formatLeadingCommas(sql: string, dialect: SqlFormatDialect = "generic")
 function applySqlFormatterLayout(sql: string, settings: SqlFormatterSettings, dialect: SqlFormatDialect): string {
   let formatted = normalizeLikeOperatorCase(sql, settings, dialect);
   if (settings.logicalOperatorNewline === "none") formatted = keepLogicalOperatorsOnSameLine(formatted, dialect);
-  if (settings.fromClauseLayout === "sameLine") formatted = keepFromClauseAndFirstSourceOnSameLine(formatted);
+  if (settings.fromClauseLayout === "sameLine") formatted = keepFromClauseAndFirstSourceOnSameLine(formatted, settings.indentStyle);
   if (settings.commaPosition === "before") formatted = formatLeadingCommas(formatted, dialect);
   return formatted;
 }

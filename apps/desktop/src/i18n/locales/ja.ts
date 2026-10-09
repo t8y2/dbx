@@ -7116,8 +7116,6 @@ export default withEnglishFallback({
     sqlFormatterLayoutStyle: "レイアウトスタイル",
     sqlFormatterLayoutStyleDbx: "DBX（デフォルト）",
     sqlFormatterLayoutStyleClassic: "クラシック",
-    sqlFormatterApplyClassicPreset: "クラシックのレイアウトパラメータを適用",
-    sqlFormatterClassicPresetHint: "式の幅を 50、FROM 句のレイアウトを改行に設定します。",
     sqlFormatterLogicalOperatorNewline: "論理演算子の改行",
     sqlFormatterLogicalBefore: "演算子の前",
     sqlFormatterLogicalAfter: "演算子の後",

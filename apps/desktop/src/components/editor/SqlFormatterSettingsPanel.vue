@@ -212,17 +212,6 @@ function onLayoutStyle(value: any) {
   if (value === "dbx" || value === "classic") updateOption("layoutStyle", value);
 }
 
-/**
- * Writes the two layout parameters v0.6.16 changed, so the classic engine can
- * look like v0.6.15 again. The layout engine itself is chosen in the Layout
- * style select, which this action deliberately does not touch, and it must not
- * rewrite unrelated options such as `commaPosition`, which the user may have set
- * on purpose.
- */
-function onApplyClassicPreset() {
-  updateSettings({ ...settings.value, expressionWidth: 50, fromClauseLayout: "newLine" });
-}
-
 function onLogicalOperatorNewline(value: any) {
   if (value === "before" || value === "after" || value === "none") updateOption("logicalOperatorNewline", value);
 }
@@ -600,7 +589,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div class="grid gap-4 md:grid-cols-[minmax(0,1fr)_10rem_12rem]">
+        <div class="grid gap-4 md:grid-cols-4">
           <div class="space-y-2">
             <Label>{{ t("settings.sqlFormatterIndent") }}</Label>
             <div class="grid grid-cols-2 gap-2">
@@ -640,9 +629,7 @@ onBeforeUnmount(() => {
               </SelectContent>
             </Select>
           </div>
-        </div>
 
-        <div class="grid gap-4 md:grid-cols-3">
           <div class="space-y-2">
             <Label>{{ t("settings.sqlFormatterLayoutStyle") }}</Label>
             <Select :model-value="settings.layoutStyle" @update:model-value="onLayoutStyle">
@@ -655,15 +642,6 @@ onBeforeUnmount(() => {
                 </SelectItem>
               </SelectContent>
             </Select>
-          </div>
-
-          <div class="space-y-2 md:col-span-2">
-            <Button type="button" variant="outline" @click="onApplyClassicPreset">
-              {{ t("settings.sqlFormatterApplyClassicPreset") }}
-            </Button>
-            <p class="text-xs text-muted-foreground">
-              {{ t("settings.sqlFormatterClassicPresetHint") }}
-            </p>
           </div>
         </div>
 

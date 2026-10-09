@@ -10,7 +10,7 @@ import { readFileSync } from "node:fs";
  */
 const LOCALE_FILES = ["az", "en", "es", "id", "it", "ja", "ko", "pt-BR", "ru", "tr", "zh-CN", "zh-TW"];
 
-const LAYOUT_STYLE_KEYS = ["sqlFormatterLayoutStyle", "sqlFormatterLayoutStyleDbx", "sqlFormatterLayoutStyleClassic", "sqlFormatterApplyClassicPreset", "sqlFormatterClassicPresetHint"];
+const LAYOUT_STYLE_KEYS = ["sqlFormatterLayoutStyle", "sqlFormatterLayoutStyleDbx", "sqlFormatterLayoutStyleClassic"];
 
 function localeSource(name: string): string {
   return readFileSync(new URL(`../locales/${name}.ts`, import.meta.url), "utf8");

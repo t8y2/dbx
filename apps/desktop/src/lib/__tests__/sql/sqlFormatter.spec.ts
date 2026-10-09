@@ -790,4 +790,14 @@ describe("classic layout style (v0.6.15 reproduction)", () => {
     // A settings object saved before `layoutStyle` existed normalizes to dbx.
     expect(await formatSqlText(sql, "mysql", {} as Partial<SqlFormatterSettings>)).toBe(collapsed);
   });
+
+  it("merges a classic FROM clause onto its source with a single space under the standard indent", async () => {
+    // `sameLine` (the default) merges the clause line with the source line, and
+    // the merge must not reuse the source's indent as the gap: that is the
+    // tabular styles' alignment column, but under the standard indent it would
+    // read `FROM  t`. Selecting classic is now the only path to this merge, so
+    // the classic style is what pins its appearance.
+    expect(await formatSqlText("select * from t", "mysql", classic)).toBe(lines("SELECT", "  *", "FROM", "  t"));
+    expect(await formatSqlText("select * from t", "mysql", { ...classic, fromClauseLayout: "sameLine" })).toBe(lines("SELECT", "  *", "FROM t"));
+  });
 });

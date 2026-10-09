@@ -8329,8 +8329,6 @@ export default withEnglishFallback({
     sqlFormatterLayoutStyle: "Стиль разметки",
     sqlFormatterLayoutStyleDbx: "DBX (по умолчанию)",
     sqlFormatterLayoutStyleClassic: "Классический",
-    sqlFormatterApplyClassicPreset: "Применить классические параметры разметки",
-    sqlFormatterClassicPresetHint: "Устанавливает ширину выражения 50 и перенос предложения FROM на новую строку.",
     sqlFormatterLogicalOperatorNewline: "Перенос логических операторов",
     sqlFormatterLogicalBefore: "Перед оператором",
     sqlFormatterLogicalAfter: "После оператора",

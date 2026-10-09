@@ -7754,8 +7754,6 @@ export default withEnglishFallback({
     sqlFormatterLayoutStyle: "Gaya tata letak",
     sqlFormatterLayoutStyleDbx: "DBX (bawaan)",
     sqlFormatterLayoutStyleClassic: "Klasik",
-    sqlFormatterApplyClassicPreset: "Terapkan parameter tata letak klasik",
-    sqlFormatterClassicPresetHint: "Menyetel lebar ekspresi ke 50 dan tata letak klausa FROM ke baris baru.",
     sqlFormatterLogicalOperatorNewline: "Baris baru pada operator logika",
     sqlFormatterLogicalBefore: "Sebelum operator",
     sqlFormatterLogicalAfter: "Setelah operator",

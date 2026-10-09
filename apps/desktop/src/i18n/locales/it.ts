@@ -7086,8 +7086,6 @@ export default withEnglishFallback({
     sqlFormatterLayoutStyle: "Stile di impaginazione",
     sqlFormatterLayoutStyleDbx: "DBX (predefinito)",
     sqlFormatterLayoutStyleClassic: "Classico",
-    sqlFormatterApplyClassicPreset: "Applica i parametri di impaginazione classici",
-    sqlFormatterClassicPresetHint: "Imposta la larghezza delle espressioni a 50 e il layout della clausola FROM su una nuova riga.",
     sqlFormatterLogicalOperatorNewline: "Nuova riga operatore logico",
     sqlFormatterLogicalBefore: "Prima dell'operatore",
     sqlFormatterLogicalAfter: "Dopo l'operatore",

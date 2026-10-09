@@ -7308,8 +7308,6 @@ export default withEnglishFallback({
     sqlFormatterLayoutStyle: "Estilo de diseño",
     sqlFormatterLayoutStyleDbx: "DBX (predeterminado)",
     sqlFormatterLayoutStyleClassic: "Clásico",
-    sqlFormatterApplyClassicPreset: "Aplicar parámetros de diseño del modo clásico",
-    sqlFormatterClassicPresetHint: "Establece el ancho de expresión en 50 y el diseño de la cláusula FROM en una nueva línea.",
     sqlFormatterLogicalOperatorNewline: "Salto de línea en operador lógico",
     sqlFormatterLogicalBefore: "Antes del operador",
     sqlFormatterLogicalAfter: "Después del operador",

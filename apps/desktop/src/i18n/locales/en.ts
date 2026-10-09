@@ -8020,8 +8020,6 @@ export default {
     sqlFormatterLayoutStyle: "Layout style",
     sqlFormatterLayoutStyleDbx: "DBX (default)",
     sqlFormatterLayoutStyleClassic: "Classic",
-    sqlFormatterApplyClassicPreset: "Apply classic layout parameters",
-    sqlFormatterClassicPresetHint: "Sets expression width to 50 and FROM clause layout to a new line.",
     sqlFormatterLogicalOperatorNewline: "Logical operator newline",
     sqlFormatterLogicalBefore: "Before operator",
     sqlFormatterLogicalAfter: "After operator",

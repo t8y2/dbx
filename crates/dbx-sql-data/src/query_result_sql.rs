@@ -2046,6 +2046,12 @@ fn rownum_wrapper_projection_is_safe(statement: &str) -> bool {
                         }
                         _ => return select.projection.len() == 1,
                     };
+                    // OceanBase resolves a derived-table ROWID output as its physical
+                    // locator even when the user projected a quoted business alias.
+                    // Keep that legal projection on the original Agent cursor.
+                    if name.value.eq_ignore_ascii_case("ROWID") {
+                        return false;
+                    }
                     names.insert(if name.quote_style.is_some() {
                         name.value.clone()
                     } else {
@@ -2799,6 +2805,10 @@ mod tests {
         for sql in [
             "SELECT * FROM people",
             "SELECT a.* FROM people a",
+            "SELECT ID, BUSINESS_ROWID AS \"rowid\" FROM DBX_LOB_NOPK ORDER BY ID",
+            "SELECT BUSINESS_ROWID AS ROWID FROM DBX_LOB_NOPK",
+            "SELECT BUSINESS_ROWID AS \"RoWiD\", ROWIDTOCHAR(ROWID) AS \"__DBX_PK_0\" FROM DBX_LOB_NOPK",
+            "SELECT t.\"rowid\" FROM DBX_LOB_NOPK t",
             "SELECT a.name, a.* FROM people a ORDER BY a.id",
             "SELECT a.name, a.name FROM people a",
             "SELECT a.id, b.id FROM people a JOIN people b ON a.id = b.id",

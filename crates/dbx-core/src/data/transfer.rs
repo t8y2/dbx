@@ -4026,9 +4026,10 @@ fn generate_create_table_ddl_with_column_quoting(
 }
 
 /// Dialects that apply table/column comments via `COMMENT ON` statements:
-/// PostgreSQL/Kingbase plus Oracle-compatible Dameng.
+/// PostgreSQL/Kingbase plus Oracle-compatible OceanBase and Dameng.
 fn supports_comment_on_transfer_ddl(target_db: &DatabaseType) -> bool {
-    is_postgres_transfer_dialect(target_db) || matches!(target_db, DatabaseType::Oracle | DatabaseType::Dameng)
+    is_postgres_transfer_dialect(target_db)
+        || matches!(target_db, DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng)
 }
 
 /// Generate COMMENT ON COLUMN / ALTER TABLE COMMENT COLUMN / COMMENT ON TABLE
@@ -4610,7 +4611,7 @@ fn generate_upsert_typed_for_transfer(
             sql.push_str(&format!("\nWHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals});"));
             sql
         }
-        DatabaseType::Oracle => {
+        DatabaseType::Oracle | DatabaseType::OceanbaseOracle => {
             let mut using_rows = Vec::with_capacity(rows.len());
             for row in rows {
                 let mut vals = Vec::with_capacity(row.len().min(columns.len()));
@@ -4692,7 +4693,7 @@ fn max_transfer_write_rows(db_type: &DatabaseType, mode: &TransferMode) -> usize
         // The INSERT ALL template is shared with OceanBase's Oracle mode, so its
         // append/overwrite batches must clamp to the same per-statement row count.
         (DatabaseType::OceanbaseOracle, TransferMode::Append | TransferMode::Overwrite) => MAX_ORACLE_INSERT_ALL_ROWS,
-        (DatabaseType::Oracle, TransferMode::Upsert) => MAX_ORACLE_MERGE_ROWS,
+        (DatabaseType::Oracle | DatabaseType::OceanbaseOracle, TransferMode::Upsert) => MAX_ORACLE_MERGE_ROWS,
         _ => usize::MAX,
     }
 }
@@ -15581,6 +15582,22 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
     }
 
     #[test]
+    fn oceanbase_oracle_transfer_comments_preserve_quotes_and_skip_empty_values() {
+        let cols = vec![
+            db::ColumnInfo { comment: Some("名称's".to_string()), ..test_column("Name", "varchar2(100)") },
+            db::ColumnInfo { comment: Some("  ".to_string()), ..test_column("EMPTY", "varchar2(100)") },
+        ];
+        assert_eq!(
+            generate_comment_ddl(&cols, "Items", "APP", &DatabaseType::OceanbaseOracle, Some("项目表")),
+            vec![
+                "COMMENT ON TABLE \"APP\".\"Items\" IS '项目表'".to_string(),
+                "COMMENT ON COLUMN \"APP\".\"Items\".\"Name\" IS '名称''s'".to_string(),
+            ]
+        );
+        assert!(generate_comment_ddl(&[], "Items", "APP", &DatabaseType::OceanbaseOracle, Some(" ")).is_empty());
+    }
+
+    #[test]
     fn postgres_transfer_ddl_splits_reused_multi_statement_table_ddl() {
         let ddl =
             "CREATE TABLE \"public\".\"items\" (\"id\" integer);\nCOMMENT ON TABLE \"public\".\"items\" IS 'items';";
@@ -18441,6 +18458,87 @@ SELECT 1 FROM dual"#
             r#"INSERT INTO "APP"."INSTR_CATEGORY" ("id", "name") VALUES
 (1, 'Ada')"#
         );
+    }
+
+    #[test]
+    fn oracle_family_upsert_uses_merge_with_composite_keys_and_typed_values() {
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            let sql = generate_upsert_typed(
+                &["ID".into(), "Kind".into(), "Name".into(), "CREATED".into(), "UPDATED".into(), "OPTIONAL".into()],
+                &[
+                    Some("NUMBER".into()),
+                    Some("VARCHAR2(30)".into()),
+                    Some("VARCHAR2(60)".into()),
+                    Some("DATE".into()),
+                    Some("DATE".into()),
+                    Some("VARCHAR2(30)".into()),
+                ],
+                &[
+                    vec![
+                        json!(1),
+                        json!("A"),
+                        json!("O'Brien"),
+                        json!("2026-10-09"),
+                        json!("2026-10-09 12:34:56"),
+                        serde_json::Value::Null,
+                    ],
+                    vec![
+                        json!(2),
+                        json!("B"),
+                        json!("新增"),
+                        serde_json::Value::Null,
+                        serde_json::Value::Null,
+                        serde_json::Value::Null,
+                    ],
+                ],
+                "Items",
+                "APP",
+                &database_type,
+                &["ID".into(), "Kind".into()],
+                None,
+            );
+            assert!(sql.starts_with("MERGE INTO \"APP\".\"Items\" t USING ("), "{database_type:?}: {sql}");
+            assert!(sql.contains("ON (t.\"ID\" = s.\"ID\" AND t.\"Kind\" = s.\"Kind\")"));
+            assert!(sql.contains("WHEN MATCHED THEN UPDATE SET t.\"Name\" = s.\"Name\", t.\"CREATED\" = s.\"CREATED\", t.\"UPDATED\" = s.\"UPDATED\", t.\"OPTIONAL\" = s.\"OPTIONAL\""));
+            assert!(sql.contains("'O''Brien' AS \"Name\""));
+            assert!(sql.contains("DATE '2026-10-09' AS \"CREATED\""));
+            assert!(sql.contains("TO_DATE('2026-10-09 12:34:56', 'YYYY-MM-DD HH24:MI:SS') AS \"UPDATED\""));
+            assert!(sql.contains("NULL AS \"OPTIONAL\""));
+            assert_eq!(sql.matches("FROM dual").count(), 2);
+            assert!(sql.contains(
+                "WHEN NOT MATCHED THEN INSERT (\"ID\", \"Kind\", \"Name\", \"CREATED\", \"UPDATED\", \"OPTIONAL\")"
+            ));
+        }
+    }
+
+    #[test]
+    fn oracle_family_upsert_limits_merge_batches_and_handles_key_only_rows() {
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            for (count, expected_counts) in [(0, vec![]), (1, vec![1]), (500, vec![500]), (501, vec![500, 1])] {
+                let rows = (1..=count).map(|index| vec![json!(index)]).collect::<Vec<_>>();
+                let statements = generate_transfer_write_sql_batches(
+                    &TransferMode::Upsert,
+                    &["ID".into()],
+                    &[Some("NUMBER".into())],
+                    &rows,
+                    "Items",
+                    "APP",
+                    &database_type,
+                    &["ID".into()],
+                    None,
+                    false,
+                    false,
+                )
+                .unwrap();
+                assert_eq!(statements.len(), expected_counts.len(), "{database_type:?} rows={count}");
+                for (sql, expected_count) in statements.iter().zip(expected_counts) {
+                    assert!(sql.starts_with("MERGE INTO \"APP\".\"Items\""), "{database_type:?}: {sql}");
+                    assert_eq!(sql.matches("FROM dual").count(), expected_count);
+                    assert!(!sql.contains("WHEN MATCHED"));
+                    assert!(sql.contains("WHEN NOT MATCHED THEN INSERT (\"ID\") VALUES (s.\"ID\")"));
+                }
+            }
+        }
     }
 
     #[test]

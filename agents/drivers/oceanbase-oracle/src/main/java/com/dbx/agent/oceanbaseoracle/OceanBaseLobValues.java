@@ -159,8 +159,15 @@ final class OceanBaseLobValues {
     static Chunk read(Connection connection, Object locator, long offset, int limit) throws SQLException {
         boolean binary = locator instanceof Blob;
         try (CallableStatement call = connection.prepareCall("{call DBMS_LOB.READ(?, ?, ?, ?)}")) {
-            if (!(call instanceof OceanBaseStatement)) throw new SQLException("Unsupported OceanBase LOB statement");
-            ((OceanBaseStatement) call).setInternal();
+            OceanBaseStatement vendor;
+            try {
+                vendor = call instanceof OceanBaseStatement ? (OceanBaseStatement) call : call.unwrap(OceanBaseStatement.class);
+            } catch (SQLException error) {
+                throw new SQLException("Unsupported OceanBase LOB statement", error);
+            }
+            if (vendor == null) throw new SQLException("Unsupported OceanBase LOB statement");
+            // Only the vendor flag bypasses the pool proxy; lifecycle and cancellation stay on call.
+            vendor.setInternal();
             if (binary) call.setBlob(1, (Blob) locator);
             else call.setClob(1, (Clob) locator);
             call.setInt(2, limit);

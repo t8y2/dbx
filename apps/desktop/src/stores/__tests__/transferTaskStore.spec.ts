@@ -118,6 +118,7 @@ describe("transferTaskStore", () => {
 
   it.each([
     { name: "packages", objects: { PACKAGE: ["Quoted Package"], PACKAGE_BODY: ["P"] } },
+    { name: "types", objects: { TYPE: ["Case T"], TYPE_BODY: ["Case T"] } },
     { name: "synonyms", objects: { SYNONYM: ["Case S"], PUBLIC_SYNONYM: ["Case S"] } },
   ])("round-trips separate $name identities and their explicit conflict policy", async ({ name, objects }) => {
     const store = useTransferTaskStore();

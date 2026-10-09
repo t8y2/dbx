@@ -24,6 +24,11 @@ describe("countTransferObjects", () => {
 });
 
 describe("buildTransferObjectSelections", () => {
+  it("keeps type definitions and bodies explicit without adding paired objects", () => {
+    expect(buildTransferObjectSelections({ TYPE: setOf(["Case T"]) }, [])).toEqual([{ objectType: "TYPE", names: ["Case T"] }]);
+    expect(buildTransferObjectSelections({ TYPE_BODY: setOf(["Case T"]) }, [])).toEqual([{ objectType: "TYPE_BODY", names: ["Case T"] }]);
+    expect(buildTransferObjectSelections({ TYPE: setOf(["Case T"]), TYPE_BODY: setOf(["Case T"]) }, ["TYPE", "TYPE_BODY"])).toEqual([]);
+  });
   it("preserves same-named private and public synonyms as two selected objects", () => {
     expect(buildTransferObjectSelections({ SYNONYM: setOf(["Case S"]), PUBLIC_SYNONYM: setOf(["Case S"]) }, [])).toEqual([
       { objectType: "SYNONYM", names: ["Case S"] },

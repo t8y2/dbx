@@ -3111,6 +3111,40 @@ func (s *server) getTypeSource(schema, name, objectType string) (map[string]any,
 	return map[string]any{"name": name, "object_type": objectType, "schema": schema, "source": source, "editable": false}, nil
 }
 
+func (s *server) getTypeSource(schema, name, objectType string) (map[string]any, error) {
+	if schema == "" {
+		var err error
+		schema, err = s.normalizeSchemaForIdentity(schema)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if name == "" {
+		return nil, errors.New("an exact type name is required")
+	}
+	// Tree identities are exact dictionary values, including whitespace and case.
+	source, found, sourceErr := s.loadObjectSourceTextRows(schema, name, strings.ReplaceAll(objectType, "_", " "))
+	if sourceErr != nil || !found || strings.TrimSpace(source) == "" {
+		db, err := s.requireDB()
+		if err != nil {
+			return nil, err
+		}
+		if err = db.QueryRow("SELECT DBMS_METADATA.GET_DDL(:1, :2, :3) FROM DUAL", objectType, name, schema).Scan(&source); err != nil {
+			if sourceErr != nil {
+				return nil, fmt.Errorf("type source is unavailable: %v; GET_DDL: %w", sourceErr, err)
+			}
+			return nil, err
+		}
+	}
+	if strings.TrimSpace(source) == "" {
+		return nil, errors.New("complete type source is missing or is not visible to the current account")
+	}
+	if !strings.HasPrefix(strings.ToUpper(strings.TrimLeft(source, " \t\r\n")), "CREATE ") {
+		source = "CREATE OR REPLACE " + source
+	}
+	return map[string]any{"name": name, "object_type": objectType, "schema": schema, "source": source, "editable": false}, nil
+}
+
 func (s *server) getMetadataObjectSource(schema, name, objectType string) (map[string]any, error) {
 	db, err := s.requireDB()
 	if err != nil {

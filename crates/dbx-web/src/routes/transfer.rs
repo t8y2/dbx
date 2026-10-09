@@ -218,6 +218,22 @@ pub async fn start_transfer(
             return;
         }
 
+        let prerequisites = match transfer::transfer_schema_prerequisites(&app, &req, &source_pool_key, &target_pool_key, |progress| {
+            send_transfer_progress(&progress_channel, &progress);
+        }).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, error));
+                finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
+                return;
+            }
+        };
+        if let Some(journal) = history.as_ref() { journal.record_object_outcome(&prerequisites).await; }
+        if !prerequisites.failed.is_empty() {
+            send_transfer_progress(&progress_channel, &terminal_transfer_error(&req, "Type prerequisite failed; tables and dependent programs were not executed".into()));
+            finish_transfer_channel(&state_clone, &req.transfer_id, &progress_channel).await;
+            return;
+        }
         let tables = req.tables.clone();
         // Sort by FK dependency so referenced tables are transferred first, and
         // keep the foreign key metadata fetched along the way — MySQL-family
@@ -550,18 +566,23 @@ pub async fn start_transfer(
         // Core decision handles all content modes: DataOnly never
         // transfers schema objects; PG→PG keeps the legacy empty-selection
         // default only when structure participates in the transfer.
-        let mut object_outcome = transfer::TransferObjectOutcome::default();
+        let mut object_outcome = prerequisites;
         let progress_channel_clone = progress_channel.clone();
-        match transfer::transfer_schema_objects(&app, &req, &source_pool_key, &target_pool_key, |progress| {
+        let schema_objects = if transfer::has_transfer_type_prerequisites(&req) && !failed_tables.is_empty() {
+            Err("Selected table transfer failed; dependent programs and deferred TYPE BODY were not executed".to_string())
+        } else { transfer::transfer_schema_objects(&app, &req, &source_pool_key, &target_pool_key, |progress| {
             send_transfer_progress(&progress_channel_clone, &progress);
         })
-        .await
-        {
+        .await };
+        match schema_objects {
             Ok(outcome) => {
                 if let Some(journal) = history.as_ref() {
                     journal.record_object_outcome(&outcome).await;
                 }
-                object_outcome = outcome;
+                object_outcome.transferred.extend(outcome.transferred);
+                object_outcome.skipped.extend(outcome.skipped);
+                object_outcome.failed.extend(outcome.failed);
+                object_outcome.object_results.extend(outcome.object_results);
             }
             Err(e) if e == "Cancelled" => {
                 if let Some(journal) = history.as_ref() {

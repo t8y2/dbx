@@ -5430,7 +5430,7 @@ export interface HistoryConnectionOption extends HistoryConnectionFilter {
 export type TaskType = "transfer";
 export type TaskLifecycleOwner = "tauri" | "web";
 export type TaskRunStatus = "running" | "succeeded" | "partial_failed" | "failed" | "cancelled";
-export type TaskItemKind = "table" | "view" | "materialized_view" | "procedure" | "function" | "trigger" | "sequence" | "event" | "object" | "package" | "package_body" | "synonym" | "public_synonym" | "db_link" | "public_db_link";
+export type TaskItemKind = "table" | "view" | "materialized_view" | "procedure" | "function" | "trigger" | "sequence" | "event" | "object" | "package" | "package_body" | "synonym" | "public_synonym" | "db_link" | "public_db_link" | "type" | "type_body";
 export type TaskItemStatus = "pending" | "running" | "succeeded" | "skipped" | "failed" | "cancelled" | "not_started" | "incomplete";
 export type TaskRowCountState = "not_applicable" | "known" | "unknown" | "incomplete";
 export type TransferRunContent = "structure_and_data" | "structure_only" | "data_only";
@@ -5663,7 +5663,7 @@ export type TransferTableNameCase = "preserve" | "lower" | "upper";
 export type TransferOwnershipPolicy = "preserve" | "skip" | "reassignMissing";
 export type TransferContent = "structureAndData" | "structureOnly" | "dataOnly";
 export type TransferObjectConflictPolicy = "skip" | "replace";
-export type TransferObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "SEQUENCE" | "EVENT" | "PACKAGE" | "PACKAGE_BODY" | "SYNONYM" | "PUBLIC_SYNONYM" | "DB_LINK" | "PUBLIC_DB_LINK";
+export type TransferObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "SEQUENCE" | "EVENT" | "PACKAGE" | "PACKAGE_BODY" | "SYNONYM" | "PUBLIC_SYNONYM" | "DB_LINK" | "PUBLIC_DB_LINK" | "TYPE" | "TYPE_BODY";
 
 export interface TransferDatabaseLinkConfig {
   objectType: "DB_LINK" | "PUBLIC_DB_LINK";
@@ -5773,6 +5773,7 @@ export interface TransferSchemaObjectPlan {
   warnings: string[];
   errors: string[];
   credentialRequired?: boolean;
+  executionPhase?: "beforeTables" | "afterObjects";
 }
 
 export interface TransferSchemaObjectPreview {

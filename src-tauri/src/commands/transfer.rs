@@ -91,6 +91,27 @@ pub async fn start_transfer(
     };
 
     tokio::spawn(async move {
+        let prerequisites = dbx_core::transfer::transfer_schema_prerequisites(&state, &request, &source_pool_key, &target_pool_key, |progress| emit_progress(&app, progress)).await;
+        let mut prerequisite_outcome = dbx_core::transfer::TransferObjectOutcome::default();
+        let prerequisite_error = match prerequisites {
+            Ok(outcome) => {
+                if let Some(journal) = history.as_ref() { journal.record_object_outcome(&outcome).await; }
+                let error = if outcome.failed.is_empty() { None } else { Some("Type prerequisite failed; tables and dependent programs were not executed".to_string()) };
+                prerequisite_outcome = outcome;
+                error
+            }
+            Err(error) => Some(error),
+        };
+        if let Some(error) = prerequisite_error {
+            emit_terminal_progress(&app, history.as_ref(), TransferProgress {
+                transfer_id: transfer_id.clone(), table: "type prerequisites".into(),
+                table_index: 0, total_tables: request.tables.len(), rows_transferred: 0,
+                total_rows: None, status: if error == "Cancelled" { TransferStatus::Cancelled } else { TransferStatus::Error },
+                error: Some(error), terminal: true, object_result: None,
+            }).await;
+            dbx_core::transfer::clear_cancelled(&transfer_id).await;
+            return;
+        }
         // Sort tables by FK dependency so referenced tables are transferred first,
         // and keep the foreign key metadata fetched along the way — MySQL-family
         // targets reuse it per table below instead of re-querying it.
@@ -457,21 +478,26 @@ pub async fn start_transfer(
         // Core decision handles all content modes: DataOnly never
         // transfers schema objects; PG→PG keeps the legacy empty-selection
         // default only when structure participates in the transfer.
-        let mut object_outcome = dbx_core::transfer::TransferObjectOutcome::default();
-        match dbx_core::transfer::transfer_schema_objects(
+        let mut object_outcome = prerequisite_outcome;
+        let schema_objects = if dbx_core::transfer::has_transfer_type_prerequisites(&request) && !failed_tables.is_empty() {
+            Err("Selected table transfer failed; dependent programs and deferred TYPE BODY were not executed".to_string())
+        } else { dbx_core::transfer::transfer_schema_objects(
             &state,
             &request,
             &source_pool_key,
             &target_pool_key,
             |progress| emit_progress(&app, progress),
         )
-        .await
-        {
+        .await };
+        match schema_objects {
             Ok(outcome) => {
                 if let Some(journal) = history.as_ref() {
                     journal.record_object_outcome(&outcome).await;
                 }
-                object_outcome = outcome;
+                object_outcome.transferred.extend(outcome.transferred);
+                object_outcome.skipped.extend(outcome.skipped);
+                object_outcome.failed.extend(outcome.failed);
+                object_outcome.object_results.extend(outcome.object_results);
             }
             Err(e) if e == "Cancelled" => {
                 if let Some(journal) = history.as_ref() {

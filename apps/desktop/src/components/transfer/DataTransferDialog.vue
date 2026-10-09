@@ -122,6 +122,8 @@ const OBJECT_KIND_LABEL_KEY: Record<TransferObjectKind, string> = {
   EVENT: "objectTypeEvent",
   PACKAGE: "objectTypePackage",
   PACKAGE_BODY: "objectTypePackageBody",
+  TYPE: "objectTypeType",
+  TYPE_BODY: "objectTypeTypeBody",
   SYNONYM: "objectTypeSynonym",
   PUBLIC_SYNONYM: "objectTypePublicSynonym",
   DB_LINK: "objectTypeDatabaseLink",
@@ -211,6 +213,7 @@ const quoteTargetColumnNames = ref(true);
 const batchSize = ref(1000);
 const objectConflictPolicy = ref<api.TransferObjectConflictPolicy>("skip");
 const hasSelectedPackages = computed(() => transferContent.value !== "dataOnly" && ((selectedObjects.value.PACKAGE?.size ?? 0) > 0 || (selectedObjects.value.PACKAGE_BODY?.size ?? 0) > 0));
+const hasSelectedTypes = computed(() => transferContent.value !== "dataOnly" && ((selectedObjects.value.TYPE?.size ?? 0) > 0 || (selectedObjects.value.TYPE_BODY?.size ?? 0) > 0));
 const hasSelectedSynonyms = computed(() => transferContent.value !== "dataOnly" && ((selectedObjects.value.SYNONYM?.size ?? 0) > 0 || (selectedObjects.value.PUBLIC_SYNONYM?.size ?? 0) > 0));
 const hasSelectedSchemaObjects = computed(() => transferContent.value !== "dataOnly" && (Object.entries(selectedObjects.value) as [TransferObjectKind, Set<string>][]).some(([kind, names]) => requiresTransferSchemaObjectPlan(kind) && names.size > 0));
 const databaseLinkConfigs = ref<Record<string, api.TransferDatabaseLinkConfig>>({});
@@ -1579,6 +1582,7 @@ async function saveConfigTask() {
               <ObjectSelectionTree v-model="treeSelection" :groups="treeGroups" :disabled-groups="treeDisabledGroups" :disabled-hints="treeDisabledHints" :qualifiers="objectQualifiers" v-model:search="objectSearch" :loading="loadingObjects" class="min-h-0 flex-1" />
               <p v-if="objectLoadErrors.length" role="alert" class="whitespace-pre-line text-xs text-destructive">{{ objectLoadErrors.join("\n") }}</p>
               <p v-if="hasSelectedPackages" class="text-xs text-muted-foreground">{{ t("transfer.packageDependencyHint") }}</p>
+              <p v-if="hasSelectedTypes" class="text-xs text-muted-foreground">{{ t("transfer.typeDependencyHint") }}</p>
               <p v-if="hasSelectedSynonyms" class="text-xs text-muted-foreground">{{ t("transfer.synonymDependencyHint") }}</p>
               <!-- Per-table SQL filters (MySQL / PostgreSQL sources) -->
               <div v-if="tableFilterSupported && transferContent !== 'structureOnly' && selectedTableList.length" class="shrink-0 rounded-lg border border-border/60 bg-card/60 p-1.5">

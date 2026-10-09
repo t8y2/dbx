@@ -160,7 +160,7 @@ async fn build_plan(state: &AppState, request: &TransferRequest, source: &str, t
     let target_type = get_db_type(state, &request.target_connection_id).await?;
     let mut plan = Vec::new();
     for (kind, name) in selected(request) {
-        let mut entry = Planned { item: TransferSchemaObjectItem { credential_required: Some(true), object_type: kind, name: name.clone(), source_schema: String::new(), target_schema: String::new(), action: "create".into(), ddl: String::new(), dependencies: Vec::new(), warnings: vec!["Target fixed-user authentication must be configured again; remote connectivity is not tested.".into()], errors: Vec::new() }, config: None, existing: None };
+        let mut entry = Planned { item: TransferSchemaObjectItem { execution_phase: None, credential_required: Some(true), object_type: kind, name: name.clone(), source_schema: String::new(), target_schema: String::new(), action: "create".into(), ddl: String::new(), dependencies: Vec::new(), warnings: vec!["Target fixed-user authentication must be configured again; remote connectivity is not tested.".into()], errors: Vec::new() }, config: None, existing: None };
         let preparation: Result<(), String> = async {
             if !valid_name(&name) { return Err("DBLINK_SOURCE_NAME_UNSUPPORTED".into()); }
             let configs: Vec<_> = request.database_links.iter().filter(|c| c.object_type == kind && c.name == name).collect();

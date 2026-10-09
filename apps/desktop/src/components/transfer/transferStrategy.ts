@@ -60,8 +60,11 @@ function freezeTransferRequest(request: TransferRequest): TransferRequest {
  * existing `rebuild.sql`.
  */
 export function transferPreviewSql(preview: TransferOwnershipPreview): string {
-  const objectSql = preview.schemaObjects?.items.filter((item) => item.action === "create" || item.action === "replace").map((item) => item.ddl).filter(Boolean).join("\n\n");
-  const sections = [preview.rebuild?.backupSql, preview.structure?.sql, objectSql, preview.rebuild?.cleanupSql].filter((section): section is string => Boolean(section));
+  const items = preview.schemaObjects?.items ?? [];
+  const hasTypePhases = items.some((item) => item.executionPhase !== undefined && (item.objectType === "TYPE" || item.objectType === "TYPE_BODY"));
+  const beforeTables = (item: (typeof items)[number]) => item.executionPhase === "beforeTables" || (hasTypePhases && (item.objectType === "DB_LINK" || item.objectType === "PUBLIC_DB_LINK"));
+  const sql = (before: boolean) => items.filter((item) => beforeTables(item) === before && (item.action === "create" || item.action === "replace")).map((item) => item.ddl).filter(Boolean).join("\n\n");
+  const sections = [sql(true), preview.rebuild?.backupSql, preview.structure?.sql, sql(false), preview.rebuild?.cleanupSql].filter((section): section is string => Boolean(section));
   if (sections.length > 0) return sections.join("\n\n");
   return preview.rebuild?.sql ?? "";
 }

@@ -80,10 +80,10 @@ describe("DataTransferProgressDialog", () => {
     expect(container.textContent).toContain("PUBLIC_SYNONYM PUBLIC.S");
     expect(container.textContent).toContain("CREATE PUBLIC SYNONYM privilege is required");
   });
-  it("shows an invalid package and recovery without reporting it as transferred", async () => {
+  it.each(["PACKAGE_BODY", "TYPE", "TYPE_BODY"] as const)("shows invalid %s and recovery without reporting it as transferred", async (objectType) => {
     const tracker = useExportTracker();
     const task = tracker.addDataTransferTask("package-result", "SOURCE → TARGET", 1);
-    tracker.updateDataTransferTask(task.exportId, { transferId: task.exportId, table: "P", tableIndex: 1, totalTables: 1, rowsTransferred: 0, totalRows: null, status: "error", terminal: false, error: "Compilation failed", objectResult: { objectType: "PACKAGE_BODY", name: "P", schema: "TARGET", status: "failed", compileStatus: "INVALID", sourceVerified: false, error: "PLS-00302", recovery: "Previous definition restored" } });
+    tracker.updateDataTransferTask(task.exportId, { transferId: task.exportId, table: "P", tableIndex: 1, totalTables: 1, rowsTransferred: 0, totalRows: null, status: "error", terminal: false, error: "Compilation failed", objectResult: { objectType, name: "P", schema: "TARGET", status: "failed", compileStatus: "INVALID", sourceVerified: false, error: "PLS-00302", recovery: "Previous definition restored" } });
     tracker.updateDataTransferTask(task.exportId, { transferId: task.exportId, table: "", tableIndex: 1, totalTables: 1, rowsTransferred: 0, totalRows: null, status: "done", terminal: true, error: null });
     const container = document.createElement("div");
     document.body.append(container);
@@ -93,7 +93,7 @@ describe("DataTransferProgressDialog", () => {
     app.mount(container);
     await nextTick();
     expect(task.status).toBe("Error");
-    expect(container.textContent).toContain("PACKAGE_BODY TARGET.P");
+    expect(container.textContent).toContain(`${objectType} TARGET.P`);
     expect(container.textContent).toContain("Migration or verification failed");
     expect(container.textContent).toContain("INVALID");
     expect(container.textContent).toContain("PLS-00302");

@@ -147,6 +147,7 @@ fn mapped(source: &Definition, request: &TransferRequest, kind: TransferObjectKi
                 TransferObjectKind::Table
                     | TransferObjectKind::PublicSynonym
                     | TransferObjectKind::PackageBody
+                    | TransferObjectKind::TypeBody
                     | TransferObjectKind::Trigger
                     | TransferObjectKind::Event
             ) && selection.names.contains(&source.table_name)
@@ -167,6 +168,7 @@ fn planned_object(request: &TransferRequest, schema: &str, name: &str) -> bool {
                 selection.object_type,
                 TransferObjectKind::Table
                     | TransferObjectKind::PackageBody
+                    | TransferObjectKind::TypeBody
                     | TransferObjectKind::Synonym
                     | TransferObjectKind::PublicSynonym
                     | TransferObjectKind::Trigger
@@ -302,7 +304,7 @@ async fn build_plan(
         };
         let mut entry = Planned {
             item: TransferSchemaObjectItem {
-                credential_required: None,
+                execution_phase: None, credential_required: None,
                 object_type: kind,
                 name: name.clone(),
                 source_schema: source_schema.clone(),
@@ -671,7 +673,7 @@ mod tests {
     fn planned(name: &str, schema: &str, dependencies: &[(&str, &str)]) -> Planned {
         Planned {
             item: TransferSchemaObjectItem {
-                credential_required: None,
+                execution_phase: None, credential_required: None,
                 object_type: if public(schema) {
                     TransferObjectKind::PublicSynonym
                 } else {

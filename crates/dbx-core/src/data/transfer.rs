@@ -26,6 +26,7 @@ mod db2;
 mod ddl_plan;
 mod oracle_packages;
 mod oracle_synonyms;
+mod oracle_types;
 mod oracle_database_links;
 pub use oracle_database_links::{TransferDatabaseLinkConfig, TransferDatabaseLinkCredential};
 mod structure_plan;
@@ -214,6 +215,8 @@ pub enum TransferObjectKind {
     PublicSynonym,
     DbLink,
     PublicDbLink,
+    Type,
+    TypeBody,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -269,6 +272,7 @@ pub fn transfer_object_kinds(db_type: &DatabaseType) -> Vec<TransferObjectKind> 
         let mut kinds = transfer_object_kinds_for_family(&TransferObjectFamily::Oracle);
         kinds.extend([TransferObjectKind::Package, TransferObjectKind::PackageBody, TransferObjectKind::Synonym, TransferObjectKind::PublicSynonym]);
         kinds.extend([TransferObjectKind::DbLink, TransferObjectKind::PublicDbLink]);
+        kinds.extend([TransferObjectKind::Type, TransferObjectKind::TypeBody]);
         return kinds;
     }
     match transfer_object_family(db_type) {
@@ -7977,6 +7981,8 @@ pub fn ordered_transfer_object_kinds(kinds: Vec<TransferObjectKind>) -> Vec<Tran
         TransferObjectKind::Synonym => 7,
         TransferObjectKind::PublicSynonym => 8,
         TransferObjectKind::DbLink | TransferObjectKind::PublicDbLink => 0,
+        TransferObjectKind::Type => 1,
+        TransferObjectKind::TypeBody => 2,
     };
     let mut kinds = kinds;
     kinds.sort_by_key(rank);
@@ -8193,9 +8199,28 @@ pub async fn ensure_transfer_schema_objects_ready(
     target_pool_key: &str,
 ) -> Result<(), String> {
     oracle_database_links::ensure_ready(state, request, source_pool_key, target_pool_key).await?;
+    oracle_types::ensure_ready(state, request, source_pool_key, target_pool_key).await?;
     oracle_packages::ensure_ready(state, request, source_pool_key, target_pool_key).await?;
     oracle_synonyms::ensure_ready(state, request, source_pool_key, target_pool_key).await
 }
+
+/// Explicit type specifications and independent bodies must exist before selected
+/// table DDL/data. Bodies depending on selected tables/programs run after those objects.
+pub async fn transfer_schema_prerequisites<F: FnMut(TransferProgress)>(
+    state: &AppState, request: &TransferRequest, source_pool_key: &str,
+    target_pool_key: &str, mut progress: F,
+) -> Result<TransferObjectOutcome, String> {
+    if !oracle_types::has_selection(request) { return Ok(TransferObjectOutcome::default()); }
+    let mut outcome = oracle_database_links::execute(state, request, source_pool_key, target_pool_key, &mut progress).await?;
+    if !outcome.failed.is_empty() { return Ok(outcome); }
+    let types = oracle_types::execute(state, request, source_pool_key, target_pool_key, oracle_types::Phase::BeforeTables, &mut progress).await?;
+    outcome.transferred.extend(types.transferred);
+    outcome.skipped.extend(types.skipped);
+    outcome.failed.extend(types.failed);
+    outcome.object_results.extend(types.object_results);
+    Ok(outcome)
+}
+pub fn has_transfer_type_prerequisites(request: &TransferRequest) -> bool { oracle_types::has_selection(request) }
 
 async fn transfer_mysql_schema_objects<F>(
     state: &AppState,
@@ -8280,7 +8305,8 @@ async fn transfer_oracle_schema_objects<F>(
 where
     F: FnMut(TransferProgress),
 {
-    let mut outcome = oracle_database_links::execute(state, request, source_pool_key, target_pool_key, &mut progress_callback).await?;
+    let mut outcome = if oracle_types::has_selection(request) { TransferObjectOutcome::default() }
+        else { oracle_database_links::execute(state, request, source_pool_key, target_pool_key, &mut progress_callback).await? };
     if !outcome.failed.is_empty() {
         return Ok(outcome);
     }
@@ -8295,7 +8321,7 @@ where
         request.object_selection_mode().selections().iter().map(|s| s.object_type).collect(),
     );
     for kind in order {
-        if matches!(kind, TransferObjectKind::Package | TransferObjectKind::PackageBody | TransferObjectKind::Synonym | TransferObjectKind::PublicSynonym | TransferObjectKind::DbLink | TransferObjectKind::PublicDbLink) {
+        if matches!(kind, TransferObjectKind::Package | TransferObjectKind::PackageBody | TransferObjectKind::Synonym | TransferObjectKind::PublicSynonym | TransferObjectKind::DbLink | TransferObjectKind::PublicDbLink | TransferObjectKind::Type | TransferObjectKind::TypeBody) {
             continue;
         }
         for name in selected_object_names(request.object_selection_mode().selections(), &kind) {
@@ -8355,6 +8381,12 @@ where
     outcome.skipped.extend(synonyms.skipped);
     outcome.failed.extend(synonyms.failed);
     outcome.object_results.extend(synonyms.object_results);
+    if !outcome.failed.is_empty() { return Ok(outcome); }
+    let types = oracle_types::execute(state, request, source_pool_key, target_pool_key, oracle_types::Phase::AfterObjects, &mut progress_callback).await?;
+    outcome.transferred.extend(types.transferred);
+    outcome.skipped.extend(types.skipped);
+    outcome.failed.extend(types.failed);
+    outcome.object_results.extend(types.object_results);
     Ok(outcome)
 }
 
@@ -9341,6 +9373,10 @@ pub async fn preview_transfer_ownership(
     };
 
     let mut schema_objects = oracle_packages::preview(state, request, source_pool_key, target_pool_key).await?;
+    if let Some(mut types) = oracle_types::preview(state, request, source_pool_key, target_pool_key).await? {
+        if let Some(objects) = schema_objects.take() { types.can_execute &= objects.can_execute; types.items.extend(objects.items); }
+        schema_objects = Some(types);
+    }
     if let Some(mut links) = oracle_database_links::preview(state, request, source_pool_key, target_pool_key).await? {
         if let Some(objects) = schema_objects.take() {
             links.can_execute &= objects.can_execute;
@@ -9356,6 +9392,7 @@ pub async fn preview_transfer_ownership(
             schema_objects = Some(synonyms);
         }
     }
+    if let Some(objects) = &mut schema_objects { oracle_types::order_preview_phases(objects, request); }
     Ok(TransferOwnershipPreview { missing_owners, target_owner, rebuild, structure, schema_objects })
 }
 

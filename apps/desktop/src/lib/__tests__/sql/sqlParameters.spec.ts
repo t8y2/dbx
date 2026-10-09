@@ -347,6 +347,33 @@ describe("extractSqlParameters", () => {
   });
 
   describe.each(["oracle", "oceanbase-oracle"] as const)("%s database link separators", (databaseType) => {
+    it.each([
+      ["SELECT XMLSERIALIZE(CONTENT @value AS CLOB) FROM DUAL", "XMLTYPE('<a/>')"],
+      ["SELECT XMLSERIALIZE(CONTENT@value AS CLOB) FROM DUAL", "XMLTYPE('<a/>')"],
+      ["SELECT XMLSERIALIZE(DOCUMENT @value AS CLOB) FROM DUAL", "XMLTYPE('<a/>')"],
+      ["CREATE OR REPLACE PACKAGE BODY @value AS PROCEDURE p IS BEGIN NULL; END; END;", "test_package"],
+      ["DROP DATABASE LINK @value", "remote_db"],
+      ["CREATE DATABASE LINK @value CONNECT TO remote_user IDENTIFIED BY password USING 'remote'", "remote_db"],
+      ['SELECT "xml_column" @value FROM DUAL', "AS xml_alias"],
+    ])("keeps raw template parameters outside object references in %s", (sql, value) => {
+      expect(extractSqlParameters(sql, { databaseType })).toEqual(["value"]);
+      expect(substituteSqlParameters(sql, { value: { kind: "raw", value } }, { databaseType })).toBe(sql.replace("@value", value));
+    });
+
+    it("preserves remote routine links in expressions and PL/SQL calls", () => {
+      const sql = "SELECT HR.get_value@LINK(:id) FROM DUAL; BEGIN HR.run_job /* link */ @LINK(:id); END;";
+      expect(extractSqlParameters(sql, { databaseType })).toEqual(["id"]);
+      expect(substituteSqlParameters(sql, { id: { kind: "number", value: "7" }, LINK: { kind: "raw", value: "WRONG" } }, { databaseType })).toBe("SELECT HR.get_value@LINK(7) FROM DUAL; BEGIN HR.run_job /* link */ @LINK(7); END;");
+    });
+
+    it.each(["employees", "HR.EMPLOYEES", '"Hr"."Employees"', "DUAL"])("preserves compact and separated links on %s", (objectName) => {
+      for (const separator of ["", " /* object link */ "]) {
+        const sql = `SELECT @value FROM ${objectName}${separator}@LINK WHERE id = :id`;
+        expect(extractSqlParameters(sql, { databaseType })).toEqual(["value", "id"]);
+        expect(substituteSqlParameters(sql, { value: { kind: "number", value: "1" }, id: { kind: "number", value: "7" }, LINK: { kind: "raw", value: "WRONG" } }, { databaseType })).toBe(`SELECT 1 FROM ${objectName}${separator}@LINK WHERE id = 7`);
+      }
+    });
+
     it.each(["", " ", "\t\r\n", "/* comment with -- and @ignored */", " /* first */ \n /* second */ ", "-- comment with /* and @ignored\n"])("preserves database links separated by %j during replacement", (separator) => {
       const sql = `SELECT '@literal', @projection FROM "Hr"."Audit Log"${separator}@LINK WHERE id = :id -- @tail`;
       expect(

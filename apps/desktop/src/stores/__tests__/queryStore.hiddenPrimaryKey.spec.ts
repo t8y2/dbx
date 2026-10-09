@@ -2383,14 +2383,16 @@ describe("queryStore hidden primary key editing", () => {
       useAgentResultSession: true,
     }));
     let row = 0;
-    executeMulti.mockImplementation(async () => [{
-      columns: ["ID", "__dbx_row_num"],
-      rows: Array.from({ length: 2 }, () => [++row, `user-${row}`]),
-      affected_rows: 0,
-      execution_time_ms: 1,
-      session_id: "ob-star-cursor",
-      has_more: row < 6,
-    }]);
+    executeMulti.mockImplementation(async () => [
+      {
+        columns: ["ID", "__dbx_row_num"],
+        rows: Array.from({ length: 2 }, () => [++row, `user-${row}`]),
+        affected_rows: 0,
+        execution_time_ms: 1,
+        session_id: "ob-star-cursor",
+        has_more: row < 6,
+      },
+    ]);
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
     const tabId = store.createTab("ob-1", "app", "Query");
@@ -2398,7 +2400,10 @@ describe("queryStore hidden primary key editing", () => {
       await store.executeTabSql(tabId, sql, { pagination: { limit: 2, offset, sessionId: offset ? "ob-star-cursor" : undefined } });
       const result = store.tabs.find((item) => item.id === tabId)!.result;
       expect(result?.columns).toEqual(["ID", "__dbx_row_num"]);
-      expect(result?.rows).toEqual([[offset + 1, `user-${offset + 1}`], [offset + 2, `user-${offset + 2}`]]);
+      expect(result?.rows).toEqual([
+        [offset + 1, `user-${offset + 1}`],
+        [offset + 2, `user-${offset + 2}`],
+      ]);
     }
     expect(executeMulti).toHaveBeenCalledTimes(3);
     for (const [index, call] of executeMulti.mock.calls.entries()) {

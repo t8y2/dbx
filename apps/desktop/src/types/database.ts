@@ -1011,6 +1011,16 @@ export interface ObjectInfo {
   xugu_package_body_valid?: boolean | null;
 }
 
+export interface ObjectSpaceStatistics {
+  status: string;
+  source: string;
+  replica_scope: string;
+  data_bytes: number | null;
+  allocated_bytes: number | null;
+  components_status: string;
+  components: { kind: string; data_bytes: number | null; allocated_bytes: number | null }[];
+}
+
 export interface ObjectStatistics {
   name: string;
   schema?: string | null;
@@ -1032,6 +1042,7 @@ export interface ObjectStatistics {
   index_length?: number | null;
   auto_increment?: string | null;
   data_free?: number | null;
+  space?: ObjectSpaceStatistics | null;
 }
 
 export type ObjectSourceKind = "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "SYNONYM" | "JOB" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";

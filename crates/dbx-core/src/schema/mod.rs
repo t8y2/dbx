@@ -25,6 +25,7 @@ mod external_table_filter_tests;
 mod kingbase;
 mod mongodb_columns;
 mod oceanbase_oracle_statistics;
+mod oceanbase_oracle_space;
 pub mod plugin_metadata;
 #[cfg(test)]
 mod plugin_metadata_tests;
@@ -7058,8 +7059,7 @@ async fn list_object_statistics_once(
             return crate::mongo_ops::mongo_agent_list_object_statistics(&client, database).await;
         }
         if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OceanbaseOracle) {
-            return oceanbase_oracle_statistics::load(client, database, schema, agent_metadata_timeout(db_config.as_ref()))
-                .await;
+            return oceanbase_oracle_space::load_statistics(client, database, schema, agent_metadata_timeout(db_config.as_ref())).await;
         }
         if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Oracle) {
             return oracle_agent_list_object_statistics(

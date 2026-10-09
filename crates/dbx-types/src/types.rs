@@ -172,6 +172,26 @@ pub struct EventTriggerInfo {
     pub source: Option<String>,
 }
 
+/// OceanBase Leader disk metrics. Component snapshots must not be added to the
+/// source-reported table metric: their coverage and collection times differ.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ObjectSpaceStatistics {
+    pub status: String,
+    pub source: String,
+    pub replica_scope: String,
+    pub data_bytes: Option<i64>,
+    pub allocated_bytes: Option<i64>,
+    pub components_status: String,
+    pub components: Vec<SpaceComponent>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SpaceComponent {
+    pub kind: String,
+    pub data_bytes: Option<i64>,
+    pub allocated_bytes: Option<i64>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ObjectStatistics {
     pub name: String,
@@ -210,6 +230,8 @@ pub struct ObjectStatistics {
     pub auto_increment: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_free: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<ObjectSpaceStatistics>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

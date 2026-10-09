@@ -73,7 +73,20 @@ def handle(request):
                 elif mode == 'fallback' and 'TABLE_USED_PAGES' in params['sql']:
                     error = rpc_error('sql')
                 elif mode.startswith('ob-'):
-                    if mode == 'ob-error':
+                    if 'DBA_OB_TABLE_SPACE_USAGE' in params['sql'] or 'DBA_OB_TABLE_LOCATIONS' in params['sql']:
+                        legacy = 'DBA_OB_TABLE_LOCATIONS' in params['sql']
+                        if mode.startswith('ob-space') and mode != 'ob-space-denied' and (legacy or mode != 'ob-space-legacy'):
+                            rows = [['Empty', 'Mixed Owner', 0, 0], ['STALE', 'Mixed Owner', 64, 8192]]
+                            if legacy:
+                                rows = [['Empty', 'Mixed Owner', 'USER TABLE', 0, 0],
+                                        ['STALE', 'Mixed Owner', 'USER TABLE', 64, 8192],
+                                        ['STALE', 'Mixed Owner', 'INDEX', 20, 4096],
+                                        ['STALE', 'Mixed Owner', 'LOB AUX TABLE', None, None]]
+                            result = {'columns': [], 'rows': rows, 'affected_rows': 0, 'execution_time_ms': 0}
+                        else:
+                            error = rpc_error('sql')
+                            error['message'] = 'ORA-01031: insufficient privileges' if mode == 'ob-space-denied' else 'ORA-00942: table or view does not exist'
+                    elif mode in ('ob-error', 'ob-space-no-rows'):
                         error = rpc_error('sql')
                         error['message'] = 'ORA-01031: insufficient privileges'
                     else:

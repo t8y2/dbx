@@ -26,7 +26,7 @@ async fn oceanbase_row_statistics_preserve_zero_unknown_collection_time_and_quot
     assert_eq!(rows[2].rows_last_analyzed, None);
     assert!(rows.iter().all(|row| row.total_bytes.is_none()));
     let requests = fixture.requests("execute_query");
-    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.len(), 3);
     let sql = requests[0]["params"]["sql"].as_str().unwrap();
     assert!(sql.contains("OWNER = 'Mixed Owner'"));
     assert!(sql.contains("OBJECT_TYPE = 'TABLE'"));
@@ -44,7 +44,7 @@ async fn oceanbase_row_statistics_page_the_dictionary_without_truncating_large_s
     assert_eq!(rows.len(), 1001);
     assert_eq!(rows.last().unwrap().estimated_rows, Some(1000));
     let requests = fixture.requests("execute_query");
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 4);
     assert!(requests[1]["params"]["sql"].as_str().unwrap().contains("TABLE_NAME > 'T0999'"));
     fixture.shutdown().await;
 }
@@ -56,7 +56,7 @@ async fn oceanbase_row_statistics_do_not_turn_permission_errors_or_truncation_in
         std::fs::write(fixture.control_path("statistics"), mode).unwrap();
         let error = list_object_statistics_core(&fixture.state, "conn", "configured", "APP").await.unwrap_err();
         assert!(error.contains(message), "{error}");
-        assert_eq!(fixture.requests("execute_query").len(), 1);
+        assert_eq!(fixture.requests("execute_query").len(), 3);
         fixture.shutdown().await;
     }
 }
@@ -69,6 +69,52 @@ async fn native_oracle_statistics_keep_the_existing_space_and_rows_path() {
     assert_eq!(rows[0].total_bytes, Some(4096));
     assert_eq!(rows[0].rows_status, None);
     fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn oceanbase_statistics_route_space_over_agent_without_oracle_segments() {
+    for mode in ["ob-space", "ob-space-legacy"] {
+        let fixture = AgentFixture::new(DatabaseType::OceanbaseOracle).await;
+        std::fs::write(fixture.control_path("statistics"), mode).unwrap();
+        let rows = list_object_statistics_core(&fixture.state, "conn", "configured", "Mixed Owner").await.unwrap();
+        let empty = rows.iter().find(|row| row.name == "Empty").unwrap();
+        assert_eq!(empty.space.as_ref().unwrap().allocated_bytes, Some(0));
+        let stale = rows.iter().find(|row| row.name == "STALE").unwrap();
+        assert_eq!(stale.estimated_rows, Some(125));
+        assert_eq!(stale.space.as_ref().unwrap().allocated_bytes, Some(8192));
+        assert_eq!(stale.space.as_ref().unwrap().components[1].allocated_bytes, Some(4096));
+        assert_eq!(stale.space.as_ref().unwrap().components[2].allocated_bytes, None);
+        assert_eq!(stale.total_bytes, None);
+        let requests = fixture.requests("execute_query");
+        assert_eq!(requests.len(), 3);
+        let sql = requests[2]["params"]["sql"].as_str().unwrap();
+        assert!(sql.starts_with("WITH loc AS"), "Oracle CTEs must stay outside the paging subquery: {sql}");
+        for required in ["DATABASE_NAME = 'Mixed Owner'", "l.ROLE = 'LEADER'", "r.SVR_PORT = l.SVR_PORT", "r.SVR_IP = l.SVR_IP", "r.LS_ID = l.LS_ID", "r.TABLET_ID = l.TABLET_ID"] {
+            assert!(sql.contains(required), "{sql}");
+        }
+        assert!(!requests.iter().any(|request| request["params"]["sql"].as_str().unwrap().contains("SEGMENTS")));
+        fixture.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn oceanbase_space_and_row_dictionary_permissions_are_independent() {
+    for mode in ["ob-space-denied", "ob-space-no-rows"] {
+        let fixture = AgentFixture::new(DatabaseType::OceanbaseOracle).await;
+        std::fs::write(fixture.control_path("statistics"), mode).unwrap();
+        let rows = list_object_statistics_core(&fixture.state, "conn", "configured", "Mixed Owner").await.unwrap();
+        let row = rows.iter().find(|row| row.name == "STALE").unwrap();
+        if mode == "ob-space-denied" {
+            assert_eq!(row.estimated_rows, Some(125));
+            assert_eq!(row.space.as_ref().unwrap().status, "permission_denied");
+            assert_eq!(row.space.as_ref().unwrap().allocated_bytes, None);
+        } else {
+            assert_eq!(row.estimated_rows, None);
+            assert_eq!(row.rows_status.as_deref(), Some("permission_denied"));
+            assert_eq!(row.space.as_ref().unwrap().allocated_bytes, Some(8192));
+        }
+        fixture.shutdown().await;
+    }
 }
 
 struct AgentFixture {

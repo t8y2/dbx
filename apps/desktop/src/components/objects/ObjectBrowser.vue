@@ -84,6 +84,7 @@ import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionTableSq
 import { getTableMetadataCapabilities, type TableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { findTableStatistics } from "@/lib/dataGrid/tableInfoOverview";
 import { estimatedRowsDetails, estimatedRowsText, loadOceanBaseRowStatistics, oceanBaseTableStatistics } from "@/lib/dataGrid/oceanBaseRowStatistics";
+import { oceanbaseSpaceHint, oceanbaseSpaceRows, oceanbaseSpaceText } from "@/lib/table/oceanbaseSpaceStatistics";
 import { constraintsForConstraintsTab } from "@/lib/table/constraintPresentation";
 import { buildTableSelectSql, dropsSchemaQualifier } from "@/lib/table/tableSelectSql";
 import { PARTITION_TREE_INDENT_PX } from "@/lib/table/pgPartitionPresentation";
@@ -335,7 +336,7 @@ const supportsObjectSizeStats = computed(() => !isVictoriaMetrics.value && effec
 const supportsBatchTableActions = computed(() => !isVictoriaMetrics.value && !isMongodb.value && effectiveDatabaseType.value !== "nebula");
 const showTableStatistics = computed(() => !usesServerObjectPaging.value && effectiveDatabaseType.value !== "nebula" && (objectFilter.value === "all" || objectFilter.value === "tables"));
 const showObjectRowStats = computed(() => showTableStatistics.value || (effectiveDatabaseType.value === "oceanbase-oracle" && (objectFilter.value === "all" || objectFilter.value === "tables")));
-const showObjectSizeStats = computed(() => supportsObjectSizeStats.value && showTableStatistics.value);
+const showObjectSizeStats = computed(() => supportsObjectSizeStats.value && showObjectRowStats.value);
 const objectRowsLabel = computed(() => t(isVictoriaMetrics.value ? "objects.series" : "objects.rows"));
 
 function toggleTableDdlWordWrap() {
@@ -859,7 +860,7 @@ function sortKeyLabel(key: ObjectBrowserSortKey): string {
   if (key === "name") return t("objects.name");
   if (key === "type") return t("objects.type");
   if (key === "estimatedRows") return objectRowsLabel.value;
-  if (key === "totalBytes") return t("objects.size");
+  if (key === "totalBytes") return t(effectiveDatabaseType.value === "oceanbase-oracle" ? "objects.spaceAllocated" : "objects.size");
   if (key === "created_at") return t("objects.createdAt");
   if (key === "updated_at") return t("objects.updatedAt");
   if (key === "comment") return t("objects.comment");
@@ -1169,6 +1170,7 @@ const tableOverviewRows = computed(() => {
     { label: t("grid.tableInfoIndexLength"), value: formatObjectBrowserBytes(stats?.index_length) },
     { label: t("grid.tableInfoAutoIncrement"), value: stats?.auto_increment ?? "" },
     { label: t("grid.tableInfoDataFree"), value: formatObjectBrowserBytes(stats?.data_free) },
+    ...oceanbaseSpaceRows(stats?.space, t),
   ];
   const query = tableInfoSearchQuery.value.trim().toLowerCase();
   return rows.filter((row) => row.value && (!query || row.label.toLowerCase().includes(query) || row.value.toLowerCase().includes(query)));
@@ -3437,10 +3439,10 @@ async function loadObjectPage(append: boolean) {
     if (effectiveDatabaseType.value === "oceanbase-oracle" && rows.value.some((row) => row.type === "TABLE")) {
       void loadOceanBaseRowStatistics(request.scope.connectionId, request.scope.database, request.scope.schema, !append).then((snapshot) => {
         if (!isCurrent()) return;
-        rows.value = rows.value.map((row) => row.type !== "TABLE" ? row : {
-          ...row,
-          estimatedRows: oceanBaseTableStatistics(snapshot, row.name, row.schema || request.scope.schema).estimated_rows,
-          rowStatistics: oceanBaseTableStatistics(snapshot, row.name, row.schema || request.scope.schema),
+        rows.value = rows.value.map((row) => {
+          if (row.type !== "TABLE") return row;
+          const statistics = oceanBaseTableStatistics(snapshot, row.name, row.schema || request.scope.schema);
+          return { ...row, estimatedRows: statistics.estimated_rows, totalBytes: statistics.space?.allocated_bytes, rowStatistics: statistics };
         });
       });
     }
@@ -4156,7 +4158,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
               </div>
               <div v-if="showObjectSizeStats" class="relative flex min-w-0 items-center">
                 <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" :title="t('objects.statisticsHint')" @click="toggleSort('totalBytes')">
-                  <span class="truncate">{{ t("objects.size") }}</span>
+                  <span class="truncate">{{ t(effectiveDatabaseType === "oceanbase-oracle" ? "objects.spaceAllocated" : "objects.size") }}</span>
                   <component :is="sortIconFor('totalBytes')" v-if="sortIconFor('totalBytes')" class="h-3 w-3 shrink-0" />
                 </button>
                 <div
@@ -4256,8 +4258,8 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                   <div v-if="showObjectRowStats" class="truncate text-xs tabular-nums text-muted-foreground" :title="item.estimatedRows == null ? '' : formatObjectBrowserCount(item.estimatedRows)">
                     {{ item.rowStatistics ? estimatedRowsText(item.rowStatistics, t) : formatObjectBrowserCount(item.estimatedRows) }}
                   </div>
-                  <div v-if="showObjectSizeStats" class="truncate text-xs tabular-nums text-muted-foreground" :title="item.totalBytes == null ? '' : formatObjectBrowserBytes(item.totalBytes)">
-                    {{ formatObjectBrowserBytes(item.totalBytes) }}
+                  <div v-if="showObjectSizeStats" class="truncate text-xs tabular-nums text-muted-foreground" :title="item.rowStatistics?.space ? oceanbaseSpaceHint(item.rowStatistics.space, t) : item.totalBytes == null ? '' : formatObjectBrowserBytes(item.totalBytes)">
+                    {{ item.rowStatistics?.space ? oceanbaseSpaceText(item.rowStatistics.space, t) : formatObjectBrowserBytes(item.totalBytes) }}
                   </div>
                   <div v-if="hasCreatedAt" class="truncate text-xs tabular-nums text-muted-foreground" :title="formatObjectBrowserTimestamp(item.created_at)">
                     {{ formatObjectBrowserTimestamp(item.created_at) }}
@@ -4305,8 +4307,8 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                       <span v-if="showObjectRowStats && (item.rowStatistics || (item.estimatedRows != null && item.estimatedRows > 0))" class="object-browser-stat-badge object-browser-stat-badge-rows rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-primary">{{
                         item.rowStatistics ? estimatedRowsText(item.rowStatistics, t) : formatObjectBrowserCount(item.estimatedRows)
                       }}</span>
-                      <span v-if="showObjectSizeStats && item.totalBytes != null && item.totalBytes > 0" class="object-browser-stat-badge object-browser-stat-badge-bytes rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">{{
-                        formatObjectBrowserBytes(item.totalBytes)
+                      <span v-if="showObjectSizeStats && (item.rowStatistics?.space || (item.totalBytes != null && item.totalBytes > 0))" :title="item.rowStatistics?.space ? oceanbaseSpaceHint(item.rowStatistics.space, t) : undefined" class="object-browser-stat-badge object-browser-stat-badge-bytes rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">{{
+                        item.rowStatistics?.space ? oceanbaseSpaceText(item.rowStatistics.space, t) : formatObjectBrowserBytes(item.totalBytes)
                       }}</span>
                     </div>
                     <!-- Always reserve timestamp/comment slots when the dataset has them so every card shares one height. -->

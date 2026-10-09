@@ -30,6 +30,7 @@ export function oceanBaseTableStatistics(snapshot: Snapshot, name: string, schem
   // only by case must never borrow another table's estimate.
   return snapshot.statistics.find((stat) => stat.name === name && (!schema || stat.schema === schema)) ?? {
     name, schema, estimated_rows: null, rows_status: snapshot.status ?? "unknown",
+    space: { status: "unknown", source: "", replica_scope: "leader", data_bytes: null, allocated_bytes: null, components_status: "unknown", components: [] },
   };
 }
 

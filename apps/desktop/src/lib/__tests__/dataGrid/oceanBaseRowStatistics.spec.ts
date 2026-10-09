@@ -54,4 +54,18 @@ describe("OceanBase optimizer row statistics", () => {
     const other = await loadOceanBaseRowStatistics("cache-race", "DB", "OTHER");
     expect(other.statistics).toEqual([]);
   });
+
+  it("keeps space and row fields in one snapshot and clears removed table values on refresh", async () => {
+    const space = { status: "available", source: "SYS.DBA_OB_TABLE_SPACE_USAGE", replica_scope: "leader", data_bytes: 0, allocated_bytes: 0, components_status: "available", components: [] };
+    mocks.listObjectStatistics.mockResolvedValueOnce([{ name: "T", schema: "APP", estimated_rows: 7, space }]);
+    const first = await loadOceanBaseRowStatistics("space-refresh", "DB", "APP", true);
+    expect(oceanBaseTableStatistics(first, "T", "APP")).toMatchObject({ estimated_rows: 7, space });
+    expect(await loadOceanBaseRowStatistics("space-refresh", "DB", "APP")).toBe(first);
+    mocks.listObjectStatistics.mockResolvedValueOnce([]);
+    const refreshed = await loadOceanBaseRowStatistics("space-refresh", "DB", "APP", true);
+    const removed = oceanBaseTableStatistics(refreshed, "T", "APP");
+    expect(removed.estimated_rows).toBeNull();
+    expect(removed.space?.allocated_bytes).toBeNull();
+    expect(removed.space?.status).toBe("unknown");
+  });
 });

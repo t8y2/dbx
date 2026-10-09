@@ -321,7 +321,7 @@ describe("extractSqlParameters", () => {
       expect(extractSqlParameters(sql, { databaseType })).toEqual(["value", "source", "target", "column", "offset", "count", "sql", "input"]);
     });
 
-    it.each(["HR.NEXT", "HR.OFFSET", "HR.FIRST", "FIRST", "-- comment\nFIRST"])("preserves database links on the non-reserved object %s", (objectName) => {
+    it.each(["HR.NEXT", "HR.OFFSET", "HR.FIRST", "FIRST", "-- comment\nFIRST", "employees, FIRST", "(SELECT id FROM employees) e, FIRST"])("preserves database links on the non-reserved object %s", (objectName) => {
       const sql = `SELECT * FROM ${objectName} /* separator */ @LINK WHERE id = :id`;
       expect(extractSqlParameters(sql, { databaseType })).toEqual(["id"]);
       expect(substituteSqlParameters(sql, { LINK: { kind: "string", value: "WRONG" }, id: { kind: "number", value: "7" } }, { databaseType })).toBe(`SELECT * FROM ${objectName} /* separator */ @LINK WHERE id = 7`);
@@ -357,6 +357,11 @@ describe("extractSqlParameters", () => {
       ["BEGIN GOTO @value; <<finish>> NULL; END;", "finish", "BEGIN GOTO finish; <<finish>> NULL; END;"],
       ["BEGIN <<outer_loop>> LOOP EXIT @value; END LOOP; END;", "outer_loop", "BEGIN <<outer_loop>> LOOP EXIT outer_loop; END LOOP; END;"],
       ["BEGIN <<outer_loop>> FOR i IN 1..2 LOOP CONTINUE @value WHEN i = 1; END LOOP; END;", "outer_loop", "BEGIN <<outer_loop>> FOR i IN 1..2 LOOP CONTINUE outer_loop WHEN i = 1; END LOOP; END;"],
+      ["SELECT 1, INTERVAL @value DAY FROM DUAL", "'1'", "SELECT 1, INTERVAL '1' DAY FROM DUAL"],
+      ["SELECT 1, CASE @value WHEN 1 THEN 2 ELSE 3 END FROM DUAL", "1", "SELECT 1, CASE 1 WHEN 1 THEN 2 ELSE 3 END FROM DUAL"],
+      ["SELECT 1, TIMESTAMP @value FROM DUAL", "'2026-10-09 00:00:00'", "SELECT 1, TIMESTAMP '2026-10-09 00:00:00' FROM DUAL"],
+      ["SELECT JSON_OBJECT('first' VALUE 1, KEY @value VALUE 2) FROM DUAL", "'k'", "SELECT JSON_OBJECT('first' VALUE 1, KEY 'k' VALUE 2) FROM DUAL"],
+      ["DECLARE v NUMBER; BEGIN EXECUTE IMMEDIATE 'BEGIN :x := 1; :y := 2; END;' USING OUT v, OUT @value; END;", "v", "DECLARE v NUMBER; BEGIN EXECUTE IMMEDIATE 'BEGIN :x := 1; :y := 2; END;' USING OUT v, OUT v; END;"],
     ])("keeps expression parameters in %s", (sql, value, expected) => {
       expect(extractSqlParameters(sql, { databaseType })).toEqual(["value"]);
       expect(substituteSqlParameters(sql, { value: { kind: "raw", value } }, { databaseType })).toBe(expected);

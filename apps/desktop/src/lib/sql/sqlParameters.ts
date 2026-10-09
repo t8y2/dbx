@@ -110,6 +110,7 @@ const ORACLE_PARAMETER_PREFIX_KEYWORDS = new Set([
   "zone",
 ]);
 const ORACLE_OBJECT_PREFIX_KEYWORDS = new Set(["from", "join", "update", "into", "table", "delete"]);
+const ORACLE_TABLE_LIST_BOUNDARIES = new Set(["select", "from", "where", "group", "having", "order", "connect", "start", "union", "intersect", "minus", "for", "returning", "set", "values"]);
 const SQL_SERVER_TEMP_TABLE_CONTEXT_KEYWORDS = new Set(["table", "from", "join", "into", "update", "truncate"]);
 const MYSQL_ROUTINE_LABEL_STATEMENTS = new Set(["begin", "loop", "while", "repeat"]);
 const MYSQL_ROUTINE_LABEL_CONTEXTS = new Set(["begin", "then", "else", "do", "loop", "repeat"]);
@@ -802,7 +803,19 @@ function collectSeparatedOracleDatabaseLinks(sql: string, databaseType: Database
     const prefix = tokens[i - 2]?.normalized ?? "";
     // Non-reserved words can name objects (FROM first@link), while expression
     // keywords still introduce parameters (FETCH FIRST @count, UPDATE WAIT @n).
-    const objectContext = prefix === "." || prefix === "," || (ORACLE_OBJECT_PREFIX_KEYWORDS.has(prefix) && !(prefix === "update" && tokens[i - 3]?.normalized === "for"));
+    let objectContext = prefix === "." || (ORACLE_OBJECT_PREFIX_KEYWORDS.has(prefix) && !(prefix === "update" && tokens[i - 3]?.normalized === "for"));
+    // A comma can separate tables or expressions. Only a FROM list makes the
+    // following non-reserved keyword an object name, including after subqueries.
+    if (prefix === "," && ORACLE_PARAMETER_PREFIX_KEYWORDS.has(object.normalized)) {
+      for (let j = i - 3; j >= 0; j -= 1) {
+        const before = tokens[j];
+        if (before.depth < token.depth || before.text === ";") break;
+        if (before.depth === token.depth && before.kind === "word" && ORACLE_TABLE_LIST_BOUNDARIES.has(before.normalized)) {
+          objectContext = before.normalized === "from";
+          break;
+        }
+      }
+    }
     if (objectContext || !ORACLE_PARAMETER_PREFIX_KEYWORDS.has(object.normalized)) links.add(token.span.start);
   }
   return links;

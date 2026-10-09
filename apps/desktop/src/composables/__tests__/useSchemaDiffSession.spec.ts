@@ -520,7 +520,7 @@ test("passes only the selected type body and exact source to preparation without
   const targetBody = { ...body, schema: "DST" };
   apiMock.listFunctions.mockResolvedValueOnce([source, body]).mockResolvedValueOnce([{ ...source, schema: "DST" }, targetBody]);
   apiMock.prepareSchemaDiff.mockResolvedValue({ diffs: [], functionDiffs: [], syncSql: "" });
-  const session = startSchemaDiffSession({ sourceConnectionId: "type-source", sourceDatabase: "db", sourceSchema: "SRC", targetConnectionId: "type-target", targetDatabase: "db", targetSchema: "DST", sourceDbType: "oracle", targetDbType: "oracle", selectedRoutines: ['TYPE BODY "Dot.Type"'], options: { tables: false, functions: true }, ignoreComments: false, label: "type body" }, { tableListLoader: { load: vi.fn() } });
+  const session = startSchemaDiffSession({ sourceConnectionId: "type-source", sourceDatabase: "db", sourceSchema: "SRC", targetConnectionId: "type-target", targetDatabase: "db", targetSchema: "DST", sourceDbType: "oracle", targetDbType: "oracle", options: { tables: false, functions: true, selectedRoutines: ['TYPE BODY "Dot.Type"'] }, ignoreComments: false, label: "type body" }, { tableListLoader: { load: vi.fn() } });
   await waitForSession(session);
   assert.equal(session.status, "completed");
   const payload = apiMock.prepareSchemaDiff.mock.calls[0]?.[0];

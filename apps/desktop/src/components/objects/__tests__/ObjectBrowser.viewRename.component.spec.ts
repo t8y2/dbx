@@ -17,6 +17,8 @@ vi.mock("@/lib/backend/api", async (importOriginal) => ({
   loadSchemaCache: vi.fn().mockResolvedValue(null),
   saveSchemaCache: vi.fn().mockResolvedValue(undefined),
   deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+  saveOpenTabsState: vi.fn().mockResolvedValue(undefined),
+  saveEditorSettings: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("@/composables/useSqlHighlighter", () => ({ useSqlHighlighter: () => ({ highlight: (sql: string) => sql }) }));
 vi.mock("vue-virtual-scroller", () => ({ RecycleScroller: defineComponent({ props: ["items"], setup: (props, { slots }) => () => h("div", props.items.map((item: unknown) => slots.default?.({ item }))) }) }));
@@ -27,6 +29,7 @@ vi.mock("@/components/ui/CustomContextMenu.vue", () => ({ default: defineCompone
   },
 }) }));
 vi.mock("@/components/editor/QueryEditor.vue", () => ({ default: { render: () => null } }));
+vi.mock("@/components/icons/DatabaseIcon.vue", () => ({ default: { render: () => null } }));
 vi.mock("@/components/objects/ProcedureExecutionDialog.vue", () => ({ default: { render: () => null } }));
 vi.mock("@/components/objects/CustomTypeInfoPanel.vue", () => ({ default: { render: () => null } }));
 vi.mock("@/components/export/XlsxHeaderDialog.vue", () => ({ default: { render: () => null } }));

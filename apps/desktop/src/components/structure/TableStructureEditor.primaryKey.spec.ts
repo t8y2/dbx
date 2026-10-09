@@ -38,7 +38,10 @@ const mocks = vi.hoisted(() => ({
   toast: vi.fn(),
 }));
 
-vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
+vi.mock("vue-i18n", async () => {
+  const { ref } = await import("vue");
+  return { useI18n: () => ({ t: (key: string) => key, locale: ref("en") }) };
+});
 
 vi.mock("@lucide/vue", async () => {
   const { defineComponent, h } = await import("vue");
@@ -80,7 +83,7 @@ vi.mock("@/components/ui/button", async () => {
       setup:
         (_props, { attrs, slots }) =>
         () =>
-          h("button", attrs, slots.default?.()),
+          h("button", { ...attrs }, slots.default?.()),
     }),
   };
 });
@@ -117,7 +120,7 @@ vi.mock("@/components/ui/badge", async () => {
   };
 });
 vi.mock("@/components/ui/tabs", async () => {
-  const { defineComponent, h } = await import("vue");
+  const { defineComponent, h, provide, inject } = await import("vue");
   const Div = defineComponent({
     inheritAttrs: false,
     setup:
@@ -127,12 +130,21 @@ vi.mock("@/components/ui/tabs", async () => {
   });
   const Button = defineComponent({
     inheritAttrs: false,
-    setup:
-      (_props, { attrs, slots }) =>
-      () =>
-        h("button", attrs, slots.default?.()),
+    props: ["value"],
+    setup(props, { attrs, slots }) {
+      const select = inject<(value: string) => void>("test-tabs-select")!;
+      return () => h("button", { ...attrs, onClick: () => select(props.value) }, slots.default?.());
+    },
   });
-  return { Tabs: Div, TabsContent: Div, TabsList: Div, TabsTrigger: Button };
+  const Tabs = defineComponent({
+    props: ["modelValue"],
+    emits: ["update:modelValue"],
+    setup(_props, { slots, emit }) {
+      provide("test-tabs-select", (value: string) => emit("update:modelValue", value));
+      return () => h("div", slots.default?.());
+    },
+  });
+  return { Tabs, TabsContent: Div, TabsList: Div, TabsTrigger: Button };
 });
 vi.mock("@/components/ui/dropdown-menu", async () => {
   const { defineComponent, h } = await import("vue");
@@ -489,14 +501,25 @@ describe("TableStructureEditor primary key editing", () => {
     await vi.waitFor(() => expect(mocks.previewForeignKeyChange).toHaveBeenCalledWith(
       mocks.connection.id, "Owner", expect.objectContaining({ schema: "Owner", tableName: "users", originalName: null }),
     ));
-    buttonWithText(section, "common.cancel").click();
+    const cancel = buttonWithText(section, "common.cancel");
+    await vi.waitFor(() => expect(cancel.disabled).toBe(false));
+    cancel.click();
+    await nextTick();
+    buttonWithText(root, "structureEditor.columns").click();
     await nextTick();
     buttonWithText(root, "structureEditor.addColumn").click();
     await nextTick();
-    expect(buttonWithText(section, "foreignKeyEditor.add").disabled).toBe(true);
-    buttonWithText(section, "foreignKeyEditor.add").click();
+    const newColumn = root.querySelector<HTMLInputElement>('[data-column-row-index="1"] input:not([type="checkbox"])')!;
+    newColumn.value = "pending_column";
+    newColumn.dispatchEvent(new Event("input", { bubbles: true }));
     await nextTick();
-    expect(section.querySelector('[data-name]')).toBeNull();
+    buttonWithText(root, "structureEditor.foreignKeys").click();
+    await nextTick();
+    const dirtySection = root.querySelector<HTMLElement>('[aria-label="foreignKeyEditor.title"]')!;
+    expect(buttonWithText(dirtySection, "foreignKeyEditor.add").disabled).toBe(true);
+    buttonWithText(dirtySection, "foreignKeyEditor.add").click();
+    await nextTick();
+    expect(dirtySection.querySelector('[data-name]')).toBeNull();
     expect(mocks.applyForeignKeyChange).not.toHaveBeenCalled();
   });
 

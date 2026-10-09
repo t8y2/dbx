@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useConnectionStore } from "@/stores/connectionStore";
 import * as api from "@/lib/backend/api";
+import { uuid } from "@/lib/common/utils";
 import { executeWithProductionContextGuard } from "@/lib/database/productionExecutionGuard";
 import { executeTypeWritePlan, prepareTypeWritePlan, readTypeWriteSnapshot, type TypePart, type TypeSnapshot, type TypeTarget, type TypeWriteIO, type TypeWritePlan, type TypeWriteResult } from "@/lib/database/oracleTypeWrite";
 import type { ConnectionConfig } from "@/types/database";
@@ -35,7 +36,7 @@ const hasBody = computed(() => snapshot.value?.definitions.some((item) => item.k
 
 function ioFor(target: TypeTarget, connection: ConnectionConfig, database: string, request: number): TypeWriteIO {
   const query = async (sql: string) => {
-    const id = `oracle-type-write-${crypto.randomUUID()}`;
+    const id = `oracle-type-write-${uuid()}`;
     ids.add(id);
     try { return await api.executeQuery(connection.id, database, sql, undefined, id, { maxRows: 100000, timeoutSecs: 30 }); }
     finally { ids.delete(id); }

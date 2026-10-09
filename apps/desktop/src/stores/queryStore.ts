@@ -2093,10 +2093,10 @@ export const useQueryStore = defineStore("query", () => {
     if (!tab.result && !tab.results?.length && !tab.resultEvicted) return false;
 
     const closeSession = closeResultSession(tab);
-    await releaseResultLargeValues(tab.result, ...(tab.results ?? []));
+    const releaseLargeValues = releaseResultLargeValues(tab.result, ...(tab.results ?? []));
     releaseTabResultObjectPayloads(tab);
     clearResultPayload(tab);
-    await closeSession;
+    await Promise.all([closeSession, releaseLargeValues]);
     return true;
   }
 

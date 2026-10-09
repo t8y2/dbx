@@ -60,10 +60,27 @@ describe("QueryEditor completion metadata ownership", () => {
     expect(store.listCompletionColumns).toHaveBeenCalledTimes(3);
     const sql = `SELECT s. FROM ${source} s`;
     const context = getSqlCompletionContext(sql, 9, { databaseType: "oceanbase-oracle" });
-    expect(buildSelectStarExpansion(context, metadata.cachedColumnsByTable, "oracle", context.qualifier, "oceanbase-oracle")).toBe(`"${column}"`);
+    expect(buildSelectStarExpansion(context, metadata.cachedColumnsByTable, "oracle", context.qualifier, "oceanbase-oracle")).toBe(column);
     const items = buildSqlCompletionItems(sql, 9, { tables: [], columnsByTable: metadata.cachedColumnsByTable, databaseType: "oceanbase-oracle", currentSchema: "APP" });
     expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual([column]);
-    expect(items.find((item) => item.label === "s.*")?.apply).toBe(`"${column}"`);
+    expect(items.find((item) => item.label === "s.*")?.apply).toBe(column);
+  });
+
+  it.each([
+    ["MiXeD", '"MiXeD"'],
+    ["With.Dot", '"With.Dot"'],
+    ['A"B', '"A""B"'],
+    ["SELECT", '"SELECT"'],
+  ])("preserves the exact OceanBase column identifier %s in scoped star expansion", async (column, expected) => {
+    const { metadata, store } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", schema: "APP" });
+    store.listCompletionColumns.mockResolvedValue([{ name: column, table: "Alias" }]);
+    await metadata.ensureColumnsForTable({ name: "Alias" }, { nameQuoted: true });
+    const sql = 'SELECT s. FROM "Alias" s';
+    const context = getSqlCompletionContext(sql, 9, { databaseType: "oceanbase-oracle" });
+    expect(buildSelectStarExpansion(context, metadata.cachedColumnsByTable, "oracle", context.qualifier, "oceanbase-oracle")).toBe(expected);
+    const items = buildSqlCompletionItems(sql, 9, { tables: [], columnsByTable: metadata.cachedColumnsByTable, databaseType: "oceanbase-oracle", currentSchema: "APP", quoteIdentifiers: false });
+    expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual([column]);
+    expect(items.find((item) => item.label === "s.*")?.apply).toBe(expected);
   });
 
   it.each(["Alias", "APP.Alias", '"Alias"'])("uses the same OceanBase cache identity for diagnostics on %s", async (source) => {

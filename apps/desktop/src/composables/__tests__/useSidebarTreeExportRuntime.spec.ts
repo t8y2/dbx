@@ -1,3 +1,4 @@
+import { Window } from "happy-dom";
 import { shallowRef, reactive, nextTick, effectScope } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ColumnInfo, TreeNode } from "@/types/database";
@@ -92,6 +93,9 @@ describe("useSidebarTreeExportRuntime", () => {
     const ddl = `-- Export scope: table and all visible table triggers (count: 1).\nCREATE TABLE "APP"."A" (id NUMBER) REPLICA_NUM=1;\n\n${trigger}`;
     apiMock.getTableDdl.mockResolvedValue(ddl);
     let saved = "";
+    const browser = new Window();
+    vi.stubGlobal("document", browser.document);
+    vi.stubGlobal("HTMLAnchorElement", browser.HTMLAnchorElement);
     vi.stubGlobal("Blob", class { constructor(parts: string[]) { saved = parts.join(""); } });
     vi.stubGlobal("URL", { createObjectURL: vi.fn(() => "blob:ddl"), revokeObjectURL: vi.fn() });
     const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
@@ -113,6 +117,7 @@ describe("useSidebarTreeExportRuntime", () => {
       scope.stop();
       click.mockRestore();
       vi.unstubAllGlobals();
+      await browser.happyDOM.close();
     }
   });
 

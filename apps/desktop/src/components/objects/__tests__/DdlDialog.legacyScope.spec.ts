@@ -91,7 +91,7 @@ describe("DdlViewDialog legacy fallback selectors", () => {
     expect(ddlTabContentSource).toContain('v-if="activeTab.ddlViewer" class="flex h-10');
     expect(ddlTabContentSource).toContain('@click="refreshDdlViewer"');
     expect(ddlTabContentSource).toContain('@click="viewDdlTableData"');
-    expect(ddlTabContentSource).toContain(':read-only="!!activeTab.ddlViewer"');
-    expect(ddlTabContentSource).toContain(':hide-execution-controls="!!activeTab.ddlViewer"');
+    expect(ddlTabContentSource).toContain(':read-only="!!activeTab.ddlViewer || !!activeTab.sourceSnapshot"');
+    expect(ddlTabContentSource).toContain(':hide-execution-controls="!!activeTab.ddlViewer || !!activeTab.sourceSnapshot"');
   });
 });

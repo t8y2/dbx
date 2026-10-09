@@ -1,4 +1,5 @@
 import { diagnosticErrorStatus, diagnosticRows, type DiagnosticContext, type DiagnosticMetric, type DiagnosticQuery, type RuntimeDiagnosticRecord } from "./runtimeDiagnostics";
+import { uuid } from "@/lib/common/utils";
 
 export interface AuditWindow {
   fromMicros: string;
@@ -87,7 +88,7 @@ export async function collectOceanBaseRuntimeDiagnostic(context: DiagnosticConte
   validateTarget(target);
   const record: RuntimeDiagnosticRecord = {
     format: "dbx-runtime-diagnostic-v1",
-    id: crypto.randomUUID(),
+    id: uuid(),
     context: { connectionId: context.connectionId, connectionName: context.connectionName, database: context.database, engine: "oceanbase-oracle" },
     target: targetFromRow({ SQL_ID: target.sqlId, TRACE_ID: target.traceId, TENANT_ID: target.tenantId, SVR_IP: target.serverIp, SVR_PORT: target.serverPort, SID: target.sessionId, REQUEST_ID: target.requestId, REQUEST_TIME: target.requestTimeMicros }, target.window),
     collectedAt: new Date().toISOString(),

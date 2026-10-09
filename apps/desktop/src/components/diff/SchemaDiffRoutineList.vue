@@ -4,7 +4,7 @@ import { useI18n } from "vue-i18n";
 import { schemaDiffObjectSelectionState, type SchemaDiffObject } from "@/lib/schema/schemaDiff";
 import { schemaDiffRoutineKey, summarizeSchemaDiffRoutineTextDiff, type SchemaDiffRoutineTextDiffStats } from "@/lib/schema/schemaDiffRoutine";
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   objects: SchemaDiffObject[];
   viewingObjectId?: string | null;
   emptyText?: string;
@@ -12,7 +12,7 @@ const props = defineProps<{
   targetSchema?: string;
   /** When false, hide deploy checkboxes (compare/copy-only dialects). */
   selectable?: boolean;
-}>();
+}>(), { selectable: true });
 
 const emit = defineEmits<{
   (e: "toggle-selection", object: SchemaDiffObject, selected: boolean): void;

@@ -121,6 +121,21 @@ describe.each([false, true])("OceanBase standalone routine completion (semantic=
   });
 
   it.each([
+    ["RUN", "RUN"],
+    ["MiXeD", '"MiXeD"'],
+    ['A"B', '"A""B"'],
+  ])("keeps required quoting for routine %s when generated-SQL quoting is disabled", async (name, reference) => {
+    const { provide, store, currentView } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", database: "OB", schema: "APP", modelValue: "CALL APP." }, undefined, semanticCompletionEnabled);
+    store.listCompletionObjects.mockResolvedValue([{ name, schema: "APP", type: "procedure", signature: "" }]);
+    const result = await provide();
+    const option = result!.options.find((candidate) => candidate.label === name)!;
+    expect(option).toBeDefined();
+    if (typeof option.apply === "function") option.apply(currentView, option, result!.from, currentView.state.doc.length);
+    else currentView.dispatch(insertCompletionText(currentView.state, option.apply ?? option.label, result!.from, currentView.state.doc.length));
+    expect(currentView.state.doc.toString()).toBe(`CALL APP.${reference}()`);
+  });
+
+  it.each([
     ["CALL pkg.", "APP", "PKG", "CALL pkg.\"Do.Work\"()"],
     ['CALL "Mixed.Owner"."Mixed.Package".', "Mixed.Owner", "Mixed.Package", 'CALL "Mixed.Owner"."Mixed.Package"."Do.Work"()'],
   ])("loads package members for %s and inserts only the member", async (sql, owner, packageName, expected) => {

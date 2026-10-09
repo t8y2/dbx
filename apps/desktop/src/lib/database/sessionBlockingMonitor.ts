@@ -1,4 +1,5 @@
 import * as api from "@/lib/backend/api";
+import { uuid } from "@/lib/common/utils";
 
 export interface MonitorContext {
   connectionId: string;
@@ -99,7 +100,7 @@ export function createSessionBlockingMonitor(backend: Backend = api) {
       };
       async function query(sql: string): Promise<Row[]> {
         if (controller.signal.aborted) throw new Error(timedOut ? "timeout" : "cancelled");
-        const executionId = crypto.randomUUID();
+        const executionId = uuid();
         let rejectAbort!: (cause: Error) => void;
         const aborted = new Promise<never>((_, reject) => {
           rejectAbort = reject;

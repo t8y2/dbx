@@ -61,6 +61,7 @@ import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import OraclePrimaryKeyEditor from "./OraclePrimaryKeyEditor.vue";
 import OracleForeignKeyEditor from "./OracleForeignKeyEditor.vue";
+import LightTooltip from "@/components/ui/LightTooltip.vue";
 import OracleCheckEditor from "./OracleCheckEditor.vue";
 import OracleUniqueEditor from "./OracleUniqueEditor.vue";
 import { useQueryStore } from "@/stores/queryStore";

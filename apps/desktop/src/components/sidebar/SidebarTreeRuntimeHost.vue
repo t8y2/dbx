@@ -7045,6 +7045,9 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   }
 
   if (node.type === "trigger" || node.type === "package" || node.type === "package-body") {
+    if (canRenameObject.value) {
+      items.push({ label: t("contextMenu.renameObject"), action: openRenameObjectDialog, icon: Pencil, shortcut: shortcutRename });
+    }
     if (currentDatabaseType() === "xugu" && buildXuguCompileSql({ objectType: node.type, schema: node.schema, name: node.objectName || node.label })) {
       items.push({ label: t("contextMenu.compileObject"), action: compileXuguObject, icon: Wrench });
     }

@@ -9,6 +9,7 @@ import * as api from "@/lib/backend/api";
 import { formatError } from "@/lib/backend/errorUtils";
 import { executeWithProductionContextGuard } from "@/lib/database/productionExecutionGuard";
 import { useTabUiState } from "@/lib/tabs/tabUiState";
+import { uuid } from "@/lib/common/utils";
 import { compileOracleObject, inspectOracleObject, listOracleInvalidObjects, oracleCompileSql, oracleObjectKey, supportsOracleInvalidObjects, type OracleCompileError, type OracleCompileResult, type OracleInvalidObject, type OracleMetadataQuery, type OracleObjectInspection } from "@/lib/database/oracleInvalidObjects";
 import type { ConnectionConfig } from "@/types/database";
 
@@ -52,7 +53,7 @@ const types = ["PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE
 function queryFor(connection: ConnectionConfig): OracleMetadataQuery {
   const database = connection.database || "";
   return async (sql) => {
-    const id = `oracle-invalid-${crypto.randomUUID()}`;
+    const id = `oracle-invalid-${uuid()}`;
     activeQueries.add(id);
     try { return await api.executeQuery(connection.id, database, sql, undefined, id, { maxRows: 100000, timeoutSecs: 30 }); }
     finally { activeQueries.delete(id); }

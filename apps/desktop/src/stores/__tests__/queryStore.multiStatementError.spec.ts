@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   cancelQuery: vi.fn(),
   closeClientConnectionSession: vi.fn(),
   closeQuerySession: vi.fn(),
+  releaseLargeValue: vi.fn(),
   ensureConnected: vi.fn(),
   executeMulti: vi.fn(),
   executeMultiWithProgress: vi.fn(),
@@ -28,6 +29,7 @@ vi.mock("@/lib/backend/api", () => ({
   cancelQuery: mocks.cancelQuery,
   closeClientConnectionSession: mocks.closeClientConnectionSession,
   closeQuerySession: mocks.closeQuerySession,
+  releaseLargeValue: mocks.releaseLargeValue,
   executeMulti: mocks.executeMulti,
   executeMultiWithProgress: mocks.executeMultiWithProgress,
   executeQuery: mocks.executeQuery,
@@ -1368,22 +1370,28 @@ describe("queryStore multi-statement errors", () => {
 
   it("does not clear a newer result while closing the previous result session", async () => {
     const pendingClose = deferred<void>();
+    const pendingRelease = deferred<void>();
     mocks.closeQuerySession.mockReturnValue(pendingClose.promise);
+    mocks.releaseLargeValue.mockReturnValue(pendingRelease.promise);
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
     const tabId = store.createTab("mysql-1", "app", "Query");
     const tab = store.tabs.find((item) => item.id === tabId)!;
     tab.result = { columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, session_id: "result-session-1" };
+    tab.result.large_value_context = { connectionId: "mysql-1", database: "app", clientSessionId: "result-client-1" };
+    tab.result.large_value_refs = ["old-lob"];
     tab.resultSessionId = "result-session-1";
     tab.resultClientSessionId = "result-client-1";
 
     const closing = store.closeQueryResult(tabId);
     expect(tab.result).toBeUndefined();
+    expect(mocks.releaseLargeValue).toHaveBeenCalledWith({ connectionId: "mysql-1", database: "app", clientSessionId: "result-client-1", valueRef: "old-lob" });
 
     tab.result = { columns: ["value"], rows: [[2]], affected_rows: 0, execution_time_ms: 1, session_id: "result-session-2" };
     tab.resultSessionId = "result-session-2";
     tab.resultClientSessionId = "result-client-2";
     pendingClose.resolve();
+    pendingRelease.resolve();
 
     await expect(closing).resolves.toBe(true);
     expect(tab.result?.rows).toEqual([[2]]);

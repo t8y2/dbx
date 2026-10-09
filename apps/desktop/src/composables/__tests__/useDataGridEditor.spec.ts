@@ -180,7 +180,7 @@ describe("useDataGridEditor searched replacements", () => {
       }),
     );
     const save = editor.saveChanges();
-    expect(mocks.prepareDataGridSave).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(mocks.prepareDataGridSave).toHaveBeenCalledOnce());
     editable.value = false;
     finishPreparation({ statements: ["UPDATE people SET first='new'"], rollbackStatements: [] });
     await save;

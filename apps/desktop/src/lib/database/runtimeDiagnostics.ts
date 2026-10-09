@@ -1,4 +1,5 @@
 import * as api from "@/lib/backend/api";
+import { uuid } from "@/lib/common/utils";
 import type { HistoryEntry, HistorySearchRequest } from "@/lib/backend/api";
 import type { QueryResult } from "@/types/database";
 import { collectOceanBaseRuntimeDiagnostic, findOceanBaseDiagnosticTargets, type AuditWindow, type OceanBaseDiagnosticTarget } from "./oceanbaseRuntimeDiagnostics";
@@ -116,7 +117,7 @@ export async function collectOracleRuntimeDiagnostic(context: DiagnosticContext,
   validateTarget(target);
   const record: RuntimeDiagnosticRecord = {
     format: "dbx-runtime-diagnostic-v1",
-    id: crypto.randomUUID(),
+    id: uuid(),
     context: { connectionId: context.connectionId, connectionName: context.connectionName, database: context.database, engine: context.engine },
     target: { instanceId: target.instanceId, sqlId: target.sqlId, childNumber: target.childNumber, childAddress: target.childAddress, firstLoadTime: target.firstLoadTime, executions: target.executions, lastActiveTime: target.lastActiveTime },
     engineVersion: null,
@@ -183,7 +184,7 @@ export function createRuntimeDiagnostics(backend: Backend = api) {
   function queryFor(context: DiagnosticContext, signal: AbortSignal): DiagnosticQuery {
     return async (sql) => {
       if (signal.aborted) throw new Error("Diagnostic cancelled");
-      const executionId = crypto.randomUUID();
+      const executionId = uuid();
       const cancel = () => {
         void backend.cancelQuery(executionId).catch(() => undefined);
       };

@@ -44,6 +44,7 @@ async function mount(dbType: string, profile: string, toolbar = true) {
   const store = useConnectionStore();
   store.connections = [connection];
   store.connectedIds.add(connection.id);
+  vi.spyOn(store, "ensureConnected").mockResolvedValue(undefined);
   const host = document.createElement("div");
   document.body.append(host);
   const app = toolbar

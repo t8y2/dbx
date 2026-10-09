@@ -4413,6 +4413,8 @@ function buildSchemaItems(prefix: string, schemas: string[], dialect?: SqlComple
 }
 
 function buildObjectItems(context: SqlCompletionContext, objects: SqlCompletionObject[], dialect?: SqlCompletionApplyDialect, databaseType?: DatabaseType, currentSchema?: string, includeParams = true): SqlCompletionItem[] {
+  // The generated-SQL quote preference cannot change an Oracle routine's exact identity.
+  if (isOracleCompletionDatabase(databaseType)) dialect = "oracle";
   if (completionQualifierIsReferencedTable(context)) return [];
   const onlyProcedures = context.contextKind === "exec";
   const onlyFunctions = context.suggestColumns && context.referencedTables.length > 0 && !context.qualifier;

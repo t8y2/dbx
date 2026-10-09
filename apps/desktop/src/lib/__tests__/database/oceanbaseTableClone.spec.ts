@@ -75,12 +75,13 @@ describe("OceanBase Oracle structure clone", () => {
 
   it("requires confirmation of the exact target and exclusions before dispatch", async () => {
     const plan = await buildDuplicateTableStructurePlan(options);
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal("window", { confirm });
     const t = vi.fn((_key: string, values?: Record<string, string>) => JSON.stringify(values));
     expect(confirmOceanbaseTableClone(plan, t)).toBe(false);
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining('Target Schema'));
     expect(t).toHaveBeenCalledWith("contextMenu.oceanbaseClonePreview", expect.objectContaining({ excluded: expect.stringContaining("TRG_SOURCE") }));
-    confirm.mockRestore();
+    vi.unstubAllGlobals();
   });
 
   it("stops after a partial DDL failure and reports committed objects plus manual recovery", async () => {

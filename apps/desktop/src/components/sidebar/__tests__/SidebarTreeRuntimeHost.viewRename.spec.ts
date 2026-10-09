@@ -6,9 +6,13 @@ import i18n from "@/i18n";
 import type { ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import type { TreeNode } from "@/types/database";
 
+vi.mock("@/components/icons/DatabaseIcon.vue", () => ({ default: { render: () => null } }));
+
 vi.mock("@/lib/backend/api", async (importOriginal) => ({
   ...await importOriginal<typeof import("@/lib/backend/api")>(),
   listPlugins: vi.fn().mockResolvedValue([]),
+  saveOpenTabsState: vi.fn().mockResolvedValue(undefined),
+  saveEditorSettings: vi.fn().mockResolvedValue(undefined),
   buildRenameObjectSql: vi.fn().mockResolvedValue('RENAME "Old View" TO "New View"'),
   getObjectSource: vi.fn().mockResolvedValue({ source: 'CREATE PROCEDURE "APP"."Old View" AS BEGIN NULL; END;', editable: true }),
   buildRoutineRenameObjectSourceStatements: vi.fn().mockResolvedValue(["preflight", "create", "validate", "grants", "drop"]),

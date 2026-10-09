@@ -3,6 +3,7 @@ import { onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import * as api from "@/lib/backend/api";
+import { uuid } from "@/lib/common/utils";
 import { useQueryStore } from "@/stores/queryStore";
 import type { OracleTypeDetails } from "@/types/oracleTypes";
 
@@ -42,7 +43,7 @@ async function load() {
   details.value = null;
   error.value = "";
   loading.value = true;
-  executionId = `oracle-type-${crypto.randomUUID()}`;
+  executionId = `oracle-type-${uuid()}`;
   try {
     const result = await api.getOracleTypeDetails(target.connectionId, target.database, target.schema, target.name, target.objectType, executionId);
     if (current === serial) details.value = result;

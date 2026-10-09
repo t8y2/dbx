@@ -1591,6 +1591,32 @@ class OceanBaseOracleAgentTest {
         });
     }
 
+    @Test
+    void triggerSourceUsesCompleteDictionaryFallbackAndStateWithoutDbmsMetadata() {
+        for (String status : new String[]{"ENABLED", "DISABLED"}) {
+            List<String> sql = new ArrayList<>();
+            List<String> params = new ArrayList<>();
+            OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+            TestSupport.setPrivateConnection(agent, proxy(Connection.class, (method, args) -> {
+                if ("prepareStatement".equals(method.getName())) {
+                    String query = String.valueOf(args[0]);
+                    sql.add(query);
+                    if (query.contains("DBMS_METADATA")) throw new SQLException("DBMS_METADATA is unavailable");
+                    ResultSet rows = query.contains("ALL_SOURCE")
+                        ? resultSet(new String[]{"TEXT"}, new Object[][]{{"TRIGGER audit BEFORE INSERT ON events\nBEGIN NULL; END;"}})
+                        : resultSet(new String[]{"TABLE_OWNER", "TABLE_NAME", "STATUS"}, new Object[][]{{"APP", "EVENTS", status}});
+                    return objectSourceStatement(params, rows, false);
+                }
+                return defaultValue(method.getReturnType());
+            }));
+            String ddl = agent.getObjectSource("APP", "AUDIT", "TRIGGER").getSource();
+            Assertions.assertTrue(ddl.contains("TRIGGER \"APP\".\"AUDIT\" BEFORE INSERT ON \"APP\".\"EVENTS\""));
+            Assertions.assertTrue(ddl.endsWith("ALTER TRIGGER \"APP\".\"AUDIT\" " + (status.equals("ENABLED") ? "ENABLE;" : "DISABLE;")));
+            Assertions.assertEquals(2, sql.size());
+            Assertions.assertEquals(List.of("APP", "AUDIT", "TRIGGER", "APP", "AUDIT"), params);
+        }
+    }
+
     private static Connection objectSourceConnection(List<String> sql, List<String> params, ResultSet resultSet) {
         PreparedStatement statement = objectSourceStatement(params, resultSet, false);
         return proxy(Connection.class, (method, args) -> {

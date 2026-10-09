@@ -45,6 +45,17 @@ def handle(request):
         if session in cancelled:
             cancelled[session].set()
         sessions.pop(session, None)
+    elif method == 'get_object_source':
+        sources = json.loads((root / 'transfer-sources').read_text())
+        source = sources.get(params['name'], {'error': 'object source missing'})
+        if 'error' in source:
+            error = rpc_error('sql')
+            error['message'] = source['error']
+        else:
+            result = {'name': params['name'], 'schema': 'SRC', 'object_type': params['object_type'], 'source': source['source']}
+    elif method == 'get_columns' and (root / 'transfer-sources').exists():
+        result = [{'name': 'Alias', 'data_type': 'NUMBER', 'is_nullable': True,
+                   'column_default': None, 'is_primary_key': False, 'extra': ''}]
     elif method == 'list_databases':
         failure = root / 'list-error'
         if failure.exists():
@@ -56,6 +67,21 @@ def handle(request):
         reply = json.loads((root / 'completion-reply.json').read_text())
         result = reply.get('result')
         error = reply.get('error')
+    elif method == 'execute_query' and (root / 'transfer-sources').exists():
+        sql = params['sql']
+        failure = root / 'transfer-fail-sql'
+        if 'DBMS_METADATA.GET_DDL' in sql:
+            native = root / 'transfer-native-ddl'
+            if native.exists():
+                result = {'columns': ['DDL'], 'rows': [[native.read_text()]], 'affected_rows': 0, 'execution_time_ms': 0}
+            else:
+                error = rpc_error('sql')
+                error['message'] = 'DBMS_METADATA unavailable; dictionary source is readable'
+        elif failure.exists() and failure.read_text() in sql:
+            error = rpc_error('sql')
+            error['message'] = 'fixture target DDL permission failure'
+        else:
+            result = {'columns': [], 'rows': [], 'affected_rows': 0, 'execution_time_ms': 0}
     elif method in ('execute_query', 'get_table_ddl'):
         with session_locks[session]:
             if method == 'get_table_ddl':

@@ -123,6 +123,132 @@ struct AgentFixture {
     _listener: tokio::net::TcpListener,
 }
 
+fn object_transfer_request(objects: serde_json::Value) -> crate::data::transfer::TransferRequest {
+    serde_json::from_value(json!({
+        "transferId": "ob-source-fallback", "sourceConnectionId": "conn", "sourceDatabase": "configured",
+        "sourceSchema": "SRC", "targetConnectionId": "conn", "targetDatabase": "configured", "targetSchema": "DST",
+        "tables": [], "createTable": true, "content": "structureOnly", "batchSize": 100, "objects": objects
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn oceanbase_transfer_uses_editor_source_rpc_when_get_ddl_is_unavailable() {
+    use crate::data::transfer::transfer_schema_objects;
+    let fixture = AgentFixture::new(DatabaseType::OceanbaseOracle).await;
+    std::fs::write(fixture.control_path("transfer-sources"), json!({
+        "S": {"source": "CREATE SEQUENCE \"SRC\".\"S\" START WITH 7;"},
+        "V": {"source": "SELECT 1 FROM DUAL"},
+        "M": {"source": "CREATE MATERIALIZED VIEW \"SRC\".\"M\" REFRESH COMPLETE ON DEMAND AS SELECT 1 X FROM DUAL;"},
+        "F": {"source": "CREATE OR REPLACE FUNCTION F RETURN NUMBER AS BEGIN RETURN 1; END;\n/"},
+        "P": {"source": "CREATE OR REPLACE PROCEDURE P AS BEGIN NULL; END;\n/"},
+        "T": {"source": "CREATE OR REPLACE TRIGGER \"SRC\".\"T\" BEFORE INSERT ON \"SRC\".\"BASE\" BEGIN NULL; END;\n/\nALTER TRIGGER \"SRC\".\"T\" DISABLE;"}
+    }).to_string()).unwrap();
+    let request = object_transfer_request(json!([
+        {"objectType": "TRIGGER", "names": ["T"]}, {"objectType": "PROCEDURE", "names": ["P"]},
+        {"objectType": "FUNCTION", "names": ["F"]}, {"objectType": "MATERIALIZED_VIEW", "names": ["M"]},
+        {"objectType": "VIEW", "names": ["V"]}, {"objectType": "SEQUENCE", "names": ["S"]}
+    ]));
+    let key = fixture.state.get_or_create_pool_for_session("conn", Some("configured"), None).await.unwrap();
+    let outcome = transfer_schema_objects(&fixture.state, &request, &key, &key, |_| {}).await.unwrap();
+    assert_eq!(outcome.transferred.len(), 6);
+    assert!(outcome.failed.is_empty());
+    assert_eq!(fixture.requests("get_object_source").len(), 6);
+    let sqls = fixture
+        .requests("execute_query")
+        .into_iter()
+        .map(|request| request["params"]["sql"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert!(sqls.iter().all(|sql| !sql.contains("DBMS_METADATA")));
+    let ddl = sqls.iter().filter(|sql| sql.starts_with("CREATE") || sql.starts_with("ALTER")).collect::<Vec<_>>();
+    assert_eq!(ddl.len(), 7);
+    assert!(ddl[0].starts_with("CREATE SEQUENCE \"DST\".\"S\""));
+    assert!(ddl.iter().any(|sql| sql.contains("VIEW \"DST\".\"V\" (\"Alias\")")));
+    assert!(ddl.last().unwrap().contains("ALTER TRIGGER \"DST\".\"T\" DISABLE"));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn oceanbase_transfer_does_not_count_empty_denied_or_partially_applied_sources_as_success() {
+    use crate::data::transfer::transfer_schema_objects;
+    for (source, fail_sql, expected) in [
+        (json!({"source": ""}), None, "No complete source"),
+        (json!({"error": "ORA-01031 source unavailable"}), None, "ORA-01031"),
+        (
+            json!({"source": "CREATE OR REPLACE TRIGGER \"SRC\".\"T\" BEFORE INSERT ON \"SRC\".\"BASE\" BEGIN NULL; END;\n/\nALTER TRIGGER \"SRC\".\"T\" DISABLE;"}),
+            Some("ALTER TRIGGER"),
+            "after 1 completed DDL statements",
+        ),
+    ] {
+        let fixture = AgentFixture::new(DatabaseType::OceanbaseOracle).await;
+        std::fs::write(fixture.control_path("transfer-sources"), json!({"T": source}).to_string()).unwrap();
+        if let Some(sql) = fail_sql {
+            std::fs::write(fixture.control_path("transfer-fail-sql"), sql).unwrap();
+        }
+        let request = object_transfer_request(json!([{"objectType": "TRIGGER", "names": ["T"]}]));
+        let key = fixture.state.get_or_create_pool_for_session("conn", Some("configured"), None).await.unwrap();
+        let mut errors = vec![];
+        let outcome = transfer_schema_objects(&fixture.state, &request, &key, &key, |progress| {
+            if let Some(error) = progress.error {
+                errors.push(error);
+            }
+        })
+        .await
+        .unwrap();
+        assert!(outcome.transferred.is_empty());
+        assert_eq!(outcome.failed, vec!["Trigger:T"]);
+        assert!(errors.iter().any(|error| error.contains(expected)), "{errors:?}");
+        fixture.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn native_oracle_transfer_keeps_get_ddl_path() {
+    let fixture = AgentFixture::new(DatabaseType::Oracle).await;
+    std::fs::write(fixture.control_path("transfer-sources"), "{}").unwrap();
+    std::fs::write(fixture.control_path("transfer-native-ddl"), "CREATE SEQUENCE \"SRC\".\"S\" START WITH 9;").unwrap();
+    let request = object_transfer_request(json!([{"objectType": "SEQUENCE", "names": ["S"]}]));
+    let key = fixture.state.get_or_create_pool_for_session("conn", Some("configured"), None).await.unwrap();
+    let outcome =
+        crate::data::transfer::transfer_schema_objects(&fixture.state, &request, &key, &key, |_| {}).await.unwrap();
+    assert_eq!(outcome.transferred, vec!["Sequence:S"]);
+    assert!(fixture.requests("get_object_source").is_empty());
+    assert!(fixture
+        .requests("execute_query")
+        .iter()
+        .any(|request| request["params"]["sql"].as_str().unwrap().contains("DBMS_METADATA.GET_DDL")));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn oceanbase_cross_family_sequence_keeps_existing_conversion_with_editor_source() {
+    let fixture = AgentFixture::new(DatabaseType::OceanbaseOracle).await;
+    std::fs::write(
+        fixture.control_path("transfer-sources"),
+        json!({"S": {"source": "CREATE SEQUENCE \"SRC\".\"S\" START WITH 7 INCREMENT BY 2 NOCYCLE;"}}).to_string(),
+    )
+    .unwrap();
+    let mut target = fixture.state.configs.read().await.get("conn").unwrap().clone();
+    target.id = "target".into();
+    target.db_type = DatabaseType::SqlServer;
+    fixture.state.configs.write().await.insert("target".into(), target);
+    let mut request = object_transfer_request(json!([{"objectType": "SEQUENCE", "names": ["S"]}]));
+    request.target_connection_id = "target".into();
+    request.target_schema = "dbo".into();
+    // The fixture captures target SQL; SQL Server execution is a separate acceptance step.
+    let key = fixture.state.get_or_create_pool_for_session("conn", Some("configured"), None).await.unwrap();
+    let outcome =
+        crate::data::transfer::transfer_schema_objects(&fixture.state, &request, &key, &key, |_| {}).await.unwrap();
+    assert_eq!(outcome.transferred, vec!["Sequence:S"]);
+    assert_eq!(fixture.requests("get_object_source").len(), 1);
+    let requests = fixture.requests("execute_query");
+    assert!(requests.iter().all(|request| !request["params"]["sql"].as_str().unwrap().contains("DBMS_METADATA")));
+    assert!(requests
+        .iter()
+        .any(|request| request["params"]["sql"].as_str().unwrap().contains("CREATE SEQUENCE [dbo].[S]")));
+    fixture.shutdown().await;
+}
+
 impl AgentFixture {
     async fn new(db_type: DatabaseType) -> Self {
         let directory = tempfile::tempdir().unwrap();

@@ -1072,6 +1072,22 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             String owner = normalizeSchema(schema);
             String objectName = normalizeObjectName(name);
             String normalizedType = normalizeObjectSourceType(objectType);
+            if ("TRIGGER".equals(normalizedType)) {
+                ObjectSource source = getDictionaryFirstObjectSource(owner, objectName, normalizedType);
+                String sql = "SELECT TABLE_OWNER, TABLE_NAME, STATUS FROM ALL_TRIGGERS WHERE OWNER = ? AND TRIGGER_NAME = ?";
+                try (var stmt = requireConnection().prepareStatement(sql)) {
+                    stmt.setString(1, owner);
+                    stmt.setString(2, objectName);
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        if (!rs.next()) throw new SQLException("Trigger metadata is missing or inaccessible: " + objectName);
+                        String tableOwner = rs.getString(1);
+                        String tableName = rs.getString(2);
+                        if (tableOwner == null || tableName == null) throw new SQLException("Trigger table metadata is unavailable: " + objectName);
+                        return new ObjectSource(objectName, normalizedType, owner,
+                            OceanBaseTriggerDdl.render(source.getSource(), owner, objectName, tableOwner, tableName, rs.getString(3)));
+                    }
+                }
+            }
             if (prefersDictionarySource(normalizedType)) {
                 return getDictionaryFirstObjectSource(owner, objectName, normalizedType);
             }

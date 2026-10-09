@@ -7,6 +7,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, QueryTab } from "@/types/database";
 
 vi.mock("@/components/editor/QueryEditor.vue", () => ({ default: { render: () => null } }));
+// Header navigation does not exercise result export; do not leave its lazy import running at teardown.
+vi.mock("@/components/transfer/QueryResultTransferDialog.vue", () => ({ default: { render: () => null } }));
 const mocks = vi.hoisted(() => ({ openTableStructureEditor: vi.fn(() => true) }));
 vi.mock("@/components/grid/DataGrid.vue", () => ({
   __esModule: true,

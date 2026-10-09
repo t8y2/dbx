@@ -9845,7 +9845,7 @@ LIMIT 100;</pre
                     </div>
                     <div class="space-y-2 md:col-span-2">
                       <Label for="webdav-user-agent">{{ t("settings.syncUserAgent") }}</Label>
-                      <Input id="webdav-user-agent" v-model="webdavUserAgent" autocomplete="off" placeholder="Zotero/7.0.15" />
+                      <Input id="webdav-user-agent" v-model="webdavUserAgent" autocomplete="off" placeholder="Zotero/10.0.0" />
                       <p class="text-xs text-muted-foreground">
                         {{ t("settings.syncUserAgentDescription") }}
                       </p>

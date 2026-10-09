@@ -147,7 +147,7 @@ video,img{display:block;width:100%;border-radius:10px;border:1px solid var(--lin
 a{color:inherit}</style>
 <main><h1>#${pr} 界面预览</h1><p class="m">commit ${short(sha)} · <a href="https://github.com/${repo}/pull/${pr}">回到 PR</a>${m.summary ? " · " + esc(m.summary) : ""}</p>
 ${warned ? `<p class="warn">⚠️ 这次录制有 ${m.errors?.length || 0} 步没能按计划执行${shots.some((x) => x.warn) ? "；带 ⚠️ 的截图拍摄于步骤失败之后，画面未必是说明文字所描述的状态" : ""}。</p>` : ""}
-${m.video ? `<figure><video src="${m.video}" controls autoplay muted playsinline poster="${m.poster || ""}"></video><figcaption>红线是鼠标走过的轨迹，红色圆环是一次点击；底部文字是这一步在做什么。空格暂停，← → 逐段查看。</figcaption></figure>` : ""}
+${m.video ? `<figure><video src="${m.video}" controls autoplay muted playsinline poster="${m.poster || ""}"></video><figcaption>红线是鼠标走过的轨迹，红色圆环是一次点击；底部文字是这一步在做什么。多个场景各自从应用初始状态开始。空格暂停，← → 逐段查看。</figcaption></figure>` : ""}
 ${shots.map((x) => `<figure${x.warn ? ' class="shaky"' : ""}><img src="${esc(x.file)}" alt="${esc(x.caption)}"><figcaption>${x.warn ? "⚠️ " : ""}${esc(x.scene)} · ${esc(x.caption)}</figcaption></figure>`).join("\n")}
 </main></html>`;
 }

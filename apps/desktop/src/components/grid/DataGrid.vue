@@ -69,6 +69,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Input } from "@/components/ui/input";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import DataGridBusyOverlay from "@/components/grid/DataGridBusyOverlay.vue";
+import { DATA_GRID_CLIPBOARD_BATCH_CHARS, DataGridClipboardCapacityError, dataGridPendingRowLimit, dataGridPreparationBatchSize, type DataGridRowPreparationOptions, type DataGridRowPreparationProgress } from "@/lib/dataGrid/dataGridRowPreparation";
 import ProductionWatermark from "@/components/common/ProductionWatermark.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import LightDropdownMenu from "@/components/ui/LightDropdownMenu.vue";
@@ -233,6 +234,7 @@ import {
   ELASTICSEARCH_PAGE_JUMP_WARNING_REQUESTS,
   elasticsearchCursorPageJumpRequestCount,
   hasCompleteLocalDataGridResult,
+  hasShortDataGridSqlPage,
   reconcileDataGridExactTotalWithObservedPage,
   resolveDataGridPaginationTotal,
   showDataGridRerunTotalCountAction,
@@ -332,8 +334,8 @@ import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import { useDataGridExport, type MongoCopyUpdateTarget } from "@/composables/useDataGridExport";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { eventTargetAllowsNativeClipboard, isPlainClipboardShortcut, readTextFromClipboard } from "@/lib/common/clipboard";
-import { claimDataGridPaste, claimDataGridSelectAll, clearDataGridClipboardCopy, parseDataGridClipboard, planDataGridPaste } from "@/lib/dataGrid/dataGridClipboard";
-import { parseInsertStatementPaste } from "@/lib/dataGrid/dataGridInsertPaste";
+import { claimDataGridPaste, claimDataGridSelectAll, clearDataGridClipboardCopy, parseDataGridClipboard, parseDataGridClipboardInBatches, planDataGridPaste } from "@/lib/dataGrid/dataGridClipboard";
+import { parseInsertStatementPaste, parseInsertStatementPasteInBatches } from "@/lib/dataGrid/dataGridInsertPaste";
 import { beginDataGridNativeSelectionBlock, finishDataGridNativeSelectionBlock } from "@/lib/dataGrid/dataGridNativeSelection";
 import { DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS, DATA_GRID_COPY_EXTRACTOR_IDS, DATA_GRID_DEFAULT_COPY_PREFERENCES, extractorUnavailableForDatabase, type DataGridCopyExtractorId, type DataGridCopyPreference } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { columnNamesForCopy } from "@/lib/dataGrid/dataGridColumnNameCopy";
@@ -591,6 +593,7 @@ interface DataGridProps {
     exportColumnExtras?: Array<string | null | undefined>;
     insertMode?: SqlInsertMode;
   }) => Promise<api.QueryResultExportRequest | undefined>;
+  transferQueryResult?: () => void;
   allExportResults?: Array<{
     sheetName: string;
     result: QueryResult;
@@ -3577,8 +3580,12 @@ const canCountTableRows = computed(() => props.context !== "results" && !!props.
 const canJumpLastPage = computed(() => canGoNextPage.value && (hasKnownPaginationTotalRowCount.value || allRowsLoaded.value || canCalculateTotalRowCount.value));
 const totalRowCountBusy = computed(() => props.totalRowCountLoading === true || manualTotalRowCountLoading.value);
 const pageJumpBusy = computed(() => !!props.pageJumpProgress && props.pageJumpProgress.totalRequests > 1);
+const rowPreparationProgress = shallowRef<DataGridRowPreparationProgress | null>(null);
+let rowPreparationController: AbortController | null = null;
+let gridClipboardLifecycle = 0;
+let gridClipboardActive = true;
 /** Automatic background counts keep rows interactive; explicit count navigation still blocks the surface. */
-const gridSurfaceBusy = computed(() => isRefreshingData.value || props.loading === true || manualTotalRowCountLoading.value || pageJumpBusy.value);
+const gridSurfaceBusy = computed(() => isRefreshingData.value || props.loading === true || manualTotalRowCountLoading.value || pageJumpBusy.value || rowPreparationProgress.value !== null);
 const gridPaginationBusy = computed(() => gridSurfaceBusy.value || totalRowCountBusy.value);
 const dataGridNativeSelectionBlockOwner = {};
 watch(
@@ -3850,23 +3857,46 @@ function selectAndRevealLastLoadedRow() {
   });
 }
 
+// SQL-page counts can come from another session. Explicit load-all must
+// observe a short tail on the original execution path, even at a cached total.
+const loadsSqlPages = computed(() => isResultsContext.value && !!props.pageSql);
+const sqlPageExhausted = computed(() =>
+  hasShortDataGridSqlPage({
+    rowCount: props.result.rows.length,
+    pageOffset: props.pageOffset,
+    pageLimit: props.pageLimit,
+    executedPageOffset: props.executedPageOffset,
+    executedPageLimit: props.executedPageLimit,
+  }),
+);
+function nextLoadAllSegment() {
+  if (loadsSqlPages.value) {
+    if (sqlPageExhausted.value) return null;
+    const segment = dataGridLoadAllSegment(props.result.rows.length, infiniteScrollMaxRows.value, true);
+    // Preserve the existing bulk load while more rows are expected; a
+    // cached end only needs a normal page to probe the actual source.
+    return segment && !canFetchNextInfiniteScrollSegment.value ? { offset: segment.offset, limit: Math.min(segment.limit, pageSize.value) } : segment;
+  }
+  const effectiveTotal = paginationTotalRowCount.value ?? displayedTotalRowCount.value;
+  const canFetchMore = canFetchNextInfiniteScrollSegment.value && (!totalRowCountIsExact.value || effectiveTotal === undefined || props.result.rows.length < effectiveTotal);
+  const targetMaxRows = dataGridLoadAllInitialTarget(props.result.rows.length, infiniteScrollMaxRows.value, totalRowCountIsExact.value ? effectiveTotal : undefined);
+  return dataGridLoadAllSegment(props.result.rows.length, targetMaxRows, canFetchMore);
+}
+
 function loadAllRowsAndGoToLast() {
   if (!props.loadAllRowsEnabled || gridSurfaceBusy.value || infiniteScrollLoading.value || props.result.rows.length === 0) return;
   // search_after cursor paging fetches page by page; a single giant append
   // against those cursors is untested, so ES/Easysearch grids keep the
   // reveal-only shortcut instead of loading everything.
   if (isResultsContext.value && (resolvedDatabaseType.value === "elasticsearch" || resolvedDatabaseType.value === "easysearch")) return;
-  const effectiveTotal = paginationTotalRowCount.value ?? displayedTotalRowCount.value;
-  const canFetchMore = canFetchNextInfiniteScrollSegment.value && (!totalRowCountIsExact.value || effectiveTotal === undefined || props.result.rows.length < effectiveTotal);
-  const targetMaxRows = dataGridLoadAllInitialTarget(props.result.rows.length, infiniteScrollMaxRows.value, totalRowCountIsExact.value ? effectiveTotal : undefined);
-  const segment = dataGridLoadAllSegment(props.result.rows.length, targetMaxRows, canFetchMore);
+  const segment = nextLoadAllSegment();
   if (!segment) {
     loadAllRowsActive.value = true;
     infiniteScrollAllLoaded = true;
     selectAndRevealLastLoadedRow();
     return;
   }
-  const knownTotal = effectiveTotal;
+  const knownTotal = paginationTotalRowCount.value ?? displayedTotalRowCount.value;
   const remaining = typeof knownTotal === "number" && Number.isFinite(knownTotal) && knownTotal >= props.result.rows.length ? knownTotal - props.result.rows.length : segment.limit;
   if (remaining > LOAD_ALL_ROWS_CONFIRM_ROW_THRESHOLD) {
     pendingLoadAllRows.value = { remaining };
@@ -3897,14 +3927,16 @@ function finishOrContinueLoadAllRun(requestedOffset: number | undefined, request
   if (!loadAllRowsLoopActive) return false;
   const effectiveTotal = paginationTotalRowCount.value ?? displayedTotalRowCount.value;
   const canFetchMore = canFetchNextInfiniteScrollSegment.value && (!totalRowCountIsExact.value || effectiveTotal === undefined || props.result.rows.length < effectiveTotal);
-  const nextSegment = canFetchMore
-    ? dataGridLoadAllNextSegment({
-        loadedRowCount: props.result.rows.length,
-        requestedOffset: requestedOffset ?? props.result.rows.length,
-        requestedLimit: requestedLimit ?? pageSize.value,
-        totalRowCount: totalRowCountIsExact.value ? effectiveTotal : undefined,
-      })
-    : null;
+  const nextSegment = loadsSqlPages.value
+    ? nextLoadAllSegment()
+    : canFetchMore
+      ? dataGridLoadAllNextSegment({
+          loadedRowCount: props.result.rows.length,
+          requestedOffset: requestedOffset ?? props.result.rows.length,
+          requestedLimit: requestedLimit ?? pageSize.value,
+          totalRowCount: totalRowCountIsExact.value ? effectiveTotal : undefined,
+        })
+      : null;
   if (!nextSegment) {
     loadAllRowsLoopActive = false;
     infiniteScrollAllLoaded = true;
@@ -3920,10 +3952,7 @@ function confirmLoadAllRows() {
   if (!pending) return;
   pendingLoadAllRows.value = undefined;
   loadAllRowsConfirmOpen.value = false;
-  const effectiveTotal = paginationTotalRowCount.value ?? displayedTotalRowCount.value;
-  const canFetchMore = canFetchNextInfiniteScrollSegment.value && (!totalRowCountIsExact.value || effectiveTotal === undefined || props.result.rows.length < effectiveTotal);
-  const targetMaxRows = dataGridLoadAllInitialTarget(props.result.rows.length, infiniteScrollMaxRows.value, totalRowCountIsExact.value ? effectiveTotal : undefined);
-  const segment = dataGridLoadAllSegment(props.result.rows.length, targetMaxRows, canFetchMore);
+  const segment = nextLoadAllSegment();
   if (segment) startLoadAllRows(segment);
 }
 function checkInfiniteScroll(scroller: HTMLElement) {
@@ -4367,9 +4396,11 @@ const {
   restoreCellValue,
   cancelEdit,
   onEditKeydown,
-  addRows: addEditorRows,
+  addRowsInBatches: addEditorRowsInBatches,
+  availableInsertRows,
   appendPastedRowsToNewRow,
-  appendPastedRowsAsNewRows,
+  appendPastedRowsToNewRowInBatches,
+  appendPastedRowsAsNewRowsInBatches,
   cloneRow: cloneEditorRow,
   showDeleteRowConfirm,
   requestDeleteRow,
@@ -4946,9 +4977,37 @@ function selectedRowPlacement(position: "above" | "below"): GridNewRowPlacement 
   return null;
 }
 
-function insertRows(count: number, position: "above" | "below" | "end") {
+async function prepareGridRows<T>(prepare: (options: DataGridRowPreparationOptions) => Promise<T>): Promise<T | undefined> {
+  if (rowPreparationController || isSaving.value || !gridClipboardActive) return undefined;
+  const controller = new AbortController();
+  rowPreparationController = controller;
+  const operation = dataGridResultLifecycle.beginOperation();
+  const pendingVersion = pendingChangesVersion.value;
+  try {
+    return await prepare({
+      signal: controller.signal,
+      isCurrent: () => gridClipboardActive && dataGridResultLifecycle.isCurrent(operation) && pendingChangesVersion.value === pendingVersion,
+      onProgress: (progress) => {
+        rowPreparationProgress.value = progress;
+      },
+    });
+  } finally {
+    rowPreparationController = null;
+    rowPreparationProgress.value = null;
+  }
+}
+
+function cancelRowPreparation() {
+  rowPreparationController?.abort();
+}
+
+function onRowPreparationOpenChange(open: boolean) {
+  if (!open) cancelRowPreparation();
+}
+
+async function insertRows(count: number, position: "above" | "below" | "end") {
   const placement: GridNewRowPlacement | null = position === "end" ? null : selectedRowPlacement(position);
-  const firstNewRowId = addEditorRows(count, placement);
+  const firstNewRowId = await prepareGridRows((options) => addEditorRowsInBatches(count, placement, options));
   if (firstNewRowId !== undefined) {
     nextTick(() => {
       const displayIndex = displayRowIndexById(firstNewRowId);
@@ -8805,6 +8864,7 @@ const exportMenuItems = computed(() => {
 
   if (!hasFullResultExport) {
     return [
+      ...(props.context === "results" && props.transferQueryResult ? [{ value: "database", label: t("grid.exportDatabase") }] : []),
       { value: "csv", label: t("grid.exportCsv") },
       { value: "xlsx", label: t("grid.exportXlsx") },
       ...(canIncludeSql ? [{ value: "xlsx-with-sql", label: t("grid.exportXlsxWithSql") }] : []),
@@ -8821,6 +8881,7 @@ const exportMenuItems = computed(() => {
   }
 
   return [
+    ...(props.context === "results" && props.transferQueryResult ? [{ value: "database", label: t("grid.exportDatabase"), separatorBefore: true }] : []),
     { value: "page-csv", label: t("grid.exportCurrentPageCsv") },
     { value: "page-xlsx", label: t("grid.exportCurrentPageXlsx") },
     ...(canIncludeSql
@@ -8868,6 +8929,7 @@ function selectPageSizeMenuItem(value: string) {
 
 function selectExportMenuItem(value: string) {
   const actions: Record<string, () => void> = {
+    database: () => props.transferQueryResult?.(),
     "page-csv": exportCurrentPageCsv,
     "page-xlsx": exportCurrentPageXlsx,
     "page-xlsx-with-sql": exportCurrentPageXlsxWithSql,
@@ -9132,22 +9194,32 @@ function clipboardShortcut(event: KeyboardEvent, key: string): boolean {
 async function pasteClipboardIntoSelection() {
   if (!props.editable) return;
   const operation = dataGridResultLifecycle.beginOperation();
+  const lifecycle = gridClipboardLifecycle;
   const text = await readTextFromClipboard();
-  if (!dataGridResultLifecycle.isCurrent(operation)) return;
-  pasteTextIntoGrid(text);
+  if (!gridClipboardActive || lifecycle !== gridClipboardLifecycle || !dataGridResultLifecycle.isCurrent(operation)) return;
+  await pasteTextIntoGrid(text);
 }
 
 async function pasteClipboardAsNewRows() {
   if (!canInsertRows.value || isSaving.value || isConditionalUpdateActive.value) return;
   const operation = dataGridResultLifecycle.beginOperation();
+  const lifecycle = gridClipboardLifecycle;
   // Capture the column mapping with the result, before the asynchronous read.
   const columnIndexes = [...visibleColumnIndexes.value];
   try {
     const text = await readTextFromClipboard();
-    if (!dataGridResultLifecycle.isCurrent(operation) || !canInsertRows.value || isSaving.value || isConditionalUpdateActive.value) return;
-    const insertPaste = parseInsertStatementPaste(text);
+    if (!gridClipboardActive || lifecycle !== gridClipboardLifecycle || !dataGridResultLifecycle.isCurrent(operation) || !canInsertRows.value || isSaving.value || isConditionalUpdateActive.value) return;
+    if (!clipboardWithinGridCapacity(text)) return;
     const firstNewRowId = -(newRows.value.length + 1);
-    const result = appendPastedRowsAsNewRows(insertPaste?.rows ?? parseDataGridClipboard(text), columnIndexes, insertPaste?.columnNames);
+    const limits = { maxRows: availableInsertRows.value };
+    const result = await prepareGridRows(async (options) => {
+      const insertPaste = await parseInsertStatementPasteInBatches(text, options, limits);
+      if (options.signal?.aborted || options.isCurrent?.() === false) return undefined;
+      const rows = insertPaste?.rows ?? (await parseDataGridClipboardInBatches(text, options, limits));
+      if (!rows) return undefined;
+      return appendPastedRowsAsNewRowsInBatches(rows, columnIndexes, insertPaste?.columnNames, options);
+    });
+    if (!result || (!result.ok && result.reason === "cancelled")) return;
     if (!result.ok) {
       toast(batchAppendPasteError(result.reason), 5000);
       return;
@@ -9159,7 +9231,7 @@ async function pasteClipboardAsNewRows() {
     });
     focusInsertedTransposeRecord(firstNewRowId);
   } catch (error) {
-    if (dataGridResultLifecycle.isCurrent(operation)) toast(t("grid.copyFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+    if (gridClipboardActive && lifecycle === gridClipboardLifecycle && dataGridResultLifecycle.isCurrent(operation)) reportGridPasteError(error);
   }
 }
 
@@ -9186,14 +9258,27 @@ function batchAppendPasteError(reason: string): string {
     "empty-paste": "grid.batchAppendPasteEmpty",
     "readonly-column": "grid.batchAppendPasteReadonlyColumn",
     "no-matching-columns": "grid.batchAppendPasteNoMatchingColumns",
+    "capacity-exceeded": "grid.insertRowsCapacityExceeded",
   };
-  return t(messages[reason] ?? "grid.batchAppendPasteInvalidTarget");
+  return t(messages[reason] ?? "grid.batchAppendPasteInvalidTarget", { max: availableInsertRows.value });
 }
 
-function blankSelectionBatchAppendPasteTarget(pastedRows: readonly (readonly (string | null)[])[]): { rowId: number; columnIndexes: number[] } | null {
-  if (pastedRows.length <= 1) return null;
+function clipboardWithinGridCapacity(text: string): boolean {
+  if (text.length > 16 * 1024 * 1024) {
+    toast(t("grid.insertRowsClipboardTooLarge"), 5000);
+    return false;
+  }
+  return true;
+}
+
+function reportGridPasteError(error: unknown) {
+  toast(error instanceof DataGridClipboardCapacityError ? t("grid.insertRowsClipboardTooLarge") : t("grid.copyFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+}
+
+function blankSelectionBatchAppendPasteTarget(pastedRowCount: number): { rowId: number; columnIndexes: number[] } | null {
+  if (pastedRowCount <= 1) return null;
   const range = selectedRange.value;
-  if (!range || (range.startRow === range.endRow && range.startCol !== range.endCol)) return null;
+  if (!range) return null;
   const selectedItems = Array.from({ length: range.endRow - range.startRow + 1 }, (_, offset) => displayItemAt(range.startRow + offset));
   if (selectedItems.some((item) => (!item?.isNew && !item?.isDraft) || item.isDeleted || item.data.some((value) => value !== null && (typeof value !== "string" || value.trim() !== "")))) return null;
   const item = selectedItems[0];
@@ -9202,9 +9287,17 @@ function blankSelectionBatchAppendPasteTarget(pastedRows: readonly (readonly (st
   return { rowId: item.id, columnIndexes: visibleColumnIndexes.value.slice(range.startCol) };
 }
 
-function appendParsedRowsToBlankTarget(targetRowId: number, rows: readonly (readonly (string | null)[])[], columnIndexes: readonly number[], columnNames?: readonly string[] | null): boolean {
-  const result = appendPastedRowsToNewRow(targetRowId, rows, columnIndexes, columnNames);
+function appendParsedRowsToBlankTarget(targetRowId: number, rows: readonly (readonly (string | null)[])[], columnIndexes: readonly number[], columnNames?: readonly string[] | null, preparation?: DataGridRowPreparationOptions): boolean | Promise<boolean> {
+  if (preparation) return appendPastedRowsToNewRowInBatches(targetRowId, rows, columnIndexes, columnNames, preparation).then(finishParsedRowsAppend);
+  if (rows.length > dataGridPreparationBatchSize(props.result.columns.length) || newRows.value.length > dataGridPreparationBatchSize(props.result.columns.length)) {
+    return prepareGridRows((options) => appendPastedRowsToNewRowInBatches(targetRowId, rows, columnIndexes, columnNames, options)).then((result) => (result ? finishParsedRowsAppend(result) : false));
+  }
+  return finishParsedRowsAppend(appendPastedRowsToNewRow(targetRowId, rows, columnIndexes, columnNames));
+}
+
+function finishParsedRowsAppend(result: ReturnType<typeof appendPastedRowsToNewRow>): boolean {
   if (!result.ok) {
+    if (result.reason === "cancelled") return false;
     if (result.reason === "invalid-target" || result.reason === "target-not-empty") {
       batchAppendPasteRowId.value = null;
     }
@@ -9216,28 +9309,44 @@ function appendParsedRowsToBlankTarget(targetRowId: number, rows: readonly (read
   return true;
 }
 
-function pasteTextIntoGrid(text: string): boolean {
+function pasteTextIntoGrid(text: string): boolean | Promise<boolean> {
+  if (rowPreparationController || !gridClipboardActive || !clipboardWithinGridCapacity(text)) return false;
+  const insertionTarget = batchAppendPasteTargetRowId() !== null || blankSelectionBatchAppendPasteTarget(2) !== null;
+  const limits = insertionTarget ? { maxRows: dataGridPendingRowLimit(props.result.columns.length) } : {};
+  if (text.length > DATA_GRID_CLIPBOARD_BATCH_CHARS) {
+    return prepareGridRows(async (options) => {
+      const insertPaste = await parseInsertStatementPasteInBatches(text, options, limits);
+      if (options.signal?.aborted || options.isCurrent?.() === false) return false;
+      const rows = insertPaste?.rows ?? (await parseDataGridClipboardInBatches(text, options, limits));
+      if (!rows || options.signal?.aborted || options.isCurrent?.() === false) return false;
+      return applyParsedGridPaste(rows, insertPaste?.columnNames, options);
+    })
+      .then((result) => result ?? false)
+      .catch((error) => {
+        reportGridPasteError(error);
+        return false;
+      });
+  }
+  try {
+    const insertPaste = parseInsertStatementPaste(text, limits);
+    return applyParsedGridPaste(insertPaste?.rows ?? parseDataGridClipboard(text, limits), insertPaste?.columnNames);
+  } catch (error) {
+    reportGridPasteError(error);
+    return false;
+  }
+}
+
+function applyParsedGridPaste(rows: readonly (readonly (string | null)[])[], columnNames?: readonly string[] | null, preparation?: DataGridRowPreparationOptions): boolean | Promise<boolean> {
   // SQL INSERT statements are only meaningful as new rows, so they are honored
   // on the blank-new-row targets below; any other target pastes the parsed
   // values through the regular cell path instead of treating the whole
   // statement as literal text.
-  const insertPaste = parseInsertStatementPaste(text);
-  if (insertPaste) {
-    const insertTargetRowId = batchAppendPasteTargetRowId();
-    if (insertTargetRowId !== null) {
-      return appendParsedRowsToBlankTarget(insertTargetRowId, insertPaste.rows, visibleColumnIndexes.value, insertPaste.columnNames);
-    }
-    const insertCellTarget = blankSelectionBatchAppendPasteTarget(insertPaste.rows);
-    if (insertCellTarget) return appendParsedRowsToBlankTarget(insertCellTarget.rowId, insertPaste.rows, insertCellTarget.columnIndexes, insertPaste.columnNames);
-    return pasteRowsIntoSelection(insertPaste.rows);
-  }
-  const rows = parseDataGridClipboard(text);
   const targetRowId = batchAppendPasteTargetRowId();
   if (targetRowId !== null) {
-    return appendParsedRowsToBlankTarget(targetRowId, rows, visibleColumnIndexes.value);
+    return appendParsedRowsToBlankTarget(targetRowId, rows, visibleColumnIndexes.value, columnNames, preparation);
   }
-  const cellTarget = blankSelectionBatchAppendPasteTarget(rows);
-  if (cellTarget) return appendParsedRowsToBlankTarget(cellTarget.rowId, rows, cellTarget.columnIndexes);
+  const cellTarget = blankSelectionBatchAppendPasteTarget(rows.length);
+  if (cellTarget) return appendParsedRowsToBlankTarget(cellTarget.rowId, rows, cellTarget.columnIndexes, columnNames, preparation);
   return pasteRowsIntoSelection(rows);
 }
 
@@ -9252,11 +9361,16 @@ function pasteRowsIntoSelection(rows: readonly (readonly (string | null)[])[]): 
   const start = pasteStartCell();
   if (!start) return false;
   let applied = false;
-  for (const cell of planDataGridPaste(rows, displayRowCount.value - start.rowIndex, visibleColumns.value.length - start.colIndex)) {
-    const item = displayItemAt(start.rowIndex + cell.rowOffset);
-    if (!item) continue;
-    const visibleCol = start.colIndex + cell.columnOffset;
-    applied = applyVisibleSelectedCellValue(item, visibleCol, cell.value, allowDraftSelectionValue) || applied;
+  beginBatch();
+  try {
+    for (const cell of planDataGridPaste(rows, displayRowCount.value - start.rowIndex, visibleColumns.value.length - start.colIndex)) {
+      const item = displayItemAt(start.rowIndex + cell.rowOffset);
+      if (!item) continue;
+      const visibleCol = start.colIndex + cell.columnOffset;
+      applied = applyVisibleSelectedCellValue(item, visibleCol, cell.value, allowDraftSelectionValue) || applied;
+    }
+  } finally {
+    commitBatch();
   }
   if (applied) toast(t("grid.pasted"));
   return applied;
@@ -10783,7 +10897,13 @@ function transposeFieldTitle(item: { column: string; type: string; comment?: str
 }
 
 function toggleTransposeColumnSort() {
-  transposeColumnSortDirection.value = transposeColumnSortDirection.value === "asc" ? "desc" : "asc";
+  if (transposeColumnSortDirection.value === null) {
+    transposeColumnSortDirection.value = "asc";
+  } else if (transposeColumnSortDirection.value === "asc") {
+    transposeColumnSortDirection.value = "desc";
+  } else {
+    transposeColumnSortDirection.value = null;
+  }
 }
 
 function transposeColumnIndexKind(column: string): ColumnIndexKind | undefined {
@@ -11107,7 +11227,7 @@ watch(
       // While a "load all" run is active the per-request row cap must not be
       // read as the end of data — only the requested-vs-appended count and an
       // exact known total end the run (#10752).
-      ...(loadAllRowsLoopActive && appendRequestedLimit ? { loadAll: { requestedLimit: appendRequestedLimit, totalRowCount: totalRowCountIsExact.value ? (paginationTotalRowCount.value ?? displayedTotalRowCount.value) : undefined } } : {}),
+      ...(loadAllRowsLoopActive && appendRequestedLimit ? { loadAll: { requestedLimit: appendRequestedLimit, totalRowCount: !loadsSqlPages.value && totalRowCountIsExact.value ? (paginationTotalRowCount.value ?? displayedTotalRowCount.value) : undefined } } : {}),
     });
     if (appendCompletion) {
       if (infiniteScrollEnabled.value || loadAllRowsLoopActive) {
@@ -12496,13 +12616,20 @@ watch(gridSurfaceBusy, (isLoading) => {
 });
 
 onActivated(() => {
+  gridClipboardActive = true;
   autoRefresh.start();
 });
 onDeactivated(() => {
+  gridClipboardActive = false;
+  gridClipboardLifecycle++;
+  rowPreparationController?.abort();
   autoRefresh.stop();
 });
 
 onUnmounted(() => {
+  gridClipboardActive = false;
+  gridClipboardLifecycle++;
+  rowPreparationController?.abort();
   syncPendingDataEditorDraft(false);
   cleanupFrames();
   autoRefresh.stop();
@@ -12965,6 +13092,7 @@ function copySubmenu(): ContextMenuItem {
 
 function exportSubmenu(): ContextMenuItem {
   const items: ContextMenuItem[] = [
+    ...(props.context === "results" && props.transferQueryResult ? [{ label: t("grid.exportDatabase"), action: props.transferQueryResult }] : []),
     { label: t("grid.exportCsv"), action: exportCsv },
     { label: t("grid.exportXlsx"), action: exportXlsx },
     { label: t("grid.exportJson"), action: exportJson },
@@ -14938,7 +15066,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                 <div v-if="hasGridVerticalOverflow" ref="gridVerticalScrollbarTrackRef" class="data-grid-vertical-scrollbar" @pointerdown="startGridVerticalScrollbarDrag">
                   <div ref="gridVerticalScrollbarThumbRef" class="data-grid-vertical-scrollbar__thumb" />
                 </div>
-                <div v-if="gridSurfaceBusy" class="absolute inset-0 z-20 flex items-center justify-center" :class="pageJumpProgress ? 'bg-background/35 backdrop-blur-[1px]' : 'bg-background/50'">
+                <div v-if="gridSurfaceBusy && !rowPreparationProgress" class="absolute inset-0 z-20 flex items-center justify-center" :class="pageJumpProgress ? 'bg-background/35 backdrop-blur-[1px]' : 'bg-background/50'">
                   <DataGridBusyOverlay :elapsed-ms="loadingElapsed" :page-jump-progress="pageJumpProgress" :show-cancel="showCancel" :cancelling="cancelling" :cancel-disabled="cancelDisabled" @cancel="emit('cancel')" />
                 </div>
               </div>
@@ -15450,7 +15578,32 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
         </div>
       </template>
     </DataGridBulkEditDialog>
-    <DataGridInsertRowsDialog v-if="insertRowsDialogMounted" v-model:open="insertRowsDialogOpen" :can-place-at-selection="canPlaceInsertAtSelection" :initial-position="insertPosition" @insert="insertRows" />
+    <DataGridInsertRowsDialog v-if="insertRowsDialogMounted" v-model:open="insertRowsDialogOpen" :can-place-at-selection="canPlaceInsertAtSelection" :initial-position="insertPosition" :max-rows="availableInsertRows" @insert="insertRows" />
+    <Dialog :open="rowPreparationProgress !== null" @update:open="onRowPreparationOpenChange">
+      <DialogContent data-grid-row-preparation class="sm:max-w-[420px]" :show-close-button="false" @interact-outside.prevent>
+        <DialogHeader>
+          <DialogTitle>{{ t(rowPreparationProgress?.phase === "parsing" ? "grid.insertRowsParsing" : "grid.insertRowsPreparing") }}</DialogTitle>
+        </DialogHeader>
+        <div v-if="rowPreparationProgress" class="space-y-2">
+          <p class="text-sm tabular-nums" aria-live="polite">
+            {{ rowPreparationProgress.phase === "parsing" ? `${Math.floor((rowPreparationProgress.completed / Math.max(1, rowPreparationProgress.total)) * 100)}%` : t("grid.insertRowsProgress", { current: rowPreparationProgress.completed, total: rowPreparationProgress.total }) }}
+          </p>
+          <div
+            class="h-1.5 overflow-hidden rounded-full bg-muted"
+            role="progressbar"
+            :aria-label="t(rowPreparationProgress.phase === 'parsing' ? 'grid.insertRowsParsing' : 'grid.insertRowsPreparing')"
+            :aria-valuemin="0"
+            :aria-valuemax="rowPreparationProgress.total"
+            :aria-valuenow="rowPreparationProgress.completed"
+          >
+            <div class="h-full bg-primary" :style="{ width: `${(rowPreparationProgress.completed / rowPreparationProgress.total) * 100}%` }" />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" @click="cancelRowPreparation"><X class="h-4 w-4" />{{ t("dangerDialog.cancel") }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
 
     <DataGridExtractorDialog v-model:open="extractorConfigOpen" :preference="selectedCopyPreference" :options="settingsStore.editorSettings.dataGridExtractorOptions" :items="copyPreferenceMenuItems" :preview="previewWithPreference" @save="saveExtractorConfiguration" />
     <DataGridCopyColumnNamesDialog v-if="copyColumnNamesDialogMounted" v-model:open="copyColumnNamesDialogOpen" :column-names="copyColumnNamesDialogColumns" :database-type="resolvedDatabaseType" :column-comments="columnCommentMap" @copy="copyText" />

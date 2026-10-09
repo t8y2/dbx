@@ -2417,6 +2417,10 @@
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 22581,
+      "traits": {
+        "schemaAware": true,
+        "treeSchema": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,

@@ -14,6 +14,8 @@ interface GraphActions {
 
 const graphViews = vi.hoisted(() => [] as GraphActions[]);
 vi.mock("@/components/editor/QueryEditor.vue", () => ({ default: { render: () => null } }));
+// ContentArea also preloads the grid for graph results; keep its async imports within this test's lifetime.
+vi.mock("@/components/grid/DataGrid.vue", () => ({ default: { render: () => null } }));
 vi.mock("@/components/grid/DataGridColumnLayoutPopover.vue", () => ({ default: { render: () => null } }));
 vi.mock("@/components/graph/GraphResultView.vue", () => ({
   __esModule: true,

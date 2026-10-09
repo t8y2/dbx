@@ -9,6 +9,7 @@ import { normalizeDataGridSaveError } from "@/lib/dataGrid/dataGridSql";
 import { isOpaqueAggregateStateColumnType } from "@/lib/dataGrid/binaryCellDownload";
 import { rowStatusFilterAfterAddingRow, type RowStatusFilter } from "@/lib/dataGrid/gridRowStatus";
 import type { GridNewRowMeta, GridNewRowPlacement } from "@/lib/dataGrid/gridNewRowPlacement";
+import { dataGridPendingRowLimit, dataGridPreparationBatchSize, finishDataGridRowPreparation, runDataGridRowPreparation, type DataGridRowPreparationOptions, type DataGridRowPreparationProgress } from "@/lib/dataGrid/dataGridRowPreparation";
 import { supportsDataGridTransaction } from "@/lib/table/tableEditing";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useHistoryStore } from "@/stores/historyStore";
@@ -37,7 +38,6 @@ interface RowItem {
 }
 
 export const DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID = Number.MIN_SAFE_INTEGER;
-export const DATA_GRID_MAX_BATCH_INSERT_ROWS = 1000;
 
 type RowKind = "none" | "existing" | "new" | "draft";
 type ConditionalUpdateOutcome = "not-started" | "running" | "completed" | "failed" | "unknown";
@@ -51,7 +51,7 @@ interface ConditionalUpdateExecution {
   outcome: ConditionalUpdateOutcome;
 }
 
-export type DataGridAppendPastedRowsResult = { ok: true; rowCount: number } | { ok: false; reason: "not-editable" | "invalid-target" | "target-not-empty" | "empty-paste" | "readonly-column" | "no-matching-columns" };
+export type DataGridAppendPastedRowsResult = { ok: true; rowCount: number } | { ok: false; reason: "not-editable" | "invalid-target" | "target-not-empty" | "empty-paste" | "readonly-column" | "no-matching-columns" | "capacity-exceeded" | "cancelled" };
 
 type CommitEditResult =
   | {
@@ -199,12 +199,13 @@ interface QueuedAutoSaveChange {
   value: CellValue;
 }
 
-type PendingChangesHistorySnapshot = Pick<PendingChangesSnapshot, "newRows" | "newRowMeta" | "quickEntryDraftRow" | "dirtyRows" | "deletedRows" | "transactionActive" | "manualSaveRequired">;
+type PendingChangesHistorySnapshot = Pick<PendingChangesSnapshot, "newRows" | "newRowMeta" | "quickEntryDraftRow" | "dirtyRows" | "deletedRows" | "transactionActive" | "manualSaveRequired"> & { cellCount?: number };
 
 const pendingChangesCache = new Map<string, PendingChangesSnapshot>();
 const closingPendingSnapshotTabs = new Set<string>();
 const BEFORE_TAB_SWITCH_EVENT = "dbx:before-tab-switch";
 const MAX_PENDING_CHANGES_HISTORY = 100;
+const MAX_PENDING_HISTORY_CELLS = 2_000_000;
 
 function dataGridRowsIdentityChanged(previousRows: CellValue[][] | undefined, nextRows: CellValue[][], appendedFromRowCount?: number): boolean {
   if (!previousRows) return true;
@@ -286,6 +287,21 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   const scrollerRef = ref<GridScrollerRef | null>(null);
   const dirtyRows = shallowRef<Map<number, Map<number, CellValue>>>(new Map());
   const newRows = ref<CellValue[][]>([]);
+  const availableInsertRows = computed(() => Math.max(0, dataGridPendingRowLimit(result.value.columns.length) - newRows.value.length));
+
+  function canAllocateNewRows(count: number): boolean {
+    if (count <= availableInsertRows.value) return true;
+    saveError.value = i18n.global.t("grid.insertRowsCapacityExceeded", { max: availableInsertRows.value });
+    return false;
+  }
+
+  function rowPreparationIsCurrent(): () => boolean {
+    const version = pendingChangesVersion.value;
+    const rows = newRows.value;
+    const sourceRows = result.value.rows;
+    const columns = result.value.columns;
+    return () => !!editable.value && !isSaving.value && !isConditionalUpdateActive.value && pendingChangesVersion.value === version && newRows.value === rows && result.value.rows === sourceRows && result.value.columns === columns;
+  }
   // Parallel to newRows: one stable token + display placement per pending row.
   // Kept in lockstep with every structural mutation of newRows.
   const newRowMeta = ref<GridNewRowMeta[]>([]);
@@ -294,7 +310,10 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     return { token: nextNewRowToken++, placement, sourceIndex, editedColumns: editedColumns?.length ? [...editedColumns] : undefined };
   }
   function cloneNewRowMeta(meta: readonly GridNewRowMeta[]): GridNewRowMeta[] {
-    return meta.map((item) => ({ token: item.token, placement: item.placement ? { ...item.placement } : null, sourceIndex: item.sourceIndex, editedColumns: item.editedColumns ? [...item.editedColumns] : undefined }));
+    return toRaw(meta).map((entry) => {
+      const item = toRaw(entry);
+      return { token: item.token, placement: item.placement ? { ...toRaw(item.placement) } : null, sourceIndex: item.sourceIndex, editedColumns: item.editedColumns ? [...toRaw(item.editedColumns)] : undefined };
+    });
   }
 
   function updateClonedRowEditedColumns(newIndex: number, col: number, value: CellValue) {
@@ -467,13 +486,35 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function pendingChangesSnapshot(): PendingChangesHistorySnapshot {
+    return finishDataGridRowPreparation(preparePendingChangesSnapshot());
+  }
+
+  function* preparePendingChangesSnapshot(): Generator<DataGridRowPreparationProgress, PendingChangesHistorySnapshot> {
+    const sourceRows = toRaw(newRows.value);
+    const sourceMeta = toRaw(newRowMeta.value);
+    const rows: CellValue[][] = [];
+    const meta: GridNewRowMeta[] = [];
+    const batchSize = dataGridPreparationBatchSize(result.value.columns.length);
+    if (sourceRows.length > batchSize) yield { completed: 0, total: sourceRows.length };
+    let cellCount = 0;
+    for (let index = 0; index < sourceRows.length; index++) {
+      const row = toRaw(sourceRows[index]!);
+      rows.push([...row]);
+      cellCount += row.length;
+      if (sourceMeta[index]) meta.push(...cloneNewRowMeta([sourceMeta[index]!]));
+      if (sourceRows.length > batchSize && ((index + 1) % batchSize === 0 || index + 1 === sourceRows.length)) yield { completed: index + 1, total: sourceRows.length };
+    }
+    const changes = new Map([...toRaw(dirtyRows.value)].map(([rowIndex, values]) => [rowIndex, new Map(toRaw(values))]));
+    for (const values of changes.values()) cellCount += values.size;
+    cellCount += deletedRows.value.size + quickEntryDraftRow.value.length;
     return {
+      cellCount,
       manualSaveRequired: manualSaveRequired.value,
-      newRows: newRows.value.map((row) => [...row]),
-      newRowMeta: cloneNewRowMeta(newRowMeta.value),
-      quickEntryDraftRow: quickEntryDraftRow.value.length > 0 ? [...quickEntryDraftRow.value] : undefined,
-      dirtyRows: new Map([...dirtyRows.value].map(([rowIndex, changes]) => [rowIndex, new Map(changes)])),
-      deletedRows: new Set(deletedRows.value),
+      newRows: rows,
+      newRowMeta: meta,
+      quickEntryDraftRow: quickEntryDraftRow.value.length > 0 ? [...toRaw(quickEntryDraftRow.value)] : undefined,
+      dirtyRows: changes,
+      deletedRows: new Set(toRaw(deletedRows.value)),
       transactionActive: transactionActive.value,
     };
   }
@@ -504,8 +545,21 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     touchPendingChanges();
   }
 
-  function pushUndoSnapshot() {
-    undoStack.value = [...undoStack.value.slice(-MAX_PENDING_CHANGES_HISTORY + 1), pendingChangesSnapshot()];
+  function boundedPendingHistory(history: readonly PendingChangesHistorySnapshot[], snapshot: PendingChangesHistorySnapshot): PendingChangesHistorySnapshot[] {
+    const retained = [snapshot];
+    let cells = snapshot.cellCount ?? 0;
+    for (let index = history.length - 1; index >= 0 && retained.length < MAX_PENDING_CHANGES_HISTORY; index--) {
+      const previous = history[index]!;
+      const previousCells = previous.cellCount ?? 0;
+      if (cells + previousCells > MAX_PENDING_HISTORY_CELLS) break;
+      cells += previousCells;
+      retained.push(previous);
+    }
+    return retained.reverse();
+  }
+
+  function pushUndoSnapshot(snapshot = pendingChangesSnapshot()) {
+    undoStack.value = boundedPendingHistory(undoStack.value, snapshot);
     redoStack.value = [];
   }
 
@@ -518,7 +572,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     const snapshot = undoStack.value[undoStack.value.length - 1];
     if (!snapshot) return;
     undoStack.value = undoStack.value.slice(0, -1);
-    redoStack.value = [...redoStack.value, pendingChangesSnapshot()];
+    redoStack.value = boundedPendingHistory(redoStack.value, pendingChangesSnapshot());
     restorePendingChangesSnapshot(snapshot);
   }
 
@@ -526,7 +580,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     const snapshot = redoStack.value[redoStack.value.length - 1];
     if (!snapshot) return;
     redoStack.value = redoStack.value.slice(0, -1);
-    undoStack.value = [...undoStack.value, pendingChangesSnapshot()];
+    undoStack.value = boundedPendingHistory(undoStack.value, pendingChangesSnapshot());
     restorePendingChangesSnapshot(snapshot);
   }
 
@@ -828,6 +882,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       quickEntryDraftRow.value = emptyDraftRow();
       return;
     }
+    if (!canAllocateNewRows(1)) return;
     rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
     newRows.value = [...newRows.value, [...quickEntryDraftRow.value]];
     newRowMeta.value = [...newRowMeta.value, allocateNewRowMeta(null)];
@@ -897,6 +952,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       if (options.promoteDraft === false) {
         return { changed: false, rowKind: "draft" };
       }
+      if (!canAllocateNewRows(1)) return { changed: false, rowKind: "draft" };
       rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
       newRows.value = [...newRows.value, nextDraftRow];
       newRowMeta.value = [...newRowMeta.value, allocateNewRowMeta(null)];
@@ -1182,6 +1238,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
 
   function addRow() {
     if (isConditionalUpdateActive.value) return;
+    if (!canAllocateNewRows(1)) return;
     pushUndoSnapshot();
     rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
     newRows.value.push(result.value.columns.map(() => null));
@@ -1210,19 +1267,37 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   // positions). Returns the first inserted row's id, or undefined when the
   // count was rejected.
   function addRows(count: number, placement: GridNewRowPlacement | null = null): number | undefined {
+    return finishDataGridRowPreparation(prepareAddedRows(count, placement));
+  }
+
+  function addRowsInBatches(count: number, placement: GridNewRowPlacement | null = null, preparation: DataGridRowPreparationOptions = {}): Promise<number | undefined> {
+    const isCurrent = rowPreparationIsCurrent();
+    return runDataGridRowPreparation(prepareAddedRows(count, placement), { ...preparation, isCurrent: () => isCurrent() && preparation.isCurrent?.() !== false }, undefined);
+  }
+
+  function* prepareAddedRows(count: number, placement: GridNewRowPlacement | null): Generator<DataGridRowPreparationProgress, number | undefined> {
     if (isConditionalUpdateActive.value) return undefined;
-    if (!Number.isInteger(count) || count <= 0) return undefined;
-    const clampedCount = Math.min(count, DATA_GRID_MAX_BATCH_INSERT_ROWS);
+    if (!Number.isSafeInteger(count) || count <= 0) return undefined;
+    if (!canAllocateNewRows(count)) return undefined;
     const firstNewIndex = newRows.value.length;
-    pushUndoSnapshot();
-    rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
+    const isCurrent = rowPreparationIsCurrent();
+    const batchSize = dataGridPreparationBatchSize(result.value.columns.length);
+    const preparedRows: CellValue[][] = [];
+    const preparedMeta: GridNewRowMeta[] = [];
     const blankRow = result.value.columns.map(() => null);
-    for (let i = 0; i < clampedCount; i++) {
-      newRows.value.push([...blankRow]);
-      newRowMeta.value.push(allocateNewRowMeta(placement));
+    if (count > batchSize) yield { completed: 0, total: count };
+    for (let i = 0; i < count; i++) {
+      preparedRows.push([...blankRow]);
+      preparedMeta.push(allocateNewRowMeta(placement));
+      if (count > batchSize && ((i + 1) % batchSize === 0 || i + 1 === count)) yield { completed: i + 1, total: count };
     }
-    newRows.value = [...newRows.value];
-    newRowMeta.value = [...newRowMeta.value];
+    if (!isCurrent()) return undefined;
+    const snapshot = yield* preparePendingChangesSnapshot();
+    if (!isCurrent()) return undefined;
+    pushUndoSnapshot(snapshot);
+    rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
+    newRows.value = [...newRows.value, ...preparedRows];
+    newRowMeta.value = [...newRowMeta.value, ...preparedMeta];
     touchPendingChanges();
     if (useTransaction.value && !transactionActive.value) {
       enterTransaction();
@@ -1241,17 +1316,36 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function appendPastedRowsAsNewRows(pastedRows: readonly (readonly (string | null)[])[], columnIndexes: readonly number[], columnNames?: readonly string[] | null): DataGridAppendPastedRowsResult {
-    return appendPastedRows(null, pastedRows, columnIndexes, columnNames);
+    return finishDataGridRowPreparation(preparePastedRows(null, pastedRows, columnIndexes, columnNames));
   }
 
   function appendPastedRowsToNewRow(targetRowId: number, pastedRows: readonly (readonly (string | null)[])[], columnIndexes: readonly number[], columnNames?: readonly string[] | null): DataGridAppendPastedRowsResult {
-    return appendPastedRows(targetRowId, pastedRows, columnIndexes, columnNames);
+    return finishDataGridRowPreparation(preparePastedRows(targetRowId, pastedRows, columnIndexes, columnNames));
+  }
+
+  function appendPastedRowsAsNewRowsInBatches(pastedRows: readonly (readonly (string | null)[])[], columnIndexes: readonly number[], columnNames?: readonly string[] | null, preparation: DataGridRowPreparationOptions = {}): Promise<DataGridAppendPastedRowsResult> {
+    return appendPastedRowsInBatches(null, pastedRows, columnIndexes, columnNames, preparation);
+  }
+
+  function appendPastedRowsToNewRowInBatches(targetRowId: number, pastedRows: readonly (readonly (string | null)[])[], columnIndexes: readonly number[], columnNames?: readonly string[] | null, preparation: DataGridRowPreparationOptions = {}): Promise<DataGridAppendPastedRowsResult> {
+    return appendPastedRowsInBatches(targetRowId, pastedRows, columnIndexes, columnNames, preparation);
+  }
+
+  function appendPastedRowsInBatches(targetRowId: number | null, pastedRows: readonly (readonly (string | null)[])[], columnIndexes: readonly number[], columnNames: readonly string[] | null | undefined, preparation: DataGridRowPreparationOptions): Promise<DataGridAppendPastedRowsResult> {
+    const isCurrent = rowPreparationIsCurrent();
+    return runDataGridRowPreparation(preparePastedRows(targetRowId, pastedRows, columnIndexes, columnNames), { ...preparation, isCurrent: () => isCurrent() && preparation.isCurrent?.() !== false }, { ok: false, reason: "cancelled" });
   }
 
   // A null target appends populated rows directly, without a preparatory blank
   // row or a second undo entry. Cell/row paste still validates its blank target.
-  function appendPastedRows(targetRowId: number | null, pastedRows: readonly (readonly (string | null)[])[], columnIndexes: readonly number[], columnNames?: readonly string[] | null): DataGridAppendPastedRowsResult {
+  function* preparePastedRows(targetRowId: number | null, pastedRows: readonly (readonly (string | null)[])[], columnIndexes: readonly number[], columnNames?: readonly string[] | null): Generator<DataGridRowPreparationProgress, DataGridAppendPastedRowsResult> {
     if (!editable.value) return { ok: false, reason: "not-editable" };
+    const batchSize = dataGridPreparationBatchSize(result.value.columns.length);
+    if (pastedRows.length > dataGridPendingRowLimit(result.value.columns.length)) {
+      canAllocateNewRows(pastedRows.length);
+      return { ok: false, reason: "capacity-exceeded" };
+    }
+    if (pastedRows.length > batchSize || newRows.value.length > batchSize) yield { completed: 0, total: pastedRows.length };
     if (pastedRows.every((row) => row.every((value) => value === ""))) {
       return { ok: false, reason: "empty-paste" };
     }
@@ -1267,7 +1361,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     const targetRow = targetIsDraft ? quickEntryDraftRow.value : targetNewIndex === undefined ? undefined : newRows.value[targetNewIndex];
     if (targetRowId !== null && (!targetRow || !isBlankNewRow(targetRow))) return { ok: false, reason: "target-not-empty" };
 
-    const pastedColumnCount = Math.max(...pastedRows.map((row) => row.length));
+    const pastedColumnCount = pastedRows.reduce((max, row) => Math.max(max, row.length), 0);
     if (pastedColumnCount <= 0) return { ok: false, reason: "empty-paste" };
 
     // With explicit column names (SQL INSERT), align pasted values by column
@@ -1292,18 +1386,29 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     if (valueTargets.length === 0) return { ok: false, reason: "no-matching-columns" };
     if (valueTargets.some(({ columnIndex }) => !canEditColumn(columnIndex))) return { ok: false, reason: "readonly-column" };
 
-    const nextRows = newRows.value.map((row) => [...row]);
-    const nextMeta = cloneNewRowMeta(newRowMeta.value);
+    const isCurrent = rowPreparationIsCurrent();
+    const sourceRows = toRaw(newRows.value);
+    const sourceMeta = toRaw(newRowMeta.value);
+    const targetPlacement = targetNewIndex === undefined ? null : (sourceMeta[targetNewIndex]?.placement ?? null);
     let reusableNewRowCount = 0;
     if (targetNewIndex !== undefined) {
-      for (let rowIndex = targetNewIndex!; rowIndex < nextRows.length && reusableNewRowCount < pastedRows.length; rowIndex++) {
-        if (!isBlankNewRow(nextRows[rowIndex]!)) break;
+      for (let rowIndex = targetNewIndex!; rowIndex < sourceRows.length && reusableNewRowCount < pastedRows.length; rowIndex++) {
+        if (!isBlankNewRow(sourceRows[rowIndex]!)) break;
+        const placement = sourceMeta[rowIndex]?.placement ?? null;
+        if (placement?.anchorId !== targetPlacement?.anchorId || placement?.position !== targetPlacement?.position) break;
         reusableNewRowCount++;
+        if (reusableNewRowCount % batchSize === 0) yield { completed: 0, total: pastedRows.length };
       }
     }
+    if (!canAllocateNewRows(pastedRows.length - reusableNewRowCount)) return { ok: false, reason: "capacity-exceeded" };
+    let nextRows: CellValue[][];
+    let nextMeta: GridNewRowMeta[];
     const shouldClearColumn = clonedColumnClearPredicate();
-    const mappedRows = pastedRows.map((pastedRow, rowIndex) => {
-      const nextRow = rowIndex < reusableNewRowCount ? nextRows[targetNewIndex! + rowIndex]! : emptyDraftRow();
+    const mappedRows: CellValue[][] = [];
+    const mappedMeta: GridNewRowMeta[] = [];
+    for (let rowIndex = 0; rowIndex < pastedRows.length; rowIndex++) {
+      const pastedRow = pastedRows[rowIndex]!;
+      const nextRow = rowIndex < reusableNewRowCount ? [...toRaw(sourceRows[targetNewIndex! + rowIndex]!)] : emptyDraftRow();
       for (const { columnIndex, valueIndex } of valueTargets) {
         if (valueIndex >= pastedRow.length) continue;
         // Pasting a copied row into a new row must not reuse its generated key.
@@ -1314,25 +1419,24 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
         const value = pastedRow[valueIndex];
         nextRow[columnIndex] = value === null ? null : coerceCellValue(value, nextRow[columnIndex], columnIndex);
       }
-      return nextRow;
-    });
+      mappedRows.push(nextRow);
+      mappedMeta.push(rowIndex < reusableNewRowCount && sourceMeta[targetNewIndex! + rowIndex] ? cloneNewRowMeta([sourceMeta[targetNewIndex! + rowIndex]!])[0]! : allocateNewRowMeta(targetPlacement));
+      if (pastedRows.length > batchSize && ((rowIndex + 1) % batchSize === 0 || rowIndex + 1 === pastedRows.length)) yield { completed: rowIndex + 1, total: pastedRows.length };
+    }
 
-    pushUndoSnapshot();
+    if (!isCurrent()) return { ok: false, reason: "cancelled" };
+    const snapshot = yield* preparePendingChangesSnapshot();
+    if (!isCurrent()) return { ok: false, reason: "cancelled" };
+    pushUndoSnapshot(snapshot);
     if (targetIsDraft || targetRowId === null) {
-      nextRows.push(...mappedRows);
-      for (let i = 0; i < mappedRows.length; i++) nextMeta.push(allocateNewRowMeta(null));
+      nextRows = sourceRows.concat(mappedRows);
+      nextMeta = sourceMeta.concat(mappedMeta);
       if (targetIsDraft) quickEntryDraftRow.value = emptyDraftRow();
     } else {
-      // Reused blank rows keep their original placement; rows added beyond the
-      // reusable count append at the end (preserving existing paste behavior).
-      const newMetas = mappedRows.map((_, rowOffset) => {
-        if (rowOffset < reusableNewRowCount) {
-          return nextMeta[targetNewIndex! + rowOffset] ?? allocateNewRowMeta(null);
-        }
-        return allocateNewRowMeta(null);
-      });
-      nextMeta.splice(targetNewIndex!, reusableNewRowCount, ...newMetas);
-      nextRows.splice(targetNewIndex!, reusableNewRowCount, ...mappedRows);
+      // Keep the expanded batch at its insertion anchor, without consuming
+      // blank rows that were inserted elsewhere in the grid.
+      nextMeta = [...sourceMeta.slice(0, targetNewIndex), ...mappedMeta, ...sourceMeta.slice(targetNewIndex! + reusableNewRowCount)];
+      nextRows = [...sourceRows.slice(0, targetNewIndex), ...mappedRows, ...sourceRows.slice(targetNewIndex! + reusableNewRowCount)];
     }
     newRows.value = nextRows;
     newRowMeta.value = nextMeta;
@@ -1379,6 +1483,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   function cloneRow(rowId: number, resolvedValues?: ReadonlyMap<number, CellValue>) {
     const item = getRowItem(rowId);
     if (!item) return;
+    if (!canAllocateNewRows(1)) return;
     const clonedData = clonedRowData(item, resolvedValues);
     pushUndoSnapshot();
     rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
@@ -1403,6 +1508,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     if (isConditionalUpdateActive.value) return;
     const rowsToClone = rowIds.map((rowId) => getRowItem(rowId)).filter(Boolean) as RowItem[];
     if (rowsToClone.length === 0) return;
+    if (!canAllocateNewRows(rowsToClone.length)) return;
     pushUndoSnapshot();
     rowStatusFilter.value = rowStatusFilterAfterAddingRow(rowStatusFilter.value);
     for (const item of rowsToClone) {
@@ -2361,8 +2467,12 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     onEditKeydown,
     addRow,
     addRows,
+    addRowsInBatches,
+    availableInsertRows,
     appendPastedRowsToNewRow,
     appendPastedRowsAsNewRows,
+    appendPastedRowsToNewRowInBatches,
+    appendPastedRowsAsNewRowsInBatches,
     cloneRow,
     cloneRows,
     applyDeleteRows,

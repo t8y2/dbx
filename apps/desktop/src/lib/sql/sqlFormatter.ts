@@ -9,6 +9,37 @@ export const MAX_SQL_FORMAT_CHARS = 1_000_000;
 
 type SqlFormatterModule = typeof import("sql-formatter");
 
+// MySQL's REPLACE is both a write statement and a string function. The
+// upstream tokenizer prioritizes the statement token, which cannot appear in
+// a CASE branch. Resolve calls by the next non-comment token without changing
+// REPLACE INTO / LOW_PRIORITY / DELAYED statements or the source text.
+let mysqlFunctionSafeDialect: SqlFormatterModule["mysql"] | null = null;
+
+function resolveMysqlFunctionSafeDialect(sqlFormatter: SqlFormatterModule): SqlFormatterModule["mysql"] {
+  if (mysqlFunctionSafeDialect) return mysqlFunctionSafeDialect;
+
+  const options = sqlFormatter.mysql.tokenizerOptions;
+  mysqlFunctionSafeDialect = {
+    ...sqlFormatter.mysql,
+    tokenizerOptions: {
+      ...options,
+      postProcess: (inputTokens) => {
+        const tokens = options.postProcess?.(inputTokens) ?? inputTokens;
+        return tokens.map((token, index) => {
+          if (token.type !== "RESERVED_CLAUSE" || token.text !== "REPLACE") return token;
+
+          let nextIndex = index + 1;
+          while (tokens[nextIndex]?.type === "LINE_COMMENT" || tokens[nextIndex]?.type === "BLOCK_COMMENT") nextIndex += 1;
+          if (tokens[nextIndex]?.type !== "OPEN_PAREN") return token;
+
+          return { ...token, type: "RESERVED_FUNCTION_NAME" as (typeof tokens)[number]["type"] };
+        });
+      },
+    },
+  };
+  return mysqlFunctionSafeDialect;
+}
+
 // sql-formatter classifies ClickHouse date-part abbreviations as reserved
 // keywords even where ClickHouse accepts them as ordinary identifiers. Keep
 // them identifier-like so keyword casing cannot rewrite aliases such as `m`.
@@ -389,7 +420,7 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
           },
         }
       : options;
-  const resolvedDialect = dialect === "clickhouse" ? resolveClickHouseIdentifierSafeDialect(sqlFormatter) : dialect === "oracle" ? resolveOracleExtendedDialect(sqlFormatter) : undefined;
+  const resolvedDialect = dialect === "mysql" ? resolveMysqlFunctionSafeDialect(sqlFormatter) : dialect === "clickhouse" ? resolveClickHouseIdentifierSafeDialect(sqlFormatter) : dialect === "oracle" ? resolveOracleExtendedDialect(sqlFormatter) : undefined;
   const formatWithFallback = (input: string): string => {
     try {
       if (resolvedDialect) {

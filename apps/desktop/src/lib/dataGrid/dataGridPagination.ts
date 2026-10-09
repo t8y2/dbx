@@ -73,6 +73,15 @@ export function resolveDataGridPaginationTotal(options: { paginationTotalRowCoun
   return Math.min(total, options.maxRows);
 }
 
+/** A rewritten SQL page proves exhaustion only after a short (possibly empty) tail. */
+export function hasShortDataGridSqlPage(options: { rowCount: number; pageOffset?: number; pageLimit?: number; executedPageOffset?: number; executedPageLimit?: number }): boolean {
+  const offset = options.pageOffset ?? 0;
+  const lastOffset = options.executedPageOffset ?? offset;
+  const limit = options.executedPageLimit ?? options.pageLimit;
+  const lastRows = options.rowCount - (lastOffset - offset);
+  return limit !== undefined && limit > 0 && lastRows >= 0 && lastRows < limit;
+}
+
 export interface ReconcileDataGridExactTotalOptions {
   offset: number;
   rowCount: number;

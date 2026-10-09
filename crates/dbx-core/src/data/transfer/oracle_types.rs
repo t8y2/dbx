@@ -13,11 +13,11 @@ fn dependency_kind_for(kind: &str) -> Option<TransferObjectKind> {
 
 // Positions are retained so dependency-qualified identifiers can be mapped without
 // changing strings, q/nq literals, comments or unrelated schema references.
-use dbx_sql_core::oracle_program_compatibility::{map_reference_as, map_unqualified_table};
+use dbx_sql::oracle_program_compatibility::{map_reference_as, map_unqualified_table};
 #[cfg(test)]
-use dbx_sql_core::oracle_program_compatibility::supported_version;
+use dbx_sql::oracle_program_compatibility::supported_version;
 pub(super) fn map_reference(sql: &str, owner: &str, name: &str, target: &str) -> Result<String, String> {
-    dbx_sql_core::oracle_program_compatibility::map_reference(sql, owner, name, target)
+    dbx_sql::oracle_program_compatibility::map_reference(sql, owner, name, target)
 }
 pub(super) async fn map_table_type_references(state: &AppState, request: &TransferRequest, pool: &str, table: &str, ddl: String) -> Result<String, String> {
     if !has_selection(request) { return Ok(ddl); }
@@ -38,7 +38,7 @@ fn compatible_source(sql: &str, kind: TransferObjectKind, details: &OracleTypeDe
     let dependencies = details.dependencies.rows.iter().map(|d| dbx_types::types::RoutineDependency {
         owner: d.referenced_schema.clone().unwrap_or_default(), name: d.referenced_name.clone(), object_type: d.referenced_type.replace('_', " "),
     }).collect::<Vec<_>>();
-    dbx_sql_core::oracle_program_compatibility::compatible_type_source(sql, dictionary_kind(kind), &dependencies)
+    dbx_sql::oracle_program_compatibility::compatible_type_source(sql, dictionary_kind(kind), &dependencies)
 }
 fn source_kind(kind: TransferObjectKind) -> db::ObjectSourceKind { if kind == TransferObjectKind::TypeBody { db::ObjectSourceKind::TypeBody } else { db::ObjectSourceKind::Type } }
 fn selected(request: &TransferRequest) -> Vec<(TransferObjectKind, String)> {
@@ -127,7 +127,7 @@ async fn object_status(state: &AppState, pool: &str, owner: &str, name: &str, ki
     rows.first().map(|row| text(row, 0)).transpose()
 }
 fn conversion_profile(source_type: &DatabaseType, source_banner: &str, target_type: &DatabaseType, target_banner: &str) -> Result<bool, String> {
-    dbx_sql_core::oracle_program_compatibility::conversion_profile(source_type, source_banner, target_type, target_banner)
+    dbx_sql::oracle_program_compatibility::conversion_profile(source_type, source_banner, target_type, target_banner)
 }
 async fn check_engines(state: &AppState, request: &TransferRequest, source: &str, target: &str) -> Result<bool, String> {
     let source_type = get_db_type(state, &request.source_connection_id).await?;

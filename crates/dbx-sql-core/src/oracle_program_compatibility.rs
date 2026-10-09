@@ -11,6 +11,8 @@ pub struct OracleProgramContext {
     pub target_version: String,
     pub target_editions_disabled: bool,
     pub non_editioned_source_objects: Vec<(String, String)>,
+    pub target_dependencies: Vec<(String, String, String)>,
+    pub blocked_types: Vec<(String, String)>,
 }
 
 pub fn conversion_source(sql: &str, kind: &str, name: &str, source: DatabaseType, target: DatabaseType, context: &OracleProgramContext) -> Result<String, String> {
@@ -18,13 +20,13 @@ pub fn conversion_source(sql: &str, kind: &str, name: &str, source: DatabaseType
     if target == DatabaseType::Oracle && !context.target_editions_disabled {
         return Err("Oracle target schema edition status is enabled or unknown; conversion blocked".into());
     }
-    if source == DatabaseType::Oracle && matches!(kind, "TYPE" | "TYPE BODY")
+    if source == DatabaseType::Oracle
         && !context.non_editioned_source_objects.contains(&(name.to_string(), kind.to_string())) {
-        return Err("Oracle source TYPE edition state is unknown or editioned; conversion blocked".into());
+        return Err("Oracle source program edition state is unknown or editioned; conversion blocked".into());
     }
     let edition = Regex::new(r"(?is)^(\s*CREATE\s+(?:OR\s+REPLACE\s+)?)(?:NONEDITIONABLE|EDITIONABLE)\s+").unwrap();
     if edition.is_match(sql) {
-        if !matches!(kind, "TYPE" | "TYPE BODY") { return Err("Program edition conversion has not been confirmed".into()); }
+        if source != DatabaseType::Oracle { return Err("Source program edition conversion has not been confirmed".into()); }
         return Ok(edition.replace(sql, "${1}").to_string());
     }
     Ok(sql.to_string())
@@ -107,7 +109,7 @@ pub fn map_unqualified_table(sql: &str, name: &str, target: &str, target_name: &
 
 pub fn compatible_type_source(sql: &str, kind: &str, dependencies: &[RoutineDependency]) -> Result<(), String> {
     let tail = declaration_tail(sql, kind)?;
-    let words = source_tokens(sql).into_iter().map(|t| t.2).collect::<Vec<_>>();
+    let words = source_tokens(&tail).into_iter().map(|t| t.2).collect::<Vec<_>>();
     // These clauses carry identity, edition, inheritance or execution semantics that
     // the fixed 19c/21c ↔ 4.2.5 conversion profile does not translate.
     for keyword in ["OID", "UNDER", "FINAL", "INSTANTIABLE", "OVERRIDING", "MAP", "AUTHID", "EDITIONABLE", "NONEDITIONABLE", "SHARING", "ACCESSIBLE", "OPAQUE", "EXTERNAL", "LIBRARY", "LANGUAGE", "PRAGMA", "PIPELINED", "PARALLEL_ENABLE", "RESULT_CACHE", "SQL_MACRO", "XMLTYPE", "JSON", "BFILE", "NCLOB", "UROWID", "ROWID", "PERSISTABLE", "COLLATION"] {
@@ -194,4 +196,44 @@ pub fn conversion_profile(source_type: &DatabaseType, source_banner: &str, targe
         return Err("Oracle 23 TYPE conversion lacks fixed-version documentation; only Oracle 19c/21c and OceanBase 4.2.5 conversion profiles are confirmed".into());
     }
     Ok(conversion)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn complete_type_body_header_is_not_a_body_local_type_declaration() {
+        let body = "CREATE TYPE BODY T AS MEMBER FUNCTION f RETURN NUMBER IS BEGIN RETURN ABS(SELF.age); END; END;";
+        assert!(compatible_type_source(body, "TYPE BODY", &[]).is_ok());
+        assert!(compatible_type_source(&body.replace("ABS(SELF.age)", "unknown_call(SELF.age)"), "TYPE BODY", &[]).unwrap_err().contains("UNKNOWN_CALL"));
+        assert!(compatible_type_source(&body.replace("IS BEGIN", "IS TYPE local_t IS TABLE OF NUMBER; BEGIN"), "TYPE BODY", &[]).is_err());
+    }
+
+    #[test]
+    fn fixed_versions_do_not_accept_mysql_prefix_or_unconfirmed_oracle_conversion() {
+        assert!(conversion_profile(&DatabaseType::Oracle, "Oracle Database 19c Enterprise Edition", &DatabaseType::OceanbaseOracle, "4.2.5.6").unwrap());
+        assert!(conversion_profile(&DatabaseType::OceanbaseOracle, "4.2.5.6", &DatabaseType::Oracle, "Oracle Database 21c Enterprise Edition").unwrap());
+        assert!(conversion_profile(&DatabaseType::OceanbaseOracle, "5.7.25-OceanBase-v4.2.5.0", &DatabaseType::Oracle, "Oracle Database 19c Enterprise Edition").is_err());
+        assert!(conversion_profile(&DatabaseType::Oracle, "Oracle Database 23ai Enterprise Edition", &DatabaseType::OceanbaseOracle, "4.2.5.0").is_err());
+    }
+
+    #[test]
+    fn mapping_preserves_literals_and_rejects_owner_shadowing() {
+        let sql = "CREATE TYPE BODY T AS MEMBER FUNCTION f RETURN NUMBER IS BEGIN -- SRC.T\nRETURN SRC.T(q'[SRC.T O'Reilly]', nq'{SRC.T}'); END; END;";
+        let mapped = map_reference(sql, "SRC", "T", "Mixed Target").unwrap();
+        assert!(mapped.contains("RETURN \"Mixed Target\".T("));
+        assert!(mapped.contains("-- SRC.T\n"));
+        assert!(mapped.contains("q'[SRC.T O'Reilly]', nq'{SRC.T}'"));
+        assert!(map_reference("FUNCTION f(SRC NUMBER) RETURN NUMBER IS BEGIN RETURN SRC.T; END;", "SRC", "T", "DST").is_err());
+    }
+
+    #[test]
+    fn type_categories_report_specific_unknown_semantics() {
+        assert!(compatible_type_source("CREATE TYPE T AS OBJECT (n NUMBER(10,2), label VARCHAR2(30 CHAR));", "TYPE", &[]).is_ok());
+        assert!(compatible_type_source("CREATE TYPE T AS TABLE OF NUMBER;", "TYPE", &[]).is_ok());
+        assert!(compatible_type_source("CREATE TYPE T AS VARRAY(8) OF VARCHAR2(30);", "TYPE", &[]).is_ok());
+        assert!(compatible_type_source("CREATE TYPE T AS OBJECT (n NUMBER) NOT FINAL;", "TYPE", &[]).unwrap_err().contains("FINAL"));
+        assert!(compatible_type_source("CREATE TYPE T AS OBJECT (value XMLTYPE);", "TYPE", &[]).unwrap_err().contains("XMLTYPE"));
+    }
 }

@@ -1698,12 +1698,23 @@ func oracleListSQLWithVisibleSchemas(baseSQL string, visibleSchemas []string) (s
 }
 
 func (s *server) currentSchema() (string, error) {
+	const sqlText = "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL"
+	var schema string
+	// CURRENT_SCHEMA is per Oracle session. A manual transaction sets it only on
+	// its pinned connection and skips per-statement setSchema, so a pooled
+	// session would report the login user's schema and resolve unqualified
+	// tables against the wrong owner (#11258).
+	if s.manualTx != nil {
+		if err := s.manualTx.QueryRow(sqlText).Scan(&schema); err != nil {
+			return "", err
+		}
+		return strings.ToUpper(schema), nil
+	}
 	db, err := s.requireDB()
 	if err != nil {
 		return "", err
 	}
-	var schema string
-	if err := db.QueryRow("SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL").Scan(&schema); err != nil {
+	if err := db.QueryRow(sqlText).Scan(&schema); err != nil {
 		return "", err
 	}
 	return strings.ToUpper(schema), nil

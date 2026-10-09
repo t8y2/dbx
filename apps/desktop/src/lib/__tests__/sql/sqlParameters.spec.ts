@@ -320,6 +320,20 @@ describe("extractSqlParameters", () => {
         BEGIN EXECUTE IMMEDIATE @sql USING @input; END;`;
       expect(extractSqlParameters(sql, { databaseType })).toEqual(["value", "source", "target", "column", "offset", "count", "sql", "input"]);
     });
+
+    it.each(["HR.NEXT", "HR.OFFSET", "HR.FIRST", "FIRST", "-- comment\nFIRST"])("preserves database links on the non-reserved object %s", (objectName) => {
+      const sql = `SELECT * FROM ${objectName} /* separator */ @LINK WHERE id = :id`;
+      expect(extractSqlParameters(sql, { databaseType })).toEqual(["id"]);
+      expect(substituteSqlParameters(sql, { LINK: { kind: "string", value: "WRONG" }, id: { kind: "number", value: "7" } }, { databaseType })).toBe(`SELECT * FROM ${objectName} /* separator */ @LINK WHERE id = 7`);
+    });
+
+    it("keeps lock wait, null ordering and cursor parameters", () => {
+      const sql = `SELECT * FROM HR.EMPLOYEES ORDER BY id NULLS @position FOR UPDATE WAIT @seconds;
+        BEGIN OPEN @cursor FOR SELECT * FROM HR.EMPLOYEES; END;`;
+      expect(extractSqlParameters(sql, { databaseType })).toEqual(["position", "seconds", "cursor"]);
+      expect(substituteSqlParameters(sql, { position: { kind: "raw", value: "FIRST" }, seconds: { kind: "number", value: "5" }, cursor: { kind: "raw", value: "c" } }, { databaseType })).toBe(`SELECT * FROM HR.EMPLOYEES ORDER BY id NULLS FIRST FOR UPDATE WAIT 5;
+        BEGIN OPEN c FOR SELECT * FROM HR.EMPLOYEES; END;`);
+    });
   });
 
   it.each(["postgres", "sqlserver", "dameng"] as const)("keeps separated at-sign parameters unchanged for %s", (databaseType) => {

@@ -342,6 +342,7 @@ pub(super) fn capabilities_for(
                 drop_index: true,
                 rebuild_index: true,
                 index_type: true,
+                add_primary_key: matches!(database_type, Some(DatabaseType::OceanbaseOracle)),
                 ..base
             }
         }

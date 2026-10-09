@@ -23,7 +23,7 @@ import SideBySideTextDiff, { type TextDiffSide } from "@/components/common/SideB
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 import { getSchemaDiffOptionsForDbType } from "@/lib/schema/schemaDiffOptions";
-import { finishSchemaDiffDeployment, type DeployTxResult } from "@/lib/schema/deployTxResult";
+import { finishSchemaDiffDeployment, schemaDiffRoutineExecutionStatements, schemaDiffRoutineExecutedSteps, schemaDiffRoutineExpectedDefinitions, type DeployTxResult } from "@/lib/schema/deployTxResult";
 import { getSchemaDiffNextProgressStep, isSchemaDiffPostgresLike, shouldLoadSchemaDiffExtraObjectPhase, type SchemaDiffProgressPhase } from "@/lib/schema/schemaDiffProgress";
 import { createSchemaDiffTableListLoader } from "@/lib/schema/schemaDiffTableList";
 import { countSchemaDiffActionableObjects, partitionSchemaDiffObjectsByResultTab, swapSchemaDiffRoutineMappings } from "@/lib/schema/schemaDiffRoutine";
@@ -163,6 +163,7 @@ const focusedRollbackSql = ref("");
 const selectedDeploySql = ref("");
 const selectedForwardDeploySql = ref("");
 const selectedRoutineDiffs = ref<FunctionDiff[]>([]);
+const selectedRoutineSteps = ref<SchemaDiffRoutineStep[]>([]);
 const blockedRoutineSteps = ref<SchemaDiffRoutineStep[]>([]);
 const executing = ref(false);
 const lastDiffResult = ref<SchemaDiffPreparation | null>(null);
@@ -827,6 +828,7 @@ function buildSchemaSyncPlanOptions(options: SchemaDiffCompareOptions) {
   const engineDbType = targetEngineDbType.value ?? getDbType();
   return {
     databaseType: engineDbType,
+    routineEndpoints: { sourceConnectionId: sourceConnectionId.value, sourceDatabase: sourceDatabase.value, targetConnectionId: targetConnectionId.value, targetDatabase: targetDatabase.value },
     sourceDatabaseType: sourceEngineDbType.value ?? (sourceDbType.value as DatabaseType),
     sourceSchema: sourceSchema.value,
     targetSchema: schemaDiffDeployTargetSchema(getDbType(), targetDatabase.value, targetSchema.value),
@@ -849,6 +851,7 @@ function formatSchemaSyncPlan(plan: Awaited<ReturnType<typeof api.generateSchema
 
 function clearSelectedDeploySql() {
   selectedRoutineDiffs.value = [];
+  selectedRoutineSteps.value = [];
   blockedRoutineSteps.value = [];
   selectedForwardDeploySql.value = "";
   selectedDeploySql.value = "";
@@ -878,6 +881,7 @@ async function regenerateSelectedDeploySql() {
 
   const formatted = formatSchemaSyncPlan(plan, input, options);
   selectedRoutineDiffs.value = input.functionDiffs;
+  selectedRoutineSteps.value = plan.routineSteps ?? [];
   blockedRoutineSteps.value = plan.routineSteps?.filter((step) => step.blockedReason) ?? [];
   rollbackCompleteness.value = plan.rollbackCompleteness ?? "complete";
   missingRollbackObjects.value = plan.missingRollbackObjects ?? [];
@@ -1011,16 +1015,41 @@ async function executeDeploySql() {
   const expected = isOracleRoutineTarget.value ? selectedRoutineDiffs.value.map((diff) => ({ ...diff, source: diff.source ? { ...diff.source } : undefined, target: diff.target ? { ...diff.target } : undefined })) : [];
   executing.value = true;
   try {
+    let programSteps = selectedRoutineSteps.value;
+    if (expected.length > 0 && !rollback) {
+      const options = normalizeSchemaDiffCompareOptions(activeConfig.value?.options, getDbType());
+      const plan = await api.generateSchemaSyncPlan({ diffs: [], functionDiffs: expected, sequenceDiffs: [], ruleDiffs: [], ownerDiffs: [] }, buildSchemaSyncPlanOptions(options));
+      const refreshed = plan.routineSteps ?? [];
+      schemaDiffRoutineExecutionStatements(refreshed);
+      if (JSON.stringify(refreshed) !== JSON.stringify(programSteps)) throw new Error("Program metadata or compatibility changed; refresh the preview before execution");
+      programSteps = refreshed;
+    }
+    if (expected.length > 0 && rollback) {
+      const current = await api.listFunctions(connectionId, database, schema);
+      for (const diff of expected) {
+        const kind = (diff.source ?? diff.target)?.function_type;
+        const actual = current.find((info) => info.name === diff.name && info.function_type === kind);
+        if (diff.type === "added" && !actual) throw new Error("The added target routine is already missing; inspect partial execution before recovery");
+        diff.source = actual;
+      }
+      const reverse = expected.map((diff): FunctionDiff => ({ ...diff, type: diff.type === "added" ? "removed" : diff.type === "removed" ? "added" : "modified", source: diff.target, target: diff.source }));
+      const options = normalizeSchemaDiffCompareOptions(activeConfig.value?.options, getDbType());
+      const plan = await api.generateSchemaSyncPlan({ diffs: [], functionDiffs: reverse, sequenceDiffs: [], ruleDiffs: [], ownerDiffs: [] }, { ...buildSchemaSyncPlanOptions(options), sourceDatabaseType: targetEngineDbType.value ?? getDbType(), sourceSchema: schema, targetSchema: schema, routineEndpoints: { sourceConnectionId: connectionId, sourceDatabase: database, targetConnectionId: connectionId, targetDatabase: database, recovery: true } });
+      programSteps = plan.routineSteps ?? [];
+    }
+    if (expected.length > 0 && programSteps.length !== expected.length) throw new Error(t("diff.routinePlanBlocked", { reason: t("diff.noObjectsSelected") }));
+    const statements = expected.length > 0 ? schemaDiffRoutineExecutionStatements(programSteps) : [sql];
     const targetConnection = store.getConfig(connectionId);
     const txLog = await executeWithProductionSqlGuard({
       connection: targetConnection,
       database,
       sql,
       source: t("production.sourceSchemaDiff"),
-      execute: () => api.executeScriptWith2pc(connectionId, database, [sql], schema, destructive),
+      execute: () => api.executeScriptWith2pc(connectionId, database, statements, schema, destructive),
     });
     if (txLog === undefined) return;
-    deployResult.value = await finishSchemaDiffDeployment(txLog, expected, (input) => api.validateSchemaDiffRoutines(connectionId, database, schema, input), t, rollback);
+    deployResult.value = await finishSchemaDiffDeployment(txLog, schemaDiffRoutineExpectedDefinitions(expected, programSteps, rollback), (input) => api.validateSchemaDiffRoutines(connectionId, database, schema, input), t, rollback, schema);
+    if (expected.length > 0) deployResult.value.executedSteps = schemaDiffRoutineExecutedSteps(programSteps, deployResult.value.executedCount ?? (txLog.status === "committed" ? statements.length : 0));
     showResultDialog.value = true;
   } catch (e: any) {
     deployResult.value = {
@@ -1068,11 +1097,13 @@ async function handleSelectObject(reviewObject: SchemaDiffObject) {
 
   if (obj.objectKind !== "function") return;
 
-  const preferredKind: ObjectSourceKind = obj.routineType === "PROCEDURE" ? "PROCEDURE" : "FUNCTION";
+  const preferredKind: ObjectSourceKind = obj.routineType === "PACKAGE BODY" ? "PACKAGE_BODY" : obj.routineType === "TYPE BODY" ? "TYPE_BODY" : obj.routineType ?? "FUNCTION";
 
-  async function fetchRoutineDdl(connectionId: string, database: string, schema: string, name: string): Promise<string | undefined> {
+  async function fetchRoutineDdl(connectionId: string, database: string, schema: string, name: string, tableName?: string): Promise<string | undefined> {
     try {
-      const { source } = await loadObjectSourceWithRoutineFallback(api.getObjectSource, connectionId, database, schema, name, preferredKind, obj.arguments);
+      const source = preferredKind === "PROCEDURE" || preferredKind === "FUNCTION"
+        ? (await loadObjectSourceWithRoutineFallback(api.getObjectSource, connectionId, database, schema, name, preferredKind, obj.arguments)).source
+        : await api.getObjectSource(connectionId, database, schema, name, preferredKind, obj.arguments, tableName);
       return source?.source?.trim() ? source.source : undefined;
     } catch {
       return undefined;
@@ -1080,20 +1111,20 @@ async function handleSelectObject(reviewObject: SchemaDiffObject) {
   }
 
   if (obj.operationType === "create" && !obj.sourceDdl) {
-    const ddl = await fetchRoutineDdl(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, obj.name);
+    const ddl = await fetchRoutineDdl(sourceConnectionId.value, sourceDatabase.value, obj.sourceSchema ?? sourceSchema.value, obj.name, obj.sourceTrigger?.tableName);
     if (ddl) obj.sourceDdl = ddl;
   }
   if (obj.operationType === "delete" && !obj.targetDdl) {
-    const ddl = await fetchRoutineDdl(targetConnectionId.value, targetDatabase.value, targetSchema.value, obj.name);
+    const ddl = await fetchRoutineDdl(targetConnectionId.value, targetDatabase.value, obj.targetSchema ?? targetSchema.value, obj.name, obj.targetTrigger?.tableName);
     if (ddl) obj.targetDdl = ddl;
   }
   if (obj.operationType === "modify") {
     if (!obj.sourceDdl) {
-      const ddl = await fetchRoutineDdl(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, obj.name);
+      const ddl = await fetchRoutineDdl(sourceConnectionId.value, sourceDatabase.value, obj.sourceSchema ?? sourceSchema.value, obj.name, obj.sourceTrigger?.tableName);
       if (ddl) obj.sourceDdl = ddl;
     }
     if (!obj.targetDdl) {
-      const ddl = await fetchRoutineDdl(targetConnectionId.value, targetDatabase.value, targetSchema.value, obj.name);
+      const ddl = await fetchRoutineDdl(targetConnectionId.value, targetDatabase.value, obj.targetSchema ?? targetSchema.value, obj.name, obj.targetTrigger?.tableName);
       if (ddl) obj.targetDdl = ddl;
     }
   }
@@ -1665,12 +1696,18 @@ const targetConnectionInfo = computed(() => {
             <div v-if="deployResult?.routineValidations?.length" class="mt-3 space-y-2 text-xs">
               <p class="font-medium">{{ t("diff.routineValidationTitle") }}</p>
               <ul class="max-h-48 space-y-2 overflow-auto">
-                <li v-for="item in deployResult.routineValidations" :key="`${item.routineType}-${item.name}`" :class="item.success ? 'text-green-600 dark:text-green-400' : 'text-destructive'">
-                  <span class="font-mono">{{ item.routineType }} {{ item.name }}</span>
+                <li v-for="item in deployResult.routineValidations" :key="JSON.stringify([item.schema, item.routineType, item.name, item.trigger?.tableOwner, item.trigger?.tableName])" :class="item.success ? 'text-green-600 dark:text-green-400' : 'text-destructive'">
+                  <span class="font-mono">{{ item.routineType }} {{ item.schema ? `${item.schema}.` : "" }}{{ item.name }}</span>
+                  <span v-if="item.trigger" class="font-mono"> · {{ item.trigger.tableOwner }}.{{ item.trigger.tableName }} · {{ item.trigger.status }}</span>
                   <pre class="whitespace-pre-wrap">{{ item.message }}</pre>
                 </li>
               </ul>
             </div>
+            <div v-if="deployResult?.executedSteps?.length" class="mt-3 space-y-2 text-xs">
+              <p class="font-medium">{{ t("diff.executedStatements") }}</p>
+              <ol class="max-h-40 list-inside list-decimal overflow-auto font-mono"><li v-for="(statement, index) in deployResult.executedSteps" :key="index" class="whitespace-pre-wrap">{{ statement }}</li></ol>
+            </div>
+            <p v-if="isOracleRoutineTarget && !deployResult?.success" class="mt-3 text-xs text-amber-700 dark:text-amber-400">{{ t("diff.routineRecoveryHint") }}</p>
           </div>
 
           <DialogFooter>

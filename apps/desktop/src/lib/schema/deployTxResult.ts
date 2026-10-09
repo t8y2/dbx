@@ -1,4 +1,5 @@
-import type { FunctionDiff, SchemaDiffRoutineValidation } from "@/lib/schema/schemaDiff";
+import type { FunctionDiff, SchemaDiffRoutineStep, SchemaDiffRoutineValidation } from "@/lib/schema/schemaDiff";
+import { schemaDiffRoutineType } from "@/lib/schema/schemaDiffRoutine";
 
 export interface DeployTxResult {
   success: boolean;
@@ -9,18 +10,47 @@ export interface DeployTxResult {
   executedCount?: number;
   statementCount?: number;
   routineValidations?: SchemaDiffRoutineValidation[];
+  executedSteps?: string[];
+}
+
+/** Keep each PL/SQL body whole; trigger state changes are separate statements. */
+export function schemaDiffRoutineExecutionStatements(steps: SchemaDiffRoutineStep[]): string[] {
+  if (steps.some((step) => step.blockedReason || !step.sql?.trim())) throw new Error("Program object plan is blocked or incomplete");
+  return steps.flatMap((step) => [step.sql!, ...(step.postSql ?? [])]);
+}
+
+export function schemaDiffRoutineExecutedSteps(steps: SchemaDiffRoutineStep[], executedCount: number): string[] {
+  return steps.flatMap((step) => [
+    `${step.routineType} ${step.targetSchema ? `${step.targetSchema}.` : ""}${step.name}${step.trigger ? ` · ${step.trigger.tableOwner}.${step.trigger.tableName}` : ""}`,
+    ...(step.postSql ?? []),
+  ]).slice(0, Math.max(0, executedCount));
+}
+
+/** Validate the generated target definition, including reviewed owner/edition conversion. */
+export function schemaDiffRoutineExpectedDefinitions(expected: FunctionDiff[], steps: SchemaDiffRoutineStep[], rollback = false): FunctionDiff[] {
+  return expected.map((diff) => {
+    const info = rollback ? diff.target : diff.source;
+    const step = steps.find((step) => step.name === diff.name && step.routineType === schemaDiffRoutineType(info?.function_type));
+    if (!info || !step?.sql || step.operation === "removed") return diff;
+    const mapped = { ...info, definition: step.sql };
+    return rollback ? { ...diff, target: mapped } : { ...diff, source: mapped };
+  });
 }
 
 /** Oracle DDL can commit while leaving an INVALID routine. Readback is part of deployment. */
-export async function finishSchemaDiffDeployment(txLog: any, expected: FunctionDiff[], validate: (expected: FunctionDiff[]) => Promise<SchemaDiffRoutineValidation[]>, t: (key: string, params?: Record<string, any>) => string, rollback = false): Promise<DeployTxResult> {
+export async function finishSchemaDiffDeployment(txLog: any, expected: FunctionDiff[], validate: (expected: FunctionDiff[]) => Promise<SchemaDiffRoutineValidation[]>, t: (key: string, params?: Record<string, any>) => string, rollback = false, targetSchema?: string): Promise<DeployTxResult> {
   const result = buildDeployTxResult(txLog, t);
+  if (expected.length > 0 && result.status === "rolled_back") return { ...result, message: t("diff.routineRecoveryHint") };
   if (!result.success || expected.length === 0) return result;
   const validationInput = rollback ? expected.map((diff): FunctionDiff => ({ ...diff, type: diff.type === "added" ? "removed" : diff.type === "removed" ? "added" : "modified", source: diff.target, target: diff.source })) : expected;
   try {
     const validations = await validate(validationInput);
     const complete = validationInput.every((diff) => {
-      const routineType = (diff.source?.function_type ?? diff.target?.function_type ?? "").toUpperCase().includes("PROC") ? "PROCEDURE" : "FUNCTION";
-      const matches = validations.filter((item) => item.name === diff.name && item.routineType === routineType);
+      const fn = diff.source ?? diff.target;
+      const routineType = schemaDiffRoutineType(fn?.function_type);
+      const trigger = fn?.trigger;
+      const tableOwner = trigger && trigger.tableOwner === fn?.schema ? targetSchema ?? trigger.tableOwner : trigger?.tableOwner;
+      const matches = validations.filter((item) => (!targetSchema || item.schema === undefined || item.schema === targetSchema) && item.name === diff.name && item.routineType === routineType && item.trigger?.tableName === trigger?.tableName && item.trigger?.tableOwner === tableOwner);
       return matches.length === 1 && matches[0]!.success;
     });
     if (complete && validations.every((item) => item.success)) return { ...result, routineValidations: validations };

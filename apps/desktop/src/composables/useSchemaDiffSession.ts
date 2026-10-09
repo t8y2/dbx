@@ -5,12 +5,12 @@ import { openSchemaDiffSession } from "@/composables/useDialogSources";
 import { useExportTracker } from "@/composables/useExportTracker";
 import { filterSchemaDiffTables } from "@/lib/schema/schemaDiffTableFilter";
 import { compileSchemaDiffTableFilter } from "@/lib/schema/schemaDiffTableFilter";
-import { filterSchemaDiffFunctions } from "@/lib/schema/schemaDiffRoutine";
+import { filterSchemaDiffFunctions, schemaDiffRoutineType } from "@/lib/schema/schemaDiffRoutine";
 import { loadSchemaDetails } from "@/lib/schema/schemaDiffMetadataLoad";
 import { registerSchemaDiffTask } from "@/lib/schema/schemaDiffCancellation";
 import type { SchemaDiffTableIdentity, SchemaDiffTableListLoader } from "@/lib/schema/schemaDiffTableList";
 import { getSchemaDiffNextProgressStep, isSchemaDiffPostgresLike, shouldLoadSchemaDiffExtraObjectPhase, shouldLoadSchemaDiffRoutines, type SchemaDiffProgressPhase } from "@/lib/schema/schemaDiffProgress";
-import { schemaDiffRoutineObjectTypesIntersection } from "@/lib/database/databaseObjectCapabilities";
+import { schemaDiffRoutineObjectTypesIntersection, type SchemaDiffRoutineObjectType } from "@/lib/database/databaseObjectCapabilities";
 import { convertToSchemaDiffObjects, databaseTypeToDialectKind, normalizeDialectKind, schemaDiffDeployTargetSchema, type SchemaDiffObject } from "@/lib/schema/schemaDiff";
 import { normalizeSchemaDiffCompareOptions, type SchemaDiffCompareOptions } from "@/types/schemaDiff";
 import type { DatabaseType, FunctionInfo, TableInfo } from "@/types/database";
@@ -88,17 +88,9 @@ function sessionError(error: unknown): string {
   return error instanceof Error ? error.message : (error as { message?: string } | null)?.message || String(error);
 }
 
-function filterFunctionsByRoutineKinds(functions: FunctionInfo[], kinds: Array<"PROCEDURE" | "FUNCTION">): FunctionInfo[] {
-  if (kinds.length === 0) return [];
-  if (kinds.length === 2) return functions;
-  const allowProcedure = kinds.includes("PROCEDURE");
-  const allowFunction = kinds.includes("FUNCTION");
-  return functions.filter((fn) => {
-    const type = (fn.function_type || "").toUpperCase();
-    if (allowProcedure && type.includes("PROC")) return true;
-    if (allowFunction && (type.includes("FUNC") || type === "" || type === "FUNCTION")) return true;
-    return false;
-  });
+function filterFunctionsByRoutineKinds(functions: FunctionInfo[], kinds: SchemaDiffRoutineObjectType[]): FunctionInfo[] {
+  const allowed = new Set(kinds.map(schemaDiffRoutineType));
+  return functions.filter((fn) => allowed.has(schemaDiffRoutineType(fn.function_type)));
 }
 
 function publishProgress(session: SchemaDiffSession, progress: SchemaDiffSessionProgress): void {
@@ -223,6 +215,7 @@ async function runSchemaDiffSession(session: SchemaDiffSession, dependencies: Sc
 
     publishProgress(session, { phase: "comparing" });
     const result = await api.prepareSchemaDiff({
+      routineEndpoints: { sourceConnectionId: input.sourceConnectionId, sourceDatabase: input.sourceDatabase, targetConnectionId: input.targetConnectionId, targetDatabase: input.targetDatabase },
       sourceTables,
       targetTables,
       sourceDetails,

@@ -6795,9 +6795,22 @@ export default withEnglishFallback({
     totalFiles: "{count} arquivos",
   },
   diff: {
+    routineIncomingDependencies: "Chamadores potencialmente afetados: {dependencies}",
+    routineRecoveryHint: "Parte do DDL pode já ter sido aplicada. Verifique as etapas executadas e o estado do dicionário antes de usar o plano de recuperação; a reversão automática não é garantida.",
+    routineOracleKindsHint: "Oracle / OceanBase Oracle também comparam especificações e corpos de pacotes e gatilhos.",
     routinePlanBlocked: "Implantação bloqueada: {reason}",
     routineDependencies: "Dependências: {dependencies}",
     routineValidationTitle: "Compilação e releitura do código-fonte",
+    typeReferencedColumns: "Colunas que referenciam o tipo: {columns}",
+    typeMetadataState: "Associação: {pairing}; dependências de saída: {outgoing}; de entrada: {incoming}",
+    typeReadState: {
+      available: "Disponível",
+      empty: "Nenhum registro visível",
+      unknown: "Desconhecido",
+      unsupported: "Não suportado",
+      denied: "Permissão negada",
+      error: "Falha na leitura",
+    },
     routineValidationFailed: "O DDL foi executado, mas a verificação de compilação ou do código-fonte falhou ou ficou incompleta. As alterações aplicadas não foram revertidas.",
     progress: {
       loadingObjects: "Lendo os objetos dos bancos de dados de origem e destino...",

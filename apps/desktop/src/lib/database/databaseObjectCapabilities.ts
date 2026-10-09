@@ -158,13 +158,16 @@ export function supportsSchemaDiffRoutines(dbType?: DatabaseType): boolean {
   return SCHEMA_DIFF_ROUTINE_KINDS.some((kind) => sidebarObjects.includes(kind) && sourceReadable.includes(kind));
 }
 
-export function schemaDiffRoutineObjectTypes(dbType?: DatabaseType): Array<"PROCEDURE" | "FUNCTION"> {
+export type SchemaDiffRoutineObjectType = "PROCEDURE" | "FUNCTION" | "PACKAGE" | "PACKAGE_BODY" | "TRIGGER" | "TYPE" | "TYPE_BODY";
+
+export function schemaDiffRoutineObjectTypes(dbType?: DatabaseType): SchemaDiffRoutineObjectType[] {
   if (!supportsSchemaDiffRoutines(dbType)) return [];
+  if (dbType === "oracle" || dbType === "oceanbase-oracle") return ["PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE_BODY", "TRIGGER", "TYPE", "TYPE_BODY"];
   const { sidebarObjects, sourceReadable } = databaseObjectCapabilities(dbType);
   return SCHEMA_DIFF_ROUTINE_KINDS.filter((kind) => sidebarObjects.includes(kind) && sourceReadable.includes(kind));
 }
 
-export function schemaDiffRoutineObjectTypesIntersection(sourceDbType?: DatabaseType, targetDbType?: DatabaseType): Array<"PROCEDURE" | "FUNCTION"> {
+export function schemaDiffRoutineObjectTypesIntersection(sourceDbType?: DatabaseType, targetDbType?: DatabaseType): SchemaDiffRoutineObjectType[] {
   if (!sourceDbType || !targetDbType) return [];
   const sourceFamily = SCHEMA_DIFF_ROUTINE_FAMILY.get(sourceDbType);
   const targetFamily = SCHEMA_DIFF_ROUTINE_FAMILY.get(targetDbType);

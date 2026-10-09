@@ -7767,9 +7767,22 @@ export default withEnglishFallback({
     warnings: "警告",
   },
   diff: {
+    routineIncomingDependencies: "可能失效的调用方：{dependencies}",
+    routineRecoveryHint: "部分 DDL 可能已生效。请核对已执行步骤和字典状态后使用恢复计划，不能假定已自动回滚。",
+    routineOracleKindsHint: "Oracle / OceanBase Oracle 还可比较包规格、包体和触发器。",
     routinePlanBlocked: "无法部署：{reason}",
     routineDependencies: "依赖对象：{dependencies}",
     routineValidationTitle: "编译状态与源码读回",
+    typeReferencedColumns: "引用此类型的表列：{columns}",
+    typeMetadataState: "配对：{pairing}；出向依赖：{outgoing}；入向依赖：{incoming}",
+    typeReadState: {
+      available: "可读取",
+      empty: "无可见记录",
+      unknown: "未知",
+      unsupported: "不支持",
+      denied: "无权限",
+      error: "读取失败",
+    },
     routineValidationFailed: "DDL 已执行，但编译状态或源码读回验证失败或不完整。已应用的变更未回滚。",
     progress: {
       loadingObjects: "正在读取源库和目标库对象…",

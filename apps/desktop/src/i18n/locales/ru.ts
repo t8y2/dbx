@@ -8036,9 +8036,22 @@ export default withEnglishFallback({
     fileFilterHint: "Используйте шаблон, например *.sql или *.sh, либо регулярное выражение, например {regex}.",
   },
   diff: {
+    routineIncomingDependencies: "Возможно затронутые вызывающие объекты: {dependencies}",
+    routineRecoveryHint: "Часть DDL уже могла примениться. Перед восстановлением проверьте выполненные шаги и состояние словаря; автоматический откат не гарантирован.",
+    routineOracleKindsHint: "Oracle / OceanBase Oracle также сравнивают спецификации и тела пакетов и триггеры.",
     routinePlanBlocked: "Развертывание заблокировано: {reason}",
     routineDependencies: "Зависимости: {dependencies}",
     routineValidationTitle: "Компиляция и повторное чтение исходного кода",
+    typeReferencedColumns: "Столбцы, ссылающиеся на тип: {columns}",
+    typeMetadataState: "Связь: {pairing}; исходящие зависимости: {outgoing}; входящие: {incoming}",
+    typeReadState: {
+      available: "Доступно",
+      empty: "Нет видимых записей",
+      unknown: "Неизвестно",
+      unsupported: "Не поддерживается",
+      denied: "Нет доступа",
+      error: "Ошибка чтения",
+    },
     routineValidationFailed: "DDL выполнен, но проверка компиляции или исходного кода завершилась ошибкой либо не завершена. Примененные изменения не были отменены.",
     progress: {
       loadingObjects: "Чтение объектов исходной и целевой баз данных...",

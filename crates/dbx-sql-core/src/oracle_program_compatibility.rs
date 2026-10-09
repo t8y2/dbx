@@ -13,6 +13,7 @@ pub struct OracleProgramContext {
     pub non_editioned_source_objects: Vec<(String, String)>,
     pub target_dependencies: Vec<(String, String, String)>,
     pub blocked_types: Vec<(String, String)>,
+    pub blocked_bodies: Vec<(String, String)>,
 }
 
 pub fn conversion_source(sql: &str, kind: &str, name: &str, source: DatabaseType, target: DatabaseType, context: &OracleProgramContext) -> Result<String, String> {

@@ -169,8 +169,8 @@ describe("databaseObjectCapabilities", () => {
     expect(supportsSchemaDiffRoutines(undefined)).toBe(false);
     expect(schemaDiffRoutineObjectTypes("mysql")).toEqual(["PROCEDURE", "FUNCTION"]);
     expect(schemaDiffRoutineObjectTypes("sqlserver")).toEqual(["PROCEDURE", "FUNCTION"]);
-    expect(schemaDiffRoutineObjectTypes("oracle")).toEqual(["PROCEDURE", "FUNCTION"]);
-    expect(schemaDiffRoutineObjectTypesIntersection("oracle", "oceanbase-oracle")).toEqual(["PROCEDURE", "FUNCTION"]);
+    expect(schemaDiffRoutineObjectTypes("oracle")).toEqual(["PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE_BODY", "TRIGGER", "TYPE", "TYPE_BODY"]);
+    expect(schemaDiffRoutineObjectTypesIntersection("oracle", "oceanbase-oracle")).toEqual(["PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE_BODY", "TRIGGER", "TYPE", "TYPE_BODY"]);
     expect(schemaDiffRoutineObjectTypesIntersection("mysql", "mysql")).toEqual(["PROCEDURE", "FUNCTION"]);
     expect(schemaDiffRoutineObjectTypesIntersection("mysql", "oracle")).toEqual([]);
     expect(schemaDiffRoutineObjectTypesIntersection("mysql", "sqlserver")).toEqual([]);

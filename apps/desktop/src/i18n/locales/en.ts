@@ -7781,9 +7781,22 @@ export default {
     warnings: "Warnings",
   },
   diff: {
+    routineIncomingDependencies: "Potentially affected callers: {dependencies}",
+    routineRecoveryHint: "Some DDL may already be applied. Review the executed steps and dictionary status before using the rollback plan; automatic rollback is not guaranteed.",
+    routineOracleKindsHint: "Oracle / OceanBase Oracle also compare package specifications, package bodies, and triggers.",
     routinePlanBlocked: "Deployment blocked: {reason}",
     routineDependencies: "Dependencies: {dependencies}",
     routineValidationTitle: "Compilation and source readback",
+    typeReferencedColumns: "Referenced table columns: {columns}",
+    typeMetadataState: "Pairing: {pairing}; outgoing dependencies: {outgoing}; incoming dependencies: {incoming}",
+    typeReadState: {
+      available: "Available",
+      empty: "No visible rows",
+      unknown: "Unknown",
+      unsupported: "Unsupported",
+      denied: "Permission denied",
+      error: "Read failed",
+    },
     routineValidationFailed: "DDL executed, but compilation or source readback was unsuccessful or incomplete. Applied changes have not been rolled back.",
     progress: {
       loadingObjects: "Reading source and target database objects...",

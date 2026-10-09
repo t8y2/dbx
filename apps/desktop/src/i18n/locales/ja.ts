@@ -6824,9 +6824,22 @@ export default withEnglishFallback({
     totalFiles: "{count} ファイル",
   },
   diff: {
+    routineIncomingDependencies: "影響を受ける可能性がある呼び出し元: {dependencies}",
+    routineRecoveryHint: "一部の DDL は適用済みの場合があります。復元計画を使う前に実行済み手順と辞書の状態を確認してください。自動ロールバックは保証されません。",
+    routineOracleKindsHint: "Oracle / OceanBase Oracle ではパッケージ仕様、パッケージ本体、トリガーも比較します。",
     routinePlanBlocked: "デプロイできません: {reason}",
     routineDependencies: "依存オブジェクト: {dependencies}",
     routineValidationTitle: "コンパイル状態とソースの再取得",
+    typeReferencedColumns: "型を参照する表の列: {columns}",
+    typeMetadataState: "対応: {pairing}; 依存先: {outgoing}; 参照元: {incoming}",
+    typeReadState: {
+      available: "取得可能",
+      empty: "参照可能なレコードなし",
+      unknown: "不明",
+      unsupported: "未対応",
+      denied: "権限なし",
+      error: "読み取り失敗",
+    },
     routineValidationFailed: "DDL は実行されましたが、コンパイル状態またはソースの再取得の検証に失敗したか、検証が不完全です。適用済みの変更はロールバックされていません。",
     progress: {
       loadingObjects: "ソースとターゲットのデータベースオブジェクトを読み込み中...",

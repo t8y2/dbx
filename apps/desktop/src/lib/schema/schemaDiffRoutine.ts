@@ -1,6 +1,6 @@
 import type { FunctionInfo } from "@/types/database";
 import type { SchemaDiffRoutineMapping } from "@/types/schemaDiff";
-import type { DiffObjectKind, SchemaDiffObject } from "@/lib/schema/schemaDiff";
+import type { DiffObjectKind, FunctionDiff, SchemaDiffObject } from "@/lib/schema/schemaDiff";
 import { buildTextDiff } from "@/lib/common/textDiff";
 import {
   areSchemaDiffTableMappingsEqual,
@@ -69,8 +69,30 @@ export function schemaDiffRoutineKey(name: string, args = ""): string {
   return trimmedArgs ? `${name}(${trimmedArgs})` : name;
 }
 
-export function schemaDiffRoutineKeyFromFunction(fn: Pick<FunctionInfo, "name" | "arguments">): string {
+export type SchemaDiffRoutineKind = "PROCEDURE" | "FUNCTION" | "PACKAGE" | "PACKAGE BODY" | "TRIGGER" | "TYPE" | "TYPE BODY";
+
+export function schemaDiffRoutineType(type = ""): SchemaDiffRoutineKind {
+  const kind = type.toUpperCase().replaceAll("_", " ");
+  if (kind === "PACKAGE" || kind === "PACKAGE BODY" || kind === "TRIGGER" || kind === "TYPE" || kind === "TYPE BODY") return kind;
+  return kind.includes("PROC") ? "PROCEDURE" : "FUNCTION";
+}
+
+export function schemaDiffRoutineKeyFromFunction(fn: Pick<FunctionInfo, "name" | "arguments"> & Partial<Pick<FunctionInfo, "function_type" | "trigger" | "schema">>): string {
+  const kind = schemaDiffRoutineType(fn.function_type);
+  if (kind === "PACKAGE" || kind === "PACKAGE BODY" || kind === "TRIGGER" || kind === "TYPE" || kind === "TYPE BODY") {
+    const quote = (name: string) => `"${name.replaceAll('"', '""')}"`;
+    const trigger = fn.trigger;
+    const table = trigger ? ` ON ${trigger.tableOwner === fn.schema ? "" : `${quote(trigger.tableOwner)}.`}${quote(trigger.tableName)}` : "";
+    return `${kind} ${quote(fn.name)}${table}`;
+  }
   return schemaDiffRoutineKey(fn.name, fn.arguments);
+}
+
+export function schemaDiffRoutineObjectId(diff: FunctionDiff): string {
+  const fn = diff.source ?? diff.target;
+  const kind = schemaDiffRoutineType(fn?.function_type);
+  if (kind === "FUNCTION" || kind === "PROCEDURE") return `func-${diff.name}-${diff.source?.arguments || diff.target?.arguments || ""}`;
+  return `routine-${JSON.stringify([kind, diff.name, fn?.schema ?? "", fn?.trigger?.tableOwner ?? "", fn?.trigger?.tableName ?? ""])}`;
 }
 
 export function isSchemaDiffRoutineObjectKind(kind: DiffObjectKind): boolean {

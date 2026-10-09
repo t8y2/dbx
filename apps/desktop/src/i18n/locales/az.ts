@@ -6705,9 +6705,22 @@ export default withEnglishFallback({
     fileFilterHint: "*.sql və ya *.sh kimi fayl şablonundan, yaxud {regex} kimi müntəzəm ifadədən istifadə edin.",
   },
   diff: {
+    routineIncomingDependencies: "Təsirlənə biləcək çağıranlar: {dependencies}",
+    routineRecoveryHint: "DDL qismən tətbiq edilmiş ola bilər. Bərpa planından əvvəl icra olunmuş addımları və lüğətin vəziyyətini yoxlayın; avtomatik geri qaytarma təmin edilmir.",
+    routineOracleKindsHint: "Oracle / OceanBase Oracle paket spesifikasiyalarını, paket gövdələrini və triggerləri də müqayisə edir.",
     routinePlanBlocked: "Yerləşdirmə bloklanıb: {reason}",
     routineDependencies: "Asılılıqlar: {dependencies}",
     routineValidationTitle: "Kompilyasiya və mənbə kodunun yoxlanması",
+    typeReferencedColumns: "Tipə istinad edən cədvəl sütunları: {columns}",
+    typeMetadataState: "Cütləşmə: {pairing}; çıxan asılılıqlar: {outgoing}; daxil olan: {incoming}",
+    typeReadState: {
+      available: "Mövcuddur",
+      empty: "Görünən qeyd yoxdur",
+      unknown: "Naməlum",
+      unsupported: "Dəstəklənmir",
+      denied: "İcazə rədd edildi",
+      error: "Oxuma xətası",
+    },
     routineValidationFailed: "DDL icra edildi, lakin kompilyasiya və ya mənbə kodunun yoxlanması uğursuz oldu və ya tamamlanmadı. Tətbiq edilmiş dəyişikliklər geri qaytarılmayıb.",
     progress: {
       loadingObjects: "Mənbə və hədəf verilənlər bazası obyektləri oxunur...",

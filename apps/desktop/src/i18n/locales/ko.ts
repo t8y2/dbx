@@ -6635,9 +6635,22 @@ export default withEnglishFallback({
     fileFilterHint: "*.sql 또는 *.sh 같은 와일드카드나 {regex} 같은 정규식을 사용할 수 있습니다.",
   },
   diff: {
+    routineIncomingDependencies: "영향을 받을 수 있는 호출자: {dependencies}",
+    routineRecoveryHint: "일부 DDL이 이미 적용되었을 수 있습니다. 복구 계획을 사용하기 전에 실행된 단계와 사전 상태를 확인하세요. 자동 롤백은 보장되지 않습니다.",
+    routineOracleKindsHint: "Oracle / OceanBase Oracle은 패키지 명세, 패키지 본문 및 트리거도 비교합니다.",
     routinePlanBlocked: "배포 차단: {reason}",
     routineDependencies: "종속 객체: {dependencies}",
     routineValidationTitle: "컴파일 상태 및 소스 재조회",
+    typeReferencedColumns: "타입을 참조하는 테이블 열: {columns}",
+    typeMetadataState: "연결: {pairing}; 참조 대상: {outgoing}; 참조 객체: {incoming}",
+    typeReadState: {
+      available: "조회 가능",
+      empty: "조회 가능한 레코드 없음",
+      unknown: "알 수 없음",
+      unsupported: "지원하지 않음",
+      denied: "권한 없음",
+      error: "읽기 실패",
+    },
     routineValidationFailed: "DDL은 실행되었지만 컴파일 상태 또는 소스 재조회 검증에 실패했거나 검증이 완료되지 않았습니다. 적용된 변경 사항은 롤백되지 않았습니다.",
     progress: {
       loadingObjects: "원본 및 대상 데이터베이스 객체를 읽는 중...",

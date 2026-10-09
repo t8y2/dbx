@@ -4,13 +4,13 @@ import { createApp, defineComponent, h, nextTick, ref, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ObjectBrowser from "@/components/objects/ObjectBrowser.vue";
 import { invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
-import type { ConnectionConfig, ObjectBrowserFilter, ObjectInfo } from "@/types/database";
+import type { ConnectionConfig, ObjectBrowserFilter, ObjectInfo, ObjectStatistics } from "@/types/database";
 
-const mocks = vi.hoisted(() => ({ listObjects: vi.fn() }));
+const mocks = vi.hoisted(() => ({ listObjects: vi.fn(), listObjectStatistics: vi.fn() }));
 vi.mock("@/lib/backend/api", () => ({
   listObjects: (...args: unknown[]) => mocks.listObjects(...args),
   listSchemas: vi.fn().mockResolvedValue(["APP", "OTHER"]),
-  listObjectStatistics: vi.fn().mockResolvedValue([]),
+  listObjectStatistics: (...args: unknown[]) => mocks.listObjectStatistics(...args),
 }));
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({ getConfig: () => connection, ensureConnected: vi.fn().mockResolvedValue(undefined), orderByPinnedTreeNodes: (rows: unknown[]) => rows }),
@@ -52,6 +52,7 @@ const object = (name: string, schema = "APP"): ObjectInfo => ({ name, schema, ob
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.listObjectStatistics.mockReset().mockResolvedValue([]);
   invalidateObjectBrowserRowsCache({});
 });
 afterEach(() => {
@@ -81,6 +82,35 @@ async function searchObjects(host: HTMLElement, query: string) {
 }
 
 describe("OceanBase Oracle object pagination (#11418)", () => {
+  it("shows a zero estimate and a distinct missing-statistics state without unbounded objects", async () => {
+    mocks.listObjects.mockResolvedValue([object("Empty"), object("Uncollected")]);
+    mocks.listObjectStatistics.mockResolvedValue([
+      { name: "Empty", schema: "APP", estimated_rows: 0, rows_status: "available" },
+      { name: "Uncollected", schema: "APP", estimated_rows: null, rows_status: "not_collected" },
+    ]);
+    const { host } = await mountBrowser();
+    await vi.waitFor(() => expect(host.textContent).toContain("objects.rowsStatus_not_collected"));
+    expect(host.querySelector('[title="0"]')).not.toBeNull();
+    expect(mocks.listObjects.mock.calls.every((args) => args[5] === 3)).toBe(true);
+    expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["schema", "refresh"] as const)("ignores an old statistics response after %s", async (change) => {
+    let resolveOld!: (stats: ObjectStatistics[]) => void;
+    mocks.listObjects.mockResolvedValueOnce([object("T")]).mockResolvedValue([object("T", change === "schema" ? "OTHER" : "APP")]);
+    mocks.listObjectStatistics.mockReturnValueOnce(new Promise((resolve) => { resolveOld = resolve; })).mockResolvedValue([{ name: "T", schema: change === "schema" ? "OTHER" : "APP", estimated_rows: 999, rows_status: "available" }]);
+    const { host, schema } = await mountBrowser();
+    await vi.waitFor(() => expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1));
+    if (change === "schema") schema.value = "OTHER";
+    else host.querySelector<HTMLButtonElement>('[title^="grid.refresh"]')!.click();
+    await vi.waitFor(() => expect(host.querySelector('[title="999"]')).not.toBeNull());
+    resolveOld([{ name: "T", schema: "APP", estimated_rows: 123, rows_status: "available" }]);
+    await nextTick();
+    await nextTick();
+    expect(host.querySelector('[title="123"]')).toBeNull();
+    expect(host.querySelector('[title="999"]')).not.toBeNull();
+  });
+
   it("starts the default table tab with a typed request", async () => {
     mocks.listObjects.mockResolvedValue([object("O11418_1")]);
     await mountBrowser(null);

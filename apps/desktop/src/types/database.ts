@@ -1015,6 +1015,10 @@ export interface ObjectStatistics {
   name: string;
   schema?: string | null;
   estimated_rows?: number | null;
+  rows_status?: "available" | "not_collected" | "permission_denied" | "unsupported" | "error" | "unknown" | null;
+  rows_source?: string | null;
+  rows_last_analyzed?: string | null;
+  rows_stale?: boolean | null;
   total_bytes?: number | null;
   data_length?: number | null;
   engine?: string | null;

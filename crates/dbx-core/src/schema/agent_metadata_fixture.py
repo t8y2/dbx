@@ -72,6 +72,19 @@ def handle(request):
                     error = rpc_error(mode)
                 elif mode == 'fallback' and 'TABLE_USED_PAGES' in params['sql']:
                     error = rpc_error('sql')
+                elif mode.startswith('ob-'):
+                    if mode == 'ob-error':
+                        error = rpc_error('sql')
+                        error['message'] = 'ORA-01031: insufficient privileges'
+                    else:
+                        rows = [['Empty', 'Mixed Owner', 0, '2026-10-08 10:00:00', 'NO'],
+                                ['STALE', 'Mixed Owner', 125, '2026-09-01 11:00:00', 'YES'],
+                                ['Uncollected', 'Mixed Owner', None, None, None]]
+                        if mode == 'ob-pages':
+                            rows = [[f'T{i:04}', 'APP', i, None, None] for i in range(1000)] if 'TABLE_NAME >' not in params['sql'] else [['T1000', 'APP', 1000, None, None]]
+                        result = {'columns': ['TABLE_NAME', 'OWNER', 'NUM_ROWS', 'LAST_ANALYZED', 'STALE_STATS'],
+                                  'rows': rows, 'affected_rows': 0, 'execution_time_ms': 0,
+                                  'truncated': mode == 'ob-truncated'}
                 else:
                     result = {'columns': ['TABLE_NAME', 'OWNER', 'NUM_ROWS', 'TOTAL_BYTES'],
                               'rows': [] if mode == 'empty' else [['EVENTS', 'APP', 12, None if mode == 'fallback' else 4096]],

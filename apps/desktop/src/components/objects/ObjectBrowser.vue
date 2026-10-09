@@ -83,6 +83,7 @@ import { supportsAiAssistantContext, supportsDataDictionary, supportsSchemaDiagr
 import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionTableSqlSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, objectListSchemaForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { getTableMetadataCapabilities, type TableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { findTableStatistics } from "@/lib/dataGrid/tableInfoOverview";
+import { estimatedRowsDetails, estimatedRowsText, loadOceanBaseRowStatistics, oceanBaseTableStatistics } from "@/lib/dataGrid/oceanBaseRowStatistics";
 import { constraintsForConstraintsTab } from "@/lib/table/constraintPresentation";
 import { buildTableSelectSql, dropsSchemaQualifier } from "@/lib/table/tableSelectSql";
 import { PARTITION_TREE_INDENT_PX } from "@/lib/table/pgPartitionPresentation";
@@ -333,7 +334,7 @@ const supportsObjectSizeStats = computed(() => !isVictoriaMetrics.value && effec
 // MongoDB collections are not dropped or truncated through it.
 const supportsBatchTableActions = computed(() => !isVictoriaMetrics.value && !isMongodb.value && effectiveDatabaseType.value !== "nebula");
 const showTableStatistics = computed(() => !usesServerObjectPaging.value && effectiveDatabaseType.value !== "nebula" && (objectFilter.value === "all" || objectFilter.value === "tables"));
-const showObjectRowStats = computed(() => showTableStatistics.value);
+const showObjectRowStats = computed(() => showTableStatistics.value || (effectiveDatabaseType.value === "oceanbase-oracle" && (objectFilter.value === "all" || objectFilter.value === "tables")));
 const showObjectSizeStats = computed(() => supportsObjectSizeStats.value && showTableStatistics.value);
 const objectRowsLabel = computed(() => t(isVictoriaMetrics.value ? "objects.series" : "objects.rows"));
 
@@ -1153,7 +1154,8 @@ const tableOverviewRows = computed(() => {
     { label: t("common.database"), value: props.database },
     ...(sidePanelRow.value?.valid != null ? [{ label: t("objects.validity"), value: t(sidePanelRow.value.valid ? "objects.validStatus" : "objects.invalidStatus") }] : []),
     { label: t("structureEditor.comment"), value: tableOverviewComment.value ?? "" },
-    { label: t("grid.tableInfoEstimatedRows"), value: formatObjectBrowserCount(stats?.estimated_rows) },
+    { label: t("grid.tableInfoEstimatedRows"), value: estimatedRowsText(stats, t) },
+    ...estimatedRowsDetails(stats, t),
     { label: t("grid.tableInfoTotalSize"), value: formatObjectBrowserBytes(stats?.total_bytes) },
     { label: t("grid.tableInfoDataLength"), value: formatObjectBrowserBytes(stats?.data_length) },
     { label: t("grid.tableInfoEngine"), value: stats?.engine ?? "" },
@@ -1273,7 +1275,12 @@ async function fetchTableOverview(force = false) {
   const schema = row.schema || selectedSchema.value || props.database;
   tableOverviewLoading.value = true;
   try {
-    const [statistics, comment] = await Promise.all([api.listObjectStatistics(props.connection.id, props.database, schema).catch(() => [] as ObjectStatistics[]), api.getTableComment(props.connection.id, props.database, schema, row.name, props.catalog).catch(() => null)]);
+    const [statistics, comment] = await Promise.all([
+      effectiveDatabaseType.value === "oceanbase-oracle"
+        ? loadOceanBaseRowStatistics(props.connection.id, props.database, schema, force).then((snapshot) => [oceanBaseTableStatistics(snapshot, row.name, schema)])
+        : api.listObjectStatistics(props.connection.id, props.database, schema).catch(() => [] as ObjectStatistics[]),
+      api.getTableComment(props.connection.id, props.database, schema, row.name, props.catalog).catch(() => null),
+    ]);
     if (sidePanelGuard.isStale(epoch)) return;
     tableOverviewStats.value = findTableStatistics(statistics, row.name, schema) ?? null;
     tableOverviewComment.value = comment;
@@ -3427,6 +3434,16 @@ async function loadObjectPage(append: boolean) {
     applyObjectBrowserRows(append ? [...rows.value, ...pageRows] : pageRows);
     objectPageOffset = offset + page.length;
     hasMoreObjects.value = objects.length > pageSize;
+    if (effectiveDatabaseType.value === "oceanbase-oracle" && rows.value.some((row) => row.type === "TABLE")) {
+      void loadOceanBaseRowStatistics(request.scope.connectionId, request.scope.database, request.scope.schema, !append).then((snapshot) => {
+        if (!isCurrent()) return;
+        rows.value = rows.value.map((row) => row.type !== "TABLE" ? row : {
+          ...row,
+          estimatedRows: oceanBaseTableStatistics(snapshot, row.name, row.schema || request.scope.schema).estimated_rows,
+          rowStatistics: oceanBaseTableStatistics(snapshot, row.name, row.schema || request.scope.schema),
+        });
+      });
+    }
   } catch (e: unknown) {
     if (!isCurrent()) return;
     if (append) scaffoldRefreshError.value = translateBackendError(t, e);
@@ -4237,7 +4254,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                     </span>
                   </div>
                   <div v-if="showObjectRowStats" class="truncate text-xs tabular-nums text-muted-foreground" :title="item.estimatedRows == null ? '' : formatObjectBrowserCount(item.estimatedRows)">
-                    {{ formatObjectBrowserCount(item.estimatedRows) }}
+                    {{ item.rowStatistics ? estimatedRowsText(item.rowStatistics, t) : formatObjectBrowserCount(item.estimatedRows) }}
                   </div>
                   <div v-if="showObjectSizeStats" class="truncate text-xs tabular-nums text-muted-foreground" :title="item.totalBytes == null ? '' : formatObjectBrowserBytes(item.totalBytes)">
                     {{ formatObjectBrowserBytes(item.totalBytes) }}
@@ -4285,8 +4302,8 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                       <span v-if="item.valid != null" class="rounded border px-1 py-px text-[10px] font-medium" :class="item.valid ? 'border-emerald-500/30 text-emerald-600' : 'border-destructive/30 text-destructive'">
                         {{ t(item.valid ? "objects.validStatus" : "objects.invalidStatus") }}
                       </span>
-                      <span v-if="showObjectRowStats && item.estimatedRows != null && item.estimatedRows > 0" class="object-browser-stat-badge object-browser-stat-badge-rows rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-primary">{{
-                        formatObjectBrowserCount(item.estimatedRows)
+                      <span v-if="showObjectRowStats && (item.rowStatistics || (item.estimatedRows != null && item.estimatedRows > 0))" class="object-browser-stat-badge object-browser-stat-badge-rows rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-primary">{{
+                        item.rowStatistics ? estimatedRowsText(item.rowStatistics, t) : formatObjectBrowserCount(item.estimatedRows)
                       }}</span>
                       <span v-if="showObjectSizeStats && item.totalBytes != null && item.totalBytes > 0" class="object-browser-stat-badge object-browser-stat-badge-bytes rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">{{
                         formatObjectBrowserBytes(item.totalBytes)

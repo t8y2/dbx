@@ -8,6 +8,69 @@ use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[tokio::test]
+async fn oceanbase_row_statistics_preserve_zero_unknown_collection_time_and_quoted_names() {
+    let fixture = AgentFixture::new(DatabaseType::OceanbaseOracle).await;
+    std::fs::write(fixture.control_path("statistics"), "ob-rows").unwrap();
+    let rows = list_object_statistics_core(&fixture.state, "conn", "configured", "Mixed Owner").await.unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].name, "Empty");
+    assert_eq!(rows[0].schema.as_deref(), Some("Mixed Owner"));
+    assert_eq!(rows[0].estimated_rows, Some(0));
+    assert_eq!(rows[0].rows_status.as_deref(), Some("available"));
+    assert_eq!(rows[0].rows_last_analyzed.as_deref(), Some("2026-10-08 10:00:00"));
+    assert_eq!(rows[1].estimated_rows, Some(125));
+    assert_eq!(rows[1].rows_stale, Some(true));
+    assert_eq!(rows[2].estimated_rows, None);
+    assert_eq!(rows[2].rows_status.as_deref(), Some("not_collected"));
+    assert_eq!(rows[2].rows_last_analyzed, None);
+    assert!(rows.iter().all(|row| row.total_bytes.is_none()));
+    let requests = fixture.requests("execute_query");
+    assert_eq!(requests.len(), 1);
+    let sql = requests[0]["params"]["sql"].as_str().unwrap();
+    assert!(sql.contains("OWNER = 'Mixed Owner'"));
+    assert!(sql.contains("OBJECT_TYPE = 'TABLE'"));
+    assert!(sql.contains("PARTITION_NAME IS NULL"));
+    assert!(sql.contains("SUBPARTITION_NAME IS NULL"));
+    assert!(!sql.contains("COUNT(") && !sql.contains("DBMS_STATS") && !sql.contains("ALL_OBJECTS"));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn oceanbase_row_statistics_page_the_dictionary_without_truncating_large_schemas() {
+    let fixture = AgentFixture::new(DatabaseType::OceanbaseOracle).await;
+    std::fs::write(fixture.control_path("statistics"), "ob-pages").unwrap();
+    let rows = list_object_statistics_core(&fixture.state, "conn", "configured", "APP").await.unwrap();
+    assert_eq!(rows.len(), 1001);
+    assert_eq!(rows.last().unwrap().estimated_rows, Some(1000));
+    let requests = fixture.requests("execute_query");
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1]["params"]["sql"].as_str().unwrap().contains("TABLE_NAME > 'T0999'"));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn oceanbase_row_statistics_do_not_turn_permission_errors_or_truncation_into_empty_estimates() {
+    for (mode, message) in [("ob-error", "ORA-01031"), ("ob-truncated", "truncated")] {
+        let fixture = AgentFixture::new(DatabaseType::OceanbaseOracle).await;
+        std::fs::write(fixture.control_path("statistics"), mode).unwrap();
+        let error = list_object_statistics_core(&fixture.state, "conn", "configured", "APP").await.unwrap_err();
+        assert!(error.contains(message), "{error}");
+        assert_eq!(fixture.requests("execute_query").len(), 1);
+        fixture.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn native_oracle_statistics_keep_the_existing_space_and_rows_path() {
+    let fixture = AgentFixture::new(DatabaseType::Oracle).await;
+    let rows = list_object_statistics_core(&fixture.state, "conn", "configured", "APP").await.unwrap();
+    assert_eq!(rows[0].estimated_rows, Some(12));
+    assert_eq!(rows[0].total_bytes, Some(4096));
+    assert_eq!(rows[0].rows_status, None);
+    fixture.shutdown().await;
+}
+
 struct AgentFixture {
     state: Arc<AppState>,
     directory: tempfile::TempDir,

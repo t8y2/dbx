@@ -24,6 +24,7 @@ mod agent_pg_sequences;
 mod external_table_filter_tests;
 mod kingbase;
 mod mongodb_columns;
+mod oceanbase_oracle_statistics;
 pub mod plugin_metadata;
 #[cfg(test)]
 mod plugin_metadata_tests;
@@ -7055,6 +7056,10 @@ async fn list_object_statistics_once(
     if let Some(client) = extract_pool!(pool_handle.as_ref(), Agent) {
         if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::MongoDb) {
             return crate::mongo_ops::mongo_agent_list_object_statistics(&client, database).await;
+        }
+        if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OceanbaseOracle) {
+            return oceanbase_oracle_statistics::load(client, database, schema, agent_metadata_timeout(db_config.as_ref()))
+                .await;
         }
         if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Oracle) {
             return oracle_agent_list_object_statistics(

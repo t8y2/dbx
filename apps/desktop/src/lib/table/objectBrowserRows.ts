@@ -22,6 +22,7 @@ export type ObjectBrowserRow = {
   partitionParentSchema?: string;
   partitionParentName?: string;
   estimatedRows?: number | null;
+  rowStatistics?: import("@/types/database").ObjectStatistics;
   totalBytes?: number | null;
 };
 

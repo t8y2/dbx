@@ -5,7 +5,8 @@ import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import TablePartitionsPanel from "@/components/structure/TablePartitionsPanel.vue";
 import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPresentation";
-import { formatObjectBrowserBytes, formatObjectBrowserCount } from "@/lib/table/objectBrowserRows";
+import { formatObjectBrowserBytes } from "@/lib/table/objectBrowserRows";
+import { estimatedRowsDetails, estimatedRowsText } from "@/lib/dataGrid/oceanBaseRowStatistics";
 import type { ColumnInfo, ConstraintInfo, ForeignKeyInfo, IndexInfo, ObjectStatistics, PgTablePartitioning, TableInfoTab, TriggerInfo } from "@/types/database";
 
 interface DataGridTableInfoPanelsProps {
@@ -57,7 +58,8 @@ const overviewRows = computed(() => {
     { label: t("common.database"), value: props.database },
     { label: t("grid.tableOwner"), value: props.tableOwner ?? "", mono: true },
     { label: t("structureEditor.comment"), value: props.overviewComment ?? "" },
-    { label: t("grid.tableInfoEstimatedRows"), value: formatObjectBrowserCount(props.overviewStats?.estimated_rows), mono: true },
+    { label: t("grid.tableInfoEstimatedRows"), value: estimatedRowsText(props.overviewStats, t), mono: true },
+    ...estimatedRowsDetails(props.overviewStats, t),
     { label: t("grid.tableInfoTotalSize"), value: formatObjectBrowserBytes(props.overviewStats?.total_bytes), mono: true },
     { label: t("grid.tableInfoDataLength"), value: formatObjectBrowserBytes(props.overviewStats?.data_length), mono: true },
     { label: t("grid.tableInfoEngine"), value: props.overviewStats?.engine ?? "", mono: true },

@@ -108,6 +108,7 @@ import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { shouldNavigateFromTableInfoColumnClick } from "@/lib/table/tableInfoColumnNavigation";
 import { tableInfoTabForDrawerToggle } from "@/lib/table/tableInfoTabPreference";
 import { findTableStatistics } from "@/lib/dataGrid/tableInfoOverview";
+import { loadOceanBaseRowStatistics, oceanBaseTableStatistics } from "@/lib/dataGrid/oceanBaseRowStatistics";
 import * as api from "@/lib/backend/api";
 import type { SqlInsertMode } from "@/lib/export/sqlInsertMode";
 import { dataGridCellDisplayText, dataGridCellEditorText } from "@/lib/dataGrid/dataGridCellCoercion";
@@ -11997,10 +11998,12 @@ async function fetchTableOverview(force = false) {
     // Both lookups are best-effort: drivers without statistics support simply
     // leave the corresponding rows hidden in the overview tab.
     const [stats, comment] = await Promise.all([
-      api.listObjectStatistics(connectionId, database, schema ?? "").catch((error) => {
-        console.debug("table overview statistics unavailable", error);
-        return [] as ObjectStatistics[];
-      }),
+      resolvedDatabaseType.value === "oceanbase-oracle"
+        ? loadOceanBaseRowStatistics(connectionId, database, schema ?? "", force).then((snapshot) => [oceanBaseTableStatistics(snapshot, tableName, schema ?? "")])
+        : api.listObjectStatistics(connectionId, database, schema ?? "").catch((error) => {
+            console.debug("table overview statistics unavailable", error);
+            return [] as ObjectStatistics[];
+          }),
       api.getTableComment(connectionId, database, schema ?? "", tableName, props.tableMeta?.catalog).catch((error) => {
         console.debug("table overview comment unavailable", error);
         return null;

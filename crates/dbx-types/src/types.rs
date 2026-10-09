@@ -177,6 +177,14 @@ pub struct ObjectStatistics {
     pub name: String,
     pub schema: Option<String>,
     pub estimated_rows: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows_last_analyzed: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows_stale: Option<bool>,
     pub total_bytes: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_length: Option<i64>,

@@ -333,10 +333,10 @@ class FirebirdAgentTest {
 
         IllegalArgumentException error = Assertions.assertThrows(
             IllegalArgumentException.class,
-            () -> agent.getObjectSource(null, "P_6141", "VIEW")
+            () -> agent.getObjectSource(null, "P_6141", "UNKNOWN")
         );
 
-        Assertions.assertEquals("Unsupported object type: VIEW", error.getMessage());
+        Assertions.assertEquals("Unsupported object type: UNKNOWN", error.getMessage());
     }
 
     @SafeVarargs

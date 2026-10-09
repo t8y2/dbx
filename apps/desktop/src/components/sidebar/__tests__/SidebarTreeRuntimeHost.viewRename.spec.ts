@@ -11,6 +11,7 @@ vi.mock("@/components/icons/DatabaseIcon.vue", () => ({ default: { render: () =>
 vi.mock("@/lib/backend/api", async (importOriginal) => ({
   ...await importOriginal<typeof import("@/lib/backend/api")>(),
   listPlugins: vi.fn().mockResolvedValue([]),
+  deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
   saveOpenTabsState: vi.fn().mockResolvedValue(undefined),
   saveEditorSettings: vi.fn().mockResolvedValue(undefined),
   buildRenameObjectSql: vi.fn().mockResolvedValue('RENAME "Old View" TO "New View"'),

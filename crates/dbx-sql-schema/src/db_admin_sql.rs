@@ -973,6 +973,9 @@ pub fn supports_object_rename(database_type: Option<DatabaseType>, object_type: 
     let Some(database_type) = database_type else {
         return false;
     };
+    if database_type == DatabaseType::OceanbaseOracle && object_type == DatabaseObjectType::MaterializedView {
+        return false;
+    }
     if database_type == DatabaseType::SqlServer {
         return true;
     }
@@ -1009,6 +1012,11 @@ pub fn supports_object_rename(database_type: Option<DatabaseType>, object_type: 
 
 pub fn build_rename_object_sql(options: RenameObjectSqlOptions) -> Result<String, String> {
     let database_type = options.database_type;
+    if database_type == Some(DatabaseType::OceanbaseOracle)
+        && options.object_type == DatabaseObjectType::MaterializedView
+    {
+        return Err("DBX has not enabled OceanBase Oracle materialized view rename: the server version, patch level and schema capability have not been verified. No rename SQL was generated.".into());
+    }
     if !supports_object_rename(database_type, options.object_type) {
         return Err(format!(
             "Renaming {} is not supported for {}.",
@@ -3428,6 +3436,29 @@ mod tests {
                 new_name: "NEW_VIEW".to_string(),
             });
             assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn oceanbase_materialized_view_rename_requires_verified_capability() {
+        assert!(!supports_object_rename(Some(DatabaseType::OceanbaseOracle), DatabaseObjectType::MaterializedView));
+        for schema in [None, Some("APP".to_string()), Some("Mixed Owner".to_string())] {
+            let error = build_rename_object_sql(RenameObjectSqlOptions {
+                database_type: Some(DatabaseType::OceanbaseOracle),
+                object_type: DatabaseObjectType::MaterializedView,
+                schema,
+                old_name: "Mixed\"View".into(),
+                new_name: "Existing Name".into(),
+            })
+            .unwrap_err();
+            assert!(error.contains("DBX has not enabled"));
+            assert!(error.contains("have not been verified"));
+            assert!(error.contains("No rename SQL was generated"));
+        }
+        // Ordinary VIEW is owned by O10; this guard must not alter that path.
+        assert!(supports_object_rename(Some(DatabaseType::OceanbaseOracle), DatabaseObjectType::View));
+        for database_type in [DatabaseType::Postgres, DatabaseType::Oracle, DatabaseType::Dameng] {
+            assert!(supports_object_rename(Some(database_type), DatabaseObjectType::MaterializedView));
         }
     }
 

@@ -752,6 +752,7 @@ async fn serve() -> Result<(), String> {
         .route("/schema/object-source", get(routes::schema::get_object_source))
         .route("/schema/event-info", get(routes::schema::get_event_info))
         .route("/schema/custom-type-details", get(routes::schema::get_custom_type_details))
+        .route("/schema/oracle-type-details", get(routes::schema::get_oracle_type_details))
         .route("/schema/columns", get(routes::schema::list_columns))
         .route("/plugin/table-metadata", post(routes::schema::get_plugin_table_metadata))
         .route("/schema/all-columns", get(routes::schema::get_all_columns))

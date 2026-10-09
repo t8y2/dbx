@@ -429,6 +429,22 @@ pub async fn get_custom_type_details(
     Ok(Json(result))
 }
 
+pub async fn get_oracle_type_details(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<dbx_core::schema::oracle_types::OracleTypeDetails>, AppError> {
+    let kind = match q.object_type {
+        Some(dbx_core::db::ObjectSourceKind::Type) => "TYPE",
+        Some(dbx_core::db::ObjectSourceKind::TypeBody) => "TYPE_BODY",
+        _ => return Err(AppError::from("Expected TYPE or TYPE_BODY".to_string())),
+    };
+    let result = run_cancellable(&state, q.execution_id, dbx_core::schema::oracle_types::get_oracle_type_details_core(
+        &state.app, &q.connection_id, q.database.as_deref().unwrap_or(""),
+        q.schema.as_deref().unwrap_or(""), q.table.as_deref().unwrap_or(""), kind,
+    )).await?;
+    Ok(Json(result))
+}
+
 pub(crate) use dbx_core::object_cache::object_metadata_cache_prefix;
 use dbx_core::object_cache::{metadata_cache_segment, OBJECT_METADATA_CACHE_PREFIX};
 

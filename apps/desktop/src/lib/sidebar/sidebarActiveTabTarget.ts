@@ -137,7 +137,7 @@ export function activeTabSidebarTarget(tab: QueryTab | undefined | null): Active
     return { type: "management", connectionId: tab.connectionId, nodeType: managementNodeTypes[tab.mode as keyof typeof managementNodeTypes] };
   }
 
-  if (tab.mode === "databases") {
+  if (tab.mode === "databases" || tab.mode === "oracle-type-editor") {
     return { type: "connection", connectionId: tab.connectionId };
   }
 

@@ -155,11 +155,12 @@ FROM USER_MVIEWS mv
 const oracleListTablesOrderSQL = `ORDER BY OBJECT_NAME`
 const oracleListTablesSQL = oracleListTablesBaseSQL + "\n" + oracleListTablesOrderSQL
 const oracleListObjectsBaseSQL = `
-SELECT OBJECT_NAME, OBJECT_TYPE, COMMENTS
+SELECT OBJECT_NAME, OBJECT_TYPE, COMMENTS, STATUS
 FROM (
 SELECT t.TABLE_NAME AS OBJECT_NAME,
        'TABLE' AS OBJECT_TYPE,
-       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS,
+       CAST(NULL AS VARCHAR2(7)) AS STATUS
 FROM ALL_TABLES t
 WHERE t.OWNER = :1
   AND t.NESTED = 'NO'
@@ -174,26 +175,33 @@ UNION ALL
 SELECT o.OBJECT_NAME,
        CASE o.OBJECT_TYPE
          WHEN 'PACKAGE BODY' THEN 'PACKAGE_BODY'
+         WHEN 'TYPE BODY' THEN 'TYPE_BODY'
          WHEN 'MATERIALIZED VIEW' THEN 'MATERIALIZED_VIEW'
          ELSE o.OBJECT_TYPE
        END AS OBJECT_TYPE,
-       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS,
+       o.STATUS
 FROM ALL_OBJECTS o
 WHERE o.OWNER = :2
-  AND o.OBJECT_TYPE IN ('VIEW', 'MATERIALIZED VIEW', 'PROCEDURE', 'FUNCTION', 'SEQUENCE', 'PACKAGE', 'PACKAGE BODY')
+  AND o.OBJECT_TYPE IN ('VIEW', 'MATERIALIZED VIEW', 'PROCEDURE', 'FUNCTION', 'SEQUENCE', 'PACKAGE', 'PACKAGE BODY', 'TYPE', 'TYPE BODY')
+  AND (o.OBJECT_TYPE NOT IN ('TYPE', 'TYPE BODY') OR
+       (NVL(o.GENERATED, 'N') = 'N' AND o.OWNER NOT IN ('SYS', 'SYSTEM')
+        AND EXISTS (SELECT 1 FROM ALL_TYPES t WHERE t.OWNER = o.OWNER AND t.TYPE_NAME = o.OBJECT_NAME AND t.PREDEFINED = 'NO')))
 UNION ALL
 SELECT s.SYNONYM_NAME AS OBJECT_NAME,
        'SYNONYM' AS OBJECT_TYPE,
-       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS,
+       CAST(NULL AS VARCHAR2(7)) AS STATUS
 FROM ALL_SYNONYMS s
 WHERE s.OWNER = :3
 )`
 const oracleListObjectsSessionUserBaseSQL = `
-SELECT OBJECT_NAME, OBJECT_TYPE, COMMENTS
+SELECT OBJECT_NAME, OBJECT_TYPE, COMMENTS, STATUS
 FROM (
 SELECT t.TABLE_NAME AS OBJECT_NAME,
        'TABLE' AS OBJECT_TYPE,
-       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS,
+       CAST(NULL AS VARCHAR2(7)) AS STATUS
 FROM USER_TABLES t
 WHERE t.NESTED = 'NO'
   AND NOT EXISTS (
@@ -206,16 +214,22 @@ UNION ALL
 SELECT o.OBJECT_NAME,
        CASE o.OBJECT_TYPE
          WHEN 'PACKAGE BODY' THEN 'PACKAGE_BODY'
+         WHEN 'TYPE BODY' THEN 'TYPE_BODY'
          WHEN 'MATERIALIZED VIEW' THEN 'MATERIALIZED_VIEW'
          ELSE o.OBJECT_TYPE
        END AS OBJECT_TYPE,
-       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS,
+       o.STATUS
 FROM USER_OBJECTS o
-WHERE o.OBJECT_TYPE IN ('VIEW', 'MATERIALIZED VIEW', 'PROCEDURE', 'FUNCTION', 'SEQUENCE', 'PACKAGE', 'PACKAGE BODY')
+WHERE o.OBJECT_TYPE IN ('VIEW', 'MATERIALIZED VIEW', 'PROCEDURE', 'FUNCTION', 'SEQUENCE', 'PACKAGE', 'PACKAGE BODY', 'TYPE', 'TYPE BODY')
+  AND (o.OBJECT_TYPE NOT IN ('TYPE', 'TYPE BODY') OR
+       (NVL(o.GENERATED, 'N') = 'N' AND USER NOT IN ('SYS', 'SYSTEM')
+        AND EXISTS (SELECT 1 FROM USER_TYPES t WHERE t.TYPE_NAME = o.OBJECT_NAME AND t.PREDEFINED = 'NO')))
 UNION ALL
 SELECT s.SYNONYM_NAME AS OBJECT_NAME,
        'SYNONYM' AS OBJECT_TYPE,
-       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS,
+       CAST(NULL AS VARCHAR2(7)) AS STATUS
 FROM USER_SYNONYMS s
 )`
 const oracleListObjectsOrderSQL = `ORDER BY CASE OBJECT_TYPE
@@ -470,6 +484,7 @@ type objectInfo struct {
 	ObjectType string  `json:"object_type"`
 	Schema     string  `json:"schema"`
 	Comment    *string `json:"comment"`
+	Valid      *bool   `json:"valid,omitempty"`
 }
 
 type columnInfo struct {
@@ -1795,7 +1810,7 @@ func oracleListSessionUserTablesQuery(constraints metadataListConstraints) oracl
 func oracleListObjectsQuery(schema string, constraints metadataListConstraints) oracleMetadataListQuery {
 	return oracleConstrainedMetadataListQuery(
 		oracleListObjectsBaseSQL,
-		"OBJECT_NAME, OBJECT_TYPE, COMMENTS",
+		"OBJECT_NAME, OBJECT_TYPE, COMMENTS, STATUS",
 		"OBJECT_TYPE",
 		oracleListObjectsOrderSQL,
 		[]any{schema, schema, schema},
@@ -1806,7 +1821,7 @@ func oracleListObjectsQuery(schema string, constraints metadataListConstraints) 
 func oracleListSessionUserObjectsQuery(constraints metadataListConstraints) oracleMetadataListQuery {
 	return oracleConstrainedMetadataListQuery(
 		oracleListObjectsSessionUserBaseSQL,
-		"OBJECT_NAME, OBJECT_TYPE, COMMENTS",
+		"OBJECT_NAME, OBJECT_TYPE, COMMENTS, STATUS",
 		"OBJECT_TYPE",
 		oracleListObjectsOrderSQL,
 		nil,
@@ -1927,19 +1942,19 @@ func (s *server) listTables(schema string, constraints metadataListConstraints) 
 }
 
 func (s *server) listObjects(schema string, constraints metadataListConstraints) ([]objectInfo, error) {
-	schema, err := s.normalizeSchema(schema)
-	if err != nil {
-		return nil, err
+	if schema == "" {
+		var err error
+		schema, err = s.normalizeSchemaForIdentity(schema)
+		if err != nil {
+			return nil, err
+		}
 	}
 	query := oracleListObjectsQuery(schema, constraints)
-	if s.schemaIsSessionUser(schema) {
+	if username, userErr := s.sessionUser(); userErr == nil && schema == username {
 		query = oracleListSessionUserObjectsQuery(constraints)
 	}
 	rows, err := s.queryRows(query.SQL, query.Args)
 	if err != nil {
-		if isOraclePGALimitError(err) {
-			return []objectInfo{}, nil
-		}
 		return nil, err
 	}
 	defer s.closeRows(rows)
@@ -1947,12 +1962,22 @@ func (s *server) listObjects(schema string, constraints metadataListConstraints)
 	for rows.Next() {
 		var item objectInfo
 		item.Schema = schema
-		if err := rows.Scan(&item.Name, &item.ObjectType, &item.Comment); err != nil {
+		var status sql.NullString
+		if err := rows.Scan(&item.Name, &item.ObjectType, &item.Comment, &status); err != nil {
 			return nil, err
 		}
+		item.Valid = oracleObjectValidity(status)
 		result = append(result, item)
 	}
 	return emptyIfNil(result), rows.Err()
+}
+
+func oracleObjectValidity(status sql.NullString) *bool {
+	if !status.Valid || (status.String != "VALID" && status.String != "INVALID") {
+		return nil
+	}
+	valid := status.String == "VALID"
+	return &valid
 }
 
 func (s *server) completionAssistantSearch(request completionAssistantRequest) (completionAssistantResponse, error) {
@@ -2994,12 +3019,15 @@ func oracleTriggerBody(source, description string) (string, bool) {
 }
 
 func (s *server) getObjectSource(schema, name, objectType string) (map[string]any, error) {
+	upperType := strings.ToUpper(objectType)
+	if upperType == "TYPE" || upperType == "TYPE_BODY" {
+		return s.getTypeSource(schema, name, upperType)
+	}
 	var err error
 	schema, err = s.normalizeSchemaForIdentity(schema)
 	if err != nil {
 		return nil, err
 	}
-	upperType := strings.ToUpper(objectType)
 	if upperType == "VIEW" {
 		source, err := s.getViewSource(schema, name)
 		if err != nil {
@@ -3023,6 +3051,40 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 		}
 	}
 	return map[string]any{"name": name, "object_type": objectType, "schema": schema, "source": ""}, nil
+}
+
+func (s *server) getTypeSource(schema, name, objectType string) (map[string]any, error) {
+	if schema == "" {
+		var err error
+		schema, err = s.normalizeSchemaForIdentity(schema)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if name == "" {
+		return nil, errors.New("an exact type name is required")
+	}
+	// Tree identities are exact dictionary values, including whitespace and case.
+	source, found, sourceErr := s.loadObjectSourceTextRows(schema, name, strings.ReplaceAll(objectType, "_", " "))
+	if sourceErr != nil || !found || strings.TrimSpace(source) == "" {
+		db, err := s.requireDB()
+		if err != nil {
+			return nil, err
+		}
+		if err = db.QueryRow("SELECT DBMS_METADATA.GET_DDL(:1, :2, :3) FROM DUAL", objectType, name, schema).Scan(&source); err != nil {
+			if sourceErr != nil {
+				return nil, fmt.Errorf("type source is unavailable: %v; GET_DDL: %w", sourceErr, err)
+			}
+			return nil, err
+		}
+	}
+	if strings.TrimSpace(source) == "" {
+		return nil, errors.New("complete type source is missing or is not visible to the current account")
+	}
+	if !strings.HasPrefix(strings.ToUpper(strings.TrimLeft(source, " \t\r\n")), "CREATE ") {
+		source = "CREATE OR REPLACE " + source
+	}
+	return map[string]any{"name": name, "object_type": objectType, "schema": schema, "source": source, "editable": false}, nil
 }
 
 func (s *server) getMetadataObjectSource(schema, name, objectType string) (map[string]any, error) {

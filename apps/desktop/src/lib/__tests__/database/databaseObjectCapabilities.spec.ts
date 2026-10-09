@@ -27,8 +27,8 @@ describe("databaseObjectCapabilities", () => {
   it("exposes OceanBase Oracle sequences and synonyms through the grouped object path", () => {
     const oceanBaseObjects = sidebarObjectKindsForDatabase("oceanbase-oracle");
 
-    expect(oceanBaseObjects).toEqual(["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY"]);
-    expect(databaseObjectCapabilities("oceanbase-oracle").sourceReadable).toEqual(["VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY"]);
+    expect(oceanBaseObjects).toEqual(["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"]);
+    expect(databaseObjectCapabilities("oceanbase-oracle").sourceReadable).toEqual(["VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"]);
     expect(
       buildObjectGroupPlaceholderNodes({
         nodeId: "connection:database:APP",
@@ -37,13 +37,13 @@ describe("databaseObjectCapabilities", () => {
         schema: "APP",
         objectTypes: oceanBaseObjects,
       }).map((node) => node.type),
-    ).toEqual(["group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-sequences", "group-synonyms", "group-packages"]);
+    ).toEqual(["group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-sequences", "group-synonyms", "group-packages", "group-types"]);
   });
 
   it("exposes Oracle sequences through the existing grouped object path", () => {
     const oracleObjects = sidebarObjectKindsForDatabase("oracle");
 
-    expect(oracleObjects).toEqual(["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY"]);
+    expect(oracleObjects).toEqual(["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"]);
     expect(databaseObjectCapabilities("oracle").sourceReadable).toContain("SEQUENCE");
     expect(
       buildObjectGroupPlaceholderNodes({
@@ -118,8 +118,11 @@ describe("databaseObjectCapabilities", () => {
     }
   });
 
-  it("only Xugu TYPE nodes can open object source", () => {
-    expect(supportsTypeObjectSource("xugu")).toBe(true);
+  it("opens TYPE source only on implemented Oracle-family and Xugu paths", () => {
+    for (const dbType of ["xugu", "oracle", "oceanbase-oracle"] as const) {
+      expect(supportsTypeObjectSource(dbType)).toBe(true);
+      expect(databaseObjectCapabilities(dbType).sourceReadable).toEqual(expect.arrayContaining(["TYPE", "TYPE_BODY"]));
+    }
     for (const dbType of ["postgres", "opengauss", "gaussdb", "kingbase", "vastbase", undefined] as const) {
       expect(supportsTypeObjectSource(dbType), String(dbType)).toBe(false);
     }

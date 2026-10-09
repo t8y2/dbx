@@ -14,6 +14,7 @@ import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutio
 import * as api from "@/lib/backend/api";
 import QueryEditor from "@/components/editor/QueryEditor.vue";
 import RoutineMetadataPanel from "@/components/objects/RoutineMetadataPanel.vue";
+import OracleTypeMetadataPanel from "@/components/objects/OracleTypeMetadataPanel.vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import type { DatabaseType, ObjectSourceKind } from "@/types/database";
@@ -68,6 +69,7 @@ onBeforeUnmount(() => {
 const canEdit = computed(() => sourceEditable.value && (props.objectType !== "SEQUENCE" || props.databaseType === "oceanbase-oracle"));
 const title = computed(() => `${editing.value ? t("contextMenu.editView") : t("contextMenu.viewSource")} - ${props.name}`);
 const hasRoutineMetadata = computed(() => !!routineMetadata.value && (routineMetadata.value.parameters.length > 0 || !!routineMetadata.value.returnType));
+const isOracleType = computed(() => (props.databaseType === "oracle" || props.databaseType === "oceanbase-oracle") && (props.objectType === "TYPE" || props.objectType === "TYPE_BODY"));
 
 watch(
   () => [props.open, props.connectionId, props.database, props.schema, props.name, props.relationName, props.signature, props.objectType, props.databaseType, props.initialEditing] as const,
@@ -115,7 +117,7 @@ async function loadSource(nextEditing = props.initialEditing && canEdit.value) {
     routineMetadata.value = !isRoutine ? null : result.routine_parameters !== undefined ? jdbcRoutineMetadata(result.routine_parameters) : target.databaseType === "xugu" ? xuguRoutineMetadataFromDefinition(result.source) : null;
     sourceEditable.value = editableAllowed;
     const displaySource = resolvedType === "SEQUENCE" ? result.source : editable;
-    const formatted = await formatSqlForDisplay(displaySource, target.formatDialect ?? target.dialect, settingsStore.editorSettings.sqlFormatter);
+    const formatted = isOracleType.value ? result.source : await formatSqlForDisplay(displaySource, target.formatDialect ?? target.dialect, settingsStore.editorSettings.sqlFormatter);
     if (serial !== loadSerial) return;
     editableText.value = editable;
     content.value = formatted;
@@ -258,6 +260,7 @@ function closeDialog() {
         </div>
       </div>
       <div v-else class="flex min-h-0 flex-col gap-3 overflow-hidden">
+        <OracleTypeMetadataPanel v-if="isOracleType" :connection-id="props.connectionId" :database="props.database" :schema="props.schema || props.database" :name="props.name" :object-type="props.objectType === 'TYPE_BODY' ? 'TYPE_BODY' : 'TYPE'" />
         <RoutineMetadataPanel v-if="hasRoutineMetadata && routineMetadata" :parameters="routineMetadata.parameters" :return-type="routineMetadata.returnType" />
         <QueryEditor
           v-if="content || !hasRoutineMetadata"

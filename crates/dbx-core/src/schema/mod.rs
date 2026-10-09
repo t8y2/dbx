@@ -2,6 +2,7 @@ pub mod table_structure_sql;
 pub mod oracle_constraint_change;
 mod oracle_routines;
 pub use oracle_routines::{validate_schema_diff_routines, RoutineValidation};
+pub mod oracle_types;
 
 pub use dbx_drivers::metadata::sqlite_ddl;
 
@@ -11101,7 +11102,11 @@ async fn get_object_source_once(
             }
             first_string_cell(result?)?
         } else if let Some(client) = extract_pool!(pool_handle.as_ref(), Agent) {
-            if uses_oracle_metadata_object_source(db_config.as_ref(), &object_type) {
+            if db_config.as_ref().is_some_and(|config| matches!(config.db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle))
+                && matches!(object_type, db::ObjectSourceKind::Type | db::ObjectSourceKind::TypeBody)
+            {
+                return oracle_types::source(client, database, schema, name, &object_type, agent_metadata_timeout(db_config.as_ref())).await;
+            } else if uses_oracle_metadata_object_source(db_config.as_ref(), &object_type) {
                 oracle_agent_object_source(
                     client,
                     database,
@@ -11271,11 +11276,13 @@ fn oracle_owner_filter(schema: &str) -> String {
 
 pub fn oracle_list_objects_sql(schema: &str) -> String {
     format!(
-        "SELECT object_name, CASE object_type WHEN 'PACKAGE BODY' THEN 'PACKAGE_BODY' ELSE object_type END AS object_type, owner \
-         FROM all_objects \
-         WHERE owner = {} AND object_type IN ('TABLE', 'VIEW', 'PROCEDURE', 'FUNCTION', 'SEQUENCE', 'PACKAGE', 'PACKAGE BODY') \
+        "SELECT object_name, CASE object_type WHEN 'PACKAGE BODY' THEN 'PACKAGE_BODY' WHEN 'TYPE BODY' THEN 'TYPE_BODY' ELSE object_type END AS object_type, owner, status \
+         FROM all_objects o \
+         WHERE owner = {} AND object_type IN ('TABLE', 'VIEW', 'PROCEDURE', 'FUNCTION', 'SEQUENCE', 'PACKAGE', 'PACKAGE BODY', 'TYPE', 'TYPE BODY') \
+         AND (object_type NOT IN ('TYPE', 'TYPE BODY') OR (NVL(generated, 'N') = 'N' AND owner NOT IN ('SYS', 'SYSTEM') \
+         AND EXISTS (SELECT 1 FROM all_types t WHERE t.owner = o.owner AND t.type_name = o.object_name AND t.predefined = 'NO'))) \
          ORDER BY CASE object_type WHEN 'TABLE' THEN 0 WHEN 'VIEW' THEN 1 WHEN 'PROCEDURE' THEN 2 WHEN 'FUNCTION' THEN 3 WHEN 'SEQUENCE' THEN 4 WHEN 'PACKAGE' THEN 5 ELSE 6 END, object_name",
-        oracle_owner_filter(schema)
+        if schema.is_empty() { "USER".into() } else { sql_string(schema) }
     )
 }
 
@@ -11355,7 +11362,11 @@ async fn oracle_agent_list_objects(
                 name,
                 object_type,
                 schema,
-                valid: None,
+                valid: match row.get(3).and_then(|value| value.as_str()) {
+                    Some("VALID") => Some(true),
+                    Some("INVALID") => Some(false),
+                    _ => None,
+                },
                 signature: None,
                 custom_type_kind: None,
                 has_members: None,

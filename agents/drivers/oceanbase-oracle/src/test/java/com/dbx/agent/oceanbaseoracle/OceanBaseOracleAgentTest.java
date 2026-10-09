@@ -430,9 +430,9 @@ class OceanBaseOracleAgentTest {
         List<String> sql = new ArrayList<>();
         OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
         TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
-            new String[]{"OBJECT_NAME", "OBJECT_TYPE", "COMMENTS"},
+            new String[]{"OBJECT_NAME", "OBJECT_TYPE", "COMMENTS", "STATUS"},
             new Object[][]{
-                {"FORMAT_USER", "FUNCTION", null}
+                {"FORMAT_USER", "FUNCTION", "User formatter", "VALID"}
             }
         )));
 
@@ -444,8 +444,60 @@ class OceanBaseOracleAgentTest {
         Assertions.assertEquals(1, objects.size());
         Assertions.assertEquals("FORMAT_USER", objects.get(0).getName());
         Assertions.assertEquals("FUNCTION", objects.get(0).getObject_type());
+        Assertions.assertEquals("User formatter", objects.get(0).getComment());
+        Assertions.assertEquals(Boolean.TRUE, objects.get(0).getValid());
         Assertions.assertTrue(sql.get(0).contains("OBJECT_TYPE IN (?)"), sql.get(0));
         Assertions.assertTrue(sql.get(0).contains("ROWNUM <= ?"), sql.get(0));
+    }
+
+    @Test
+    void publicSynonymMetadataKeepsCommentsStatusAndPagingColumns() {
+        List<String> sql = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
+            new String[]{"OBJECT_NAME", "OBJECT_TYPE", "COMMENTS", "STATUS"},
+            new Object[][]{{"USER_LINK", "SYNONYM", null, null}}
+        )));
+
+        List<ObjectInfo> objects = agent.listObjects(
+            "PUBLIC", new MetadataListConstraints("link", 1, Integer.MAX_VALUE, List.of("SYNONYM"))
+        );
+
+        Assertions.assertEquals("PUBLIC", objects.get(0).getSchema());
+        Assertions.assertNull(objects.get(0).getValid());
+        Assertions.assertTrue(sql.get(0).contains("SELECT OBJECT_NAME, OBJECT_TYPE, COMMENTS, STATUS"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("s.OWNER = '__public' THEN 'PUBLIC'"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("MIN(a.OBJECT_ID) AS OBJECT_ID"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("MIN(a.STATUS) = MAX(a.STATUS)"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("UPPER(c.COMMENTS) LIKE ?"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("END, OBJECT_NAME, o.OBJECT_ID"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("t.PREDEFINED = 'NO'"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("ROWNUM <= ?"), sql.get(0));
+    }
+
+    @Test
+    void objectMetadataNormalizesBodyKindsAndPreservesUnknownValidity() {
+        List<String> sql = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, resultSet(
+            new String[]{"OBJECT_NAME", "OBJECT_TYPE", "COMMENTS", "STATUS"},
+            new Object[][]{
+                {"USER_TYPE", "TYPE BODY", null, "INVALID"},
+                {"USER_PACKAGE", "PACKAGE BODY", null, "UNKNOWN"},
+                {"USER_TABLE", "TABLE", "User records", "VALID"}
+            }
+        )));
+
+        List<ObjectInfo> objects = agent.listObjects("APP");
+
+        Assertions.assertEquals("TYPE_BODY", objects.get(0).getObject_type());
+        Assertions.assertEquals(Boolean.FALSE, objects.get(0).getValid());
+        Assertions.assertEquals("PACKAGE_BODY", objects.get(1).getObject_type());
+        Assertions.assertNull(objects.get(1).getValid());
+        Assertions.assertEquals("User records", objects.get(2).getComment());
+        Assertions.assertEquals(Boolean.TRUE, objects.get(2).getValid());
+        Assertions.assertTrue(sql.get(0).contains("o.OWNER NOT IN ('SYS', 'SYSTEM')"), sql.get(0));
+        Assertions.assertTrue(sql.get(0).contains("NVL(o.GENERATED, 'N') = 'N'"), sql.get(0));
     }
 
     @Test

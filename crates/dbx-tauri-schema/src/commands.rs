@@ -390,6 +390,19 @@ pub async fn get_custom_type_details(
 }
 
 #[tauri::command]
+pub async fn get_oracle_type_details(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    name: String,
+    object_type: String,
+    execution_id: Option<String>,
+) -> Result<dbx_core::schema::oracle_types::OracleTypeDetails, String> {
+    run_cancellable(&state, execution_id, dbx_core::schema::oracle_types::get_oracle_type_details_core(&state, &connection_id, &database, &schema, &name, &object_type)).await
+}
+
+#[tauri::command]
 pub async fn get_columns(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

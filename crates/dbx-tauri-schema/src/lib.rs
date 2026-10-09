@@ -32,6 +32,7 @@ define_registry![
     get_object_source,
     get_event_info,
     get_custom_type_details,
+    get_oracle_type_details,
     list_schemas,
     list_schema_infos,
     list_data_types,
@@ -85,7 +86,7 @@ mod tests {
 
     #[test]
     fn handles_only_schema_commands() {
-        assert_eq!(COMMANDS.len(), 49);
+        assert_eq!(COMMANDS.len(), 50);
         assert!(handles("list_databases"));
         assert!(handles("list_event_triggers"));
         assert!(!handles("prepare_schema_diff"));

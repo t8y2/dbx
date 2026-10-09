@@ -1791,6 +1791,10 @@ export async function listSchemaInfos(connectionId: string, database: string): P
 export async function getCustomTypeDetails(connectionId: string, database: string, schema: string, name: string): Promise<CustomTypeDetails> {
   return invoke("get_custom_type_details", { connectionId, database, schema, name });
 }
+
+export async function getOracleTypeDetails(connectionId: string, database: string, schema: string, name: string, objectType: "TYPE" | "TYPE_BODY", executionId?: string): Promise<import("@/types/oracleTypes").OracleTypeDetails> {
+  return invoke("get_oracle_type_details", { connectionId, database, schema, name, objectType, executionId });
+}
 export async function getColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string, clientSessionId?: string, currentSchema?: string): Promise<ColumnInfo[]> {
   return invoke("get_columns", {
     connectionId,

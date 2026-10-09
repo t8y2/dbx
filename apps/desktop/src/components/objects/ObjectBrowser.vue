@@ -104,6 +104,7 @@ import {
 import { confirmOceanbaseTableClone, executeOceanbaseTableClone, showOceanbaseTableCloneFailure, OceanbaseTableCloneError } from "@/lib/database/oceanbaseTableClone";
 import { useToast } from "@/composables/useToast";
 import { buildExecutableObjectSourceStatements, buildRoutineRenameObjectSourceStatements, executeObjectSourceSave, formatObjectSourceSaveError, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
+import OracleTypeMetadataPanel from "@/components/objects/OracleTypeMetadataPanel.vue";
 import { buildRenameObjectSql, supportsObjectRename } from "@/lib/table/objectRenameSql";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { autoRevealExportedPathIfConfigured, promptExportSavePath } from "@/lib/export/exportPath";
@@ -4581,6 +4582,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
               <X class="h-3 w-3" />
             </Button>
           </div>
+          <OracleTypeMetadataPanel v-if="!sourceLoading && sourceRow && ['TYPE', 'TYPE_BODY'].includes(sourceRow.type) && ['oracle', 'oceanbase-oracle'].includes(effectiveDatabaseType)" :connection-id="props.connection.id" :database="props.database" :schema="sourceRow.schema || selectedSchema || props.database" :name="sourceRow.name" :object-type="sourceRow.type === 'TYPE_BODY' ? 'TYPE_BODY' : 'TYPE'" />
           <div v-if="sourceLoading" class="flex flex-1 items-center justify-center">
             <Loader2 class="h-4 w-4 animate-spin text-muted-foreground" />
           </div>

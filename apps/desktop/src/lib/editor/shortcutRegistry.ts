@@ -51,6 +51,7 @@ export type ShortcutActionId =
   | "openSettings"
   | "closeTab"
   | "closeOtherTabs"
+  | "closeWindow"
   | "focusSearch"
   | "quickOpen"
   | "globalSearch"
@@ -473,6 +474,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "contextMenu.closeOtherTabs",
     scope: "global",
     defaultShortcut: closeOtherTabsDefaultShortcut(),
+  },
+  {
+    id: "closeWindow",
+    labelKey: "settings.shortcutCloseWindow",
+    scope: "global",
+    defaultShortcut: "Shift+Mod+W",
   },
   {
     id: "focusSearch",

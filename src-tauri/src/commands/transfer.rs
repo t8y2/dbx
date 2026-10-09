@@ -5,12 +5,22 @@ use crate::commands::connection::{ensure_connection_writable, AppState};
 
 // Re-export types and functions used by other modules
 use dbx_core::models::connection::DatabaseType;
+use dbx_core::persistence::task_history::{
+    TaskHistoryStorageError, TaskItemStatus, TaskLifecycleOwner, TransferTaskJournal,
+};
 pub use dbx_core::transfer::{
     get_db_type, TransferOwnershipPreview, TransferProgress, TransferRequest, TransferStatus,
 };
 
 fn emit_progress(app: &AppHandle, progress: TransferProgress) {
     let _ = app.emit("transfer-progress", progress);
+}
+
+async fn emit_terminal_progress(app: &AppHandle, history: Option<&TransferTaskJournal>, progress: TransferProgress) {
+    if let Some(history) = history {
+        history.finish(&progress).await;
+    }
+    emit_progress(app, progress);
 }
 
 #[tauri::command]
@@ -69,6 +79,12 @@ pub async fn start_transfer(
     .await?;
 
     dbx_core::transfer::ensure_transfer_source_types_supported(&state, &request, &source_pool_key).await?;
+
+    let history = match TransferTaskJournal::accept(&state.storage, &state, &request, TaskLifecycleOwner::Tauri).await {
+        Ok(history) => history,
+        Err(TaskHistoryStorageError::RunIdConflict) => return Err("TRANSFER_RUN_ID_CONFLICT".to_string()),
+        Err(error) => return Err(error.code().to_string()),
+    };
 
     tokio::spawn(async move {
         // Sort tables by FK dependency so referenced tables are transferred first,
@@ -157,8 +173,9 @@ pub async fn start_transfer(
             {
                 Ok(names) => Some(names),
                 Err(e) if e == "Cancelled" => {
-                    emit_progress(
+                    emit_terminal_progress(
                         &app,
+                        history.as_ref(),
                         TransferProgress {
                             transfer_id: transfer_id.clone(),
                             table: "rename pre-pass".to_string(),
@@ -170,13 +187,15 @@ pub async fn start_transfer(
                             error: None,
                             terminal: true,
                         },
-                    );
+                    )
+                    .await;
                     dbx_core::transfer::clear_cancelled(&transfer_id).await;
                     return;
                 }
                 Err(e) => {
-                    emit_progress(
+                    emit_terminal_progress(
                         &app,
+                        history.as_ref(),
                         TransferProgress {
                             transfer_id: transfer_id.clone(),
                             table: "rename pre-pass".to_string(),
@@ -188,7 +207,8 @@ pub async fn start_transfer(
                             error: Some(e),
                             terminal: true,
                         },
-                    );
+                    )
+                    .await;
                     dbx_core::transfer::clear_cancelled(&transfer_id).await;
                     return;
                 }
@@ -215,8 +235,9 @@ pub async fn start_transfer(
             {
                 Ok(()) => {}
                 Err(e) if e == "Cancelled" => {
-                    emit_progress(
+                    emit_terminal_progress(
                         &app,
+                        history.as_ref(),
                         TransferProgress {
                             transfer_id: transfer_id.clone(),
                             table: "schema dependencies".to_string(),
@@ -228,13 +249,15 @@ pub async fn start_transfer(
                             error: None,
                             terminal: true,
                         },
-                    );
+                    )
+                    .await;
                     dbx_core::transfer::clear_cancelled(&transfer_id).await;
                     return;
                 }
                 Err(e) => {
-                    emit_progress(
+                    emit_terminal_progress(
                         &app,
+                        history.as_ref(),
                         TransferProgress {
                             transfer_id: transfer_id.clone(),
                             table: "schema dependencies".to_string(),
@@ -246,7 +269,8 @@ pub async fn start_transfer(
                             error: Some(e),
                             terminal: true,
                         },
-                    );
+                    )
+                    .await;
                     dbx_core::transfer::clear_cancelled(&transfer_id).await;
                     return;
                 }
@@ -254,8 +278,9 @@ pub async fn start_transfer(
         }
         for (i, table) in sorted_tables.iter().enumerate() {
             if dbx_core::transfer::is_cancelled(&transfer_id).await {
-                emit_progress(
+                emit_terminal_progress(
                     &app,
+                    history.as_ref(),
                     TransferProgress {
                         transfer_id: transfer_id.clone(),
                         table: table.clone(),
@@ -267,14 +292,23 @@ pub async fn start_transfer(
                         error: None,
                         terminal: true,
                     },
-                );
+                )
+                .await;
                 dbx_core::transfer::clear_cancelled(&transfer_id).await;
                 return;
             }
 
             log::info!("[transfer] table {}/{}: {}", i + 1, total_tables, table);
-
-            match dbx_core::transfer::transfer_table(
+            let history_item_index =
+                history.as_ref().and_then(|journal| journal.item_index_for_table(table)).unwrap_or(i);
+            if let Some(journal) = history.as_ref() {
+                journal.start_table(history_item_index).await;
+            }
+            let mut source_row_count = None;
+            let mut moved_row_count = None;
+            let history_for_progress = history.as_ref();
+            let history_for_count = history.as_ref();
+            let result = dbx_core::transfer::transfer_table_with_result(
                 &state,
                 &request,
                 table,
@@ -289,12 +323,32 @@ pub async fn start_transfer(
                 |progress| {
                     last_rows_transferred = progress.rows_transferred;
                     last_total_rows = progress.total_rows;
+                    moved_row_count = Some(progress.rows_transferred);
+                    if let Some(journal) = history_for_progress {
+                        journal.observe_table_progress(history_item_index, progress.rows_transferred);
+                    }
                     emit_progress(&app, progress);
                 },
+                |source_count| {
+                    source_row_count = source_count;
+                    if let Some(journal) = history_for_count {
+                        journal.observe_source_count(history_item_index, source_count);
+                    }
+                },
             )
-            .await
-            {
-                Ok(rows) => {
+            .await;
+            match result {
+                Ok(result) => {
+                    if let Some(journal) = history.as_ref() {
+                        journal
+                            .finish_table(
+                                history_item_index,
+                                TaskItemStatus::Succeeded,
+                                result.source_row_count,
+                                Some(result.moved_rows),
+                            )
+                            .await;
+                    }
                     emit_progress(
                         &app,
                         TransferProgress {
@@ -302,8 +356,8 @@ pub async fn start_transfer(
                             table: table.clone(),
                             table_index: i,
                             total_tables,
-                            rows_transferred: rows,
-                            total_rows: last_total_rows.or(Some(rows)),
+                            rows_transferred: result.moved_rows,
+                            total_rows: last_total_rows.or(Some(result.moved_rows)),
                             status: TransferStatus::TableDone,
                             error: None,
                             terminal: false,
@@ -312,22 +366,39 @@ pub async fn start_transfer(
                 }
                 Err(e) => {
                     if e == "Cancelled" {
-                        emit_progress(
+                        if let Some(journal) = history.as_ref() {
+                            journal
+                                .finish_table(
+                                    history_item_index,
+                                    TaskItemStatus::Cancelled,
+                                    source_row_count,
+                                    moved_row_count,
+                                )
+                                .await;
+                        }
+                        emit_terminal_progress(
                             &app,
+                            history.as_ref(),
                             TransferProgress {
                                 transfer_id: transfer_id.clone(),
                                 table: table.clone(),
                                 table_index: i,
                                 total_tables,
-                                rows_transferred: last_rows_transferred,
-                                total_rows: last_total_rows,
+                                rows_transferred: 0,
+                                total_rows: None,
                                 status: TransferStatus::Cancelled,
                                 error: None,
                                 terminal: true,
                             },
-                        );
+                        )
+                        .await;
                         dbx_core::transfer::clear_cancelled(&transfer_id).await;
                         return;
+                    }
+                    if let Some(journal) = history.as_ref() {
+                        journal
+                            .finish_table(history_item_index, TaskItemStatus::Failed, source_row_count, moved_row_count)
+                            .await;
                     }
                     failed_tables.push(table.clone());
                     emit_progress(
@@ -385,11 +456,18 @@ pub async fn start_transfer(
         .await
         {
             Ok(outcome) => {
+                if let Some(journal) = history.as_ref() {
+                    journal.record_object_outcome(&outcome).await;
+                }
                 object_outcome = outcome;
             }
             Err(e) if e == "Cancelled" => {
-                emit_progress(
+                if let Some(journal) = history.as_ref() {
+                    journal.record_schema_objects_error(true).await;
+                }
+                emit_terminal_progress(
                     &app,
+                    history.as_ref(),
                     TransferProgress {
                         transfer_id: transfer_id.clone(),
                         table: "schema objects".to_string(),
@@ -401,11 +479,15 @@ pub async fn start_transfer(
                         error: None,
                         terminal: true,
                     },
-                );
+                )
+                .await;
                 dbx_core::transfer::clear_cancelled(&transfer_id).await;
                 return;
             }
             Err(e) => {
+                if let Some(journal) = history.as_ref() {
+                    journal.record_schema_objects_error(false).await;
+                }
                 failed_tables.push("schema objects".to_string());
                 emit_progress(
                     &app,
@@ -461,8 +543,9 @@ pub async fn start_transfer(
             String::new()
         };
 
-        emit_progress(
+        emit_terminal_progress(
             &app,
+            history.as_ref(),
             TransferProgress {
                 transfer_id: transfer_id.clone(),
                 table: String::new(),
@@ -487,7 +570,8 @@ pub async fn start_transfer(
                 },
                 terminal: true,
             },
-        );
+        )
+        .await;
         dbx_core::transfer::clear_cancelled(&transfer_id).await;
     });
 

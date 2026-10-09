@@ -1591,18 +1591,135 @@ where
     Err(errors.into_iter().next_back().unwrap_or_else(|| format!("[postgres][{log_context}] no SQL tiers configured")))
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum GetColumnsTierDiagnostic {
+    TierStarted { tier: &'static str },
+    TierSucceeded { tier: &'static str, tier_elapsed_ms: u128, column_count: usize },
+    TierEmpty { tier: &'static str, tier_elapsed_ms: u128, column_count: usize },
+    TierFailed { tier: &'static str, tier_elapsed_ms: u128, sqlstate: Option<String> },
+    Done { status: &'static str, selected_tier: Option<&'static str>, total_elapsed_ms: u128 },
+}
+
+fn log_get_columns_tier_diagnostic(event: GetColumnsTierDiagnostic) {
+    match event {
+        GetColumnsTierDiagnostic::TierStarted { tier } => {
+            log::debug!("[postgres][get_columns:tier:start] tier={tier}");
+        }
+        GetColumnsTierDiagnostic::TierSucceeded { tier, tier_elapsed_ms, column_count } => {
+            log::debug!(
+                "[postgres][get_columns:tier:success] tier={tier} tier_elapsed_ms={tier_elapsed_ms} column_count={column_count}"
+            );
+        }
+        GetColumnsTierDiagnostic::TierEmpty { tier, tier_elapsed_ms, column_count } => {
+            log::debug!(
+                "[postgres][get_columns:tier:empty] tier={tier} tier_elapsed_ms={tier_elapsed_ms} column_count={column_count}"
+            );
+        }
+        GetColumnsTierDiagnostic::TierFailed { tier, tier_elapsed_ms, sqlstate } => {
+            log::debug!(
+                "[postgres][get_columns:tier:failed] tier={tier} tier_elapsed_ms={tier_elapsed_ms} sqlstate={}",
+                sqlstate.as_deref().unwrap_or("none")
+            );
+        }
+        GetColumnsTierDiagnostic::Done { status, selected_tier, total_elapsed_ms } => {
+            log::debug!(
+                "[postgres][get_columns:done] status={status} selected_tier={} total_elapsed_ms={total_elapsed_ms}",
+                selected_tier.unwrap_or("none")
+            );
+        }
+    }
+}
+
 /// Column-list tier runner: a tier is useful once it reported at least one
-/// column. See [`query_with_useful_compat_fallback`].
-async fn query_with_non_empty_compat_fallback<F, Fut>(
-    log_context: &str,
-    tiers: &[&'static str],
-    run: F,
+/// column. Diagnostics are intentionally scoped to single-table `get_columns`;
+/// errors remain unchanged for callers but are never copied into these logs.
+/// `tier_elapsed_ms` measures the full driver call, not server-side execution.
+async fn query_with_column_metadata_fallback<F, Fut, E, ErrorToString, SqlStateForError, Emit>(
+    tiers: &[(&'static str, &'static str)],
+    mut run: F,
+    total_started: Option<Instant>,
+    error_to_string: ErrorToString,
+    sqlstate_for_error: SqlStateForError,
+    mut emit: Emit,
 ) -> Result<Vec<ColumnInfo>, String>
 where
     F: FnMut(&'static str) -> Fut,
-    Fut: std::future::Future<Output = Result<Vec<ColumnInfo>, tokio_postgres::Error>>,
+    Fut: std::future::Future<Output = Result<Vec<ColumnInfo>, E>>,
+    ErrorToString: Fn(E) -> String,
+    SqlStateForError: Fn(&E) -> Option<String>,
+    Emit: FnMut(GetColumnsTierDiagnostic),
 {
-    query_with_useful_compat_fallback(log_context, tiers, run, |columns: &Vec<ColumnInfo>| !columns.is_empty()).await
+    let diagnostics_enabled = total_started.is_some();
+    let mut unuseful_result = None;
+    let mut errors = Vec::new();
+
+    for &(tier, sql) in tiers {
+        if diagnostics_enabled {
+            emit(GetColumnsTierDiagnostic::TierStarted { tier });
+        }
+        let tier_started = diagnostics_enabled.then(Instant::now);
+
+        match run(sql).await {
+            Ok(columns) if !columns.is_empty() => {
+                if let Some(started) = tier_started.as_ref() {
+                    emit(GetColumnsTierDiagnostic::TierSucceeded {
+                        tier,
+                        tier_elapsed_ms: started.elapsed().as_millis(),
+                        column_count: columns.len(),
+                    });
+                }
+                if let Some(started) = total_started.as_ref() {
+                    emit(GetColumnsTierDiagnostic::Done {
+                        status: "success",
+                        selected_tier: Some(tier),
+                        total_elapsed_ms: started.elapsed().as_millis(),
+                    });
+                }
+                return Ok(columns);
+            }
+            Ok(columns) => {
+                if let Some(started) = tier_started.as_ref() {
+                    emit(GetColumnsTierDiagnostic::TierEmpty {
+                        tier,
+                        tier_elapsed_ms: started.elapsed().as_millis(),
+                        column_count: columns.len(),
+                    });
+                }
+                unuseful_result = Some((tier, columns));
+            }
+            Err(error) => {
+                let sqlstate = diagnostics_enabled.then(|| sqlstate_for_error(&error)).flatten();
+                if let Some(started) = tier_started.as_ref() {
+                    emit(GetColumnsTierDiagnostic::TierFailed {
+                        tier,
+                        tier_elapsed_ms: started.elapsed().as_millis(),
+                        sqlstate,
+                    });
+                }
+                errors.push(error_to_string(error));
+            }
+        }
+    }
+
+    if let Some((tier, columns)) = unuseful_result {
+        if let Some(started) = total_started.as_ref() {
+            emit(GetColumnsTierDiagnostic::Done {
+                status: "empty",
+                selected_tier: Some(tier),
+                total_elapsed_ms: started.elapsed().as_millis(),
+            });
+        }
+        return Ok(columns);
+    }
+
+    if let Some(started) = total_started.as_ref() {
+        emit(GetColumnsTierDiagnostic::Done {
+            status: "failed",
+            selected_tier: None,
+            total_elapsed_ms: started.elapsed().as_millis(),
+        });
+    }
+    Err(errors.into_iter().next_back().unwrap_or_else(|| "[postgres][get_columns] no SQL tiers configured".to_string()))
 }
 
 fn pg_db_error_to_string(err: &tokio_postgres::error::DbError) -> String {
@@ -7936,10 +8053,35 @@ async fn get_columns_with_sql(
 }
 
 pub async fn get_columns(pool: &Pool, schema: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
-    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
-    let tiers = [POSTGRES_COLUMNS_SQL, POSTGRES_COLUMNS_COMPAT_SQL, POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL];
-    query_with_non_empty_compat_fallback("get_columns", &tiers, |sql| get_columns_with_sql(&client, sql, schema, table))
-        .await
+    let diagnostics_enabled = log::log_enabled!(log::Level::Debug);
+    let total_started = diagnostics_enabled.then(Instant::now);
+    let client = match checkout_postgres_client(pool, None, super::connection_timeout()).await {
+        Ok(client) => client,
+        Err(error) => {
+            if let Some(started) = total_started.as_ref() {
+                log_get_columns_tier_diagnostic(GetColumnsTierDiagnostic::Done {
+                    status: "failed",
+                    selected_tier: None,
+                    total_elapsed_ms: started.elapsed().as_millis(),
+                });
+            }
+            return Err(error);
+        }
+    };
+    let tiers = [
+        ("primary", POSTGRES_COLUMNS_SQL),
+        ("compat", POSTGRES_COLUMNS_COMPAT_SQL),
+        ("information_schema", POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL),
+    ];
+    query_with_column_metadata_fallback(
+        &tiers,
+        |sql| get_columns_with_sql(&client, sql, schema, table),
+        total_started,
+        pg_error_to_string,
+        |error: &tokio_postgres::Error| error.as_db_error().map(|db_error| db_error.code().code().to_string()),
+        log_get_columns_tier_diagnostic,
+    )
+    .await
 }
 
 pub fn pg_quote_literal(value: &str) -> String {
@@ -13987,6 +14129,311 @@ mod tests {
             .expect_err("every tier failed");
 
         assert!(!error.is_empty());
+    }
+
+    #[derive(Debug)]
+    struct TestColumnMetadataError {
+        message: &'static str,
+        sqlstate: Option<&'static str>,
+    }
+
+    fn test_column_metadata_error_string(error: TestColumnMetadataError) -> String {
+        error.message.to_string()
+    }
+
+    fn test_column_metadata_sqlstate(error: &TestColumnMetadataError) -> Option<String> {
+        error.sqlstate.map(str::to_string)
+    }
+
+    #[tokio::test]
+    async fn get_columns_tier_diagnostics_fall_back_after_sqlstate_error() {
+        let tiers = [("primary", "primary-sql"), ("compat", "compat-sql"), ("information_schema", "info-sql")];
+        let calls = Cell::new(Vec::new());
+        let mut events = Vec::new();
+        let result = query_with_column_metadata_fallback(
+            &tiers,
+            |sql| {
+                calls.set({
+                    let mut seen = calls.take();
+                    seen.push(sql);
+                    seen
+                });
+                async move {
+                    if sql == "primary-sql" {
+                        Err(TestColumnMetadataError { message: "primary failure", sqlstate: Some("42703") })
+                    } else {
+                        Ok(vec![ColumnInfo { name: "id".to_string(), ..Default::default() }])
+                    }
+                }
+            },
+            Some(Instant::now()),
+            test_column_metadata_error_string,
+            test_column_metadata_sqlstate,
+            |event| events.push(event),
+        )
+        .await
+        .expect("compat tier succeeds");
+
+        assert_eq!(calls.take(), vec!["primary-sql", "compat-sql"]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "id");
+        assert!(matches!(&events[0], GetColumnsTierDiagnostic::TierStarted { tier } if *tier == "primary"));
+        assert!(
+            matches!(&events[1], GetColumnsTierDiagnostic::TierFailed { tier, sqlstate, .. } if *tier == "primary" && sqlstate.as_deref() == Some("42703"))
+        );
+        assert!(matches!(&events[2], GetColumnsTierDiagnostic::TierStarted { tier } if *tier == "compat"));
+        assert!(
+            matches!(&events[3], GetColumnsTierDiagnostic::TierSucceeded { tier, column_count: 1, .. } if *tier == "compat")
+        );
+        assert!(matches!(
+            events.last(),
+            Some(GetColumnsTierDiagnostic::Done { status: "success", selected_tier: Some("compat"), .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn get_columns_tier_diagnostics_reach_information_schema_after_two_failures() {
+        let tiers = [("primary", "primary-sql"), ("compat", "compat-sql"), ("information_schema", "info-sql")];
+        let calls = Cell::new(Vec::new());
+        let mut events = Vec::new();
+        let result = query_with_column_metadata_fallback(
+            &tiers,
+            |sql| {
+                calls.set({
+                    let mut seen = calls.take();
+                    seen.push(sql);
+                    seen
+                });
+                async move {
+                    if sql == "info-sql" {
+                        Ok(vec![ColumnInfo { name: "fallback-column".to_string(), ..Default::default() }])
+                    } else {
+                        Err(TestColumnMetadataError { message: "tier failure", sqlstate: Some("0A000") })
+                    }
+                }
+            },
+            Some(Instant::now()),
+            test_column_metadata_error_string,
+            test_column_metadata_sqlstate,
+            |event| events.push(event),
+        )
+        .await
+        .expect("information_schema tier succeeds");
+
+        assert_eq!(calls.take(), vec!["primary-sql", "compat-sql", "info-sql"]);
+        assert_eq!(result[0].name, "fallback-column");
+        assert!(matches!(
+            events.last(),
+            Some(GetColumnsTierDiagnostic::Done { status: "success", selected_tier: Some("information_schema"), .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn get_columns_tier_diagnostics_fall_back_after_empty_result() {
+        let tiers = [("primary", "primary-sql"), ("compat", "compat-sql"), ("information_schema", "info-sql")];
+        let calls = Cell::new(Vec::new());
+        let mut events = Vec::new();
+        let result = query_with_column_metadata_fallback(
+            &tiers,
+            |sql| {
+                calls.set({
+                    let mut seen = calls.take();
+                    seen.push(sql);
+                    seen
+                });
+                async move {
+                    if sql == "primary-sql" {
+                        Ok(Vec::new())
+                    } else {
+                        Ok(vec![ColumnInfo { name: "id".to_string(), ..Default::default() }])
+                    }
+                }
+            },
+            Some(Instant::now()),
+            test_column_metadata_error_string,
+            test_column_metadata_sqlstate,
+            |event| events.push(event),
+        )
+        .await
+        .expect("compat tier succeeds");
+
+        assert_eq!(calls.take(), vec!["primary-sql", "compat-sql"]);
+        assert_eq!(result.len(), 1);
+        assert!(
+            matches!(&events[1], GetColumnsTierDiagnostic::TierEmpty { tier, column_count: 0, .. } if *tier == "primary")
+        );
+        assert!(!events.iter().any(|event| matches!(event, GetColumnsTierDiagnostic::TierFailed { .. })));
+        assert!(matches!(
+            events.last(),
+            Some(GetColumnsTierDiagnostic::Done { status: "success", selected_tier: Some("compat"), .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn get_columns_tier_diagnostics_keep_last_error_without_logging_error_text() {
+        let tiers = [
+            ("primary", "sensitive-primary-sql"),
+            ("compat", "sensitive-compat-sql"),
+            ("information_schema", "sensitive-info-sql"),
+        ];
+        let calls = Cell::new(Vec::new());
+        let mut events = Vec::new();
+        let result = query_with_column_metadata_fallback(
+            &tiers,
+            |sql| {
+                calls.set({
+                    let mut seen = calls.take();
+                    seen.push(sql);
+                    seen
+                });
+                async move {
+                    Err(TestColumnMetadataError {
+                        message: if sql == "sensitive-info-sql" { "last tier error" } else { "earlier tier error" },
+                        sqlstate: Some("0A000"),
+                    })
+                }
+            },
+            Some(Instant::now()),
+            test_column_metadata_error_string,
+            test_column_metadata_sqlstate,
+            |event| events.push(event),
+        )
+        .await;
+
+        assert_eq!(calls.take(), vec!["sensitive-primary-sql", "sensitive-compat-sql", "sensitive-info-sql"]);
+        assert_eq!(result.expect_err("all tiers fail"), "last tier error");
+        assert_eq!(
+            events.iter().filter(|event| matches!(event, GetColumnsTierDiagnostic::TierFailed { .. })).count(),
+            3
+        );
+        assert!(matches!(
+            events.last(),
+            Some(GetColumnsTierDiagnostic::Done { status: "failed", selected_tier: None, .. })
+        ));
+        let event_text = format!("{events:?}");
+        assert!(!event_text.contains("sensitive"));
+        assert!(!event_text.contains("tier error"));
+    }
+
+    #[tokio::test]
+    async fn get_columns_tier_diagnostics_select_primary_without_fallback() {
+        let tiers = [("primary", "primary-sql"), ("compat", "compat-sql"), ("information_schema", "info-sql")];
+        let calls = Cell::new(Vec::new());
+        let mut events = Vec::new();
+        let result = query_with_column_metadata_fallback(
+            &tiers,
+            |sql| {
+                calls.set({
+                    let mut seen = calls.take();
+                    seen.push(sql);
+                    seen
+                });
+                async move { Ok(vec![ColumnInfo { name: "stable-name".to_string(), ..Default::default() }]) }
+            },
+            Some(Instant::now()),
+            test_column_metadata_error_string,
+            test_column_metadata_sqlstate,
+            |event| events.push(event),
+        )
+        .await
+        .expect("primary tier succeeds");
+
+        assert_eq!(calls.take(), vec!["primary-sql"]);
+        assert_eq!(result[0].name, "stable-name");
+        assert!(matches!(
+            events.last(),
+            Some(GetColumnsTierDiagnostic::Done { status: "success", selected_tier: Some("primary"), .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn get_columns_tier_diagnostics_preserve_empty_fallback_result() {
+        let tiers = [("primary", "primary-sql"), ("compat", "compat-sql"), ("information_schema", "info-sql")];
+        let calls = Cell::new(Vec::new());
+        let mut events = Vec::new();
+        let result = query_with_column_metadata_fallback(
+            &tiers,
+            |sql| {
+                calls.set({
+                    let mut seen = calls.take();
+                    seen.push(sql);
+                    seen
+                });
+                async move {
+                    if sql == "compat-sql" {
+                        Err(TestColumnMetadataError { message: "compat failure", sqlstate: Some("0A000") })
+                    } else {
+                        Ok(Vec::new())
+                    }
+                }
+            },
+            Some(Instant::now()),
+            test_column_metadata_error_string,
+            test_column_metadata_sqlstate,
+            |event| events.push(event),
+        )
+        .await
+        .expect("successful empty tier is returned when none is useful");
+
+        assert!(result.is_empty());
+        assert_eq!(calls.take(), vec!["primary-sql", "compat-sql", "info-sql"]);
+        assert!(matches!(
+            events.last(),
+            Some(GetColumnsTierDiagnostic::Done { status: "empty", selected_tier: Some("information_schema"), .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn get_columns_tier_diagnostics_are_silent_when_disabled() {
+        let tiers = [("primary", "primary-sql"), ("compat", "compat-sql")];
+        let calls = Cell::new(Vec::new());
+        let mut events = Vec::new();
+        let result = query_with_column_metadata_fallback(
+            &tiers,
+            |sql| {
+                calls.set({
+                    let mut seen = calls.take();
+                    seen.push(sql);
+                    seen
+                });
+                async move { Ok(vec![ColumnInfo { name: "id".to_string(), ..Default::default() }]) }
+            },
+            None,
+            test_column_metadata_error_string,
+            test_column_metadata_sqlstate,
+            |event| events.push(event),
+        )
+        .await
+        .expect("primary tier succeeds with diagnostics disabled");
+
+        assert_eq!(calls.take(), vec!["primary-sql"]);
+        assert_eq!(result[0].name, "id");
+        assert!(events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_columns_tier_diagnostics_handle_errors_without_sqlstate() {
+        let tiers = [("primary", "primary-sql"), ("compat", "compat-sql")];
+        let mut events = Vec::new();
+        let result = query_with_column_metadata_fallback(
+            &tiers,
+            |sql| async move {
+                if sql == "primary-sql" {
+                    Err(TestColumnMetadataError { message: "transport failure", sqlstate: None })
+                } else {
+                    Ok(vec![ColumnInfo { name: "id".to_string(), ..Default::default() }])
+                }
+            },
+            Some(Instant::now()),
+            test_column_metadata_error_string,
+            test_column_metadata_sqlstate,
+            |event| events.push(event),
+        )
+        .await
+        .expect("compat tier succeeds after unstructured error");
+
+        assert_eq!(result.len(), 1);
+        assert!(matches!(&events[1], GetColumnsTierDiagnostic::TierFailed { tier: "primary", sqlstate: None, .. }));
     }
 
     #[test]

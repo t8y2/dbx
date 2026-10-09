@@ -23,6 +23,7 @@ const props = withDefaults(
     loadAllRowsActive: boolean;
     loadAllRowsEnabled: boolean;
     canLoadAllRows: boolean;
+    canExport?: boolean;
     pageSize: number;
     defaultPageSize: number;
     pageSizeMenuItems: LightDropdownItem[];
@@ -32,7 +33,7 @@ const props = withDefaults(
     canGoNextPage: boolean;
     canJumpLastPage: boolean;
   }>(),
-  { paginationEnabled: true, loadAllRowsActive: false, loadAllRowsEnabled: true, canLoadAllRows: false },
+  { paginationEnabled: true, loadAllRowsActive: false, loadAllRowsEnabled: true, canLoadAllRows: false, canExport: true },
 );
 
 const customPageSizeInput = defineModel<string>("customPageSizeInput", { default: "" });
@@ -164,6 +165,6 @@ function handlePageInputKeydown(event: KeyboardEvent) {
       </TooltipTrigger>
       <TooltipContent side="bottom">{{ t("grid.loadAllAndGoToLastRow") }}</TooltipContent>
     </Tooltip>
-    <DataGridExportMenu :items="exportMenuItems" :label="t('grid.export')" :on-select="(value) => emit('selectExport', value)" />
+    <DataGridExportMenu v-if="canExport" :items="exportMenuItems" :label="t('grid.export')" :on-select="(value) => emit('selectExport', value)" />
   </div>
 </template>

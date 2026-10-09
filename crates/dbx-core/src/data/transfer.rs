@@ -485,6 +485,13 @@ impl TransferRequest {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransferTableResult {
+    pub moved_rows: u64,
+    /// Source COUNT result when the executor obtained it. It is not a target row count.
+    pub source_row_count: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferProgress {
@@ -10516,15 +10523,16 @@ async fn create_transfer_target_table(
     Ok(())
 }
 
-/// Transfer a single table. Returns rows transferred.
-/// `progress_callback` is invoked for progress updates.
+/// Transfer a single table, returning moved rows and the source COUNT when available.
+/// `progress_callback` is invoked for progress updates; source-count observation is separate
+/// so the existing progress event payload remains unchanged.
 ///
 /// `preexisting_backup_names` carries the output of [`rename_tables_to_backup`] and is
 /// required whenever `drop_target_before_create` is set — this pass only checks whether the
 /// table was renamed aside, and never renames or drops anything itself. Removing the backups
 /// is [`drop_backup_tables`], after every table has succeeded.
 #[allow(clippy::too_many_arguments)]
-async fn transfer_table_inner<F>(
+async fn transfer_table_inner<F, C>(
     state: &Arc<AppState>,
     request: &TransferRequest,
     table: &str,
@@ -10537,14 +10545,17 @@ async fn transfer_table_inner<F>(
     pending_fk_alters: &mut Vec<(String, String)>,
     preexisting_backup_names: Option<&HashMap<String, String>>,
     mut progress_callback: F,
-) -> Result<u64, String>
+    mut source_count_callback: C,
+) -> Result<TransferTableResult, String>
 where
     F: FnMut(TransferProgress),
+    C: FnMut(Option<u64>),
 {
     if *target_db_type == DatabaseType::Db2 {
         db2::validate_request(request)?;
     }
     if is_mongodb_transfer_type(source_db_type) || is_mongodb_transfer_type(target_db_type) {
+        source_count_callback(None);
         return transfer_mongodb_table(
             state,
             request,
@@ -10556,7 +10567,8 @@ where
             target_pool_key,
             progress_callback,
         )
-        .await;
+        .await
+        .map(|moved_rows| TransferTableResult { moved_rows, source_row_count: None });
     }
 
     let table_filter = transfer_table_filter_for(request, table)?;
@@ -10762,6 +10774,7 @@ where
     } else {
         None
     };
+    source_count_callback(total_rows);
     log::info!("[transfer] {} total_rows={:?}", table, total_rows);
 
     let server_side_complex_copy =
@@ -10847,7 +10860,7 @@ where
             )
             .await?;
         }
-        return Ok(0);
+        return Ok(TransferTableResult { moved_rows: 0, source_row_count: None });
     }
 
     // A preexisting target also needs its columns read, even for a data-only
@@ -11032,7 +11045,7 @@ where
             error: None,
             terminal: false,
         });
-        return Ok(copied);
+        return Ok(TransferTableResult { moved_rows: copied, source_row_count: total_rows });
     }
 
     // COPY fast path: PG-family append/overwrite transfers stream the whole
@@ -11394,7 +11407,7 @@ where
         .await?;
     }
 
-    Ok(total_transferred)
+    Ok(TransferTableResult { moved_rows: total_transferred, source_row_count: total_rows })
 }
 
 /// Free the constraint names the backups are still holding (MySQL family).
@@ -11705,10 +11718,49 @@ pub async fn transfer_table<F>(
     known_foreign_keys: &HashMap<String, Vec<db::ForeignKeyInfo>>,
     pending_fk_alters: &mut Vec<(String, String)>,
     preexisting_backup_names: Option<&HashMap<String, String>>,
-    mut progress_callback: F,
+    progress_callback: F,
 ) -> Result<u64, String>
 where
     F: FnMut(TransferProgress),
+{
+    transfer_table_with_result(
+        state,
+        request,
+        table,
+        table_index,
+        source_db_type,
+        target_db_type,
+        source_pool_key,
+        target_pool_key,
+        known_foreign_keys,
+        pending_fk_alters,
+        preexisting_backup_names,
+        progress_callback,
+        |_| {},
+    )
+    .await
+    .map(|result| result.moved_rows)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn transfer_table_with_result<F, C>(
+    state: &Arc<AppState>,
+    request: &TransferRequest,
+    table: &str,
+    table_index: usize,
+    source_db_type: &DatabaseType,
+    target_db_type: &DatabaseType,
+    source_pool_key: &str,
+    target_pool_key: &str,
+    known_foreign_keys: &HashMap<String, Vec<db::ForeignKeyInfo>>,
+    pending_fk_alters: &mut Vec<(String, String)>,
+    preexisting_backup_names: Option<&HashMap<String, String>>,
+    mut progress_callback: F,
+    mut source_count_callback: C,
+) -> Result<TransferTableResult, String>
+where
+    F: FnMut(TransferProgress),
+    C: FnMut(Option<u64>),
 {
     let state = state.clone();
     let request = request.clone();
@@ -11731,6 +11783,7 @@ where
     let request_target_schema = request.target_schema.clone();
     let request_target_catalog = request.target_catalog.clone();
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(TRANSFER_PROGRESS_CHANNEL_CAPACITY);
+    let (source_count_tx, mut source_count_rx) = tokio::sync::mpsc::channel(1);
 
     let mut task = tokio::spawn(async move {
         let mut task_pending_fk_alters = Vec::new();
@@ -11749,6 +11802,9 @@ where
             move |progress| {
                 try_send_transfer_progress(&progress_tx, progress);
             },
+            move |source_count| {
+                let _ = source_count_tx.try_send(source_count);
+            },
         )
         .await;
         (result, task_pending_fk_alters)
@@ -11759,6 +11815,7 @@ where
         tokio::select! {
             biased;
             Some(progress) = progress_rx.recv() => progress_callback(progress),
+            Some(source_count) = source_count_rx.recv() => source_count_callback(source_count),
             result = &mut task => {
                 let (result, task_pending_fk_alters) =
                     result.map_err(|error| format!("Transfer table task failed: {error}"))?;

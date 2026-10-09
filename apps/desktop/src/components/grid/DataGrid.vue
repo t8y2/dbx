@@ -2662,6 +2662,8 @@ const gridStyle = computed(() => ({
   [EDITOR_FONT_FAMILY_CSS_VAR]: settingsStore.editorSettings.fontFamily,
   "--dbx-data-grid-font-family": tableFontFamily.value,
   "--dbx-table-font-size": `${tableFontSize.value}px`,
+  ...(settingsStore.editorSettings.dataGridCrosshairRowBg?.trim() ? { "--data-grid-cell-crosshair-row-bg": settingsStore.editorSettings.dataGridCrosshairRowBg.trim() } : {}),
+  ...(settingsStore.editorSettings.dataGridCrosshairColBg?.trim() ? { "--data-grid-cell-crosshair-col-bg": settingsStore.editorSettings.dataGridCrosshairColBg.trim() } : {}),
 }));
 const gridHorizontalScrollLeft = ref(0);
 let gridScrollLeftBeforeTranspose = 0;
@@ -7464,7 +7466,7 @@ const dataGridTypeColorKey = computed(() => {
 });
 const canvasRenderStyleKey = computed(
   () =>
-    `${settingsStore.editorSettings.theme}:${settingsStore.editorSettings.uiScale}:${canvasBackingPixelRatio.value}:${isDark.value}:${themePalette.value}:${tableFontFamily.value}:${tableFontSize.value}:${!!saveError.value}:${dataGridTypeColorKey.value}:${dataGridStripedRows.value}:${settingsStore.editorSettings.dataGridZebraRowBg}`,
+    `${settingsStore.editorSettings.theme}:${settingsStore.editorSettings.uiScale}:${canvasBackingPixelRatio.value}:${isDark.value}:${themePalette.value}:${tableFontFamily.value}:${tableFontSize.value}:${!!saveError.value}:${dataGridTypeColorKey.value}:${dataGridStripedRows.value}:${settingsStore.editorSettings.dataGridZebraRowBg}:${settingsStore.editorSettings.dataGridCrosshairRowBg}:${settingsStore.editorSettings.dataGridCrosshairColBg}`,
 );
 const CANVAS_MOUSE_WHEEL_SCROLL_MULTIPLIER = 1.5;
 const CANVAS_TRACKPAD_DELTA_THRESHOLD = 40;
@@ -8246,6 +8248,8 @@ function drawCanvasGrid() {
     showWhitespace: showWhitespaceEnabled.value,
     stripedRows: dataGridStripedRows.value,
     zebraRowBg: settingsStore.editorSettings.dataGridZebraRowBg,
+    crosshairRowBg: settingsStore.editorSettings.dataGridCrosshairRowBg,
+    crosshairColBg: settingsStore.editorSettings.dataGridCrosshairColBg,
     rowNumberMode: dataGridRowNumberMode.value,
   });
   if (!drawn) return;
@@ -15349,6 +15353,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
         :load-all-rows-active="loadAllRowsActive"
         :load-all-rows-enabled="loadAllRowsEnabled"
         :can-load-all-rows="result.rows.length > 0"
+        :can-export="result.columns.length > 0"
         :page-size="pageSize"
         :default-page-size="defaultPageSize"
         :page-size-menu-items="pageSizeMenuItems"

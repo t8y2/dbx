@@ -151,6 +151,11 @@ import type {
   HistorySearchRequest,
   HistorySearchResult,
   HistoryConnectionOption,
+  TaskRunDetail,
+  TaskRunItemsPage,
+  TaskRunItemsQuery,
+  TaskRunListQuery,
+  TaskRunPage,
   SqlFileRequest,
   SqlFilePreview,
   SqlFileTable,
@@ -5298,6 +5303,31 @@ export async function searchHistory(request: HistorySearchRequest): Promise<Hist
 
 export async function loadHistoryConnectionOptions(): Promise<HistoryConnectionOption[]> {
   return get("/api/history/options");
+}
+
+export async function loadTaskRuns(query: TaskRunListQuery = {}): Promise<TaskRunPage> {
+  return get(
+    `/api/task-runs?${qs({
+      limit: query.limit,
+      cursorCreatedAt: query.cursor?.createdAt,
+      cursorRunId: query.cursor?.runId,
+      taskType: query.taskType,
+      status: query.status,
+    })}`,
+  );
+}
+
+export async function loadTaskRun(runId: string): Promise<TaskRunDetail | null> {
+  return get(`/api/task-runs/${encodeURIComponent(runId)}`);
+}
+
+export async function loadTaskRunItems(runId: string, query: TaskRunItemsQuery = {}): Promise<TaskRunItemsPage> {
+  return get(
+    `/api/task-runs/${encodeURIComponent(runId)}/items?${qs({
+      limit: query.limit,
+      afterItemIndex: query.afterItemIndex,
+    })}`,
+  );
 }
 
 export async function loadRedisHistory(limit = 100, offset = 0): Promise<HistoryEntry[]> {

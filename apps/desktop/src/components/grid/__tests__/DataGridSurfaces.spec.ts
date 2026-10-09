@@ -412,6 +412,55 @@ describe("DataGridPagination", () => {
     await mounted.setProps({ loading: false, canLoadAllRows: false });
     expect(findOne(mounted.root, (node) => node.props["aria-label"] === "grid.loadAllAndGoToLastRow").props.disabled).toBe(true);
   });
+
+  it("gates the bottom export menu based on canExport", async () => {
+    const mounted = mountComponent(DataGridPagination, {
+      selectionSummary: null,
+      selectionSummarySumText: "",
+      selectionSummaryAverageText: "",
+      loading: false,
+      infiniteScrollEnabled: false,
+      infiniteScrollAllLoaded: false,
+      pageSize: 100,
+      customPageSizeInput: "",
+      pageSizeMenuItems: [],
+      exportMenuItems: [{ value: "csv", label: "CSV" }],
+      currentPage: 1,
+      canGoNextPage: false,
+      canJumpLastPage: false,
+      canExport: true,
+    });
+
+    const findExportMenu = () => findAll(mounted.root, (node) => node.props["data-stub"] === "LightDropdown" && node.props["aria-label"] === "grid.export");
+    expect(findExportMenu()).toHaveLength(1);
+
+    await mounted.setProps({ canExport: false });
+    expect(findExportMenu()).toHaveLength(0);
+
+    await mounted.setProps({ canExport: true });
+    expect(findExportMenu()).toHaveLength(1);
+  });
+
+  it("renders export menu by default when canExport is not specified", () => {
+    const mounted = mountComponent(DataGridPagination, {
+      selectionSummary: null,
+      selectionSummarySumText: "",
+      selectionSummaryAverageText: "",
+      loading: false,
+      infiniteScrollEnabled: false,
+      infiniteScrollAllLoaded: false,
+      pageSize: 100,
+      customPageSizeInput: "",
+      pageSizeMenuItems: [],
+      exportMenuItems: [{ value: "csv", label: "CSV" }],
+      currentPage: 1,
+      canGoNextPage: false,
+      canJumpLastPage: false,
+    });
+
+    const exportMenus = findAll(mounted.root, (node) => node.props["data-stub"] === "LightDropdown" && node.props["aria-label"] === "grid.export");
+    expect(exportMenus).toHaveLength(1);
+  });
 });
 
 describe("DataGridColumnHeader", () => {

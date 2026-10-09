@@ -3254,6 +3254,7 @@ type oracleViewSourceQueryStep struct {
 	panicText        string
 	nextPanicText    string
 	columnsPanicText string
+	columnsPanicCall int
 }
 
 type oracleViewSourceDriver struct {
@@ -3319,6 +3320,7 @@ func (c *oracleViewSourceConn) QueryContext(
 		values:           step.rows,
 		nextPanicText:    step.nextPanicText,
 		columnsPanicText: step.columnsPanicText,
+		columnsPanicCall: step.columnsPanicCall,
 	}, nil
 }
 
@@ -3354,10 +3356,13 @@ type oracleViewSourceRows struct {
 	next             int
 	nextPanicText    string
 	columnsPanicText string
+	columnsPanicCall int
+	columnsCalls     int
 }
 
 func (r *oracleViewSourceRows) Columns() []string {
-	if r.columnsPanicText != "" {
+	r.columnsCalls++
+	if r.columnsPanicText != "" && (r.columnsPanicCall == 0 || r.columnsPanicCall == r.columnsCalls) {
 		panic(r.columnsPanicText)
 	}
 	return r.columns
@@ -3561,12 +3566,7 @@ func TestOracleCursorSurvivesDeadlineWindow(t *testing.T) {
 }
 
 func TestOracleQueryRowsRecoversDriverPanic(t *testing.T) {
-	driverName := "oracle-test-panic-" + strings.ReplaceAll(t.Name(), "/", "-")
-	sql.Register(driverName, &oraclePanicDriver{})
-	db, err := sql.Open(driverName, "dsn")
-	if err != nil {
-		t.Fatal(err)
-	}
+	db := sql.OpenDB(oracleQueryConnector{oracleGuardTestConnector{&oraclePanicDriver{}}})
 	t.Cleanup(func() { _ = db.Close() })
 
 	s := newServer()
@@ -3578,6 +3578,9 @@ func TestOracleQueryRowsRecoversDriverPanic(t *testing.T) {
 	var panicErr oracleDriverPanicError
 	if !errors.As(err, &panicErr) {
 		t.Fatalf("expected oracle driver panic error, got %v", err)
+	}
+	if stats := db.Stats(); stats.InUse != 0 {
+		t.Errorf("driver panic leaked a pool connection: in_use=%d open=%d", stats.InUse, stats.OpenConnections)
 	}
 	s.activeCancelMu.Lock()
 	defer s.activeCancelMu.Unlock()
@@ -3780,6 +3783,9 @@ func TestRuntimeHandleLineRecoversRequestPanic(t *testing.T) {
 	if string(resp.ID) != "5" {
 		t.Fatalf("panic response must keep the request id, got %s", resp.ID)
 	}
+	if stats := db.Stats(); stats.InUse != 0 || len(session.activeRows) != 0 {
+		t.Errorf("metadata panic leaked rows/connection: in_use=%d active_rows=%d", stats.InUse, len(session.activeRows))
+	}
 
 	// The RPC stream must survive the panic and keep serving requests.
 	followUp, shutdown := runtime.handleLine(`{"jsonrpc":"2.0","id":6,"method":"handshake","params":{}}`)
@@ -3981,13 +3987,8 @@ type oracleManualTxDriver struct {
 
 func openOracleManualTxTestDB(t *testing.T) (*sql.DB, *oracleManualTxDriver) {
 	t.Helper()
-	driverName := "oracle-test-manual-tx-" + strings.ReplaceAll(t.Name(), "/", "-") + "-" + time.Now().Format("150405.000000000")
 	drv := &oracleManualTxDriver{}
-	sql.Register(driverName, drv)
-	db, err := sql.Open(driverName, "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	db := sql.OpenDB(oracleQueryConnector{oracleGuardTestConnector{drv}})
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() {
 		_ = db.Close()

@@ -3781,14 +3781,7 @@ impl ServerHandler for DbxMcpServer {
             })
             .into_iter()
             .collect();
-        Ok(ListResourcesResult {
-            result_type: None,
-            meta: None,
-            next_cursor: None,
-            ttl_ms: None,
-            cache_scope: None,
-            resources,
-        })
+        Ok(ListResourcesResult::with_all_items(resources))
     }
 
     async fn list_resource_templates(
@@ -3823,14 +3816,7 @@ impl ServerHandler for DbxMcpServer {
                     .with_mime_type("text/markdown"),
             );
         }
-        Ok(ListResourceTemplatesResult {
-            result_type: None,
-            meta: None,
-            next_cursor: None,
-            ttl_ms: None,
-            cache_scope: None,
-            resource_templates,
-        })
+        Ok(ListResourceTemplatesResult::with_all_items(resource_templates))
     }
 
     async fn read_resource(
@@ -3880,14 +3866,7 @@ impl ServerHandler for DbxMcpServer {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
-        Ok(rmcp::model::ListToolsResult {
-            result_type: None,
-            meta: None,
-            next_cursor: None,
-            ttl_ms: None,
-            cache_scope: None,
-            tools: self.policy_filtered_tools().await,
-        })
+        Ok(rmcp::model::ListToolsResult::with_all_items(self.policy_filtered_tools().await))
     }
 }
 

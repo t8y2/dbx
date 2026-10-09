@@ -299,6 +299,11 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ sidebarIndent: 999, sidebarFontSize: 1 } as any).sidebarFontSize).toBe(9);
     expect(normalizeEditorSettings({ sidebarIndent: 1.4, sidebarFontSize: 13.6 } as any).sidebarIndent).toBe(4);
     expect(normalizeEditorSettings({ sidebarIndent: 1.4, sidebarFontSize: 13.6 } as any).sidebarFontSize).toBe(14);
+    expect(normalizeEditorSettings({}).sidebarDensity).toBe("default");
+    expect(normalizeEditorSettings({ sidebarDensity: "compact" }).sidebarDensity).toBe("compact");
+    expect(normalizeEditorSettings({ sidebarDensity: "default" }).sidebarDensity).toBe("default");
+    expect(normalizeEditorSettings({ sidebarDensity: "comfortable" } as any).sidebarDensity).toBe("default");
+    expect(normalizeEditorSettings({ sidebarDensity: 123 } as any).sidebarDensity).toBe("default");
   });
 
   it("uses inline comments by default and preserves legacy comment visibility", () => {
@@ -713,6 +718,15 @@ describe("normalizeEditorSettings", () => {
     for (const invalidValue of [0, 1, "true", null]) {
       expect(normalizeEditorSettings({ dataGridCrosshairHighlight: invalidValue as never }).dataGridCrosshairHighlight).toBe(false);
     }
+  });
+
+  it("defaults crosshair row and column backgrounds empty and normalizes custom colors", () => {
+    expect(normalizeEditorSettings({}).dataGridCrosshairRowBg).toBe("");
+    expect(normalizeEditorSettings({}).dataGridCrosshairColBg).toBe("");
+    expect(normalizeEditorSettings({ dataGridCrosshairRowBg: " #aec3e0 \n", dataGridCrosshairColBg: " #8eaad2 " }).dataGridCrosshairRowBg).toBe("#aec3e0");
+    expect(normalizeEditorSettings({ dataGridCrosshairRowBg: " #aec3e0 \n", dataGridCrosshairColBg: " #8eaad2 " }).dataGridCrosshairColBg).toBe("#8eaad2");
+    expect(normalizeEditorSettings({ dataGridCrosshairRowBg: null as never, dataGridCrosshairColBg: null as never }).dataGridCrosshairRowBg).toBe("");
+    expect(normalizeEditorSettings({ dataGridCrosshairRowBg: null as never, dataGridCrosshairColBg: null as never }).dataGridCrosshairColBg).toBe("");
   });
 
   it("defaults zebra row background empty and normalizes custom color", () => {
@@ -1703,14 +1717,28 @@ describe("settingsStore persisted settings initialization", () => {
     await store.initEditorSettings();
 
     expect(store.editorSettings.dataGridCrosshairHighlight).toBe(false);
+    expect(store.editorSettings.dataGridCrosshairRowBg).toBe("");
+    expect(store.editorSettings.dataGridCrosshairColBg).toBe("");
 
-    await store.updateEditorSettingsAndPersist({ dataGridCrosshairHighlight: true });
-    expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ dataGridCrosshairHighlight: true }));
+    await store.updateEditorSettingsAndPersist({
+      dataGridCrosshairHighlight: true,
+      dataGridCrosshairRowBg: "#112233",
+      dataGridCrosshairColBg: "#445566",
+    });
+    expect(saveEditorSettings).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        dataGridCrosshairHighlight: true,
+        dataGridCrosshairRowBg: "#112233",
+        dataGridCrosshairColBg: "#445566",
+      }),
+    );
 
     setActivePinia(createPinia());
     const restartedStore = useSettingsStore();
     await restartedStore.initEditorSettings();
     expect(restartedStore.editorSettings.dataGridCrosshairHighlight).toBe(true);
+    expect(restartedStore.editorSettings.dataGridCrosshairRowBg).toBe("#112233");
+    expect(restartedStore.editorSettings.dataGridCrosshairColBg).toBe("#445566");
   });
 
   it("loads, persists, and reloads data grid striped rows preference", async () => {

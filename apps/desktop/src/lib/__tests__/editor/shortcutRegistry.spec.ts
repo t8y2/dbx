@@ -275,6 +275,21 @@ describe("shortcutRegistry editor actions", () => {
     expect(normalizeShortcutSettings({ closeTab: "" }).closeTab).toBe("");
   });
 
+  it("registers closeWindow as a global shortcut with Shift+Mod+W default", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "closeWindow");
+    expect(definition).toMatchObject({
+      id: "closeWindow",
+      labelKey: "settings.shortcutCloseWindow",
+      scope: "global",
+      defaultShortcut: "Shift+Mod+W",
+    });
+    expect(DEFAULT_SHORTCUT_SETTINGS.closeWindow).toBe("Shift+Mod+W");
+    expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.closeWindow, "Win32")).toBe("Ctrl+Shift+W");
+    expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.closeWindow, "MacIntel")).toBe("Shift+Cmd+W");
+    expect(normalizeShortcutSettings({ closeWindow: "Mod+Alt+W" }).closeWindow).toBe("Mod+Alt+W");
+    expect(normalizeShortcutSettings({ closeWindow: "" }).closeWindow).toBe("");
+  });
+
   it("normalizes custom, cleared, and invalid modifier-only shortcuts", () => {
     expect(normalizeShortcutSettings({ openDataInNewTab: "Shift" }).openDataInNewTab).toBe("Shift");
     expect(normalizeShortcutSettings({ openDataInNewTab: "" }).openDataInNewTab).toBe("");

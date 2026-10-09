@@ -310,6 +310,7 @@ async fn iris_transfer_agent_preserves_errors_count_fallback_and_cancellation() 
     for failure in ["source", "target", "count", "cancel"] {
         let (directory, state, request, source, target) = iris_transfer_fixture(None, 5, failure, true).await;
         let mut totals = Vec::new();
+        let mut observed_source_count = None;
         let result = Box::pin(transfer_table_inner(
             &state,
             &request,
@@ -328,12 +329,16 @@ async fn iris_transfer_agent_preserves_errors_count_fallback_and_cancellation() 
                     CANCELLED.try_write().unwrap().insert(request.transfer_id.clone());
                 }
             },
+            |source_count| observed_source_count = source_count,
         ))
         .await;
         clear_cancelled(&request.transfer_id).await;
         state.shutdown(std::time::Duration::from_secs(1)).await;
         if failure == "count" {
-            assert_eq!(result.unwrap(), 5);
+            let result = result.unwrap();
+            assert_eq!(result.moved_rows, 5);
+            assert_eq!(result.source_row_count, None);
+            assert_eq!(observed_source_count, None);
             assert!(totals.iter().all(Option::is_none));
         } else {
             let error = result.unwrap_err();

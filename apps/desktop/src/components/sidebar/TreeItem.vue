@@ -945,6 +945,8 @@ function hasTrailingMetadata(): boolean {
 
 const usesFullWidthLabel = computed(() => usesFullWidthTreeLabel(activeNode.value.type, settingsStore.editorSettings.sidebarAllowHorizontalScroll, hasTrailingMetadata()));
 
+const isCompactSidebar = computed(() => settingsStore.editorSettings.sidebarDensity === "compact");
+
 const rowWidthClass = computed(() => (usesFullWidthLabel.value ? "w-max min-w-full" : "w-full min-w-0"));
 
 const labelWidthClass = computed(() => {
@@ -1583,7 +1585,17 @@ function onKeydown(event: KeyboardEvent) {
 </script>
 
 <template>
-  <div v-if="node.type === 'table-search-control'" data-sidebar-table-search-control class="tree-table-search-control flex h-7 items-center gap-1.5 py-0.5 pr-2" :style="tableSearchStyle" @click.stop @dblclick.stop @mousedown.stop @keydown="onTableSearchControlKeydown">
+  <div
+    v-if="node.type === 'table-search-control'"
+    data-sidebar-table-search-control
+    class="tree-table-search-control flex items-center gap-1.5 pr-2"
+    :class="isCompactSidebar ? 'h-6 py-0' : 'h-7 py-0.5'"
+    :style="tableSearchStyle"
+    @click.stop
+    @dblclick.stop
+    @mousedown.stop
+    @keydown="onTableSearchControlKeydown"
+  >
     <div class="relative min-w-0 flex-1">
       <Search class="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
       <Input
@@ -1591,7 +1603,8 @@ function onKeydown(event: KeyboardEvent) {
         autocapitalize="off"
         autocorrect="off"
         spellcheck="false"
-        class="h-6 w-full rounded border pl-7 pr-6 text-xs shadow-none focus-visible:ring-1"
+        class="w-full rounded border pl-7 pr-6 text-xs shadow-none focus-visible:ring-1"
+        :class="isCompactSidebar ? 'h-5' : 'h-6'"
         :style="{ backgroundColor: 'var(--tree-table-search-input-bg)', borderColor: 'var(--tree-table-search-border)' }"
         :placeholder="t(node.label)"
         :aria-label="t(node.label)"
@@ -1616,9 +1629,10 @@ function onKeydown(event: KeyboardEvent) {
     <LightTooltip :text="visibleLabel(node)" :disabled="isTooltipDisabled()" side="right" :side-offset="8" :delay="0" :close-delay="30" :surface="detailTooltip ? 'popover' : 'foreground'">
       <div
         ref="rowRef"
-        class="group flex cursor-default items-center gap-2 min-h-7 py-1 px-2 relative outline-none"
+        class="group flex cursor-default items-center gap-2 px-2 relative outline-none"
         style="contain: layout style"
         :class="[
+          isCompactSidebar ? 'min-h-6 py-0.5' : 'min-h-7 py-1',
           rowWidthClass,
           {
             'group/sidebar-row': true,

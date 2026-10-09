@@ -117,6 +117,7 @@ import {
   isBrowserTaskManagerShortcut,
   isCloseOtherTabsShortcut,
   isCloseTabShortcut,
+  isCloseWindowShortcut,
   isDisconnectAllActiveConnectionsShortcut,
   isEditTableStructureShortcut,
   isExecuteSqlInNewResultTabShortcut,
@@ -4305,6 +4306,18 @@ async function handleKeydown(e: KeyboardEvent) {
     e.preventDefault();
     e.stopPropagation();
     void appSidebarRef.value?.disconnectAllActiveConnections();
+    return;
+  }
+  if (isCloseWindowShortcut(e, shortcuts)) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (isDetachedWindowContext) {
+      void requestDetachedReturn("close");
+      return;
+    }
+    if (isDesktop) {
+      void api.requestAppClose();
+    }
     return;
   }
   if (isCloseTabShortcut(e, shortcuts)) {

@@ -203,6 +203,11 @@ if (cmd === "dbs") {
   const dir = path.resolve(arg(3));
   fs.mkdirSync(dir, { recursive: true });
   python(dir);
+  // a small importable file, for import/mapping dialogs (record.mjs's
+  // "upload" step resolves names inside this directory)
+  fs.writeFileSync(path.join(dir, "sample.csv"),
+    "name,category,price,stock\n" +
+    Array.from({ length: 8 }, (_, i) => `键盘 K${i + 100},键盘,${(199 + i * 23).toFixed(2)},${40 - i * 3}`).join("\n") + "\n");
   console.log("[ui-preview] databases written to", dir);
 } else if (cmd === "api") {
   seedApi().catch((e) => { console.error(e); process.exit(1); });

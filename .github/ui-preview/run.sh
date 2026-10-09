@@ -52,6 +52,7 @@ if [ -z "$url" ]; then
 
   node "$here/seed.mjs" dbs "$work/dbs"
   node "$here/seed.mjs" api "$url" "$work/dbs"
+  export SEED_DIR="$work/dbs"
 fi
 
 status=0

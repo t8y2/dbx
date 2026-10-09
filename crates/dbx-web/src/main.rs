@@ -1322,6 +1322,9 @@ async fn serve() -> Result<(), String> {
         // Transfer
         .route("/transfer/start", post(routes::transfer::start_transfer))
         .route("/transfer/ownership-preview", post(routes::transfer::preview_transfer_ownership))
+        .route("/task-runs", get(routes::task_history::list_task_runs))
+        .route("/task-runs/{run_id}", get(routes::task_history::get_task_run))
+        .route("/task-runs/{run_id}/items", get(routes::task_history::list_task_run_items))
         .route("/transfer/progress/{transferId}", get(routes::transfer::transfer_progress))
         .route("/transfer/cancel", post(routes::transfer::cancel_transfer))
         .route("/transfer/sort-tables-by-fk", post(routes::transfer::sort_tables_by_fk_dependency))

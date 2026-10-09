@@ -547,7 +547,7 @@ function applyAutoMapping() {
     return;
   }
   const headerless = titleRow.value === 0 && (isDelimitedFormat(sourceFormat.value) || sourceFormat.value === "excel");
-  columnMapping.value = autoMapImportColumns(currentPreview.columns, targetColumnNames.value, headerless ? "position" : "name");
+  columnMapping.value = autoMapImportColumns(currentPreview.columns, targetColumnNames.value, headerless ? "position" : "auto");
 }
 
 function applySuggestedColumnDataTypes(currentPreview = preview.value) {
@@ -942,6 +942,24 @@ function updateMapping(sourceColumn: string, value: any) {
   };
 }
 
+function mapByPosition() {
+  const currentPreview = preview.value;
+  if (!currentPreview) return;
+  columnMapping.value = autoMapImportColumns(currentPreview.columns, targetColumnNames.value, "position");
+}
+
+function mapByName() {
+  const currentPreview = preview.value;
+  if (!currentPreview) return;
+  columnMapping.value = autoMapImportColumns(currentPreview.columns, targetColumnNames.value, "name");
+}
+
+function skipAllColumns() {
+  const currentPreview = preview.value;
+  if (!currentPreview) return;
+  columnMapping.value = Object.fromEntries(currentPreview.columns.map((source) => [source, ""]));
+}
+
 function updateColumnDataType(sourceColumn: string, value: any) {
   columnDataTypes.value = {
     ...columnDataTypes.value,
@@ -1294,13 +1312,23 @@ watch(
       minimized.value = false;
       backgroundMode.value = false;
       dialogDragOffset.value = { x: 0, y: 0 };
+      if (previewReloadTimer) {
+        clearTimeout(previewReloadTimer);
+        previewReloadTimer = null;
+      }
       if (!running.value) void releaseTableImportSources();
     }
   },
   { immediate: true },
 );
 
-onBeforeUnmount(stopDialogDrag);
+onBeforeUnmount(() => {
+  stopDialogDrag();
+  if (previewReloadTimer) {
+    clearTimeout(previewReloadTimer);
+    previewReloadTimer = null;
+  }
+});
 
 watch([sourceFormat, delimiter, titleRow, dataStartRow, lastDataRow, trimValues, emptyStringAsNull, selectedSheet, jsonShape, previewLimit], schedulePreviewReload);
 watch([textEncoding, decimalSeparator], schedulePreviewReloadAfterEncodingChange);
@@ -1706,9 +1734,24 @@ watch(rawProgressPercent, (percent) => {
             </div>
           </div>
 
-          <div v-if="preview" class="grid gap-3" :class="targetMode === 'create' ? 'grid-cols-[minmax(360px,460px)_1fr]' : 'grid-cols-[minmax(240px,300px)_1fr]'">
+          <div v-if="preview" class="grid gap-3" :class="targetMode === 'create' ? 'grid-cols-[minmax(360px,460px)_1fr]' : 'grid-cols-[minmax(280px,360px)_1fr]'">
             <div class="rounded-md border">
-              <div class="border-b px-3 py-2 text-xs font-medium">{{ t("tableImport.mapping") }}</div>
+              <div class="flex items-center justify-between border-b px-3 py-1.5 text-xs font-medium">
+                <span>{{ t("tableImport.mapping") }}</span>
+                <div v-if="targetMode === 'existing'" class="flex items-center gap-1.5 font-normal">
+                  <button type="button" data-action="map-by-position" class="text-xs text-muted-foreground hover:text-foreground hover:underline" @click="mapByPosition">
+                    {{ t("tableImport.mapByPosition") }}
+                  </button>
+                  <span class="text-muted-foreground/40">·</span>
+                  <button type="button" data-action="map-by-name" class="text-xs text-muted-foreground hover:text-foreground hover:underline" @click="mapByName">
+                    {{ t("tableImport.mapByName") }}
+                  </button>
+                  <span class="text-muted-foreground/40">·</span>
+                  <button type="button" data-action="skip-all" class="text-xs text-muted-foreground hover:text-foreground hover:underline" @click="skipAllColumns">
+                    {{ t("tableImport.skipAll") }}
+                  </button>
+                </div>
+              </div>
               <div class="max-h-[320px] overflow-auto p-2">
                 <div class="grid items-center gap-2 border-b px-1 pb-1 text-[11px] font-medium text-muted-foreground" :class="targetMode === 'create' ? 'grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(92px,120px)]' : 'grid-cols-[1fr_1fr]'">
                   <span>{{ t("tableImport.sourceColumn") }}</span>

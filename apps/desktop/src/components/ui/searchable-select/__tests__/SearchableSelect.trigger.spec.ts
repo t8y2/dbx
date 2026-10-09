@@ -284,4 +284,28 @@ describe("SearchableSelect trigger", () => {
     expect(emitted.modelValue).toEqual(["int"]);
     expect(document.activeElement).toBe(nextInput);
   });
+
+  it("prioritizes exact match over preceding substring matches when typing in search input", async () => {
+    const { root, emitted } = mountSelect({
+      options: ["tinyint", "smallint", "int", "bigint"],
+      modelValue: "",
+    });
+
+    const trigger = root.querySelector("button")!;
+    trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+    await nextTick();
+
+    const input = document.body.querySelector<HTMLInputElement>("input")!;
+    expect(input).not.toBeNull();
+    input.value = "int";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+
+    const tabEvent = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
+    input.dispatchEvent(tabEvent);
+    await nextTick();
+
+    expect(tabEvent.defaultPrevented).toBe(true);
+    expect(emitted.modelValue).toEqual(["int"]);
+  });
 });

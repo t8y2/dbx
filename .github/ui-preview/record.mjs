@@ -223,15 +223,17 @@ async function codeContext(diff, src) {
   return out + (entries ? `\n=== how the changes are reached (other components rendering/opening them — the entry points to plan from) ===\n${entries}` : "");
 }
 
-const GUIDE = `You plan a short screen recording of dbx, a database GUI (shown here in a browser at ${VIEW.width}x${VIEW.height}). It runs for real on a sandbox machine: the web build of the app against a dbx-web backend with password protection off, and made-up data beside it (seed.mjs) so the pages that need data have some. That data: two saved SQLite connections, "商店 Shop (SQLite)" (tables customers · products · orders · audit_log, a view v_daily_revenue, foreign keys and a trigger) and "分析 Analytics (SQLite)" (events with 5000 rows — the grid pages — and daily_stats with 90 days); a saved-SQL folder "常用查询" with three files; and query history over the last three days across both connections, real executions mixed with seeded entries, a few failures among them. The UI language is ${LOCALE}. What it doesn't have: any server database (MySQL, PostgreSQL, Redis, MongoDB… none are connected — connection dialogs can be opened but not completed), no AI provider configured, no plugins or JDBC drivers installed, no SSH tunnels.
+const GUIDE = `You plan a short screen recording of dbx, a database GUI (shown here in a browser at ${VIEW.width}x${VIEW.height}). It runs for real on a sandbox machine: the web build of the app against a dbx-web backend with password protection off, and made-up data beside it (seed.mjs) so the pages that need data have some. That data: two saved SQLite connections, "商店 Shop (SQLite)" (tables customers, products, orders, audit_log, a view v_daily_revenue, foreign keys and a trigger) and "分析 Analytics (SQLite)" (events with 5000 rows — the grid pages — and daily_stats with 90 days); a small sample.csv (name,category,price,stock) for import dialogs; a saved-SQL folder "常用查询" with three files; and query history over the last three days across both connections, real executions mixed with seeded entries, a few failures among them. The UI language is ${LOCALE}. What it doesn't have: any server database (MySQL, PostgreSQL, Redis, MongoDB… none are connected — connection dialogs can be opened but not completed), no AI provider configured, no plugins or JDBC drivers installed, no SSH tunnels.
 
-dbx is a single-page app with no URL routing: every recording starts from the page as it opens. The left sidebar lists the connections; opening one (double-click, or right-click → its menu) opens its tables and its tabs — the query editor, table data, structure, ER diagram; the toolbar above the editor runs the SQL; other panels (SQL 库, 查询历史, 全局搜索, 设置) open from the interface itself. Find your way from the outline you are given.
+dbx is a single-page app with no URL routing: every recording starts from the page as it opens. The left sidebar lists the connections; opening one (double-click, or right-click → its menu) opens its tables and its tabs — the query editor, table data, structure, ER diagram; the toolbar above the editor runs the SQL; other panels (SQL 库, 查询历史, 全局搜索, 设置) open from the interface itself. Find your way from the outline you are given. Two ways of working that reach further than clicks:
+- The query editor runs any SQL against the sandbox's SQLite databases (they are throwaway — writes are fine): when a state needs data (a result with no columns, an empty table, a table of a shape), open a connection, type the SQL that produces it and run it, and show the state it makes.
+- A file picker can't be clicked through, but a step can set it: { "do": "upload", "target": "input[type=file]", "value": "sample.csv" } — seed.mjs puts sample.csv (a small product list: name,category,price,stock) beside the databases, for import and mapping dialogs.
 
 The diff is what the PR does. The title and description are the author's words and may be out of date or wrong: plan and summarise from the diff alone, and when the description claims something in the UI the diff doesn't do (a setting, a page, a button), don't look for it — say so in "mismatch".
 
 You get the PR's title, description, diff, an outline of the app as it renders now, the changed frontend files themselves, and the entry chains: the other components that render the changed ones, under what v-if/v-show condition they are shown, and the code that flips those conditions. Use only selectors you can build from what the outline shows, or, for what only appears after an interaction (a dialog, a context menu, a dropdown, a tab), from the changed files and entry chains: the outline shows the app at rest, so an element the diff styles or builds being missing from it means you must open it first, not that it isn't there. The entry chains are the map — when a selector from the diff is nowhere in the outline, plan the steps that flip its condition (the toolbar button, the context menu, the tab the entry chain names), and don't search random other pages for it.
 
-Write a plan that shows a reviewer exactly what this PR changes in the UI and whether it works as intended: go where the change is, do what a user would do to see it (open the connection, switch the tab, type the SQL, open the dialog…), and take a screenshot at each state that matters, before and after an interaction when that is the point. Captions say what is being done or what to look at ("打开订单表后的数据网格"), never what the result is or should be — the reviewer judges that from the picture, and the sandbox may differ from what you expect; and they never name a thing the diff doesn't add. When the change only shows with data this sandbox doesn't have (a server database, a plugin), say so in "unseen" and still show the place it would be. Keep it short: usually 1–3 scenes, under 15 steps each. Don't show unrelated pages. Never press anything that deletes, removes, clears or resets (删除/清空/移除/重置), and never run SQL that drops or truncates. Say ui_change false (and no scenes) only when the diff plainly changes nothing a user can see — only tests, comments, docs, or code that never reaches the screen; any change to the page's CSS, markup, text or behaviour is a UI change.
+Write a plan that shows a reviewer exactly what this PR changes in the UI and whether it works as intended: go where the change is, do what a user would do to see it (open the connection, switch the tab, type the SQL, open the dialog…), and take a screenshot at each state that matters, before and after an interaction when that is the point. Put a wish for text in the step's "text" field, never inside the target selector ([aria-label="设置"] hides it from the runner's text fallback — target "button" with text "设置" instead). Captions say what is being done or what to look at ("打开订单表后的数据网格"), never what the result is or should be — the reviewer judges that from the picture, and the sandbox may differ from what you expect; and they never name a thing the diff doesn't add. When the change only shows with data this sandbox doesn't have (a server database, a plugin), say so in "unseen" and still show the place it would be. Keep it short: usually 1–3 scenes, under 15 steps each. Don't show unrelated pages. Never press anything that deletes, removes, clears or resets (删除/清空/移除/重置), and never run SQL that drops or truncates. Say ui_change false (and no scenes) only when the diff plainly changes nothing a user can see — only tests, comments, docs, or code that never reaches the screen; any change to the page's CSS, markup, text or behaviour is a UI change.
 
 Reply with JSON only:
 {
@@ -245,6 +247,7 @@ Reply with JSON only:
         { "do": "click", "target": "css selector", "text": "optional: only elements containing this text", "dblclick": false, "caption": "Chinese caption shown in the video" },
         { "do": "hover", "target": "…", "caption": "…" },
         { "do": "type", "target": "…", "value": "text to type", "caption": "…" },
+        { "do": "upload", "target": "input[type=file]", "value": "sample.csv", "caption": "…" },
         { "do": "press", "key": "Escape" },
         { "do": "scroll", "to": "css selector of what to bring into view", "text": "optional" },
         { "do": "scroll", "target": "optional scroll container", "dy": 400 },
@@ -276,6 +279,13 @@ async function glide(page, x, y) {
 async function locate(page, step) {
   if (!step.target) throw new Error(`${step.do} needs a target`);
   let loc = page.locator(step.target);
+  // a wish for text tucked into the selector ([aria-label="设置"], [title="Run"]):
+  // take it out and treat it as the text filter, where the fallback can use it
+  const attrText = /\[(?:aria-label|title|placeholder|data-slot|data-view)[*^$]?=~?"([^"]+)"/.exec(step.target)?.[1];
+  if (!step.text && attrText) {
+    step = { ...step, text: attrText };
+    loc = loc.filter({ hasText: attrText });
+  }
   if (step.text) loc = loc.filter({ hasText: step.text });
   const visible = async (l) => {
     const n = await l.count();
@@ -288,17 +298,20 @@ async function locate(page, step) {
   const hit = await visible(loc);
   if (hit) return hit;
   // the selector guessed a role or structure this app doesn't use (a tab, a
-  // menuitem…): fall back to the one visible clickable thing carrying the
+  // menuitem, a tree node…): fall back to the one visible thing carrying the
   // text — only when exactly one is on screen, so a wrong guess fails loud
   if (step.text) {
-    const loose = page.locator('button, a, li, [role="menuitem"], [role="tab"], [role="button"], [class*="categor"], [class*="nav"] button, [class*="sidebar"] *').filter({ hasText: step.text });
+    const loose = page.locator('button, a, li, span, div[class]:not([class=""]), [role="menuitem"], [role="tab"], [role="button"], [role="treeitem"], [class*="categor"] *, [class*="nav"] *, [class*="tree"] *, [class*="sidebar"] *').filter({ hasText: step.text });
     const seen = [];
     const n = await loose.count();
-    for (let i = 0; i < n; i++) {
+    for (let i = 0; i < n && seen.length <= 2; i++) {
       const one = loose.nth(i);
       if (await one.isVisible()) seen.push(one);
     }
-    if (seen.length === 1) return seen[0];
+    // at most two on screen (the same text in a parent and its child): take
+    // the last, which in DOM order is the innermost; more means the wish for
+    // the text is too vague — fail loud rather than click something wrong
+    if (seen.length >= 1 && seen.length <= 2) return seen.at(-1);
   }
   throw new Error(`nothing visible matches ${step.target}${step.text ? ` with "${step.text}"` : ""} (${await loc.count()} in the page)`);
 }
@@ -367,12 +380,15 @@ async function pointAt(page, loc) {
   return b;
 }
 
-// The app polls, so the network never goes quiet: loaded, and its first
-// paint in, is ready
+// The app polls, so the network never goes quiet: loaded, its toolbar and
+// the seeded connections painted in, is ready
 async function settle(page) {
   await page.waitForLoadState("load").catch(() => {});
-  await page.waitForFunction(() => document.querySelectorAll("button").length >= 2, null, { timeout: 15000 }).catch(() => {});
-  await sleep(1200);
+  await page.waitForFunction(() => {
+    const txt = document.body.innerText || "";
+    return txt.includes("新建连接") || txt.includes("New Connection") || document.querySelectorAll("button").length >= 6;
+  }, null, { timeout: 20000 }).catch(() => {});
+  await sleep(1500);
 }
 
 const caption = (page, text) => page.evaluate((t) => window.__uiPreviewCaption?.(t), text || "").catch(() => {});
@@ -395,7 +411,9 @@ async function runStep(page, step, scene) {
         await sleep(90);
         await page.mouse.up();
       }
-      await sleep(700);
+      // a click that opens something (a menu, the settings, a dialog) needs
+      // its new DOM painted before the next step looks for it
+      await sleep(1200);
       break;
     }
     case "hover": {
@@ -410,6 +428,16 @@ async function runStep(page, step, scene) {
       await loc.fill("");
       await page.keyboard.type(String(step.value ?? ""), { delay: 70 });
       await sleep(600);
+      break;
+    }
+    case "upload": {
+      // a file for an <input type=file>: the name is resolved inside SEED_DIR
+      // (seed.mjs puts a sample CSV there) — the OS picker can't be driven
+      const loc = step.target ? await locate(page, step) : page.locator('input[type="file"]').first();
+      const dir = env("SEED_DIR", ".");
+      const file = path.resolve(dir, String(step.value ?? step.file ?? "sample.csv"));
+      await loc.setInputFiles(file);
+      await sleep(800);
       break;
     }
     case "press":
@@ -527,7 +555,7 @@ async function main() {
       let steps = (s.steps || []).slice(0, 25);
       for (let i = 0; i < steps.length; i++) {
         const step = steps[i];
-        if (["click", "hover", "type", "press", "scroll"].includes(step.do)) interactive = true;
+        if (["click", "hover", "type", "press", "scroll", "upload"].includes(step.do)) interactive = true;
         try { await runStep(page, step, scene); }
         catch (e) {
           if (manifest.leak) break;

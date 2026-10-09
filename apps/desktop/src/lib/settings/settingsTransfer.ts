@@ -144,6 +144,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "sidebarShowTooltips",
     "sidebarIndent",
     "sidebarFontSize",
+    "sidebarDensity",
     "sidebarHiddenTablePrefixes",
     "sidebarCopyTableNameSeparator",
     "sidebarCopyTableNameIncludeSchema",
@@ -173,6 +174,8 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "dataGridCellDetailButtonVisible",
     "dataGridCellDetailDialogDefault",
     "dataGridCrosshairHighlight",
+    "dataGridCrosshairRowBg",
+    "dataGridCrosshairColBg",
     "dataGridStripedRows",
     "dataGridZebraRowBg",
     "flatteningMultiLineText",
@@ -325,6 +328,7 @@ const PASS_THROUGH_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (val
   webLogoPosition: (value) => value === "left" || value === "right" || value === "hidden",
   resultTabNamingMode: (value) => value === "source" || value === "ordinal" || value === "comment",
   activeCustomThemeId: (value) => typeof value === "string" && value.trim().length > 0,
+  sidebarDensity: (value) => value === "default" || value === "compact",
   // normalizeToolbarItems keeps unknown/typed values for every known key, so
   // each one must already be the boolean the UI writes, and no extra key may
   // appear.

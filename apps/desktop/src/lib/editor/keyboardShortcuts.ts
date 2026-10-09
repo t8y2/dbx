@@ -188,6 +188,10 @@ export function isCloseOtherTabsShortcut(event: ShortcutLikeEvent, shortcuts?: P
   return matchesShortcut(event, actionShortcut("closeOtherTabs", shortcuts), platform);
 }
 
+export function isCloseWindowShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("closeWindow", shortcuts));
+}
+
 export function isSendSelectionToAiShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("sendSelectionToAi", shortcuts));
 }

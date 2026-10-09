@@ -152,6 +152,11 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridZebraRowBg");
   });
 
+  it("includes crosshair row and column backgrounds in draft keys", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridCrosshairRowBg");
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridCrosshairColBg");
+  });
+
   it("includes dataGridCellDetailDialogDefault", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridCellDetailDialogDefault");
   });

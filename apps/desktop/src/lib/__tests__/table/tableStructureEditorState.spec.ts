@@ -373,6 +373,8 @@ describe("tableStructureEditorState", () => {
     if (!existing) throw new Error("expected an existing trigger draft");
 
     expect(canEditStructuredTriggerDraft("oracle", existing)).toBe(false);
+    expect(canEditStructuredTriggerDraft("oceanbase-oracle", existing)).toBe(false);
+    expect(canEditStructuredTriggerDraft("oceanbase-oracle", { ...existing, original: undefined })).toBe(true);
     expect(canEditStructuredTriggerDraft(undefined, existing)).toBe(false);
     expect(canEditStructuredTriggerDraft("mysql", existing)).toBe(true);
     expect(canEditStructuredTriggerDraft("sqlserver", existing)).toBe(true);

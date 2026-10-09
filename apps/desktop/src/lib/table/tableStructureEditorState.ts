@@ -1278,7 +1278,7 @@ export function createTriggerDrafts(triggers: TriggerInfo[]): EditableStructureT
 }
 
 export function canEditStructuredTriggerDraft(databaseType: DatabaseType | undefined, trigger: EditableStructureTrigger): boolean {
-  return !trigger.original || (databaseType !== undefined && databaseType !== "oracle");
+  return !trigger.original || (databaseType !== undefined && databaseType !== "oracle" && databaseType !== "oceanbase-oracle");
 }
 
 export function toColumnNames(columns: string[]): string {

@@ -6824,6 +6824,38 @@ fn changed_postgres_trigger_remains_unsupported() {
 }
 
 #[test]
+fn oceanbase_oracle_keeps_existing_trigger_source_guard_and_new_drop_paths() {
+    let mut options = structure_change_options(DatabaseType::OceanbaseOracle, Some("APP"), "ORDERS", Vec::new());
+    let mut draft = trigger("ORDERS_AUDIT", "AFTER EACH ROW", "INSERT", "BEGIN\n  NULL;\nEND;");
+    options.triggers = vec![draft.clone()];
+    let created = build_table_structure_change_sql(options.clone());
+    assert!(created.warnings.is_empty());
+    assert_eq!(created.statements, vec!["CREATE OR REPLACE TRIGGER \"APP\".\"ORDERS_AUDIT\" AFTER INSERT ON \"APP\".\"ORDERS\"\nFOR EACH ROW\nBEGIN\n  NULL;\nEND;"]);
+
+    draft.original = Some(TriggerInfo {
+        name: draft.name.clone(),
+        event: draft.event.clone(),
+        timing: draft.timing.clone(),
+        statement: Some(draft.statement.clone()),
+        enabled: None,
+    });
+    draft.statement = "BEGIN\n  :NEW.ID := 1;\nEND;".to_string();
+    options.triggers = vec![draft.clone()];
+    let changed = build_table_structure_change_sql(options.clone());
+    assert!(changed.statements.is_empty());
+    assert_eq!(
+        changed.warnings,
+        vec!["Editing existing Oracle trigger \"ORDERS_AUDIT\" requires its complete source definition."]
+    );
+
+    draft.marked_for_drop = true;
+    options.triggers = vec![draft];
+    let dropped = build_table_structure_change_sql(options);
+    assert!(dropped.warnings.is_empty());
+    assert_eq!(dropped.statements, vec!["DROP TRIGGER \"APP\".\"ORDERS_AUDIT\";"]);
+}
+
+#[test]
 fn rejects_editing_existing_oracle_trigger_without_complete_source() {
     let mut existing = trigger(
         "DBX_TRIGGER_4320_AUDIT",

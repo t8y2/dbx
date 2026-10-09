@@ -882,12 +882,36 @@ describe("useDataGridExport prepared row statements", () => {
     expect(copyToClipboard).toHaveBeenCalledWith(payload);
   });
 
-  it("does not allow raw output for a multi-cell selection", async () => {
+  it("copies and previews a single-column view definition as original text", async () => {
+    const lines = ["CREATE view v_Test as", "\tselect 'quoted' as value", '-- "keep quotes"'];
+    const rows = lines.map((line) => [line]);
+    const matrix: CellSelectionMatrix = {
+      rowIndexes: [0, 1, 2],
+      columnIndexes: [0],
+      columns: ["Text"],
+      rows,
+    };
+    const result = { text: lines.join("\n"), mimeType: "text/plain", fileExtension: "txt", rowCount: 3, columnCount: 1 };
+    vi.mocked(extractDataGridSelection).mockResolvedValue(result);
+    const state = createExportState(editableTable, ["Text"], matrix, undefined, undefined, rows);
+
+    expect(state.canCopyWithExtractor("raw")).toBe(true);
+    await expect(state.copyWithPreference("raw")).resolves.toBe(true);
+    expect(extractDataGridSelection).toHaveBeenCalledWith(expect.objectContaining({ extractor: "raw", rows }));
+    expect(copyToClipboard).toHaveBeenCalledWith(result.text);
+    expect(parseDataGridClipboard(result.text)).toEqual(rows);
+    await expect(state.previewWithPreference("raw", DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS)).resolves.toMatchObject({ text: result.text, sourceRowCount: 3, truncated: false });
+  });
+
+  it("does not allow raw output for a multi-column selection", async () => {
     const matrix: CellSelectionMatrix = {
       rowIndexes: [0, 1],
-      columnIndexes: [0],
-      columns: ["id"],
-      rows: [[1], [2]],
+      columnIndexes: [0, 1],
+      columns: ["id", "name"],
+      rows: [
+        [1, "Ada"],
+        [2, "Linus"],
+      ],
     };
     const state = createExportState(editableTable, ["id", "name"], matrix, undefined, undefined, [
       [1, "Ada"],

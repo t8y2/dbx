@@ -4,11 +4,12 @@ import type { DataGridCopyInsertMode, DataGridTableMeta } from "@/lib/dataGrid/d
 export const DATA_GRID_COPY_EXTRACTOR_IDS = ["raw", "tsv", "tsv-with-headers", "csv", "csv-with-headers", "pipe-separated", "dsv", "json", "json-lines", "one-row", "sql-in-list", "sql-inserts", "sql-updates", "sql-select", "where-clause", "markdown", "html", "xml", "pretty"] as const;
 
 export type DataGridCopyExtractorId = (typeof DATA_GRID_COPY_EXTRACTOR_IDS)[number];
-export type DataGridCopyPreference = "smart" | Exclude<DataGridCopyExtractorId, "raw">;
+export type DataGridCopyPreference = "smart" | DataGridCopyExtractorId;
 export type DataGridExtractorCategory = "raw" | "delimited" | "json" | "sql" | "document";
 
 export const DATA_GRID_DEFAULT_COPY_PREFERENCES: readonly DataGridCopyPreference[] = [
   "smart",
+  "raw",
   "tsv",
   "tsv-with-headers",
   "csv",

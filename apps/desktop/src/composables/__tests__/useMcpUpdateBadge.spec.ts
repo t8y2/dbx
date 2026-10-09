@@ -59,6 +59,14 @@ function makeBadge(enabled = true, isDesktop = true) {
   });
 }
 
+function makeDeferrableBadge(shouldDefer: () => boolean) {
+  return useMcpUpdateBadge({
+    isDesktop: true,
+    updateNotificationsEnabled: () => true,
+    shouldDeferRefresh: shouldDefer,
+  });
+}
+
 beforeEach(() => {
   mockedCheck.mockReset();
 });
@@ -129,6 +137,38 @@ describe("useMcpUpdateBadge", () => {
     const badge = makeBadge(true, false);
     await badge.refreshMcpUpdateStatus();
     expect(mockedCheck).not.toHaveBeenCalled();
+    expect(badge.mcpUpdateAvailable.value).toBe(false);
+  });
+
+  it("组件更新窗口内暂停后台轮询", async () => {
+    mockedCheck.mockResolvedValue(makeStatus(true));
+    const badge = makeDeferrableBadge(() => true);
+    badge.applyMcpStatus(false);
+
+    await badge.refreshMcpUpdateStatus();
+
+    expect(mockedCheck).not.toHaveBeenCalled();
+    expect(badge.mcpUpdateAvailable.value).toBe(false);
+  });
+
+  it("权威状态切换使在途轮询失效，晚返回的旧快照不会重新点亮入口", async () => {
+    const pending = deferred<McpServerStatus>();
+    mockedCheck.mockReturnValueOnce(pending.promise);
+    let defer = false;
+    const badge = makeDeferrableBadge(() => defer);
+
+    const refresh = badge.refreshMcpUpdateStatus();
+    expect(mockedCheck).toHaveBeenCalledOnce();
+
+    // 组件更新安装完成：权威来源确认无更新，并使在途轮询失效。
+    defer = true;
+    badge.applyMcpStatus(false);
+    badge.invalidateMcpUpdateStatus();
+
+    // 更新前的旧快照晚返回，必须被忽略。
+    pending.resolve(makeStatus(true));
+    await refresh;
+
     expect(badge.mcpUpdateAvailable.value).toBe(false);
   });
 

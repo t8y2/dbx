@@ -27,6 +27,90 @@ import java.util.Locale;
 import java.util.Map;
 
 class SqlServerLegacyAgentTest {
+    @Test
+    void autoCommitBatchesCollectEveryResultAndUpdateCountOnce() {
+        SqlServerLegacyAgent agent = new SqlServerLegacyAgent();
+        java.util.concurrent.atomic.AtomicInteger index = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicInteger executions = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicInteger drained = new java.util.concurrent.atomic.AtomicInteger();
+        ResultSet first = autoCommitRows(drained, 101, 102);
+        ResultSet last = autoCommitRows(new java.util.concurrent.atomic.AtomicInteger(), 303);
+        java.sql.Statement statement = proxy(java.sql.Statement.class, (method, args) -> {
+            switch (method.getName()) {
+                case "execute": executions.incrementAndGet(); return true;
+                case "setMaxRows": throw new AssertionError("Do not cap the server's batch execution");
+                case "getResultSet": return index.get() == 0 ? first : last;
+                case "getMoreResults": return index.incrementAndGet() == 2;
+                case "getUpdateCount": return index.get() == 1 ? 7 : -1;
+                default: return defaultValue(method.getReturnType());
+            }
+        });
+        TestSupport.setPrivateConnection(agent, proxy(Connection.class, (method, args) -> {
+            if (method.getName().equals("createStatement")) return statement;
+            if (method.getName().equals("getAutoCommit")) return true;
+            if (method.getName().equals("commit") || method.getName().equals("rollback")) {
+                throw new AssertionError("Auto-commit query must not commit/rollback implicitly");
+            }
+            return defaultValue(method.getReturnType());
+        }));
+
+        List<com.dbx.agent.QueryResult> results = agent.executeQueryResults(
+            "SELECT 101; UPDATE t SET n=7; SELECT 303", null, new com.dbx.agent.ExecuteQueryOptions(1, null, 5));
+        Assertions.assertEquals(1, executions.get());
+        Assertions.assertEquals(3, results.size());
+        Assertions.assertEquals(101, results.get(0).getRows().get(0).get(0));
+        Assertions.assertTrue(results.get(0).getTruncated());
+        Assertions.assertEquals(2, drained.get());
+        Assertions.assertEquals(7, results.get(1).getAffected_rows());
+        Assertions.assertEquals(303, results.get(2).getRows().get(0).get(0));
+        Assertions.assertTrue(agent.permitsAutomaticReconnect());
+    }
+
+    @Test
+    void autoCommitBatchPropagatesErrorsAfterTheFirstResult() {
+        SqlServerLegacyAgent agent = new SqlServerLegacyAgent();
+        java.util.concurrent.atomic.AtomicInteger executions = new java.util.concurrent.atomic.AtomicInteger();
+        java.sql.Statement statement = proxy(java.sql.Statement.class, (method, args) -> {
+            switch (method.getName()) {
+                case "execute": executions.incrementAndGet(); return true;
+                case "getResultSet": return autoCommitRows(new java.util.concurrent.atomic.AtomicInteger(), 101);
+                case "getMoreResults": throw new SQLException("late batch error");
+                default: return defaultValue(method.getReturnType());
+            }
+        });
+        TestSupport.setPrivateConnection(agent, proxy(Connection.class, (method, args) -> {
+            if (method.getName().equals("createStatement")) return statement;
+            if (method.getName().equals("getAutoCommit")) return true;
+            return defaultValue(method.getReturnType());
+        }));
+        RuntimeException error = Assertions.assertThrows(RuntimeException.class, () -> agent.executeQueryResults(
+            "SELECT 101; RAISERROR('late batch error',16,1)", null, new com.dbx.agent.ExecuteQueryOptions(1, null, 5)));
+        Assertions.assertTrue(error.getMessage().contains("late batch error"));
+        Assertions.assertEquals(1, executions.get());
+    }
+
+    private static ResultSet autoCommitRows(java.util.concurrent.atomic.AtomicInteger drained, int... values) {
+        java.sql.ResultSetMetaData metadata = proxy(java.sql.ResultSetMetaData.class, (method, args) -> {
+            switch (method.getName()) {
+                case "getColumnCount": return 1;
+                case "getColumnLabel": return "n";
+                case "getColumnType": return Types.INTEGER;
+                case "getColumnTypeName": return "int";
+                default: return defaultValue(method.getReturnType());
+            }
+        });
+        java.util.concurrent.atomic.AtomicInteger row = new java.util.concurrent.atomic.AtomicInteger(-1);
+        return proxy(ResultSet.class, (method, args) -> {
+            switch (method.getName()) {
+                case "next": if (row.incrementAndGet() >= values.length) return false; drained.incrementAndGet(); return true;
+                case "getMetaData": return metadata;
+                case "getObject":
+                case "getInt": return values[row.get()];
+                default: return defaultValue(method.getReturnType());
+            }
+        });
+    }
+
     private static final class ManualFixture {
         final SqlServerLegacyAgent agent = new SqlServerLegacyAgent();
         final java.util.concurrent.atomic.AtomicInteger count = new java.util.concurrent.atomic.AtomicInteger();

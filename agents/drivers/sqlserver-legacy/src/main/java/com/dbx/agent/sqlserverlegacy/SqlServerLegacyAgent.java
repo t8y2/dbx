@@ -147,8 +147,13 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
     @Override
     public List<QueryResult> executeQueryResults(String sql, String schema, ExecuteQueryOptions options) {
         Connection conn = getConnection();
-        if (!manualTransactionSession || conn == null) throw new IllegalStateException("No dedicated manual transaction connection");
+        if (conn == null) throw new IllegalStateException("Not connected");
         return unchecked(() -> {
+            if (!manualTransactionSession) {
+                beforeQueryExecution(conn, options.getTimeoutSecs());
+                return JdbcExecutor.current().executeAll(conn, sql, options.getMaxRows(),
+                    options.getFetchSize(), options.getTimeoutSecs(), resultValueReader());
+            }
             if (conn.getAutoCommit()) throw new IllegalStateException("DBX_MANUAL_TRANSACTION_STATE_LOST: autoCommit changed");
             beforeQueryExecution(conn, options.getTimeoutSecs());
             int before = transactionCount(conn, options.getTimeoutSecs());

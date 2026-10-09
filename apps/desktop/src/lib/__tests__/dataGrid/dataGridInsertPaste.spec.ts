@@ -1,8 +1,44 @@
 import { describe, expect, it } from "vitest";
 
-import { parseInsertStatementPaste } from "@/lib/dataGrid/dataGridInsertPaste";
+import { parseInsertStatementPaste, parseInsertStatementPasteInBatches } from "@/lib/dataGrid/dataGridInsertPaste";
+import { DataGridClipboardCapacityError } from "@/lib/dataGrid/dataGridRowPreparation";
 
 describe("parseInsertStatementPaste", () => {
+  it("rejects excessive logical tuples in a single SQL line without a spread stack overflow", () => {
+    const text = `INSERT INTO t VALUES ${Array.from({ length: 200_000 }, () => "(1)").join(",")}`;
+    expect(() => parseInsertStatementPaste(text)).toThrow(DataGridClipboardCapacityError);
+  });
+
+  it("bounds cells while parsing a wide tuple and rows across statements", () => {
+    expect(() => parseInsertStatementPaste("INSERT INTO t VALUES (1,2,3)", { maxCells: 2 })).toThrow(DataGridClipboardCapacityError);
+    expect(() => parseInsertStatementPaste("INSERT INTO t VALUES (1); INSERT INTO t VALUES (2)", { maxRows: 1 })).toThrow(DataGridClipboardCapacityError);
+  });
+
+  it("can cancel before allocating rows during a long SQL literal scan", async () => {
+    const controller = new AbortController();
+    const progress: number[] = [];
+    const text = `INSERT INTO t VALUES ('${"a".repeat(1_000_000)}')`;
+    const parsed = await parseInsertStatementPasteInBatches(text, {
+      signal: controller.signal,
+      onProgress: ({ completed, phase }) => {
+        expect(phase).toBe("parsing");
+        progress.push(completed);
+        if (completed > 0) controller.abort();
+      },
+    });
+    expect(parsed).toBeNull();
+    expect(progress.at(-1)).toBeLessThan(text.length);
+  });
+
+  it("parses a large SQL batch completely through the asynchronous path", async () => {
+    const text = `INSERT INTO t (a) VALUES ${Array.from({ length: 5000 }, (_, i) => `(${i})`).join(",")}`;
+    const progress: number[] = [];
+    const parsed = await parseInsertStatementPasteInBatches(text, { onProgress: ({ completed }) => progress.push(completed) });
+    expect(parsed?.rows).toHaveLength(5000);
+    expect(parsed?.rows.at(-1)).toEqual(["4999"]);
+    expect(progress.length).toBeGreaterThan(2);
+  });
+
   it("returns null for non-INSERT text", () => {
     expect(parseInsertStatementPaste("name\tage\nalice\t30")).toBeNull();
     expect(parseInsertStatementPaste("SELECT * FROM users")).toBeNull();

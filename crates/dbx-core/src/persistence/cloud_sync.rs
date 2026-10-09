@@ -12,6 +12,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr};
 
+mod webdav_snapshot;
+
 use crate::ai::AiConfigItem;
 use crate::connection_secrets::{
     plugin_connection_secret_key, CASSANDRA_KEYSTORE_PASSWORD_KEY, CASSANDRA_TRUSTSTORE_PASSWORD_KEY,
@@ -1819,22 +1821,23 @@ impl WebDavClient {
 
     pub async fn put_snapshot(&self, snapshot: &SyncSnapshot) -> Result<WebDavSyncSummary, String> {
         let remote_path = self.remote_path();
+        let (bytes, content_type) = webdav_snapshot::encode(snapshot, &remote_path)?;
+        let byte_count = bytes.len();
         self.ensure_parent_collections(&remote_path).await?;
-        let bytes = serde_json::to_vec_pretty(snapshot).map_err(|e| e.to_string())?;
         let response = self
             .request(Method::PUT, &remote_path)?
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(bytes.clone())
+            .header(header::CONTENT_TYPE, content_type)
+            .body(bytes)
             .send()
             .await
             .map_err(|e| e.to_string())?;
         let status = response.status();
         if !status.is_success() {
-            return Err(format!("WebDAV upload failed with HTTP {status}"));
+            return Err(webdav_snapshot::upload_error(status, content_type));
         }
         Ok(WebDavSyncSummary {
             remote_path,
-            bytes: bytes.len(),
+            bytes: byte_count,
             exported_at: Some(snapshot.exported_at.clone()),
             app_version: Some(snapshot.app_version.clone()),
         })
@@ -1847,8 +1850,8 @@ impl WebDavClient {
         if !status.is_success() {
             return Err(format!("WebDAV download failed with HTTP {status}"));
         }
-        let bytes = response.bytes().await.map_err(|e| e.to_string())?;
-        let snapshot: SyncSnapshot = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        let bytes = webdav_snapshot::read_response(response).await?;
+        let snapshot = webdav_snapshot::decode(&bytes)?;
         let summary = WebDavSyncSummary {
             remote_path,
             bytes: bytes.len(),

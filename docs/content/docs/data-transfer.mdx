@@ -7,7 +7,7 @@ Data Transfer copies tables or collections from one source into another connecti
 
 <Callout type="warn">Cross-engine transfer passes through DBX field and type conversion. Target privileges, constraints, triggers, defaults, and engine semantics still determine the result. Rehearse important migrations and validate row counts and key fields afterward.</Callout>
 
-## Two Entry Points
+## Entry Points
 
 ### Data Transfer Wizard
 
@@ -20,6 +20,22 @@ After copying one or more tables in the object tree, paste them at a target loca
 - Within the same context, choose structure and data, structure only, or data only, and edit each target name
 - Pasting into another connection, database, or schema opens the Data Transfer wizard with the source tables and target prefilled
 - Whole-row copy excludes generated or computed columns and applies path-specific handling for PostgreSQL identity and SQL Server identity columns
+
+### Export Query Results to a Database
+
+Choose **Export to Database** from the query result grid's export or context menu, then select the target connection, database, schema where applicable, and table name.
+
+After selecting the destination, use **Execution preview** to review the source, destination, currently loaded row and column counts, source columns, and planned operations. Preview does not write to the database; execution still loads the full exportable result and checks limits. **Start Transfer** opens a separate confirmation step; only **Confirm transfer** begins execution. Overwriting an existing table explicitly warns that all existing target rows will be deleted. Returning to settings preserves your selections.
+
+- **Create target table**: for a single-table `SELECT * FROM table` on the same engine, DBX reads the source DDL and preserves column types, lengths, precision, defaults, comments, primary keys, indexes, and table options while replacing the table name. Schema-wide index and constraint names are adjusted to avoid collisions. Unsafe or unavailable DDL stops the transfer instead of silently creating text columns.
+- Projections, joins, expressions, and cross-engine queries generate a table from result fields. They have no unique whole-table DDL. Insufficient metadata or target timestamp precision uses text types to preserve values without inferring source constraints. Writes to existing tables reject temporal values that cannot retain their precision before writing.
+- A new target name must not already exist. To write to an existing table, disable **Create target table**. Append keeps its rows; overwrite runs `DELETE + INSERT` in a transaction while keeping its structure, foreign keys, and triggers. Existing MySQL targets require InnoDB.
+- The transfer checks the complete result, export row limit, pagination, and large-value previews. Procedures and statements that modify data are not rerun for export; only their fully loaded results can be reused.
+- Results with an active cursor or manual transaction must first load all rows in the grid. Ordinary pagination reads through the source query session to preserve session settings and avoid reading different data on another connection.
+- Copying source table structure inside a manual transaction is not supported. Commit or roll back and rerun the query before choosing **Create target table**. MySQL and H2 temporary tables also stop structure copying instead of creating a target with a different lifetime.
+- Cancel during preparation. Once writing starts, wait for the transaction to finish. Drivers that implicitly commit table creation attempt to remove the table created by this transfer if writing fails; cleanup failures identify that table.
+
+This entry point lists target drivers with implemented transactional writes. It does not migrate standalone triggers, grants, or cross-table dependencies. Complex DDL, incompatible types, and unsupported identity handling fail explicitly. Use the Data Transfer wizard for database or multi-object migrations.
 
 ## Wizard Workflow
 

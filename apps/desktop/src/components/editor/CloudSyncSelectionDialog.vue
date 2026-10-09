@@ -488,8 +488,12 @@ function toggleAllAiConfigs() {
 // passphrase gate as the other encrypted items.
 function toggleSecretIdsAll(key: "connectionSecrets" | "tunnelSecrets", event: Event) {
   const catalogIds = (key === "connectionSecrets" ? props.catalog?.connectionSecrets : props.catalog?.tunnelSecrets) ?? [];
+  // Credentials of deselected connections/tunnels are filtered out server-side (metadata_ids),
+  // so the aggregate row must only select ids whose owner row is still selected.
+  const ownerIds = ids(key === "connectionSecrets" ? "connections" : "tunnelProfiles");
+  const selectableIds = catalogIds.filter((id) => ownerIds.includes(id));
   const current = ids(key);
-  const allSelected = catalogIds.length > 0 && catalogIds.every((id) => current.includes(id));
+  const allSelected = selectableIds.length > 0 && selectableIds.every((id) => current.includes(id));
   if (!allSelected && !ensureSecretsEnabled()) {
     // State did not change, so Vue will not re-sync the checkbox the user just flipped; revert it manually.
     const input = event.target as HTMLInputElement;
@@ -497,7 +501,7 @@ function toggleSecretIdsAll(key: "connectionSecrets" | "tunnelSecrets", event: E
     input.indeterminate = summaryState(key === "connectionSecrets" ? connectionSecretsSummary.value : tunnelSecretsSummary.value) === "partial";
     return;
   }
-  selection.value[key] = allSelected ? [] : [...catalogIds];
+  selection.value[key] = allSelected ? [] : [...selectableIds];
   syncIncludeSecrets();
 }
 

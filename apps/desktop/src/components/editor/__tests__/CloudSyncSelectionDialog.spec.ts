@@ -447,6 +447,33 @@ describe.each(["restore", "upload"] as const)("CloudSyncSelectionDialog %s group
     expect(credentialBoxes[1].checked).toBe(true);
   });
 
+  it("only selects credentials of still-selected owners on the aggregate row", async () => {
+    await mount(
+      {
+        connections: [
+          { id: "connection-1", label: "Primary" },
+          { id: "connection-2", label: "Secondary" },
+        ],
+        connectionSecrets: ["connection-1", "connection-2"],
+        tunnelProfiles: [{ id: "tunnel-1", label: "Tunnel" }],
+        tunnelSecrets: ["tunnel-1"],
+        selection: { connections: ["connection-2"] },
+      },
+      { secretsPassphraseAvailable: true },
+    );
+    const secretsSection = Array.from(root!.querySelectorAll("details"))[4];
+    const rows = Array.from(secretsSection.querySelectorAll("label"));
+    const connectionRow = rows.find((label) => label.textContent?.includes("settings.syncSelectionConnectionCredentials"))!;
+    expect(connectionRow.textContent).toContain("(0/2)");
+
+    connectionRow.querySelector("input")!.click();
+    await nextTick();
+    // connection-1 is deselected, so its credential cannot be aggregated in even though the
+    // catalog lists it; only connection-2's credential is selected.
+    expect(connectionRow.textContent).toContain("(1/2)");
+    expect(secretsSection.querySelector("summary")!.textContent).toContain("1/4");
+  });
+
   it("disables the confirm action while nothing is selected", async () => {
     await mount();
     const actionKey = mode === "restore" ? "settings.syncSelectionRestoreAction" : "settings.syncSelectionUploadAction";

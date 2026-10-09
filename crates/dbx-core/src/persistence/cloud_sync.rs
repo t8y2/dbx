@@ -455,6 +455,9 @@ pub async fn describe_local_sync_state(
     let mut connection_secret_ids = Vec::new();
     for config in &source_connections {
         let mut secrets = Vec::new();
+        // `true` mirrors every real export path: the Tauri/web commands tie
+        // include_plugin_secrets to include_secrets, so the catalog must count
+        // plugin-secret-only connections as credential candidates too.
         collect_connection_secrets(&mut secrets, config, true)?;
         if !secrets.is_empty() {
             connection_secret_ids.push(config.id.clone());

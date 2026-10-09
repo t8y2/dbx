@@ -272,7 +272,7 @@ with zipfile.ZipFile(sys.argv[2], 'w') as archive:
       const mockPath = `${mocks}:/usr/bin:/bin`;
       const isolatedScript = `export PATH=${JSON.stringify(mockPath)}\n[[ "$(command -v npm)" == ${JSON.stringify(join(mocks, "npm"))} ]]\n[[ "$(command -v node)" == ${JSON.stringify(join(mocks, "node"))} ]]\n${expanded}`;
       return spawnSync("/bin/bash", ["--noprofile", "--norc", "-e", "-o", "pipefail", "-c", isolatedScript], {
-        cwd: scenario.root, encoding: "utf8", env: { PATH: mockPath, HOME: scenario.root, TMPDIR: scenario.root, VERSION: "0.4.104" },
+        cwd: scenario.root, encoding: "utf8", env: { PATH: mockPath, HOME: scenario.root, TMPDIR: scenario.root, RUNNER_TEMP: scenario.root, VERSION: "0.4.104" },
       });
     },
     npmCommands: () => existsSync(npmLog) ? readFileSync(npmLog, "utf8").trim().split("\n").map((line) => JSON.parse(line)) : [],

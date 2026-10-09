@@ -237,12 +237,31 @@ describe("extractSqlParameters", () => {
     expect(extractSqlParameters("select @amount/2, @total / 4")).toEqual(["amount", "total"]);
   });
 
-  it("ignores Oracle database links while preserving standalone at-sign placeholders", () => {
+  it.each(["oracle", "oceanbase-oracle"] as const)("ignores %s database links while preserving standalone at-sign placeholders", (databaseType) => {
     const sql = 'SELECT * FROM HR.EMPLOYEES@REMOTE_DB, "AUDIT_LOG"@ARCHIVE_DB WHERE tenant_id = @tenant_id';
-    expect(extractSqlParameters("SELECT 1 FROM DUAL@WDHIS160;", { databaseType: "oracle" })).toEqual([]);
-    expect(extractSqlParameters(sql, { databaseType: "oracle" })).toEqual(["tenant_id"]);
-    expect(substituteSqlParameters(sql, { tenant_id: { kind: "number", value: "7" } }, { databaseType: "oracle" })).toBe('SELECT * FROM HR.EMPLOYEES@REMOTE_DB, "AUDIT_LOG"@ARCHIVE_DB WHERE tenant_id = 7');
+    expect(extractSqlParameters("SELECT 1 FROM DUAL@WDHIS160;", { databaseType })).toEqual([]);
+    expect(extractSqlParameters(sql, { databaseType })).toEqual(["tenant_id"]);
+    expect(substituteSqlParameters(sql, { tenant_id: { kind: "number", value: "7" } }, { databaseType })).toBe('SELECT * FROM HR.EMPLOYEES@REMOTE_DB, "AUDIT_LOG"@ARCHIVE_DB WHERE tenant_id = 7');
     expect(extractSqlParameters("SELECT * FROM EMPLOYEES@REMOTE_DB", { databaseType: "postgres" })).toEqual(["REMOTE_DB"]);
+  });
+
+  it.each(["oracle", "oceanbase-oracle"] as const)("preserves %s links, quoted names, strings and comments during substitution", (databaseType) => {
+    const sql = `SELECT '@literal' FROM "Hr"."Audit Log"@ARCHIVE_DB /* @comment */ WHERE "Id" = :id AND tenant_id = @tenant_id -- @tail`;
+    expect(extractSqlParameters(sql, { databaseType })).toEqual(["id", "tenant_id"]);
+    expect(
+      substituteSqlParameters(
+        sql,
+        {
+          id: { kind: "number", value: "3" },
+          tenant_id: { kind: "number", value: "7" },
+          ARCHIVE_DB: { kind: "number", value: "99" },
+          literal: { kind: "number", value: "99" },
+          comment: { kind: "number", value: "99" },
+          tail: { kind: "number", value: "99" },
+        },
+        { databaseType },
+      ),
+    ).toBe(`SELECT '@literal' FROM "Hr"."Audit Log"@ARCHIVE_DB /* @comment */ WHERE "Id" = 3 AND tenant_id = 7 -- @tail`);
   });
 
   it("describes each placeholder syntax for the parameter dialog", () => {
@@ -659,8 +678,8 @@ describe("extractSqlParameters", () => {
   });
 });
 
-describe("Oracle and Dameng trigger pseudo-records", () => {
-  it("ignores Oracle default pseudo-record fields while keeping ordinary parameters", () => {
+describe("Oracle, OceanBase Oracle and Dameng trigger pseudo-records", () => {
+  it.each(["oracle", "oceanbase-oracle"] as const)("ignores %s default pseudo-record fields while keeping ordinary parameters", (databaseType) => {
     const sql = `
       CREATE OR REPLACE TRIGGER audit_orders
       BEFORE UPDATE ON orders
@@ -671,7 +690,7 @@ describe("Oracle and Dameng trigger pseudo-records", () => {
       END;
     `;
 
-    expect(extractSqlParameters(sql, { databaseType: "oracle" })).toEqual(["tenant_id"]);
+    expect(extractSqlParameters(sql, { databaseType })).toEqual(["tenant_id"]);
   });
 
   it("ignores Dameng default pseudo-record fields case-insensitively", () => {
@@ -686,7 +705,7 @@ describe("Oracle and Dameng trigger pseudo-records", () => {
     expect(extractSqlParameters(sql, { databaseType: "dameng" })).toEqual(["actor_id"]);
   });
 
-  it("parses REFERENCING aliases without disabling default pseudo-records", () => {
+  it.each(["oracle", "oceanbase-oracle"] as const)("parses %s REFERENCING aliases without disabling default pseudo-records", (databaseType) => {
     const sql = `
       create or replace trigger audit_orders
       before update on orders
@@ -697,10 +716,10 @@ describe("Oracle and Dameng trigger pseudo-records", () => {
       end;
     `;
 
-    expect(extractSqlParameters(sql, { databaseType: "oracle" })).toEqual(["reason"]);
+    expect(extractSqlParameters(sql, { databaseType })).toEqual(["reason"]);
   });
 
-  it("replaces ordinary trigger parameters but preserves pseudo-record fields", () => {
+  it.each(["oracle", "oceanbase-oracle", "dameng"] as const)("replaces ordinary %s trigger parameters but preserves pseudo-record fields", (databaseType) => {
     const sql = `create trigger audit_orders before update on orders
       referencing new as inserted old as deleted
       for each row begin
@@ -715,7 +734,7 @@ describe("Oracle and Dameng trigger pseudo-records", () => {
           user_id: { kind: "number", value: "42" },
           note: { kind: "string", value: "manual" },
         },
-        { databaseType: "dameng" },
+        { databaseType },
       ),
     ).toBe(`create trigger audit_orders before update on orders
       referencing new as inserted old as deleted
@@ -732,11 +751,12 @@ describe("Oracle and Dameng trigger pseudo-records", () => {
       select :new, :outside_value from dual;`;
 
     expect(extractSqlParameters(oracleScript, { databaseType: "oracle" })).toEqual(["value", "new", "outside_value"]);
+    expect(extractSqlParameters(oracleScript, { databaseType: "oceanbase-oracle" })).toEqual(["value", "new", "outside_value"]);
     expect(extractSqlParameters("create trigger t before update on x begin :NEW.id := :value; end;", { databaseType: "postgres" })).toEqual(["NEW", "value"]);
     expect(extractSqlParameters("create trigger t before update on x begin NEW.id := :value; end;", { databaseType: "postgres" })).toEqual(["value"]);
   });
 
-  it("keeps assignment, casts, comments, strings, and non-field pseudo-record tokens unchanged", () => {
+  it.each(["oracle", "oceanbase-oracle", "dameng"] as const)("keeps %s assignment, casts, comments, strings, and non-field pseudo-record tokens unchanged", (databaseType) => {
     const sql = `create trigger audit_orders before update on orders
       for each row begin
         :new := :actual_value;
@@ -746,7 +766,7 @@ describe("Oracle and Dameng trigger pseudo-records", () => {
         note := ':EVENTINFO.string_field';
       end;`;
 
-    expect(extractSqlParameters(sql, { databaseType: "dameng" })).toEqual(["new", "actual_value", "target_value"]);
+    expect(extractSqlParameters(sql, { databaseType })).toEqual(["new", "actual_value", "target_value"]);
   });
 });
 

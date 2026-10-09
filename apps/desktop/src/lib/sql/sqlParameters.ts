@@ -1,4 +1,5 @@
 import type { DatabaseType } from "@/types/database";
+import { supportsOracleDatabaseLinks } from "@/lib/database/oracleDatabaseLinks";
 
 export type SqlParameterValueKind = "string" | "number" | "boolean" | "null" | "raw";
 
@@ -725,7 +726,7 @@ function isDuckDbCompactPrefixAliasSeparator(sql: string, index: number, databas
 }
 
 function isOracleDatabaseLinkMarker(sql: string, index: number, databaseType: DatabaseType | undefined): boolean {
-  if (databaseType !== "oracle" || index === 0) return false;
+  if (!supportsOracleDatabaseLinks(databaseType) || index === 0) return false;
   const previous = sql[index - 1];
   return PARAMETER_NAME_CHAR_RE.test(previous) || previous === "$" || previous === "#" || previous === '"';
 }
@@ -872,7 +873,7 @@ function readDuckDbStructFieldSeparator(sql: string, start: number): number | nu
   return sql[separator] === ":" ? separator : null;
 }
 
-// Oracle and Dameng expose trigger rows through colon-prefixed pseudo-records,
+// Oracle, OceanBase Oracle and Dameng expose trigger rows through colon-prefixed pseudo-records,
 // unlike PostgreSQL's unprefixed NEW/OLD records. Keep ordinary :name binds enabled.
 function collectTriggerPseudoRecordFieldStarts(sql: string, databaseType?: DatabaseType): Set<number> {
   const starts = new Set<number>();
@@ -955,7 +956,7 @@ function collectTriggerPseudoRecordFieldStarts(sql: string, databaseType?: Datab
 }
 
 function triggerPseudoRecordDefaults(databaseType?: DatabaseType): readonly TriggerPseudoRecordName[] | null {
-  if (databaseType === "oracle") return ["new", "old", "parent"];
+  if (databaseType === "oracle" || databaseType === "oceanbase-oracle") return ["new", "old", "parent"];
   if (databaseType === "dameng") return ["new", "old", "eventinfo"];
   return null;
 }

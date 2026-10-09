@@ -1016,6 +1016,27 @@ class OceanBaseOracleAgentTest {
     }
 
     @Test
+    void getColumnsPreservesBinaryPrecisionAndUnspecifiedNumberPrecision() {
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(), columnResultSet(new Object[][]{
+            {"F1", "FLOAT", "Y", 1, -127, 22, null, null, null, 0},
+            {"F24", "FLOAT", "Y", 24, -127, 22, null, null, null, 0},
+            {"F126", "FLOAT", "Y", 126, -127, 22, null, null, null, 0},
+            {"FU", "FLOAT", "Y", null, null, 22, null, null, null, 0},
+            {"N0", "NUMBER", "Y", null, 0, 22, null, null, null, 0},
+            {"N2", "NUMBER", "Y", null, 2, 22, null, null, null, 0},
+            {"NN2", "NUMBER", "Y", null, -2, 22, null, null, null, 0},
+            {"NU", "NUMBER", "Y", null, null, 22, null, null, null, 0}
+        })));
+        List<ColumnInfo> columns = agent.getColumns("APP", "NUMBERS");
+        Assertions.assertEquals(List.of("FLOAT(1)", "FLOAT(24)", "FLOAT(126)", "FLOAT", "NUMBER(*,0)", "NUMBER(*,2)", "NUMBER(*,-2)", "NUMBER"), columns.stream().map(ColumnInfo::getData_type).toList());
+        Assertions.assertEquals(Integer.valueOf(24), columns.get(1).getNumeric_precision());
+        Assertions.assertNull(columns.get(4).getNumeric_precision());
+        Assertions.assertEquals(Integer.valueOf(-2), columns.get(6).getNumeric_scale());
+        Assertions.assertNull(columns.get(7).getNumeric_scale());
+    }
+
+    @Test
     void getColumnsPreservesCharacterUnitsAndNegativeScale() {
         List<String> sql = new ArrayList<>();
         OceanBaseOracleAgent agent = new OceanBaseOracleAgent();

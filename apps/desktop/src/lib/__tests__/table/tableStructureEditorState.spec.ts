@@ -42,6 +42,33 @@ import {
 } from "@/lib/table/tableStructureEditorState";
 
 describe("tableStructureEditorState", () => {
+  it.each(["oracle", "oceanbase-oracle"] as const)("keeps numeric metadata unchanged through drafts for %s", (databaseType) => {
+    const cases = [
+      { data_type: "FLOAT", numeric_precision: 1, numeric_scale: -127, expected: "FLOAT(1)" },
+      { data_type: "FLOAT", numeric_precision: 24, numeric_scale: -127, expected: "FLOAT(24)" },
+      { data_type: "FLOAT", numeric_precision: 126, numeric_scale: -127, expected: "FLOAT(126)" },
+      { data_type: "FLOAT", numeric_precision: null, numeric_scale: null, expected: "FLOAT" },
+      { data_type: "NUMBER", numeric_precision: null, numeric_scale: 0, expected: "NUMBER(*,0)" },
+      { data_type: "NUMBER", numeric_precision: null, numeric_scale: 2, expected: "NUMBER(*,2)" },
+      { data_type: "NUMBER", numeric_precision: null, numeric_scale: -2, expected: "NUMBER(*,-2)" },
+      { data_type: "NUMBER", numeric_precision: 10, numeric_scale: -2, expected: "NUMBER(10,-2)" },
+      { data_type: "NUMBER", numeric_precision: null, numeric_scale: null, expected: "NUMBER" },
+      { data_type: "NUMBER(12,-3)", numeric_precision: 12, numeric_scale: -3, expected: "NUMBER(12,-3)" },
+    ];
+    for (const { expected, ...metadata } of cases) {
+      const drafts = createColumnDrafts([{ name: "VALUE", is_nullable: true, is_primary_key: false, column_default: null, extra: null, ...metadata }], databaseType);
+      expect(drafts[0]?.dataType).toBe(expected);
+      expect(drafts[0]?.original?.data_type).toBe(expected);
+      drafts[0]!.comment = "updated comment";
+      expect(hasExistingColumnTypeChange(drafts)).toBe(false);
+    }
+    expect(isDataTypeLengthDisabled(databaseType, "FLOAT")).toBe(false);
+    expect(combineDataTypeForDatabase(databaseType, "FLOAT", "126")).toBe("FLOAT(126)");
+    expect(combineDataTypeForDatabase(databaseType, "NUMBER", "*,-2")).toBe("NUMBER(*,-2)");
+    expect(isDataTypeLengthDisabled(databaseType, "BINARY_FLOAT")).toBe(true);
+    expect(isDataTypeLengthDisabled("dameng", "FLOAT")).toBe(true);
+  });
+
   describe("index naming", () => {
     it("uses a lowercase type prefix and the initial field name", () => {
       expect(generateShortIndexName("Prop_Code")).toBe("idx_prop_code");

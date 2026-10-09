@@ -1513,10 +1513,12 @@ fn oracle_synonym_target_from_query_result(result: db::QueryResult) -> Option<Or
 fn oracle_column_type(data_type: &str, precision: Option<i32>, scale: Option<i32>, length: Option<i32>) -> String {
     match data_type.to_ascii_uppercase().as_str() {
         "NUMBER" => match (precision, scale) {
-            (Some(precision), Some(scale)) if scale > 0 => format!("NUMBER({precision},{scale})"),
+            (Some(precision), Some(scale)) if scale != 0 => format!("NUMBER({precision},{scale})"),
             (Some(precision), _) => format!("NUMBER({precision})"),
+            (None, Some(scale)) => format!("NUMBER(*,{scale})"),
             _ => "NUMBER".to_string(),
         },
+        "FLOAT" => precision.map_or_else(|| "FLOAT".to_string(), |precision| format!("FLOAT({precision})")),
         "VARCHAR2" | "NVARCHAR2" | "CHAR" | "NCHAR" | "RAW" => match length {
             Some(length) => format!("{data_type}({length})"),
             None => data_type.to_string(),
@@ -5911,6 +5913,28 @@ for line in sys.stdin:
         assert!(!should_query_oracle_columns_via_sql_first(&DatabaseType::Oracle, None));
         assert!(!should_query_oracle_columns_via_sql_first(&DatabaseType::Oracle, Some("  ")));
         assert!(!should_query_oracle_columns_via_sql_first(&DatabaseType::Postgres, Some("tab-1")));
+    }
+
+    #[test]
+    fn oracle_numeric_query_metadata_keeps_precision_scale_and_nulls() {
+        for (data_type, precision, scale, expected) in [
+            ("FLOAT", Some(24), Some(-127), "FLOAT(24)"),
+            ("FLOAT", None, None, "FLOAT"),
+            ("NUMBER", None, Some(0), "NUMBER(*,0)"),
+            ("NUMBER", None, Some(-2), "NUMBER(*,-2)"),
+            ("NUMBER", Some(10), Some(-2), "NUMBER(10,-2)"),
+            ("NUMBER", None, None, "NUMBER"),
+        ] {
+            let result = oracle_current_schema_result(&[], vec![vec![
+                serde_json::json!("VALUE"), serde_json::json!(data_type), serde_json::json!("Y"),
+                serde_json::Value::Null, serde_json::json!(22), serde_json::json!(precision),
+                serde_json::json!(scale), serde_json::Value::Null, serde_json::json!(0),
+            ]]);
+            let columns = oracle_columns_from_query_result(result);
+            assert_eq!(columns[0].data_type, expected);
+            assert_eq!(columns[0].numeric_precision, precision);
+            assert_eq!(columns[0].numeric_scale, scale);
+        }
     }
 
     #[test]

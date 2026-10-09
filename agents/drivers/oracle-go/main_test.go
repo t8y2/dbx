@@ -1311,6 +1311,8 @@ func TestOracleColumnTypeDDL(t *testing.T) {
 	precision := 10
 	scale := 2
 	zeroScale := 0
+	negativeScale := -2
+	binaryPrecision := 126
 	byteUnit := "B"
 	charUnit := "C"
 
@@ -1325,6 +1327,13 @@ func TestOracleColumnTypeDDL(t *testing.T) {
 		{name: "national character type ignores unit", column: columnInfo{DataType: "NVARCHAR2", CharacterMaximumLength: &charLen, CharacterLengthUnit: &charUnit}, want: "NVARCHAR2(64)"},
 		{name: "number scale", column: columnInfo{DataType: "NUMBER", NumericPrecision: &precision, NumericScale: &scale}, want: "NUMBER(10,2)"},
 		{name: "number zero scale", column: columnInfo{DataType: "NUMBER", NumericPrecision: &precision, NumericScale: &zeroScale}, want: "NUMBER(10)"},
+		{name: "number negative scale", column: columnInfo{DataType: "NUMBER", NumericPrecision: &precision, NumericScale: &negativeScale}, want: "NUMBER(10,-2)"},
+		{name: "number star zero scale", column: columnInfo{DataType: "NUMBER", NumericScale: &zeroScale}, want: "NUMBER(*,0)"},
+		{name: "number star positive scale", column: columnInfo{DataType: "NUMBER", NumericScale: &scale}, want: "NUMBER(*,2)"},
+		{name: "number star negative scale", column: columnInfo{DataType: "NUMBER", NumericScale: &negativeScale}, want: "NUMBER(*,-2)"},
+		{name: "number unknown precision and scale", column: columnInfo{DataType: "NUMBER"}, want: "NUMBER"},
+		{name: "float binary precision", column: columnInfo{DataType: "FLOAT", NumericPrecision: &binaryPrecision}, want: "FLOAT(126)"},
+		{name: "float unknown precision", column: columnInfo{DataType: "FLOAT"}, want: "FLOAT"},
 		{name: "timestamp preserves precision", column: columnInfo{DataType: "TIMESTAMP(6)"}, want: "TIMESTAMP(6)"},
 	}
 	for _, tt := range tests {

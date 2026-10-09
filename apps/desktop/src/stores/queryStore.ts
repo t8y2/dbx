@@ -907,6 +907,9 @@ function bindColumnsForSource(
         return { ...column, sourceName: canonicalName };
       }
       if (column.sourceQualifier) return column;
+      if (dbType === "oceanbase-oracle" && !column.sourceNameQuoted && column.sourceName.toUpperCase() === "ROWID" && editableQuerySources(analysis).length === 1) {
+        return { ...column, sourceKey: source.key };
+      }
       const matchingSources = allSourceColumns.flatMap((entry) => {
         const canonicalName = resolveSourceColumnName(dbType, column.sourceName!, column.sourceNameQuoted, entry.columns);
         return canonicalName ? [{ source: entry.source, canonicalName }] : [];

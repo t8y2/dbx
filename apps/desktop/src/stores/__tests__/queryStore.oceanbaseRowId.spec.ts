@@ -128,20 +128,19 @@ describe("OceanBase Oracle query ROWID preparation", () => {
     expect(tab.queryEditabilityReason).toBeUndefined();
   });
 
-  it("does not confuse a quoted physical rowid column with the synthetic identity", async () => {
+  it.each(["a.", ""])("does not confuse a quoted physical rowid column with the synthetic identity: %s", async (qualifier) => {
     mocks.getColumns.mockResolvedValue([
       { name: "rowid", data_type: "VARCHAR2(100)", is_nullable: true, is_primary_key: false },
       { name: "TASKNAME", data_type: "VARCHAR2(100)", is_nullable: true, is_primary_key: false },
     ]);
-    const sql = await emittedSql('select a."rowid", a.taskname from sipf.t_sipf_debug_log a');
-    expect(sql).toBe('select a."rowid", a.taskname, ROWIDTOCHAR(ROWID) AS "__DBX_PK_0" from sipf.t_sipf_debug_log a');
+    const sql = await emittedSql(`select ${qualifier}"rowid", a.taskname from sipf.t_sipf_debug_log a`);
+    expect(sql).toBe(`select ${qualifier}"rowid", a.taskname, ROWIDTOCHAR(ROWID) AS "__DBX_PK_0" from sipf.t_sipf_debug_log a`);
   });
 
-  it("uses an explicitly selected ROWID as the row identity without hiding it", async () => {
+  it.each(["select a.rowid as rid, a.taskname from sipf.t_sipf_debug_log a", "select rowid as rid, taskname from sipf.t_sipf_debug_log"])("uses an explicitly selected ROWID as the row identity without hiding it: %s", async (originalSql) => {
     const { analyzeEditableQueryEditability } = await import("@/lib/sql/sqlAnalysis");
     mocks.analyze.mockImplementation(async (sql: string) => analyzeEditableQueryEditability(sql));
     mocks.executeMulti.mockResolvedValue([{ columns: ["RID", "TASKNAME"], rows: [["AAAPr9AAEAAAACXAAA", "first"]], affected_rows: 0, execution_time_ms: 1 }]);
-    const originalSql = "select a.rowid as rid, a.taskname from sipf.t_sipf_debug_log a";
     const { store, id, sql } = await executedQuery(originalSql);
     expect(sql).toBe(originalSql);
     const tab = store.tabs.find((item) => item.id === id)!;
@@ -150,7 +149,7 @@ describe("OceanBase Oracle query ROWID preparation", () => {
     expect(tab.tableMeta?.primaryKeys).toEqual(["__DBX_ROWID"]);
   });
 
-  it("retains the physical primary key when ROWID is also selected", async () => {
+  it.each(["a.", ""])("retains the physical primary key when ROWID is also selected: %s", async (qualifier) => {
     const { analyzeEditableQueryEditability } = await import("@/lib/sql/sqlAnalysis");
     mocks.analyze.mockImplementation(async (sql: string) => analyzeEditableQueryEditability(sql));
     mocks.getColumns.mockResolvedValue([
@@ -158,7 +157,7 @@ describe("OceanBase Oracle query ROWID preparation", () => {
       { name: "TASKNAME", data_type: "VARCHAR2(100)", is_nullable: true, is_primary_key: false },
     ]);
     mocks.executeMulti.mockResolvedValue([{ columns: ["RID", "TASKNAME", "__DBX_PK_0"], rows: [["AAAPr9AAEAAAACXAAA", "first", 1]], affected_rows: 0, execution_time_ms: 1 }]);
-    const { store, id, sql } = await executedQuery("select a.rowid as rid, a.taskname from sipf.t_sipf_debug_log a");
+    const { store, id, sql } = await executedQuery(`select ${qualifier}rowid as rid, a.taskname from sipf.t_sipf_debug_log a`);
     expect(sql).toContain('"ID" AS "__DBX_PK_0"');
     expect(sql).not.toContain("ROWIDTOCHAR");
     const tab = store.tabs.find((item) => item.id === id)!;
@@ -170,6 +169,7 @@ describe("OceanBase Oracle query ROWID preparation", () => {
     "select distinct a.taskname from sipf.t_sipf_debug_log a",
     "select a.taskname, count(*) from sipf.t_sipf_debug_log a group by a.taskname",
     "select a.taskname, b.taskname from sipf.t_sipf_debug_log a join sipf.t_sipf_debug_log b on a.taskname = b.taskname",
+    "select rowid, a.taskname from sipf.t_sipf_debug_log a join sipf.t_sipf_debug_log b on a.taskname = b.taskname",
     "select a.taskname from sipf.t_sipf_debug_log a union select b.taskname from sipf.t_sipf_debug_log b",
   ])("does not inject ROWID into an unsafe query: %s", async (sql) => {
     expect(await emittedSql(sql)).toBe(sql);

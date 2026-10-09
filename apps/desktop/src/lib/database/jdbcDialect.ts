@@ -119,6 +119,11 @@ export function effectiveDatabaseTypeForConnection(connection?: JdbcDialectConne
  * would drop them from the connection list and disable every non-table kind.
  */
 export function transferDatabaseTypeForConnection(connection?: JdbcDialectConnection): DatabaseType | undefined {
+  // GBase connections are mapped to the MySQL dialect for SQL generation, but
+  // the GBase driver manifest explicitly disables data transfer. Keep that
+  // capability restriction attached to the raw connection type instead of
+  // exposing the mapped MySQL type to transfer callers.
+  if (connection?.db_type === "gbase") return undefined;
   const effective = effectiveDatabaseTypeForConnection(connection);
   if (effective === "doris" || effective === "starrocks") return connection?.db_type;
   return effective;

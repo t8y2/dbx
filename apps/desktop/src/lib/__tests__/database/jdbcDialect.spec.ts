@@ -285,7 +285,7 @@ describe("jdbc dialect inference", () => {
     expect(transferDatabaseTypeForConnection(undefined)).toBeUndefined();
     expect(transferDatabaseTypeForConnection({ db_type: "mysql" })).toBe("mysql");
     expect(transferDatabaseTypeForConnection({ db_type: "postgres" })).toBe("postgres");
-    expect(transferDatabaseTypeForConnection({ db_type: "gbase" })).toBe("mysql");
+    expect(transferDatabaseTypeForConnection({ db_type: "gbase" })).toBeUndefined();
     expect(transferDatabaseTypeForConnection({ db_type: "jdbc", connection_string: "jdbc:gbase://localhost:5258/dbx_test" })).toBe("gbase");
     // A generic-JDBC Doris URL keeps its raw db_type (never admitted), matching
     // the pre-effective-type behavior for unknown jdbc connections.

@@ -461,6 +461,78 @@ describe("DataGridPagination", () => {
     const exportMenus = findAll(mounted.root, (node) => node.props["data-stub"] === "LightDropdown" && node.props["aria-label"] === "grid.export");
     expect(exportMenus).toHaveLength(1);
   });
+
+  it("copies each aggregate value on click, and only the values", () => {
+    const copySelectionSummary = vi.fn();
+    const mounted = mountComponent(DataGridPagination, {
+      selectionSummary: { cellCount: 4, rowCount: 2 },
+      selectionSummarySumText: "10",
+      selectionSummaryAverageText: "2.5",
+      loading: false,
+      infiniteScrollEnabled: false,
+      infiniteScrollAllLoaded: false,
+      pageSize: 100,
+      customPageSizeInput: "",
+      pageSizeMenuItems: [],
+      exportMenuItems: [],
+      currentPage: 1,
+      canGoNextPage: false,
+      canJumpLastPage: false,
+      onCopySelectionSummary: copySelectionSummary,
+    });
+
+    const sum = findOne(mounted.root, (node) => node.props["data-selection-summary-sum"] === "");
+    const average = findOne(mounted.root, (node) => node.props["data-selection-summary-average"] === "");
+    // Native buttons provide tab focus plus Enter/Space activation without recreating
+    // the complete button interaction model on a clickable text span.
+    expect(sum.type).toBe("button");
+    expect(average.type).toBe("button");
+    expect(sum.props.title).toBe("grid.copyValue");
+    expect(hostText(sum)).toContain("grid.copyValue");
+
+    dispatch(sum, "click");
+    expect(copySelectionSummary).toHaveBeenCalledWith("10");
+
+    dispatch(average, "click");
+    expect(copySelectionSummary).toHaveBeenLastCalledWith("2.5");
+    expect(copySelectionSummary).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the aggregate values non-copyable while the selection drag is pending", () => {
+    const copySelectionSummary = vi.fn();
+    const mounted = mountComponent(DataGridPagination, {
+      selectionSummary: { cellCount: 4, rowCount: 2 },
+      selectionSummarySumText: "…",
+      selectionSummaryAverageText: "…",
+      selectionSummaryPending: true,
+      loading: false,
+      infiniteScrollEnabled: false,
+      infiniteScrollAllLoaded: false,
+      pageSize: 100,
+      customPageSizeInput: "",
+      pageSizeMenuItems: [],
+      exportMenuItems: [],
+      currentPage: 1,
+      canGoNextPage: false,
+      canJumpLastPage: false,
+      onCopySelectionSummary: copySelectionSummary,
+    });
+
+    const sum = findOne(mounted.root, (node) => node.props["data-selection-summary-sum"] === "");
+    // Pending aggregate placeholders retain their layout but expose no copy action.
+    expect(sum.props.title).toBeUndefined();
+    expect(sum.props.disabled).toBe(true);
+
+    dispatch(sum, "click");
+    expect(copySelectionSummary).not.toHaveBeenCalled();
+  });
+});
+
+describe("DataGrid selection summary copy wiring", () => {
+  it("routes the pagination aggregate copy through the grid clipboard helper", () => {
+    expect(dataGridSource).toMatch(/@copy-selection-summary="copyText"/);
+    expect(dataGridSource).toMatch(/:selection-summary-pending="isSelectingCells"/);
+  });
 });
 
 describe("DataGridColumnHeader", () => {

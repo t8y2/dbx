@@ -156,6 +156,10 @@ public interface DatabaseAgent {
 
     List<ForeignKeyInfo> listForeignKeys(String schema, String table);
 
+    default List<ConstraintInfo> listConstraints(String schema, String table) {
+        throw new UnsupportedOperationException("Constraint metadata is not supported by this driver");
+    }
+
     List<TriggerInfo> listTriggers(String schema, String table);
 
     default List<PartitionInfo> listPartitions(String schema, String table) {

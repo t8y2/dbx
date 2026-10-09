@@ -221,7 +221,7 @@ import { normalizeSqliteNamespace } from "@/lib/database/sqliteNamespace";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { isSchemaAware, isSingleDatabase } from "@/lib/database/databaseCapabilities";
 import ExplainPlanViewer from "@/components/explain/ExplainPlanViewer.vue";
-import { parseExplainResult, parseOracleExplainText, type ParsedExplainPlan } from "@/lib/diagram/explainPlan";
+import { parseExplainResult, parseOracleExplainText, parseDb2ExplainText, type ParsedExplainPlan } from "@/lib/diagram/explainPlan";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { AI_TABLE_MENTION_CANDIDATE_LIMIT, AI_TABLE_MENTION_SCHEMA_LIMIT, filterAiTableMentionCandidates, formatAiTableMention, parseAiTableMentions, type AiTableMention } from "@/lib/ai/aiTableMentions";
 import { handleAiTableReferenceDropEvent } from "@/lib/ai/aiTableReferenceDrop";
@@ -2565,6 +2565,13 @@ function extractExplainData(result: unknown): unknown | undefined {
 
 /** Parse explain_data (a serialized QueryResult) into ParsedExplainPlan */
 function parseExplainFromData(explainData: unknown, dbType: string): ParsedExplainPlan | undefined {
+  if (dbType === "db2" && typeof explainData === "string") {
+    try {
+      return parseDb2ExplainText(explainData);
+    } catch {
+      return undefined;
+    }
+  }
   if (dbType === "oracle" && typeof explainData === "string") {
     return parseOracleExplainText(explainData);
   }

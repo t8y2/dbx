@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, nextTick, onMounted } from "vue";
 import { useI18n } from "vue-i18n";
-import { FolderOpen, FileCode, FolderClosed, ChevronRight, ChevronDown, X, Trash2, RefreshCw, FolderSearch, Copy, Play, ChevronsUpDown, ChevronsDownUp, Settings, FilePlus, Pencil } from "@lucide/vue";
+import { FolderOpen, FileCode, FolderClosed, ChevronRight, ChevronDown, X, Trash2, RefreshCw, FolderSearch, Copy, Play, ChevronsUpDown, ChevronsDownUp, Settings, FilePlus, Pencil, LocateFixed } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -17,7 +17,7 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { forgetExternalSqlFileTarget, moveExternalSqlFileTarget, resolveExternalSqlFileTargetForActiveTab } from "@/lib/sql/externalSqlFileTarget";
-import { externalSqlFileOpenErrorMessage, externalSqlEditorMaxBytes, formatSqlFileSize, isExternalSqlFileTooLargeError, isSqlFilePath } from "@/lib/sql/sqlFileOpen";
+import { externalSqlFileOpenErrorMessage, externalSqlEditorMaxBytes, formatSqlFileSize, isExternalSqlFileTooLargeError, isSqlFilePath, normalizeExternalSqlPath } from "@/lib/sql/sqlFileOpen";
 import * as api from "@/lib/backend/api";
 import type { SqlFileEntry } from "@/lib/backend/api";
 import { getSqlFileFilter, getSqlFileFolderPaths, saveSqlFileFilter, saveSqlFileFolderPaths, notifySqlFileFoldersChanged } from "@/lib/sqlFile/sqlFileFolders";
@@ -63,6 +63,46 @@ const showDeleteDialog = ref(false);
 const selectedPaths = ref<Set<string>>(new Set());
 const activePath = ref<string | null>(null);
 const selectionAnchorIndex = ref<number | null>(null);
+const fileTree = ref<HTMLElement | null>(null);
+
+function findFileAncestors(entries: SqlFileEntry[], path: string): string[] | null {
+  for (const entry of entries) {
+    if (!entry.is_dir && normalizeExternalSqlPath(entry.path) === path) return [];
+    if (entry.is_dir) {
+      const ancestors = findFileAncestors(entry.children, path);
+      if (ancestors) return [entry.path, ...ancestors];
+    }
+  }
+  return null;
+}
+
+const activeFileTarget = computed(() => {
+  const tab = queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId);
+  if (!tab?.externalSqlPath) return null;
+  const path = normalizeExternalSqlPath(tab.externalSqlPath);
+  for (const folder of folders.value) {
+    if (folder.loading) continue;
+    const ancestors = findFileAncestors(folder.entries, path);
+    if (ancestors) return { folder, path, ancestors };
+  }
+  return null;
+});
+
+async function locateActiveFile() {
+  const target = activeFileTarget.value;
+  if (!target) return;
+  target.folder.collapsed = false;
+  target.folder.expanded = new Set([...target.folder.expanded, ...target.ancestors]);
+  const itemIndex = visibleItems.value.findIndex((item) => item.type === "file" && normalizeExternalSqlPath(item.id) === target.path);
+  const item = visibleItems.value[itemIndex];
+  if (!item) return;
+  selectedPaths.value = new Set();
+  activePath.value = item.id;
+  selectionAnchorIndex.value = itemIndex;
+  await nextTick();
+  const row = Array.from(fileTree.value?.querySelectorAll<HTMLElement>("[data-sql-file-path]") ?? []).find((row) => normalizeExternalSqlPath(row.dataset.sqlFilePath!) === target.path);
+  row?.scrollIntoView({ block: "center", inline: "nearest" });
+}
 
 function clearSelection() {
   selectedPaths.value = new Set();
@@ -547,6 +587,11 @@ function clearContextTarget() {
         {{ t("sqlFileTree.storageHelp") }}
       </HelpTooltip>
       <span class="flex-1" />
+      <LightTooltip :text="t('sidebar.locateActiveTab')" side="bottom" :delay="0" :close-delay="0" nowrap>
+        <Button variant="ghost" size="icon" class="h-5 w-5" :aria-label="t('sidebar.locateActiveTab')" :disabled="!activeFileTarget" @click="locateActiveFile">
+          <LocateFixed class="h-3 w-3" />
+        </Button>
+      </LightTooltip>
       <LightTooltip :text="t('sqlFileTree.filterSettings')" side="bottom" :delay="0" :close-delay="0" nowrap>
         <Button
           variant="ghost"
@@ -580,6 +625,7 @@ function clearContextTarget() {
     <CustomContextMenu :items="contextMenuItems" @close="clearContextTarget">
       <template #default="{ onContextMenu }">
         <div
+          ref="fileTree"
           class="flex-1 overflow-y-auto"
           @click="handlePanelClick"
           @contextmenu.capture="contextTarget = { kind: 'panel' }"
@@ -649,6 +695,7 @@ function clearContextTarget() {
                     data-sql-file-row="true"
                     v-for="{ entry, depth } in flatTree(folder.entries, folder.expanded)"
                     :key="entry.path"
+                    :data-sql-file-path="entry.path"
                     class="flex cursor-default select-none items-center gap-1 px-2 py-1 text-sm"
                     :class="[entry.is_dir ? 'rounded-sm' : 'rounded-none', isPathHighlighted(entry.path) ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/40']"
                     :style="{ paddingLeft: depth * 16 + 8 + 'px' }"

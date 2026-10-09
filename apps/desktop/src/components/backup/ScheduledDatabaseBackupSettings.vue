@@ -33,12 +33,15 @@ import {
   type DatabaseBackupSchedule,
 } from "@/lib/backup/scheduledDatabaseBackup";
 import { databaseBackupTableSelectionScopeKey, normalizeDatabaseBackupTableTargets, type DatabaseBackupTableSelectionState } from "@/lib/backup/scheduledDatabaseBackup";
+import { getLastBackupDirectory, setLastBackupDirectory } from "@/lib/export/exportPath";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
 
 const { t, locale } = useI18n();
 const { toast } = useToast();
 const connectionStore = useConnectionStore();
+const settingsStore = useSettingsStore();
 const { schedules, runs, activeScheduleIds, activeRunIds, cancellingRunIds, activeRuns, heartbeat, destinationRoot, error: backupError, saveSchedule, setScheduleEnabled, deleteSchedule, deleteRuns, renameRun, runSchedule, runOneShot, cancelRun } = useScheduledDatabaseBackups();
 const desktop = isTauriRuntime();
 const backgroundEnabled = ref(false);
@@ -155,13 +158,26 @@ watch(historyConnectionPickerOpen, (open) => {
   if (!open) historyConnectionSearch.value = "";
 });
 
+/**
+ * 解析新建备份时的默认「备份目录」。
+ * 优先级：服务端根目录（Web 端） > 上次备份目录 > 设置中的「首选导出路径」。
+ * Desktop 端后端 root 恒为 null（见 src-tauri/background_backup.rs），
+ * 此前默认值恒为空串，导致每次新建备份都要重新选择目录（issue #11317）。
+ */
+function defaultBackupDestinationDirectory(): string {
+  if (destinationRoot.value) return destinationRoot.value;
+  const remembered = getLastBackupDirectory();
+  if (remembered) return remembered;
+  return settingsStore.editorSettings.preferredExportPath?.trim() || "";
+}
+
 function newBackupConfig(connectionId = sqlConnections.value[0]?.id ?? ""): DatabaseBackupExecutionConfig {
   return {
     connectionId,
     databases: [],
     tableFilterMode: "all",
     tablePatterns: [],
-    destinationDirectory: destinationRoot.value || "",
+    destinationDirectory: defaultBackupDestinationDirectory(),
     includeStructure: true,
     includeData: true,
     includeObjects: true,
@@ -455,8 +471,13 @@ function toggleDatabase(database: string) {
 
 async function chooseDestination() {
   const { open } = await import("@tauri-apps/plugin-dialog");
-  const selected = await open({ directory: true, multiple: false, title: t("databaseBackup.selectDestination") });
-  if (typeof selected === "string") activeDraft.value.destinationDirectory = selected;
+  // 传入当前目录，让系统选择框直接定位到上次使用的位置（issue #11317）
+  const selected = await open({ directory: true, multiple: false, defaultPath: activeDraft.value.destinationDirectory || undefined, title: t("databaseBackup.selectDestination") });
+  if (typeof selected === "string") {
+    activeDraft.value.destinationDirectory = selected;
+    // 记住本次选择，作为下次新建备份的默认目录
+    setLastBackupDirectory(selected);
+  }
 }
 
 async function submitSchedule() {
@@ -464,6 +485,7 @@ async function submitSchedule() {
   saving.value = true;
   try {
     if (desktop) await api.recordDatabaseExportDestination(draft.value.destinationDirectory);
+    if (desktop) setLastBackupDirectory(draft.value.destinationDirectory);
     await saveSchedule({
       ...draft.value,
       databases: allDatabases.value ? [] : [...selectedDatabases.value],
@@ -492,6 +514,7 @@ async function startOneShotBackup() {
   oneShotStarting.value = true;
   try {
     if (desktop) await api.recordDatabaseExportDestination(oneShotDraft.value.destinationDirectory);
+    if (desktop) setLastBackupDirectory(oneShotDraft.value.destinationDirectory);
     const run = await runOneShot(
       {
         ...oneShotDraft.value,

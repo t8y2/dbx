@@ -359,4 +359,28 @@ describe("sql layout", () => {
       ),
     );
   });
+
+  it("preserves keyword case when keywordCase is preserve (#11382)", async () => {
+    const sql = lines("select id as emp_id, name as emp_name", "from employees", "where status = 1 and dept = 'sales'", "order by id desc", "limit 10;");
+    expect(await format(sql, { keywordCase: "preserve" })).toBe(lines("select id   as emp_id,", "       name as emp_name", "from employees", "where status = 1", "      and dept = 'sales'", "order by id desc", "limit 10;"));
+  });
+
+  it("converts keyword case to lower when keywordCase is lower (#11382)", async () => {
+    const sql = lines("SELECT id AS emp_id, name AS emp_name", "FROM employees", "WHERE status = 1 AND dept = 'sales'", "ORDER BY id DESC", "LIMIT 10;");
+    expect(await format(sql, { keywordCase: "lower" })).toBe(lines("select id   as emp_id,", "       name as emp_name", "from employees", "where status = 1", "      and dept = 'sales'", "order by id desc", "limit 10;"));
+  });
+
+  it("preserves keyword case in join, union, case expression and ddl (#11382)", async () => {
+    const joinSql = "select a.id from t1 left join t2 on t1.id = t2.id;";
+    expect(await format(joinSql, { keywordCase: "preserve" })).toBe(lines("select a.id", "from t1", "    left join t2 on t1.id = t2.id;"));
+
+    const unionSql = lines("select 1", "union all", "select 2;");
+    expect(await format(unionSql, { keywordCase: "preserve" })).toBe(lines("select 1", "union all", "select 2;"));
+
+    const caseSql = "select case when a = 1 then 'one' else 'other' end as val from t;";
+    expect(await format(caseSql, { keywordCase: "preserve" })).toBe("select case when a = 1 then 'one' else 'other' end as val from t;");
+
+    const ddlSql = "create table test (id int, name varchar(255));";
+    expect(await format(ddlSql, { keywordCase: "preserve" })).toBe("create table test (id int, name varchar(255));");
+  });
 });

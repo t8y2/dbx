@@ -257,6 +257,8 @@ pub struct TableStructureSqlOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mysql_engine: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mysql_auto_increment_value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transwarp_create: Option<TranswarpCreateTableOptions>,
     /// MySQL only: the table's current default collation
     /// (`information_schema.TABLES.TABLE_COLLATION`). A column whose collation

@@ -425,6 +425,8 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
 
         private boolean quarantineAndClose(ExecutorService cleanup) {
             state.compareAndSet(State.ACTIVE, State.QUARANTINED);
+            // Release native requests before cleanup waits for their session lock.
+            cancel();
             boolean replaceRuntime = server != null && server.quarantine();
             if (!cleanupScheduled.compareAndSet(false, true)) {
                 return replaceRuntime;

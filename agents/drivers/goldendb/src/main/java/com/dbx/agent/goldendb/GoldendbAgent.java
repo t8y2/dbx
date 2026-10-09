@@ -457,6 +457,12 @@ public final class GoldendbAgent extends AbstractJdbcAgent {
                 case Types.BIT:
                     value = rs.getBoolean(index);
                     break;
+                case Types.BINARY:
+                case Types.VARBINARY:
+                case Types.LONGVARBINARY:
+                case Types.BLOB:
+                    value = JdbcExecutor.bytesToHex(rs.getBytes(index));
+                    break;
                 default:
                     value = rs.getString(index);
                     break;

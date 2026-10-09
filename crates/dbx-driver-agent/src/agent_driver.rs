@@ -2712,6 +2712,17 @@ impl AgentDriverClient {
         self.call_method(AgentMethod::GetExplainInfo, params).await
     }
 
+    /// Estimated-plan RPC with the same session cancellation contract as queries.
+    pub async fn get_explain_info_with_timeout_and_cancel<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+        timeout_duration: Option<Duration>,
+        cancel_token: Option<CancellationToken>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout_and_cancel(AgentMethod::GetExplainInfo, params, timeout_duration, cancel_token)
+            .await
+    }
+
     pub async fn close_query_session<T: DeserializeOwned + Send + 'static>(
         &mut self,
         session_id: &str,
@@ -4605,6 +4616,11 @@ def respond(req):
             value = cancel_count
         write_response(req, value)
         return
+    if method == 'blocked_count':
+        with state_lock:
+            value = len(blocked)
+        write_response(req, value)
+        return
     if method == 'cancel_session':
         session_id = params['agentSessionId']
         with state_lock:
@@ -4617,7 +4633,7 @@ def respond(req):
 
     session_id = params.get('agentSessionId', '__legacy__')
     with session_lock(session_id):
-        if method in ('execute_query', 'start_table_read'):
+        if method in ('execute_query', 'start_table_read', 'get_explain_info'):
             sql = params.get('sql', '')
             with state_lock:
                 query_count += 1
@@ -4763,6 +4779,60 @@ for line in sys.stdin:
         let _ = std::fs::remove_file(script_path);
     }
 
+    #[tokio::test]
+    async fn native_explain_timeout_and_cancel_preserve_sibling_session() {
+        let (runtime, script_path) = spawn_stateful_test_runtime("native-explain-cancel-test").await;
+        let mut client = AgentDriverClient::shared_session(runtime.clone(), "explain-session".to_string());
+        let mut sibling = AgentDriverClient::shared_session(runtime.clone(), "editor-session".to_string());
+        let error = client
+            .get_explain_info_with_timeout_and_cancel::<serde_json::Value>(
+                serde_json::json!({"sql": "slow-timeout-plan"}),
+                Some(Duration::from_millis(75)),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("Agent RPC call timed out"));
+        // The cancel acknowledgement can precede the old worker's exit.
+        // Drain its session lock before watching the next blocked request.
+        client
+            .call_with_timeout::<serde_json::Value>("probe", serde_json::json!({}), Some(Duration::from_millis(500)))
+            .await
+            .unwrap();
+        let token = CancellationToken::new();
+        let task_token = token.clone();
+        let task = tokio::spawn(async move {
+            let result = client
+                .get_explain_info_with_timeout_and_cancel::<serde_json::Value>(
+                    serde_json::json!({"sql": "slow-unlimited-plan"}),
+                    None,
+                    Some(task_token),
+                )
+                .await;
+            (result, client)
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while runtime_counter(&runtime, "blocked_count").await == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        token.cancel();
+        let (result, mut client) = tokio::time::timeout(Duration::from_secs(1), task).await.unwrap().unwrap();
+        let error = result.unwrap_err();
+        assert!(error.contains("Query canceled"), "{error}");
+        assert_eq!(runtime_counter(&runtime, "cancel_count").await, 2);
+        client
+            .call_with_timeout::<serde_json::Value>("probe", serde_json::json!({}), Some(Duration::from_millis(500)))
+            .await
+            .unwrap();
+        let response: serde_json::Value = sibling.call("probe", serde_json::json!({})).await.unwrap();
+        assert_eq!(response, serde_json::json!({"ok": true}));
+        assert!(!runtime.is_failed());
+        runtime.kill_and_wait().await;
+        let _ = std::fs::remove_file(script_path);
+    }
     #[tokio::test]
     async fn table_read_uses_the_supplied_rpc_timeout() {
         let (runtime, script_path) = spawn_stateful_test_runtime("table-read-timeout-test").await;

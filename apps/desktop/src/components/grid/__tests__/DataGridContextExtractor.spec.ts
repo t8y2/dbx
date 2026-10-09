@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   buildTableSelectSql: vi.fn(async ({ whereInput }: { whereInput?: string }) => `SELECT payload FROM events${whereInput ? ` WHERE ${whereInput}` : ""}`),
   executeMulti: vi.fn(),
   cancelQuery: vi.fn(),
+  extractDataGridSelection: vi.fn(),
   copyToClipboard: vi.fn(),
   toast: vi.fn(),
 }));
@@ -21,6 +22,7 @@ vi.mock("@/lib/backend/api", () => ({
   buildTableSelectSql: mocks.buildTableSelectSql,
   executeMulti: mocks.executeMulti,
   cancelQuery: mocks.cancelQuery,
+  extractDataGridSelection: mocks.extractDataGridSelection,
 }));
 
 vi.mock("@/composables/useToast", () => ({
@@ -261,6 +263,24 @@ afterEach(() => {
 });
 
 describe("DataGrid context menu target lifecycle", () => {
+  it("offers original text for a single column spanning multiple rows", async () => {
+    const lines = ["CREATE view v_Test as", "\tselect 'quoted' as value", '-- "keep quotes"'];
+    mocks.extractDataGridSelection.mockResolvedValueOnce({ text: lines.join("\n"), mimeType: "text/plain", fileExtension: "txt", rowCount: 3, columnCount: 1 });
+    mocks.copyToClipboard.mockResolvedValueOnce(true);
+    const { host } = mountGrid({ columns: ["id", "payload"], rows: lines.map((line, index) => [index + 1, line]), affected_rows: 0, execution_time_ms: 0 });
+    await settle();
+    columnHeader(host, 1).click();
+    openContextMenu(gridCell(host));
+    await settle();
+    contextMenuButton("Copy").dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    await settle();
+
+    contextMenuButton("Original Text (Single Column)").click();
+
+    await vi.waitFor(() => expect(mocks.copyToClipboard).toHaveBeenCalledWith(lines.join("\n")));
+    expect(mocks.extractDataGridSelection).toHaveBeenCalledWith(expect.objectContaining({ extractor: "raw", rows: lines.map((line) => [line]) }));
+  });
+
   it("does not reuse a closed header target for a later select-all menu", async () => {
     const { host } = mountGrid(hydratedResult(1, "value"));
     await settle();
@@ -362,7 +382,7 @@ describe("DataGrid context menu target lifecycle", () => {
     contextMenuButton("Export").dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
     await settle();
 
-    expect(contextMenuButton("Cell Text").disabled).toBe(false);
+    expect(contextMenuButton("Original Text (Single Column)").disabled).toBe(false);
     expect(contextMenuButton("JSON Array").disabled).toBe(false);
     expect(contextMenuButton("SQL Select").disabled).toBe(false);
   });

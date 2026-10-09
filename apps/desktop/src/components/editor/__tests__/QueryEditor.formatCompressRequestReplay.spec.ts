@@ -268,4 +268,25 @@ describe("QueryEditor format/compress request replay", () => {
     expect(editorView.state.selection.main.anchor).toBe(0);
     expect(editorView.state.selection.main.head).toBe(formatted.length);
   });
+
+  it.each([
+    ["whole document", false, 13],
+    ["full selection", true, 14],
+  ] as const)("formats MySQL view CASE/REPLACE calls through the %s toolbar request", async (_name, selectAll, requestId) => {
+    const source = "ALTER ALGORITHM=UNDEFINED DEFINER=`root`@`127.0.0.1` SQL SECURITY DEFINER VIEW `v_format_repro` AS SELECT CASE WHEN 1 THEN REPLACE('a','a','b') END AS `结果`;";
+    const { state, emits, host } = mountEditor({ modelValue: source, tabId: "mysql-view" });
+    await waitForEditor(host);
+    const editorView = EditorView.findFromDOM(host.querySelector(".cm-editor") as HTMLElement)!;
+    editorView.dispatch({ selection: { anchor: 0, head: selectAll ? source.length : 0 } });
+
+    state.formatRequestId = requestId;
+    await vi.waitFor(() => expect(emits.at(-1)).toContain("\n"), WAIT);
+
+    expect(editorView.state.doc.toString()).toContain("REPLACE('a', 'a', 'b')");
+    expect(editorView.state.doc.toString()).toContain("AS `结果`");
+    if (selectAll) {
+      expect(editorView.state.selection.main.from).toBe(0);
+      expect(editorView.state.selection.main.to).toBe(editorView.state.doc.length);
+    }
+  });
 });

@@ -1934,6 +1934,17 @@ impl SnippetSyncClient {
         }
     }
 
+    fn gitlab_raw_file_url(&self, snippet_id: &str, reference: &str) -> Result<Url, String> {
+        let mut url = Url::parse(&self.snippet_url(Some(snippet_id))?).map_err(|e| e.to_string())?;
+        url.path_segments_mut().map_err(|_| "GitLab snippet URL cannot be a base URL".to_string())?.extend([
+            "files",
+            reference,
+            DEFAULT_SNIPPET_FILE_NAME,
+            "raw",
+        ]);
+        Ok(url)
+    }
+
     pub async fn test(&self) -> Result<(), String> {
         self.require_token()?;
         let url = match (self.config.provider, normalized_snippet_id(self.config.snippet_id.as_deref())) {
@@ -2092,20 +2103,19 @@ impl SnippetSyncClient {
                 .iter()
                 .find(|file| file.get("path").and_then(serde_json::Value::as_str) == Some(DEFAULT_SNIPPET_FILE_NAME))
                 .ok_or_else(|| format!("Snippet does not contain {DEFAULT_SNIPPET_FILE_NAME}"))?;
-            // Snippet repositories default to `main` on current instances but
-            // `master` on older ones; the per-file `raw_url` always carries the
-            // snippet's actual default branch, so prefer it over guessing.
-            let constructed_main = format!("{url}/files/main/{DEFAULT_SNIPPET_FILE_NAME}/raw");
-            let raw_url = file
+            // raw_url is a browser route and can use a different scheme or host.
+            // Read its ref, but send the token only to the configured instance API.
+            let reference = file
                 .get("raw_url")
                 .and_then(serde_json::Value::as_str)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| constructed_main.clone());
-            let response = self.request(Method::GET, &raw_url)?.send().await.map_err(|e| e.to_string())?;
-            if response.status() == StatusCode::NOT_FOUND && raw_url == constructed_main {
-                let master_url = format!("{url}/files/master/{DEFAULT_SNIPPET_FILE_NAME}/raw");
-                let response = self.request(Method::GET, &master_url)?.send().await.map_err(|e| e.to_string())?;
+                .and_then(|raw_url| gitlab_snippet_raw_ref(raw_url, snippet_id))
+                .unwrap_or_else(|| "main".to_string());
+            let raw_url = self.gitlab_raw_file_url(snippet_id, &reference)?;
+            let response = self.request(Method::GET, raw_url.as_str())?.send().await.map_err(|e| e.to_string())?;
+            if response.status() == StatusCode::NOT_FOUND && reference == "main" {
+                let master_url = self.gitlab_raw_file_url(snippet_id, "master")?;
+                let response =
+                    self.request(Method::GET, master_url.as_str())?.send().await.map_err(|e| e.to_string())?;
                 ensure_snippet_success(response.status(), "raw download")?;
                 return response.text().await.map_err(|e| e.to_string());
             }
@@ -3052,6 +3062,21 @@ fn required_snippet_passphrase(passphrase: Option<&str>) -> Result<&str, String>
 
 fn required_sync_passphrase(passphrase: Option<&str>) -> Result<&str, String> {
     normalized_passphrase(passphrase).ok_or_else(|| "A sync password is required for snippet sync.".to_string())
+}
+
+fn gitlab_snippet_raw_ref(raw_url: &str, snippet_id: &str) -> Option<String> {
+    let url = Url::parse(raw_url).ok()?;
+    let segments: Vec<_> = url.path_segments()?.collect();
+    let reference = match segments.as_slice() {
+        [.., "snippets", id, "raw", reference, DEFAULT_SNIPPET_FILE_NAME] if *id == snippet_id => *reference,
+        [.., "snippets", id, "files", reference, DEFAULT_SNIPPET_FILE_NAME, "raw"] if *id == snippet_id => *reference,
+        _ => return None,
+    };
+    percent_encoding::percent_decode_str(reference)
+        .decode_utf8()
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(|value| value.into_owned())
 }
 
 fn gitlab_instance_url(value: Option<&str>) -> Result<String, String> {
@@ -4500,6 +4525,56 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert!(requests[0].starts_with("GET /api/v4/snippets/42 HTTP/1.1"));
         assert!(requests[1].starts_with("GET /api/v4/snippets/42/files/master/dbx-sync.json/raw HTTP/1.1"));
+    }
+
+    #[test]
+    fn gitlab_raw_file_url_keeps_configured_https_instance() {
+        let client = SnippetSyncClient::new(SnippetSyncConfig {
+            provider: SnippetProvider::GitLab,
+            instance_url: Some("https://gitlab.example.com/gitlab".to_string()),
+            token: Some("test-token".to_string()),
+            snippet_id: Some("42".to_string()),
+            replace_legacy_snippet: false,
+        })
+        .unwrap();
+        assert_eq!(
+            client.gitlab_raw_file_url("42", "feature/sync").unwrap().as_str(),
+            "https://gitlab.example.com/gitlab/api/v4/snippets/42/files/feature%2Fsync/dbx-sync.json/raw"
+        );
+    }
+
+    #[tokio::test]
+    async fn gitlab_download_uses_instance_api_for_web_raw_urls() {
+        let storage = crate::persistence::test_storage::open(&temp_db_path("gitlab-web-raw-url")).await.unwrap();
+        let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
+        let encrypted = serde_json::to_string(&encrypt_snippet_snapshot(&snapshot, "password").unwrap()).unwrap();
+        for (raw_url, reference) in [
+            ("{SERVER_BASE}/-/snippets/42/raw/master/dbx-sync.json", "master"),
+            ("http://127.0.0.1:9/-/snippets/42/raw/custom/dbx-sync.json", "custom"),
+            ("{SERVER_BASE}/gitlab/-/snippets/42/raw/feature%2Fsync/dbx-sync.json", "feature%2Fsync"),
+            ("not-a-url", "main"),
+        ] {
+            let (base, server) = spawn_gitlab_server(vec![
+                serde_json::json!({"files": [{"path": "dbx-sync.json", "raw_url": raw_url}]}).to_string(),
+                encrypted.clone(),
+            ])
+            .await;
+            let client = SnippetSyncClient::new(SnippetSyncConfig {
+                provider: SnippetProvider::GitLab,
+                instance_url: Some(base.strip_suffix("/api/v4").unwrap().to_string()),
+                token: Some("test-token".to_string()),
+                snippet_id: Some("42".to_string()),
+                replace_legacy_snippet: false,
+            })
+            .unwrap();
+            let (restored, _) = client.get_snapshot(Some("password")).await.unwrap();
+            assert_eq!(restored.app_version, snapshot.app_version);
+            let requests = server.await.unwrap();
+            assert_eq!(requests.len(), 2);
+            assert!(requests[1]
+                .starts_with(&format!("GET /api/v4/snippets/42/files/{reference}/dbx-sync.json/raw HTTP/1.1")));
+            assert!(requests[1].to_ascii_lowercase().contains("private-token: test-token"));
+        }
     }
 
     #[tokio::test]

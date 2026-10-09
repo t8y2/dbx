@@ -5283,6 +5283,8 @@ async fn exec_tx_pg_statements(
     budget: &DbOperationBudget,
     cancel_context: Option<db::postgres::PostgresCancelContext>,
 ) -> Result<u64, QueryExecutionError> {
+    let statements =
+        statements.iter().map(|sql| db::postgres::encode_postgres_sql(client, sql)).collect::<Result<Vec<_>, _>>()?;
     let tx = tokio::time::timeout(budget.recycle_timeout, client.transaction())
         .await
         .map_err(|_| {

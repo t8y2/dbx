@@ -73,6 +73,15 @@ export function resolveDataGridPaginationTotal(options: { paginationTotalRowCoun
   return Math.min(total, options.maxRows);
 }
 
+/** A rewritten SQL page proves exhaustion only after a short (possibly empty) tail. */
+export function hasShortDataGridSqlPage(options: { rowCount: number; pageOffset?: number; pageLimit?: number; executedPageOffset?: number; executedPageLimit?: number }): boolean {
+  const offset = options.pageOffset ?? 0;
+  const lastOffset = options.executedPageOffset ?? offset;
+  const limit = options.executedPageLimit ?? options.pageLimit;
+  const lastRows = options.rowCount - (lastOffset - offset);
+  return limit !== undefined && limit > 0 && lastRows >= 0 && lastRows < limit;
+}
+
 export interface ReconcileDataGridExactTotalOptions {
   offset: number;
   rowCount: number;
@@ -195,4 +204,40 @@ export function dataGridLoadAllNextSegment(options: { loadedRowCount: number; re
   const totalRowCount = typeof options.totalRowCount === "number" && Number.isFinite(options.totalRowCount) && options.totalRowCount >= 0 ? Math.trunc(options.totalRowCount) : undefined;
   if (totalRowCount !== undefined && loadedRowCount >= totalRowCount) return null;
   return { offset: loadedRowCount, limit: totalRowCount !== undefined ? Math.min(requestedLimit, totalRowCount - loadedRowCount) : requestedLimit };
+}
+
+/**
+ * Whether an explicit "load all" entry point may issue an append request at
+ * all. Everything already known to be complete must short-circuit to the
+ * reveal-only path: re-requesting against an exhausted result made the grid
+ * append whatever the backend answered with, duplicating rows on engines
+ * whose cursor or pagination layer does not honor the requested offset
+ * (#11321: clicking load-all a second time doubled a fully loaded 10-row
+ * result). Two independent completion signals are gated:
+ * - `allRowsLoaded` — the grid's own "no more rows" marker, set when a chunk
+ *   came back short; must gate the run even when the total is unknown;
+ * - `localResultComplete` — a result fetched without a row limit already
+ *   holds every row the backend will return; paging it cannot yield more.
+ * `loadedRowCount >= exactTotal` covers totals learned after either marker.
+ *
+ * The marker is ambiguous, though: the load watcher and the non-loadAll
+ * append-completion path also set it when the result-row CAP is hit — and a
+ * capped result is not exhausted. Load-all is the only way to fetch the rest
+ * (#10752), so `resultRowCap` releases the marker when the run sits at or
+ * past the cap. Worst case for a genuinely exhausted capped result is one
+ * empty append before the loop terminates.
+ */
+export function canStartDataGridLoadAll(options: { hasMore?: boolean; loadedRowCount: number; pageSize: number; totalRowCount?: number; exactTotal?: number; allRowsLoaded: boolean; localResultComplete: boolean; resultRowCap?: number }): boolean {
+  const loadedRowCount = Number.isFinite(options.loadedRowCount) ? Math.max(0, Math.trunc(options.loadedRowCount)) : 0;
+  const resultRowCap = typeof options.resultRowCap === "number" && Number.isFinite(options.resultRowCap) && options.resultRowCap > 0 ? Math.trunc(options.resultRowCap) : undefined;
+  const atResultRowCap = resultRowCap !== undefined && loadedRowCount >= resultRowCap;
+  if ((options.allRowsLoaded && !atResultRowCap) || options.localResultComplete) return false;
+  if (typeof options.exactTotal === "number" && Number.isFinite(options.exactTotal) && options.exactTotal >= 0 && loadedRowCount >= options.exactTotal) return false;
+  return canFetchNextDataGridSegment({
+    hasMore: options.hasMore,
+    loadedRowCount: options.loadedRowCount,
+    pageSize: options.pageSize,
+    totalRowCount: options.totalRowCount,
+    allRowsLoaded: options.localResultComplete,
+  });
 }

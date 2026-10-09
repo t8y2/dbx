@@ -541,6 +541,8 @@ fn preview_object_kind_label(kind: &TransferObjectKind) -> &'static str {
         TransferObjectKind::Event => "Events",
         TransferObjectKind::Package => "Package specifications",
         TransferObjectKind::PackageBody => "Package bodies",
+        TransferObjectKind::Type => "Type specifications",
+        TransferObjectKind::TypeBody => "Type bodies",
         TransferObjectKind::Synonym => "Private synonyms",
         TransferObjectKind::PublicSynonym => "Public synonyms",
         TransferObjectKind::DbLink => "Private database links",

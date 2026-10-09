@@ -207,7 +207,7 @@ async fn preview_unique(
                     return Err("The backing index identity is ambiguous.".into());
                 }
                 evidence.push(serde_json::to_string(&result.rows).map_err(|error| error.to_string())?);
-                if oceanbase && (old.definition.name != *index_name || text(row, 1) != "UNIQUE") {
+                if oceanbase && (old.definition.name != *index_name || text(row, 1)? != "UNIQUE") {
                     return Err("The OceanBase UNIQUE/index mapping cannot be confirmed; no DDL was executed.".into());
                 }
                 if oceanbase || change.drop_previous_index {
@@ -286,9 +286,9 @@ async fn preview_unique(
             for row in &indexes.rows {
                 let index_owner = text(row, 0)?;
                 let index_name = text(row, 1)?;
-                if text(row, 2) != "NORMAL"
-                    || text(row, 4) != "VALID"
-                    || (desired.deferrable && text(row, 3) != "NONUNIQUE")
+                if text(row, 2)? != "NORMAL"
+                    || text(row, 4)? != "VALID"
+                    || (desired.deferrable && text(row, 3)? != "NONUNIQUE")
                 {
                     continue;
                 }

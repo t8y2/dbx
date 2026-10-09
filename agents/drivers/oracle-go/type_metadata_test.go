@@ -16,7 +16,8 @@ func TestTypeSourceUsesExactIdentityAndRetainsBodyLines(t *testing.T) {
 		queryContains: "FROM ALL_SOURCE", args: []driver.Value{owner, name, "TYPE BODY"},
 		rows: [][]driver.Value{{lines[0]}, {lines[1]}, {lines[2]}},
 	}})
-	s := &server{db: db}
+	s := newServer()
+	s.db = db
 	value, err := s.getObjectSource(owner, name, "TYPE_BODY")
 	if err != nil {
 		t.Fatal(err)
@@ -39,7 +40,8 @@ func TestTypeSourceFallsBackToExactDDLAndRejectsMissingSource(t *testing.T) {
 			db, calls := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
 				{queryContains: "FROM ALL_SOURCE", args: []driver.Value{"Owner", "Mixed", "TYPE"}}, ddl,
 			})
-			s := &server{db: db}
+			s := newServer()
+			s.db = db
 			value, err := s.getObjectSource("Owner", "Mixed", "TYPE")
 			if missing {
 				if err == nil || value != nil {

@@ -122,7 +122,7 @@ async fn require_engine(state: &AppState, connection_id: &str) -> Result<Engine,
     let configs = state.configs.read().await;
     match configs.get(connection_id).map(|config| config.db_type) {
         Some(DatabaseType::Oracle) => Ok(Engine::Oracle),
-        Some(DatabaseType::OceanBaseOracle) => Ok(Engine::OceanBaseOracle),
+        Some(DatabaseType::OceanbaseOracle) => Ok(Engine::OceanBaseOracle),
         _ => Err("This primary-key editor requires Oracle or OceanBase Oracle.".into()),
     }
 }

@@ -201,7 +201,8 @@ pub async fn oracle_user_admin_core(
     let Some(PoolKind::Agent(client)) = pool else {
         return Err("Oracle-family Agent required".into());
     };
-    let mut client = lock_metadata_mutex_with_timeout(&client, METADATA_POOL_ACQUIRE_TIMEOUT).await?;
+    let mut client = tokio::time::timeout(METADATA_POOL_ACQUIRE_TIMEOUT, client.lock())
+        .await.map_err(|_| crate::query::METADATA_POOL_BUSY_ERROR.to_string())?;
     let timeout = agent_metadata_timeout(Some(&config));
     let version = client
         .connection_info(timeout)

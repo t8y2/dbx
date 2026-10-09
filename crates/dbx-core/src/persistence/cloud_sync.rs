@@ -4542,7 +4542,7 @@ mod tests {
 
     #[tokio::test]
     async fn gitlab_download_uses_instance_api_for_web_raw_urls() {
-        let storage = Storage::open(&temp_db_path("gitlab-web-raw-url")).await.unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_db_path("gitlab-web-raw-url")).await.unwrap();
         let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
         let encrypted = serde_json::to_string(&encrypt_snippet_snapshot(&snapshot, "password").unwrap()).unwrap();
         for (raw_url, reference) in [

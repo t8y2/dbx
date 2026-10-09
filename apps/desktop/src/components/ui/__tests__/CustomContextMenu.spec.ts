@@ -20,6 +20,91 @@ afterEach(() => {
 });
 
 describe("CustomContextMenu lifecycle", () => {
+  it("ignores a pending refresh after the menu has been closed", async () => {
+    let complete!: () => void;
+    const refresh = vi.fn(() => [{ label: "Updated" }]);
+    const close = vi.fn();
+    const root = defineComponent({
+      setup: () => () =>
+        h(
+          CustomContextMenu,
+          {
+            onClose: close,
+            items: [
+              {
+                label: "Switch",
+                sidebarActionId: "menu.layout",
+                closeOnSelect: false,
+                refreshItems: refresh,
+                action: () =>
+                  new Promise<void>((resolve) => {
+                    complete = resolve;
+                  }),
+              },
+            ],
+          },
+          { default: ({ onContextMenu }: { onContextMenu: (event: MouseEvent) => void }) => h("div", { id: "pending-refresh", onContextmenu: onContextMenu }) },
+        ),
+    });
+    const host = document.createElement("div");
+    document.body.append(host);
+    mountedContainers.push(host);
+    const app = createApp(root);
+    app.mount(host);
+    host.querySelector("#pending-refresh")?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+    await nextTick();
+    document.querySelector<HTMLButtonElement>('[data-menu-action="menu.layout"]')?.click();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await nextTick();
+    complete();
+    await Promise.resolve();
+    await nextTick();
+    expect(close).toHaveBeenCalledOnce();
+    expect(refresh).not.toHaveBeenCalled();
+    expect(document.querySelector("[data-dbx-context-menu]")).toBeNull();
+    app.unmount();
+  });
+
+  it("keeps a height-constrained main menu open on its own scroll events", async () => {
+    const close = vi.fn();
+    const items = Array.from({ length: 50 }, (_, i) => ({ label: `Action ${i}` }));
+    const root = defineComponent({ setup: () => () => h(CustomContextMenu, { items, onClose: close }, { default: ({ onContextMenu }: { onContextMenu: (event: MouseEvent) => void }) => h("div", { id: "tall-menu", onContextmenu: onContextMenu }) }) });
+    const host = document.createElement("div");
+    document.body.append(host);
+    mountedContainers.push(host);
+    const app = createApp(root);
+    app.mount(host);
+    host.querySelector("#tall-menu")?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+    await nextTick();
+    const menu = document.querySelector<HTMLElement>("[data-dbx-context-menu]")!;
+    expect(menu.style.maxHeight).toBe("calc(100vh - 16px)");
+    menu.dispatchEvent(new Event("scroll", { bubbles: true }));
+    await nextTick();
+    expect(close).not.toHaveBeenCalled();
+    expect(menu.querySelectorAll("button")).toHaveLength(50);
+    app.unmount();
+  });
+  it("opens submenus on click without requiring a hover", async () => {
+    const action = vi.fn();
+    const root = defineComponent({
+      setup: () => () => h(CustomContextMenu, { items: [{ label: "Data tools", children: [{ label: "Export", action }] }] }, { default: ({ onContextMenu }: { onContextMenu: (event: MouseEvent) => void }) => h("div", { id: "click-submenu", onContextmenu: onContextMenu }) }),
+    });
+    const container = document.createElement("div");
+    mountedContainers.push(container);
+    document.body.append(container);
+    const app = createApp(root);
+    app.mount(container);
+    container.querySelector("#click-submenu")?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+    await nextTick();
+    const trigger = Array.from(document.body.querySelectorAll("button")).find((button) => button.textContent === "Data tools");
+    trigger?.click();
+    await nextTick();
+    const child = Array.from(document.body.querySelectorAll("button")).find((button) => button.textContent === "Export");
+    expect(child).toBeTruthy();
+    child?.click();
+    expect(action).toHaveBeenCalledOnce();
+    app.unmount();
+  });
   it("exposes the open state and closes only the active target", async () => {
     const firstOpen = vi.fn();
     const firstClose = vi.fn();

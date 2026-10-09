@@ -14,6 +14,8 @@ const mocks = vi.hoisted(() => ({
   openTable: vi.fn(),
   locateTable: vi.fn(),
   viewMode: "list" as ObjectBrowserViewMode,
+  menuLayout: "grouped" as "grouped" | "full",
+  pinnedActions: [] as string[],
 }));
 
 vi.mock("@/lib/backend/api", () => ({
@@ -37,6 +39,8 @@ vi.mock("@/stores/settingsStore", () => ({
       objectBrowserViewMode: mocks.viewMode,
       objectBrowserShowCheckbox: false,
       sidebarActivation: "double",
+      sidebarMenuLayout: mocks.menuLayout,
+      sidebarMenuPinnedActions: { table: mocks.pinnedActions },
     },
   }),
 }));
@@ -81,6 +85,8 @@ beforeEach(() => {
   document.head.append(gridStyle);
   vi.clearAllMocks();
   mocks.viewMode = "list";
+  mocks.menuLayout = "grouped";
+  mocks.pinnedActions = [];
   connection.db_type = "postgres";
   mocks.listObjects.mockResolvedValue([
     { name: "orders", object_type: "TABLE", schema: "row_schema" },
@@ -211,7 +217,8 @@ describe.each(["list", "grid"] as const)("ObjectBrowser locate in sidebar (%s)",
     expect(mocks.openTable).not.toHaveBeenCalled();
   });
 
-  it("locates only the context row while preserving the batch selection", async () => {
+  it.each(["grouped", "full"] as const)("locates only the context row while preserving the batch selection in %s menus", async (layout) => {
+    mocks.menuLayout = layout;
     const host = await mountBrowser();
     for (const name of ["orders", "customers"]) rowFor(host, name).dispatchEvent(new MouseEvent("click", { bubbles: true, ctrlKey: true }));
     await nextTick();
@@ -222,10 +229,22 @@ describe.each(["list", "grid"] as const)("ObjectBrowser locate in sidebar (%s)",
     expect(mocks.locateTable).toHaveBeenCalledExactlyOnceWith({ tableName: "orders", tableType: "TABLE", schema: "row_schema", catalog: "external_catalog" });
     for (const name of ["orders", "customers"]) expect(rowFor(host, name).classList.contains("bg-accent")).toBe(true);
     await openMenu(host, "orders");
-    menuButton("common.more").dispatchEvent(new MouseEvent("mouseenter"));
+    menuButton(layout === "full" ? "common.more" : "sidebarMenu.groups.danger").dispatchEvent(new MouseEvent("mouseenter"));
     await nextTick();
     menuButton("contextMenu.batchDrop");
     menuButton("contextMenu.batchEmpty");
+    expect(mocks.openTable).not.toHaveBeenCalled();
+  });
+
+  it("uses the saved table preferences to show export directly in the browser", async () => {
+    mocks.pinnedActions = ["contextMenu.exportData"];
+    const host = await mountBrowser();
+    await openMenu(host, "orders");
+    menuButton("contextMenu.exportData").click();
+    await nextTick();
+    menuButton("CSV");
+    menuButton("JSON");
+    menuButton("XLSX");
     expect(mocks.openTable).not.toHaveBeenCalled();
   });
 

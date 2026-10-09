@@ -2566,15 +2566,16 @@ function copyNameMenuItem(): ContextMenuItem {
   const connectionName = node.connectionId ? connectionStore.getConfig(node.connectionId)?.name || "" : "";
   if (copyDisplayPathForTreeNode(node, connectionName)) {
     return {
+      sidebarActionId: "contextMenu.copyName",
       label: t("contextMenu.copyName"),
       icon: Copy,
       children: [
-        { label: t("contextMenu.name"), action: copyName, icon: Copy },
-        { label: t("contextMenu.fullPath"), action: copyDisplayPath, icon: Copy },
+        { sidebarActionId: "contextMenu.name", label: t("contextMenu.name"), action: copyName, icon: Copy },
+        { sidebarActionId: "contextMenu.fullPath", label: t("contextMenu.fullPath"), action: copyDisplayPath, icon: Copy },
       ],
     };
   }
-  return { label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value };
+  return { sidebarActionId: "contextMenu.copyName", label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value };
 }
 
 const CONNECTION_URL_COPY_LABEL_KEYS: Record<ConnectionUrlCopyFormat, string> = {
@@ -2603,6 +2604,7 @@ function connectionUrlCopyMenuItem(databaseOverride?: string): ContextMenuItem |
   const formats = connectionUrlCopyFormats(config);
   if (formats.length === 0) return null;
   return {
+    sidebarActionId: "contextMenu.copyConnectionInfo",
     label: t("contextMenu.copyConnectionInfo"),
     icon: Link2,
     children: formats.map((format) => ({
@@ -5755,6 +5757,7 @@ function addToAiMenuItem(node: TreeNode): ContextMenuItem {
   const tables = node.type === "table" ? selectedAiTableTargets() : [];
   const count = tables.length;
   return {
+    sidebarActionId: "contextMenu.addToAi",
     label: count > 1 ? t("contextMenu.addToAiMultiple", { count }) : t("contextMenu.addToAi"),
     action: () => emit("add-to-ai", count > 1 ? tables : node),
     icon: Sparkles,
@@ -5769,10 +5772,11 @@ function exportDataSubmenu(includeSqlInsert = true): ContextMenuItem {
   ];
   if (includeSqlInsert) {
     children.push({ label: "SQL INSERT", action: () => exportData("sql", "source") });
-    children.push({ label: t("contextMenu.standardSqlInsert"), action: () => exportData("sql", "standard") });
+    children.push({ sidebarActionId: "contextMenu.standardSqlInsert", label: t("contextMenu.standardSqlInsert"), action: () => exportData("sql", "standard") });
   }
   children.push({ label: "XLSX", action: () => exportDataXlsx() });
   return {
+    sidebarActionId: "contextMenu.exportData",
     label: count > 1 ? t("contextMenu.exportDataMultiple", { count }) : t("contextMenu.exportData"),
     icon: Upload,
     children,
@@ -5781,17 +5785,19 @@ function exportDataSubmenu(includeSqlInsert = true): ContextMenuItem {
 
 function copyStructureAsSubmenu(): ContextMenuItem {
   return {
+    sidebarActionId: "contextMenu.copyStructureAs",
     label: t("contextMenu.copyStructureAs"),
     icon: Clipboard,
     children: [
-      { label: t("contextMenu.copyStructureAsTsv"), action: () => copyStructureAs("tsv") },
-      { label: t("contextMenu.copyStructureAsMarkdown"), action: () => copyStructureAs("markdown") },
+      { sidebarActionId: "contextMenu.copyStructureAsTsv", label: t("contextMenu.copyStructureAsTsv"), action: () => copyStructureAs("tsv") },
+      { sidebarActionId: "contextMenu.copyStructureAsMarkdown", label: t("contextMenu.copyStructureAsMarkdown"), action: () => copyStructureAs("markdown") },
     ],
   };
 }
 
 function moreActionsSubmenu(children: ContextMenuItem[]): ContextMenuItem {
   return {
+    sidebarActionId: "common.more",
     label: t("common.more"),
     icon: ListTree,
     variant: "destructive",
@@ -5837,6 +5843,7 @@ function savedSqlHistorySubmenu(): ContextMenuItem | null {
   if (!scope) return null;
   const files = rankSavedSqlHistory(savedSqlStore.allFiles, { ...scope, limit: 10 });
   return {
+    sidebarActionId: "contextMenu.sqlHistory",
     label: t("contextMenu.sqlHistory"),
     icon: ScrollText,
     children:
@@ -5848,6 +5855,7 @@ function savedSqlHistorySubmenu(): ContextMenuItem | null {
           }))
         : [
             {
+              sidebarActionId: "contextMenu.noSqlHistory",
               label: t("contextMenu.noSqlHistory"),
               disabled: true,
             },
@@ -5875,59 +5883,60 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
   // 2. Connection
   if (node.type === "connection") {
     if (isConnecting.value) {
-      items.push({ label: t("connection.cancelConnecting"), action: cancelConnectionAttempt, icon: X });
+      items.push({ sidebarActionId: "connection.cancelConnecting", label: t("connection.cancelConnecting"), action: cancelConnectionAttempt, icon: X });
     } else if (canDisconnectConnection()) {
-      items.push({ label: connectionDisconnectMenuLabel(), action: disconnectConnection, icon: Unplug, shortcut: shortcutDisconnectConnection.value });
+      items.push({ sidebarActionId: "contextMenu.disconnectConnection", label: connectionDisconnectMenuLabel(), action: disconnectConnection, icon: Unplug, shortcut: shortcutDisconnectConnection.value });
       // save_password=false 且本次运行期已输入密码：提供"断开并忘记本次密码"，
       // 清除会话凭据后下次连接需重新输入。
       if (canForgetSessionCredential()) {
         items.push({
+          sidebarActionId: "connection.disconnectAndForgetPassword",
           label: t("connection.disconnectAndForgetPassword"),
           action: disconnectAndForgetConnectionPassword,
           icon: Unplug,
         });
       }
     } else if (!isConnected.value) {
-      items.push({ label: t("contextMenu.openConnection"), action: toggle, icon: Plug });
+      items.push({ sidebarActionId: "contextMenu.openConnection", label: t("contextMenu.openConnection"), action: toggle, icon: Plug });
     }
     items.push({ label: "", separator: true });
-    items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    items.push({ sidebarActionId: "contextMenu.copyName", label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     const connectionUrlCopyMenu = connectionUrlCopyMenuItem();
     if (connectionUrlCopyMenu) items.push(connectionUrlCopyMenu);
     items.push({ label: "", separator: true });
     const supportsQueryActions = supportsConnectionQueryActions(currentDatabaseType());
     const supportsAiContext = supportsAiAssistantContext(currentDatabaseType());
     if (supportsQueryActions) {
-      items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      items.push({ sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
       if (supportsAiContext) {
         items.push(addToAiMenuItem(node));
       }
     }
     if (canCreateMeilisearchIndex.value) {
-      items.push({ label: t("meilisearch.createIndex"), action: openCreateMeilisearchIndexDialog, icon: Plus });
+      items.push({ sidebarActionId: "meilisearch.createIndex", label: t("meilisearch.createIndex"), action: openCreateMeilisearchIndexDialog, icon: Plus });
     }
     const connectionWorkspace = node.connectionId ? driverProfileDatabaseWorkspace(connectionStore.getConfig(node.connectionId)?.driver_profile) : undefined;
     if (connectionWorkspace?.entryScopes.includes("connection")) {
       items.push({ label: t(connectionWorkspace.menuLabelKey), action: openProfileConnectionWorkspace, icon: GitBranch });
     }
     if (canOpenConnectionDatabaseBrowser.value) {
-      items.push({ label: t("contextMenu.openDatabaseBrowser"), action: openDatabaseBrowser, icon: TableProperties });
+      items.push({ sidebarActionId: "contextMenu.openDatabaseBrowser", label: t("contextMenu.openDatabaseBrowser"), action: openDatabaseBrowser, icon: TableProperties });
     }
     if (currentDatabaseType() === "redis") {
-      items.push({ label: t("contextMenu.instanceInfo"), action: openRedisInstanceInfo, icon: Info });
+      items.push({ sidebarActionId: "contextMenu.instanceInfo", label: t("contextMenu.instanceInfo"), action: openRedisInstanceInfo, icon: Info });
     }
     if (supportsQueryActions) {
       const sqlHistoryMenu = savedSqlHistorySubmenu();
       if (sqlHistoryMenu) items.push(sqlHistoryMenu);
     }
     if (node.connectionId && connectionSupportsDatabaseUserAdmin(connectionStore.getConfig(node.connectionId))) {
-      items.push({ label: t("contextMenu.userAdmin"), action: openUserAdmin, icon: UsersRound });
+      items.push({ sidebarActionId: "contextMenu.userAdmin", label: t("contextMenu.userAdmin"), action: openUserAdmin, icon: UsersRound });
     }
     if (node.connectionId && connectionSupportsProcessList(connectionStore.getConfig(node.connectionId))) {
-      items.push({ label: t(currentDatabaseType() === "xugu" ? "processList.transactionTitle" : "contextMenu.processList"), action: openProcessList, icon: Activity });
+      items.push({ sidebarActionId: "contextMenu.processList", label: t(currentDatabaseType() === "xugu" ? "processList.transactionTitle" : "contextMenu.processList"), action: openProcessList, icon: Activity });
     }
     if (currentDatabaseType() === "sqlserver") {
-      items.push({ label: t("contextMenu.sqlServerTrace"), action: openSqlServerActivityTrace, icon: Activity });
+      items.push({ sidebarActionId: "contextMenu.sqlServerTrace", label: t("contextMenu.sqlServerTrace"), action: openSqlServerActivityTrace, icon: Activity });
     }
     if (
       node.connectionId &&
@@ -5937,27 +5946,28 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
         connectionSupportsServerDashboard(connectionStore.getConfig(node.connectionId)) ||
         connectionSupportsPgServerDashboard(connectionStore.getConfig(node.connectionId)))
     ) {
-      items.push({ label: t("contextMenu.serverDashboard"), action: openServerDashboard, icon: Gauge });
+      items.push({ sidebarActionId: "contextMenu.serverDashboard", label: t("contextMenu.serverDashboard"), action: openServerDashboard, icon: Gauge });
     }
     if (currentDatabaseType() === "dameng") {
-      items.push({ label: t("contextMenu.damengUsers"), action: openDamengUsers, icon: UsersRound });
-      items.push({ label: t("contextMenu.damengRoles"), action: openDamengRoles, icon: ShieldCheck });
-      items.push({ label: t("contextMenu.damengJobAdmin"), action: openDamengJobAdmin, icon: CalendarClock });
+      items.push({ sidebarActionId: "contextMenu.damengUsers", label: t("contextMenu.damengUsers"), action: openDamengUsers, icon: UsersRound });
+      items.push({ sidebarActionId: "contextMenu.damengRoles", label: t("contextMenu.damengRoles"), action: openDamengRoles, icon: ShieldCheck });
+      items.push({ sidebarActionId: "contextMenu.damengJobAdmin", label: t("contextMenu.damengJobAdmin"), action: openDamengJobAdmin, icon: CalendarClock });
     }
     if (canCopyFinalProxyPort.value) {
-      items.push({ label: t("contextMenu.copyFinalProxyPort"), action: copyFinalProxyPort, icon: Network });
+      items.push({ sidebarActionId: "contextMenu.copyFinalProxyPort", label: t("contextMenu.copyFinalProxyPort"), action: copyFinalProxyPort, icon: Network });
     }
     if (canOpenSqlFileExecution.value) {
-      items.push({ label: t("sqlFile.title"), action: openSqlFileExecution, icon: FileCode });
+      items.push({ sidebarActionId: "sqlFile.title", label: t("sqlFile.title"), action: openSqlFileExecution, icon: FileCode });
     }
     if (canExportAllDatabases.value) {
-      items.push({ label: t("contextMenu.exportAllDatabases"), action: openAllDatabasesExport, icon: Upload });
+      items.push({ sidebarActionId: "contextMenu.exportAllDatabases", label: t("contextMenu.exportAllDatabases"), action: openAllDatabasesExport, icon: Upload });
     }
     if (canOpenScheduledBackups.value) {
-      items.push({ label: t("databaseBackup.title"), action: openScheduledBackups, icon: CalendarClock });
+      items.push({ sidebarActionId: "databaseBackup.title", label: t("databaseBackup.title"), action: openScheduledBackups, icon: CalendarClock });
     }
     if (canCreateDatabase.value) {
       items.push({
+        sidebarActionId: "contextMenu.createDatabase",
         label: connectionNamespaceCreationLabel(),
         action: openConnectionNamespaceCreation,
         icon: Plus,
@@ -5965,6 +5975,7 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
     }
     if (canCreateNacosNamespace.value) {
       items.push({
+        sidebarActionId: "nacos.createNamespace",
         label: t("nacos.createNamespace"),
         action: openCreateNacosNamespaceDialog,
         icon: FolderPlus,
@@ -5984,15 +5995,16 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
       }));
       if (!allMoveTargetsInGroup(null)) {
         groupChildren.push({ label: "", separator: true });
-        groupChildren.push({ label: t("connectionGroup.ungrouped"), action: () => moveToGroup(null) });
+        groupChildren.push({ sidebarActionId: "connectionGroup.ungrouped", label: t("connectionGroup.ungrouped"), action: () => moveToGroup(null) });
       }
       groupChildren.push({ label: "", separator: true });
-      groupChildren.push({ label: t("connectionGroup.newGroup"), action: moveToNewGroup, icon: FolderPlus });
-      items.push({ label: t("connectionGroup.moveToGroup"), icon: FolderInput, children: groupChildren });
+      groupChildren.push({ sidebarActionId: "connectionGroup.newGroup", label: t("connectionGroup.newGroup"), action: moveToNewGroup, icon: FolderPlus });
+      items.push({ sidebarActionId: "connectionGroup.moveToGroup", label: t("connectionGroup.moveToGroup"), icon: FolderInput, children: groupChildren });
     } else {
-      items.push({ label: t("connectionGroup.moveToNewGroup"), action: moveToNewGroup, icon: FolderPlus });
+      items.push({ sidebarActionId: "connectionGroup.moveToNewGroup", label: t("connectionGroup.moveToNewGroup"), action: moveToNewGroup, icon: FolderPlus });
     }
     items.push({
+      sidebarActionId: "contextMenu.refreshChildren",
       label: t("contextMenu.refreshChildren"),
       action: refresh,
       icon: RefreshCw,
@@ -6005,6 +6017,9 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
     });
     for (const entry of visibleFilterMenu) {
       items.push({
+        // Oracle's root namespace filter uses schemas, but shares the primary
+        // visible-object filter's preference and ordering with other engines.
+        sidebarActionId: entry.target === "visible-databases" ? "contextMenu.configureVisibleObjects" : "visibleSchemas.title",
         label: t(entry.label === "schemas" ? "visibleSchemas.title" : "contextMenu.configureVisibleObjects"),
         action: entry.target === "visible-schemas" ? openVisibleSchemasDialog : openVisibleDatabasesDialog,
         icon: ListFilter,
@@ -6012,14 +6027,16 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
     }
     if (currentDatabaseType() === "nacos") {
       items.push({
+        sidebarActionId: "nacos.nacosVisibleNamespacesTitle",
         label: t("nacos.nacosVisibleNamespacesTitle"),
         action: openVisibleNacosNamespacesDialog,
         icon: ListFilter,
       });
     }
-    items.push({ label: t("contextMenu.editConnection"), action: editConnection, icon: Pencil, shortcut: shortcutEditConnection.value });
+    items.push({ sidebarActionId: "contextMenu.editConnection", label: t("contextMenu.editConnection"), action: editConnection, icon: Pencil, shortcut: shortcutEditConnection.value });
     if (revealConnectionFilePath.value) {
       items.push({
+        sidebarActionId: "contextMenu.revealDatabaseFile",
         label: t("contextMenu.revealDatabaseFile"),
         action: revealDatabaseFile,
         icon: FolderOpen,
@@ -6029,21 +6046,24 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
       const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
       const usesSsh = (config?.transport_layers || []).some((layer) => layer.enabled !== false && layer.type === "ssh");
       items.push({
+        sidebarActionId: "contextMenu.backupSqliteDatabase",
         label: t("contextMenu.backupSqliteDatabase"),
         action: backupSqliteDatabase,
         icon: HardDriveDownload,
       });
       if (usesSsh) {
         items.push({
+          sidebarActionId: "contextMenu.restoreSqliteDatabase",
           label: t("contextMenu.restoreSqliteDatabase"),
           action: restoreSqliteDatabase,
           icon: HardDriveDownload,
         });
       }
     }
-    items.push({ label: connectionDuplicateMenuLabel(), action: duplicateConnection, icon: CopyPlus });
+    items.push({ sidebarActionId: "contextMenu.duplicateConnection", label: connectionDuplicateMenuLabel(), action: duplicateConnection, icon: CopyPlus });
     items.push({ label: "", separator: true });
     items.push({
+      sidebarActionId: "contextMenu.deleteConnection",
       label: connectionDeleteMenuLabel(),
       action: deleteConnection,
       icon: Trash2,
@@ -6097,9 +6117,10 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   // 4. Database / Schema
   if (node.type === "database" || node.type === "schema") {
     if (isXuguSyntheticTreeNode(currentDatabaseType(), node.type, node.schema)) {
-      items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+      items.push({ sidebarActionId: "contextMenu.copyName", label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
       items.push({ label: "", separator: true });
       items.push({
+        sidebarActionId: "contextMenu.refreshChildren",
         label: t("contextMenu.refreshChildren"),
         action: refresh,
         icon: RefreshCw,
@@ -6108,12 +6129,13 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       return true;
     }
     if (currentDatabaseType() === "hbase") {
-      items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+      items.push({ sidebarActionId: "contextMenu.copyName", label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
       if (canCreateTable.value) {
         items.push({ label: "", separator: true });
-        items.push({ label: t("contextMenu.createTable"), action: createTable, icon: Plus });
+        items.push({ sidebarActionId: "contextMenu.createTable", label: t("contextMenu.createTable"), action: createTable, icon: Plus });
       }
       items.push({
+        sidebarActionId: "contextMenu.refreshChildren",
         label: t("contextMenu.refreshChildren"),
         action: refresh,
         icon: RefreshCw,
@@ -6122,33 +6144,33 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       return true;
     }
     if (["neo4j", "nebula"].includes(currentDatabaseType() || "") && node.type === "database") {
-      if (canCloseDatabaseConnection.value) items.push({ label: t("contextMenu.closeDatabaseConnection"), action: closeDatabaseConnection, icon: Unplug });
+      if (canCloseDatabaseConnection.value) items.push({ sidebarActionId: "contextMenu.closeDatabaseConnection", label: t("contextMenu.closeDatabaseConnection"), action: closeDatabaseConnection, icon: Unplug });
       items.push(copyNameMenuItem());
       items.push({ label: "", separator: true });
-      if (canOpenObjectBrowser.value) items.push({ label: t("contextMenu.openObjectBrowser"), action: openObjectBrowser, icon: TableProperties });
-      items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      if (canOpenObjectBrowser.value) items.push({ sidebarActionId: "contextMenu.openObjectBrowser", label: t("contextMenu.openObjectBrowser"), action: openObjectBrowser, icon: TableProperties });
+      items.push({ sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
       if (supportsAiAssistantContext(currentDatabaseType())) items.push(addToAiMenuItem(node));
       const sqlHistoryMenu = savedSqlHistorySubmenu();
       if (sqlHistoryMenu) items.push(sqlHistoryMenu);
       items.push({ label: isNodeDefaultDatabase.value ? t("contextMenu.clearDefaultDatabase") : t("contextMenu.setDefaultDatabase"), action: isNodeDefaultDatabase.value ? clearNodeDefaultDatabase : setNodeAsDefaultDatabase, icon: Database });
-      if (canOpenSqlFileExecution.value) items.push({ label: t("sqlFile.title"), action: openSqlFileExecution, icon: FileCode });
+      if (canOpenSqlFileExecution.value) items.push({ sidebarActionId: "sqlFile.title", label: t("sqlFile.title"), action: openSqlFileExecution, icon: FileCode });
       items.push({ label: "", separator: true });
-      items.push({ label: t("contextMenu.refreshChildren"), action: refresh, icon: RefreshCw, shortcut: shortcutRefresh });
+      items.push({ sidebarActionId: "contextMenu.refreshChildren", label: t("contextMenu.refreshChildren"), action: refresh, icon: RefreshCw, shortcut: shortcutRefresh });
       return true;
     }
     if (canCloseDatabaseConnection.value) {
       items.unshift({ label: "", separator: true });
-      items.unshift({ label: t("contextMenu.closeDatabaseConnection"), action: closeDatabaseConnection, icon: Unplug });
+      items.unshift({ sidebarActionId: "contextMenu.closeDatabaseConnection", label: t("contextMenu.closeDatabaseConnection"), action: closeDatabaseConnection, icon: Unplug });
     }
     items.push(copyNameMenuItem());
     const databaseUrlCopyMenu = connectionUrlCopyMenuItem(node.database || undefined);
     if (databaseUrlCopyMenu) items.push(databaseUrlCopyMenu);
     items.push({ label: "", separator: true });
     if (canOpenObjectBrowser.value) {
-      items.push({ label: t("contextMenu.openObjectBrowser"), action: openObjectBrowser, icon: TableProperties });
+      items.push({ sidebarActionId: "contextMenu.openObjectBrowser", label: t("contextMenu.openObjectBrowser"), action: openObjectBrowser, icon: TableProperties });
     }
     if (supportsConnectionQueryActions(currentDatabaseType())) {
-      items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      items.push({ sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
       if (node.type === "database" && supportsAiAssistantContext(currentDatabaseType())) {
         items.push(addToAiMenuItem(node));
       }
@@ -6161,23 +6183,24 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     }
     if (node.type === "database" && currentDatabaseType() !== "cloudflare-d1") {
       if (!isNodeDefaultDatabase.value) {
-        items.push({ label: t("contextMenu.setDefaultDatabase"), action: setNodeAsDefaultDatabase, icon: Database });
+        items.push({ sidebarActionId: "contextMenu.setDefaultDatabase", label: t("contextMenu.setDefaultDatabase"), action: setNodeAsDefaultDatabase, icon: Database });
       } else {
-        items.push({ label: t("contextMenu.clearDefaultDatabase"), action: clearNodeDefaultDatabase, icon: Database });
+        items.push({ sidebarActionId: "contextMenu.clearDefaultDatabase", label: t("contextMenu.clearDefaultDatabase"), action: clearNodeDefaultDatabase, icon: Database });
       }
     }
     if (node.type === "schema") {
       if (!isNodeDefaultSchema.value) {
-        items.push({ label: t("contextMenu.setDefaultSchema"), action: setNodeAsDefaultSchema, icon: Database });
+        items.push({ sidebarActionId: "contextMenu.setDefaultSchema", label: t("contextMenu.setDefaultSchema"), action: setNodeAsDefaultSchema, icon: Database });
       } else {
-        items.push({ label: t("contextMenu.clearDefaultSchema"), action: clearNodeDefaultSchema, icon: Database });
+        items.push({ sidebarActionId: "contextMenu.clearDefaultSchema", label: t("contextMenu.clearDefaultSchema"), action: clearNodeDefaultSchema, icon: Database });
       }
     }
     if (canEditDatabaseProperties.value) {
-      items.push({ label: t("contextMenu.editDatabaseProperties"), action: openEditDatabasePropertiesDialog, icon: SquarePen });
+      items.push({ sidebarActionId: "contextMenu.editDatabaseProperties", label: t("contextMenu.editDatabaseProperties"), action: openEditDatabasePropertiesDialog, icon: SquarePen });
     }
     if (canRenameDatabase.value) {
       items.push({
+        sidebarActionId: "contextMenu.renameDatabase",
         label: t("contextMenu.renameDatabase"),
         action: openRenameDatabaseDialog,
         icon: Pencil,
@@ -6185,28 +6208,29 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       });
     }
     if (canCreateTable.value) {
-      items.push({ label: t("contextMenu.createTable"), action: createTable, icon: Plus });
+      items.push({ sidebarActionId: "contextMenu.createTable", label: t("contextMenu.createTable"), action: createTable, icon: Plus });
     }
     if (canOpenTableImport.value) {
-      items.push({ label: t("contextMenu.importData"), action: openTableImport, icon: Download });
+      items.push({ sidebarActionId: "contextMenu.importData", label: t("contextMenu.importData"), action: openTableImport, icon: Download });
     }
     if (canCreateSchema.value) {
-      items.push({ label: t("contextMenu.createSchema"), action: openCreateSchemaDialog, icon: Plus });
+      items.push({ sidebarActionId: "contextMenu.createSchema", label: t("contextMenu.createSchema"), action: openCreateSchemaDialog, icon: Plus });
     }
     if (canEditSchemaComment.value) {
-      items.push({ label: t("contextMenu.editSchemaComment"), action: openEditSchemaCommentDialog, icon: SquarePen });
+      items.push({ sidebarActionId: "contextMenu.editSchemaComment", label: t("contextMenu.editSchemaComment"), action: openEditSchemaCommentDialog, icon: SquarePen });
     }
     if (canOpenSqlFileExecution.value) {
-      items.push({ label: t("sqlFile.title"), action: openSqlFileExecution, icon: FileCode });
+      items.push({ sidebarActionId: "sqlFile.title", label: t("sqlFile.title"), action: openSqlFileExecution, icon: FileCode });
     }
     if (canOpenDiagram.value) {
-      items.push({ label: t("diagram.open"), action: openDiagram, icon: Network });
-      items.push({ label: t("docs.title"), action: openDocs, icon: BookOpen });
+      items.push({ sidebarActionId: "diagram.open", label: t("diagram.open"), action: openDiagram, icon: Network });
+      items.push({ sidebarActionId: "docs.title", label: t("docs.title"), action: openDocs, icon: BookOpen });
     }
     if (canOpenDatabaseSearch.value) {
-      items.push({ label: t("databaseSearch.open"), action: openDatabaseSearch, icon: Search });
+      items.push({ sidebarActionId: "databaseSearch.open", label: t("databaseSearch.open"), action: openDatabaseSearch, icon: Search });
     }
     items.push({
+      sidebarActionId: "contextMenu.refreshChildren",
       label: t("contextMenu.refreshChildren"),
       action: refresh,
       icon: RefreshCw,
@@ -6214,28 +6238,30 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     });
     if (canConfigureVisibleSchemas.value) {
       items.push({
+        sidebarActionId: "visibleSchemas.title",
         label: t("visibleSchemas.title"),
         action: openVisibleSchemasDialog,
         icon: ListFilter,
       });
     }
     items.push({ label: "", separator: true });
-    items.push({ label: t("transfer.dataTransfer"), action: openTransfer, icon: ArrowRightLeft });
-    items.push({ label: t("diff.title"), action: openSchemaDiff, icon: ArrowRightLeft });
-    items.push({ label: t("dataCompare.title"), action: openDataCompare, icon: ArrowRightLeft });
-    items.push({ label: t("contextMenu.exportDatabase"), action: openDatabaseExport, icon: Upload });
+    items.push({ sidebarActionId: "transfer.dataTransfer", label: t("transfer.dataTransfer"), action: openTransfer, icon: ArrowRightLeft });
+    items.push({ sidebarActionId: "diff.title", label: t("diff.title"), action: openSchemaDiff, icon: ArrowRightLeft });
+    items.push({ sidebarActionId: "dataCompare.title", label: t("dataCompare.title"), action: openDataCompare, icon: ArrowRightLeft });
+    items.push({ sidebarActionId: "contextMenu.exportDatabase", label: t("contextMenu.exportDatabase"), action: openDatabaseExport, icon: Upload });
     if (canOpenDataDictionary.value) {
-      items.push({ label: t("dataDictionary.title"), action: openDataDictionary, icon: FileText });
+      items.push({ sidebarActionId: "dataDictionary.title", label: t("dataDictionary.title"), action: openDataDictionary, icon: FileText });
     }
     const destructiveActions: ContextMenuItem[] = [];
     if (canEmptyDatabaseTables(node, node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined)) {
-      destructiveActions.push({ label: t("databaseEmpty.menu"), action: () => void requestEmptyDatabaseTables(node), icon: Eraser, variant: "destructive" as const });
+      destructiveActions.push({ sidebarActionId: "databaseEmpty.menu", label: t("databaseEmpty.menu"), action: () => void requestEmptyDatabaseTables(node), icon: Eraser, variant: "destructive" as const });
     }
     if (canDropDatabaseTables(node, node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined)) {
-      destructiveActions.push({ label: t("databaseDrop.menu"), action: () => void requestDropDatabaseTables(node), icon: Trash2, variant: "destructive" as const });
+      destructiveActions.push({ sidebarActionId: "databaseDrop.menu", label: t("databaseDrop.menu"), action: () => void requestDropDatabaseTables(node), icon: Trash2, variant: "destructive" as const });
     }
     if (canDropDatabase.value) {
       destructiveActions.push({
+        sidebarActionId: "contextMenu.dropDatabase",
         label: t("contextMenu.dropDatabase"),
         action: dropDatabase,
         icon: Trash2,
@@ -6252,6 +6278,7 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     }
     if (canDropSchema.value) {
       items.push({
+        sidebarActionId: "contextMenu.dropSchema",
         label: t("contextMenu.dropSchema"),
         action: dropSchema,
         icon: Trash2,
@@ -6536,50 +6563,51 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   // 否则解析不出 scope，菜单只会静默失败。
   if (isTableVGroupGroupableRowType(node.type) && (node.type === "table" || !!tableVGroupScopeKey(resolveTableVGroupScopeFromNode(connectionStore.treeNodes, node)))) {
     const vgroupMoveItems = buildTableVGroupMoveMenuItems(node);
-    if (vgroupMoveItems.length) items.push({ label: t("tableVGroup.moveToGroup"), icon: FolderInput, children: vgroupMoveItems });
+    if (vgroupMoveItems.length) items.push({ sidebarActionId: "tableVGroup.moveToGroup", label: t("tableVGroup.moveToGroup"), icon: FolderInput, children: vgroupMoveItems });
   }
   // 6. Table / View / Materialized View
   if (node.type === "table" || node.type === "view" || node.type === "materialized_view") {
     if (currentDatabaseType() === "victoriametrics" && node.type === "table") {
-      items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+      items.push({ sidebarActionId: "contextMenu.copyName", label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
       items.push({ label: "", separator: true });
-      items.push({ label: t("contextMenu.viewData"), action: openDataImmediately, icon: TableProperties });
-      items.push({ label: t("contextMenu.openInNewDataTab"), action: openDataInNewTabImmediately, icon: CopyPlus });
-      items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      items.push({ sidebarActionId: "contextMenu.viewData", label: t("contextMenu.viewData"), action: openDataImmediately, icon: TableProperties });
+      items.push({ sidebarActionId: "contextMenu.openInNewDataTab", label: t("contextMenu.openInNewDataTab"), action: openDataInNewTabImmediately, icon: CopyPlus });
+      items.push({ sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
       if (supportsAiAssistantContext(currentDatabaseType())) {
         items.push(addToAiMenuItem(node));
       }
       items.push({ label: "", separator: true });
       items.push(exportDataSubmenu(false));
-      items.push({ label: t("contextMenu.refreshChildren"), action: refresh, icon: RefreshCw, shortcut: shortcutRefresh });
+      items.push({ sidebarActionId: "contextMenu.refreshChildren", label: t("contextMenu.refreshChildren"), action: refresh, icon: RefreshCw, shortcut: shortcutRefresh });
       appendPluginTableMenuItems(items, node);
       return true;
     }
     if (["neo4j", "nebula"].includes(currentDatabaseType() || "")) {
       items.push(copyNameMenuItem());
-      items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+      items.push({ sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
       if (supportsAiAssistantContext(currentDatabaseType())) items.push(addToAiMenuItem(node));
       items.push({ label: "", separator: true });
-      items.push({ label: t("contextMenu.viewData"), action: openDataImmediately, icon: TableProperties });
-      items.push({ label: t("contextMenu.openInNewDataTab"), action: openDataInNewTabImmediately, icon: CopyPlus, shortcut: shortcutOpenDataInNewTab.value });
-      if (currentDatabaseType() === "nebula") items.push({ label: t("contextMenu.viewDdl"), action: openDdl, icon: FileCode });
+      items.push({ sidebarActionId: "contextMenu.viewData", label: t("contextMenu.viewData"), action: openDataImmediately, icon: TableProperties });
+      items.push({ sidebarActionId: "contextMenu.openInNewDataTab", label: t("contextMenu.openInNewDataTab"), action: openDataInNewTabImmediately, icon: CopyPlus, shortcut: shortcutOpenDataInNewTab.value });
+      if (currentDatabaseType() === "nebula") items.push({ sidebarActionId: "contextMenu.viewDdl", label: t("contextMenu.viewDdl"), action: openDdl, icon: FileCode });
       if (currentDatabaseType() === "neo4j") items.push(exportDataSubmenu(false));
       const sqlHistoryMenu = savedSqlHistorySubmenu();
       if (sqlHistoryMenu) items.push(sqlHistoryMenu);
       items.push({ label: "", separator: true });
-      items.push({ label: t("contextMenu.refreshChildren"), action: refresh, icon: RefreshCw, shortcut: shortcutRefresh });
+      items.push({ sidebarActionId: "contextMenu.refreshChildren", label: t("contextMenu.refreshChildren"), action: refresh, icon: RefreshCw, shortcut: shortcutRefresh });
       appendPluginTableMenuItems(items, node);
       return true;
     }
     const destructiveActions: ContextMenuItem[] = [];
     items.push(copyNameMenuItem());
-    items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+    items.push({ sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
     if (node.type === "table" && supportsAiAssistantContext(currentDatabaseType())) {
       items.push(addToAiMenuItem(node));
     }
     items.push({ label: "", separator: true });
-    items.push({ label: t("contextMenu.viewData"), action: openDataImmediately, icon: TableProperties });
+    items.push({ sidebarActionId: "contextMenu.viewData", label: t("contextMenu.viewData"), action: openDataImmediately, icon: TableProperties });
     items.push({
+      sidebarActionId: "contextMenu.openInNewDataTab",
       label: t("contextMenu.openInNewDataTab"),
       action: openDataInNewTabImmediately,
       icon: CopyPlus,
@@ -6587,32 +6615,35 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     });
     if (node.type === "table") {
       items.push({
+        sidebarActionId: "contextMenu.viewDdl",
         label: t("contextMenu.viewDdl"),
         action: openDdl,
         icon: FileCode,
       });
     }
     if (canViewDatabaseObjectDependencies(currentDatabaseType(), node)) {
-      items.push({ label: t("contextMenu.viewDependencies"), action: openDatabaseObjectDependencies, icon: Network });
+      items.push({ sidebarActionId: "contextMenu.viewDependencies", label: t("contextMenu.viewDependencies"), action: openDatabaseObjectDependencies, icon: Network });
     }
     if (node.type === "view" || node.type === "materialized_view") {
-      items.push({ label: t("contextMenu.editView"), action: () => openObjectSourceDialog(true), icon: Pencil });
-      items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
+      items.push({ sidebarActionId: "contextMenu.editView", label: t("contextMenu.editView"), action: () => openObjectSourceDialog(true), icon: Pencil });
+      items.push({ sidebarActionId: "contextMenu.viewSource", label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
       if (node.type === "view" && currentDatabaseType() === "dameng" && buildDamengCompileViewSql({ schema: node.schema, name: node.objectName || node.label })) {
-        items.push({ label: t("contextMenu.compileObject"), action: compileDamengView, icon: Wrench });
+        items.push({ sidebarActionId: "contextMenu.compileObject", label: t("contextMenu.compileObject"), action: compileDamengView, icon: Wrench });
       }
       items.push({
+        sidebarActionId: "contextMenu.viewDdl",
         label: t("contextMenu.viewDdl"),
         action: openDdl,
         icon: FileCode,
       });
-      items.push({ label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });
+      items.push({ sidebarActionId: "contextMenu.changeOpenMode", label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });
     }
     if (canOpenStructureEditor.value) {
-      items.push({ label: t("contextMenu.editStructure"), action: openStructureEditor, icon: PencilRuler });
+      items.push({ sidebarActionId: "contextMenu.editStructure", label: t("contextMenu.editStructure"), action: openStructureEditor, icon: PencilRuler });
     }
     if (canRenameObject.value) {
       items.push({
+        sidebarActionId: "contextMenu.renameObject",
         label: t("contextMenu.renameObject"),
         action: openRenameObjectDialog,
         icon: Pencil,
@@ -6621,6 +6652,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     }
     if (node.type === "view" || node.type === "materialized_view") {
       destructiveActions.push({
+        sidebarActionId: "contextMenu.dropView",
         label: deleteMenuLabel(t("contextMenu.dropView")),
         action: deleteMenuAction(requestDropObject),
         icon: Trash2,
@@ -6628,8 +6660,9 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
         variant: "destructive" as const,
       });
     }
-    if (node.type === "table") items.push({ label: t("modelGeneration.title"), action: openModelGeneration, icon: Code2 });
+    if (node.type === "table") items.push({ sidebarActionId: "modelGeneration.title", label: t("modelGeneration.title"), action: openModelGeneration, icon: Code2 });
     items.push({
+      sidebarActionId: "contextMenu.generateSql",
       label: t("contextMenu.generateSql"),
       icon: FilePlus,
       children: isTableNotView.value
@@ -6648,35 +6681,36 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     const sqlHistoryMenu = savedSqlHistorySubmenu();
     if (sqlHistoryMenu) items.push(sqlHistoryMenu);
     if (canOpenDiagram.value) {
-      items.push({ label: t("diagram.open"), action: openDiagram, icon: Network });
+      items.push({ sidebarActionId: "diagram.open", label: t("diagram.open"), action: openDiagram, icon: Network });
     }
     if (canOpenTableImport.value) {
-      items.push({ label: t("contextMenu.importData"), action: openTableImport, icon: Download });
+      items.push({ sidebarActionId: "contextMenu.importData", label: t("contextMenu.importData"), action: openTableImport, icon: Download });
     }
     if (isTableNotView.value) {
-      items.push({ label: t("dataCompare.title"), action: openDataCompare, icon: ArrowRightLeft });
+      items.push({ sidebarActionId: "dataCompare.title", label: t("dataCompare.title"), action: openDataCompare, icon: ArrowRightLeft });
     }
     items.push({ label: "", separator: true });
     items.push(exportDataSubmenu());
-    items.push({ label: t("contextMenu.exportDatabase"), action: openDatabaseExport, icon: Upload });
-    items.push({ label: t("contextMenu.exportStructure"), action: exportStructure, icon: FileCode });
+    items.push({ sidebarActionId: "contextMenu.exportDatabase", label: t("contextMenu.exportDatabase"), action: openDatabaseExport, icon: Upload });
+    items.push({ sidebarActionId: "contextMenu.exportStructure", label: t("contextMenu.exportStructure"), action: exportStructure, icon: FileCode });
     if (canOpenDataDictionary.value) {
-      items.push({ label: t("dataDictionary.title"), action: openDataDictionary, icon: FileText });
+      items.push({ sidebarActionId: "dataDictionary.title", label: t("dataDictionary.title"), action: openDataDictionary, icon: FileText });
     }
     items.push(copyStructureAsSubmenu());
     if (isTableNotView.value) {
       items.push({ label: "", separator: true });
-      items.push({ label: t("contextMenu.duplicateStructure"), action: duplicateStructure, icon: CopyPlus });
+      items.push({ sidebarActionId: "contextMenu.duplicateStructure", label: t("contextMenu.duplicateStructure"), action: duplicateStructure, icon: CopyPlus });
       // Keep menu copy aligned with keyboard copy so frozen multi-selection and single-row fallback stay compatible.
       items.push(...treeTableClipboardMenuItems(node));
       if (supportsVacuum.value) {
-        destructiveActions.push({ label: t("contextMenu.vacuumTable"), action: vacuumTable, icon: Activity, variant: "destructive" as const });
+        destructiveActions.push({ sidebarActionId: "contextMenu.vacuumTable", label: t("contextMenu.vacuumTable"), action: vacuumTable, icon: Activity, variant: "destructive" as const });
       }
       if (supportsMysqlAutoIncrement.value || batchAutoIncrementCount > 1) {
-        items.push({ label: autoIncrementMenuLabel(t("contextMenu.mysqlAutoIncrement")), action: autoIncrementMenuAction(mysqlAutoIncrement), icon: Gauge });
+        items.push({ sidebarActionId: "contextMenu.mysqlAutoIncrement", label: autoIncrementMenuLabel(t("contextMenu.mysqlAutoIncrement")), action: autoIncrementMenuAction(mysqlAutoIncrement), icon: Gauge });
       }
       if (supportsTruncate.value) {
         destructiveActions.push({
+          sidebarActionId: "contextMenu.truncateTable",
           label: truncateMenuLabel(t("contextMenu.truncateTable")),
           action: truncateMenuAction(truncateTable),
           icon: Scissors,
@@ -6684,12 +6718,14 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
         });
       }
       destructiveActions.push({
+        sidebarActionId: "contextMenu.emptyTable",
         label: emptyMenuLabel(t("contextMenu.emptyTable")),
         action: emptyMenuAction(emptyTable),
         icon: Eraser,
         variant: "destructive" as const,
       });
       destructiveActions.push({
+        sidebarActionId: "contextMenu.dropTable",
         label: deleteMenuLabel(t("contextMenu.dropTable")),
         action: deleteMenuAction(dropTable),
         icon: Trash2,
@@ -6703,6 +6739,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     }
     items.push({ label: "", separator: true });
     items.push({
+      sidebarActionId: "contextMenu.refreshChildren",
       label: t("contextMenu.refreshChildren"),
       action: refresh,
       icon: RefreshCw,
@@ -6898,7 +6935,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 
 function treeTableClipboardMenuItems(node: TreeNode): ContextMenuItem[] {
   if (currentDatabaseType() === "victoriametrics") return [];
-  const copyItem: ContextMenuItem = { label: t("contextMenu.copyTable"), action: copySelectedNames, icon: Copy };
+  const copyItem: ContextMenuItem = { sidebarActionId: "contextMenu.copyTable", label: t("contextMenu.copyTable"), action: copySelectedNames, icon: Copy };
   if (!node.connectionId || !node.database) return [copyItem];
   const state = tableClipboardMenuState(
     normalizedTreeClipboardTableEntries(),
@@ -6911,7 +6948,7 @@ function treeTableClipboardMenuItems(node: TreeNode): ContextMenuItem[] {
     canTransferTreeClipboardToCurrentNode(),
   );
   if (state === "copy") return [copyItem];
-  const pasteItem: ContextMenuItem = { label: t("contextMenu.pasteTable"), action: openPasteTableDialog, icon: Clipboard };
+  const pasteItem: ContextMenuItem = { sidebarActionId: "contextMenu.pasteTable", label: t("contextMenu.pasteTable"), action: openPasteTableDialog, icon: Clipboard };
   return state === "paste" ? [pasteItem] : [copyItem, pasteItem];
 }
 
@@ -7094,6 +7131,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
   // 1. Pin toggle
   if (canPin.value) {
     items.push({
+      sidebarActionId: "sidebar.togglePinnedObject",
       label: isPinned.value ? t("contextMenu.unpin") : t("contextMenu.pin"),
       action: togglePin,
       icon: Pin,

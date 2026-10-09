@@ -35,9 +35,11 @@ const subY = ref(0);
 let subCloseTimer: ReturnType<typeof setTimeout> | null = null;
 let subAnchorRect: { left: number; right: number; top: number; bottom: number } | null = null;
 let contextMenuRegistration: ContextMenuRegistration | null = null;
+let menuRevision = 0;
 
 function close() {
   if (!show.value) return;
+  menuRevision += 1;
   activeSubIndex.value = null;
   subAnchorRect = null;
   activeItems.value = [];
@@ -70,7 +72,10 @@ function isScrollInsideMenu(e: Event): boolean {
 function onScroll(e: Event) {
   // Submenus (and tall main menus) are scrollable; ignore their own scroll
   // so wheel/trackpad scrolling does not dismiss the menu.
-  if (isScrollInsideMenu(e)) return;
+  if (isScrollInsideMenu(e)) {
+    if (e.target instanceof Node && menuRef.value?.contains(e.target)) activeSubIndex.value = null;
+    return;
+  }
   close();
 }
 
@@ -102,17 +107,52 @@ onMounted(() => {
   contextMenuRegistration = registerGlobalContextMenu(close);
 });
 
-function handleItemClick(item: ContextMenuItem) {
+function handleItemClick(item: ContextMenuItem, index: number, event: MouseEvent) {
   if (itemIsDisabled(item)) return;
-  if (item.children?.length) return; // submenu trigger — do nothing on click
+  if (item.children?.length) {
+    onItemMouseEnter(index, event);
+    return;
+  }
   if (item.closeOnSelect !== false) close();
-  item.action?.();
+  runItemAction(item);
 }
 
 function handleSubItemClick(item: ContextMenuItem) {
   if (itemIsDisabled(item)) return;
   if (item.closeOnSelect !== false) close();
-  item.action?.();
+  runItemAction(item);
+}
+
+function adjustMenuPosition() {
+  if (!menuRef.value) return;
+  const rect = menuRef.value.getBoundingClientRect();
+  x.value = Math.max(8, Math.min(x.value, window.innerWidth - rect.width - 8));
+  y.value = Math.max(8, Math.min(y.value, window.innerHeight - rect.height - 8));
+}
+
+function runItemAction(item: ContextMenuItem) {
+  const revision = menuRevision;
+  const result = item.action?.() as unknown;
+  if (item.closeOnSelect !== false || !item.refreshItems) return;
+  const refresh = () => {
+    if (!show.value || revision !== menuRevision) return;
+    activeSubIndex.value = null;
+    subAnchorRect = null;
+    if (subCloseTimer) {
+      clearTimeout(subCloseTimer);
+      subCloseTimer = null;
+    }
+    activeItems.value = item.refreshItems!();
+    nextTick(() => {
+      if (!show.value || revision !== menuRevision) return;
+      adjustMenuPosition();
+      const button = [...(menuRef.value?.querySelectorAll<HTMLButtonElement>("button") ?? [])].find((entry) => entry.dataset.menuAction === item.sidebarActionId);
+      button?.focus({ preventScroll: true });
+      button?.scrollIntoView?.({ block: "nearest" });
+    });
+  };
+  if (result && typeof (result as PromiseLike<unknown>).then === "function") void Promise.resolve(result).then(refresh, refresh);
+  else refresh();
 }
 
 function onContextMenu(event: MouseEvent, itemsOverride?: ContextMenuItem[]) {
@@ -122,6 +162,8 @@ function onContextMenu(event: MouseEvent, itemsOverride?: ContextMenuItem[]) {
   // value before Vue has flushed the parent-to-child update.
   const items = itemsOverride ?? (typeof props.items === "function" ? props.items() : props.items);
   if (items.length === 0) return;
+  menuRevision += 1;
+  activeSubIndex.value = null;
   activeItems.value = items;
   event.preventDefault();
   event.stopPropagation();
@@ -130,14 +172,7 @@ function onContextMenu(event: MouseEvent, itemsOverride?: ContextMenuItem[]) {
   contextMenuRegistration?.activate();
   show.value = true;
   emit("open");
-  nextTick(() => {
-    if (!menuRef.value) return;
-    const rect = menuRef.value.getBoundingClientRect();
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    if (rect.right > vw) x.value = Math.max(0, vw - rect.width - 8);
-    if (rect.bottom > vh) y.value = Math.max(0, vh - rect.height - 8);
-  });
+  nextTick(adjustMenuPosition);
 }
 
 // ---- submenu ----
@@ -274,10 +309,10 @@ onBeforeUnmount(() => {
       v-if="show"
       ref="menuRef"
       data-dbx-context-menu
-      :style="{ position: 'fixed', left: x + 'px', top: y + 'px', zIndex: 9999 }"
-      class="pointer-events-auto bg-popover text-popover-foreground min-w-40 w-max max-w-[calc(100vw-16px)] rounded-md p-1 overflow-y-auto ring-1 ring-foreground/10 shadow-lg"
+      :style="{ position: 'fixed', left: x + 'px', top: y + 'px', zIndex: 9999, maxHeight: 'calc(100vh - 16px)' }"
+      class="pointer-events-auto bg-popover text-popover-foreground min-w-40 w-max max-w-[calc(100vw-16px)] rounded-md p-1 overflow-y-auto overscroll-contain ring-1 ring-foreground/10 shadow-lg"
     >
-      <template v-for="(item, index) in activeItems" :key="index">
+      <template v-for="(item, index) in activeItems" :key="item.sidebarActionId ?? index">
         <template v-if="item.visible !== false">
           <div v-if="item.separator" class="-mx-1 my-1 flex items-center px-1">
             <div class="h-px flex-1 bg-border/70" />
@@ -287,8 +322,9 @@ onBeforeUnmount(() => {
             :disabled="itemIsDisabled(item)"
             :aria-pressed="item.checkedStyle === 'switch' ? !!item.checked : undefined"
             :title="item.title"
+            :data-menu-action="item.sidebarActionId"
             :class="[...itemButtonClass(item.variant), activeSubmenuTriggerClass(item, index)]"
-            @click="handleItemClick(item)"
+            @click="(event) => handleItemClick(item, index, event)"
             @mouseenter="(e) => onItemMouseEnter(index, e)"
             @mouseleave="onItemMouseLeave"
           >

@@ -1,3 +1,4 @@
+import { sidebarMenuMessages } from "./sidebarMenuMessages";
 import { withEnglishFallback } from "./fallback";
 import { mongodbDatabaseDumpEs as mongoDump } from "./mongodbDatabaseDump";
 import { meilisearchManagementEs } from "./meilisearchManagement";
@@ -63,6 +64,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  sidebarMenu: sidebarMenuMessages["es"],
   modelGeneration: {
     title: "Generar modelo",
     editTemplate: "Editar plantilla",

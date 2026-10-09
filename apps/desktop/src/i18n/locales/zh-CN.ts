@@ -1,3 +1,4 @@
+import { sidebarMenuMessages } from "./sidebarMenuMessages";
 import { redisGroupingZhCN as redisGrouping } from "./redisGrouping";
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/zh-CN";
@@ -7,6 +8,7 @@ import { meilisearchManagementZhCN } from "./meilisearchManagement";
 import { mongodbDatabaseDumpZhCN as mongoDump } from "./mongodbDatabaseDump";
 
 export default withEnglishFallback({
+  sidebarMenu: sidebarMenuMessages["zh-CN"],
   modelGeneration: {
     title: "生成模型",
     editTemplate: "编辑模板",

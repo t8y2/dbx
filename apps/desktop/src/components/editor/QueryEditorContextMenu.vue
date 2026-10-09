@@ -42,6 +42,7 @@ import { queryContextObjectActions, type QueryContextObjectAction } from "@/lib/
 import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import type { SqlSelectionCaseMode } from "@/lib/sql/sqlSelectionCase";
 import type { QueryEditorProps } from "./queryEditorTypes";
+import { useSidebarMenuPresentation } from "@/composables/useSidebarMenuPresentation";
 
 export interface QueryEditorContextMenuState {
   readOnly: QueryEditorProps["readOnly"];
@@ -93,12 +94,14 @@ const props = defineProps<{ getState: () => QueryEditorContextMenuState; actions
 const emit = defineEmits<{ close: [] }>();
 defineSlots<{ default(props: { onContextMenu: (event: MouseEvent) => void; isOpen: boolean }): unknown }>();
 const { t } = useI18n();
+const { presentMenu, SidebarMenuPreferencesDialog, sidebarMenuPreferencesOpen, sidebarMenuPreferences } = useSidebarMenuPresentation();
 
 function contextObjectMenuItem(action: QueryContextObjectAction, target: SqlObjectNavigationTarget | null): ContextMenuItem {
   const disabled = !target;
   switch (action) {
     case "view-data":
       return {
+        sidebarActionId: `editor.object.${action}`,
         label: t("contextMenu.viewData"),
         action: () => props.actions.emitContextObjectAction(action),
         disabled,
@@ -106,6 +109,7 @@ function contextObjectMenuItem(action: QueryContextObjectAction, target: SqlObje
       };
     case "peek-table-structure":
       return {
+        sidebarActionId: `editor.object.${action}`,
         label: t("contextMenu.peekStructure"),
         action: () => props.actions.emitContextObjectAction(action),
         disabled,
@@ -113,6 +117,7 @@ function contextObjectMenuItem(action: QueryContextObjectAction, target: SqlObje
       };
     case "edit-table-structure":
       return {
+        sidebarActionId: `editor.object.${action}`,
         label: t("contextMenu.editStructure"),
         action: () => props.actions.emitContextObjectAction(action),
         disabled,
@@ -120,6 +125,7 @@ function contextObjectMenuItem(action: QueryContextObjectAction, target: SqlObje
       };
     case "edit-view":
       return {
+        sidebarActionId: `editor.object.${action}`,
         label: t("contextMenu.editView"),
         action: () => props.actions.emitContextObjectAction(action),
         disabled,
@@ -127,6 +133,7 @@ function contextObjectMenuItem(action: QueryContextObjectAction, target: SqlObje
       };
     case "view-source":
       return {
+        sidebarActionId: `editor.object.${action}`,
         label: t("contextMenu.viewSource"),
         action: () => props.actions.emitContextObjectAction(action),
         disabled,
@@ -134,6 +141,7 @@ function contextObjectMenuItem(action: QueryContextObjectAction, target: SqlObje
       };
     case "view-ddl":
       return {
+        sidebarActionId: `editor.object.${action}`,
         label: t("contextMenu.viewDdl"),
         action: () => props.actions.emitContextObjectAction(action),
         disabled,
@@ -157,6 +165,7 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
       ? []
       : [
           {
+            sidebarActionId: "editor.execute",
             label: executeContextMenuLabel,
             action: actions.executeFromContextMenu,
             disabled: !canExecuteContextSql,
@@ -164,6 +173,7 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
             shortcut: shortcuts.executeSql,
           },
           {
+            sidebarActionId: "settings.shortcutExecuteSqlInNewResultTab",
             label: t("settings.shortcutExecuteSqlInNewResultTab"),
             action: actions.executeInNewResultTabFromContextMenu,
             disabled: !canExecuteContextSql,
@@ -171,6 +181,7 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
             shortcut: shortcuts.executeSqlInNewResultTab,
           },
           {
+            sidebarActionId: "toolbar.explainPlan",
             label: t("toolbar.explainPlan"),
             action: actions.explainFromContextMenu,
             disabled: state.canExplain === false || !canExecuteContextSql,
@@ -178,24 +189,27 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
             shortcut: shortcuts.explainSql,
           },
           {
+            sidebarActionId: "editor.previewChanges",
             label: t("editor.previewChanges"),
             action: () => void actions.requestPreviewChanges(props.getState().previewContextSql),
             disabled: !state.previewContextSql,
             icon: Eye,
           },
           {
+            sidebarActionId: "editor.contextMenu.export",
             label: t("editor.contextMenu.export"),
             icon: Download,
             disabled: !canExecuteContextSql,
             children: [
-              { label: t("editor.contextMenu.exportQueryResultTo", { format: "CSV" }), action: () => actions.exportQueryFromContextMenu("csv") },
-              { label: t("editor.contextMenu.exportQueryResultTo", { format: "XLSX" }), action: () => actions.exportQueryFromContextMenu("xlsx") },
-              { label: t("editor.contextMenu.exportQueryResultTo", { format: "TXT" }), action: () => actions.exportQueryFromContextMenu("txt") },
+              { sidebarActionId: "editor.contextMenu.exportQueryResultTo", label: t("editor.contextMenu.exportQueryResultTo", { format: "CSV" }), action: () => actions.exportQueryFromContextMenu("csv") },
+              { sidebarActionId: "editor.contextMenu.exportQueryResultTo", label: t("editor.contextMenu.exportQueryResultTo", { format: "XLSX" }), action: () => actions.exportQueryFromContextMenu("xlsx") },
+              { sidebarActionId: "editor.contextMenu.exportQueryResultTo", label: t("editor.contextMenu.exportQueryResultTo", { format: "TXT" }), action: () => actions.exportQueryFromContextMenu("txt") },
             ],
           },
         ]),
     ...queryContextObjectActions(state.contextObjectTarget?.type).map((action) => contextObjectMenuItem(action, state.contextObjectTarget)),
     {
+      sidebarActionId: "editor.contextMenu.expandSelectStar",
       label: t("editor.contextMenu.expandSelectStar"),
       action: () => expandSelectStar?.(),
       disabled: !expandSelectStar,
@@ -204,6 +218,7 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
     },
     { label: "", separator: true },
     {
+      sidebarActionId: "editor.contextMenu.commentSelection",
       label: t("editor.contextMenu.commentSelection"),
       action: actions.toggleCommentFromContextMenu,
       disabled: state.readOnly || !canCopySelectedSql,
@@ -211,6 +226,7 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
       shortcut: shortcuts.toggleLineComment,
     },
     {
+      sidebarActionId: "editor.contextMenu.blockCommentSelection",
       label: t("editor.contextMenu.blockCommentSelection"),
       action: actions.toggleBlockCommentFromContextMenu,
       disabled: state.readOnly || !canCopySelectedSql || !supportsQueryEditorBlockComments(state.databaseType),
@@ -218,6 +234,7 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
       shortcut: shortcuts.toggleBlockComment,
     },
     {
+      sidebarActionId: "editor.format",
       label: canCopySelectedSql ? t("editor.contextMenu.formatSelectionSql") : t("toolbar.formatSql"),
       action: () => void actions.formatCurrentSql(),
       disabled: state.readOnly || (!canCopySelectedSql && !canExecuteContextSql && !state.hasContent) || !canFormatSqlForDatabaseType(state.databaseType),
@@ -225,28 +242,33 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
       shortcut: shortcuts.formatSql,
     },
     {
+      sidebarActionId: "editor.contextMenu.compressSelectionSql",
       label: t("editor.contextMenu.compressSelectionSql"),
       action: actions.compressCurrentSql,
       disabled: state.readOnly || !canCopySelectedSql,
       icon: Minimize2,
     },
     {
+      sidebarActionId: "editor.contextMenu.folding",
       label: t("editor.contextMenu.folding"),
       icon: ChevronsUpDown,
       children: [
         {
+          sidebarActionId: "editor.contextMenu.toggleFold",
           label: t("editor.contextMenu.toggleFold"),
           action: () => actions.toggleFoldFromContextMenu?.(),
           icon: ChevronsUpDown,
           shortcut: shortcuts.toggleFold,
         },
         {
+          sidebarActionId: "editor.contextMenu.foldAll",
           label: t("editor.contextMenu.foldAll"),
           action: () => actions.foldAllFromContextMenu?.(),
           icon: FoldVertical,
           shortcut: shortcuts.foldAll,
         },
         {
+          sidebarActionId: "editor.contextMenu.unfoldAll",
           label: t("editor.contextMenu.unfoldAll"),
           action: () => actions.unfoldAllFromContextMenu?.(),
           icon: UnfoldVertical,
@@ -255,6 +277,7 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
       ],
     },
     {
+      sidebarActionId: "editor.contextMenu.copySelection",
       label: t("editor.contextMenu.copySelection"),
       action: actions.copySelectedSqlFromContextMenu,
       disabled: !canCopySelectedSql,
@@ -262,18 +285,21 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
       shortcut: "Mod+C",
     },
     {
+      sidebarActionId: "editor.contextMenu.copySelectionAsRichText",
       label: t("editor.contextMenu.copySelectionAsRichText"),
       action: actions.copySelectedSqlAsRichTextFromContextMenu,
       disabled: !canCopySelectedSql,
       icon: Highlighter,
     },
     {
+      sidebarActionId: "editor.contextMenu.screenshotSelection",
       label: t("editor.contextMenu.screenshotSelection"),
       action: actions.openCodeSnapshot,
       disabled: !canCopySelectedSql,
       icon: Camera,
     },
     {
+      sidebarActionId: "editor.contextMenu.cutSelection",
       label: t("editor.contextMenu.cutSelection"),
       action: actions.cutSelectedSqlFromContextMenu,
       disabled: !canCopySelectedSql || state.readOnly,
@@ -281,6 +307,7 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
       shortcut: "Mod+X",
     },
     {
+      sidebarActionId: "editor.contextMenu.pasteFromClipboard",
       label: t("editor.contextMenu.pasteFromClipboard"),
       action: actions.pasteClipboardSqlFromContextMenu,
       disabled: state.readOnly,
@@ -289,12 +316,14 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
     },
     {
       // 显式入口：即使关闭了「粘贴时自动还原源码 SQL」设置也能使用
+      sidebarActionId: "editor.contextMenu.pasteRestoringSourceSql",
       label: t("editor.contextMenu.pasteRestoringSourceSql"),
       action: actions.pasteClipboardSqlRestoringSource,
       disabled: state.readOnly,
       icon: WandSparkles,
     },
     {
+      sidebarActionId: "editor.contextMenu.sendToAi",
       label: t("editor.contextMenu.sendToAi"),
       action: () => {
         actions.sendSelectionToAi();
@@ -304,6 +333,7 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
       shortcut: shortcuts.sendSelectionToAi,
     },
     {
+      sidebarActionId: "editor.contextMenu.toggleCaseSelection",
       label: t("editor.contextMenu.toggleCaseSelection"),
       action: () => actions.convertSelectedSqlCase("toggle"),
       disabled: !canCopySelectedSql,
@@ -311,6 +341,7 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
       shortcut: shortcuts.toggleCaseSelection,
     },
     {
+      sidebarActionId: "editor.contextMenu.uppercaseSelection",
       label: t("editor.contextMenu.uppercaseSelection"),
       action: () => actions.convertSelectedSqlCase("upper"),
       disabled: !canCopySelectedSql,
@@ -318,6 +349,7 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
       shortcut: shortcuts.uppercaseSelection,
     },
     {
+      sidebarActionId: "editor.contextMenu.lowercaseSelection",
       label: t("editor.contextMenu.lowercaseSelection"),
       action: () => actions.convertSelectedSqlCase("lower"),
       disabled: !canCopySelectedSql,
@@ -325,6 +357,7 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
       shortcut: shortcuts.lowercaseSelection,
     },
     {
+      sidebarActionId: "editor.contextMenu.convertNamingStyle",
       label: t("editor.contextMenu.convertNamingStyle"),
       action: actions.convertSelectedNamingStyle,
       disabled: !canCopySelectedSql,
@@ -332,24 +365,28 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
       shortcut: shortcuts.convertNamingStyle,
     },
     {
+      sidebarActionId: "editor.contextMenu.delimitedList",
       label: t("editor.contextMenu.delimitedList"),
       action: actions.openDelimitedListDialog,
       disabled: state.readOnly || !canCopySelectedSql,
       icon: List,
     },
     {
+      sidebarActionId: "editor.contextMenu.addNextSelectionOccurrence",
       label: t("editor.contextMenu.addNextSelectionOccurrence"),
       action: actions.addNextSelectionOccurrenceFromContextMenu,
       icon: TextSelect,
       shortcut: shortcuts.addNextSelectionOccurrence,
     },
     {
+      sidebarActionId: "editor.contextMenu.selectAllSelectionOccurrences",
       label: t("editor.contextMenu.selectAllSelectionOccurrences"),
       action: actions.selectAllSelectionOccurrencesFromContextMenu,
       icon: TextSelect,
       shortcut: shortcuts.selectAllSelectionOccurrences,
     },
     {
+      sidebarActionId: "editor.contextMenu.selectCurrentStatement",
       label: t("editor.contextMenu.selectCurrentStatement"),
       action: actions.selectCurrentStatementFromContextMenu,
       icon: TextSelect,
@@ -357,12 +394,14 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
     },
     { label: "", separator: true },
     {
+      sidebarActionId: "editor.contextMenu.findReplace",
       label: t("editor.contextMenu.findReplace"),
       action: actions.openFindReplaceFromContextMenu,
       icon: Search,
       shortcut: shortcuts.find,
     },
     {
+      sidebarActionId: "editor.contextMenu.deleteEmptyLines",
       label: t("editor.contextMenu.deleteEmptyLines"),
       action: actions.deleteEmptyLines,
       disabled: state.readOnly,
@@ -370,6 +409,7 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
     },
     { label: "", separator: true },
     {
+      sidebarActionId: "editor.contextMenu.selectAll",
       label: t("editor.contextMenu.selectAll"),
       action: actions.selectAllSqlFromContextMenu,
       icon: TextSelect,
@@ -379,7 +419,7 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
 });
 
 function currentContextMenuItems(): ContextMenuItem[] {
-  return contextMenuItems.value;
+  return presentMenu(contextMenuItems.value, "sql-editor");
 }
 </script>
 
@@ -387,4 +427,5 @@ function currentContextMenuItems(): ContextMenuItem[] {
   <CustomContextMenu :items="currentContextMenuItems" @close="emit('close')" v-slot="slotProps">
     <slot v-bind="slotProps" />
   </CustomContextMenu>
+  <SidebarMenuPreferencesDialog v-if="sidebarMenuPreferences" v-model:open="sidebarMenuPreferencesOpen" :scope="sidebarMenuPreferences.scope" :items="sidebarMenuPreferences.items" />
 </template>

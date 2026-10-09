@@ -126,6 +126,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { treeNodePinIdentity, type PinnedTreeNodeIdentity } from "@/lib/app/pinnedItems";
 import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useSidebarMenuPresentation } from "@/composables/useSidebarMenuPresentation";
 import { formatSidebarTableNamesForCopy, type SidebarTableCopyTarget } from "@/lib/sidebar/sidebarTableNameCopy";
 import { useQueryStore } from "@/stores/queryStore";
 import { getTableMutationHistoryStoreOrNull, recordTableMutationHistory } from "@/lib/history/tableMutationHistory";
@@ -217,6 +218,7 @@ const { highlight } = useSqlHighlighter();
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
+const { presentMenu, SidebarMenuPreferencesDialog, sidebarMenuPreferencesOpen, sidebarMenuPreferences } = useSidebarMenuPresentation();
 const refreshTooltip = computed(() => {
   const shortcut = formatShortcut(settingsStore.editorSettings.shortcuts.refreshData);
   return shortcut ? `${t("grid.refresh")} (${shortcut})` : t("grid.refresh");
@@ -3567,10 +3569,11 @@ function exportDataSubmenu(item: ObjectBrowserRow): ContextMenuItem {
   ];
   if (!isVictoriaMetrics.value) {
     formats.push({ label: "SQL INSERT", action: () => exportData(item, "sql", "source") });
-    formats.push({ label: t("contextMenu.standardSqlInsert"), action: () => exportData(item, "sql", "standard") });
+    formats.push({ sidebarActionId: "contextMenu.standardSqlInsert", label: t("contextMenu.standardSqlInsert"), action: () => exportData(item, "sql", "standard") });
   }
   formats.push({ label: "XLSX", action: () => exportDataXlsx(item) });
   return {
+    sidebarActionId: "contextMenu.exportData",
     label: t("contextMenu.exportData"),
     icon: Upload,
     children: formats,
@@ -3592,10 +3595,10 @@ function objectBrowserTableClipboardMenuState(item: ObjectBrowserRow) {
 
 function tableClipboardMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   if (isVictoriaMetrics.value) return [];
-  const copyItem: ContextMenuItem = { label: t("contextMenu.copyTable"), action: () => copySingleTableToClipboard(item), icon: Copy };
+  const copyItem: ContextMenuItem = { sidebarActionId: "contextMenu.copyTable", label: t("contextMenu.copyTable"), action: () => copySingleTableToClipboard(item), icon: Copy };
   const state = objectBrowserTableClipboardMenuState(item);
   if (state === "copy") return [copyItem];
-  const pasteItem: ContextMenuItem = { label: t("contextMenu.pasteTable"), action: openPasteTableDialog, icon: Clipboard };
+  const pasteItem: ContextMenuItem = { sidebarActionId: "contextMenu.pasteTable", label: t("contextMenu.pasteTable"), action: openPasteTableDialog, icon: Clipboard };
   return state === "paste" ? [pasteItem] : [copyItem, pasteItem];
 }
 
@@ -3613,6 +3616,7 @@ function addToAiMenuItem(item: ObjectBrowserRow): ContextMenuItem {
   // and future-proof if multi-schema selection ever appears.
   const targets = useBatch ? selectedTableRows.value.map((row) => ({ name: row.name, schema: row.schema })) : [{ name: item.name, schema: item.schema }];
   return {
+    sidebarActionId: "contextMenu.addToAi",
     label: useBatch ? t("contextMenu.addToAiMultiple", { count }) : t("contextMenu.addToAi"),
     action: () => emit("addToAi", targets),
     icon: Sparkles,
@@ -3626,30 +3630,31 @@ function selectedBatchTableCountLabel(key: "batchDrop" | "batchTruncate" | "batc
 function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   if (effectiveDatabaseType.value === "nebula") {
     return [
-      { label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
-      { label: t("contextMenu.viewDdl"), action: () => openTableInfo(item, "ddl"), icon: FileCode },
+      { sidebarActionId: "contextMenu.viewData", label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
+      { sidebarActionId: "contextMenu.viewDdl", label: t("contextMenu.viewDdl"), action: () => openTableInfo(item, "ddl"), icon: FileCode },
       { label: "", separator: true },
-      { label: t("contextMenu.copyName"), action: () => copyName(item), icon: Copy },
+      { sidebarActionId: "contextMenu.copyName", label: t("contextMenu.copyName"), action: () => copyName(item), icon: Copy },
     ];
   }
   if (isVictoriaMetrics.value) {
     return [
-      { label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
-      { label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
+      { sidebarActionId: "contextMenu.viewData", label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
+      { sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
       ...(supportsAiAssistantContext(effectiveDatabaseType.value) ? [addToAiMenuItem(item)] : []),
       { label: "", separator: true },
       exportDataSubmenu(item),
       { label: "", separator: true },
-      { label: t("contextMenu.copyName"), action: () => copyName(item), icon: Copy },
+      { sidebarActionId: "contextMenu.copyName", label: t("contextMenu.copyName"), action: () => copyName(item), icon: Copy },
     ];
   }
   const useBatchActions = isSelectedBatchTableContext(item);
   const moreActions: ContextMenuItem[] = [];
   if (supportsVacuumTable.value) {
-    moreActions.push({ label: t("contextMenu.vacuumTable"), action: () => requestVacuumTable(item), icon: Activity, variant: "destructive" as const });
+    moreActions.push({ sidebarActionId: "contextMenu.vacuumTable", label: t("contextMenu.vacuumTable"), action: () => requestVacuumTable(item), icon: Activity, variant: "destructive" as const });
   }
   if (supportsTruncateTable.value) {
     moreActions.push({
+      sidebarActionId: "contextMenu.truncateTable",
       label: useBatchActions ? selectedBatchTableCountLabel("batchTruncate") : t("contextMenu.truncateTable"),
       action: useBatchActions ? requestBatchTruncateTables : () => requestTruncateTable(item),
       icon: Scissors,
@@ -3658,12 +3663,14 @@ function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   }
   moreActions.push(
     {
+      sidebarActionId: "contextMenu.emptyTable",
       label: useBatchActions ? selectedBatchTableCountLabel("batchEmpty") : t("contextMenu.emptyTable"),
       action: useBatchActions ? requestBatchEmptyTables : () => requestEmptyTable(item),
       icon: Eraser,
       variant: "destructive" as const,
     },
     {
+      sidebarActionId: "contextMenu.dropTable",
       label: useBatchActions ? selectedBatchTableCountLabel("batchDrop") : t("contextMenu.dropTable"),
       action: useBatchActions ? requestBatchDropTables : () => requestDrop(item),
       icon: Trash2,
@@ -3671,70 +3678,75 @@ function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     },
   );
   return [
-    { label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
+    { sidebarActionId: "contextMenu.viewData", label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
     {
+      sidebarActionId: "contextMenu.viewDdl",
       label: t("contextMenu.viewDdl"),
       action: () => openTableInfo(item, "ddl"),
       icon: FileCode,
     },
-    ...(canOpenStructureEditor.value ? [{ label: t("contextMenu.editStructure"), action: () => openStructureEditor(item), icon: PencilRuler }] : []),
-    ...(canRename(item) ? [{ label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }] : []),
-    { label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
+    ...(canOpenStructureEditor.value ? [{ sidebarActionId: "contextMenu.editStructure", label: t("contextMenu.editStructure"), action: () => openStructureEditor(item), icon: PencilRuler }] : []),
+    ...(canRename(item) ? [{ sidebarActionId: "contextMenu.renameObject", label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }] : []),
+    { sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
     ...(supportsAiAssistantContext(effectiveDatabaseType.value) ? [addToAiMenuItem(item)] : []),
-    ...(canOpenDiagram.value ? [{ label: t("diagram.open"), action: () => openDiagram(item), icon: Network }] : []),
-    ...(canOpenTableImport.value ? [{ label: t("contextMenu.importData"), action: () => openTableImport(item), icon: Download }] : []),
-    { label: t("dataCompare.title"), action: () => openDataCompare(item), icon: ArrowRightLeft },
+    ...(canOpenDiagram.value ? [{ sidebarActionId: "diagram.open", label: t("diagram.open"), action: () => openDiagram(item), icon: Network }] : []),
+    ...(canOpenTableImport.value ? [{ sidebarActionId: "contextMenu.importData", label: t("contextMenu.importData"), action: () => openTableImport(item), icon: Download }] : []),
+    { sidebarActionId: "dataCompare.title", label: t("dataCompare.title"), action: () => openDataCompare(item), icon: ArrowRightLeft },
     { label: "", separator: true },
     exportDataSubmenu(item),
-    { label: t("contextMenu.exportDatabase"), action: () => openDatabaseExport(item), icon: Upload },
-    { label: t("contextMenu.exportStructure"), action: () => exportStructure(item), icon: FileCode },
-    ...(canOpenDataDictionary.value ? [{ label: t("dataDictionary.title"), action: () => openDataDictionary(item), icon: FileText }] : []),
+    { sidebarActionId: "contextMenu.exportDatabase", label: t("contextMenu.exportDatabase"), action: () => openDatabaseExport(item), icon: Upload },
+    { sidebarActionId: "contextMenu.exportStructure", label: t("contextMenu.exportStructure"), action: () => exportStructure(item), icon: FileCode },
+    ...(canOpenDataDictionary.value ? [{ sidebarActionId: "dataDictionary.title", label: t("dataDictionary.title"), action: () => openDataDictionary(item), icon: FileText }] : []),
     { label: "", separator: true },
-    { label: t("contextMenu.duplicateStructure"), action: () => requestDuplicateStructure(item), icon: CopyPlus },
+    { sidebarActionId: "contextMenu.duplicateStructure", label: t("contextMenu.duplicateStructure"), action: () => requestDuplicateStructure(item), icon: CopyPlus },
     ...tableClipboardMenuItems(item),
     { label: "", separator: true },
-    { label: t("common.more"), icon: ListTree, children: moreActions },
+    { sidebarActionId: "common.more", label: t("common.more"), icon: ListTree, children: moreActions },
     { label: "", separator: true },
-    { label: t("contextMenu.copyName"), action: () => copyName(item), icon: Copy },
+    { sidebarActionId: "contextMenu.copyName", label: t("contextMenu.copyName"), action: () => copyName(item), icon: Copy },
   ];
 }
 
 function getViewMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   if (effectiveDatabaseType.value === "nebula") {
     return [
-      { label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
-      { label: t("contextMenu.viewDdl"), action: () => openTableInfo(item, "ddl"), icon: ScrollText },
+      { sidebarActionId: "contextMenu.viewData", label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
+      { sidebarActionId: "contextMenu.viewDdl", label: t("contextMenu.viewDdl"), action: () => openTableInfo(item, "ddl"), icon: ScrollText },
       { label: "", separator: true },
-      { label: t("contextMenu.copyName"), action: () => copyName(item), icon: Copy },
+      { sidebarActionId: "contextMenu.copyName", label: t("contextMenu.copyName"), action: () => copyName(item), icon: Copy },
     ];
   }
   return [
-    { label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
-    { label: t("contextMenu.editView"), action: () => openSource(item), icon: PencilLine },
-    { label: t("contextMenu.viewSource"), action: () => openSource(item), icon: Code2 },
-    ...(effectiveDatabaseType.value === "dameng" && item.type === "VIEW" && buildDamengCompileViewSql({ schema: item.schema || selectedSchema.value, name: item.name }) ? [{ label: t("contextMenu.compileObject"), action: () => compileDamengView(item), icon: Wrench }] : []),
+    { sidebarActionId: "contextMenu.viewData", label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
+    { sidebarActionId: "contextMenu.editView", label: t("contextMenu.editView"), action: () => openSource(item), icon: PencilLine },
+    { sidebarActionId: "contextMenu.viewSource", label: t("contextMenu.viewSource"), action: () => openSource(item), icon: Code2 },
+    ...(effectiveDatabaseType.value === "dameng" && item.type === "VIEW" && buildDamengCompileViewSql({ schema: item.schema || selectedSchema.value, name: item.name })
+      ? [{ sidebarActionId: "contextMenu.compileObject", label: t("contextMenu.compileObject"), action: () => compileDamengView(item), icon: Wrench }]
+      : []),
     {
+      sidebarActionId: "contextMenu.viewDdl",
       label: t("contextMenu.viewDdl"),
       action: () => openTableInfo(item, "ddl"),
       icon: ScrollText,
     },
-    ...(canRename(item) ? [{ label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }] : []),
-    { label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
-    ...(canOpenDiagram.value ? [{ label: t("diagram.open"), action: () => openDiagram(item), icon: Network }] : []),
+    ...(canRename(item) ? [{ sidebarActionId: "contextMenu.renameObject", label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }] : []),
+    { sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
+    ...(canOpenDiagram.value ? [{ sidebarActionId: "diagram.open", label: t("diagram.open"), action: () => openDiagram(item), icon: Network }] : []),
     { label: "", separator: true },
     exportDataSubmenu(item),
-    { label: t("contextMenu.exportDatabase"), action: () => openDatabaseExport(item), icon: Upload },
-    { label: t("contextMenu.exportStructure"), action: () => exportStructure(item), icon: FileCode },
-    ...(canOpenDataDictionary.value ? [{ label: t("dataDictionary.title"), action: () => openDataDictionary(item), icon: FileText }] : []),
+    { sidebarActionId: "contextMenu.exportDatabase", label: t("contextMenu.exportDatabase"), action: () => openDatabaseExport(item), icon: Upload },
+    { sidebarActionId: "contextMenu.exportStructure", label: t("contextMenu.exportStructure"), action: () => exportStructure(item), icon: FileCode },
+    ...(canOpenDataDictionary.value ? [{ sidebarActionId: "dataDictionary.title", label: t("dataDictionary.title"), action: () => openDataDictionary(item), icon: FileText }] : []),
     { label: "", separator: true },
     {
+      sidebarActionId: "contextMenu.dropView",
       label: t("contextMenu.dropView"),
       action: () => requestDrop(item),
       icon: Trash2,
       variant: "destructive" as const,
     },
     { label: "", separator: true },
-    { label: t("contextMenu.copyName"), action: () => copyName(item), icon: Copy },
+    { sidebarActionId: "contextMenu.copyName", label: t("contextMenu.copyName"), action: () => copyName(item), icon: Copy },
   ];
 }
 
@@ -3826,12 +3838,13 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       }),
     );
   }
-  return items;
+  return item.type === "TABLE" || item.type === "VIEW" || item.type === "MATERIALIZED_VIEW" ? presentMenu(items, item.type === "TABLE" ? "table" : "view") : items;
 }
 </script>
 
 <template>
   <div ref="rootRef" data-object-browser-root class="flex h-full min-h-0 min-w-0 flex-col bg-background outline-none" tabindex="0" @keydown="onObjectBrowserKeydown">
+    <SidebarMenuPreferencesDialog v-if="sidebarMenuPreferences" v-model:open="sidebarMenuPreferencesOpen" :scope="sidebarMenuPreferences.scope" :items="sidebarMenuPreferences.items" />
     <div v-if="!isEventEditor" ref="toolbarRef" class="flex h-10 shrink-0 items-center gap-2 overflow-hidden border-b px-3">
       <div class="flex min-w-12 items-center gap-2">
         <span class="inline-flex max-w-[14rem] min-w-0 items-center rounded border border-border bg-muted/50 px-2 py-0.5 text-xs font-medium truncate" :title="selectedSchema || props.database">

@@ -677,6 +677,91 @@ pub async fn cancel_conditional_update(
     Json(state.app.running_queries.cancel_and_wait(&req.execution_id, CONDITIONAL_UPDATE_CANCEL_WAIT).await)
 }
 
+pub async fn read_large_value_chunk(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<dbx_core::query::LargeValueRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    dbx_core::query::request_large_value(&state.app, req, false).await
+        .map(Json).map_err(AppError::from)
+}
+
+pub async fn release_large_value(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<dbx_core::query::LargeValueRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    dbx_core::query::request_large_value(&state.app, req, true).await
+        .map(Json).map_err(AppError::from)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LargeValueDownloadRequest {
+    pub request: dbx_core::query::LargeValueRequest,
+    pub file_name: String,
+}
+
+pub async fn prepare_large_value_download(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<LargeValueDownloadRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let mut temporary = tempfile::NamedTempFile::new().map_err(|error| AppError::from(error.to_string()))?;
+    dbx_core::query::write_large_value_snapshot(&state.app, req.request, temporary.as_file_mut())
+        .await.map_err(AppError::from)?;
+    let (_, path) = temporary.keep().map_err(|error| AppError::from(error.to_string()))?;
+    let download_id = uuid::Uuid::new_v4().to_string();
+    state.export_files.write().await.insert(download_id.clone(), crate::state::WebExportFile {
+        file_path: path.to_string_lossy().into_owned(), download_filename: req.file_name, format: "lob".to_string(),
+    });
+    let cleanup_state = state.clone();
+    let cleanup_id = download_id.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+        if let Some(file) = cleanup_state.export_files.write().await.remove(&cleanup_id) {
+            let _ = tokio::fs::remove_file(file.file_path).await;
+        }
+    });
+    Ok(Json(serde_json::json!({ "downloadId": download_id })))
+}
+
+pub async fn download_large_value(
+    State(state): State<Arc<WebState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<axum::response::Response, AppError> {
+    let file = state.export_files.write().await.remove(&id)
+        .ok_or_else(|| AppError::from("LOB download expired".to_string()))?;
+    super::mongodb_import_export::export_file_response(file).await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotExportDownloadRequest {
+    pub request: dbx_core::query::snapshot_export::SnapshotExportRequest,
+    pub file_name: String,
+}
+
+pub async fn prepare_snapshot_export(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<SnapshotExportDownloadRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let mut temporary = tempfile::NamedTempFile::new().map_err(|error| AppError::from(error.to_string()))?;
+    let format = req.request.format.clone();
+    dbx_core::query::snapshot_export::write_snapshot_export(&state.app, req.request, temporary.as_file_mut()).await.map_err(AppError::from)?;
+    let (_, path) = temporary.keep().map_err(|error| AppError::from(error.to_string()))?;
+    let download_id = uuid::Uuid::new_v4().to_string();
+    state.export_files.write().await.insert(download_id.clone(), crate::state::WebExportFile {
+        file_path: path.to_string_lossy().into_owned(), download_filename: req.file_name, format,
+    });
+    let cleanup_state = state.clone();
+    let cleanup_id = download_id.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+        if let Some(file) = cleanup_state.export_files.write().await.remove(&cleanup_id) {
+            let _ = tokio::fs::remove_file(file.file_path).await;
+        }
+    });
+    Ok(Json(serde_json::json!({ "downloadId": download_id })))
+}
+
 pub async fn close_query_session(
     State(state): State<Arc<WebState>>,
     Json(req): Json<CloseSessionRequest>,

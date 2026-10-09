@@ -69,6 +69,55 @@ describe("tableMetadataCache columns facet request counts", () => {
     expect(mocks.getColumns).toHaveBeenCalledOnce();
   });
 
+  it("uses a synonym's exact resolved target for indexes while retaining its source name", async () => {
+    mocks.getColumns.mockResolvedValue([{ ...column("ItemId"), is_primary_key: false, resolved_schema: "MixedOwner", resolved_table: "ActualItems", resolved_object_type: "TABLE" }]);
+    mocks.listIndexes.mockResolvedValue([{ name: "ITEMS_PK", columns: ["ItemId"], is_primary: true, is_unique: true }]);
+    const request = { connectionId: "ob-1", database: "service", schema: "AppOwner", tableName: "ItemsAlias", tableType: "SYNONYM", databaseType: "oceanbase-oracle" };
+
+    const result = await loadTableMetadata(request);
+
+    expect(mocks.listIndexes).toHaveBeenCalledExactlyOnceWith("ob-1", "service", "MixedOwner", "ActualItems", undefined);
+    expect(result.metadata).toMatchObject({ schema: "AppOwner", tableName: "ItemsAlias", tableType: "TABLE", primaryKeys: ["ItemId"] });
+    expect((await loadTableColumns(request)).tableType).toBe("TABLE");
+  });
+
+  it("keeps unqualified synonym column metadata separate for different current schemas", async () => {
+    const request = { connectionId: "ob-1", database: "service", tableName: "ITEMS", databaseType: "oceanbase-oracle", currentSchema: "FirstOwner" };
+    mocks.getColumns.mockImplementation(async (_c, _d, _s, _t, _catalog, _session, currentSchema) => [{ ...column(currentSchema === "SecondOwner" ? "SecondId" : "FirstId"), resolved_schema: currentSchema, resolved_table: "Items", resolved_object_type: "TABLE" }]);
+
+    const first = await loadTableColumns(request);
+    const second = await loadTableColumns({ ...request, currentSchema: "SecondOwner" });
+    const cached = await loadTableColumns(request);
+
+    expect(first.columns[0]?.name).toBe("FirstId");
+    expect(second.columns[0]?.name).toBe("SecondId");
+    expect(cached.columns[0]?.name).toBe("FirstId");
+    expect(mocks.getColumns).toHaveBeenNthCalledWith(1, "ob-1", "service", "", "ITEMS", undefined, undefined, "FirstOwner");
+    expect(mocks.getColumns).toHaveBeenNthCalledWith(2, "ob-1", "service", "", "ITEMS", undefined, undefined, "SecondOwner");
+    expect(mocks.getColumns).toHaveBeenCalledTimes(2);
+
+    invalidateTableMetadataCache({ connectionId: "ob-1", database: "service", schema: "FirstOwner", tableName: "ITEMS" });
+    await loadTableColumns(request);
+    await loadTableColumns({ ...request, currentSchema: "SecondOwner" });
+    expect(mocks.getColumns).toHaveBeenCalledTimes(3);
+  });
+
+  it("uses the current schema for parallel index discovery on a known direct table", async () => {
+    let releaseColumns: (value: ColumnInfo[]) => void = () => {};
+    mocks.getColumns.mockReturnValueOnce(
+      new Promise<ColumnInfo[]>((resolve) => {
+        releaseColumns = resolve;
+      }),
+    );
+    const load = loadTableMetadata({ connectionId: "ob-1", database: "service", schema: "", currentSchema: "SelectedOwner", tableName: "Items", tableType: "TABLE", databaseType: "oceanbase-oracle" });
+
+    await flush();
+
+    expect(mocks.listIndexes).toHaveBeenCalledExactlyOnceWith("ob-1", "service", "SelectedOwner", "Items", undefined);
+    releaseColumns([column("ID")]);
+    expect((await load).metadata.primaryKeys).toEqual(["ID"]);
+  });
+
   it("R1 — cold single-source columns load: 1 getColumns, 0 listIndexes", async () => {
     const result = await loadTableColumns({ ...usersRequest });
     expect(result.columns[0]?.name).toBe("users");

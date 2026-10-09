@@ -1152,6 +1152,8 @@ export interface ColumnInfo {
   name: string;
   data_type: string;
   resolved_schema?: string;
+  resolved_table?: string;
+  resolved_object_type?: string;
   is_nullable: boolean;
   column_default: string | null;
   is_primary_key: boolean;
@@ -1405,7 +1407,11 @@ export interface QueryResult {
   total_is_exact?: boolean;
   truncated?: boolean;
   /** Variable-length cells represented by bounded previews in `rows`. */
-  large_value_cells?: Array<{ row_index: number; column_index: number; original_bytes: number }>;
+  large_value_cells?: Array<{ row_index: number; column_index: number; original_bytes: number; value_ref?: string }>;
+  /** Frontend-only original result connection, independent of the currently active tab. */
+  large_value_context?: { connectionId: string; database: string; clientSessionId?: string; txnSessionId?: string; catalog?: string };
+  /** Retained result refs also cover cells already hydrated into complete local values. */
+  large_value_refs?: string[];
   session_id?: string | null;
   has_more?: boolean;
   /** For Elasticsearch REST search results parsed into a _source table,

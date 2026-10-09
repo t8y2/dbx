@@ -41,7 +41,7 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}, configureMetad
   const store = {
     getConfig: vi.fn(() => undefined),
     lookupLocalCompletionTables: vi.fn((): SqlCompletionTable[] => []),
-    lookupLocalCompletionColumns: vi.fn(() => []),
+    lookupLocalCompletionColumns: vi.fn((): SqlCompletionColumn[] => []),
     lookupLocalCompletionColumnsByPrefix: vi.fn(() => []),
     lookupLocalCompletionObjects: vi.fn(() => []),
     lookupLocalCompletionDatabases: vi.fn((): string[] => []),
@@ -53,7 +53,7 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}, configureMetad
     listCompletionSchemas: vi.fn(async (): Promise<string[]> => []),
     listCompletionDatabases: vi.fn(async (): Promise<string[]> => []),
     refreshCompletionTables: vi.fn(async () => []),
-    refreshCompletionColumns: vi.fn(async () => []),
+    refreshCompletionColumns: vi.fn(async (): Promise<SqlCompletionColumn[]> => []),
     refreshCompletionSchemas: vi.fn(async () => []),
     refreshCompletionDatabases: vi.fn(async () => []),
     listRedisCompletionCommandDocs: vi.fn(async () => commands),
@@ -159,6 +159,32 @@ describe.each([false, true])("OceanBase standalone routine completion (semantic=
     resolve([{ name: "P_OLD", schema: "APP", type: "procedure" }]);
     const result = await pending;
     expect(result?.options.some((option) => option.label === "P_OLD") ?? false).toBe(false);
+  });
+});
+
+describe("OceanBase INSERT completion", () => {
+  beforeEach(() => vi.useRealTimers());
+
+  it.each([
+    ["Alias", undefined],
+    ["APP.Alias", "APP"],
+    ['"Alias"', undefined],
+    ['"MixedOwner"."Alias"', "MixedOwner"],
+  ])("resolves %s with the selected schema kept as context", async (source, explicitSchema) => {
+    const { provide, store } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", schema: "APP", modelValue: `INSERT INTO ${source} (` });
+    store.listCompletionColumns.mockImplementation(async (...args: unknown[]) => (args[3] === explicitSchema ? [{ name: "ID", table: "Alias", schema: explicitSchema }] : []));
+    expect((await provide())?.options.map((option) => option.label)).toContain("ID");
+    expect(store.listCompletionColumns).toHaveBeenCalledWith("connection", "demo", "Alias", explicitSchema, expect.objectContaining({ currentSchema: "APP" }), undefined);
+    if (source.startsWith('"')) expect(store.listCompletionColumns).toHaveBeenCalledWith("connection", "demo", "Alias", explicitSchema, expect.objectContaining({ tableQuoted: true }), undefined);
+  });
+
+  it("keeps synchronous INSERT lookup and background refresh unqualified", async () => {
+    const { provide, store } = createHarness({ databaseType: "oceanbase-oracle", dialect: "oracle", schema: "APP", modelValue: "INSERT INTO Alias (" });
+    store.lookupLocalCompletionColumns.mockImplementation((...args: unknown[]) => (args[3] === undefined ? [{ name: "ID", table: "Alias" }] : []));
+    store.refreshCompletionColumns.mockResolvedValue([{ name: "ID", table: "Alias" }]);
+    expect((await provide(false))?.options.map((option) => option.label)).toContain("ID");
+    expect(store.lookupLocalCompletionColumns).toHaveBeenCalledWith("connection", "demo", "Alias", undefined, undefined, expect.objectContaining({ currentSchema: "APP" }));
+    expect(store.refreshCompletionColumns).toHaveBeenCalledWith("connection", "demo", "Alias", undefined, expect.objectContaining({ currentSchema: "APP" }), undefined);
   });
 });
 

@@ -27,6 +27,7 @@ import {
   buildSqlSemanticDiagnostics,
   isSqlSemanticDiagnosticInputContext,
   isSqlVirtualTableReference,
+  oceanBaseDiagnosticTableReference,
   shouldRunSqlSemanticDiagnostics,
   sqlSemanticDiagnosticRangesForViewport,
   sqlServerRoutineDefinitionRangesForViewport,
@@ -259,7 +260,8 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
     };
   }
 
-  function semanticDiagnosticTablesForScope(tables: SqlTableReference[], scope: CompletionMetadataScope): SqlTableReference[] {
+  function semanticDiagnosticTablesForScope(tables: SqlTableReference[], scope: CompletionMetadataScope, sql: string): SqlTableReference[] {
+    if (props.databaseType === "oceanbase-oracle") return tables.map((table) => oceanBaseDiagnosticTableReference(table, sql));
     if (props.databaseType !== "sqlserver" || scope.database === props.database) return tables;
     return tables.map((table) => (table.database ? table : { ...table, database: scope.database, schema: table.schema ?? scope.schema }));
   }
@@ -274,7 +276,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
         enriched.push(table);
         continue;
       }
-      if (metadata.usesOracleSessionCompletionColumns(table.schema)) {
+      if ((props.databaseType === "oceanbase-oracle" && !table.schema) || metadata.usesOracleSessionCompletionColumns(table.schema)) {
         enriched.push(table);
         continue;
       }
@@ -448,7 +450,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
         const metadataScope = semanticDiagnosticMetadataScope(sql, range);
         const scopedAnalysis = {
           ...semanticAnalysis,
-          tables: semanticDiagnosticTablesForScope(semanticAnalysis.tables, metadataScope),
+          tables: semanticDiagnosticTablesForScope(semanticAnalysis.tables, metadataScope, range.sql),
         };
         const { tables, missingTables } = await enrichSemanticDiagnosticTables(scopedAnalysis.tables, metadataScope);
         const columnMetadataMissingTables = await ensureColumnsForSemanticDiagnostics(tables, metadataScope);
@@ -468,6 +470,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
               loadedColumnTables: metadata.loadedColumnsByTable,
               sql: range.sql,
               databaseType: props.databaseType,
+              currentSchema: metadataScope.schema,
             }),
             range,
             sql,
@@ -582,7 +585,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
         const metadataScope = semanticDiagnosticMetadataScope(sql, range);
         const scopedAnalysis = {
           ...semanticAnalysis,
-          tables: semanticDiagnosticTablesForScope(semanticAnalysis.tables, metadataScope),
+          tables: semanticDiagnosticTablesForScope(semanticAnalysis.tables, metadataScope, range.sql),
         };
         const { tables, missingTables } = await enrichSemanticDiagnosticTables(scopedAnalysis.tables, metadataScope);
         const loadedColumnsBefore = metadata.loadedColumnsByTable.size;
@@ -603,6 +606,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
               loadedColumnTables: metadata.loadedColumnsByTable,
               sql: range.sql,
               databaseType: props.databaseType,
+              currentSchema: metadataScope.schema,
             },
           ),
           range,

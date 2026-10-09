@@ -1338,6 +1338,7 @@ describe("useDataGridEditor saveChanges reload", () => {
       databaseType?: import("@/types/database").DatabaseType;
       primaryKeys?: string[];
       onExecuteSql?: (sql: string) => Promise<void>;
+      prepareSaveBaseline?: import("@/composables/useDataGridEditor").UseDataGridEditorOptions["prepareSaveBaseline"];
     } = {},
   ) {
     const emit = vi.fn();
@@ -1386,10 +1387,40 @@ describe("useDataGridEditor saveChanges reload", () => {
       getRowItem: () => undefined,
       prepareFullReload: options.prepareFullReload,
       refreshSavedRows: options.refreshSavedRows,
+      prepareSaveBaseline: options.prepareSaveBaseline,
       emit,
     });
     return { editor, emit, currentPage, ensureManualTransactionSession };
   }
+
+  it("loads complete original baselines before generating forward and rollback SQL", async () => {
+    const source = { columns: ["id", "status"], rows: [[1, "LOB preview"]] as CellValue[][] };
+    const prepareSaveBaseline = vi.fn(async (changes: Parameters<NonNullable<import("@/composables/useDataGridEditor").UseDataGridEditorOptions["prepareSaveBaseline"]>>[0]) => {
+      expect(changes.dirtyRows.get(0).get(1)).toBeNull();
+      source.rows[0]![1] = "complete original LOB";
+    });
+    mocks.prepareDataGridSave.mockImplementation(async (options) => {
+      expect(options.rows[0][1]).toBe("complete original LOB");
+      expect(options.dirtyRows).toEqual([[0, [[1, null]]]]);
+      return { statements: ["UPDATE orders_test SET status=NULL WHERE id=1"], rollbackStatements: ["UPDATE orders_test SET status='complete original LOB' WHERE id=1"] };
+    });
+    const { editor } = createSaveTestEditor({ queryResult: source, prepareSaveBaseline });
+    editor.dirtyRows.value.set(0, new Map([[1, null]]));
+    await expect(editor.previewChanges()).resolves.toEqual(["UPDATE orders_test SET status=NULL WHERE id=1"]);
+    expect(prepareSaveBaseline).toHaveBeenCalledOnce();
+  });
+
+  it("blocks writes and keeps pending changes when the original LOB baseline expired", async () => {
+    const { editor } = createSaveTestEditor({ prepareSaveBaseline: vi.fn().mockRejectedValue(new Error("LOB snapshot expired")) });
+    editor.dirtyRows.value.set(0, new Map([[1, null]]));
+    await editor.saveChanges();
+    expect(mocks.prepareDataGridSave).not.toHaveBeenCalled();
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(mocks.executeInTransaction).not.toHaveBeenCalled();
+    expect(mocks.executeInManualTransaction).not.toHaveBeenCalled();
+    expect(editor.dirtyRows.value.get(0)!.get(1)).toBeNull();
+    expect(editor.saveError.value).toContain("LOB snapshot expired");
+  });
 
   // https://github.com/t8y2/dbx/issues/8321: without a primary key the row is
   // addressed by matching every column value, and the loaded page cannot show

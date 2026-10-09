@@ -2863,6 +2863,8 @@ export default {
     binaryImportFailed: "Failed to import file: {message}",
     binaryImportTooLarge: "File is too large ({size}, limit {limit}). Importing large files into a single cell is not supported.",
     downloadBinaryValue: "Download Value",
+    downloadSnapshotValue: "Download complete result snapshot",
+    largeValueSnapshotPreview: "{value} (result snapshot preview)",
     downloadSaved: "Saved to {path}",
     downloadStarted: "Download started: {fileName}",
     binaryDownload: {

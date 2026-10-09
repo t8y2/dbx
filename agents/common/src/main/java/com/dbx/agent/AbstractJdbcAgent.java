@@ -421,7 +421,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
             releasePooledConnection(true);
             return;
         }
-        if (sessionAffinity || executor.hasOpenSessions() || executor.hasActiveStatements()) {
+        if (sessionAffinity || executor.hasOpenSessions() || executor.hasActiveStatements() || hasRetainedResultResources()) {
             return;
         }
         releasePooledConnection(!preparePooledConnectionForReturn());
@@ -438,7 +438,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         if (sessionAffinity) {
             return;
         }
-        if (executor.hasOpenSessions() || executor.hasActiveStatements()) {
+        if (executor.hasOpenSessions() || executor.hasActiveStatements() || hasRetainedResultResources()) {
             return;
         }
         releasePooledConnection(!preparePooledConnectionForReturn());
@@ -713,7 +713,12 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         );
     }
 
+    protected boolean hasRetainedResultResources() { return false; }
+
+    protected void releaseRetainedResultResources() { }
+
     private void closeCurrentConnection() throws Exception {
+        releaseRetainedResultResources();
         if (pooledLease != null) {
             boolean evict = pooledConnectionPoisoned || sessionAffinity || !preparePooledConnectionForReturn();
             releasePooledConnection(evict);
@@ -733,6 +738,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
     }
 
     private void releasePooledConnection(boolean evict) {
+        releaseRetainedResultResources();
         JdbcConnectionPoolRegistry.Lease lease = pooledLease;
         pooledLease = null;
         connection = null;

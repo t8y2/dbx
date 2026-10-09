@@ -7830,6 +7830,20 @@ pub async fn get_columns_core_for_session(
     table: &str,
     client_session_id: Option<&str>,
 ) -> Result<Vec<db::ColumnInfo>, String> {
+    get_columns_core_for_session_in_context(state, connection_id, database, schema, table, client_session_id, None)
+        .await
+}
+
+/// Keep the selected OceanBase schema separate from an explicitly qualified object schema.
+pub async fn get_columns_core_for_session_in_context(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+    client_session_id: Option<&str>,
+    current_schema: Option<&str>,
+) -> Result<Vec<db::ColumnInfo>, String> {
     if connection_config(state, connection_id).await.is_some_and(|config| config.db_type == DatabaseType::MongoDb) {
         return Box::pin(mongodb_columns::get_columns(state, connection_id, database, table)).await;
     }
@@ -7837,7 +7851,7 @@ pub async fn get_columns_core_for_session(
         let metadata_session =
             EphemeralAgentMetadataSession::open(state, connection_id, Some(database), "columns").await;
         if metadata_session.client_session_id().is_some() {
-            let result = get_columns_core_for_session_inner(
+            let result = get_columns_core_for_session_inner_in_context(
                 state,
                 connection_id,
                 database,
@@ -7845,13 +7859,36 @@ pub async fn get_columns_core_for_session(
                 table,
                 metadata_session.client_session_id(),
                 false,
+                current_schema,
             )
             .await;
             metadata_session.finish(state, connection_id, Some(database)).await;
             return result;
         }
     }
-    get_columns_core_for_session_inner(state, connection_id, database, schema, table, client_session_id, true).await
+    if current_schema.is_none() {
+        return get_columns_core_for_session_inner(
+            state,
+            connection_id,
+            database,
+            schema,
+            table,
+            client_session_id,
+            true,
+        )
+        .await;
+    }
+    get_columns_core_for_session_inner_in_context(
+        state,
+        connection_id,
+        database,
+        schema,
+        table,
+        client_session_id,
+        true,
+        current_schema,
+    )
+    .await
 }
 
 async fn get_columns_core_for_session_inner(
@@ -7863,6 +7900,29 @@ async fn get_columns_core_for_session_inner(
     client_session_id: Option<&str>,
     use_client_session_context: bool,
 ) -> Result<Vec<db::ColumnInfo>, String> {
+    get_columns_core_for_session_inner_in_context(
+        state,
+        connection_id,
+        database,
+        schema,
+        table,
+        client_session_id,
+        use_client_session_context,
+        None,
+    )
+    .await
+}
+
+async fn get_columns_core_for_session_inner_in_context(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+    client_session_id: Option<&str>,
+    use_client_session_context: bool,
+    current_schema: Option<&str>,
+) -> Result<Vec<db::ColumnInfo>, String> {
     get_columns_core_for_session_inner_with_pool(
         state,
         connection_id,
@@ -7873,6 +7933,7 @@ async fn get_columns_core_for_session_inner(
         use_client_session_context,
         None,
         true,
+        current_schema,
     )
     .await
 }
@@ -7895,6 +7956,7 @@ async fn get_columns_core_for_existing_pool(
         true,
         Some(pool_key),
         false,
+        None,
     )
     .await
 }
@@ -7909,6 +7971,7 @@ async fn get_columns_core_for_session_inner_with_pool(
     use_client_session_context: bool,
     existing_pool_key: Option<&str>,
     allow_recovery: bool,
+    current_schema: Option<&str>,
 ) -> Result<Vec<db::ColumnInfo>, String> {
     let context_session_id = if use_client_session_context { client_session_id } else { None };
     let existing_pool_key = existing_pool_key.map(str::to_owned);
@@ -8077,10 +8140,13 @@ async fn get_columns_core_for_session_inner_with_pool(
                     }
                 }
                 match client
-                    .get_columns::<Vec<db::ColumnInfo>>(
+                    .get_columns_in_context::<Vec<db::ColumnInfo>>(
                         database,
                         schema,
                         table,
+                        current_schema.filter(|_| {
+                            db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OceanbaseOracle)
+                        }),
                         agent_metadata_timeout(db_config.as_ref()),
                     )
                     .await

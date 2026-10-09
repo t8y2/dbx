@@ -29,6 +29,7 @@ import com.dbx.agent.QueryPageOptions;
 import com.dbx.agent.QueryPageResult;
 import com.dbx.agent.QueryResult;
 import com.dbx.agent.QueryTiming;
+import com.dbx.agent.SpatialColumn;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.TriggerInfo;
 
@@ -67,6 +68,8 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
         "GGSYS", "FLOWS_FILES", "APEX_PUBLIC_USER", "GSMROOTUSER", "SYSRAC"
     );
     private boolean queryTimeoutChanged;
+    private final OceanBaseLobValues lobValues = new OceanBaseLobValues();
+    private boolean deferCharacterLobs;
 
     public static final JdbcAgentProfile OCEANBASE_ORACLE_PROFILE = new JdbcAgentProfile(
         "com.oceanbase.jdbc.Driver",
@@ -92,15 +95,32 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     @Override
     public QueryResult executeQuery(String sql, String schema, ExecuteQueryOptions options) {
         try (QueryTiming timing = QueryTiming.begin()) {
+            prepareLobExecution(sql, options.getDeferLobs());
             QueryResult result = super.executeQuery(sql, schema, options);
+            var marked = OceanBaseLobValues.mark(result.getColumns(), result.getColumn_types(), result.getRows());
+            if (marked != null) {
+                var spatialColumns = remapLobSpatialColumns(result.getSpatial_columns(), marked.columns());
+                var spatialValues = remapLobSpatialValues(result.getSpatial_values(), marked.columns());
+                result.setColumns(marked.columns());
+                result.setColumn_types(marked.types());
+                result.setRows(marked.rows());
+                result.setSpatial_columns(spatialColumns);
+                result.setSpatial_values(spatialValues);
+            }
             result.setQuery_timings_ms(timing.finish());
             return result;
+        } catch (RuntimeException error) {
+            lobValues.clear();
+            throw error;
+        } finally {
+            deferCharacterLobs = false;
         }
     }
 
     @Override
     public QueryPageResult executeQueryPage(String sql, String schema, QueryPageOptions options) {
         try (QueryTiming timing = QueryTiming.begin()) {
+            prepareLobExecution(sql, options.getDeferLobs());
             long prepareStarted = System.nanoTime();
             Connection connection = requireConnected();
             uncheckedVoid(() -> beforeQueryExecution(connection, options.getTimeoutSecs()));
@@ -108,8 +128,14 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             QueryPageResult result = JdbcExecutor.current().executeBoundedPage(
                 connection, sql, schema, this::setSchemaSQL, this::resetSchemaSQL, options, resultValueReader()
             );
+            markLobPage(result);
             result.setQuery_timings_ms(timing.finish());
             return result;
+        } catch (RuntimeException error) {
+            lobValues.clear();
+            throw error;
+        } finally {
+            deferCharacterLobs = false;
         }
     }
 
@@ -117,10 +143,101 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     public QueryPageResult fetchQueryPage(String sessionId, int pageSize) {
         try (QueryTiming timing = QueryTiming.begin()) {
             QueryPageResult result = super.fetchQueryPage(sessionId, pageSize);
+            markLobPage(result);
             result.setQuery_timings_ms(timing.finish());
             return result;
         }
     }
+
+    @Override
+    public QueryPageResult startTableRead(String sql, String schema, QueryPageOptions options) {
+        prepareLobExecution(sql, options.getDeferLobs());
+        try {
+            QueryPageResult result = super.startTableRead(sql, schema, options);
+            markLobPage(result);
+            return result;
+        } catch (RuntimeException error) {
+            lobValues.clear();
+            throw error;
+        } finally {
+            deferCharacterLobs = false;
+        }
+    }
+
+    @Override
+    public QueryPageResult fetchTableReadPage(String sessionId, int pageSize) {
+        QueryPageResult result = super.fetchTableReadPage(sessionId, pageSize);
+        markLobPage(result);
+        return result;
+    }
+
+    private static void markLobPage(QueryPageResult result) {
+        var marked = OceanBaseLobValues.mark(result.getColumns(), result.getColumn_types(), result.getRows());
+        if (marked == null) return;
+        var spatialColumns = remapLobSpatialColumns(result.getSpatial_columns(), marked.columns());
+        var spatialValues = remapLobSpatialValues(result.getSpatial_values(), marked.columns());
+        result.setColumns(marked.columns());
+        result.setColumn_types(marked.types());
+        result.setRows(marked.rows());
+        result.setSpatial_columns(spatialColumns);
+        result.setSpatial_values(spatialValues);
+    }
+
+    private static List<SpatialColumn> remapLobSpatialColumns(List<SpatialColumn> spatial, List<String> columns) {
+        List<Integer> retained = new ArrayList<>();
+        for (int index = 0; index < columns.size(); index++) {
+            if (!columns.get(index).startsWith(OceanBaseLobValues.MARKER_PREFIX)) retained.add(index);
+        }
+        List<SpatialColumn> remapped = new ArrayList<>();
+        for (SpatialColumn column : spatial) remapped.add(new SpatialColumn(retained.get(column.getColumn_index()), column.getSrid()));
+        return remapped;
+    }
+
+    private static List<List<Integer>> remapLobSpatialValues(List<List<Integer>> spatial, List<String> columns) {
+        List<List<Integer>> remapped = new ArrayList<>();
+        for (List<Integer> row : spatial) {
+            List<Integer> expanded = new ArrayList<>();
+            int sourceIndex = 0;
+            for (String column : columns) {
+                expanded.add(column.startsWith(OceanBaseLobValues.MARKER_PREFIX) ? null : row.get(sourceIndex++));
+            }
+            remapped.add(expanded);
+        }
+        return remapped;
+    }
+
+    private void prepareLobExecution(String sql, boolean requested) {
+        // Unproven statements may end the transaction or replace an object. Fail closed.
+        String leading = sql.replaceFirst("(?s)^(?:\\s|--[^\\r\\n]*(?:\\r?\\n|$)|/\\*.*?\\*/)*", "");
+        if (!leading.matches("(?is)^SELECT\\b.*")) lobValues.clear();
+        deferCharacterLobs = requested;
+    }
+
+    @Override
+    protected JdbcExecutor.ResultValueReader resultValueReader() {
+        if (!deferCharacterLobs) return super.resultValueReader();
+        return (JdbcExecutor.ColumnAwareResultValueReader) (rs, index, sqlType, typeName) -> {
+            Object preview = lobValues.preview(rs, index, sqlType, typeName);
+            return preview == null ? resultValue(rs, index, sqlType) : preview;
+        };
+    }
+
+    @Override
+    protected boolean hasRetainedResultResources() { return lobValues.hasValues(); }
+
+    @Override
+    protected void releaseRetainedResultResources() { lobValues.clear(); }
+
+    @Override
+    public void invalidateLargeValues() { lobValues.clear(); }
+
+    @Override
+    public Object readLargeValueChunk(String valueRef, long offset, int limit) {
+        return unchecked(() -> lobValues.fetch(requireConnected(), valueRef, offset, limit));
+    }
+
+    @Override
+    public boolean releaseLargeValue(String valueRef) { return lobValues.release(valueRef); }
 
     @Override
     protected String buildJdbcUrl(ConnectParams params) {
@@ -1087,6 +1204,142 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
 
     @Override
     public List<ColumnInfo> getColumns(String schema, String table) {
+        return getColumnsInContext(schema, table, null);
+    }
+
+    @Override
+    public List<ColumnInfo> getColumnsInContext(String schema, String table, String currentSchema) {
+        return unchecked(() -> {
+            String owner = normalizeSchema(schema == null || schema.isBlank() ? currentSchema : schema);
+            String tableName = normalizeObjectName(table);
+            String initialOwner = owner;
+            String initialName = tableName;
+            boolean publicFallback = false;
+            Set<List<String>> visited = new HashSet<>();
+            for (int depth = 0; depth <= 32; depth++) {
+                if (!visited.add(List.of(owner, tableName))) {
+                    throw new SQLException("Synonym cycle detected at " + owner + "." + tableName);
+                }
+                List<ColumnInfo> columns = getObjectColumns(owner, tableName);
+                if (!columns.isEmpty()) {
+                    if (depth > 0) {
+                        if (publicFallback) verifyPublicColumnTarget(initialOwner, initialName, owner, tableName);
+                        String objectType = queryColumnObjectType(owner, tableName);
+                        for (ColumnInfo column : columns) {
+                            column.setResolved_schema(owner);
+                            column.setResolved_table(tableName);
+                            column.setResolved_object_type(objectType);
+                        }
+                    }
+                    return columns;
+                }
+                String objectType = queryColumnObjectType(owner, tableName);
+                if (objectType != null && !"SYNONYM".equals(objectType)) {
+                    throw new SQLException("Column metadata for " + owner + "." + tableName + " (" + objectType + ") is not accessible or not available");
+                }
+                SynonymTarget target = queryColumnSynonym(owner, tableName);
+                if (target == null && objectType == null && depth == 0 && (schema == null || schema.isBlank())) {
+                    target = queryColumnSynonym("PUBLIC", tableName);
+                    // OceanBase 4.2.5 exposes public synonyms under its internal dictionary owner.
+                    if (target == null) target = queryColumnSynonym("__public", tableName);
+                    publicFallback = target != null;
+                }
+                if (target == null) {
+                    throw new SQLException("Object " + owner + "." + tableName + " not found or not accessible for column metadata");
+                }
+                if (target.databaseLink() != null && !target.databaseLink().isBlank()) {
+                    throw new SQLException("Column metadata for DBLink synonyms is not supported: " + owner + "." + tableName);
+                }
+                if (target.owner() == null || target.owner().isBlank() || target.name() == null || target.name().isBlank()) {
+                    throw new SQLException("Incomplete synonym target metadata for " + owner + "." + tableName);
+                }
+                owner = target.owner();
+                tableName = target.name();
+            }
+            throw new SQLException("Synonym resolution exceeded 32 links");
+        });
+    }
+
+    private record SynonymTarget(String owner, String name, String databaseLink) {}
+
+    private void verifyPublicColumnTarget(String owner, String name, String targetOwner, String targetName) throws SQLException {
+        // ALL_OBJECTS can hide a foreign-schema object that still shadows a public synonym.
+        // NAME_RESOLVE stops at DBLinks; no remote resolution is performed here.
+        String originalSchema = currentSchema();
+        if (originalSchema.isBlank()) throw new SQLException("Cannot determine current schema for public synonym resolution");
+        boolean switchSchema = !owner.equals(originalSchema);
+        Exception primaryError = null;
+        try {
+            if (switchSchema) {
+                try (var stmt = requireConnection().createStatement()) {
+                    stmt.execute(setSchemaSQL(owner));
+                }
+            }
+            try (var stmt = requireConnection().prepareCall("BEGIN DBMS_UTILITY.NAME_RESOLVE(?, ?, ?, ?, ?, ?, ?, ?); END;")) {
+                stmt.setString(1, quoteIdentifier(name));
+                stmt.setInt(2, 0);
+                for (int index = 3; index <= 6; index++) stmt.registerOutParameter(index, Types.VARCHAR);
+                stmt.registerOutParameter(7, Types.NUMERIC);
+                stmt.registerOutParameter(8, Types.NUMERIC);
+                stmt.execute();
+                String databaseLink = stmt.getString(6);
+                if (databaseLink != null && !databaseLink.isBlank()) {
+                    throw new SQLException("Column metadata for DBLink synonyms is not supported: " + owner + "." + name);
+                }
+                if (!targetOwner.equals(stmt.getString(3)) || !targetName.equals(stmt.getString(4))) {
+                    throw new SQLException("Public synonym target does not match database name resolution for " + owner + "." + name
+                        + "; a local object may be inaccessible");
+                }
+            }
+        } catch (SQLException | RuntimeException error) {
+            primaryError = error;
+            throw error;
+        } finally {
+            if (switchSchema) {
+                try (var stmt = requireConnection().createStatement()) {
+                    stmt.execute(setSchemaSQL(originalSchema));
+                } catch (SQLException restoreError) {
+                    if (primaryError == null) throw restoreError;
+                    primaryError.addSuppressed(restoreError);
+                }
+            }
+        }
+    }
+
+    private SynonymTarget queryColumnSynonym(String owner, String name) throws SQLException {
+        String sql = "SELECT TABLE_OWNER, TABLE_NAME, DB_LINK FROM ALL_SYNONYMS WHERE OWNER = ? AND SYNONYM_NAME = ?";
+        try (var stmt = requireConnection().prepareStatement(sql)) {
+            stmt.setString(1, owner);
+            stmt.setString(2, name);
+            try (ResultSet rs = stmt.executeQuery()) {
+                return rs.next() ? new SynonymTarget(rs.getString("TABLE_OWNER"), rs.getString("TABLE_NAME"), rs.getString("DB_LINK")) : null;
+            }
+        }
+    }
+
+    private String queryColumnObjectType(String owner, String name) throws SQLException {
+        String sql = """
+            SELECT OBJECT_TYPE FROM ALL_OBJECTS
+            WHERE OWNER = ? AND OBJECT_NAME = ?
+              AND OBJECT_TYPE IN ('TABLE', 'VIEW', 'MATERIALIZED VIEW', 'SYNONYM',
+                'SEQUENCE', 'PROCEDURE', 'FUNCTION', 'PACKAGE', 'TYPE')
+            """;
+        try (var stmt = requireConnection().prepareStatement(sql)) {
+            stmt.setString(1, owner);
+            stmt.setString(2, name);
+            try (ResultSet rs = stmt.executeQuery()) {
+                String type = null;
+                while (rs.next()) {
+                    String candidate = rs.getString("OBJECT_TYPE");
+                    if ("MATERIALIZED VIEW".equals(candidate)) return candidate;
+                    if (type == null || "VIEW".equals(candidate)) type = candidate;
+                }
+                return type;
+            }
+        }
+    }
+
+    private List<ColumnInfo> getObjectColumns(String schema, String table) {
         return unchecked(() -> {
             String owner = normalizeSchema(schema);
             String tableName = normalizeObjectName(table);

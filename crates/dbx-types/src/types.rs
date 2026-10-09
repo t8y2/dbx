@@ -321,6 +321,10 @@ pub struct ColumnInfo {
     pub data_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_table: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_object_type: Option<String>,
     pub is_nullable: bool,
     pub column_default: Option<String>,
     pub is_primary_key: bool,
@@ -573,6 +577,9 @@ pub struct LargeValueCell {
     pub row_index: usize,
     pub column_index: usize,
     pub original_bytes: usize,
+    /// Opaque original-result locator. Absent for legacy preview/re-query drivers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

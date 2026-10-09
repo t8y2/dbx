@@ -1791,7 +1791,7 @@ export async function listSchemaInfos(connectionId: string, database: string): P
 export async function getCustomTypeDetails(connectionId: string, database: string, schema: string, name: string): Promise<CustomTypeDetails> {
   return invoke("get_custom_type_details", { connectionId, database, schema, name });
 }
-export async function getColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string, clientSessionId?: string): Promise<ColumnInfo[]> {
+export async function getColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string, clientSessionId?: string, currentSchema?: string): Promise<ColumnInfo[]> {
   return invoke("get_columns", {
     connectionId,
     database,
@@ -1799,6 +1799,7 @@ export async function getColumns(connectionId: string, database: string, schema:
     table,
     catalog,
     clientSessionId,
+    currentSchema,
   });
 }
 
@@ -2021,6 +2022,22 @@ export interface ConditionalUpdateCancellationResult {
 
 export async function cancelConditionalUpdate(executionId: string): Promise<ConditionalUpdateCancellationResult> {
   return invoke("cancel_conditional_update", { executionId });
+}
+
+export async function readLargeValueChunk(request: import("./http").LargeValueRequest): Promise<import("./http").LargeValueChunk> {
+  return invoke("read_large_value_chunk", { request });
+}
+
+export async function releaseLargeValue(request: import("./http").LargeValueRequest): Promise<boolean> {
+  return invoke("release_large_value", { request });
+}
+
+export async function downloadLargeValue(request: import("./http").LargeValueRequest, filePath: string): Promise<void> {
+  await invoke("download_large_value", { request, filePath });
+}
+
+export async function exportSnapshotResult(request: import("./http").SnapshotExportRequest, filePath: string): Promise<void> {
+  await invoke("export_snapshot_result", { request, filePath });
 }
 
 export async function closeQuerySession(connectionId: string, database: string, sessionId: string, clientSessionId?: string, catalog?: string): Promise<boolean> {

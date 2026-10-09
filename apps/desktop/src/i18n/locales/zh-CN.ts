@@ -2798,6 +2798,8 @@ export default withEnglishFallback({
     binaryImportFailed: "导入文件失败：{message}",
     binaryImportTooLarge: "文件过大（{size}，上限 {limit}）。不支持将大文件导入到单个单元格。",
     downloadBinaryValue: "下载值",
+    downloadSnapshotValue: "下载完整结果快照",
+    largeValueSnapshotPreview: "{value}（结果快照预览）",
     downloadSaved: "已保存到 {path}",
     downloadStarted: "已交给浏览器下载：{fileName}",
     binaryDownload: {

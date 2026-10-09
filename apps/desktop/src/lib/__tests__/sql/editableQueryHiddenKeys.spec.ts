@@ -3,6 +3,18 @@ import { buildQueryWithHiddenPrimaryKeys, hiddenResultColumnIndexes } from "@/li
 import { analyzeEditableQueryEditability, allPrimaryKeysPresent, sourceColumnsForResult, type EditableQueryInfo } from "@/lib/sql/sqlAnalysis";
 
 describe("editable query hidden primary keys", () => {
+  it.each(["oracle", "oceanbase-oracle"] as const)("preserves source spelling and projection boundaries for %s star queries", (databaseType) => {
+    for (const [sql, expected] of [
+      ['SELECT * FROM "Owner"."Items" "i"', 'SELECT "i".*, ROWIDTOCHAR(ROWID) AS "__DBX_PK_1" FROM "Owner"."Items" "i"'],
+      ['SELECT "i".* FROM "Owner"."Items" "i"', 'SELECT "i".*, ROWIDTOCHAR(ROWID) AS "__DBX_PK_1" FROM "Owner"."Items" "i"'],
+      ['SELECT /*+ FULL(t) */ * -- columns\nFROM APP.ITEMS t', 'SELECT /*+ FULL(t) */ t.*, ROWIDTOCHAR(ROWID) AS "__DBX_PK_1" -- columns\nFROM APP.ITEMS t'],
+    ]) {
+      const result = buildQueryWithHiddenPrimaryKeys({ sql, databaseType, primaryKeys: ["__DBX_ROWID"], existingResultNames: ["rowid", "__DBX_PK_0"], sourceExpressions: { __DBX_ROWID: "ROWIDTOCHAR(ROWID)" } });
+      expect(result?.sql).toBe(expected);
+      expect(result?.projections).toEqual([{ sourceName: "__DBX_ROWID", alias: "__DBX_PK_1" }]);
+    }
+  });
+
   it("appends quoted MySQL primary keys without changing the visible projection", () => {
     expect(
       buildQueryWithHiddenPrimaryKeys({

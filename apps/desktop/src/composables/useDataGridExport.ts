@@ -1,4 +1,4 @@
-import { computed, type ComputedRef, type Ref, createApp } from "vue";
+import { computed, type ComputedRef, type Ref, createApp, watch, getCurrentScope, onScopeDispose } from "vue";
 import { useI18n } from "vue-i18n";
 import { useDataGridExtractor } from "@/composables/useDataGridExtractor";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -13,6 +13,8 @@ import { useToast } from "@/composables/useToast";
 import { useExportTracker } from "@/composables/useExportTracker";
 import { clipboardCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
 import { binaryCellClipboardText } from "@/lib/dataGrid/binaryCellDownload";
+import { materializeSnapshotResultRows } from "@/lib/dataGrid/largeValueSnapshot";
+import { snapshotExportSelection, assertSnapshotXlsxCellLengths } from "@/lib/dataGrid/snapshotExport";
 import { tryStartExclusiveActivation, type ActionActivationGuard } from "@/lib/connection/actionActivation";
 import { clipboardLineEndings, copyToClipboard } from "@/lib/common/clipboard";
 import { clearDataGridClipboardCopy, rememberDataGridClipboardCopy } from "@/lib/dataGrid/dataGridClipboard";
@@ -169,6 +171,7 @@ export interface UseDataGridExportOptions {
    * silently change what "export all data" produces.
    */
   completeLocalResult?: ComputedRef<QueryResult | undefined>;
+  snapshotResult?: ComputedRef<QueryResult>;
   allExportResults?: ComputedRef<Array<{ sheetName: string; result: QueryResult; sql?: string }> | undefined>;
   currentResultLabel?: ComputedRef<string | undefined>;
   exportFileBaseName?: ComputedRef<string | undefined>;
@@ -197,6 +200,8 @@ interface CopyInsertData {
 }
 
 export function useDataGridExport(options: UseDataGridExportOptions) {
+  let activeSnapshotCancel: (() => Promise<void>) | undefined;
+  if (getCurrentScope()) onScopeDispose(() => { void activeSnapshotCancel?.().catch(() => undefined); });
   const { t } = useI18n();
   const { toast } = useToast();
   const tracker = useExportTracker();
@@ -523,7 +528,10 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     // client-side filters/search and unsaved edits, which would silently
     // change what the export contains.
     if (useFullExport && rowIds === undefined && hasCompleteLocalResult?.value && completeLocalResult?.value) {
-      const normalized = hasColumnSubset || databaseType.value === "mongodb" ? normalizeCompleteLocalResult(completeLocalResult.value, targetColumns, projectionSourceIndexes) : normalizeCompleteLocalResult(completeLocalResult.value);
+      const original = completeLocalResult.value;
+      const rows = await materializeSnapshotResultRows(original, () => completeLocalResult.value === original);
+      const materialized = { ...original, rows };
+      const normalized = hasColumnSubset || databaseType.value === "mongodb" ? normalizeCompleteLocalResult(materialized, targetColumns, projectionSourceIndexes) : normalizeCompleteLocalResult(materialized);
       const columnComments = buildXlsxHeaderOverrides(normalized.columns, normalized.columnComments, headerMode);
       return {
         ...applyGlobalDateTimeExportFormat(
@@ -589,6 +597,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   async function writeXlsxResult(outputPath: string, result: { columns: string[]; columnTypes: string[]; columnComments?: (string | null)[]; rows: CellValue[][] }, includeSqlSheet: boolean, autoFilter: boolean, sqlOverride?: string) {
+    if (options.snapshotResult?.value.large_value_refs?.length || options.snapshotResult?.value.large_value_cells?.some((cell) => cell.value_ref)) assertSnapshotXlsxCellLengths(result.rows);
     const effectiveSql = sqlOverride ?? currentExportSql();
     const sqlWorksheet = includeSqlSheet ? buildXlsxSqlWorksheet([{ sql: effectiveSql || "" }]) : undefined;
     const rightAlign = useSettingsStore().editorSettings.numericColumnRightAlign;
@@ -929,10 +938,76 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return exported;
   }
 
+  async function exportLocalSnapshot(format: "csv" | "json", rowIds: number[] | undefined, columnIndexes: number[] | undefined, full: boolean): Promise<boolean> {
+    const original = options.snapshotResult?.value;
+    const originalConnectionId = connectionId.value;
+    const originalDatabase = database.value;
+    const isCurrent = () => options.snapshotResult?.value === original && connectionId.value === originalConnectionId && database.value === originalDatabase;
+    if (!original || full && rowIds === undefined && !hasCompleteLocalResult?.value) return false;
+    const exportAll = full && rowIds === undefined && hasCompleteLocalResult?.value;
+    const visibleIndexes = visibleColumnIndexesOption?.value ?? columns.value.map((_, index) => index);
+    const indexes = columnIndexes?.filter((index) => index >= 0 && index < columns.value.length);
+    const sourceIndexes = exportAll && !indexes ? original.columns.map((_, index) => index) : (indexes ?? columns.value.map((_, index) => index)).map((index) => visibleIndexes[index] ?? index);
+    const names = sourceIndexes.map((index) => original.columns[index]!);
+    const items = exportAll
+      ? original.rows.map((row, sourceIndex) => ({ sourceIndex, data: sourceIndexes.map((index) => row[index]) }))
+      : rowsToExport(rowIds).map((item) => ({
+          sourceIndex: item.sourceIndex, isNew: item.isNew,
+          data: externalizeRows([item.data], indexes)[0]!,
+          isDirtyCol: (indexes ?? columns.value.map((_, index) => index)).map((index) => item.isDirtyCol[index] ?? false),
+        }));
+    const selected = snapshotExportSelection(original, names, sourceIndexes, items);
+    if (!selected) return false;
+    const types = sourceIndexes.map((index) => original.column_types?.[index] ?? "");
+    selected.rows = applyGlobalDateTimeExportFormat({ columns: names, columnTypes: types, rows: selected.rows as CellValue[][] }, true).rows;
+    let outputPath = exportFileName(full ? "export" : "export-page", format, { page: !full });
+    if (isTauriRuntime()) {
+      const path = await promptExportSavePath({ defaultFileName: outputPath, filters: [{ name: FORMAT_META[format]!.label, extensions: [format] }], preferredPath: useSettingsStore().editorSettings.preferredExportPath });
+      if (!path) return true;
+      outputPath = path;
+    }
+    if (!isCurrent()) throw new Error("LOB result context changed");
+    const executionId = uuid();
+    const cancel = async () => { await api.cancelQuery(executionId); };
+    activeSnapshotCancel = cancel;
+    const title = currentExportTitle();
+    tracker.addTask(title, format, outputPath, executionId);
+    tracker.registerTaskCancelHandler(executionId, cancel);
+    if (exportProgressState) exportProgressState.value = {
+      title: t("exportProgress.title"), tableName: title, format, rowsExported: 0, totalRows: selected.rows.length,
+      status: "Running", errorMessage: null, filePath: outputPath, startedAt: Date.now(), finishedAt: undefined,
+    };
+    if (exportProgressDialog) exportProgressDialog.value = true;
+    if (exportCanMinimize) exportCanMinimize.value = true;
+    const previousCancel = exportCancelHandler?.value;
+    if (exportCancelHandler) exportCancelHandler.value = cancel;
+    const stop = watch(() => [options.snapshotResult?.value, connectionId.value, database.value], () => { if (!isCurrent()) void cancel().catch(() => undefined); });
+    try {
+      await api.exportSnapshotResult({ ...selected, context: { ...selected.context, executionId }, format, quoteMode: useSettingsStore().editorSettings.csvQuoteMode, nullLiteral: csvNullLiteralForMode(useSettingsStore().editorSettings.csvNullMode) }, outputPath);
+      if (!isCurrent()) throw new Error("LOB result context changed");
+      tracker.updateTableExportTask(executionId, { exportId: executionId, tableName: title, rowsExported: selected.rows.length, totalRows: selected.rows.length, status: "Done" });
+      if (exportProgressState) exportProgressState.value = { ...exportProgressState.value, status: "Done", rowsExported: selected.rows.length, finishedAt: Date.now() };
+      notifyExportSuccess(outputPath);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      tracker.updateTableExportTask(executionId, { exportId: executionId, tableName: title, rowsExported: 0, totalRows: selected.rows.length, status: "Error", errorMessage });
+      if (exportProgressState) exportProgressState.value = { ...exportProgressState.value, status: "Error", errorMessage, finishedAt: Date.now() };
+      throw error;
+    } finally {
+      stop();
+      if (activeSnapshotCancel === cancel) activeSnapshotCancel = undefined;
+      tracker.unregisterTaskCancelHandler(executionId);
+      if (exportCanMinimize) exportCanMinimize.value = false;
+      if (exportCancelHandler) exportCancelHandler.value = previousCancel ?? null;
+    }
+    return true;
+  }
+
   async function exportCsv(target?: ExportTargetParam, columnIndexesParam?: number[]) {
     const { rowIds, columnIndexes } = normalizeExportTarget(target, columnIndexesParam);
     await runExclusiveExport(async () => {
       try {
+        if (await exportLocalSnapshot("csv", rowIds, columnIndexes, true)) return;
         if (await exportQueryResultViaBackend("csv", rowIds, false, "name", true, undefined, false, columnIndexes)) return;
         if (await exportFullTableDataViaBackend("csv", rowIds, "name", true, undefined, false, columnIndexes)) return;
 
@@ -1015,6 +1090,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   async function exportCurrentPageCsv(columnIndexes?: number[]) {
     await runExclusiveExport(async () => {
       try {
+        if (await exportLocalSnapshot("csv", undefined, columnIndexes, false)) return;
         let outputPath = exportFileName("export-page", "csv", { page: true });
         if (isTauriRuntime()) {
           const path = await promptExportSavePath({
@@ -1038,6 +1114,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const { rowIds, columnIndexes } = normalizeExportTarget(target, columnIndexesParam);
     await runExclusiveExport(async () => {
       try {
+        if (await exportLocalSnapshot("json", rowIds, columnIndexes, true)) return;
         if (await exportFullTableDataViaBackend("json", rowIds, "name", true, undefined, false, columnIndexes)) return;
         if (await exportQueryResultViaBackend("json", rowIds, false, "name", true, undefined, false, columnIndexes)) return;
 
@@ -1063,6 +1140,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   async function exportCurrentPageJson(columnIndexes?: number[]) {
     await runExclusiveExport(async () => {
       try {
+        if (await exportLocalSnapshot("json", undefined, columnIndexes, false)) return;
         let outputPath = exportFileName("export-page", "json", { page: true });
         if (isTauriRuntime()) {
           const path = await promptExportSavePath({
@@ -1370,15 +1448,21 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
 
         const exportPattern = useSettingsStore().editorSettings.globalDateTimeExportFormat;
         const rightAlign = useSettingsStore().editorSettings.numericColumnRightAlign;
-        const worksheets = sheets.map((sheet) => ({
+        const worksheets = [];
+        for (const sheet of sheets) {
+          const sourceRows = sheet.result.rows;
+          const rows = await materializeSnapshotResultRows(sheet.result, () => sheet.result.rows === sourceRows);
+          if (sheet.result.large_value_refs?.length || sheet.result.large_value_cells?.some((cell) => cell.value_ref)) assertSnapshotXlsxCellLengths(rows);
+          worksheets.push({
           sheetName: sheet.sheetName,
           columns: sheet.result.columns,
           columnTypes: sheet.result.column_types ?? [],
           columnComments: buildXlsxHeaderOverrides(sheet.result.columns, commentsForExportColumns(sheet.result.columns), exportOptions.headerMode),
-          rows: formatTemporalRowsForExport(sheet.result.rows, sheet.result.column_types ?? [], exportPattern),
+          rows: formatTemporalRowsForExport(rows, sheet.result.column_types ?? [], exportPattern),
           numericColumnRightAlign: rightAlign,
           autoFilter: exportOptions.autoFilter,
-        }));
+          });
+        }
         const sqlWorksheet = includeSqlSheet ? buildXlsxSqlWorksheet(sheets.map((sheet) => ({ resultName: sheet.sheetName, sql: sheet.sql || sheet.result.sourceStatement || "" }))) : undefined;
         await api.exportQueryResultsXlsx(outputPath, sqlWorksheet ? [...worksheets, { ...sqlWorksheet, autoFilter: false }] : worksheets, exportOptions.autoFilter, exportPattern || undefined);
         notifyExportSuccess(outputPath);

@@ -784,6 +784,21 @@ describe("connectionStore completion assistant", () => {
     expect(store.lookupLocalCompletionColumns("oracle-1", "ORCL", "ORDERS")).toEqual([]);
   });
 
+  it("passes OceanBase synonym lookup context separately and isolates selected schemas", async () => {
+    const getColumns = vi.fn().mockResolvedValue([{ name: "ID", data_type: "NUMBER", is_nullable: false }]);
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({ getColumns, checkConnectionHealth: vi.fn().mockResolvedValue(undefined) }));
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [oceanBaseOracleConnection()];
+    store.connectedIds.add("oceanbase-oracle-1");
+    await store.listCompletionColumns("oceanbase-oracle-1", "OBORCL", "Alias", undefined, { currentSchema: "MixedOwner" });
+    expect(getColumns).toHaveBeenLastCalledWith("oceanbase-oracle-1", "OBORCL", "", "Alias", undefined, undefined, "MixedOwner");
+    await store.listCompletionColumns("oceanbase-oracle-1", "OBORCL", "Alias", undefined, { currentSchema: "OtherOwner" });
+    expect(getColumns).toHaveBeenLastCalledWith("oceanbase-oracle-1", "OBORCL", "", "Alias", undefined, undefined, "OtherOwner");
+    expect(getColumns).toHaveBeenCalledTimes(2);
+  });
+
   it("lets a JDBC connection to Oracle resolve CURRENT_SCHEMA for unqualified column completion, same as the native Oracle driver", async () => {
     const completionAssistantSearch = vi.fn().mockResolvedValue({
       candidates: [],

@@ -1202,6 +1202,20 @@ public final class JdbcExecutor {
      * agents to convert vendor-specific column types (e.g. PostGIS
      * {@code geometry}) without re-querying the metadata.
      */
+    public <T> T withActiveStatement(Statement statement, SqlOperation<T> operation) throws SQLException {
+        activeStatements.add(statement);
+        try {
+            return operation.run();
+        } finally {
+            activeStatements.remove(statement);
+        }
+    }
+
+    @FunctionalInterface
+    public interface SqlOperation<T> {
+        T run() throws SQLException;
+    }
+
     public interface ColumnAwareResultValueReader extends ResultValueReader {
         Object read(ResultSet rs, int index, int sqlType, String columnTypeName) throws SQLException;
 

@@ -335,6 +335,36 @@ pub async fn close_query_session(
 }
 
 #[tauri::command]
+pub async fn read_large_value_chunk(
+    state: State<'_, Arc<AppState>>,
+    request: dbx_core::query::LargeValueRequest,
+) -> Result<serde_json::Value, String> {
+    dbx_core::query::request_large_value(&state, request, false).await
+}
+
+#[tauri::command]
+pub async fn release_large_value(
+    state: State<'_, Arc<AppState>>,
+    request: dbx_core::query::LargeValueRequest,
+) -> Result<serde_json::Value, String> {
+    dbx_core::query::request_large_value(&state, request, true).await
+}
+
+#[tauri::command]
+pub async fn download_large_value(
+    state: State<'_, Arc<AppState>>,
+    request: dbx_core::query::LargeValueRequest,
+    file_path: String,
+) -> Result<u64, String> {
+    let path = std::path::Path::new(&file_path);
+    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|error| error.to_string())?;
+    let written = dbx_core::query::write_large_value_snapshot(&state, request, temporary.as_file_mut()).await?;
+    temporary.persist(path).map_err(|error| error.to_string())?;
+    Ok(written)
+}
+
+#[tauri::command]
 pub async fn close_client_connection_session(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
@@ -344,6 +374,20 @@ pub async fn close_client_connection_session(
 ) -> Result<bool, String> {
     let database = query_session_database(&database, catalog.as_deref());
     state.close_client_session_pool(&connection_id, database, &client_session_id).await
+}
+
+#[tauri::command]
+pub async fn export_snapshot_result(
+    state: State<'_, Arc<AppState>>,
+    request: dbx_core::query::snapshot_export::SnapshotExportRequest,
+    file_path: String,
+) -> Result<(), String> {
+    let path = std::path::Path::new(&file_path);
+    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|error| error.to_string())?;
+    dbx_core::query::snapshot_export::write_snapshot_export(&state, request, temporary.as_file_mut()).await?;
+    temporary.persist(path).map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn query_session_database<'a>(database: &'a str, catalog: Option<&str>) -> Option<&'a str> {

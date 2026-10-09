@@ -30,6 +30,7 @@ export interface TableMetadataRequest {
   tableName: string;
   tableType?: string;
   databaseType: DatabaseType | string;
+  currentSchema?: string;
   driverProfile?: string;
   catalog?: string;
   force?: boolean;
@@ -156,16 +157,16 @@ function bumpTableMetadataInvalidationStamp(scopeKey: string): void {
   tableMetadataInvalidationStamps.set(scopeKey, (tableMetadataInvalidationStamps.get(scopeKey) ?? 0) + 1);
 }
 
-export function tableMetadataScope(request: Pick<TableMetadataRequest, "connectionId" | "database" | "schema" | "tableName" | "tableType" | "driverProfile" | "databaseType" | "catalog">): MetadataScopeInput {
+export function tableMetadataScope(request: Pick<TableMetadataRequest, "connectionId" | "database" | "schema" | "tableName" | "tableType" | "driverProfile" | "databaseType" | "catalog" | "currentSchema">): MetadataScopeInput {
   return {
     kind: "table-metadata",
     connectionId: request.connectionId,
     database: request.database,
-    schema: request.schema ?? "",
+    schema: request.schema || request.currentSchema || "",
     tableName: request.tableName,
     tableType: request.tableType,
     driverProfile: request.driverProfile || request.databaseType,
-    extra: request.catalog ? { catalog: request.catalog } : undefined,
+    extra: request.catalog || request.currentSchema ? { catalog: request.catalog, currentSchema: request.currentSchema } : undefined,
   };
 }
 
@@ -176,13 +177,13 @@ function withVirtualRowIdentifier(metadata: TableMetadata, request: Pick<TableMe
   return { ...metadata, primaryKeys: virtualPrimaryKeys, virtualPrimaryKeys, rowIdentityResolved: true };
 }
 
-export function getCachedTableMetadata(request: Pick<TableMetadataRequest, "connectionId" | "database" | "schema" | "tableName" | "tableType" | "driverProfile" | "databaseType" | "catalog">): TableMetadataLoadResult | undefined {
+export function getCachedTableMetadata(request: Pick<TableMetadataRequest, "connectionId" | "database" | "schema" | "tableName" | "tableType" | "driverProfile" | "databaseType" | "catalog" | "currentSchema">): TableMetadataLoadResult | undefined {
   const hit = tableMetadataCache.get(tableMetadataScope(request));
   if (!hit) return undefined;
   return { metadata: withVirtualRowIdentifier(hit.value, request), cacheStatus: hit.stale ? "stale" : "hit", ageMs: hit.ageMs };
 }
 
-export function updateCachedTableMetadataType(request: Pick<TableMetadataRequest, "connectionId" | "database" | "schema" | "tableName" | "tableType" | "driverProfile" | "databaseType" | "catalog">, tableType: string): boolean {
+export function updateCachedTableMetadataType(request: Pick<TableMetadataRequest, "connectionId" | "database" | "schema" | "tableName" | "tableType" | "driverProfile" | "databaseType" | "catalog" | "currentSchema">, tableType: string): boolean {
   const scope = tableMetadataScope(request);
   const hit = tableMetadataCache.get(scope);
   if (!hit) return false;
@@ -190,7 +191,7 @@ export function updateCachedTableMetadataType(request: Pick<TableMetadataRequest
   return true;
 }
 
-export function getCachedTableColumns(request: Pick<TableMetadataRequest, "connectionId" | "database" | "schema" | "tableName" | "tableType" | "driverProfile" | "databaseType" | "catalog">): TableColumnsLoadResult | undefined {
+export function getCachedTableColumns(request: Pick<TableMetadataRequest, "connectionId" | "database" | "schema" | "tableName" | "tableType" | "driverProfile" | "databaseType" | "catalog" | "currentSchema">): TableColumnsLoadResult | undefined {
   const hit = tableColumnsCache.get(tableMetadataScope(request));
   if (!hit) return undefined;
   return { columns: hit.value.columns, tableType: hit.value.tableType, cacheStatus: hit.stale ? "stale" : "hit", ageMs: hit.ageMs, cachedAt: hit.cachedAt };
@@ -247,11 +248,14 @@ export async function loadTableColumns(request: TableMetadataRequest): Promise<T
       scope,
       async () => {
         // Display-only loader: columns only, never index discovery.
-        const columns = await api.getColumns(request.connectionId, request.database, request.schema ?? "", request.tableName, request.catalog);
+        const columns = request.currentSchema
+          ? await api.getColumns(request.connectionId, request.database, request.schema ?? "", request.tableName, request.catalog, undefined, request.currentSchema)
+          : await api.getColumns(request.connectionId, request.database, request.schema ?? "", request.tableName, request.catalog);
+        const resolvedTarget = columns.find((column) => column.resolved_table);
         return {
           schema: request.schema || undefined,
           tableName: request.tableName,
-          tableType: request.tableType,
+          tableType: resolvedTarget ? resolvedTarget.resolved_object_type?.trim() || "UNKNOWN" : request.tableType,
           catalog: request.catalog,
           database: request.database,
           columns,
@@ -300,7 +304,7 @@ export async function loadTableIndexes(request: TableMetadataRequest): Promise<I
     if (!oldestKey) break;
     tableIndexesLoads.delete(oldestKey);
   }
-  const promise = api.listIndexes(request.connectionId, request.database, request.schema ?? "", request.tableName, request.catalog);
+  const promise = api.listIndexes(request.connectionId, request.database, request.schema || request.currentSchema || "", request.tableName, request.catalog);
   const entry = { parts: metadataScopeParts(scope), promise, expiresAt: Date.now() + TABLE_METADATA_CACHE_TTL_MS };
   tableIndexesLoads.set(scopeKey, entry);
   void promise.catch(() => {
@@ -339,25 +343,28 @@ export async function loadTableMetadata(request: TableMetadataRequest): Promise<
     metadata = await tableMetadataCoordinator.run(
       scope,
       async () => {
-        // Column discovery can be especially slow on Oracle. Start row-identity
-        // discovery independently unless an agent-backed PostgreSQL-family
-        // relation must first report its visible schema for the index lookup.
+        // Synonyms can resolve to a different owner and object name. Wait for
+        // their columns, while known base tables retain concurrent discovery.
         const resolveReportedSchema = (request.databaseType === "vastbase" || request.databaseType === "kingbase") && !request.schema;
+        const resolveSynonymTarget = (request.databaseType === "oracle" || request.databaseType === "oceanbase-oracle" || request.driverProfile === "oracle" || request.driverProfile === "oceanbase-oracle") && request.tableType?.trim().toUpperCase() !== "TABLE";
         let rowIdentityResolved = true;
         const indexFailure = (): IndexInfo[] => {
           rowIdentityResolved = false;
           return [];
         };
-        const indexesPromise = resolveReportedSchema ? undefined : loadTableIndexes(request).catch(indexFailure);
+        const indexesPromise = resolveReportedSchema || resolveSynonymTarget ? undefined : loadTableIndexes(request).catch(() => undefined);
         const columnsResult = await columnsPromise;
         const columns = columnsResult.columns;
+        const resolvedTarget = columns.find((column) => column.resolved_table);
         const resolvedSchema = resolveReportedSchema ? columns.find((column) => column.resolved_schema)?.resolved_schema : request.schema;
-        const indexes = columns.length > 0 ? await (indexesPromise ?? loadTableIndexes({ ...request, schema: resolvedSchema }).catch(indexFailure)) : [];
-        const primaryKeys = editableRowIdentifierColumns(request.databaseType as DatabaseType, columns, indexes, request.tableType);
+        const indexRequest = { ...request, schema: resolvedTarget?.resolved_schema ?? (resolvedSchema || request.currentSchema), tableName: resolvedTarget?.resolved_table ?? request.tableName };
+        const loadedIndexes = columns.length > 0 ? await ((!resolvedTarget && indexesPromise) || loadTableIndexes(indexRequest).catch(() => undefined)) : [];
+        const indexes = loadedIndexes ?? indexFailure();
+        const primaryKeys = editableRowIdentifierColumns(request.databaseType as DatabaseType, columns, indexes, columnsResult.tableType);
         return {
           schema: resolvedSchema || undefined,
           tableName: request.tableName,
-          tableType: request.tableType,
+          tableType: columnsResult.tableType,
           catalog: request.catalog,
           database: request.database,
           columns,

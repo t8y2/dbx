@@ -2373,12 +2373,22 @@ impl AgentDriverClient {
         table: &str,
         timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
-        self.call_method_with_timeout(
-            AgentMethod::GetColumns,
-            agent_schema_table_params(database, schema, table),
-            timeout_duration,
-        )
-        .await
+        self.get_columns_in_context(database, schema, table, None, timeout_duration).await
+    }
+
+    pub async fn get_columns_in_context<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: &str,
+        schema: &str,
+        table: &str,
+        current_schema: Option<&str>,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        let mut params = agent_schema_table_params(database, schema, table);
+        if let Some(current_schema) = current_schema {
+            params["current_schema"] = serde_json::json!(current_schema);
+        }
+        self.call_method_with_timeout(AgentMethod::GetColumns, params, timeout_duration).await
     }
 
     pub async fn get_custom_type_details<T: DeserializeOwned + Send + 'static>(
@@ -4633,6 +4643,9 @@ def respond(req):
 
     session_id = params.get('agentSessionId', '__legacy__')
     with session_lock(session_id):
+        if method == 'get_columns':
+            write_response(req, params)
+            return
         if method in ('execute_query', 'start_table_read', 'get_explain_info'):
             sql = params.get('sql', '')
             with state_lock:
@@ -4678,6 +4691,43 @@ for line in sys.stdin:
 
     async fn runtime_counter(runtime: &Arc<AgentRuntimeClient>, method: &str) -> u64 {
         runtime.call(method, serde_json::json!({}), Some(Duration::from_secs(2)), None).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn columns_rpc_preserves_explicit_schema_and_optional_current_schema() {
+        let (runtime, script_path) = spawn_stateful_test_runtime("columns-context-test").await;
+        let mut client = AgentDriverClient::shared_session(runtime.clone(), "columns-session".to_string());
+
+        let contextual: serde_json::Value = client
+            .get_columns_in_context("APP", "", "ORDERS_ALIAS", Some("SelectedOwner"), Some(Duration::from_secs(2)))
+            .await
+            .unwrap();
+        assert_eq!(contextual["schema"], "");
+        assert_eq!(contextual["current_schema"], "SelectedOwner");
+        assert_eq!(contextual["table"], "ORDERS_ALIAS");
+        assert_eq!(contextual["agentSessionId"], "columns-session");
+
+        let qualified: serde_json::Value = client
+            .get_columns_in_context(
+                "APP",
+                "ActualOwner",
+                "ORDERS_ALIAS",
+                Some("SelectedOwner"),
+                Some(Duration::from_secs(2)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(qualified["schema"], "ActualOwner");
+        assert_eq!(qualified["current_schema"], "SelectedOwner");
+
+        let legacy: serde_json::Value =
+            client.get_columns("APP", "OWNER", "ORDERS_ALIAS", Some(Duration::from_secs(2))).await.unwrap();
+        assert_eq!(legacy["schema"], "OWNER");
+        assert!(legacy.get("current_schema").is_none());
+
+        runtime.kill();
+        wait_for_runtime_reap(&runtime).await;
+        let _ = std::fs::remove_file(script_path);
     }
 
     async fn wait_for_runtime_reap(runtime: &AgentRuntimeClient) {

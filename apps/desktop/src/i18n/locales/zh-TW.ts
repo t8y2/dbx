@@ -2572,6 +2572,8 @@ export default withEnglishFallback({
     binaryImportFailed: "匯入檔案失敗：{message}",
     binaryImportTooLarge: "檔案過大（{size}，上限 {limit}）。不支援將大檔案匯入到單一儲存格。",
     downloadBinaryValue: "下載值",
+    downloadSnapshotValue: "下載完整結果快照",
+    largeValueSnapshotPreview: "{value}（結果快照預覽）",
     downloadSaved: "已儲存到 {path}",
     downloadStarted: "已交給瀏覽器下載：{fileName}",
     binaryDownload: {

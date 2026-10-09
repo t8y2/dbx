@@ -335,6 +335,7 @@ import { translateBackendError } from "@/i18n/backend-errors";
 import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import { useDataGridExport, type MongoCopyUpdateTarget } from "@/composables/useDataGridExport";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { promptExportSavePath } from "@/lib/export/exportPath";
 import { eventTargetAllowsNativeClipboard, isPlainClipboardShortcut, readTextFromClipboard } from "@/lib/common/clipboard";
 import { claimDataGridPaste, claimDataGridSelectAll, clearDataGridClipboardCopy, parseDataGridClipboard, parseDataGridClipboardInBatches, planDataGridPaste } from "@/lib/dataGrid/dataGridClipboard";
 import { parseInsertStatementPaste, parseInsertStatementPasteInBatches } from "@/lib/dataGrid/dataGridInsertPaste";
@@ -4388,6 +4389,7 @@ const editor = useDataGridEditor({
   cacheKey: computed(() => props.pendingStateKey ?? props.cacheKey),
   onResultPayloadMutated: () => queryStore.invalidateResultEstimateForPayload(props.result),
   refreshSavedRows,
+  prepareSaveBaseline: async (changes) => { await largeValueRuntime?.prepareSaveBaseline(changes); },
   onCellValueChanged: (rowId, columnIndex) => largeValueRuntime?.invalidateVisibleLargeValuePreviewCell(rowId, columnIndex),
   prepareFullReload,
   emit,
@@ -8688,6 +8690,7 @@ const {
   queryResultExportRequest: props.queryResultExportRequest,
   hasCompleteLocalResult,
   completeLocalResult: computed(() => (hasCompleteLocalResult.value ? props.result : undefined)),
+  snapshotResult: computed(() => props.result),
   allExportResults: computed(() => props.allExportResults),
   currentResultLabel: computed(() => props.result.sourceLabel),
   exportFileBaseName: computed(() => props.exportFileBaseName),
@@ -10622,6 +10625,15 @@ async function downloadDetailBinaryValue(detail: DataGridCellDetail | null, mode
   if (!detail || !canDownloadDetailBinaryValue(detail)) return;
   try {
     const sourceResult = props.result;
+    if (largeValueRuntimeInstance.snapshotReference(getRowItem(detail.rowId), detail.colIndex)) {
+      const extension = mode === "binary" ? binaryCellDownloadPayload(detail.value, mode, detail.type, resolvedDatabaseType.value).extension : "txt";
+      const fileName = binaryCellDownloadFileName({ column: detail.column, rowNumber: detail.rowNumber, mode, extension });
+      const path = isTauriRuntime() ? await promptExportSavePath({ defaultFileName: fileName, filters: [{ name: "LOB", extensions: [extension] }] }) : fileName;
+      if (!path || props.result !== sourceResult) return;
+      await largeValueRuntimeInstance.downloadSnapshotCell(detail.rowId, detail.colIndex, path, mode);
+      toast(isTauriRuntime() ? t("grid.downloadSaved", { path }) : t("grid.downloadStarted", { fileName }));
+      return;
+    }
     if (!(await hydrateLargeValueCell(detail.rowId, detail.colIndex))) return;
     if (props.result !== sourceResult) return;
     const resolvedDetail = cellDetailFor(displayRowIndexById(detail.rowId), detail.colIndex);
@@ -10645,6 +10657,23 @@ async function downloadDetailBinaryValue(detail: DataGridCellDetail | null, mode
 }
 
 function binaryDownloadSubmenu(detail: DataGridCellDetail | null): ContextMenuItem | null {
+  if (detail && largeValueRuntimeInstance.snapshotReference(getRowItem(detail.rowId), detail.colIndex)
+    && !isBinaryCellColumnType(detail.type)) {
+    return {
+      label: t("grid.downloadSnapshotValue"), icon: Download,
+      action: async () => {
+        const defaultFileName = `lob-row-${detail.rowNumber}.txt`;
+        const path = isTauriRuntime() ? await promptExportSavePath({ defaultFileName, filters: [{ name: "Text", extensions: ["txt"] }] }) : defaultFileName;
+        if (!path) return;
+        try {
+          await largeValueRuntimeInstance.downloadSnapshotCell(detail.rowId, detail.colIndex, path);
+          toast(isTauriRuntime() ? t("grid.downloadSaved", { path }) : t("grid.downloadStarted", { fileName: defaultFileName }));
+        } catch (error) {
+          reportLargeValueLoadError(error);
+        }
+      },
+    };
+  }
   if (!canDownloadDetailBinaryValue(detail)) return null;
   return {
     label: t("grid.downloadBinaryValue"),

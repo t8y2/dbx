@@ -38,6 +38,8 @@ public final class AgentProtocol {
     public static final String METHOD_EXECUTE_QUERY_PAGE = "execute_query_page";
     public static final String METHOD_FETCH_QUERY_PAGE = "fetch_query_page";
     public static final String METHOD_CLOSE_QUERY_SESSION = "close_query_session";
+    public static final String METHOD_READ_LARGE_VALUE_CHUNK = "read_large_value_chunk";
+    public static final String METHOD_RELEASE_LARGE_VALUE = "release_large_value";
     public static final String METHOD_START_TABLE_READ = "start_table_read";
     public static final String METHOD_FETCH_TABLE_READ_PAGE = "fetch_table_read_page";
     public static final String METHOD_CLOSE_TABLE_READ_SESSION = "close_table_read_session";
@@ -215,6 +217,8 @@ public final class AgentProtocol {
         METHOD_EXECUTE_QUERY_PAGE,
         METHOD_FETCH_QUERY_PAGE,
         METHOD_CLOSE_QUERY_SESSION,
+        METHOD_READ_LARGE_VALUE_CHUNK,
+        METHOD_RELEASE_LARGE_VALUE,
         METHOD_START_TABLE_READ,
         METHOD_FETCH_TABLE_READ_PAGE,
         METHOD_CLOSE_TABLE_READ_SESSION,

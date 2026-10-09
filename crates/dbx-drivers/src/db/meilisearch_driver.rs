@@ -384,6 +384,8 @@ pub async fn get_columns(client: &MeilisearchClient, index: &str) -> Result<Vec<
             name,
             data_type: field_type.label().to_string(),
             resolved_schema: None,
+            resolved_table: None,
+            resolved_object_type: None,
             is_nullable: true,
             column_default: None,
             is_unique: false,

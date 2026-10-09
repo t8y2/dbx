@@ -152,6 +152,7 @@ public final class JsonRpcServer {
 
     void cancelActiveStatements() {
         jdbcExecutor.cancelActiveStatements();
+        agent.invalidateLargeValues();
         AbstractJdbcAgent jdbcAgent = pooledJdbcAgent();
         if (jdbcAgent != null) {
             jdbcAgent.releaseIdlePooledConnection(jdbcExecutor);
@@ -265,7 +266,9 @@ public final class JsonRpcServer {
         }
         if (AgentProtocol.METHOD_GET_COLUMNS.equals(method)) {
             switchCatalog(params);
-            return agent.getColumns(params.get("schema").getAsString(), params.get("table").getAsString());
+            String currentSchema = params.has("current_schema") && !params.get("current_schema").isJsonNull()
+                ? params.get("current_schema").getAsString() : null;
+            return agent.getColumnsInContext(params.get("schema").getAsString(), params.get("table").getAsString(), currentSchema);
         }
         if (AgentProtocol.METHOD_LIST_INDEXES.equals(method)) {
             switchCatalog(params);
@@ -323,6 +326,13 @@ public final class JsonRpcServer {
         if (AgentProtocol.METHOD_CLOSE_QUERY_SESSION.equals(method)) {
             return agent.closeQuerySession(params.get("sessionId").getAsString());
         }
+        if (AgentProtocol.METHOD_READ_LARGE_VALUE_CHUNK.equals(method)) {
+            return agent.readLargeValueChunk(params.get("valueRef").getAsString(),
+                params.get("offset").getAsLong(), intOrDefault(params, "limit", 4096));
+        }
+        if (AgentProtocol.METHOD_RELEASE_LARGE_VALUE.equals(method)) {
+            return agent.releaseLargeValue(params.get("valueRef").getAsString());
+        }
         if (AgentProtocol.METHOD_START_TABLE_READ.equals(method)) {
             return agent.startTableRead(
                 params.get("sql").getAsString(),
@@ -359,20 +369,25 @@ public final class JsonRpcServer {
             return result;
         }
         if (AgentProtocol.METHOD_EXECUTE_TRANSACTION.equals(method)) {
+            agent.invalidateLargeValues();
             Type statementsType = new TypeToken<List<String>>() {}.getType();
             List<String> statements = gson.fromJson(params.get("statements"), statementsType);
             return agent.executeTransaction(statements, stringOrNull(params, "schema"));
         }
         if (AgentProtocol.METHOD_BEGIN_MANUAL_TRANSACTION.equals(method)) {
+            agent.invalidateLargeValues();
             return agent.beginManualTransaction(stringOrNull(params, "schema"));
         }
         if (AgentProtocol.METHOD_COMMIT_MANUAL_TRANSACTION.equals(method)) {
+            agent.invalidateLargeValues();
             return agent.commitManualTransaction();
         }
         if (AgentProtocol.METHOD_ROLLBACK_MANUAL_TRANSACTION.equals(method)) {
+            agent.invalidateLargeValues();
             return agent.rollbackManualTransaction();
         }
         if (AgentProtocol.METHOD_EXECUTE_BATCH.equals(method)) {
+            agent.invalidateLargeValues();
             Type statementsType = new TypeToken<List<String>>() {}.getType();
             List<String> statements = gson.fromJson(params.get("statements"), statementsType);
             return agent.executeBatch(statements, stringOrNull(params, "schema"));

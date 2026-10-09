@@ -1547,6 +1547,8 @@ export interface SqlCompletionContext {
   insertTable?: string;
   insertDatabase?: string;
   insertSchema?: string;
+  insertTableQuoted?: boolean;
+  insertSchemaQuoted?: boolean;
   statementKind: SqlStatementKind;
   tableTriggerWord?: string;
   isGroupBy: boolean;
@@ -2673,6 +2675,8 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
     insertTable: insertInfo?.table,
     insertDatabase: insertInfo?.database,
     insertSchema: insertInfo?.schema,
+    insertTableQuoted: insertInfo?.nameQuoted,
+    insertSchemaQuoted: insertInfo?.schemaQuoted,
     statementKind,
     tableTriggerWord: lastWord || undefined,
     isGroupBy: isInGroupByContext(beforeCursor),
@@ -3267,7 +3271,7 @@ function detectComparisonLeftColumn(beforeCursor: string): string | undefined {
   return match?.[1];
 }
 
-function detectInsertColumnListContext(beforeCursor: string): { table: string; database?: string; schema?: string } | null {
+function detectInsertColumnListContext(beforeCursor: string): { table: string; database?: string; schema?: string; nameQuoted?: boolean; schemaQuoted?: boolean } | null {
   // Keep quoted identifiers intact so schema/table targets resolve to their
   // real names instead of placeholder string contents.
   const cleaned = beforeCursor.replace(/'[^']*'/g, "''");
@@ -3278,12 +3282,15 @@ function detectInsertColumnListContext(beforeCursor: string): { table: string; d
   const fullTable = match[1];
   if (!fullTable) return null;
   const parts = splitQualifiedNameParts(fullTable);
+  const rawParts = splitQualifiedNameRawParts(fullTable);
   const table = parts[parts.length - 1];
   if (!table) return null;
   return {
     table,
     database: parts.length >= 3 ? parts[parts.length - 3] : undefined,
     schema: parts.length >= 2 ? parts[parts.length - 2] : undefined,
+    nameQuoted: isQuotedIdentifier(rawParts[rawParts.length - 1]),
+    schemaQuoted: parts.length >= 2 ? isQuotedIdentifier(rawParts[rawParts.length - 2]) : undefined,
   };
 }
 
@@ -5132,7 +5139,10 @@ function columnsForInsertTarget(context: SqlCompletionContext, columnsByTable: M
   const schemaKey = context.insertSchema ? normalizeIdentifierPart(context.insertSchema) : undefined;
   const databaseKey = context.insertDatabase ? normalizeIdentifierPart(context.insertDatabase) : undefined;
   const qualifiedKey = schemaKey ? normalizeCompletionKey(`${context.insertDatabase ? `${context.insertDatabase}.` : ""}${context.insertSchema}.${context.insertTable}`) : undefined;
+  const reference = { name: context.insertTable, schema: context.insertSchema, nameQuoted: context.insertTableQuoted, schemaQuoted: context.insertSchemaQuoted };
   return collectCompletionColumns(columnsByTable).filter((column) => {
+    const scopedMatch = matchesOceanBaseCompletionCacheKey(column.key, reference);
+    if (scopedMatch !== undefined) return scopedMatch;
     if (normalizeIdentifierPart(column.table) !== tableKey) return false;
     if (!schemaKey) return true;
     if (!databaseKey && column.schema && normalizeIdentifierPart(column.schema) === schemaKey) return true;
@@ -5267,6 +5277,8 @@ function referencedTableMatchesColumnQualifier(table: SqlCompletionReferencedTab
 }
 
 function columnMatchesReferencedTable(column: SqlCompletionColumn & { key: string }, table: SqlCompletionReferencedTable): boolean {
+  const scopedMatch = matchesOceanBaseCompletionCacheKey(column.key, table);
+  if (scopedMatch !== undefined) return scopedMatch;
   if (normalizeIdentifierPart(column.table) !== normalizeIdentifierPart(table.name)) return false;
   if (!table.schema) return true;
   return columnMatchesQualifiedTable(column, { database: table.database, schema: table.schema, table: table.name });
@@ -5341,7 +5353,26 @@ function buildJoinConditionItems(context: SqlCompletionContext, columnsByTable: 
   return items;
 }
 
+type CompletionCacheTableReference = { name: string; schema?: string | null; nameQuoted?: boolean; schemaQuoted?: boolean };
+
+function oceanBaseCompletionReferenceKey(table: CompletionCacheTableReference): string {
+  const schema = table.schema ? (table.schemaQuoted ? table.schema : table.schema.toUpperCase()) : null;
+  const name = table.nameQuoted ? table.name : table.name.toUpperCase();
+  return `oceanbase-oracle:${JSON.stringify([schema, name, !!table.schemaQuoted, !!table.nameQuoted])}:`;
+}
+
+export function oceanBaseCompletionCacheKey(table: CompletionCacheTableReference, currentSchema?: string | null): string {
+  return `${oceanBaseCompletionReferenceKey(table)}${JSON.stringify(currentSchema ?? null)}`;
+}
+
+export function matchesOceanBaseCompletionCacheKey(key: string, table: CompletionCacheTableReference, currentSchema?: string): boolean | undefined {
+  if (!key.startsWith("oceanbase-oracle:[")) return undefined;
+  return currentSchema === undefined ? key.startsWith(oceanBaseCompletionReferenceKey(table)) : key === oceanBaseCompletionCacheKey(table, currentSchema);
+}
+
 function columnsForReferencedTable(table: SqlCompletionReferencedTable, columnsByTable: Map<string, SqlCompletionColumn[]>): SqlCompletionColumn[] {
+  const scopedColumns = [...columnsByTable].filter(([key]) => matchesOceanBaseCompletionCacheKey(key, table));
+  if (scopedColumns.length > 0) return scopedColumns.length === 1 ? applyReferencedColumnAliases(table, scopedColumns[0]![1]) : [];
   const keys = table.schema ? [table.database ? `${table.database}.${table.schema}.${table.name}` : undefined, `${table.schema}.${table.name}`, table.name].filter((key): key is string => !!key) : [table.name];
   for (const key of keys) {
     const columns = columnsByTable.get(key);
@@ -5352,6 +5383,8 @@ function columnsForReferencedTable(table: SqlCompletionReferencedTable, columnsB
 
 function foreignKeysForReferencedTable(table: SqlCompletionReferencedTable, foreignKeysByTable?: Map<string, SqlCompletionForeignKey[]>): SqlCompletionForeignKey[] {
   if (!foreignKeysByTable) return [];
+  const scopedKeys = [...foreignKeysByTable].filter(([key]) => matchesOceanBaseCompletionCacheKey(key, table));
+  if (scopedKeys.length > 0) return scopedKeys.length === 1 ? scopedKeys[0]![1] : [];
   const keys = table.schema ? [table.database ? `${table.database}.${table.schema}.${table.name}` : undefined, `${table.schema}.${table.name}`, table.name].filter((key): key is string => !!key) : [table.name];
   for (const key of keys) {
     const foreignKeys = foreignKeysByTable.get(key);

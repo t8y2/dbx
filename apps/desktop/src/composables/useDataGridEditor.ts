@@ -154,6 +154,7 @@ export interface UseDataGridEditorOptions {
   cacheKey?: ComputedRef<string | undefined>;
   /** 保存成功后结果负载被原地修改时通知宿主，使缓存的字节估算失效。 */
   onResultPayloadMutated?: () => void;
+  prepareSaveBaseline?: (changes: { dirtyRows: ReadonlyMap<number, ReadonlyMap<number, CellValue>>; deletedRows: ReadonlySet<number> }) => Promise<void>;
   refreshSavedRows?: (request: { dirtyRows: ReadonlyMap<number, ReadonlyMap<number, CellValue>>; columns: readonly string[]; rows: readonly (readonly CellValue[])[] }) => Promise<boolean>;
   onCellValueChanged?: (rowId: number, columnIndex: number) => void;
   prepareFullReload?: () => void;
@@ -2120,6 +2121,13 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       return;
     }
 
+    try {
+      await options.prepareSaveBaseline?.(snapshot);
+    } catch (error) {
+      saveError.value = normalizeDataGridSaveError(databaseType.value, error);
+      await finishInterruptedSaveChanges(snapshot);
+      return;
+    }
     const stmtOptions = saveStatementOptions(snapshot);
     let preparedSave: Awaited<ReturnType<typeof api.prepareDataGridSave>> | undefined;
     if (stmtOptions) {
@@ -2411,7 +2419,9 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
         if (preview) return await preview({ dirtyRows: dirtyRows.value, newRows: newRows.value, newRowMeta: cloneNewRowMeta(newRowMeta.value), deletedRows: deletedRows.value, columns: result.value.columns, rows: result.value.rows });
         return [];
       }
-      const stmtOptions = saveStatementOptions();
+      const snapshot = snapshotPendingSaveChanges();
+      await options.prepareSaveBaseline?.(snapshot);
+      const stmtOptions = saveStatementOptions(snapshot);
       if (!stmtOptions) return [];
       const prepared = await prepareSaveStatements(stmtOptions);
       if (prepared?.validationError) {

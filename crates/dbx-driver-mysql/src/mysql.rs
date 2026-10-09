@@ -1288,7 +1288,7 @@ fn mysql_row_to_json_with_srids_and_previews(
             if let Some((preview, original_bytes)) =
                 preview_bytes.and_then(|limit| mysql_bounded_value_preview(row, index, limit, protected_indexes))
             {
-                large_value_cells.push(LargeValueCell { row_index, column_index: index, original_bytes });
+                large_value_cells.push(LargeValueCell { row_index, column_index: index, original_bytes, value_ref: None });
                 return preview;
             }
             mysql_value_to_json_with_effective_type(row, index, effective_types.get(index).map(String::as_str))
@@ -4948,6 +4948,8 @@ where
                 name,
                 data_type: column_type,
                 resolved_schema: None,
+                resolved_table: None,
+                resolved_object_type: None,
                 is_nullable: get_str_by_name(row, "IS_NULLABLE") == "YES",
                 column_default: get_opt_str(row, "COLUMN_DEFAULT"),
                 extra: get_opt_str(row, "EXTRA"),
@@ -5021,6 +5023,8 @@ async fn fetch_columns_show(
                 name,
                 data_type: get_str_by_name(row, "Type"),
                 resolved_schema: None,
+                resolved_table: None,
+                resolved_object_type: None,
                 is_nullable: get_str_by_name(row, "Null").eq_ignore_ascii_case("YES"),
                 column_default: get_opt_str(row, "Default"),
                 is_primary_key: key.eq_ignore_ascii_case("PRI"),
@@ -8806,6 +8810,8 @@ mod tests {
             name: " state value".to_string(),
             data_type: "unknown".to_string(),
             resolved_schema: Some("analytics".to_string()),
+            resolved_table: None,
+            resolved_object_type: None,
             is_nullable: true,
             column_default: Some("seed".to_string()),
             is_primary_key: true,
@@ -9107,7 +9113,7 @@ mod tests {
         assert_eq!(values[0], serde_json::json!("k".repeat(2048)));
         assert_eq!(values[1].as_str().map(str::len), Some(1027));
         assert!(values[1].as_str().is_some_and(|value| value.ends_with("...")));
-        assert_eq!(cells, vec![LargeValueCell { row_index: 7, column_index: 1, original_bytes: 32 * 1024 }]);
+        assert_eq!(cells, vec![LargeValueCell { row_index: 7, column_index: 1, original_bytes: 32 * 1024, value_ref: None }]);
     }
 
     #[test]
@@ -9132,7 +9138,7 @@ mod tests {
             mysql_row_to_json_with_srids_and_previews(&row, &mut spatial_columns, 0, Some(512), &protected, &[]);
 
         assert_eq!(values[0], serde_json::json!("k".repeat(2048)));
-        assert_eq!(cells, vec![LargeValueCell { row_index: 0, column_index: 1, original_bytes: 4096 }]);
+        assert_eq!(cells, vec![LargeValueCell { row_index: 0, column_index: 1, original_bytes: 4096, value_ref: None }]);
     }
 
     #[test]
@@ -9172,7 +9178,7 @@ mod tests {
         assert!(values[1].as_str().is_some_and(|value| value.ends_with("...")));
         assert_eq!(values[2].as_str().map(str::len), Some(2 + 420 * 2));
         assert_eq!(values[3], serde_json::json!("B:419:25143"));
-        assert_eq!(cells, vec![LargeValueCell { row_index: 0, column_index: 1, original_bytes: 10_000 }]);
+        assert_eq!(cells, vec![LargeValueCell { row_index: 0, column_index: 1, original_bytes: 10_000, value_ref: None }]);
     }
 
     #[test]

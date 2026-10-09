@@ -80,8 +80,72 @@ describe("OceanBase Oracle query ROWID preparation", () => {
     expect(sql).not.toContain('"__DBX_ROWID"');
   });
 
-  it.each(["select * from sipf.t_sipf_debug_log a", "select a.rowid, a.taskname from sipf.t_sipf_debug_log a", "select q.taskname from (select a.taskname from sipf.t_sipf_debug_log a) q"])("preserves queries not needing an extra ROWID: %s", async (sql) => {
+  it.each(["select a.rowid, a.taskname from sipf.t_sipf_debug_log a", "select q.taskname from (select a.taskname from sipf.t_sipf_debug_log a) q"])("preserves queries not needing an extra ROWID: %s", async (sql) => {
     expect(await emittedSql(sql)).toBe(sql);
+  });
+
+  it.each([
+    ["select * from sipf.t_sipf_debug_log a", "select a.*"],
+    ["select a.* from sipf.t_sipf_debug_log a", "select a.*"],
+    ['select * from sipf.t_sipf_debug_log "Log"', 'select "Log".*'],
+    ['select "Log".* from sipf.t_sipf_debug_log "Log"', 'select "Log".*'],
+    ["select * from sipf.t_sipf_debug_log", "select t_sipf_debug_log.*"],
+  ])("adds a hidden identity to a safe star query: %s", async (originalSql, projection) => {
+    const { analyzeEditableQueryEditability } = await import("@/lib/sql/sqlAnalysis");
+    mocks.analyze.mockImplementation(async (sql: string) => analyzeEditableQueryEditability(sql));
+    mocks.executeMulti.mockResolvedValue([{ columns: ["TASKNAME", "__DBX_PK_0"], rows: [["duplicate", "ROW-A"], ["duplicate", "ROW-B"]], affected_rows: 0, execution_time_ms: 1 }]);
+    const { store, id, sql } = await executedQuery(originalSql);
+    expect(sql).toBe(`${projection}, ROWIDTOCHAR(ROWID) AS "__DBX_PK_0"${originalSql.slice(originalSql.indexOf(" from "))}`);
+    const tab = store.tabs.find((item) => item.id === id)!;
+    expect(tab.result?.hidden_column_indexes).toEqual([1]);
+    expect(tab.result?.rows).toEqual([["duplicate", "ROW-A"], ["duplicate", "ROW-B"]]);
+    await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["TASKNAME", "__DBX_ROWID"]));
+    expect(tab.tableMeta?.primaryKeys).toEqual(["__DBX_ROWID"]);
+  });
+
+  it.each(["*", "a.*"])("keeps physical rowid and hidden-alias columns visible for %s", async (projection) => {
+    const { analyzeEditableQueryEditability } = await import("@/lib/sql/sqlAnalysis");
+    mocks.analyze.mockImplementation(async (sql: string) => analyzeEditableQueryEditability(sql));
+    mocks.getColumns.mockResolvedValue([
+      { name: "rowid", data_type: "VARCHAR2(100)", is_nullable: true, is_primary_key: false },
+      { name: "__DBX_PK_0", data_type: "VARCHAR2(100)", is_nullable: true, is_primary_key: false },
+      { name: "TASKNAME", data_type: "VARCHAR2(100)", is_nullable: true, is_primary_key: false },
+    ]);
+    mocks.executeMulti.mockResolvedValue([{ columns: ["rowid", "__DBX_PK_0", "TASKNAME", "__DBX_PK_1"], rows: [["physical", "visible", "sample", "ROW-A"]], affected_rows: 0, execution_time_ms: 1 }]);
+    const { store, id, sql } = await executedQuery(`select ${projection} from sipf.t_sipf_debug_log a`);
+    expect(sql).toContain('ROWIDTOCHAR(ROWID) AS "__DBX_PK_1"');
+    const tab = store.tabs.find((item) => item.id === id)!;
+    expect(tab.result?.hidden_column_indexes).toEqual([3]);
+    await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["rowid", "__DBX_PK_0", "TASKNAME", "__DBX_ROWID"]));
+  });
+
+  it.each(["*", "a.*"])("does not append ROWID when a star returns the physical primary key: %s", async (projection) => {
+    mocks.getColumns.mockResolvedValue([
+      { name: "ID", data_type: "NUMBER", is_nullable: false, is_primary_key: true },
+      { name: "TASKNAME", data_type: "VARCHAR2(100)", is_nullable: true, is_primary_key: false },
+    ]);
+    const sql = `select ${projection} from sipf.t_sipf_debug_log a`;
+    expect(await emittedSql(sql)).toBe(sql);
+  });
+
+  it.each(["view", "unknown"])("keeps star queries unchanged for a %s source", async (type) => {
+    mocks.lookupLocalCompletionTables.mockReturnValue(type === "unknown" ? [] : [{ name: "T_SIPF_DEBUG_LOG", type, schema: "SIPF" }]);
+    const sql = "select * from sipf.t_sipf_debug_log a";
+    expect(await emittedSql(sql)).toBe(sql);
+    expect(mocks.listTables).not.toHaveBeenCalled();
+  });
+
+  it("uses a synonym's confirmed base-table identity without changing its SQL source", async () => {
+    const { analyzeEditableQueryEditability } = await import("@/lib/sql/sqlAnalysis");
+    mocks.analyze.mockImplementation(async (sql: string) => analyzeEditableQueryEditability(sql));
+    mocks.lookupLocalCompletionTables.mockReturnValue([]);
+    mocks.getColumns.mockResolvedValue([{ name: "TASKNAME", data_type: "VARCHAR2(100)", is_nullable: true, is_primary_key: false, resolved_schema: "TargetOwner", resolved_table: "ActualLog", resolved_object_type: "TABLE" }]);
+    mocks.executeMulti.mockResolvedValue([{ columns: ["TASKNAME", "__DBX_PK_0"], rows: [["sample", "ROW-A"]], affected_rows: 0, execution_time_ms: 1 }]);
+    const { store, id, sql } = await executedQuery('select * from "AliasOwner"."LogAlias" "l"');
+    expect(sql).toBe('select "l".*, ROWIDTOCHAR(ROWID) AS "__DBX_PK_0" from "AliasOwner"."LogAlias" "l"');
+    const tab = store.tabs.find((item) => item.id === id)!;
+    await vi.waitFor(() => expect(tab.tableMeta).toMatchObject({ schema: "TargetOwner", tableName: "ActualLog", tableType: "TABLE", primaryKeys: ["__DBX_ROWID"] }));
+    expect(tab.result?.hidden_column_indexes).toEqual([1]);
   });
 
   it.each(["view", "unknown"])("does not inject ROWID for a %s source", async (type) => {
@@ -166,6 +230,9 @@ describe("OceanBase Oracle query ROWID preparation", () => {
   });
 
   it.each([
+    "select distinct a.* from sipf.t_sipf_debug_log a",
+    "select a.*, count(*) from sipf.t_sipf_debug_log a group by a.taskname",
+    "select a.*, b.* from sipf.t_sipf_debug_log a join sipf.t_sipf_debug_log b on a.taskname = b.taskname",
     "select distinct a.taskname from sipf.t_sipf_debug_log a",
     "select a.taskname, count(*) from sipf.t_sipf_debug_log a group by a.taskname",
     "select a.taskname, b.taskname from sipf.t_sipf_debug_log a join sipf.t_sipf_debug_log b on a.taskname = b.taskname",

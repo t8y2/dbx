@@ -25,12 +25,17 @@ use crate::{
 /// Stdio behavior and the core DBX permission gates remain unchanged.
 struct BoundedHttpService { template: DbxMcpServer, principals: Arc<PrincipalStates> }
 
-impl rmcp::Service<rmcp::RoleServer> for BoundedHttpService {
-    async fn handle_request(
+impl BoundedHttpService {
+    async fn bounded_request<T, F, Fut>(
         &self,
-        request: rmcp::model::ClientRequest,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> Result<rmcp::model::ServerResult, rmcp::ErrorData> {
+        dispatch: F,
+    ) -> Result<T, rmcp::ErrorData>
+    where
+        T: Send,
+        F: FnOnce(DbxMcpServer, rmcp::service::RequestContext<rmcp::RoleServer>) -> Fut + Send,
+        Fut: std::future::Future<Output = Result<T, rmcp::ErrorData>> + Send,
+    {
         let lease = context
             .extensions
             .get::<axum::http::request::Parts>()
@@ -48,34 +53,106 @@ impl rmcp::Service<rmcp::RoleServer> for BoundedHttpService {
             _ = lease.session_cancellation.cancelled() => Err(rmcp::ErrorData::internal_error("Authenticated HTTP session closed", None)),
             _ = cancellation.cancelled() => Err(rmcp::ErrorData::internal_error("MCP request cancelled", None)),
             _ = tokio::time::sleep_until(lease.deadline) => Err(rmcp::ErrorData::internal_error("Authenticated HTTP request deadline expired", None)),
-            result = rmcp::Service::handle_request(&principal.server, request, context) => result,
+            result = dispatch(principal.server.clone(), context) => result,
         }
     }
 
-    async fn handle_notification(
+    async fn bounded_notification<F, Fut>(
         &self,
-        notification: rmcp::model::ClientNotification,
         context: rmcp::service::NotificationContext<rmcp::RoleServer>,
-    ) -> Result<(), rmcp::ErrorData> {
-        let deadline = context.extensions.get::<axum::http::request::Parts>()
-            .and_then(|parts| parts.extensions.get::<crate::http_auth::HttpRequestDeadline>())
-            .cloned().ok_or_else(|| rmcp::ErrorData::internal_error("Missing authenticated HTTP request context", None))?;
-        let principal = self.principals.acquire(&deadline.principal)?;
+        dispatch: F,
+    )
+    where
+        F: FnOnce(DbxMcpServer, rmcp::service::NotificationContext<rmcp::RoleServer>) -> Fut + Send,
+        Fut: std::future::Future<Output = ()> + Send,
+    {
+        let Some(deadline) = context.extensions.get::<axum::http::request::Parts>()
+            .and_then(|parts| parts.extensions.get::<crate::http_auth::HttpRequestDeadline>()).cloned() else {
+            return;
+        };
+        let Ok(principal) = self.principals.acquire(&deadline.principal) else { return; };
         tokio::select! {
             biased;
-            _ = principal.cancellation.cancelled() => Err(rmcp::ErrorData::internal_error("Authenticated principal state closed", None)),
-            _ = deadline.session_cancellation.cancelled() => Err(rmcp::ErrorData::internal_error("Authenticated HTTP session closed", None)),
-            _ = tokio::time::sleep_until(deadline.deadline) => Err(rmcp::ErrorData::internal_error("Authenticated HTTP request deadline expired", None)),
-            result = rmcp::Service::handle_notification(&principal.server, notification, context) => result,
+            _ = principal.cancellation.cancelled() => {},
+            _ = deadline.session_cancellation.cancelled() => {},
+            _ = tokio::time::sleep_until(deadline.deadline) => {},
+            _ = dispatch(principal.server.clone(), context) => {},
         }
+    }
+}
+
+// Keep SDK protocol negotiation/dispatch in its ServerHandler implementation.
+// Every application request still enters the same lease and deadline boundary.
+macro_rules! bounded_request_method {
+    ($method:ident, $input:ty, $output:ty) => {
+        async fn $method(&self, request: $input, context: rmcp::service::RequestContext<rmcp::RoleServer>) -> Result<$output, rmcp::ErrorData> {
+            self.bounded_request(context, move |server, context| async move {
+                rmcp::ServerHandler::$method(&server, request, context).await
+            }).await
+        }
+    };
+    ($method:ident => $output:ty) => {
+        async fn $method(&self, context: rmcp::service::RequestContext<rmcp::RoleServer>) -> Result<$output, rmcp::ErrorData> {
+            self.bounded_request(context, |server, context| async move {
+                rmcp::ServerHandler::$method(&server, context).await
+            }).await
+        }
+    };
+}
+
+macro_rules! bounded_notification_method {
+    ($method:ident, $input:ty) => {
+        async fn $method(&self, notification: $input, context: rmcp::service::NotificationContext<rmcp::RoleServer>) {
+            self.bounded_notification(context, move |server, context| async move {
+                rmcp::ServerHandler::$method(&server, notification, context).await
+            }).await;
+        }
+    };
+    ($method:ident) => {
+        async fn $method(&self, context: rmcp::service::NotificationContext<rmcp::RoleServer>) {
+            self.bounded_notification(context, |server, context| async move {
+                rmcp::ServerHandler::$method(&server, context).await
+            }).await;
+        }
+    };
+}
+
+#[allow(deprecated)] // Preserve the SDK's legacy-only subscribe/unsubscribe gates.
+impl rmcp::ServerHandler for BoundedHttpService {
+    bounded_request_method!(ping => ());
+    bounded_request_method!(discover => rmcp::model::DiscoverResult);
+    bounded_request_method!(initialize, rmcp::model::InitializeRequestParams, rmcp::model::InitializeResult);
+    bounded_request_method!(complete, rmcp::model::CompleteRequestParams, rmcp::model::CompleteResult);
+    bounded_request_method!(set_level, rmcp::model::SetLevelRequestParams, ());
+    bounded_request_method!(get_prompt, rmcp::model::GetPromptRequestParams, rmcp::model::GetPromptResponse);
+    bounded_request_method!(list_prompts, Option<rmcp::model::PaginatedRequestParams>, rmcp::model::ListPromptsResult);
+    bounded_request_method!(list_resources, Option<rmcp::model::PaginatedRequestParams>, rmcp::model::ListResourcesResult);
+    bounded_request_method!(list_resource_templates, Option<rmcp::model::PaginatedRequestParams>, rmcp::model::ListResourceTemplatesResult);
+    bounded_request_method!(read_resource, rmcp::model::ReadResourceRequestParams, rmcp::model::ReadResourceResponse);
+    bounded_request_method!(subscribe, rmcp::model::SubscribeRequestParams, ());
+    bounded_request_method!(unsubscribe, rmcp::model::UnsubscribeRequestParams, ());
+    bounded_request_method!(call_tool, rmcp::model::CallToolRequestParams, rmcp::model::CallToolResponse);
+    bounded_request_method!(list_tools, Option<rmcp::model::PaginatedRequestParams>, rmcp::model::ListToolsResult);
+    bounded_request_method!(on_custom_request, rmcp::model::CustomRequest, rmcp::model::CustomResult);
+    bounded_request_method!(get_task, rmcp::model::GetTaskParams, rmcp::model::GetTaskResult);
+    bounded_request_method!(update_task, rmcp::model::UpdateTaskParams, ());
+    bounded_request_method!(cancel_task, rmcp::model::CancelTaskParams, ());
+    bounded_notification_method!(on_cancelled, rmcp::model::CancelledNotificationParam);
+    bounded_notification_method!(on_progress, rmcp::model::ProgressNotificationParam);
+    bounded_notification_method!(on_custom_notification, rmcp::model::CustomNotification);
+    bounded_notification_method!(on_initialized);
+    bounded_notification_method!(on_roots_list_changed);
+
+    fn get_tool(&self, name: &str) -> Option<rmcp::model::Tool> {
+        rmcp::ServerHandler::get_tool(&self.template, name)
     }
 
     fn supported_protocol_versions(&self) -> std::borrow::Cow<'static, [rmcp::model::ProtocolVersion]> {
-        rmcp::Service::supported_protocol_versions(&self.template)
+        rmcp::ServerHandler::supported_protocol_versions(&self.template)
     }
 
-    fn get_info(&self) -> rmcp::model::ServerInfo {
-        rmcp::Service::get_info(&self.template)
+    fn get_info(&self) -> rmcp::model::ServerConfig {
+        rmcp::ServerHandler::get_info(&self.template)
     }
 }
 
@@ -307,7 +384,6 @@ mod tests {
     use super::*;
     use crate::{
         backend::DbxBackend,
-        server::{PendingSalesforceWrites, SALESFORCE_WRITE_CONFIRM_TTL},
         transaction::{
             TransactionIo, TransactionIoError, TransactionIoSuccess, TransactionOwner, TransactionOwnerConfig,
         },

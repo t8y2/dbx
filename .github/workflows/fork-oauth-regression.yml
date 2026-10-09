@@ -36,10 +36,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: fork-oauth-mcp
+          cache-on-failure: true
       - name: Format candidate and retain exact formatting diff
         run: |
           rustfmt --edition 2021 --config skip_children=true crates/dbx-mcp/src/{http,http_auth,http_principals,oauth,server,backend,lib}.rs crates/dbx-mcp/tests/protocol.rs
           git diff --binary > "$RUNNER_TEMP/oauth-format.patch"
+          cat "$RUNNER_TEMP/oauth-format.patch"
       - uses: actions/upload-artifact@v4
         with:
           name: oauth-format-${{ github.sha }}
@@ -50,4 +52,5 @@ jobs:
       - name: Protocol and connection regressions
         run: cargo test --locked -p dbx-mcp --test protocol --test connection_crud --test connection_import
       - name: Require committed formatting
+        if: always()
         run: git diff --exit-code

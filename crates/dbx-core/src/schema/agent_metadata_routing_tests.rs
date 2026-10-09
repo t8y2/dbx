@@ -395,6 +395,24 @@ async fn completion_propagates_agent_permission_errors_without_empty_success_or_
 }
 
 #[tokio::test]
+async fn oceanbase_table_ddl_preserves_trigger_script_and_propagates_incomplete_export() {
+    let fixture = AgentFixture::new(DatabaseType::OceanbaseOracle).await;
+    let ddl = "-- Export scope: table and all visible table triggers (count: 1).\n\
+CREATE TABLE \"APP\".\"EVENTS\" (ID INTEGER);\n\
+CREATE OR REPLACE TRIGGER \"APP\".\"AUDIT\" BEFORE INSERT ON \"APP\".\"EVENTS\"\n\
+FOR EACH ROW WHEN (new.id > 0)\nBEGIN\n :new.id := :new.id + 1;\n NULL;\nEND;\n/\n\
+ALTER TRIGGER \"APP\".\"AUDIT\" DISABLE;";
+    std::fs::write(fixture.control_path("table-ddl"), ddl).unwrap();
+    assert_eq!(get_table_ddl_core(&fixture.state, "conn", "configured", "APP", "EVENTS", None).await.unwrap(), ddl);
+    assert!(fixture.requests("execute_query").is_empty(), "DDL retrieval must not execute the exported script");
+    std::fs::write(fixture.control_path("table-ddl-error"), "Table DDL export incomplete: insufficient privileges").unwrap();
+    let error = get_table_ddl_core(&fixture.state, "conn", "configured", "APP", "EVENTS", None).await.unwrap_err();
+    assert!(error.contains("export incomplete"), "{error}");
+    assert!(error.contains("insufficient privileges"), "{error}");
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
 async fn enumeration_creates_metadata_pool_when_only_workload_exists() {
     let fixture = AgentFixture::new(DatabaseType::Hive).await;
     let workload_key = fixture.state.get_or_create_pool_for_session("conn", None, None).await.unwrap();

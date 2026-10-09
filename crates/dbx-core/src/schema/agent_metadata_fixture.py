@@ -59,7 +59,13 @@ def handle(request):
     elif method in ('execute_query', 'get_table_ddl'):
         with session_locks[session]:
             if method == 'get_table_ddl':
-                result = 'CREATE TABLE APP.EVENTS (ID INTEGER);'
+                ddl = root / 'table-ddl'
+                failure = root / 'table-ddl-error'
+                if failure.exists():
+                    error = rpc_error('sql')
+                    error['message'] = failure.read_text()
+                else:
+                    result = ddl.read_text() if ddl.exists() else 'CREATE TABLE APP.EVENTS (ID INTEGER);'
             else:
                 control = root / 'statistics'
                 mode = control.read_text() if control.exists() else 'success'

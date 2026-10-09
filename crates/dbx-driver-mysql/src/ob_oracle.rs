@@ -293,10 +293,10 @@ fn list_foreign_keys_sql(schema: &str, table: &str) -> String {
 
 fn list_triggers_sql(schema: &str, table: &str) -> String {
     format!(
-        "SELECT TRIGGER_NAME, TRIGGERING_EVENT, TRIGGER_TYPE \
+        "SELECT TRIGGER_NAME, TRIGGERING_EVENT, TRIGGER_TYPE, OWNER \
          FROM ALL_TRIGGERS \
          WHERE TABLE_OWNER = {s} AND TABLE_NAME = {t} \
-         ORDER BY TRIGGER_NAME",
+         ORDER BY OWNER, TRIGGER_NAME",
         s = metadata_owner_sql(schema),
         t = quote_value(table),
     )
@@ -320,6 +320,7 @@ pub async fn list_triggers(pool: &mysql_async::Pool, schema: &str, table: &str) 
                 "INSTEAD OF"
             };
             TriggerInfo {
+                owner: Some(get_str(row, 3)),
                 name: get_str(row, 0),
                 event: get_str(row, 1),
                 timing: timing.to_string(),
@@ -339,6 +340,15 @@ pub async fn list_triggers(pool: &mysql_async::Pool, schema: &str, table: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trigger_metadata_uses_parent_owner_and_returns_catalog_trigger_owner() {
+        let sql = list_triggers_sql("APP", "MixedTable");
+        assert!(sql.contains("SELECT TRIGGER_NAME, TRIGGERING_EVENT, TRIGGER_TYPE, OWNER"));
+        assert!(sql.contains("WHERE TABLE_OWNER = 'APP' AND TABLE_NAME = 'MixedTable'"));
+        assert!(sql.contains("ORDER BY OWNER, TRIGGER_NAME"));
+        assert!(!sql.contains("WHERE OWNER ="));
+    }
 
     #[test]
     fn ob_oracle_list_objects_sql_includes_routines() {

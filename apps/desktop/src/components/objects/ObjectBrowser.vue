@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { applyDdlStoragePreference } from "@/lib/sql/ddlStorage";
+import { triggerDisplayName, triggerIdentity } from "@/lib/table/triggerIdentity";
 import DatabaseActionsMenu from "@/components/objects/DatabaseActionsMenu.vue";
 import { useDatabaseBrowserMutation } from "@/lib/database/databaseBrowserActions";
 import DdlStorageToggle from "@/components/objects/DdlStorageToggle.vue";
@@ -4526,8 +4527,8 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
               {{ t("grid.tableInfoEmpty") }}
             </div>
             <div v-else class="divide-y">
-              <div v-for="trigger in filteredTableTriggers" :key="trigger.name" class="p-3 text-xs">
-                <div class="font-medium truncate">{{ trigger.name }}</div>
+              <div v-for="trigger in filteredTableTriggers" :key="triggerIdentity(trigger)" class="p-3 text-xs">
+                <div class="font-medium truncate">{{ triggerDisplayName(trigger) }}</div>
                 <div class="mt-1 text-[11px] text-muted-foreground">{{ trigger.timing }} {{ trigger.event }}</div>
               </div>
             </div>

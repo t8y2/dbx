@@ -282,6 +282,7 @@ pub async fn list_triggers(client: &TursoClient, _schema: &str, table: &str) -> 
                 "DELETE"
             };
             TriggerInfo {
+                owner: None,
                 name: value_as_string(row.first()).unwrap_or_default(),
                 event: event.to_string(),
                 timing: timing.to_string(),

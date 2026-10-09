@@ -8,6 +8,7 @@ import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPr
 import { formatObjectBrowserBytes } from "@/lib/table/objectBrowserRows";
 import { estimatedRowsDetails, estimatedRowsText } from "@/lib/dataGrid/oceanBaseRowStatistics";
 import { oceanbaseSpaceRows } from "@/lib/table/oceanbaseSpaceStatistics";
+import { triggerDisplayName, triggerIdentity } from "@/lib/table/triggerIdentity";
 import type { ColumnInfo, ConstraintInfo, ForeignKeyInfo, IndexInfo, ObjectStatistics, PgTablePartitioning, TableInfoTab, TriggerInfo } from "@/types/database";
 
 interface DataGridTableInfoPanelsProps {
@@ -223,8 +224,8 @@ const overviewRows = computed(() => {
       {{ t("grid.tableInfoEmpty") }}
     </div>
     <div v-else class="divide-y">
-      <div v-for="trigger in props.triggers" :key="trigger.name" class="p-3 text-xs">
-        <div class="font-medium truncate">{{ trigger.name }}</div>
+      <div v-for="trigger in props.triggers" :key="triggerIdentity(trigger)" class="p-3 text-xs">
+        <div class="font-medium truncate">{{ triggerDisplayName(trigger) }}</div>
         <div class="mt-1 text-[11px] text-muted-foreground">{{ trigger.timing }} {{ trigger.event }}</div>
       </div>
     </div>

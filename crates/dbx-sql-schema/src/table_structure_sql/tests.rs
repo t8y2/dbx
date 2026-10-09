@@ -6878,6 +6878,7 @@ fn builds_oracle_foreign_key_replacement() {
 fn builds_mysql_trigger_changes() {
     let mut existing = trigger("orders_bu", "BEFORE", "UPDATE", "BEGIN\n  SET NEW.updated_at = NOW();\nEND");
     existing.original = Some(TriggerInfo {
+        owner: None,
         name: "orders_bu".to_string(),
         event: "UPDATE".to_string(),
         timing: "BEFORE".to_string(),
@@ -6957,6 +6958,7 @@ fn rebuilds_changed_sqlserver_trigger_from_complete_metadata_source() {
         "CREATE TRIGGER dbo.orders_audit ON dbo.orders AFTER INSERT, UPDATE AS BEGIN SET NOCOUNT ON; INSERT INTO audit_log VALUES (1); END",
     );
     existing.original = Some(TriggerInfo {
+        owner: None,
         name: "orders_audit".to_string(),
         event: "INSERT, UPDATE".to_string(),
         timing: "AFTER".to_string(),
@@ -7003,6 +7005,7 @@ fn sqlserver_trigger_edit_restores_disabled_state() {
     let mut existing =
         trigger("orders_audit", "AFTER", "INSERT", "BEGIN SET NOCOUNT ON; INSERT INTO audit_log VALUES (1); END");
     existing.original = Some(TriggerInfo {
+        owner: None,
         name: "orders_audit".to_string(),
         event: "INSERT".to_string(),
         timing: "AFTER".to_string(),
@@ -7052,6 +7055,7 @@ fn unchanged_postgres_trigger_does_not_block_column_rename() {
     });
     let mut existing = trigger("users_audit", "AFTER", "UPDATE", "EXECUTE FUNCTION audit_users()");
     existing.original = Some(TriggerInfo {
+        owner: None,
         name: "users_audit".to_string(),
         event: "UPDATE".to_string(),
         timing: "AFTER".to_string(),
@@ -7088,6 +7092,7 @@ fn unchanged_postgres_trigger_does_not_block_column_rename() {
 fn changed_postgres_trigger_remains_unsupported() {
     let mut existing = trigger("users_audit", "AFTER", "INSERT", "EXECUTE FUNCTION audit_users()");
     existing.original = Some(TriggerInfo {
+        owner: None,
         name: "users_audit".to_string(),
         event: "UPDATE".to_string(),
         timing: "AFTER".to_string(),
@@ -7161,6 +7166,7 @@ fn rejects_editing_existing_oracle_trigger_without_complete_source() {
         "DECLARE\n  v_event VARCHAR2(10);\nBEGIN\n  v_event := CASE WHEN INSERTING THEN 'INSERT' WHEN UPDATING THEN 'UPDATE' ELSE 'DELETE' END;\nEND;",
     );
     existing.original = Some(TriggerInfo {
+        owner: None,
         name: "DBX_TRIGGER_4320_AUDIT".to_string(),
         event: "INSERT OR UPDATE OR DELETE".to_string(),
         timing: "AFTER EACH ROW".to_string(),
@@ -7232,6 +7238,7 @@ fn builds_oracle_statement_trigger_without_row_clause() {
 fn drops_existing_oracle_trigger_without_reconstructing_it() {
     let mut existing = trigger("ORDERS_AUDIT", "AFTER EACH ROW", "INSERT", "BEGIN\n  NULL;\nEND;");
     existing.original = Some(TriggerInfo {
+        owner: Some("OtherOwner".to_string()),
         name: "ORDERS_AUDIT".to_string(),
         event: "INSERT".to_string(),
         timing: "AFTER EACH ROW".to_string(),
@@ -7262,7 +7269,7 @@ fn drops_existing_oracle_trigger_without_reconstructing_it() {
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
-    assert_eq!(result.statements, vec!["DROP TRIGGER \"APP\".\"ORDERS_AUDIT\";"]);
+    assert_eq!(result.statements, vec!["DROP TRIGGER \"OtherOwner\".\"ORDERS_AUDIT\";"]);
 }
 
 #[test]

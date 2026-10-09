@@ -827,6 +827,9 @@ pub struct ForeignKeyInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TriggerInfo {
     pub name: String,
+    /// Catalog-reported trigger owner; never inferred from the parent table schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
     pub event: String,
     pub timing: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1157,8 +1160,22 @@ mod tests {
     use super::{
         is_opaque_aggregate_state_type, CompletionAssistantCandidate, CompletionAssistantCandidateKind, ObjectInfo,
         ObjectSource, ObjectSourceKind, QueryMessage, RoutineParameterMode, SpatialColumn, SpatialColumnBuilder,
-        TableInfo,
+        TableInfo, TriggerInfo,
     };
+
+    #[test]
+    fn trigger_owner_is_optional_and_round_trips_exact_catalog_identity() {
+        let legacy = r#"{"name":"AUDIT","event":"INSERT","timing":"AFTER"}"#;
+        let mut trigger: TriggerInfo = serde_json::from_str(legacy).unwrap();
+        assert_eq!(trigger.owner, None);
+        assert!(serde_json::to_value(&trigger).unwrap().get("owner").is_none());
+        trigger.owner = Some("Other\"Owner".to_string());
+        let decoded: TriggerInfo = serde_json::from_value(serde_json::to_value(&trigger).unwrap()).unwrap();
+        assert_eq!(decoded.owner.as_deref(), Some("Other\"Owner"));
+        let null_owner: TriggerInfo =
+            serde_json::from_str(r#"{"name":"AUDIT","owner":null,"event":"INSERT","timing":"AFTER"}"#).unwrap();
+        assert_eq!(null_owner.owner, None);
+    }
 
     #[test]
     fn opaque_aggregate_state_type_is_narrow() {

@@ -246,6 +246,7 @@ END, OBJECT_NAME`
 const oracleListObjectsSQL = oracleListObjectsBaseSQL + "\n" + oracleListObjectsOrderSQL
 const oracleListTriggersSQL = `
 SELECT t.TRIGGER_NAME,
+       t.OWNER,
        t.TRIGGERING_EVENT,
        t.TRIGGER_TYPE,
        t.DESCRIPTION,
@@ -256,10 +257,10 @@ LEFT JOIN ALL_SOURCE s
   ON s.OWNER = t.OWNER
  AND s.NAME = t.TRIGGER_NAME
  AND s.TYPE = 'TRIGGER'
-WHERE t.OWNER = :1
+WHERE t.TABLE_OWNER = :1
   AND t.TABLE_NAME = :2
   AND t.BASE_OBJECT_TYPE IN ('TABLE', 'VIEW')
-ORDER BY t.TRIGGER_NAME, s.LINE`
+ORDER BY t.OWNER, t.TRIGGER_NAME, s.LINE`
 
 type request struct {
 	ID     json.RawMessage            `json:"id"`
@@ -535,6 +536,7 @@ type foreignKeyInfo struct {
 
 type triggerInfo struct {
 	Name      string  `json:"name"`
+	Owner     *string `json:"owner,omitempty"`
 	Event     string  `json:"event"`
 	Timing    string  `json:"timing"`
 	Statement *string `json:"statement,omitempty"`
@@ -1717,6 +1719,11 @@ func oracleListSQLWithVisibleSchemas(baseSQL string, visibleSchemas []string) (s
 }
 
 func (s *server) currentSchema() (string, error) {
+	schema, err := s.currentSchemaIdentity()
+	return strings.ToUpper(schema), err
+}
+
+func (s *server) currentSchemaIdentity() (string, error) {
 	db, err := s.requireDB()
 	if err != nil {
 		return "", err
@@ -1725,7 +1732,7 @@ func (s *server) currentSchema() (string, error) {
 	if err := db.QueryRow("SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL").Scan(&schema); err != nil {
 		return "", err
 	}
-	return strings.ToUpper(schema), nil
+	return schema, nil
 }
 
 func (s *server) normalizeSchema(schema string) (string, error) {
@@ -1743,6 +1750,11 @@ func resolveOracleSchema(schema string, currentSchema, sessionUser func() (strin
 }
 
 func (s *server) sessionUser() (string, error) {
+	username, err := s.sessionUserIdentity()
+	return strings.ToUpper(username), err
+}
+
+func (s *server) sessionUserIdentity() (string, error) {
 	db, err := s.requireDB()
 	if err != nil {
 		return "", err
@@ -1751,7 +1763,23 @@ func (s *server) sessionUser() (string, error) {
 	if err := db.QueryRow("SELECT SYS_CONTEXT('USERENV', 'SESSION_USER') FROM DUAL").Scan(&username); err != nil {
 		return "", err
 	}
-	return strings.ToUpper(username), nil
+	return username, nil
+}
+
+// Catalog identities are already decoded Oracle names, not unquoted user input.
+// Only the empty string requests the session default; whitespace is part of a name.
+func (s *server) catalogSchemaIdentity(schema string) (string, error) {
+	return resolveOracleCatalogSchema(schema, s.currentSchemaIdentity, s.sessionUserIdentity)
+}
+
+func resolveOracleCatalogSchema(schema string, currentSchema, sessionUser func() (string, error)) (string, error) {
+	if schema != "" {
+		return schema, nil
+	}
+	if current, err := currentSchema(); err == nil && current != "" {
+		return current, nil
+	}
+	return sessionUser()
 }
 
 func (s *server) schemaIsSessionUser(schema string) bool {
@@ -2940,12 +2968,12 @@ ORDER BY ac.CONSTRAINT_NAME, acc.POSITION`, []any{schema, table})
 	return emptyIfNil(result), nil
 }
 
+// schema and table are exact catalog identities; only an empty schema requests a default.
 func (s *server) listTriggers(schema, table string) ([]triggerInfo, error) {
-	schema, err := s.normalizeSchema(schema)
+	schema, err := s.catalogSchemaIdentity(schema)
 	if err != nil {
 		return nil, err
 	}
-	table = strings.TrimSpace(table)
 	rows, err := s.queryRows(oracleListTriggersSQL, []any{schema, table})
 	if err != nil {
 		return nil, err
@@ -2953,6 +2981,7 @@ func (s *server) listTriggers(schema, table string) ([]triggerInfo, error) {
 	defer s.closeRows(rows)
 	var result []triggerInfo
 	var currentName string
+	var currentOwner string
 	var currentDescription string
 	var source strings.Builder
 	flush := func() {
@@ -2964,18 +2993,19 @@ func (s *server) listTriggers(schema, table string) ([]triggerInfo, error) {
 		}
 	}
 	for rows.Next() {
-		var name, event, timing string
+		var name, owner, event, timing string
 		var description, lineText sql.NullString
 		var line sql.NullInt64
-		if err := rows.Scan(&name, &event, &timing, &description, &line, &lineText); err != nil {
+		if err := rows.Scan(&name, &owner, &event, &timing, &description, &line, &lineText); err != nil {
 			return nil, err
 		}
-		if name != currentName {
+		if name != currentName || owner != currentOwner {
 			flush()
 			currentName = name
+			currentOwner = owner
 			currentDescription = description.String
 			source.Reset()
-			result = append(result, triggerInfo{Name: name, Event: event, Timing: timing})
+			result = append(result, triggerInfo{Name: name, Owner: &owner, Event: event, Timing: timing})
 		}
 		if line.Valid && lineText.Valid {
 			source.WriteString(lineText.String)
@@ -3018,18 +3048,19 @@ func oracleTriggerBody(source, description string) (string, bool) {
 	return strings.TrimSpace(source), true
 }
 
+// schema and name are exact catalog identities, including quoted-name whitespace.
 func (s *server) getObjectSource(schema, name, objectType string) (map[string]any, error) {
 	upperType := strings.ToUpper(objectType)
 	if upperType == "TYPE" || upperType == "TYPE_BODY" {
 		return s.getTypeSource(schema, name, upperType)
 	}
 	var err error
-	schema, err = s.normalizeSchemaForIdentity(schema)
+	schema, err = s.catalogSchemaIdentity(schema)
 	if err != nil {
 		return nil, err
 	}
 	if upperType == "VIEW" {
-		source, err := s.getViewSource(schema, name)
+		source, err := s.getViewSourceForIdentity(schema, name)
 		if err != nil {
 			return nil, err
 		}
@@ -3039,18 +3070,11 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 		return s.getMetadataObjectSource(schema, name, upperType)
 	}
 
-	// Unquoted Oracle identifiers are stored uppercase; quoted mixed-case names must stay exact.
-	// Try caller-provided identity first, then uppercase fallback (same pattern as column metadata).
-	for _, candidate := range oracleObjectIdentityNameCandidates(name) {
-		source, found, queryErr := s.loadObjectSourceText(schema, candidate, upperType)
-		if queryErr != nil {
-			return nil, queryErr
-		}
-		if found {
-			return map[string]any{"name": candidate, "object_type": objectType, "schema": schema, "source": source}, nil
-		}
+	source, _, queryErr := s.loadObjectSourceText(schema, name, upperType)
+	if queryErr != nil {
+		return nil, queryErr
 	}
-	return map[string]any{"name": name, "object_type": objectType, "schema": schema, "source": ""}, nil
+	return map[string]any{"name": name, "object_type": objectType, "schema": schema, "source": source}, nil
 }
 
 func (s *server) getTypeSource(schema, name, objectType string) (map[string]any, error) {
@@ -3092,15 +3116,11 @@ func (s *server) getMetadataObjectSource(schema, name, objectType string) (map[s
 	if err != nil {
 		return nil, err
 	}
-	var lastErr error
-	for _, candidate := range oracleObjectIdentityNameCandidates(name) {
-		var source string
-		lastErr = db.QueryRow("SELECT DBMS_METADATA.GET_DDL(:1, :2, :3) FROM DUAL", objectType, candidate, schema).Scan(&source)
-		if lastErr == nil {
-			return map[string]any{"name": candidate, "object_type": objectType, "schema": schema, "source": source}, nil
-		}
+	var source string
+	if err := db.QueryRow("SELECT DBMS_METADATA.GET_DDL(:1, :2, :3) FROM DUAL", objectType, name, schema).Scan(&source); err != nil {
+		return nil, err
 	}
-	return nil, lastErr
+	return map[string]any{"name": name, "object_type": objectType, "schema": schema, "source": source}, nil
 }
 
 func (s *server) loadObjectSourceText(schema, name, objectType string) (string, bool, error) {
@@ -3160,20 +3180,6 @@ ORDER BY LINE`, []any{schema, name, objectType})
 		return "", false, err
 	}
 	return builder.String(), anyLine, nil
-}
-
-// oracleObjectIdentityNameCandidates returns ALL_SOURCE name variants.
-// Exact form first (quoted mixed-case), then uppercase for unquoted identifiers.
-func oracleObjectIdentityNameCandidates(name string) []string {
-	trimmed := strings.TrimSpace(name)
-	if trimmed == "" {
-		return nil
-	}
-	upper := strings.ToUpper(trimmed)
-	if trimmed == upper {
-		return []string{upper}
-	}
-	return []string{trimmed, upper}
 }
 
 // normalizeSchemaForIdentity preserves mixed-case schema owners (quoted identities)
@@ -3566,11 +3572,15 @@ func terminateOracleViewDDL(ddl string) string {
 }
 
 func (s *server) getViewSource(schema, name string) (string, error) {
+	return s.getViewSourceForIdentity(schema, strings.TrimSpace(name))
+}
+
+func (s *server) getViewSourceForIdentity(schema, name string) (string, error) {
 	db, err := s.requireDB()
 	if err != nil {
 		return "", err
 	}
-	viewName := strings.TrimSpace(name)
+	viewName := name
 	var source string
 	viewsErr := db.QueryRow(
 		"SELECT TEXT FROM ALL_VIEWS WHERE OWNER = :1 AND VIEW_NAME = :2",

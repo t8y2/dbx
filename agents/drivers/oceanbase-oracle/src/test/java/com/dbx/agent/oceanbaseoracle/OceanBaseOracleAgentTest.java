@@ -1257,7 +1257,7 @@ class OceanBaseOracleAgentTest {
             resultSet(new String[]{"GRANTEE", "COLUMN_NAME", "PRIVILEGE", "GRANTABLE"}, new Object[][]{})
         ));
         String ddl = agent.getTableDdl("APP", "T");
-        Assertions.assertTrue(ddl.startsWith(nativeTable.replace("CREATE TABLE \"T\"", "CREATE TABLE \"APP\".\"T\"") + ";"), ddl);
+        Assertions.assertTrue(ddl.contains(nativeTable.replace("CREATE TABLE \"T\"", "CREATE TABLE \"APP\".\"T\"") + ";"), ddl);
         Assertions.assertTrue(ddl.contains(nativeIndex), ddl);
         Assertions.assertTrue(ddl.contains("COMMENT ON TABLE \"APP\".\"T\" IS 'Owner''s table';"), ddl);
     }
@@ -1268,6 +1268,99 @@ class OceanBaseOracleAgentTest {
         TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(),
             resultSet(new String[]{"DDL"}, new Object[][]{{" "}})));
         Assertions.assertThrows(RuntimeException.class, () -> agent.getTableDdl("APP", "T"));
+    }
+
+    @Test
+    void tableDdlIncludesCompleteSourcesFromEachTriggerOwnerAfterTheTable() {
+        var agent = new OceanBaseOracleAgent();
+        List<String> sql = new ArrayList<>();
+        List<String> params = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, triggerExportConnection(sql, params, false,
+            new Object[][]{{"A", "AUDIT", "ENABLED"}, {"B", "AUDIT", "DISABLED"}},
+            "TRIGGER audit BEFORE UPDATE OF id ON t\nREFERENCING NEW AS n OLD AS o\nFOR EACH ROW WHEN (n.id > 0)\nBEGIN\n :n.id := :o.id + 1;\n NULL;\nEND;",
+            "TRIGGER audit AFTER INSERT ON app.t\nBEGIN NULL; END;"));
+        String ddl = agent.getTableDdl("APP", "T");
+        Assertions.assertTrue(ddl.contains("visible table triggers (count: 2)"), ddl);
+        Assertions.assertTrue(ddl.indexOf("CREATE TABLE") < ddl.indexOf("CREATE OR REPLACE TRIGGER"), ddl);
+        Assertions.assertTrue(ddl.indexOf("TRIGGER \"A\".\"AUDIT\"") < ddl.indexOf("TRIGGER \"B\".\"AUDIT\""), ddl);
+        Assertions.assertTrue(ddl.contains("ON \"APP\".\"T\"\nREFERENCING NEW AS n OLD AS o\nFOR EACH ROW WHEN (n.id > 0)\nBEGIN\n :n.id := :o.id + 1;\n NULL;\nEND;\n/"), ddl);
+        Assertions.assertTrue(ddl.contains("ALTER TRIGGER \"A\".\"AUDIT\" ENABLE;"), ddl);
+        Assertions.assertTrue(ddl.endsWith("ALTER TRIGGER \"B\".\"AUDIT\" DISABLE;"), ddl);
+        Assertions.assertTrue(params.contains("A: AUDIT: TRIGGER"), params.toString());
+        Assertions.assertTrue(params.contains("B: AUDIT: TRIGGER"), params.toString());
+        Assertions.assertTrue(sql.stream().anyMatch(s -> s.contains("WHERE TABLE_OWNER = ? AND TABLE_NAME = ? ORDER BY OWNER, TRIGGER_NAME")));
+        Assertions.assertTrue(sql.stream().allMatch(s -> s.stripLeading().startsWith("SELECT")), sql.toString());
+    }
+
+    @Test
+    void triggerListUsesTableOwnerAndKeepsRealTriggerOwners() {
+        var agent = new OceanBaseOracleAgent();
+        List<String> sql = new ArrayList<>();
+        List<String> params = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, params,
+            resultSet(new String[]{"TRIGGER_NAME", "TRIGGERING_EVENT", "TRIGGER_TYPE", "OWNER"},
+                new Object[][]{{"AUDIT", "INSERT", "AFTER", "A"}, {"AUDIT", "UPDATE", "BEFORE", "B"}})));
+        var triggers = agent.listTriggers("APP", "MixedTable");
+        Assertions.assertEquals(2, triggers.size());
+        Assertions.assertEquals("A", triggers.get(0).getOwner());
+        Assertions.assertEquals("B", triggers.get(1).getOwner());
+        Assertions.assertEquals("AUDIT", triggers.get(0).getName());
+        Assertions.assertEquals("AUDIT", triggers.get(1).getName());
+        Assertions.assertNotEquals(triggers.get(0), triggers.get(1));
+        Assertions.assertTrue(sql.get(0).contains("WHERE TABLE_OWNER = ? AND TABLE_NAME = ?"));
+        Assertions.assertTrue(sql.get(0).contains("ORDER BY OWNER, TRIGGER_NAME"));
+        Assertions.assertFalse(sql.get(0).contains("WHERE OWNER = ?"));
+        Assertions.assertEquals(List.of("APP", "MixedTable"), params);
+    }
+
+    @Test
+    void tableDdlDistinguishesNoVisibleTriggersFromUnreadableMetadata() {
+        var agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, triggerExportConnection(new ArrayList<>(), new ArrayList<>(), false, new Object[][]{}));
+        Assertions.assertTrue(agent.getTableDdl("APP", "T").contains("visible table triggers (count: 0)"));
+        TestSupport.setPrivateConnection(agent, triggerExportConnection(new ArrayList<>(), new ArrayList<>(), true, new Object[][]{}));
+        RuntimeException error = Assertions.assertThrows(RuntimeException.class, () -> agent.getTableDdl("APP", "T"));
+        Assertions.assertTrue(error.getMessage().contains("export incomplete"), error.getMessage());
+        Assertions.assertTrue(error.getMessage().contains("insufficient privileges"), error.getMessage());
+    }
+
+    @Test
+    void tableDdlRejectsEmptyTriggerSourceInsteadOfReturningPartialScript() {
+        var agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, triggerExportConnection(new ArrayList<>(), new ArrayList<>(), false,
+            new Object[][]{{"APP", "AUDIT", "ENABLED"}}, ""));
+        RuntimeException error = Assertions.assertThrows(RuntimeException.class, () -> agent.getTableDdl("APP", "T"));
+        Assertions.assertTrue(error.getMessage().contains("export incomplete"), error.getMessage());
+    }
+
+    private static Connection triggerExportConnection(List<String> sql, List<String> bindings, boolean denied,
+        Object[][] triggers, String... sources) {
+        int[] sourceIndex = {0};
+        return proxy(Connection.class, (method, args) -> {
+            if ("isClosed".equals(method.getName())) return false;
+            if (!"prepareStatement".equals(method.getName())) return defaultValue(method.getReturnType());
+            String query = (String) args[0];
+            sql.add(query);
+            List<String> parameters = new ArrayList<>();
+            return proxy(PreparedStatement.class, (call, values) -> {
+                if ("setString".equals(call.getName())) { parameters.add((String) values[1]); return null; }
+                if (!"executeQuery".equals(call.getName())) return defaultValue(call.getReturnType());
+                bindings.add(String.join(": ", parameters));
+                if (query.contains("FROM ALL_TRIGGERS")) {
+                    if (denied) throw new SQLException("insufficient privileges");
+                    return resultSet(new String[]{"OWNER", "TRIGGER_NAME", "STATUS"}, triggers);
+                }
+                if (query.contains("FROM ALL_SOURCE")) {
+                    Object[][] lines = Arrays.stream(sources[sourceIndex[0]++].split("(?<=\\n)", -1))
+                        .map(line -> new Object[]{line}).toArray(Object[][]::new);
+                    return resultSet(new String[]{"TEXT"}, lines);
+                }
+                if (query.contains("DBMS_METADATA.GET_DDL")) {
+                    return resultSet(new String[]{"DDL"}, new Object[][]{{parameters.get(0).equals("TABLE") ? "CREATE TABLE \"T\" (\"ID\" NUMBER)" : ""}});
+                }
+                return resultSet(new String[]{"EMPTY"}, new Object[][]{});
+            });
+        });
     }
 
     @Test

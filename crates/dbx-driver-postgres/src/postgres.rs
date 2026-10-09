@@ -10047,6 +10047,7 @@ pub async fn list_triggers(pool: &Pool, schema: &str, table: &str) -> Result<Vec
     Ok(rows
         .iter()
         .map(|row| TriggerInfo {
+            owner: None,
             name: pg_row_try_string(row, 0),
             event: pg_row_try_string(row, 1),
             timing: pg_row_try_string(row, 2),

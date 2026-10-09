@@ -219,6 +219,8 @@ pub struct EditableStructureTrigger {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TriggerInfo {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
     pub event: String,
     pub timing: String,
     #[serde(default)]

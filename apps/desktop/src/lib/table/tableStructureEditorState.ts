@@ -1,4 +1,5 @@
 import type { ColumnInfo, DatabaseConnectionInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo } from "@/types/database.ts";
+import { triggerIdentity } from "@/lib/table/triggerIdentity";
 import type { ColumnExtra, EditableStructureColumn, EditableStructureForeignKey, EditableStructureIndex, EditableStructureTrigger } from "@/lib/table/tableStructureEditorSql.ts";
 
 export interface CopySourceColumnDetails {
@@ -1267,7 +1268,7 @@ export function createForeignKeyDrafts(foreignKeys: ForeignKeyInfo[]): EditableS
 
 export function createTriggerDrafts(triggers: TriggerInfo[]): EditableStructureTrigger[] {
   return triggers.map((trigger) => ({
-    id: `existing:${trigger.name}`,
+    id: `existing:${triggerIdentity(trigger)}`,
     name: trigger.name,
     timing: trigger.timing,
     event: trigger.event,

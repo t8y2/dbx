@@ -3956,13 +3956,12 @@ fn foreign_key_changes(
 
 pub fn diff_triggers(source: &[TriggerInfo], target: &[TriggerInfo]) -> Vec<TriggerDiff> {
     let mut diffs = Vec::new();
-    let target_map: HashMap<&str, &TriggerInfo> =
-        target.iter().map(|trigger| (trigger.name.as_str(), trigger)).collect();
-    let source_map: HashMap<&str, &TriggerInfo> =
-        source.iter().map(|trigger| (trigger.name.as_str(), trigger)).collect();
+    let identity = |trigger: &TriggerInfo| (trigger.owner.clone(), trigger.name.clone());
+    let target_map: HashMap<_, &TriggerInfo> = target.iter().map(|trigger| (identity(trigger), trigger)).collect();
+    let source_map: HashMap<_, &TriggerInfo> = source.iter().map(|trigger| (identity(trigger), trigger)).collect();
 
     for source_trigger in source {
-        let Some(target_trigger) = target_map.get(source_trigger.name.as_str()) else {
+        let Some(target_trigger) = target_map.get(&identity(source_trigger)) else {
             diffs.push(TriggerDiff {
                 diff_type: "added".to_string(),
                 name: source_trigger.name.clone(),
@@ -3992,7 +3991,7 @@ pub fn diff_triggers(source: &[TriggerInfo], target: &[TriggerInfo]) -> Vec<Trig
     }
 
     for target_trigger in target {
-        if !source_map.contains_key(target_trigger.name.as_str()) {
+        if !source_map.contains_key(&identity(target_trigger)) {
             diffs.push(TriggerDiff {
                 diff_type: "removed".to_string(),
                 name: target_trigger.name.clone(),
@@ -5844,6 +5843,19 @@ fn generate_create_table_sql(
     if !triggers.is_empty() {
         lines.push(String::new());
         for trigger in triggers {
+            if matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle) {
+                missing.push(MissingRollbackObject {
+                    kind: "trigger".to_string(),
+                    name: trigger
+                        .owner
+                        .as_ref()
+                        .map_or_else(|| trigger.name.clone(), |owner| format!("{owner}.{}", trigger.name)),
+                    table: Some(name.to_string()),
+                    reason: "Oracle trigger reconstruction requires complete source and explicit owner mapping"
+                        .to_string(),
+                });
+                continue;
+            }
             let event_desc = if trigger.event.to_uppercase().contains("INSERT") {
                 "INSERT"
             } else if trigger.event.to_uppercase().contains("UPDATE") {
@@ -6896,6 +6908,59 @@ fn generate_schema_sync_sql_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trigger_diff_keeps_same_name_catalog_owners_separate() {
+        let source: Vec<TriggerInfo> = serde_json::from_value(serde_json::json!([
+            {"name":"AUDIT", "owner":"A", "event":"INSERT", "timing":"AFTER"},
+            {"name":"AUDIT", "owner":"B", "event":"INSERT", "timing":"AFTER"}
+        ]))
+        .unwrap();
+        let mut target = source.clone();
+        target[0].event = "UPDATE".to_string();
+        let diffs = diff_triggers(&source, &target);
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].diff_type, "modified");
+        assert_eq!(diffs[0].source.as_ref().unwrap().owner.as_deref(), Some("A"));
+        assert_eq!(diffs[0].target.as_ref().unwrap().owner.as_deref(), Some("A"));
+        let mut legacy = source[0].clone();
+        legacy.owner = None;
+        assert!(diff_triggers(&[legacy.clone()], &[legacy.clone()]).is_empty());
+        let diffs = diff_triggers(&[legacy], &source[..1]);
+        assert_eq!(diffs.iter().map(|diff| diff.diff_type.as_str()).collect::<Vec<_>>(), vec!["added", "removed"]);
+    }
+
+    #[test]
+    fn oracle_table_reconstruction_does_not_guess_trigger_owner() {
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            for owner in [None, Some("APP"), Some("OTHER")] {
+                let trigger: TriggerInfo = serde_json::from_value(serde_json::json!({
+                    "name":"AUDIT", "owner":owner, "event":"INSERT", "timing":"AFTER",
+                    "statement":"BEGIN NULL; END;"
+                }))
+                .unwrap();
+                let (sql, missing) = generate_create_table_sql(
+                    "T",
+                    &[],
+                    &[],
+                    &[],
+                    None,
+                    database_type,
+                    Some("APP"),
+                    None,
+                    &[],
+                    &[trigger],
+                );
+                assert!(!sql.contains("CREATE TRIGGER"));
+                assert_eq!(missing.len(), 1);
+                assert!(missing[0].reason.contains("explicit owner mapping"));
+                assert_eq!(
+                    missing[0].name,
+                    owner.map_or_else(|| "AUDIT".to_string(), |owner| format!("{owner}.AUDIT"))
+                );
+            }
+        }
+    }
 
     fn index(overrides: IndexInfo) -> IndexInfo {
         IndexInfo {
@@ -8428,6 +8493,7 @@ mod tests {
             add_position: None,
         }];
         let trigger = TriggerInfo {
+            owner: None,
             name: "trg_events_insert".into(),
             event: "INSERT".into(),
             timing: "AFTER".into(),
@@ -10979,6 +11045,7 @@ mod tests {
                 indexes: vec![],
                 foreign_keys: vec![],
                 triggers: vec![crate::types::TriggerInfo {
+                    owner: None,
                     name: "trg_orders".to_string(),
                     event: "INSERT".to_string(),
                     timing: "AFTER".to_string(),

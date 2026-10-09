@@ -52,6 +52,10 @@ def handle(request):
             error = rpc_error(category)
         else:
             result = [{'name': sessions[session].get('sessionRole', 'workload')}]
+    elif method == 'completion_assistant_search_v1':
+        reply = json.loads((root / 'completion-reply.json').read_text())
+        result = reply.get('result')
+        error = reply.get('error')
     elif method in ('execute_query', 'get_table_ddl'):
         with session_locks[session]:
             if method == 'get_table_ddl':

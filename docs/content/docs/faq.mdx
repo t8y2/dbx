@@ -32,3 +32,17 @@ description: Frequently asked questions about DBX, including where connection da
   </Accordion>
   <p>See the [Data Security Upgrade and Migration guide](/en/docs/data-security-migration) before upgrading an existing installation.</p>
 </Accordions>
+
+## Garbled PostgreSQL / openGauss text
+
+For a database declared as `LATIN1` whose legacy text actually contains GB18030 bytes, enter the following in **Edit connection → Connection → URL parameters**:
+
+```text
+clientEncoding=GB18030&serverEncoding=ISO-8859-1
+```
+
+Save and reconnect. The native driver converts query results, SQL and bound parameters, including table editing, text arrays, JSON, metadata and row-based exports. This does not change the database encoding or existing data. `clientEncoding` also accepts `GBK` and `UTF-8`; `serverEncoding` accepts `LATIN1`. Both parameters are required together.
+
+Use these parameters only when the declared database encoding differs from its text bytes. The server must report `server_encoding=LATIN1` and `standard_conforming_strings=on`. Invalid conversions fail explicitly rather than replacing characters or losing data. Connections without these parameters use normal PostgreSQL encoding conversion.
+
+COPY imports support DBX's default text format; transfers use the row-based INSERT path. Use row-based import/export for raw COPY output or other COPY formats.

@@ -5404,10 +5404,12 @@ export const useQueryStore = defineStore("query", () => {
       pendingSqlServerTransactionEnds.set(id, ending);
       return ending;
     }
+    const sessionId = tab.txnSessionId;
     try {
-      await api.commitManualTransaction(tab.txnSessionId);
+      await api.commitManualTransaction(sessionId);
     } finally {
-      clearManualTransactionSession(tab);
+      // A mode or target switch may have started a replacement transaction.
+      if (tab.txnSessionId === sessionId) clearManualTransactionSession(tab);
     }
   }
 

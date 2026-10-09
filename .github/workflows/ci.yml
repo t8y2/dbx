@@ -158,6 +158,9 @@ jobs:
       - name: GitHub script tests
         run: node --test .github/scripts/*.test.mjs
 
+      - name: Docker mirror config tests
+        run: python3 .github/scripts/configure-docker-mirror.test.py
+
       - name: PowerShell MCP installer tests
         shell: pwsh
         run: ./.github/scripts/install-mcp-powershell.test.ps1
@@ -869,6 +872,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Configure public Docker Hub cache
+        if: runner.os == 'Linux'
+        run: |
+          source /etc/os-release
+          [[ "$ID" == ubuntu ]] || exit 0
+          sudo python3 .github/scripts/configure-docker-mirror.py /etc/docker/daemon.json --validate
+          timeout 30s sudo systemctl restart docker
+          timeout 15s docker info --format '{{json .RegistryConfig.Mirrors}}' \
+            | python3 -c 'import json, sys; assert any(x.rstrip("/") == "https://mirror.gcr.io" for x in json.load(sys.stdin))'
+
       - name: Install system dependencies
         run: |
           sudo timeout --kill-after=30s 10m apt-get \
@@ -1503,6 +1516,16 @@ jobs:
         working-directory: agents
     steps:
       - uses: actions/checkout@v7
+      - name: Configure public Docker Hub cache
+        if: runner.os == 'Linux'
+        working-directory: ${{ github.workspace }}
+        run: |
+          source /etc/os-release
+          [[ "$ID" == ubuntu ]] || exit 0
+          sudo python3 .github/scripts/configure-docker-mirror.py /etc/docker/daemon.json --validate
+          timeout 30s sudo systemctl restart docker
+          timeout 15s docker info --format '{{json .RegistryConfig.Mirrors}}' \
+            | python3 -c 'import json, sys; assert any(x.rstrip("/") == "https://mirror.gcr.io" for x in json.load(sys.stdin))'
       - name: Setup RocketMQ server Java
         if: matrix.scenario == 'rocketmq'
         uses: actions/setup-java@v6

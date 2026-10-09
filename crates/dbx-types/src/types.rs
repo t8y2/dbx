@@ -1178,6 +1178,21 @@ mod tests {
     }
 
     #[test]
+    fn agent_object_validity_remains_optional_across_core_serialization() {
+        for expected in [Some(true), Some(false), None] {
+            let mut wire = serde_json::json!({"name":"PKG", "object_type":"PACKAGE", "schema":"APP"});
+            if let Some(valid) = expected { wire["valid"] = serde_json::json!(valid); }
+            let object: ObjectInfo = serde_json::from_value(wire).unwrap();
+            assert_eq!(object.valid, expected);
+            let forwarded = serde_json::to_value(object).unwrap();
+            match expected {
+                Some(valid) => assert_eq!(forwarded["valid"], valid),
+                None => assert!(forwarded.get("valid").is_none()),
+            }
+        }
+    }
+
+    #[test]
     fn opaque_aggregate_state_type_is_narrow() {
         assert!(is_opaque_aggregate_state_type("agg_state<group_concat(text)>"));
         assert!(is_opaque_aggregate_state_type(" AGG_STATE <sum(int)> "));

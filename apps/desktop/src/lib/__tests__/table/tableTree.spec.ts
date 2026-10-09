@@ -20,6 +20,20 @@ const context = {
 };
 
 describe("case-sensitive database objects", () => {
+  it("keeps OceanBase package validity tri-state when rebuilding after a refresh", () => {
+    const objects: ObjectInfo[] = [
+      { name: "P", object_type: "PACKAGE", schema: "APP", valid: true },
+      { name: "P", object_type: "PACKAGE_BODY", schema: "APP", valid: false },
+      { name: "U", object_type: "FUNCTION", schema: "APP", valid: null },
+    ];
+    const build = (rows: ObjectInfo[]) => buildGroupedObjectTreeNodes({ ...context, schema: "APP", objects: rows, databaseType: "oceanbase-oracle" }).flatMap((group) => group.children ?? []);
+    const initial = build(objects);
+    expect(initial.find((node) => node.type === "package")?.valid).toBe(true);
+    expect(initial.find((node) => node.type === "package-body")?.valid).toBe(false);
+    expect(initial.find((node) => node.objectName === "U")?.valid).toBeUndefined();
+    const refreshed = build(objects.map((object) => ({ ...object, valid: null })));
+    expect(refreshed.every((node) => node.valid == null)).toBe(true);
+  });
   const views: ObjectInfo[] = [
     { name: "dbx_issue4529_case_V1", object_type: "VIEW", schema: "dbx_test" },
     { name: "dbx_issue4529_case_v1", object_type: "VIEW", schema: "dbx_test" },

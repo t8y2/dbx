@@ -490,9 +490,9 @@ class OceanBaseOracleAgentTest {
 
         Assertions.assertEquals(1, objects.size());
         Assertions.assertEquals("FORMAT_USER", objects.get(0).getName());
+        Assertions.assertEquals(Boolean.TRUE, objects.get(0).getValid());
         Assertions.assertEquals("FUNCTION", objects.get(0).getObject_type());
         Assertions.assertEquals("User formatter", objects.get(0).getComment());
-        Assertions.assertEquals(Boolean.TRUE, objects.get(0).getValid());
         Assertions.assertTrue(sql.get(0).contains("OBJECT_TYPE IN (?)"), sql.get(0));
         Assertions.assertTrue(sql.get(0).contains("ROWNUM <= ?"), sql.get(0));
     }
@@ -545,6 +545,36 @@ class OceanBaseOracleAgentTest {
         Assertions.assertEquals(Boolean.TRUE, objects.get(2).getValid());
         Assertions.assertTrue(sql.get(0).contains("o.OWNER NOT IN ('SYS', 'SYSTEM')"), sql.get(0));
         Assertions.assertTrue(sql.get(0).contains("NVL(o.GENERATED, 'N') = 'N'"), sql.get(0));
+    }
+
+    @Test
+    void objectValidityPreservesTrueFalseAndUnknownThroughTheAgentWire() {
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(), resultSet(
+            new String[]{"OBJECT_NAME", "OBJECT_TYPE", "COMMENTS", "STATUS"},
+            new Object[][]{{"GOOD", "PROCEDURE", null, "VALID"}, {"BAD", "PACKAGE BODY", null, "INVALID"},
+                {"UNKNOWN", "FUNCTION", null, null}, {"OTHER", "FUNCTION", null, "N/A"}}
+        )));
+        List<ObjectInfo> objects = agent.listObjects("APP");
+        Assertions.assertEquals(Boolean.TRUE, objects.get(0).getValid());
+        Assertions.assertEquals(Boolean.FALSE, objects.get(1).getValid());
+        Assertions.assertEquals("PACKAGE_BODY", objects.get(1).getObject_type());
+        Assertions.assertNull(objects.get(2).getValid());
+        Assertions.assertNull(objects.get(3).getValid());
+        var wire = new com.google.gson.Gson().toJsonTree(objects).getAsJsonArray();
+        Assertions.assertTrue(wire.get(0).getAsJsonObject().get("valid").getAsBoolean());
+        Assertions.assertFalse(wire.get(1).getAsJsonObject().get("valid").getAsBoolean());
+        Assertions.assertFalse(wire.get(2).getAsJsonObject().has("valid"));
+    }
+
+    @Test
+    void objectValidityIsReadAgainAfterAnInvalidObjectIsReplaced() {
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(),
+            resultSet(new String[]{"OBJECT_NAME", "OBJECT_TYPE", "COMMENTS", "STATUS"}, new Object[][]{{"P", "PROCEDURE", null, "INVALID"}}),
+            resultSet(new String[]{"OBJECT_NAME", "OBJECT_TYPE", "COMMENTS", "STATUS"}, new Object[][]{{"P", "PROCEDURE", null, "VALID"}})));
+        Assertions.assertEquals(Boolean.FALSE, agent.listObjects("APP").get(0).getValid());
+        Assertions.assertEquals(Boolean.TRUE, agent.listObjects("APP").get(0).getValid());
     }
 
     @Test

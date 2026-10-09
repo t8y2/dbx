@@ -34,6 +34,18 @@ function errorResult(options: { editorStatement?: string; sourceFrom?: number; s
 }
 
 describe("sqlErrorEditorOffset", () => {
+  it.each(["oracle", "oceanbase-oracle"] as const)("does not invent a %s location for a message without position metadata", (databaseType) => {
+    const sql = "-- 中文😀\nSELECT '中文😀',\nFROM DUAL";
+    const result = errorResult({ editorStatement: sql, message: "ORA-00936: missing expression" });
+    expect(sqlErrorEditorOffset({ editorSql: sql, result, databaseType })).toBeUndefined();
+    expect(sqlErrorDisplayPosition({ editorSql: sql, result, databaseType })).toBeUndefined();
+  });
+
+  it.each(["oracle", "oceanbase-oracle"] as const)("rejects stale %s PL/SQL locations even with a typed position", (databaseType) => {
+    const sql = "-- 中文😀\nBEGIN\n  NULL;\nEND;";
+    const result = errorResult({ editorStatement: sql, position: { line: 3, column: 3, offset: 15 } });
+    expect(sqlErrorEditorOffset({ editorSql: sql.replace("NULL", "DBMS_OUTPUT.PUT_LINE('changed')"), result, databaseType })).toBeUndefined();
+  });
   it("maps a first-line column to an absolute editor offset", () => {
     const sql = "SELECT * FROM no_such_table";
     const result = errorResult({

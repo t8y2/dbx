@@ -484,21 +484,30 @@ pub fn add_oracle_routines_to_plan_with_context(
                             .iter()
                             .map(|dependency| mapped_dependency(dependency, info.schema.as_deref(), schema))
                             .collect();
-                        info.incoming_dependencies = info
-                            .incoming_dependencies
-                            .iter()
-                            .map(|dependency| mapped_dependency(dependency, info.schema.as_deref(), schema))
-                            .collect();
+                        // Incoming references describe physical objects in their own database.
+                        // Preserve target risks and derive only callers actually selected here;
+                        // execution recovery refreshes these from the live target dictionary.
+                        info.incoming_dependencies = diff.target.as_ref().map(|target| target.incoming_dependencies.clone()).unwrap_or_default();
+                        for caller in diffs.iter().filter(|caller| caller.diff_type != "removed").filter_map(|caller| caller.source.as_ref()) {
+                            if caller.dependency_objects.iter().any(|dependency| {
+                                info.schema.as_deref() == Some(dependency.owner.as_str())
+                                    && dependency.name == info.name
+                                    && dependency.object_type == info.function_type
+                                    && caller.schema == info.schema
+                            }) {
+                                let dependency = crate::types::RoutineDependency { owner: schema.to_string(), name: caller.name.clone(), object_type: caller.function_type.clone() };
+                                if !info.incoming_dependencies.contains(&dependency) { info.incoming_dependencies.push(dependency); }
+                            }
+                        }
                         if let Some(trigger) = &mut info.trigger {
                             if Some(trigger.table_owner.as_str()) == info.schema.as_deref() {
                                 trigger.table_owner = schema.to_string();
                             }
                         }
                         if let Some(metadata) = &mut info.type_info {
-                            for column in &mut metadata.referenced_columns {
-                                if Some(column.owner.as_str()) == info.schema.as_deref() {
-                                    column.owner = schema.to_string();
-                                }
+                            metadata.referenced_columns = diff.target.as_ref().and_then(|target| target.type_info.as_ref()).map(|target| target.referenced_columns.clone()).unwrap_or_default();
+                            if let Some(target) = diff.target.as_ref().and_then(|target| target.type_info.as_ref()) {
+                                metadata.incoming_state = target.incoming_state.clone();
                             }
                         }
                         info.schema = Some(schema.to_string());
@@ -827,7 +836,7 @@ mod tests {
     }
 
     #[test]
-    fn type_recovery_preserves_target_schema_and_reports_unsafe_reverse_deletion() {
+    fn type_recovery_uses_target_risks_instead_of_source_table_references() {
         let source = user_type("T", false);
         let diffs = super::super::diff_functions(&[source.clone()], &[]);
         let mut plan = SchemaSyncSqlPlan { routine_steps: Vec::new(), sync_sql: String::new(), rollback_sync_sql: Some(String::new()), rollback_completeness: super::super::RollbackCompleteness::Complete, missing_rollback_objects: Vec::new() };
@@ -836,12 +845,68 @@ mod tests {
         assert_eq!(plan.rollback_completeness, super::super::RollbackCompleteness::Complete);
         let mut referenced = source;
         referenced.type_info.as_mut().unwrap().referenced_columns.push(crate::types::RoutineColumnDependency { owner: "SOURCE".into(), table_name: "Data".into(), column_name: "Value".into() });
+        referenced.incoming_dependencies.push(crate::types::RoutineDependency { owner: "SOURCE".into(), name: "Data".into(), object_type: "TABLE".into() });
         let diffs = super::super::diff_functions(&[referenced], &[]);
         let mut plan = SchemaSyncSqlPlan { routine_steps: Vec::new(), sync_sql: String::new(), rollback_sync_sql: Some(String::new()), rollback_completeness: super::super::RollbackCompleteness::Complete, missing_rollback_objects: Vec::new() };
         add_oracle_routines_to_plan(&mut plan, &diffs, DatabaseType::Oracle, Some("TARGET"), Some(DatabaseType::Oracle), Some("SOURCE"));
-        assert_eq!(plan.rollback_completeness, super::super::RollbackCompleteness::Incomplete);
-        assert_eq!(plan.missing_rollback_objects[0].kind, "TYPE");
+        assert_eq!(plan.rollback_completeness, super::super::RollbackCompleteness::Complete);
+        assert!(plan.missing_rollback_objects.is_empty());
+        assert!(plan.rollback_sync_sql.as_ref().unwrap().contains("DROP TYPE \"TARGET\".\"T\";"));
         assert!(!plan.rollback_sync_sql.as_ref().unwrap().contains("FORCE"));
+        let mut target = user_type("T", false);
+        target.schema = Some("TARGET".into());
+        let mut referenced = diffs[0].source.clone().unwrap();
+        referenced.definition = "CREATE TYPE T AS OBJECT (n NUMBER);".into();
+        let diffs = super::super::diff_functions(&[referenced], &[target]);
+        let mut plan = SchemaSyncSqlPlan { routine_steps: Vec::new(), sync_sql: String::new(), rollback_sync_sql: Some(String::new()), rollback_completeness: super::super::RollbackCompleteness::Complete, missing_rollback_objects: Vec::new() };
+        add_oracle_routines_to_plan(&mut plan, &diffs, DatabaseType::Oracle, Some("TARGET"), Some(DatabaseType::Oracle), Some("SOURCE"));
+        assert_eq!(plan.rollback_completeness, super::super::RollbackCompleteness::Complete);
+        assert!(plan.rollback_sync_sql.as_ref().unwrap().contains("CREATE OR REPLACE TYPE \"TARGET\".\"T\""));
+        assert!(plan.rollback_sync_sql.as_ref().unwrap().contains("\"First\" NUMBER"));
+    }
+
+    #[test]
+    fn type_recovery_preserves_real_target_data_callers_and_unknown_metadata() {
+        use dbx_types::oracle_types::OracleMetadataReadState;
+        let mut source = user_type("T", false);
+        source.definition = "CREATE TYPE T AS OBJECT (n NUMBER, m NUMBER);".into();
+        for risk in ["column", "table", "caller", "denied", "unknown"] {
+            let mut target = user_type("T", false);
+            target.schema = Some("TARGET".into());
+            match risk {
+                "column" => target.type_info.as_mut().unwrap().referenced_columns.push(crate::types::RoutineColumnDependency { owner: "OTHER".into(), table_name: "Data".into(), column_name: "Value".into() }),
+                "table" => target.incoming_dependencies.push(crate::types::RoutineDependency { owner: "OTHER".into(), name: "Data".into(), object_type: "TABLE".into() }),
+                "caller" => target.incoming_dependencies.push(crate::types::RoutineDependency { owner: "OTHER".into(), name: "Child".into(), object_type: "TYPE".into() }),
+                "denied" => target.type_info.as_mut().unwrap().incoming_state = OracleMetadataReadState::Denied,
+                _ => target.type_info.as_mut().unwrap().incoming_state = OracleMetadataReadState::Unknown,
+            }
+            let diffs = super::super::diff_functions(&[source.clone()], &[target]);
+            let mut plan = SchemaSyncSqlPlan { routine_steps: Vec::new(), sync_sql: String::new(), rollback_sync_sql: Some(String::new()), rollback_completeness: super::super::RollbackCompleteness::Complete, missing_rollback_objects: Vec::new() };
+            add_oracle_routines_to_plan(&mut plan, &diffs, DatabaseType::Oracle, Some("TARGET"), Some(DatabaseType::Oracle), Some("SOURCE"));
+            assert_eq!(plan.rollback_completeness, super::super::RollbackCompleteness::Incomplete, "{risk}");
+            assert_eq!(plan.missing_rollback_objects[0].kind, "TYPE");
+            assert!(plan.rollback_sync_sql.as_ref().unwrap().is_empty());
+        }
+        // An unread source snapshot is still unknown, even when the old target was absent.
+        source.type_info.as_mut().unwrap().incoming_state = OracleMetadataReadState::Denied;
+        let diffs = super::super::diff_functions(&[source], &[]);
+        let mut plan = SchemaSyncSqlPlan { routine_steps: Vec::new(), sync_sql: String::new(), rollback_sync_sql: Some(String::new()), rollback_completeness: super::super::RollbackCompleteness::Complete, missing_rollback_objects: Vec::new() };
+        add_oracle_routines_to_plan(&mut plan, &diffs, DatabaseType::Oracle, Some("TARGET"), Some(DatabaseType::Oracle), Some("SOURCE"));
+        assert_eq!(plan.rollback_completeness, super::super::RollbackCompleteness::Incomplete);
+    }
+
+    #[test]
+    fn type_recovery_orders_new_target_callers_before_reverse_deletion() {
+        let parent = user_type("P", false);
+        let mut child = user_type("C", false);
+        child.definition = "CREATE TYPE C AS TABLE OF SOURCE.P;".into();
+        child.dependency_objects.push(crate::types::RoutineDependency { owner: "SOURCE".into(), name: "P".into(), object_type: "TYPE".into() });
+        let diffs = super::super::diff_functions(&[parent, child], &[]);
+        let mut plan = SchemaSyncSqlPlan { routine_steps: Vec::new(), sync_sql: String::new(), rollback_sync_sql: Some(String::new()), rollback_completeness: super::super::RollbackCompleteness::Complete, missing_rollback_objects: Vec::new() };
+        add_oracle_routines_to_plan(&mut plan, &diffs, DatabaseType::Oracle, Some("TARGET"), Some(DatabaseType::Oracle), Some("SOURCE"));
+        assert_eq!(plan.rollback_completeness, super::super::RollbackCompleteness::Complete);
+        let rollback = plan.rollback_sync_sql.as_ref().unwrap();
+        assert!(rollback.find("DROP TYPE \"TARGET\".\"C\";").unwrap() < rollback.find("DROP TYPE \"TARGET\".\"P\";").unwrap());
     }
 
     fn conversion_context(objects: &[crate::types::FunctionInfo], source: DatabaseType, target: DatabaseType) -> OracleProgramContext {

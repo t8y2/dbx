@@ -2637,21 +2637,25 @@ mod tests {
     }
 
     #[test]
-    fn oceanbase_duplicate_projection_export_requires_cursor_and_follows_its_end() {
-        let mut req = request("csv", None, None);
-        req.database_type = DatabaseType::OceanbaseOracle;
-        req.sql = "SELECT a.name, a.* FROM people a ORDER BY a.id".into();
-        req.query_base_sql = req.sql.clone();
-        req.use_agent_cursor = true;
-        assert!(!supports_streaming_offset_pagination(&req, 100));
-        assert_eq!(streaming_pagination_preflight_error(&req, 100, false, false), None);
-        assert!(should_fetch_next_page(true, true, 100, 100, 100));
-        assert!(!should_fetch_next_page(true, false, 100, 100, 100));
-        req.use_agent_cursor = false;
-        assert_eq!(
-            streaming_pagination_preflight_error(&req, 100, false, false),
-            Some(STREAMING_PAGINATION_UNSUPPORTED_ERROR)
-        );
+    fn oceanbase_wildcard_and_duplicate_projection_export_require_cursor_and_follow_its_end() {
+        for sql in
+            ["SELECT * FROM events", "SELECT t.* FROM events t", "SELECT a.name, a.* FROM people a ORDER BY a.id"]
+        {
+            let mut req = request("csv", None, None);
+            req.database_type = DatabaseType::OceanbaseOracle;
+            req.sql = sql.into();
+            req.query_base_sql = req.sql.clone();
+            req.use_agent_cursor = true;
+            assert!(!supports_streaming_offset_pagination(&req, 100));
+            assert_eq!(streaming_pagination_preflight_error(&req, 100, false, false), None);
+            assert!(should_fetch_next_page(true, true, 100, 100, 100));
+            assert!(!should_fetch_next_page(true, false, 100, 100, 100));
+            req.use_agent_cursor = false;
+            assert_eq!(
+                streaming_pagination_preflight_error(&req, 100, false, false),
+                Some(STREAMING_PAGINATION_UNSUPPORTED_ERROR)
+            );
+        }
     }
 
     #[test]

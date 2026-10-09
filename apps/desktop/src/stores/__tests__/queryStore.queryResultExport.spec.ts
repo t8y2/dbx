@@ -116,6 +116,41 @@ describe("queryStore query result export", () => {
     expect(queryResultTransferIncomplete(result!)).toBe(false);
   });
 
+  it.each(["SELECT * FROM events", "SELECT t.* FROM events t"])("exports every wildcard page and its real __dbx_row_num column: %s", async (sql) => {
+    mocks.getConfig.mockReturnValue({ id: "ob-1", db_type: "oceanbase-oracle", database: "app" });
+    mocks.prepareQueryPaginationExecutionPlan.mockImplementation(async (request) => ({
+      sqlToExecute: request.sql,
+      pageLimit: 2,
+      pageOffset: request.pagination.offset,
+      useAgentResultSession: true,
+    }));
+    let row = 0;
+    mocks.executeMulti.mockImplementation(async () => [{
+      columns: ["ID", "__dbx_row_num"],
+      column_types: ["NUMBER", "VARCHAR2"],
+      rows: Array.from({ length: 2 }, () => [++row, `user-${row}`]),
+      has_more: row < 6,
+      session_id: "ob-export-cursor",
+      execution_time_ms: 0,
+      affected_rows: 0,
+    }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const id = store.createTab("ob-1", "app", "Query");
+    const tab = store.tabs.find((item) => item.id === id)!;
+    tab.lastExecutedSql = sql;
+    tab.result = { columns: ["ID", "__dbx_row_num"], rows: [[1, "user-1"]], has_more: true, execution_time_ms: 0, affected_rows: 0 };
+    const result = await store.fetchTabResultForExport(id, undefined, true);
+    expect(result?.columns).toEqual(["ID", "__dbx_row_num"]);
+    expect(result?.rows).toEqual(Array.from({ length: 6 }, (_, index) => [index + 1, `user-${index + 1}`]));
+    expect(mocks.executeMulti).toHaveBeenCalledTimes(3);
+    for (const [index, call] of mocks.executeMulti.mock.calls.entries()) {
+      expect(call[2]).toBe(sql);
+      expect(call[5]).toEqual(expect.objectContaining({ pageSize: 2, fetchSize: 2, resultSessionId: index ? "ob-export-cursor" : undefined }));
+    }
+    expect(mocks.closeQuerySession).toHaveBeenCalledWith("ob-1", "app", "ob-export-cursor", id, undefined);
+  });
+
   it.each(["CALL update_and_list_items()", "INSERT INTO items VALUES (1) RETURNING id", "WITH changed AS (DELETE FROM items RETURNING id) SELECT * FROM changed"])("does not replay a result-producing mutation during transfer: %s", async (sql) => {
     mocks.getConfig.mockReturnValue({ id: "oracle-1", db_type: "oracle", database: "app" });
     const { useQueryStore } = await import("@/stores/queryStore");

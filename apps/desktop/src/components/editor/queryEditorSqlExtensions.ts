@@ -13,7 +13,7 @@ import { createStatementGutterMarkerDom } from "@/lib/editor/codemirrorStatement
 import { compareSqlCompletions } from "@/lib/editor/sqlCompletionPresentation";
 import { currentStatementFrameLayer } from "@/lib/editor/codemirrorCurrentStatementFrameLayer";
 import { createSqlAliasHighlights } from "@/lib/editor/codemirrorSqlAliasHighlights";
-import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
+import { createDbxCodeMirrorSqlDialect, supportsQueryEditorSqlLanguage } from "@/lib/editor/codemirrorSqlDialect";
 import { sqlSemanticTableNameSpansForSyntaxTree } from "@/lib/editor/codemirrorSqlSemanticHighlight";
 import { queryEditorCommentTokens, queryEditorLineCommentToken, queryEditorWordLanguageData } from "@/lib/editor/queryEditorLineComment";
 import { createShellLineCommentHighlight } from "@/lib/editor/codemirrorShellLineCommentHighlight";
@@ -293,6 +293,7 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
   };
 
   codeMirrorRuntime.buildSqlSignatureExtension = () => {
+    if (!supportsQueryEditorSqlLanguage(props.databaseType)) return [];
     return showTooltip.compute(["doc", "selection"], (currentState) => {
       const cursor = currentState.selection.main.head;
       // Signature detection only scans backward from the cursor, so window the
@@ -311,6 +312,7 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
   };
 
   codeMirrorRuntime.buildSqlCompletionExtension = () => {
+    if (!supportsQueryEditorSqlLanguage(props.databaseType)) return [];
     return autocompletion({
       activateOnTyping: true,
       defaultKeymap: false,
@@ -330,9 +332,11 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
   const shellLineCommentHighlightPlugin = createShellLineCommentHighlight({ ViewPlugin, Decoration, highlightingFor, syntaxTree });
 
   codeMirrorRuntime.buildSqlLanguageExtension = () => [
-    langSql.sql({
-      dialect: createDbxCodeMirrorSqlDialect(langSql, props.syntaxDialect ?? props.dialect, props.databaseType, sqlDriverProfile.value),
-    }),
+    supportsQueryEditorSqlLanguage(props.databaseType)
+      ? langSql.sql({
+          dialect: createDbxCodeMirrorSqlDialect(langSql, props.syntaxDialect ?? props.dialect, props.databaseType, sqlDriverProfile.value),
+        })
+      : [],
     // Non-SQL editors (MongoDB shell) keep the SQL grammar for highlighting, so override the
     // comment marker that toggleLineComment reads from language data.
     Prec.highest(EditorState.languageData.of(() => [{ commentTokens: queryEditorCommentTokens(props.databaseType) }])),
@@ -350,6 +354,7 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
   const refreshSqlSemanticHighlightEffect = StateEffect.define<null>();
 
   codeMirrorRuntime.buildSqlSemanticHighlightExtension = () => {
+    if (!supportsQueryEditorSqlLanguage(props.databaseType)) return [];
     return [
       createSqlAliasHighlights({ databaseType: props.databaseType, dialect: sqlBehaviorDialect(), enabled: queryEditorSelectionLanguage() === "sql" }),
       ViewPlugin.fromClass(

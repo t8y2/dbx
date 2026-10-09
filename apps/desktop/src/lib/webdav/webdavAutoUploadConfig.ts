@@ -2,10 +2,22 @@ import type { SyncSelection, WebDavConfig } from "@/lib/backend/api";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 
 export const WEB_DAV_BACKUP_SELECTION_STORAGE_KEY = "dbx-webdav-backup-selection";
-export const WEB_DAV_AUTO_UPLOAD_STORAGE_KEYS = ["dbx-webdav-endpoint", "dbx-webdav-username", "dbx-webdav-remote-path", "dbx-webdav-auto-upload-enabled", "dbx-webdav-auto-upload-interval-minutes", WEB_DAV_BACKUP_SELECTION_STORAGE_KEY] as const;
+export const SYNC_METHOD_STORAGE_KEY = "dbx-sync-method";
+export const WEB_DAV_AUTO_UPLOAD_STORAGE_KEYS = ["dbx-webdav-endpoint", "dbx-webdav-username", "dbx-webdav-user-agent", "dbx-webdav-remote-path", "dbx-webdav-auto-upload-enabled", "dbx-webdav-auto-upload-interval-minutes", WEB_DAV_BACKUP_SELECTION_STORAGE_KEY] as const;
 
 export const DEFAULT_WEB_DAV_REMOTE_PATH = "DBX/sync/snapshot.json";
 export const DEFAULT_WEB_DAV_AUTO_UPLOAD_INTERVAL_MINUTES = 30;
+
+export type SyncMethod = "webdav" | "snippet" | "local";
+
+export function readSyncMethod(): SyncMethod {
+  const value = safeLocalStorageGet(SYNC_METHOD_STORAGE_KEY);
+  return value === "snippet" || value === "local" ? value : "webdav";
+}
+
+export function writeSyncMethod(value: SyncMethod) {
+  safeLocalStorageSet(SYNC_METHOD_STORAGE_KEY, value);
+}
 
 export interface WebDavAutoUploadConfig {
   enabled: boolean;
@@ -22,6 +34,7 @@ export function normalizedWebDavAutoUploadInterval(value: unknown): number {
 export function readWebDavAutoUploadConfig(): WebDavAutoUploadConfig {
   const endpoint = safeLocalStorageGet("dbx-webdav-endpoint")?.trim() || "";
   const username = safeLocalStorageGet("dbx-webdav-username")?.trim() || "";
+  const userAgent = safeLocalStorageGet("dbx-webdav-user-agent")?.trim() || "";
   const remotePath = safeLocalStorageGet("dbx-webdav-remote-path")?.trim() || DEFAULT_WEB_DAV_REMOTE_PATH;
 
   return {
@@ -31,6 +44,7 @@ export function readWebDavAutoUploadConfig(): WebDavAutoUploadConfig {
       ? {
           endpoint,
           username: username || undefined,
+          userAgent: userAgent || undefined,
           remotePath,
         }
       : null,
@@ -40,6 +54,7 @@ export function readWebDavAutoUploadConfig(): WebDavAutoUploadConfig {
 export function writeWebDavAutoUploadFields(config: WebDavConfig, autoUpload: { enabled: boolean; intervalMinutes: unknown }) {
   safeLocalStorageSet("dbx-webdav-endpoint", config.endpoint.trim());
   safeLocalStorageSet("dbx-webdav-username", config.username?.trim() || "");
+  safeLocalStorageSet("dbx-webdav-user-agent", config.userAgent?.trim() || "");
   safeLocalStorageSet("dbx-webdav-remote-path", config.remotePath?.trim() || DEFAULT_WEB_DAV_REMOTE_PATH);
   safeLocalStorageSet("dbx-webdav-auto-upload-enabled", String(autoUpload.enabled));
   safeLocalStorageSet("dbx-webdav-auto-upload-interval-minutes", String(normalizedWebDavAutoUploadInterval(autoUpload.intervalMinutes)));

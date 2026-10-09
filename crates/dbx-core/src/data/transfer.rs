@@ -5,6 +5,7 @@ pub use dbx_sql::value_literals::{
     quote_postgres_string_literal,
 };
 
+use dbx_sql::postgres_index_key::decorate_postgres_index_key;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -17,8 +18,13 @@ use futures::{SinkExt, StreamExt};
 #[path = "transfer/rebuild_tests.rs"]
 mod rebuild_tests;
 
+#[cfg(test)]
+#[path = "transfer/iris_tests.rs"]
+mod iris_tests;
+
 mod db2;
 mod ddl_plan;
+mod structure_plan;
 
 use crate::connection::{config_for_pool_key, AppState, PoolKind};
 use crate::db;
@@ -33,7 +39,8 @@ use crate::query::{
 };
 use crate::sql::{split_sql_statements, split_sql_statements_for_database};
 use crate::sql_dialect::{
-    normalize_len_params, qualified_transfer_table, quote_transfer_identifier, transfer_column_identifier,
+    build_iris_table_select_sql, normalize_len_params, qualified_transfer_table, quote_transfer_identifier,
+    transfer_column_identifier,
 };
 
 static CANCELLED: std::sync::LazyLock<RwLock<HashSet<String>>> =
@@ -105,7 +112,15 @@ static INLINE_FOREIGN_KEY_CONSTRAINT_LINE_RE: std::sync::LazyLock<Regex> = std::
         .expect("valid inline foreign key constraint line regex")
 });
 
-const MAX_TRANSFER_WRITE_SQL_BYTES: usize = 512 * 1024;
+// Upper bound for a single generated INSERT/upsert statement. Raised from
+// 512 KiB so one `batchSize` page normally becomes one multi-row INSERT.
+// MySQL-family targets additionally cap batches by the live
+// `max_allowed_packet` of the target server (see transfer_write_mysql_hard_limit).
+const MAX_TRANSFER_WRITE_SQL_BYTES: usize = 90 * 1024 * 1024;
+/// Conservative write-batch cap when the target's max_allowed_packet cannot be
+/// queried (mirrors the pre-batching era limit so a failed probe cannot produce
+/// statements larger than what stock MySQL accepts).
+const TRANSFER_WRITE_SQL_FALLBACK_BYTES: usize = 512 * 1024;
 const MAX_SQLSERVER_INSERT_ROWS: usize = 1000;
 const MAX_ORACLE_INSERT_ALL_ROWS: usize = 500;
 const MAX_ORACLE_MERGE_ROWS: usize = 500;
@@ -123,6 +138,7 @@ impl SqlBatchLimits {
         let max_rows = requested_max_rows.max(1).min(match db_type {
             DatabaseType::SqlServer => MAX_SQLSERVER_INSERT_ROWS,
             DatabaseType::Oracle | DatabaseType::OceanbaseOracle => MAX_ORACLE_INSERT_ALL_ROWS,
+            DatabaseType::Iris => 1,
             DatabaseType::Transwarp => 100,
             _ => usize::MAX,
         });
@@ -260,8 +276,8 @@ pub struct TransferRequest {
     pub create_table: bool,
     #[serde(default)]
     pub content: TransferContent,
-    #[serde(default)]
-    pub objects: Vec<TransferObjectSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objects: Option<Vec<TransferObjectSelection>>,
     #[serde(default)]
     pub mode: TransferMode,
     #[serde(default)]
@@ -271,6 +287,16 @@ pub struct TransferRequest {
     #[serde(default)]
     pub ownership_policy: TransferOwnershipPolicy,
     pub batch_size: usize,
+    /// Optional per-table source filter for this transfer.
+    ///
+    /// Key = source table name; value is either a bare `WHERE` predicate
+    /// (`id <= 90000`) or a complete source `SELECT`
+    /// (`select * from t_order where id <= 90000`) used as a derived table.
+    /// Missing or empty entries transfer the whole table. Only MySQL- and
+    /// PostgreSQL-family sources are supported (see
+    /// `transfer_table_filter_supported`).
+    #[serde(default)]
+    pub table_filters: HashMap<String, String>,
     /// When true, rename the target table to a backup before creating it from the
     /// source structure. Only after the transfer succeeds is the backup dropped.
     /// Requires `create_table = true` and `content != DataOnly`.
@@ -291,6 +317,12 @@ pub struct TransferOwnershipPreview {
     pub missing_owners: Vec<String>,
     pub target_owner: String,
     pub rebuild: Option<TransferRebuildPreview>,
+    /// Structure statements a structure-only transfer is about to run. Absent for every
+    /// other content mode (`dataOnly` has no DDL, `structureAndData` keeps its current
+    /// behavior). Built without executing any DDL, but not a frozen script: `start_transfer`
+    /// re-reads source and target metadata before executing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structure: Option<TransferStructurePreview>,
 }
 
 /// SQL plan preview for a `drop_target_before_create` (rebuild) transfer.
@@ -303,6 +335,13 @@ pub struct TransferOwnershipPreview {
 pub struct TransferRebuildPreview {
     pub sql: String,
     pub tables: Vec<TransferRebuildPreviewTable>,
+    /// The backup (rename) phase on its own, for callers that place the structure preview
+    /// between the rename and the cleanup phases instead of showing the combined `sql`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backup_sql: Option<String>,
+    /// The cleanup (drop backups) phase on its own. `sql` stays the combined plan.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cleanup_sql: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -314,7 +353,129 @@ pub struct TransferRebuildPreviewTable {
     pub backup_table: Option<String>,
 }
 
+/// SQL plan preview for a structure-only transfer.
+///
+/// Plans rather than executes: every statement comes from the generator the execution pass
+/// uses for the same operation, so preview and execution can never disagree on the DDL they
+/// render. It is still a preview — the target is re-inspected when the transfer starts.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferStructurePreview {
+    pub sql: String,
+    pub tables: Vec<TransferStructurePreviewTable>,
+    pub operations: Vec<TransferStructureOperation>,
+}
+
+/// One user-facing logical operation produced by the structure transfer planner.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TransferStructureOperationKind {
+    CreateSchema,
+    CreateTable,
+    SkipExistingTable,
+    RebuildTable,
+    CreateIndex,
+    AddForeignKey,
+    CreateSequence,
+    BindSequence,
+    AddComment,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferStructureOperation {
+    pub kind: TransferStructureOperationKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_table: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_table: Option<String>,
+}
+
+impl TransferStructureOperation {
+    pub(crate) fn table(kind: TransferStructureOperationKind, source_table: &str, target_table: &str) -> Self {
+        Self {
+            kind,
+            object_name: None,
+            source_table: Some(source_table.to_string()),
+            target_table: Some(target_table.to_string()),
+        }
+    }
+
+    pub(crate) fn object(
+        kind: TransferStructureOperationKind,
+        object_name: &str,
+        source_table: &str,
+        target_table: &str,
+    ) -> Self {
+        Self {
+            kind,
+            object_name: Some(object_name.to_string()),
+            source_table: Some(source_table.to_string()),
+            target_table: Some(target_table.to_string()),
+        }
+    }
+
+    pub(crate) fn schema(schema: &str) -> Self {
+        Self {
+            kind: TransferStructureOperationKind::CreateSchema,
+            object_name: Some(schema.to_string()),
+            source_table: None,
+            target_table: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferStructurePreviewTable {
+    pub source_table: String,
+    pub target_table: String,
+    /// The target table already exists and this transfer plans no structure DDL for it,
+    /// mirroring the execution pass' skip when the target table is present.
+    pub preexisting: bool,
+    /// The structure the transfer plans for this table, or an explanatory comment when the
+    /// execution pass will skip the table entirely.
+    pub sql: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TransferObjectSelectionMode<'a> {
+    LegacyUnspecified,
+    Explicit(&'a [TransferObjectSelection]),
+}
+
+impl<'a> TransferObjectSelectionMode<'a> {
+    fn selections(self) -> &'a [TransferObjectSelection] {
+        match self {
+            Self::LegacyUnspecified => &[],
+            Self::Explicit(selections) => selections,
+        }
+    }
+
+    fn is_legacy_unspecified(self) -> bool {
+        matches!(self, Self::LegacyUnspecified)
+    }
+
+    fn filter_supported(self, supported: &[TransferObjectKind]) -> Option<Vec<TransferObjectSelection>> {
+        match self {
+            Self::LegacyUnspecified => None,
+            Self::Explicit(selections) => Some(
+                selections.iter().filter(|selection| supported.contains(&selection.object_type)).cloned().collect(),
+            ),
+        }
+    }
+}
+
 impl TransferRequest {
+    fn object_selection_mode(&self) -> TransferObjectSelectionMode<'_> {
+        match self.objects.as_deref() {
+            Some(selections) => TransferObjectSelectionMode::Explicit(selections),
+            None => TransferObjectSelectionMode::LegacyUnspecified,
+        }
+    }
+
     pub fn target_table_name(&self, source_table: &str) -> String {
         match self.target_table_name_case {
             TransferTableNameCase::Preserve => source_table.to_string(),
@@ -322,6 +483,13 @@ impl TransferRequest {
             TransferTableNameCase::Upper => source_table.to_uppercase(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransferTableResult {
+    pub moved_rows: u64,
+    /// Source COUNT result when the executor obtained it. It is not a target row count.
+    pub source_row_count: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -827,7 +995,8 @@ fn rewrite_cross_family_schema_qualifier(
 
 pub fn validate_transfer_request(request: &TransferRequest) -> Result<(), String> {
     validate_transfer_target_table_names(request)?;
-    if matches!(request.content, TransferContent::DataOnly) && !request.objects.is_empty() {
+    let selection_mode = request.object_selection_mode();
+    if matches!(request.content, TransferContent::DataOnly) && !selection_mode.selections().is_empty() {
         return Err("仅数据模式不传输非表对象".to_string());
     }
     if request.drop_target_before_create
@@ -837,7 +1006,7 @@ pub fn validate_transfer_request(request: &TransferRequest) -> Result<(), String
              Data-only mode does not create tables, so a dropped target would not be rebuilt."
             .to_string());
     }
-    for selection in &request.objects {
+    for selection in selection_mode.selections() {
         if selection.names.is_empty() {
             return Err(format!("Object selection for {:?} is empty", selection.object_type));
         }
@@ -846,6 +1015,12 @@ pub fn validate_transfer_request(request: &TransferRequest) -> Result<(), String
                 return Err(format!("Invalid object name: {name:?}"));
             }
         }
+    }
+    for (table, raw) in &request.table_filters {
+        if table.trim().is_empty() {
+            return Err("Table filter contains an empty table name".to_string());
+        }
+        parse_transfer_table_filter(raw)?;
     }
     Ok(())
 }
@@ -1589,7 +1764,7 @@ fn is_postgres_identity_extra(extra: Option<&str>) -> bool {
     })
 }
 
-fn is_postgres_generated_always_identity_extra(extra: Option<&str>) -> bool {
+pub(crate) fn is_postgres_generated_always_identity_extra(extra: Option<&str>) -> bool {
     extra.is_some_and(|value| {
         let mut parts = value.split_whitespace();
         parts.next().is_some_and(|part| part.eq_ignore_ascii_case("generated"))
@@ -2130,6 +2305,24 @@ fn is_postgres_family_target(target_db: &DatabaseType) -> bool {
     )
 }
 
+/// Engines whose ordinary string literals keep a backslash literal, so a
+/// transferred value must not have its backslashes doubled: `C:\tmp` has to stay
+/// `'C:\tmp'` instead of becoming `'C:\\tmp'`. Mirrors the SQL export path
+/// (`quote_export_sql_string_for_database`) and the grid's copy-as-SQL path,
+/// which both only double backslashes for dialects whose escape table has one.
+fn keeps_backslash_literal(target_db: &DatabaseType) -> bool {
+    matches!(
+        target_db,
+        DatabaseType::Oracle
+            | DatabaseType::OceanbaseOracle
+            | DatabaseType::Dameng
+            | DatabaseType::Sqlite
+            | DatabaseType::Rqlite
+            | DatabaseType::Turso
+            | DatabaseType::CloudflareD1
+    )
+}
+
 fn is_mysql_numeric_base_type(data_type: &str) -> bool {
     let normalized = data_type.trim().to_ascii_lowercase();
     let base = normalized.split(['(', ' ']).next().unwrap_or("");
@@ -2310,18 +2503,7 @@ fn postgres_index_column_sql(
     // The opclass is read separately from `pg_index.indclass` for every key position
     // (including expression keys) and appended uniformly — it never lives inside the
     // expression text, so there is no duplication risk.
-    let with_opclass = match opclass.filter(|o| !o.is_empty()) {
-        Some(opc) => format!("{base} {opc}"),
-        None => base,
-    };
-    match key_options {
-        Some(options) => format!(
-            "{with_opclass} {} NULLS {}",
-            if options & 1 != 0 { "DESC" } else { "ASC" },
-            if options & 2 != 0 { "FIRST" } else { "LAST" }
-        ),
-        None => with_opclass,
-    }
+    decorate_postgres_index_key(&base, opclass, key_options)
 }
 
 /// `CREATE INDEX/SEQUENCE IF NOT EXISTS` was added in PostgreSQL 9.5: 9.2/9.3/9.4
@@ -2730,6 +2912,22 @@ struct PostgresDomainSource {
     checks: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct PostgresTableDependencySelection {
+    extension_names: Vec<String>,
+    enum_type_names: Vec<String>,
+    domain_names: Vec<String>,
+}
+
+impl PostgresTableDependencySelection {
+    fn type_names(&self) -> Vec<String> {
+        let mut names = self.enum_type_names.iter().chain(&self.domain_names).cloned().collect::<Vec<_>>();
+        names.sort();
+        names.dedup();
+        names
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PostgresMaterializedViewSource {
     view_name: String,
@@ -2986,6 +3184,7 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
             }
             let escaped = if is_postgres_family_target(db_type)
                 || matches!(db_type, DatabaseType::SqlServer | DatabaseType::H2)
+                || keeps_backslash_literal(db_type)
             {
                 literal.replace('\'', "''")
             } else {
@@ -4479,6 +4678,7 @@ fn generate_upsert_typed_for_transfer(
 
 fn max_transfer_write_rows(db_type: &DatabaseType, mode: &TransferMode) -> usize {
     match (db_type, mode) {
+        (DatabaseType::Iris, _) => 1,
         (DatabaseType::SqlServer, TransferMode::Append | TransferMode::Overwrite) => MAX_SQLSERVER_INSERT_ROWS,
         (
             DatabaseType::Hive
@@ -4913,6 +5113,7 @@ pub(crate) fn generate_insert_typed_sql_batches_from_value_rows_with_options(
     let max_rows = limits.max_rows.max(1).min(match db_type {
         DatabaseType::SqlServer => MAX_SQLSERVER_INSERT_ROWS,
         DatabaseType::Oracle | DatabaseType::OceanbaseOracle => MAX_ORACLE_INSERT_ALL_ROWS,
+        DatabaseType::Iris => 1,
         _ => usize::MAX,
     });
     let target_sql_bytes = limits.target_sql_bytes.max(1);
@@ -5094,6 +5295,7 @@ fn generate_insert_sql_batches_from_value_rows(
     let max_rows = limits.max_rows.max(1).min(match db_type {
         DatabaseType::SqlServer => MAX_SQLSERVER_INSERT_ROWS,
         DatabaseType::Oracle | DatabaseType::OceanbaseOracle => MAX_ORACLE_INSERT_ALL_ROWS,
+        DatabaseType::Iris => 1,
         _ => usize::MAX,
     });
     let target_sql_bytes = limits.target_sql_bytes.max(1);
@@ -5145,6 +5347,30 @@ fn generate_insert_sql_batches_from_value_rows(
 
 #[allow(clippy::too_many_arguments)]
 #[cfg_attr(not(test), allow(dead_code))]
+/// Caps generated write batches by a MySQL-family target's `max_allowed_packet`
+/// (same pattern as `mysql_import_sql_hard_limit`); non-MySQL pools and failed
+/// probes fall back to None / a conservative constant respectively.
+async fn transfer_write_mysql_hard_limit(state: &AppState, pool_key: &str) -> Option<usize> {
+    let pool = {
+        let pool_handle = state.pool_handle(pool_key).await;
+        match pool_handle.as_ref() {
+            Some(PoolKind::Mysql(pool, _)) => pool.clone(),
+            _ => return None,
+        }
+    };
+    match crate::db::mysql::max_allowed_packet(&pool).await {
+        Ok(packet_bytes) => crate::db::mysql::mysql_sql_statement_hard_limit(packet_bytes),
+        Err(error) => {
+            log::debug!(
+                "[transfer] MySQL max_allowed_packet query failed; using the conservative write batch size: {error}"
+            );
+            Some(TRANSFER_WRITE_SQL_FALLBACK_BYTES)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(test), allow(dead_code))]
 fn generate_transfer_write_sql_batches(
     mode: &TransferMode,
     columns: &[String],
@@ -5171,6 +5397,7 @@ fn generate_transfer_write_sql_batches(
         overrides_postgres_system_values,
         mysql_spatial_markers,
         true,
+        None,
     )
 }
 
@@ -5188,6 +5415,7 @@ fn generate_transfer_write_sql_batches_with_column_quoting(
     overrides_postgres_system_values: bool,
     mysql_spatial_markers: bool,
     quote_target_column_names: bool,
+    hard_sql_bytes: Option<usize>,
 ) -> Result<Vec<String>, String> {
     if rows.is_empty() {
         return Ok(Vec::new());
@@ -5202,7 +5430,8 @@ fn generate_transfer_write_sql_batches_with_column_quoting(
             schema,
             db_type,
             catalog,
-            SqlBatchLimits::for_database(db_type, max_transfer_write_rows(db_type, mode)),
+            SqlBatchLimits::for_database(db_type, max_transfer_write_rows(db_type, mode))
+                .with_hard_sql_bytes(hard_sql_bytes),
             overrides_postgres_system_values,
             mysql_spatial_markers,
             quote_target_column_names,
@@ -5217,6 +5446,7 @@ fn generate_transfer_write_sql_batches_with_column_quoting(
         DatabaseType::CloudflareD1 => crate::db::cloudflare_d1::MAX_SQL_STATEMENT_BYTES,
         _ => MAX_TRANSFER_WRITE_SQL_BYTES,
     };
+    let batch_sql_bytes = hard_sql_bytes.map_or(max_sql_bytes, |hard| max_sql_bytes.min(hard));
     let mut statements = Vec::new();
     let mut start = 0;
 
@@ -5252,7 +5482,7 @@ fn generate_transfer_write_sql_batches_with_column_quoting(
                 mysql_spatial_markers,
                 quote_target_column_names,
             );
-            if candidate.len() > max_sql_bytes && !accepted.is_empty() {
+            if candidate.len() > batch_sql_bytes && !accepted.is_empty() {
                 break;
             }
             accepted = candidate;
@@ -5280,6 +5510,7 @@ pub fn pagination_sql(
     let col_list = columns.iter().map(|c| quote_identifier(c, db_type)).collect::<Vec<_>>().join(", ");
 
     match db_type {
+        DatabaseType::Iris => build_iris_table_select_sql(&col_list, &full_table, "", " ORDER BY %ID", limit, offset),
         DatabaseType::Oracle | DatabaseType::OceanbaseOracle => {
             let base_sql = format!("SELECT {col_list} FROM {full_table}");
             oracle_rownum_page_sql(&col_list, base_sql, offset, limit)
@@ -5324,6 +5555,10 @@ pub fn pagination_sql_with_order(
     let order_expression = postgres_order_by_expression(order_by_columns, db_type);
 
     match db_type {
+        DatabaseType::Iris => {
+            let order_by = format!(" ORDER BY {}", order_expression.as_deref().unwrap_or("%ID"));
+            build_iris_table_select_sql(&col_list, &full_table, "", &order_by, limit, offset)
+        }
         DatabaseType::Oracle | DatabaseType::OceanbaseOracle => {
             let order_by = order_expression.map(|value| format!(" ORDER BY {value}")).unwrap_or_default();
             let base_sql = format!("SELECT {col_list} FROM {full_table}{order_by}");
@@ -5412,6 +5647,10 @@ pub fn pagination_sql_with_filter_order_and_identifier_quote(
         });
 
     match db_type {
+        DatabaseType::Iris => {
+            let order_by = format!(" ORDER BY {}", order_expression.as_deref().unwrap_or("%ID"));
+            build_iris_table_select_sql(&col_list, &full_table, &where_clause, &order_by, limit, offset)
+        }
         DatabaseType::Oracle | DatabaseType::OceanbaseOracle => {
             let order_by = order_expression.map(|value| format!(" ORDER BY {value}")).unwrap_or_default();
             let base_sql = format!("SELECT {col_list} FROM {full_table}{where_clause}{order_by}");
@@ -5474,6 +5713,166 @@ pub fn count_sql_with_where_and_identifier_quote(
     let predicate = crate::sql_dialect::normalize_where_input(where_input);
     let where_clause = if predicate.is_empty() { String::new() } else { format!(" WHERE ({predicate})") };
     format!("SELECT COUNT(*) FROM {full_table}{where_clause}")
+}
+
+/// Per-table row filter supplied by the user for a data transfer.
+///
+/// * `Predicate` — the text after `WHERE` (`id <= 90000`), applied to the
+///   source table directly.
+/// * `Query` — a complete `SELECT` (`select * from t_order where id <= 90000`)
+///   used as a derived table, so joins/`ORDER BY`/`LIMIT` in the user's SQL are
+///   preserved verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransferTableFilter {
+    Predicate(String),
+    Query(String),
+}
+
+/// Source engines that support per-table transfer filters. The paged fallback
+/// only relies on MySQL/PostgreSQL `LIMIT`/`OFFSET` semantics.
+pub fn transfer_table_filter_supported(db_type: &DatabaseType) -> bool {
+    matches!(
+        db_type,
+        DatabaseType::Mysql
+            | DatabaseType::Gbase
+            | DatabaseType::Postgres
+            | DatabaseType::Kingbase
+            | DatabaseType::Gaussdb
+            | DatabaseType::OpenGauss
+            | DatabaseType::Kwdb
+    )
+}
+
+fn transfer_filter_keyword_at(input: &str, keyword: &str) -> bool {
+    let bytes = input.as_bytes();
+    if bytes.len() < keyword.len() || !input.is_char_boundary(keyword.len()) {
+        return false;
+    }
+    if !input[..keyword.len()].eq_ignore_ascii_case(keyword) {
+        return false;
+    }
+    match bytes.get(keyword.len()) {
+        None => true,
+        Some(byte) => !(byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'$'),
+    }
+}
+
+fn transfer_filter_starts_with_query(input: &str) -> bool {
+    let mut rest = input.trim_start();
+    // Skip leading SQL comments so `-- filter\nselect ...` still counts as a query.
+    loop {
+        if let Some(after) = rest.strip_prefix("--") {
+            match after.find('\n') {
+                Some(index) => rest = after[index + 1..].trim_start(),
+                None => return false,
+            }
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix('#') {
+            match after.find('\n') {
+                Some(index) => rest = after[index + 1..].trim_start(),
+                None => return false,
+            }
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix("/*") {
+            match after.find("*/") {
+                Some(index) => rest = after[index + 2..].trim_start(),
+                None => return false,
+            }
+            continue;
+        }
+        break;
+    }
+    transfer_filter_keyword_at(rest, "select") || transfer_filter_keyword_at(rest, "with")
+}
+
+/// Parses one user-supplied filter. Empty input means "no filter" (full table).
+pub fn parse_transfer_table_filter(raw: &str) -> Result<Option<TransferTableFilter>, String> {
+    let trimmed = raw.trim().trim_end_matches(';').trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.contains(';') {
+        return Err("Table filter must be a single statement; remove the extra ';' separators".to_string());
+    }
+    if transfer_filter_starts_with_query(trimmed) {
+        return Ok(Some(TransferTableFilter::Query(trimmed.to_string())));
+    }
+    let predicate = crate::sql_dialect::normalize_where_input(Some(trimmed));
+    let predicate = predicate.trim();
+    if predicate.is_empty() {
+        return Ok(None);
+    }
+    if predicate.contains(';') {
+        return Err("Table filter must be a single statement; remove the extra ';' separators".to_string());
+    }
+    Ok(Some(TransferTableFilter::Predicate(predicate.to_string())))
+}
+
+fn transfer_table_filter_for(request: &TransferRequest, table: &str) -> Result<Option<TransferTableFilter>, String> {
+    match request.table_filters.get(table) {
+        Some(raw) => parse_transfer_table_filter(raw),
+        None => Ok(None),
+    }
+}
+
+fn transfer_filter_count_sql(
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    catalog: Option<&str>,
+    filter: &TransferTableFilter,
+) -> String {
+    match filter {
+        TransferTableFilter::Predicate(predicate) => {
+            count_sql_with_where(table, schema, db_type, Some(predicate.as_str()), catalog)
+        }
+        TransferTableFilter::Query(query) => format!("SELECT COUNT(*) FROM ({query}) AS dbx_transfer_src"),
+    }
+}
+
+/// Builds one paged source read for a filtered table.
+///
+/// MySQL/PostgreSQL share `LIMIT`/`OFFSET`, and the PK `ORDER BY` keeps OFFSET
+/// paging deterministic. Keyset/ctid/COPY paging are disabled while a filter is
+/// present because they build their own `WHERE`/`FROM` and would ignore it.
+#[allow(clippy::too_many_arguments)]
+fn transfer_filter_page_sql(
+    columns: &[String],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    catalog: Option<&str>,
+    filter: &TransferTableFilter,
+    offset: u64,
+    limit: usize,
+    order_by_columns: &[String],
+    empty_row_only: bool,
+) -> String {
+    let select_list = if empty_row_only {
+        "1".to_string()
+    } else {
+        columns.iter().map(|column| quote_identifier(column, db_type)).collect::<Vec<_>>().join(", ")
+    };
+    let (from_sql, predicate) = match filter {
+        TransferTableFilter::Predicate(predicate) => {
+            (qualified_table(table, schema, db_type, catalog), Some(predicate.trim().to_string()))
+        }
+        TransferTableFilter::Query(query) => (format!("({query}) AS dbx_transfer_src"), None),
+    };
+    let where_clause = match predicate.as_deref() {
+        Some(predicate) if !predicate.is_empty() => format!(" WHERE ({predicate})"),
+        _ => String::new(),
+    };
+    let order_clause = if order_by_columns.is_empty() {
+        String::new()
+    } else {
+        let columns =
+            order_by_columns.iter().map(|column| quote_identifier(column, db_type)).collect::<Vec<_>>().join(", ");
+        format!(" ORDER BY {columns}")
+    };
+    format!("SELECT {select_list} FROM {from_sql}{where_clause}{order_clause} LIMIT {limit} OFFSET {offset}")
 }
 
 pub fn keyset_pagination_sql(
@@ -6529,21 +6928,30 @@ fn transfer_ddl_statements(sql: &str, db_type: &DatabaseType) -> Vec<String> {
 /// KEY (` / bare `FOREIGN KEY (`); a column line whose COMMENT or DEFAULT text
 /// merely mentions the words must survive (#7660).
 fn strip_inline_foreign_key_constraint_lines(statement: &str) -> String {
+    strip_inline_foreign_key_constraint_lines_collecting(statement).0
+}
+
+/// Same as [`strip_inline_foreign_key_constraint_lines`], but also returns every
+/// removed `CONSTRAINT ... FOREIGN KEY ...` clause (whitespace-trimmed, trailing
+/// comma dropped) so callers can re-create each constraint later — e.g. database
+/// export defers PostgreSQL foreign keys to the end of the script, where restore
+/// order no longer has to satisfy foreign key dependencies (issue #10575).
+pub(crate) fn strip_inline_foreign_key_constraint_lines_collecting(statement: &str) -> (String, Vec<String>) {
     if !statement.trim_start().to_ascii_uppercase().starts_with("CREATE TABLE ") {
-        return statement.to_string();
+        return (statement.to_string(), Vec::new());
     }
 
     let mut lines: Vec<String> = Vec::new();
-    let mut removed_foreign_key = false;
+    let mut removed_foreign_keys: Vec<String> = Vec::new();
     for line in statement.lines() {
         if INLINE_FOREIGN_KEY_CONSTRAINT_LINE_RE.is_match(line) {
-            removed_foreign_key = true;
+            removed_foreign_keys.push(line.trim().trim_end_matches(',').trim_end().to_string());
             continue;
         }
         lines.push(line.to_string());
     }
 
-    if removed_foreign_key {
+    if !removed_foreign_keys.is_empty() {
         if let Some(closing_index) = lines.iter().rposition(|line| line.trim_start().starts_with(')')) {
             if let Some(previous) = lines[..closing_index].iter_mut().rfind(|line| !line.trim().is_empty()) {
                 let trimmed_len = previous.trim_end_matches(char::is_whitespace).len();
@@ -6554,7 +6962,7 @@ fn strip_inline_foreign_key_constraint_lines(statement: &str) -> String {
         }
     }
 
-    lines.join("\n")
+    (lines.join("\n"), removed_foreign_keys)
 }
 
 fn is_postgres_post_table_index_statement(statement: &str) -> bool {
@@ -7358,28 +7766,48 @@ async fn get_existing_postgres_sequence_names_for_transfer(
         .collect())
 }
 
-/// Create owned PostgreSQL sequences before executing reused table DDL because
-/// serial defaults still reference `nextval('...')` in `CREATE TABLE`.
-async fn prepare_postgres_owned_sequences_for_transfer(
+/// Read-only half of [`prepare_postgres_owned_sequences_for_transfer`]: resolves which
+/// owned sequences the transfer must create and renders their `CREATE SEQUENCE` statements,
+/// executing nothing.
+///
+/// The structure SQL preview calls this so it can show the same sequence DDL the transfer
+/// pass will run (and the serial-column rewrite that DDL implies) without ever triggering a
+/// statement. Nothing in here may execute DDL — that is what
+/// [`execute_planned_postgres_owned_sequences_for_transfer`] is for.
+struct PlannedPostgresOwnedSequences {
+    create_statements: Vec<String>,
+    create_sequences: Vec<PostgresOwnedSequence>,
+    owned_sequences: Vec<PostgresOwnedSequence>,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn plan_postgres_owned_sequences_for_transfer(
     state: &AppState,
     request: &TransferRequest,
     table: &str,
-    target_table: &str,
     source_pool_key: &str,
     target_pool_key: &str,
     pg_compat_transfer: bool,
     preserves_target_table_name: bool,
     target_table_preexisting: bool,
-) -> Result<Vec<PostgresOwnedSequence>, String> {
+) -> Result<PlannedPostgresOwnedSequences, String> {
     if !(request.create_table && pg_compat_transfer && preserves_target_table_name && !target_table_preexisting) {
-        return Ok(Vec::new());
+        return Ok(PlannedPostgresOwnedSequences {
+            create_statements: Vec::new(),
+            create_sequences: Vec::new(),
+            owned_sequences: Vec::new(),
+        });
     }
 
     let owned_sequences =
         get_postgres_owned_sequences_for_transfer(state, source_pool_key, &request.source_schema, &[table.to_string()])
             .await?;
     if owned_sequences.is_empty() {
-        return Ok(Vec::new());
+        return Ok(PlannedPostgresOwnedSequences {
+            create_statements: Vec::new(),
+            create_sequences: Vec::new(),
+            owned_sequences,
+        });
     }
 
     let sequence_names = owned_sequences.iter().map(|sequence| sequence.name.clone()).collect::<Vec<_>>();
@@ -7398,6 +7826,8 @@ async fn prepare_postgres_owned_sequences_for_transfer(
             .collect::<HashMap<_, _>>();
 
     let sequence_if_not_exists = target_supports_if_not_exists_ddl(state, target_pool_key).await;
+    let mut create_statements = Vec::new();
+    let mut create_sequences = Vec::new();
     for sequence in &owned_sequences {
         let should_create = validate_existing_postgres_sequence(
             sequence,
@@ -7408,18 +7838,70 @@ async fn prepare_postgres_owned_sequences_for_transfer(
             let definition = definitions
                 .get(&sequence.name)
                 .ok_or_else(|| format!("PostgreSQL sequence definition not found: {}", sequence.name))?;
-            let create_sql = generate_postgres_transfer_sequence_create_ddl(
+            create_statements.push(generate_postgres_transfer_sequence_create_ddl(
                 definition,
                 &request.target_schema,
                 sequence_if_not_exists,
-            );
-            execute_on_pool(state, target_pool_key, &create_sql)
-                .await
-                .map_err(|e| format!("Failed to create PostgreSQL sequence for {target_table}: {e}"))?;
+            ));
+            create_sequences.push(sequence.clone());
         }
     }
 
-    Ok(owned_sequences)
+    Ok(PlannedPostgresOwnedSequences { create_statements, create_sequences, owned_sequences })
+}
+
+/// Executes the `CREATE SEQUENCE` statements a [`PlannedPostgresOwnedSequences`] planned.
+async fn execute_planned_postgres_owned_sequences_for_transfer(
+    state: &AppState,
+    target_pool_key: &str,
+    target_table: &str,
+    plan: &PlannedPostgresOwnedSequences,
+) -> Result<(), String> {
+    for create_sql in &plan.create_statements {
+        execute_on_pool(state, target_pool_key, create_sql)
+            .await
+            .map_err(|e| format!("Failed to create PostgreSQL sequence for {target_table}: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Create owned PostgreSQL sequences before executing reused table DDL because
+/// serial defaults still reference `nextval('...')` in `CREATE TABLE`.
+async fn prepare_postgres_owned_sequences_for_transfer(
+    state: &AppState,
+    request: &TransferRequest,
+    table: &str,
+    target_table: &str,
+    source_pool_key: &str,
+    target_pool_key: &str,
+    pg_compat_transfer: bool,
+    preserves_target_table_name: bool,
+    target_table_preexisting: bool,
+) -> Result<Vec<PostgresOwnedSequence>, String> {
+    let plan = plan_postgres_owned_sequences_for_transfer(
+        state,
+        request,
+        table,
+        source_pool_key,
+        target_pool_key,
+        pg_compat_transfer,
+        preserves_target_table_name,
+        target_table_preexisting,
+    )
+    .await?;
+    execute_planned_postgres_owned_sequences_for_transfer(state, target_pool_key, target_table, &plan).await?;
+    Ok(plan.owned_sequences)
+}
+
+/// Bind a planned sequence to its column after the table exists. Shared with the structure
+/// SQL preview so both render the identical statement.
+fn postgres_owned_sequence_bind_sql(request: &TransferRequest, sequence: &PostgresOwnedSequence) -> String {
+    format!(
+        "ALTER SEQUENCE {} OWNED BY {}.{}",
+        postgres_sequence_qualified_name(&request.target_schema, &sequence.name),
+        qualified_table(&sequence.owner_table, &request.target_schema, &DatabaseType::Postgres, None),
+        quote_identifier(&sequence.owner_column, &DatabaseType::Postgres)
+    )
 }
 
 /// Bind created or reused sequences after the table exists so
@@ -7432,12 +7914,7 @@ async fn bind_postgres_owned_sequences_for_transfer(
     owned_sequences: &[PostgresOwnedSequence],
 ) -> Result<(), String> {
     for sequence in owned_sequences {
-        let owner_sql = format!(
-            "ALTER SEQUENCE {} OWNED BY {}.{}",
-            postgres_sequence_qualified_name(&request.target_schema, &sequence.name),
-            qualified_table(&sequence.owner_table, &request.target_schema, &DatabaseType::Postgres, None),
-            quote_identifier(&sequence.owner_column, &DatabaseType::Postgres)
-        );
+        let owner_sql = postgres_owned_sequence_bind_sql(request, sequence);
         execute_on_pool(state, target_pool_key, &owner_sql)
             .await
             .map_err(|e| format!("Failed to bind PostgreSQL sequence for {target_table}: {e}"))?;
@@ -7474,7 +7951,7 @@ pub fn selected_object_names(selections: &[TransferObjectSelection], kind: &Tran
 }
 
 fn selected_postgres_sequence_names(request: &TransferRequest) -> Vec<String> {
-    let mut names = selected_object_names(&request.objects, &TransferObjectKind::Sequence);
+    let mut names = selected_object_names(request.object_selection_mode().selections(), &TransferObjectKind::Sequence);
     names.sort();
     names.dedup();
     names
@@ -7488,12 +7965,27 @@ fn postgres_transfer_relation_names(request: &TransferRequest) -> Vec<String> {
     names
 }
 
-/// Whether a kind participates in a transfer. An empty selection is the legacy
-/// PG→PG default: every kind participates (views, functions, triggers,
-/// materialized views are all transferred). Once the caller explicitly selects
-/// objects, only kinds with a non-empty selection participate.
-pub fn object_kind_selected_or_defaulted(selections: &[TransferObjectSelection], kind: &TransferObjectKind) -> bool {
-    selections.is_empty() || !selected_object_names(selections, kind).is_empty()
+/// Whether a kind participates in a transfer. `None` is the legacy PG→PG fallback;
+/// `Some([])` is an explicit empty selection and selects no kinds.
+pub fn object_kind_selected_or_defaulted(
+    selections: Option<&[TransferObjectSelection]>,
+    kind: &TransferObjectKind,
+) -> bool {
+    selections.is_none_or(|selections| !selected_object_names(selections, kind).is_empty())
+}
+
+fn object_name_selected_or_defaulted(
+    selection_mode: TransferObjectSelectionMode<'_>,
+    kind: &TransferObjectKind,
+    name: &str,
+) -> bool {
+    match selection_mode {
+        TransferObjectSelectionMode::LegacyUnspecified => true,
+        TransferObjectSelectionMode::Explicit(selections) => {
+            object_kind_selected_or_defaulted(Some(selections), kind)
+                && selected_object_names(selections, kind).iter().any(|selected| selected == name)
+        }
+    }
 }
 
 pub fn should_copy_data(content: &TransferContent) -> bool {
@@ -7515,12 +8007,11 @@ fn transfer_kind_from_object_source_kind(kind: &db::ObjectSourceKind) -> Option<
 
 fn filter_object_sources_by_selection(
     sources: Vec<db::ObjectSource>,
-    selections: &[TransferObjectSelection],
+    selection_mode: TransferObjectSelectionMode<'_>,
 ) -> Vec<db::ObjectSource> {
-    // Empty selection is the legacy PG→PG default: transfer everything.
-    if selections.is_empty() {
+    let TransferObjectSelectionMode::Explicit(selections) = selection_mode else {
         return sources;
-    }
+    };
     sources
         .into_iter()
         .filter(|source| {
@@ -7541,29 +8032,29 @@ fn filter_object_sources_by_selection(
 pub fn should_transfer_schema_objects(
     source_db_type: &DatabaseType,
     target_db_type: &DatabaseType,
-    content: &TransferContent,
-    objects: &[TransferObjectSelection],
+    request: &TransferRequest,
 ) -> bool {
-    if matches!(content, TransferContent::DataOnly) {
+    if matches!(request.content, TransferContent::DataOnly) {
         return false;
     }
-    if !objects.is_empty() {
-        // A table-only selection is already handled by the table transfer pass.
-        // Do not enter the PostgreSQL-family schema-object path just because the
-        // request also carries the selected table kind. This matters for
-        // Kingbase, whose catalog is not a drop-in PostgreSQL catalog.
-        return objects
-            .iter()
-            .any(|selection| selection.object_type != TransferObjectKind::Table && !selection.names.is_empty());
+    match request.object_selection_mode() {
+        TransferObjectSelectionMode::Explicit(selections) => {
+            // A table-only selection is already handled by the table transfer pass.
+            // Explicit empty selections must never enter a legacy all-objects path.
+            selections
+                .iter()
+                .any(|selection| selection.object_type != TransferObjectKind::Table && !selection.names.is_empty())
+        }
+        TransferObjectSelectionMode::LegacyUnspecified => {
+            if matches!(source_db_type, DatabaseType::Kingbase) || matches!(target_db_type, DatabaseType::Kingbase) {
+                // Kingbase V8 does not expose every PostgreSQL pg_catalog relation used
+                // by the optional object scanner, so keep its confirmed no-fallback behavior.
+                return false;
+            }
+            transfer_object_family(source_db_type) == Some(TransferObjectFamily::Postgres)
+                && transfer_object_family(target_db_type) == Some(TransferObjectFamily::Postgres)
+        }
     }
-    if matches!(source_db_type, DatabaseType::Kingbase) || matches!(target_db_type, DatabaseType::Kingbase) {
-        // Kingbase V8 does not expose every PostgreSQL pg_catalog relation used
-        // by the optional object scanner. Empty selection means the legacy
-        // table-transfer request here, so avoid probing unsupported catalogs.
-        return false;
-    }
-    transfer_object_family(source_db_type) == Some(TransferObjectFamily::Postgres)
-        && transfer_object_family(target_db_type) == Some(TransferObjectFamily::Postgres)
 }
 
 /// Transfers selected non-table objects from source to target.
@@ -7586,7 +8077,7 @@ where
     }
     let source_db_type = get_db_type(state, &request.source_connection_id).await?;
     let target_db_type = get_db_type(state, &request.target_connection_id).await?;
-    if !should_transfer_schema_objects(&source_db_type, &target_db_type, &request.content, &request.objects) {
+    if !should_transfer_schema_objects(&source_db_type, &target_db_type, request) {
         return Ok(TransferObjectOutcome::default());
     }
     if !is_same_transfer_family(&source_db_type, &target_db_type) {
@@ -7606,8 +8097,7 @@ where
     let mut filtered_request = request.clone();
     if let Some(family) = transfer_object_family(&source_db_type) {
         let supported = transfer_object_kinds_for_family(&family);
-        filtered_request.objects =
-            request.objects.iter().filter(|sel| supported.contains(&sel.object_type)).cloned().collect();
+        filtered_request.objects = request.object_selection_mode().filter_supported(&supported);
     }
     match transfer_object_family(&source_db_type) {
         Some(TransferObjectFamily::Postgres) => {
@@ -7662,9 +8152,11 @@ where
     let source_db = &request.source_database;
     let target_db =
         if request.target_database.trim().is_empty() { source_db.as_str() } else { request.target_database.as_str() };
-    let order = ordered_transfer_object_kinds(request.objects.iter().map(|s| s.object_type).collect());
+    let order = ordered_transfer_object_kinds(
+        request.object_selection_mode().selections().iter().map(|s| s.object_type).collect(),
+    );
     for kind in order {
-        for name in selected_object_names(&request.objects, &kind) {
+        for name in selected_object_names(request.object_selection_mode().selections(), &kind) {
             if is_cancelled(&request.transfer_id).await {
                 return Err("Cancelled".to_string());
             }
@@ -7731,9 +8223,11 @@ where
     let mut outcome = TransferObjectOutcome::default();
     let source_schema = resolve_oracle_schema(&request.source_schema, &request.source_database);
     let target_schema = resolve_oracle_schema(&request.target_schema, &request.target_database);
-    let order = ordered_transfer_object_kinds(request.objects.iter().map(|s| s.object_type).collect());
+    let order = ordered_transfer_object_kinds(
+        request.object_selection_mode().selections().iter().map(|s| s.object_type).collect(),
+    );
     for kind in order {
-        for name in selected_object_names(&request.objects, &kind) {
+        for name in selected_object_names(request.object_selection_mode().selections(), &kind) {
             if is_cancelled(&request.transfer_id).await {
                 return Err("Cancelled".to_string());
             }
@@ -7802,9 +8296,11 @@ where
         if request.source_schema.trim().is_empty() { "dbo".to_string() } else { request.source_schema.clone() };
     let target_schema =
         if request.target_schema.trim().is_empty() { "dbo".to_string() } else { request.target_schema.clone() };
-    let order = ordered_transfer_object_kinds(request.objects.iter().map(|s| s.object_type).collect());
+    let order = ordered_transfer_object_kinds(
+        request.object_selection_mode().selections().iter().map(|s| s.object_type).collect(),
+    );
     for kind in order {
-        for name in selected_object_names(&request.objects, &kind) {
+        for name in selected_object_names(request.object_selection_mode().selections(), &kind) {
             if is_cancelled(&request.transfer_id).await {
                 return Err("Cancelled".to_string());
             }
@@ -7872,7 +8368,8 @@ where
     let target_db_type = get_db_type(state, &request.target_connection_id).await?;
     let allowed = cross_family_transferable_object_kinds(&source_db_type, &target_db_type);
     let unsupported: Vec<String> = request
-        .objects
+        .object_selection_mode()
+        .selections()
         .iter()
         .filter(|selection| !allowed.contains(&selection.object_type))
         .map(|selection| format!("{:?}", selection.object_type))
@@ -7893,9 +8390,11 @@ where
     };
     let source_schema = resolve_schema(&request.source_schema, &request.source_database, &source_db_type);
     let target_schema = resolve_schema(&request.target_schema, &request.target_database, &target_db_type);
-    let order = ordered_transfer_object_kinds(request.objects.iter().map(|s| s.object_type).collect());
+    let order = ordered_transfer_object_kinds(
+        request.object_selection_mode().selections().iter().map(|s| s.object_type).collect(),
+    );
     for kind in order {
-        for name in selected_object_names(&request.objects, &kind) {
+        for name in selected_object_names(request.object_selection_mode().selections(), &kind) {
             if is_cancelled(&request.transfer_id).await {
                 return Err("Cancelled".to_string());
             }
@@ -8098,6 +8597,7 @@ async fn get_postgres_schema_object_sources_for_transfer(
             schema: Some(schema.to_string()),
             source,
             editable: None,
+            routine_parameters: None,
         });
     }
     for row in execute_on_pool(state, pool_key, &routines_sql).await?.rows {
@@ -8117,6 +8617,7 @@ async fn get_postgres_schema_object_sources_for_transfer(
             schema: Some(schema.to_string()),
             source,
             editable: None,
+            routine_parameters: None,
         });
     }
 
@@ -8173,19 +8674,102 @@ async fn get_postgres_trigger_sources_for_transfer(
         .collect())
 }
 
+fn postgres_table_dependency_selection_sql(schema: &str, tables: &[String]) -> Option<String> {
+    if tables.is_empty() {
+        return None;
+    }
+    let table_list = tables.iter().map(|table| quote_string_literal(table)).collect::<Vec<_>>().join(", ");
+    let source_schema = quote_string_literal(schema);
+    Some(format!(
+        "WITH RECURSIVE selected_tables AS ( \
+             SELECT c.oid FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = {source_schema} AND c.relkind IN ('r','p','f') AND c.relname IN ({table_list}) \
+         ), selected_dependencies(classid, objid) AS ( \
+             SELECT 'pg_catalog.pg_class'::regclass, oid FROM selected_tables \
+             UNION SELECT 'pg_catalog.pg_attrdef'::regclass, a.oid \
+             FROM pg_catalog.pg_attrdef a JOIN selected_tables t ON t.oid = a.adrelid \
+             UNION SELECT 'pg_catalog.pg_constraint'::regclass, c.oid \
+             FROM pg_catalog.pg_constraint c JOIN selected_tables t ON t.oid = c.conrelid \
+             UNION SELECT 'pg_catalog.pg_class'::regclass, i.indexrelid \
+             FROM pg_catalog.pg_index i JOIN selected_tables t ON t.oid = i.indrelid \
+             UNION \
+             SELECT d.refclassid, d.refobjid \
+             FROM pg_catalog.pg_depend d \
+             JOIN selected_dependencies parent ON d.classid = parent.classid AND d.objid = parent.objid \
+             WHERE d.deptype <> 'p' AND d.refclassid IN ( \
+                 'pg_catalog.pg_type'::regclass, 'pg_catalog.pg_proc'::regclass, \
+                 'pg_catalog.pg_extension'::regclass, 'pg_catalog.pg_opclass'::regclass, \
+                 'pg_catalog.pg_operator'::regclass, 'pg_catalog.pg_collation'::regclass \
+             ) \
+         ) \
+         SELECT 'ENUM'::text, t.typname \
+         FROM selected_dependencies d JOIN pg_catalog.pg_type t ON d.classid = 'pg_catalog.pg_type'::regclass AND d.objid = t.oid \
+         JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace \
+         WHERE t.typtype = 'e' AND n.nspname = {source_schema} \
+         UNION \
+         SELECT 'DOMAIN'::text, t.typname \
+         FROM selected_dependencies d JOIN pg_catalog.pg_type t ON d.classid = 'pg_catalog.pg_type'::regclass AND d.objid = t.oid \
+         JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace \
+         WHERE t.typtype = 'd' AND n.nspname = {source_schema} \
+         UNION \
+         SELECT 'EXTENSION'::text, e.extname \
+         FROM selected_dependencies d JOIN pg_catalog.pg_extension e ON d.classid = 'pg_catalog.pg_extension'::regclass AND d.objid = e.oid \
+         ORDER BY 1, 2"
+    ))
+}
+
+async fn get_postgres_table_dependency_selection(
+    state: &AppState,
+    pool_key: &str,
+    schema: &str,
+    tables: &[String],
+) -> Result<PostgresTableDependencySelection, String> {
+    let Some(sql) = postgres_table_dependency_selection_sql(schema, tables) else {
+        return Ok(PostgresTableDependencySelection::default());
+    };
+    let rows = execute_on_pool(state, pool_key, &sql).await?.rows;
+    let mut selection = PostgresTableDependencySelection::default();
+    for row in rows {
+        let (Some(kind), Some(name)) = (json_string_cell(&row, 0), json_string_cell(&row, 1)) else {
+            continue;
+        };
+        match kind.as_str() {
+            "ENUM" => selection.enum_type_names.push(name),
+            "DOMAIN" => selection.domain_names.push(name),
+            "EXTENSION" => selection.extension_names.push(name),
+            _ => {}
+        }
+    }
+    for names in [&mut selection.extension_names, &mut selection.enum_type_names, &mut selection.domain_names] {
+        names.sort();
+        names.dedup();
+    }
+    Ok(selection)
+}
+
 async fn get_postgres_extension_sources_for_transfer(
     state: &AppState,
     pool_key: &str,
     schema: &str,
+    selected_names: Option<&[String]>,
 ) -> Result<Vec<PostgresExtensionSource>, String> {
-    let sql = format!(
-        "SELECT e.extname \
-         FROM pg_extension e \
-         JOIN pg_namespace n ON n.oid = e.extnamespace \
-         WHERE n.nspname = {} \
-         ORDER BY e.extname",
-        quote_string_literal(schema)
-    );
+    let sql = if let Some(names) = selected_names {
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+        let name_list = names.iter().map(|name| quote_string_literal(name)).collect::<Vec<_>>().join(", ");
+        format!("SELECT extname FROM pg_catalog.pg_extension WHERE extname IN ({name_list}) ORDER BY extname")
+    } else {
+        format!(
+            "SELECT e.extname \
+             FROM pg_extension e \
+             JOIN pg_namespace n ON n.oid = e.extnamespace \
+             WHERE n.nspname = {} \
+             ORDER BY e.extname",
+            quote_string_literal(schema)
+        )
+    };
     let rows = execute_on_pool(state, pool_key, &sql).await?.rows;
     Ok(rows
         .into_iter()
@@ -8322,15 +8906,94 @@ async fn get_postgres_policy_statements_for_transfer(
     Ok(result_rows_to_string_statements(execute_on_pool(state, pool_key, &sql).await?.rows))
 }
 
+fn postgres_transfer_relation_scope_filter(request: &TransferRequest) -> String {
+    match request.object_selection_mode() {
+        TransferObjectSelectionMode::LegacyUnspecified => {
+            let names = postgres_transfer_relation_names(request);
+            let name_list = names.iter().map(|name| quote_string_literal(name)).collect::<Vec<_>>().join(", ");
+            let table_filter =
+                if names.is_empty() { "FALSE".to_string() } else { format!("c.relname IN ({name_list})") };
+            format!("(c.relkind IN ('v','m') OR ({table_filter} AND c.relkind IN ('r','p','f','S'))) ")
+        }
+        TransferObjectSelectionMode::Explicit(selections) => {
+            let mut filters = Vec::new();
+            if !request.tables.is_empty() {
+                let names = request.tables.iter().map(|name| quote_string_literal(name)).collect::<Vec<_>>().join(", ");
+                filters.push(format!("(c.relkind IN ('r','p','f') AND c.relname IN ({names}))"));
+            }
+            for (kind, relkind) in [
+                (TransferObjectKind::View, "v"),
+                (TransferObjectKind::MaterializedView, "m"),
+                (TransferObjectKind::Sequence, "S"),
+            ] {
+                let names = selected_object_names(selections, &kind);
+                if !names.is_empty() {
+                    let name_list = names.iter().map(|name| quote_string_literal(name)).collect::<Vec<_>>().join(", ");
+                    filters.push(format!("(c.relkind = '{relkind}' AND c.relname IN ({name_list}))"));
+                }
+            }
+            if filters.is_empty() {
+                "FALSE".to_string()
+            } else {
+                filters.join(" OR ")
+            }
+        }
+    }
+}
+
+fn postgres_transfer_routine_scope_filter(request: &TransferRequest, has_prokind: bool) -> String {
+    match request.object_selection_mode() {
+        TransferObjectSelectionMode::LegacyUnspecified => {
+            postgres_transfer_routine_catalog_sql(has_prokind).1.to_string()
+        }
+        TransferObjectSelectionMode::Explicit(selections) => {
+            let mut filters = Vec::new();
+            let functions = selected_object_names(selections, &TransferObjectKind::Function);
+            if !functions.is_empty() {
+                let names = functions.iter().map(|name| quote_string_literal(name)).collect::<Vec<_>>().join(", ");
+                filters.push(if has_prokind {
+                    format!("(p.prokind = 'f' AND p.proname IN ({names}))")
+                } else {
+                    format!("(p.proname IN ({names}) AND NOT p.proisagg AND NOT p.proiswindow)")
+                });
+            }
+            if has_prokind {
+                let procedures = selected_object_names(selections, &TransferObjectKind::Procedure);
+                if !procedures.is_empty() {
+                    let names = procedures.iter().map(|name| quote_string_literal(name)).collect::<Vec<_>>().join(", ");
+                    filters.push(format!("(p.prokind = 'p' AND p.proname IN ({names}))"));
+                }
+            }
+            if filters.is_empty() {
+                "FALSE".to_string()
+            } else {
+                filters.join(" OR ")
+            }
+        }
+    }
+}
+
 fn postgres_transfer_ownership_statements_sql(
     source_schema: &str,
     target_schema: &str,
-    tables: &[String],
+    request: &TransferRequest,
     has_prokind: bool,
+    dependency_type_names: &[String],
 ) -> String {
-    let table_list = tables.iter().map(|table| quote_string_literal(table)).collect::<Vec<_>>().join(", ");
-    let table_filter = if tables.is_empty() { "FALSE".to_string() } else { format!("c.relname IN ({table_list})") };
-    let (routine_kind, routine_filter) = postgres_transfer_routine_catalog_sql(has_prokind);
+    let (routine_kind, _) = postgres_transfer_routine_catalog_sql(has_prokind);
+    let relation_filter = postgres_transfer_relation_scope_filter(request);
+    let routine_filter = postgres_transfer_routine_scope_filter(request, has_prokind);
+    let is_legacy = request.object_selection_mode().is_legacy_unspecified();
+    let schema_scope_filter = if is_legacy { "TRUE" } else { "FALSE" };
+    let type_filter = if is_legacy {
+        "t.typtype IN ('e','d')".to_string()
+    } else if dependency_type_names.is_empty() {
+        "FALSE".to_string()
+    } else {
+        let names = dependency_type_names.iter().map(|name| quote_string_literal(name)).collect::<Vec<_>>().join(", ");
+        format!("t.typtype IN ('e','d') AND t.typname IN ({names})")
+    };
+
     format!(
         "WITH relation_owners AS ( \
              SELECT CASE c.relkind \
@@ -8343,7 +9006,7 @@ fn postgres_transfer_ownership_statements_sql(
                     pg_get_userbyid(c.relowner) AS owner_name \
              FROM pg_catalog.pg_class c \
              JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-             WHERE n.nspname = {source_schema} AND (c.relkind IN ('v','m') OR ({table_filter} AND c.relkind IN ('r','p','f','S'))) \
+             WHERE n.nspname = {source_schema} AND {relation_filter} \
          ), \
          routine_owners AS ( \
              SELECT format('ALTER %s %I.%I(%s) OWNER TO ', \
@@ -8360,12 +9023,12 @@ fn postgres_transfer_ownership_statements_sql(
                     pg_get_userbyid(t.typowner) AS owner_name \
              FROM pg_catalog.pg_type t \
              JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace \
-             WHERE n.nspname = {source_schema} AND t.typtype IN ('e','d') \
+             WHERE n.nspname = {source_schema} AND {type_filter} \
          ) \
          SELECT stmt_prefix, owner_name FROM ( \
              SELECT format('ALTER SCHEMA %I OWNER TO ', {target_schema}) AS stmt_prefix, \
                     pg_get_userbyid(n.nspowner) AS owner_name \
-             FROM pg_catalog.pg_namespace n WHERE n.nspname = {source_schema} \
+             FROM pg_catalog.pg_namespace n WHERE n.nspname = {source_schema} AND {schema_scope_filter} \
              UNION ALL SELECT stmt_prefix, owner_name FROM relation_owners \
              UNION ALL SELECT stmt_prefix, owner_name FROM routine_owners \
              UNION ALL SELECT stmt_prefix, owner_name FROM type_owners \
@@ -8373,19 +9036,33 @@ fn postgres_transfer_ownership_statements_sql(
          WHERE stmt_prefix IS NOT NULL AND owner_name IS NOT NULL",
         source_schema = quote_string_literal(source_schema),
         target_schema = quote_string_literal(target_schema),
-        table_filter = table_filter,
+        relation_filter = relation_filter,
+        routine_filter = routine_filter,
+        type_filter = type_filter,
+        schema_scope_filter = schema_scope_filter,
     )
 }
 
 async fn get_postgres_ownership_statements_for_transfer(
     state: &AppState,
     pool_key: &str,
-    source_schema: &str,
-    target_schema: &str,
-    tables: &[String],
+    request: &TransferRequest,
     has_prokind: bool,
 ) -> Result<Vec<PostgresOwnershipStatement>, String> {
-    let sql = postgres_transfer_ownership_statements_sql(source_schema, target_schema, tables, has_prokind);
+    let dependency_type_names = if request.object_selection_mode().is_legacy_unspecified() {
+        Vec::new()
+    } else {
+        get_postgres_table_dependency_selection(state, pool_key, &request.source_schema, &request.tables)
+            .await?
+            .type_names()
+    };
+    let sql = postgres_transfer_ownership_statements_sql(
+        &request.source_schema,
+        &request.target_schema,
+        request,
+        has_prokind,
+        &dependency_type_names,
+    );
     Ok(result_rows_to_postgres_ownership_statements(execute_on_pool(state, pool_key, &sql).await?.rows))
 }
 
@@ -8506,18 +9183,28 @@ async fn build_rebuild_preview(
     }
 
     let mut phases: Vec<String> = Vec::new();
-    if !rename_statements.is_empty() {
-        phases.push(format!("-- 1. Backup existing target tables\n{}", rename_statements.join(";\n")));
+    let backup_sql = if rename_statements.is_empty() {
+        None
+    } else {
+        Some(format!("-- 1. Backup existing target tables\n{}", rename_statements.join(";\n")))
+    };
+    let cleanup_sql = if drop_statements.is_empty() {
+        None
+    } else {
+        Some(format!("-- 3. Drop backups after success\n{}", drop_statements.join(";\n")))
+    };
+    if let Some(sql) = &backup_sql {
+        phases.push(sql.clone());
     }
     phases.push(format!(
         "-- 2. Recreate the {} selected table(s) from the source structure and transfer the selected data",
         resolved.len()
     ));
-    if !drop_statements.is_empty() {
-        phases.push(format!("-- 3. Drop backups after success\n{}", drop_statements.join(";\n")));
+    if let Some(sql) = &cleanup_sql {
+        phases.push(sql.clone());
     }
 
-    Ok(TransferRebuildPreview { sql: phases.join("\n\n"), tables })
+    Ok(TransferRebuildPreview { sql: phases.join("\n\n"), tables, backup_sql, cleanup_sql })
 }
 
 pub async fn preview_transfer_ownership(
@@ -8532,16 +9219,8 @@ pub async fn preview_transfer_ownership(
     let (missing_owners, target_owner) =
         if request.create_table && is_postgres_compat_transfer(source_db_type, target_db_type) {
             let has_prokind = postgres_transfer_catalog_capabilities(state, source_pool_key).await?.has_prokind;
-            let relation_names = postgres_transfer_relation_names(request);
-            let statements = get_postgres_ownership_statements_for_transfer(
-                state,
-                source_pool_key,
-                &request.source_schema,
-                &request.target_schema,
-                &relation_names,
-                has_prokind,
-            )
-            .await?;
+            let statements =
+                get_postgres_ownership_statements_for_transfer(state, source_pool_key, request, has_prokind).await?;
             let roles = distinct_postgres_ownership_roles(&statements);
             let existing_roles = get_existing_postgres_roles(state, target_pool_key, &roles).await?;
             let missing_owners = roles.into_iter().filter(|role| !existing_roles.contains(role)).collect::<Vec<_>>();
@@ -8563,18 +9242,38 @@ pub async fn preview_transfer_ownership(
         None
     };
 
-    Ok(TransferOwnershipPreview { missing_owners, target_owner, rebuild })
+    // Structure-only transfers expose the statements their create pass will run. The other
+    // content modes keep their existing previews: data-only runs no DDL, and
+    // structure-and-data is deliberately unchanged here.
+    let structure = if matches!(request.content, TransferContent::StructureOnly) {
+        Some(
+            structure_plan::build_structure_preview(
+                state,
+                request,
+                source_db_type,
+                target_db_type,
+                source_pool_key,
+                target_pool_key,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
+    Ok(TransferOwnershipPreview { missing_owners, target_owner, rebuild, structure })
 }
 
 fn postgres_transfer_grant_statements_sql(
     source_schema: &str,
     target_schema: &str,
-    tables: &[String],
+    request: &TransferRequest,
     has_prokind: bool,
 ) -> String {
-    let table_list = tables.iter().map(|table| quote_string_literal(table)).collect::<Vec<_>>().join(", ");
-    let table_filter = if tables.is_empty() { "FALSE".to_string() } else { format!("c.relname IN ({table_list})") };
-    let (routine_kind, routine_filter) = postgres_transfer_routine_catalog_sql(has_prokind);
+    let (routine_kind, _) = postgres_transfer_routine_catalog_sql(has_prokind);
+    let relation_filter = postgres_transfer_relation_scope_filter(request);
+    let routine_filter = postgres_transfer_routine_scope_filter(request, has_prokind);
+    let schema_scope_filter = if request.object_selection_mode().is_legacy_unspecified() { "TRUE" } else { "FALSE" };
     format!(
         "WITH schema_grants AS ( \
              SELECT format( \
@@ -8587,7 +9286,7 @@ fn postgres_transfer_grant_statements_sql(
              FROM ( \
                  SELECT n.nspname, (aclexplode(n.nspacl)).* \
                  FROM pg_catalog.pg_namespace n \
-                 WHERE n.nspname = {source_schema} \
+                 WHERE n.nspname = {source_schema} AND {schema_scope_filter} \
              ) a \
              LEFT JOIN pg_roles grantee ON grantee.oid = a.grantee \
              GROUP BY a.grantee, grantee.rolname \
@@ -8607,7 +9306,7 @@ fn postgres_transfer_grant_statements_sql(
                      SELECT c.relname, c.relkind, (aclexplode(c.relacl)).* \
                      FROM pg_catalog.pg_class c \
                      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-                     WHERE n.nspname = {source_schema} AND (c.relkind IN ('v','m') OR ({table_filter} AND c.relkind IN ('r','p','f','S'))) \
+                     WHERE n.nspname = {source_schema} AND {relation_filter} \
                  ) a \
                  LEFT JOIN pg_roles grantee ON grantee.oid = a.grantee \
              ) rels \
@@ -8644,19 +9343,20 @@ fn postgres_transfer_grant_statements_sql(
          WHERE stmt IS NOT NULL",
         source_schema = quote_string_literal(source_schema),
         target_schema = quote_string_literal(target_schema),
-        table_filter = table_filter,
+        schema_scope_filter = schema_scope_filter,
+        relation_filter = relation_filter,
+        routine_filter = routine_filter,
     )
 }
 
 async fn get_postgres_grant_statements_for_transfer(
     state: &AppState,
     pool_key: &str,
-    source_schema: &str,
-    target_schema: &str,
-    tables: &[String],
+    request: &TransferRequest,
     has_prokind: bool,
 ) -> Result<Vec<String>, String> {
-    let sql = postgres_transfer_grant_statements_sql(source_schema, target_schema, tables, has_prokind);
+    let sql =
+        postgres_transfer_grant_statements_sql(&request.source_schema, &request.target_schema, request, has_prokind);
     Ok(result_rows_to_string_statements(execute_on_pool(state, pool_key, &sql).await?.rows))
 }
 
@@ -9111,6 +9811,7 @@ where
             } else {
                 mongo_documents_to_rows(&documents, &sql_target_column_names)
             };
+            let write_hard_limit = transfer_write_mysql_hard_limit(state, target_pool_key).await;
             let write_statements = generate_transfer_write_sql_batches_with_column_quoting(
                 &TransferMode::Append,
                 &sql_target_column_names,
@@ -9124,6 +9825,7 @@ where
                 false,
                 false,
                 request.quote_target_column_names,
+                write_hard_limit,
             )?;
             for (statement_index, batch_sql) in write_statements.iter().enumerate() {
                 execute_on_pool(state, target_pool_key, batch_sql).await.map_err(|e| {
@@ -9218,6 +9920,19 @@ fn transfer_cursor_sql(
 
 fn uses_agent_transfer_cursor(db_type: &DatabaseType) -> bool {
     matches!(db_type, DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Transwarp | DatabaseType::Db2)
+}
+
+fn transfer_upsert_falls_back_to_append(db_type: &DatabaseType) -> bool {
+    matches!(
+        db_type,
+        DatabaseType::ClickHouse
+            | DatabaseType::Hive
+            | DatabaseType::Kyuubi
+            | DatabaseType::Impala
+            | DatabaseType::Argo
+            | DatabaseType::Transwarp
+            | DatabaseType::Iris
+    )
 }
 
 fn transfer_clear_table_sql(table: &str, schema: &str, db_type: &DatabaseType, catalog: Option<&str>) -> String {
@@ -9808,15 +10523,16 @@ async fn create_transfer_target_table(
     Ok(())
 }
 
-/// Transfer a single table. Returns rows transferred.
-/// `progress_callback` is invoked for progress updates.
+/// Transfer a single table, returning moved rows and the source COUNT when available.
+/// `progress_callback` is invoked for progress updates; source-count observation is separate
+/// so the existing progress event payload remains unchanged.
 ///
 /// `preexisting_backup_names` carries the output of [`rename_tables_to_backup`] and is
 /// required whenever `drop_target_before_create` is set — this pass only checks whether the
 /// table was renamed aside, and never renames or drops anything itself. Removing the backups
 /// is [`drop_backup_tables`], after every table has succeeded.
 #[allow(clippy::too_many_arguments)]
-async fn transfer_table_inner<F>(
+async fn transfer_table_inner<F, C>(
     state: &Arc<AppState>,
     request: &TransferRequest,
     table: &str,
@@ -9829,14 +10545,17 @@ async fn transfer_table_inner<F>(
     pending_fk_alters: &mut Vec<(String, String)>,
     preexisting_backup_names: Option<&HashMap<String, String>>,
     mut progress_callback: F,
-) -> Result<u64, String>
+    mut source_count_callback: C,
+) -> Result<TransferTableResult, String>
 where
     F: FnMut(TransferProgress),
+    C: FnMut(Option<u64>),
 {
     if *target_db_type == DatabaseType::Db2 {
         db2::validate_request(request)?;
     }
     if is_mongodb_transfer_type(source_db_type) || is_mongodb_transfer_type(target_db_type) {
+        source_count_callback(None);
         return transfer_mongodb_table(
             state,
             request,
@@ -9848,7 +10567,17 @@ where
             target_pool_key,
             progress_callback,
         )
-        .await;
+        .await
+        .map(|moved_rows| TransferTableResult { moved_rows, source_row_count: None });
+    }
+
+    let table_filter = transfer_table_filter_for(request, table)?;
+    if table_filter.is_some() && should_copy_data(&request.content) && !transfer_table_filter_supported(source_db_type)
+    {
+        return Err(format!(
+            "Table filters are not supported for source database '{}'; only the MySQL and PostgreSQL families are supported",
+            source_db_type.as_str()
+        ));
     }
 
     let total_tables = request.tables.len();
@@ -10021,7 +10750,16 @@ where
 
     let total_rows = if should_copy_data(&request.content) {
         // Count source rows only for data-bearing transfers.
-        let sql = count_sql(table, &request.source_schema, source_db_type, request.source_catalog.as_deref());
+        let sql = match table_filter.as_ref() {
+            Some(filter) => transfer_filter_count_sql(
+                table,
+                &request.source_schema,
+                source_db_type,
+                request.source_catalog.as_deref(),
+                filter,
+            ),
+            None => count_sql(table, &request.source_schema, source_db_type, request.source_catalog.as_deref()),
+        };
         match execute_on_pool(state, source_pool_key, &sql).await {
             Ok(result) => result.rows.first().and_then(|r| r.first()).and_then(|v| match v {
                 serde_json::Value::Number(n) => n.as_u64(),
@@ -10036,6 +10774,7 @@ where
     } else {
         None
     };
+    source_count_callback(total_rows);
     log::info!("[transfer] {} total_rows={:?}", table, total_rows);
 
     let server_side_complex_copy =
@@ -10121,7 +10860,7 @@ where
             )
             .await?;
         }
-        return Ok(0);
+        return Ok(TransferTableResult { moved_rows: 0, source_row_count: None });
     }
 
     // A preexisting target also needs its columns read, even for a data-only
@@ -10137,16 +10876,7 @@ where
     // identity values with 544.
     let needs_target_columns = default_rows_only
         || target_table_preexisting
-        || (request.mode == TransferMode::Upsert
-            && !matches!(
-                target_db_type,
-                DatabaseType::ClickHouse
-                    | DatabaseType::Hive
-                    | DatabaseType::Kyuubi
-                    | DatabaseType::Impala
-                    | DatabaseType::Argo
-                    | DatabaseType::Transwarp
-            ))
+        || (request.mode == TransferMode::Upsert && !transfer_upsert_falls_back_to_append(target_db_type))
         || matches!(
             target_db_type,
             DatabaseType::Postgres | DatabaseType::Dameng | DatabaseType::H2 | DatabaseType::SqlServer
@@ -10259,15 +10989,7 @@ where
 
     // Determine effective mode and PK columns for upsert
     let (effective_mode, pk_columns) = if request.mode == TransferMode::Upsert {
-        if matches!(
-            target_db_type,
-            DatabaseType::ClickHouse
-                | DatabaseType::Hive
-                | DatabaseType::Kyuubi
-                | DatabaseType::Impala
-                | DatabaseType::Argo
-                | DatabaseType::Transwarp
-        ) {
+        if transfer_upsert_falls_back_to_append(target_db_type) {
             log::warn!("[transfer] upsert not supported for {:?}, falling back to append", target_db_type);
             (TransferMode::Append, vec![])
         } else {
@@ -10323,7 +11045,7 @@ where
             error: None,
             terminal: false,
         });
-        return Ok(copied);
+        return Ok(TransferTableResult { moved_rows: copied, source_row_count: total_rows });
     }
 
     // COPY fast path: PG-family append/overwrite transfers stream the whole
@@ -10332,7 +11054,9 @@ where
     // is atomic (the target's COPY statement aborts), so the paged INSERT loop
     // below runs unchanged as a fallback.
     let mut copy_rows: Option<u64> = None;
-    if transfer_copy_fast_path_supported(pg_compat_transfer, &effective_mode, overrides_postgres_system_values) {
+    if table_filter.is_none()
+        && transfer_copy_fast_path_supported(pg_compat_transfer, &effective_mode, overrides_postgres_system_values)
+    {
         let (copy_out_sql, copy_in_sql) = postgres_copy_transfer_sql(
             &col_names,
             &write_col_names,
@@ -10406,12 +11130,16 @@ where
     // and discards every previously read row (quadratic in table size). Falls
     // back to OFFSET (keeping the same key ordering) when the key metadata
     // does not hold up mid-table.
-    let mut keyset_indexes = transfer_keyset_column_indexes(&writable_columns, &primary_key_columns, source_db_type);
+    let mut keyset_indexes = if table_filter.is_some() {
+        None
+    } else {
+        transfer_keyset_column_indexes(&writable_columns, &primary_key_columns, source_db_type)
+    };
     let mut keyset_cursor: Vec<serde_json::Value> = Vec::new();
     // A single Agent cursor keeps Hive-family rows in one query execution. Inceptor
     // rejects the generic LIMIT/OFFSET form, just like the other Agent cursor paths.
     // Re-running LIMIT/OFFSET pages is unstable for tables without a unique key.
-    let use_hive_server_cursor = uses_agent_transfer_cursor(source_db_type);
+    let use_hive_server_cursor = table_filter.is_none() && uses_agent_transfer_cursor(source_db_type);
     let hive_server_transfer_sql = use_hive_server_cursor.then(|| {
         transfer_cursor_sql(
             &col_names,
@@ -10427,7 +11155,8 @@ where
     // slower as it runs and never finishes. Tables with a usable key keep the
     // keyset cursor above, and the COPY fast path already covers the
     // PostgreSQL-to-PostgreSQL case.
-    let mut ctid_pager = if copy_rows.is_none()
+    let mut ctid_pager = if table_filter.is_none()
+        && copy_rows.is_none()
         && keyset_indexes.is_none()
         && !default_rows_only
         && *source_db_type == DatabaseType::Postgres
@@ -10453,6 +11182,8 @@ where
         None
     };
 
+    // Query once for the whole table: caps every write batch page below.
+    let write_hard_limit = transfer_write_mysql_hard_limit(state, target_pool_key).await;
     let transfer_result: Result<(), String> = async {
         if copy_rows.is_some() {
             // The COPY fast path already streamed the whole table.
@@ -10480,7 +11211,20 @@ where
                 let sql = pager.page_sql(&col_names, table, &request.source_schema, batch_size);
                 (execute_on_pool_with_max_rows(state, source_pool_key, &sql, Some(batch_size)).await?, false)
             } else {
-                let sql = if default_rows_only {
+                let sql = if let Some(filter) = table_filter.as_ref() {
+                    transfer_filter_page_sql(
+                        &col_names,
+                        table,
+                        &request.source_schema,
+                        source_db_type,
+                        request.source_catalog.as_deref(),
+                        filter,
+                        offset,
+                        batch_size,
+                        &primary_key_columns,
+                        default_rows_only,
+                    )
+                } else if default_rows_only {
                     // Preserve row multiplicity without reading generated values
                     // (which must never be assigned on the target).
                     let source_table = qualified_table(
@@ -10581,6 +11325,7 @@ where
                 overrides_postgres_system_values,
                 mysql_spatial_markers,
                 request.quote_target_column_names,
+                write_hard_limit,
             )?;
             for (statement_index, batch_sql) in write_statements.iter().enumerate() {
                 execute_transfer_write_statement(
@@ -10662,7 +11407,7 @@ where
         .await?;
     }
 
-    Ok(total_transferred)
+    Ok(TransferTableResult { moved_rows: total_transferred, source_row_count: total_rows })
 }
 
 /// Free the constraint names the backups are still holding (MySQL family).
@@ -10973,10 +11718,49 @@ pub async fn transfer_table<F>(
     known_foreign_keys: &HashMap<String, Vec<db::ForeignKeyInfo>>,
     pending_fk_alters: &mut Vec<(String, String)>,
     preexisting_backup_names: Option<&HashMap<String, String>>,
-    mut progress_callback: F,
+    progress_callback: F,
 ) -> Result<u64, String>
 where
     F: FnMut(TransferProgress),
+{
+    transfer_table_with_result(
+        state,
+        request,
+        table,
+        table_index,
+        source_db_type,
+        target_db_type,
+        source_pool_key,
+        target_pool_key,
+        known_foreign_keys,
+        pending_fk_alters,
+        preexisting_backup_names,
+        progress_callback,
+        |_| {},
+    )
+    .await
+    .map(|result| result.moved_rows)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn transfer_table_with_result<F, C>(
+    state: &Arc<AppState>,
+    request: &TransferRequest,
+    table: &str,
+    table_index: usize,
+    source_db_type: &DatabaseType,
+    target_db_type: &DatabaseType,
+    source_pool_key: &str,
+    target_pool_key: &str,
+    known_foreign_keys: &HashMap<String, Vec<db::ForeignKeyInfo>>,
+    pending_fk_alters: &mut Vec<(String, String)>,
+    preexisting_backup_names: Option<&HashMap<String, String>>,
+    mut progress_callback: F,
+    mut source_count_callback: C,
+) -> Result<TransferTableResult, String>
+where
+    F: FnMut(TransferProgress),
+    C: FnMut(Option<u64>),
 {
     let state = state.clone();
     let request = request.clone();
@@ -10999,6 +11783,7 @@ where
     let request_target_schema = request.target_schema.clone();
     let request_target_catalog = request.target_catalog.clone();
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(TRANSFER_PROGRESS_CHANNEL_CAPACITY);
+    let (source_count_tx, mut source_count_rx) = tokio::sync::mpsc::channel(1);
 
     let mut task = tokio::spawn(async move {
         let mut task_pending_fk_alters = Vec::new();
@@ -11017,6 +11802,9 @@ where
             move |progress| {
                 try_send_transfer_progress(&progress_tx, progress);
             },
+            move |source_count| {
+                let _ = source_count_tx.try_send(source_count);
+            },
         )
         .await;
         (result, task_pending_fk_alters)
@@ -11027,6 +11815,7 @@ where
         tokio::select! {
             biased;
             Some(progress) = progress_rx.recv() => progress_callback(progress),
+            Some(source_count) = source_count_rx.recv() => source_count_callback(source_count),
             result = &mut task => {
                 let (result, task_pending_fk_alters) =
                     result.map_err(|error| format!("Transfer table task failed: {error}"))?;
@@ -11068,11 +11857,48 @@ where
 
     ensure_postgres_transfer_schema_exists(state, target_pool_key, &request.target_schema, &target_db_type).await?;
 
-    let extensions =
-        get_postgres_extension_sources_for_transfer(state, source_pool_key, &request.source_schema).await?;
-    let enum_types = get_postgres_enum_sources_for_transfer(state, source_pool_key, &request.source_schema).await?;
-    let domains = get_postgres_domain_sources_for_transfer(state, source_pool_key, &request.source_schema).await?;
-    let selected_sequence_names = if request.objects.is_empty() {
+    let selection_mode = request.object_selection_mode();
+    let table_dependencies = if selection_mode.is_legacy_unspecified() {
+        None
+    } else {
+        Some(
+            get_postgres_table_dependency_selection(state, source_pool_key, &request.source_schema, &request.tables)
+                .await?,
+        )
+    };
+    let extensions = get_postgres_extension_sources_for_transfer(
+        state,
+        source_pool_key,
+        &request.source_schema,
+        table_dependencies.as_ref().map(|dependencies| dependencies.extension_names.as_slice()),
+    )
+    .await?
+    .into_iter()
+    .filter(|extension| {
+        table_dependencies
+            .as_ref()
+            .is_none_or(|dependencies| dependencies.extension_names.contains(&extension.extension_name))
+    })
+    .collect::<Vec<_>>();
+    let enum_types = get_postgres_enum_sources_for_transfer(state, source_pool_key, &request.source_schema)
+        .await?
+        .into_iter()
+        .filter(|enum_type| {
+            table_dependencies
+                .as_ref()
+                .is_none_or(|dependencies| dependencies.enum_type_names.contains(&enum_type.type_name))
+        })
+        .collect::<Vec<_>>();
+    let domains = get_postgres_domain_sources_for_transfer(state, source_pool_key, &request.source_schema)
+        .await?
+        .into_iter()
+        .filter(|domain| {
+            table_dependencies
+                .as_ref()
+                .is_none_or(|dependencies| dependencies.domain_names.contains(&domain.domain_name))
+        })
+        .collect::<Vec<_>>();
+    let selected_sequence_names = if selection_mode.is_legacy_unspecified() {
         get_postgres_sequence_names_for_transfer(state, source_pool_key, &request.source_schema).await?
     } else {
         selected_postgres_sequence_names(request)
@@ -11222,16 +12048,18 @@ where
     let object_sources = filter_object_sources_by_selection(
         get_postgres_schema_object_sources_for_transfer(state, source_pool_key, &request.source_schema, has_prokind)
             .await?,
-        &request.objects,
+        request.object_selection_mode(),
     );
     let materialized_views =
         get_postgres_materialized_view_sources_for_transfer(state, source_pool_key, &request.source_schema)
             .await?
             .into_iter()
             .filter(|view| {
-                object_kind_selected_or_defaulted(&request.objects, &TransferObjectKind::MaterializedView)
-                    && selected_object_names(&request.objects, &TransferObjectKind::MaterializedView)
-                        .contains(&view.view_name)
+                object_name_selected_or_defaulted(
+                    request.object_selection_mode(),
+                    &TransferObjectKind::MaterializedView,
+                    &view.view_name,
+                )
             })
             .collect::<Vec<_>>();
     let trigger_sources =
@@ -11239,9 +12067,11 @@ where
             .await?
             .into_iter()
             .filter(|trigger| {
-                object_kind_selected_or_defaulted(&request.objects, &TransferObjectKind::Trigger)
-                    && selected_object_names(&request.objects, &TransferObjectKind::Trigger)
-                        .contains(&trigger.trigger_name)
+                object_name_selected_or_defaulted(
+                    request.object_selection_mode(),
+                    &TransferObjectKind::Trigger,
+                    &trigger.trigger_name,
+                )
             })
             .collect::<Vec<_>>();
     let policy_statements = get_postgres_policy_statements_for_transfer(
@@ -11254,19 +12084,10 @@ where
         catalog_capabilities.supports_policy_permissiveness,
     )
     .await?;
-    let relation_names = postgres_transfer_relation_names(request);
     let ownership_statements = if matches!(request.ownership_policy, TransferOwnershipPolicy::Skip) {
         Vec::new()
     } else {
-        get_postgres_ownership_statements_for_transfer(
-            state,
-            source_pool_key,
-            &request.source_schema,
-            &request.target_schema,
-            &relation_names,
-            has_prokind,
-        )
-        .await?
+        get_postgres_ownership_statements_for_transfer(state, source_pool_key, request, has_prokind).await?
     };
     let ownership_existing_roles = if matches!(request.ownership_policy, TransferOwnershipPolicy::ReassignMissing) {
         let roles = distinct_postgres_ownership_roles(&ownership_statements);
@@ -11281,15 +12102,8 @@ where
     } else {
         None
     };
-    let grant_statements = get_postgres_grant_statements_for_transfer(
-        state,
-        source_pool_key,
-        &request.source_schema,
-        &request.target_schema,
-        &relation_names,
-        has_prokind,
-    )
-    .await?;
+    let grant_statements =
+        get_postgres_grant_statements_for_transfer(state, source_pool_key, request, has_prokind).await?;
     let materialized_view_step_count = materialized_views
         .iter()
         .map(|view| generate_postgres_materialized_view_ddls(view, &request.target_schema).len())
@@ -11859,6 +12673,8 @@ for line in sys.stdin:
 
     fn jdbc_transfer_config(connection_string: &str, driver_class: &str, profile: &str) -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             id: "test-jdbc".to_string(),
             name: "Test JDBC".to_string(),
             note: String::new(),
@@ -11904,6 +12720,7 @@ for line in sys.stdin:
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_filter: None,
             redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
@@ -12131,6 +12948,31 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
     }
 
     #[test]
+    fn transfer_keeps_backslashes_literal_for_oracle_family_and_sqlite() {
+        for db_type in [
+            DatabaseType::Oracle,
+            DatabaseType::OceanbaseOracle,
+            DatabaseType::Dameng,
+            DatabaseType::Sqlite,
+            DatabaseType::Rqlite,
+            DatabaseType::Turso,
+            DatabaseType::CloudflareD1,
+        ] {
+            assert_eq!(
+                escape_value_typed(&json!(r"C:\tmp\o'clock"), &db_type, Some("VARCHAR(64)")),
+                r"'C:\tmp\o''clock'",
+                "{db_type:?}"
+            );
+        }
+
+        // Dialects whose escape table does have a backslash escape keep doubling it.
+        assert_eq!(
+            escape_value_typed(&json!(r"C:\tmp\o'clock"), &DatabaseType::Mysql, Some("varchar(64)")),
+            r"'C:\\tmp\\o''clock'"
+        );
+    }
+
+    #[test]
     fn h2_transfer_literals_preserve_json_binary_and_backslashes() {
         assert_eq!(
             escape_value_typed(&json!(r"C:\tmp\o'clock"), &DatabaseType::H2, Some("CHARACTER VARYING")),
@@ -12262,7 +13104,13 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
         let dir = std::env::temp_dir().join(format!("dbx-transfer-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
-        (AppState::new(storage), dir)
+        let state = AppState::new_with_plugin_and_agent_dir_and_app_version(
+            storage,
+            dir.join("plugins"),
+            dir.join("agents"),
+            env!("CARGO_PKG_VERSION"),
+        );
+        (state, dir)
     }
 
     async fn spawn_influxdb3_transfer_server() -> (String, tokio::task::JoinHandle<String>) {
@@ -12406,13 +13254,42 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
         }))
         .unwrap();
         assert_eq!(request.content, TransferContent::StructureAndData);
-        assert!(request.objects.is_empty());
+        assert_eq!(request.objects, None);
         assert!(request.quote_target_column_names);
+    }
+
+    #[test]
+    fn transfer_request_distinguishes_missing_empty_and_selected_objects() {
+        let mut base = serde_json::json!({
+            "transferId": "t1", "sourceConnectionId": "s", "sourceDatabase": "db",
+            "sourceSchema": "public", "targetConnectionId": "t", "targetDatabase": "db",
+            "targetSchema": "public", "tables": ["a"], "createTable": true,
+            "mode": "append", "targetTableNameCase": "preserve", "batchSize": 1000
+        });
+        let legacy: TransferRequest = serde_json::from_value(base.clone()).unwrap();
+        assert_eq!(legacy.objects, None);
+        assert!(serde_json::to_value(&legacy).unwrap().get("objects").is_none());
+
+        base["objects"] = serde_json::json!([]);
+        let explicit_empty: TransferRequest = serde_json::from_value(base.clone()).unwrap();
+        assert_eq!(explicit_empty.objects, Some(Vec::new()));
+        assert_eq!(serde_json::to_value(&explicit_empty).unwrap()["objects"], serde_json::json!([]));
+
+        base["objects"] = serde_json::json!([{"objectType": "VIEW", "names": ["v1"]}]);
+        let explicit_selection: TransferRequest = serde_json::from_value(base).unwrap();
+        assert_eq!(
+            explicit_selection.objects,
+            Some(vec![TransferObjectSelection {
+                object_type: TransferObjectKind::View,
+                names: vec!["v1".to_string()],
+            }]),
+        );
     }
 
     #[test]
     fn transfer_request_serializes_new_fields_camel_case() {
         let request = TransferRequest {
+            table_filters: std::collections::HashMap::new(),
             transfer_id: "t1".to_string(),
             source_connection_id: "s".to_string(),
             source_database: "db".to_string(),
@@ -12425,10 +13302,10 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             tables: vec!["a".to_string()],
             create_table: true,
             content: TransferContent::StructureOnly,
-            objects: vec![TransferObjectSelection {
+            objects: Some(vec![TransferObjectSelection {
                 object_type: TransferObjectKind::View,
                 names: vec!["v1".to_string()],
-            }],
+            }]),
             mode: TransferMode::Append,
             target_table_name_case: TransferTableNameCase::Preserve,
             quote_target_column_names: true,
@@ -12485,6 +13362,17 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             assert!(!sqlserver.contains(&TransferObjectKind::MaterializedView));
             assert!(transfer_object_kinds(&DatabaseType::Sqlite).is_empty());
         }
+
+        #[test]
+        fn object_kind_fallback_distinguishes_unspecified_from_explicit_empty() {
+            let view = TransferObjectKind::View;
+            assert!(object_kind_selected_or_defaulted(None, &view));
+            assert!(!object_kind_selected_or_defaulted(Some(&[]), &view));
+            assert!(object_kind_selected_or_defaulted(
+                Some(&[TransferObjectSelection { object_type: view, names: vec!["v1".into()] }]),
+                &view,
+            ));
+        }
     }
 
     mod transfer_validation_tests {
@@ -12493,6 +13381,7 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
         #[test]
         fn validates_content_and_object_rules() {
             let base = TransferRequest {
+                table_filters: std::collections::HashMap::new(),
                 transfer_id: "t".into(),
                 source_connection_id: "s".into(),
                 source_database: "db".into(),
@@ -12510,17 +13399,17 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
                 ownership_policy: TransferOwnershipPolicy::Preserve,
                 batch_size: 1000,
                 content: TransferContent::DataOnly,
-                objects: Vec::new(),
+                objects: Some(Vec::new()),
                 drop_target_before_create: false,
                 drop_target_confirmed: false,
             };
             assert!(validate_transfer_request(&base).is_ok());
 
             let with_objects = TransferRequest {
-                objects: vec![TransferObjectSelection {
+                objects: Some(vec![TransferObjectSelection {
                     object_type: TransferObjectKind::View,
                     names: vec!["v".into()],
-                }],
+                }]),
                 ..base.clone()
             };
             // DataOnly + objects → error
@@ -12533,6 +13422,7 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
         #[test]
         fn rejects_drop_target_before_create_with_data_only() {
             let base = TransferRequest {
+                table_filters: std::collections::HashMap::new(),
                 transfer_id: "t".into(),
                 source_connection_id: "s".into(),
                 source_database: "db".into(),
@@ -12550,7 +13440,7 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
                 ownership_policy: TransferOwnershipPolicy::Preserve,
                 batch_size: 1000,
                 content: TransferContent::StructureAndData,
-                objects: Vec::new(),
+                objects: Some(Vec::new()),
                 drop_target_before_create: false,
                 drop_target_confirmed: false,
             };
@@ -12656,96 +13546,124 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
                 .contains(&View));
         }
 
+        fn should_transfer_with_objects(
+            source: &DatabaseType,
+            target: &DatabaseType,
+            content: TransferContent,
+            objects: Option<Vec<TransferObjectSelection>>,
+        ) -> bool {
+            let mut request = super::test_transfer_request(vec!["orders"]);
+            request.content = content;
+            request.objects = objects;
+            should_transfer_schema_objects(source, target, &request)
+        }
+
         #[test]
         fn should_transfer_schema_objects_matrix() {
-            // DataOnly never transfers schema objects, even for PG-family pairs.
-            assert!(!should_transfer_schema_objects(
+            let view = || TransferObjectSelection { object_type: TransferObjectKind::View, names: vec!["v1".into()] };
+            let table =
+                || TransferObjectSelection { object_type: TransferObjectKind::Table, names: vec!["orders".into()] };
+
+            // DataOnly never transfers schema objects, regardless of selection state.
+            assert!(!should_transfer_with_objects(
                 &DatabaseType::Postgres,
                 &DatabaseType::Postgres,
-                &TransferContent::DataOnly,
-                &[]
+                TransferContent::DataOnly,
+                None,
             ));
-            assert!(!should_transfer_schema_objects(
+            assert!(!should_transfer_with_objects(
                 &DatabaseType::Postgres,
                 &DatabaseType::Postgres,
-                &TransferContent::DataOnly,
-                &[TransferObjectSelection { object_type: TransferObjectKind::View, names: vec!["v1".into()] }]
+                TransferContent::DataOnly,
+                Some(vec![view()]),
             ));
-            assert!(!should_transfer_schema_objects(
+            assert!(!should_transfer_with_objects(
                 &DatabaseType::Mysql,
                 &DatabaseType::Dameng,
-                &TransferContent::DataOnly,
-                &[TransferObjectSelection { object_type: TransferObjectKind::View, names: vec!["v1".into()] }]
+                TransferContent::DataOnly,
+                Some(vec![view()]),
             ));
-            // Non-empty selections participate in structure modes.
-            assert!(should_transfer_schema_objects(
+
+            // Explicit selections run only when a non-table object is selected.
+            assert!(should_transfer_with_objects(
                 &DatabaseType::Postgres,
                 &DatabaseType::Mysql,
-                &TransferContent::StructureOnly,
-                &[TransferObjectSelection { object_type: TransferObjectKind::View, names: vec!["v1".into()] }]
+                TransferContent::StructureOnly,
+                Some(vec![view()]),
             ));
-            // Empty selection: PG→PG keeps the legacy transfer-everything default
-            // only when structure participates in the transfer.
-            assert!(should_transfer_schema_objects(
+            assert!(!should_transfer_with_objects(
                 &DatabaseType::Postgres,
                 &DatabaseType::Postgres,
-                &TransferContent::StructureOnly,
-                &[]
+                TransferContent::StructureOnly,
+                Some(Vec::new()),
             ));
-            assert!(!should_transfer_schema_objects(
-                &DatabaseType::Kingbase,
+            assert!(!should_transfer_with_objects(
                 &DatabaseType::Postgres,
-                &TransferContent::StructureAndData,
-                &[]
+                &DatabaseType::Postgres,
+                TransferContent::StructureOnly,
+                Some(vec![table()]),
             ));
-            assert!(!should_transfer_schema_objects(
-                &DatabaseType::Kingbase,
-                &DatabaseType::Kingbase,
-                &TransferContent::StructureAndData,
-                &[TransferObjectSelection { object_type: TransferObjectKind::Table, names: vec!["orders".into()] }]
+
+            // Only legacy-unspecified PostgreSQL pairs keep the all-objects fallback.
+            assert!(should_transfer_with_objects(
+                &DatabaseType::Postgres,
+                &DatabaseType::Postgres,
+                TransferContent::StructureOnly,
+                None,
             ));
-            assert!(should_transfer_schema_objects(
-                &DatabaseType::Kingbase,
-                &DatabaseType::Kingbase,
-                &TransferContent::StructureOnly,
-                &[TransferObjectSelection { object_type: TransferObjectKind::View, names: vec!["v_orders".into()] }]
-            ));
-            assert!(should_transfer_schema_objects(
+            assert!(should_transfer_with_objects(
                 &DatabaseType::Postgres,
                 &DatabaseType::OpenGauss,
-                &TransferContent::StructureOnly,
-                &[]
+                TransferContent::StructureOnly,
+                None,
             ));
-            // empty selection: every other combination transfers nothing
-            assert!(!should_transfer_schema_objects(
+            assert!(!should_transfer_with_objects(
+                &DatabaseType::Kingbase,
+                &DatabaseType::Postgres,
+                TransferContent::StructureAndData,
+                None,
+            ));
+            assert!(!should_transfer_with_objects(
+                &DatabaseType::Kingbase,
+                &DatabaseType::Kingbase,
+                TransferContent::StructureAndData,
+                Some(vec![table()]),
+            ));
+            assert!(should_transfer_with_objects(
+                &DatabaseType::Kingbase,
+                &DatabaseType::Kingbase,
+                TransferContent::StructureOnly,
+                Some(vec![view()]),
+            ));
+            assert!(!should_transfer_with_objects(
                 &DatabaseType::Postgres,
                 &DatabaseType::Mysql,
-                &TransferContent::StructureOnly,
-                &[]
+                TransferContent::StructureOnly,
+                None,
             ));
-            assert!(!should_transfer_schema_objects(
+            assert!(!should_transfer_with_objects(
                 &DatabaseType::Mysql,
                 &DatabaseType::Mysql,
-                &TransferContent::StructureAndData,
-                &[]
+                TransferContent::StructureAndData,
+                None,
             ));
-            assert!(!should_transfer_schema_objects(
+            assert!(!should_transfer_with_objects(
                 &DatabaseType::Mysql,
                 &DatabaseType::Dameng,
-                &TransferContent::StructureOnly,
-                &[]
+                TransferContent::StructureOnly,
+                None,
             ));
-            assert!(!should_transfer_schema_objects(
+            assert!(!should_transfer_with_objects(
                 &DatabaseType::Dameng,
                 &DatabaseType::SqlServer,
-                &TransferContent::StructureAndData,
-                &[]
+                TransferContent::StructureAndData,
+                None,
             ));
-            assert!(!should_transfer_schema_objects(
+            assert!(!should_transfer_with_objects(
                 &DatabaseType::Sqlite,
                 &DatabaseType::Sqlite,
-                &TransferContent::StructureOnly,
-                &[]
+                TransferContent::StructureOnly,
+                None,
             ));
         }
 
@@ -13467,6 +14385,19 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
         }
 
         #[test]
+        fn postgres_table_dependency_closure_is_scoped_to_selected_tables() {
+            assert!(postgres_table_dependency_selection_sql("public", &[]).is_none());
+            let sql = postgres_table_dependency_selection_sql("public", &["orders".into()]).unwrap();
+            assert!(sql.contains("c.relkind IN ('r','p','f') AND c.relname IN ('orders')"));
+            assert!(sql.contains("selected_dependencies(classid, objid)"));
+            assert!(sql.contains("'pg_catalog.pg_type'::regclass"));
+            assert!(sql.contains("'pg_catalog.pg_extension'::regclass"));
+            assert!(sql.contains("'ENUM'::text"));
+            assert!(sql.contains("'DOMAIN'::text"));
+            assert!(sql.contains("'EXTENSION'::text"));
+        }
+
+        #[test]
         fn postgres_transfer_relation_sources_exclude_extension_members() {
             for relkind in ['v', 'm'] {
                 let sql = postgres_transfer_relation_sources_sql("public", relkind);
@@ -13482,25 +14413,38 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
         }
 
         #[test]
-        fn postgres_transfer_ownership_supports_legacy_catalogs() {
-            let modern = postgres_transfer_ownership_statements_sql("public", "archive", &["items".into()], true);
-            assert!(modern.contains("CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END"));
-            assert!(modern.contains("p.prokind IN ('p','f')"));
-
-            let legacy = postgres_transfer_ownership_statements_sql("public", "archive", &["items".into()], false);
+        fn postgres_transfer_ownership_scopes_explicit_objects_and_supports_legacy_catalogs() {
+            let mut request = super::test_transfer_request(vec!["items"]);
+            request.objects = None;
+            let legacy = postgres_transfer_ownership_statements_sql("public", "archive", &request, false, &[]);
             assert!(!legacy.contains("prokind"));
             assert!(legacy.contains("'FUNCTION'"));
             assert!(legacy.contains("NOT p.proisagg"));
             assert!(legacy.contains("NOT p.proiswindow"));
+            assert!(legacy.contains("n.nspname = 'public' AND TRUE"));
+
+            request.objects = Some(vec![
+                TransferObjectSelection { object_type: TransferObjectKind::View, names: vec!["v_orders".into()] },
+                TransferObjectSelection { object_type: TransferObjectKind::Function, names: vec!["f_orders".into()] },
+            ]);
+            let explicit = postgres_transfer_ownership_statements_sql(
+                "public",
+                "archive",
+                &request,
+                true,
+                &["order_status".into()],
+            );
+            assert!(explicit.contains("c.relkind = 'v' AND c.relname IN ('v_orders')"));
+            assert!(explicit.contains("p.prokind = 'f' AND p.proname IN ('f_orders')"));
+            assert!(explicit.contains("t.typname IN ('order_status')"));
+            assert!(explicit.contains("n.nspname = 'public' AND FALSE"));
         }
 
         #[test]
-        fn postgres_transfer_grants_support_legacy_catalogs() {
-            let modern = postgres_transfer_grant_statements_sql("public", "archive", &["items".into()], true);
-            assert!(modern.contains("CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END"));
-            assert!(modern.contains("p.prokind IN ('p','f')"));
-
-            let legacy = postgres_transfer_grant_statements_sql("public", "archive", &["items".into()], false);
+        fn postgres_transfer_grants_scope_explicit_objects_and_support_legacy_catalogs() {
+            let mut request = super::test_transfer_request(vec!["items"]);
+            request.objects = None;
+            let legacy = postgres_transfer_grant_statements_sql("public", "archive", &request, false);
             assert!(!legacy.contains("prokind"));
             assert!(legacy.contains("'FUNCTION'::text AS routine_kind"));
             assert!(legacy.contains("NOT p.proisagg"));
@@ -13509,6 +14453,15 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             assert!(legacy.contains("(aclexplode(n.nspacl)).*"));
             assert!(legacy.contains("(aclexplode(c.relacl)).*"));
             assert!(legacy.contains("(aclexplode(p.proacl)).*"));
+
+            request.objects = Some(vec![
+                TransferObjectSelection { object_type: TransferObjectKind::View, names: vec!["v_orders".into()] },
+                TransferObjectSelection { object_type: TransferObjectKind::Function, names: vec!["f_orders".into()] },
+            ]);
+            let explicit = postgres_transfer_grant_statements_sql("public", "archive", &request, true);
+            assert!(explicit.contains("c.relkind = 'v' AND c.relname IN ('v_orders')"));
+            assert!(explicit.contains("p.prokind = 'f' AND p.proname IN ('f_orders')"));
+            assert!(explicit.contains("n.nspname = 'public' AND FALSE"));
         }
 
         #[test]
@@ -13520,6 +14473,7 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
                     schema: Some("public".into()),
                     source: "SELECT 1".into(),
                     editable: None,
+                    routine_parameters: None,
                 },
                 db::ObjectSource {
                     name: "v2".into(),
@@ -13527,27 +14481,36 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
                     schema: Some("public".into()),
                     source: "SELECT 2".into(),
                     editable: None,
+                    routine_parameters: None,
                 },
             ];
             let selection =
                 vec![TransferObjectSelection { object_type: TransferObjectKind::View, names: vec!["v1".into()] }];
-            let filtered = filter_object_sources_by_selection(sources, &selection);
+            let filtered =
+                filter_object_sources_by_selection(sources.clone(), TransferObjectSelectionMode::Explicit(&selection));
             assert_eq!(filtered.len(), 1);
             assert_eq!(filtered[0].name, "v1");
+            assert!(filter_object_sources_by_selection(sources.clone(), TransferObjectSelectionMode::Explicit(&[]),)
+                .is_empty());
+            assert_eq!(
+                filter_object_sources_by_selection(sources, TransferObjectSelectionMode::LegacyUnspecified).len(),
+                2,
+            );
         }
 
         #[test]
         fn selected_postgres_sequences_are_prepared_without_changing_default_requests() {
             let mut request = test_transfer_request(vec!["biz_banner"]);
+            request.objects = None;
             assert!(selected_postgres_sequence_names(&request).is_empty());
 
-            request.objects = vec![
+            request.objects = Some(vec![
                 TransferObjectSelection { object_type: TransferObjectKind::Table, names: vec!["biz_banner".into()] },
                 TransferObjectSelection {
                     object_type: TransferObjectKind::Sequence,
                     names: vec!["biz_banner_id_seq".into(), "biz_banner_id_seq".into()],
                 },
-            ];
+            ]);
 
             assert_eq!(selected_postgres_sequence_names(&request), vec!["biz_banner_id_seq"]);
             assert_eq!(postgres_transfer_relation_names(&request), vec!["biz_banner", "biz_banner_id_seq"]);
@@ -13620,6 +14583,7 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
     }
     fn test_transfer_request(tables: Vec<&str>) -> TransferRequest {
         TransferRequest {
+            table_filters: std::collections::HashMap::new(),
             transfer_id: "transfer-1".to_string(),
             source_connection_id: "source".to_string(),
             source_database: "source_db".to_string(),
@@ -13632,7 +14596,7 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             tables: tables.into_iter().map(str::to_string).collect(),
             create_table: true,
             content: TransferContent::default(),
-            objects: Vec::new(),
+            objects: Some(Vec::new()),
             mode: TransferMode::Append,
             target_table_name_case: TransferTableNameCase::Preserve,
             quote_target_column_names: true,
@@ -14327,6 +15291,7 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             false,
             false,
             false,
+            None,
         )
         .unwrap();
 
@@ -17641,7 +18606,9 @@ SELECT 1 FROM dual"#
     #[test]
     fn transfer_write_sql_batches_split_large_insert_statements() {
         let rows = (0..4).map(|index| vec![json!(index), json!("x".repeat(180 * 1024))]).collect::<Vec<_>>();
-        let statements = generate_transfer_write_sql_batches(
+        // A MySQL-family target's max_allowed_packet translates into a hard
+        // batch cap; the same 4x180 KiB page must split under that cap.
+        let statements = generate_transfer_write_sql_batches_with_column_quoting(
             &TransferMode::Append,
             &[String::from("id"), String::from("payload")],
             &[Some(String::from("int")), Some(String::from("text"))],
@@ -17653,6 +18620,8 @@ SELECT 1 FROM dual"#
             None,
             false,
             false,
+            true,
+            Some(512 * 1024),
         )
         .unwrap();
 
@@ -17733,7 +18702,10 @@ SELECT 1 FROM dual"#
             "dbo",
             &DatabaseType::SqlServer,
             None,
-            SqlBatchLimits::for_database(&DatabaseType::SqlServer, rows.len()),
+            // The default target now allows one large multi-row INSERT; pin the
+            // legacy 512 KiB cap so the UTF-16 measurement keeps being exercised
+            // across a split boundary.
+            SqlBatchLimits::for_database(&DatabaseType::SqlServer, rows.len()).with_hard_sql_bytes(Some(512 * 1024)),
         )
         .unwrap();
 
@@ -18131,6 +19103,8 @@ SELECT 1 FROM dual"#
     #[test]
     fn resolve_external_transfer_catalog_for_config_accepts_starrocks_driver_profile() {
         let config = crate::models::connection::ConnectionConfig {
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: "sr".to_string(),
             name: "sr".to_string(),
@@ -18177,6 +19151,7 @@ SELECT 1 FROM dual"#
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_filter: None,
             redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
@@ -18845,6 +19820,48 @@ CREATE INDEX items_name_idx ON public.items (id);"#;
 
         assert_eq!(statements.len(), 1);
         assert!(statements[0].starts_with("CREATE TABLE"));
+    }
+
+    #[test]
+    fn parse_transfer_table_filter_accepts_predicates_and_strips_where_prefix() {
+        assert_eq!(parse_transfer_table_filter(""), Ok(None));
+        assert_eq!(parse_transfer_table_filter("   "), Ok(None));
+        assert_eq!(parse_transfer_table_filter(";"), Ok(None));
+        assert_eq!(
+            parse_transfer_table_filter("age > 30"),
+            Ok(Some(TransferTableFilter::Predicate("age > 30".to_string())))
+        );
+        assert_eq!(
+            parse_transfer_table_filter("age > 30;"),
+            Ok(Some(TransferTableFilter::Predicate("age > 30".to_string())))
+        );
+        assert_eq!(
+            parse_transfer_table_filter("WHERE status = 'active'"),
+            Ok(Some(TransferTableFilter::Predicate("status = 'active'".to_string())))
+        );
+    }
+
+    #[test]
+    fn parse_transfer_table_filter_accepts_full_queries_with_comments() {
+        assert_eq!(
+            parse_transfer_table_filter("SELECT * FROM orders WHERE amount > 10"),
+            Ok(Some(TransferTableFilter::Query("SELECT * FROM orders WHERE amount > 10".to_string())))
+        );
+        assert_eq!(
+            parse_transfer_table_filter("WITH recent AS (SELECT 1) SELECT * FROM recent"),
+            Ok(Some(TransferTableFilter::Query("WITH recent AS (SELECT 1) SELECT * FROM recent".to_string())))
+        );
+        // Leading comments are skipped when detecting a query shape.
+        assert_eq!(
+            parse_transfer_table_filter("-- filtered rows\nSELECT * FROM orders"),
+            Ok(Some(TransferTableFilter::Query("-- filtered rows\nSELECT * FROM orders".to_string())))
+        );
+    }
+
+    #[test]
+    fn parse_transfer_table_filter_rejects_multiple_statements() {
+        assert!(parse_transfer_table_filter("a = 1; b = 2").is_err());
+        assert!(parse_transfer_table_filter("SELECT 1; SELECT 2").is_err());
     }
 
     #[test]

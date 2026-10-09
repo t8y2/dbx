@@ -288,15 +288,14 @@ public final class JsonRpcServer {
             return agent.listSubpartitions(params.get("schema").getAsString(), params.get("table").getAsString());
         }
         if (AgentProtocol.METHOD_EXECUTE_QUERY.equals(method)) {
-            return agent.executeQuery(
-                params.get("sql").getAsString(),
-                stringOrNull(params, "schema"),
-                new ExecuteQueryOptions(
-                    intOrDefault(params, "maxRows", JdbcExecutor.DEFAULT_MAX_ROWS),
-                    intOrNull(params, "fetchSize"),
-                    intOrDefault(params, "timeoutSecs", 0)
-                )
-            );
+            ExecuteQueryOptions options = new ExecuteQueryOptions(
+                intOrDefault(params, "maxRows", JdbcExecutor.DEFAULT_MAX_ROWS),
+                intOrNull(params, "fetchSize"), intOrDefault(params, "timeoutSecs", 0),
+                booleanOrDefault(params, "deferLobs", false));
+            if (params.has("returnAllResults") && params.get("returnAllResults").getAsBoolean()) {
+                return agent.executeQueryResults(params.get("sql").getAsString(), stringOrNull(params, "schema"), options);
+            }
+            return agent.executeQuery(params.get("sql").getAsString(), stringOrNull(params, "schema"), options);
         }
         if (AgentProtocol.METHOD_EXECUTE_QUERY_PAGE.equals(method)) {
             return agent.executeQueryPage(
@@ -306,7 +305,8 @@ public final class JsonRpcServer {
                     intOrDefault(params, "pageSize", 100),
                     intOrNull(params, "fetchSize"),
                     intOrDefault(params, "maxRows", JdbcExecutor.DEFAULT_MAX_ROWS),
-                    intOrDefault(params, "timeoutSecs", 0)
+                    intOrDefault(params, "timeoutSecs", 0),
+                    booleanOrDefault(params, "deferLobs", false)
                 )
             );
         }
@@ -327,7 +327,8 @@ public final class JsonRpcServer {
                     intOrDefault(params, "pageSize", 100),
                     intOrNull(params, "fetchSize"),
                     intOrDefault(params, "maxRows", JdbcExecutor.DEFAULT_MAX_ROWS),
-                    intOrDefault(params, "timeoutSecs", 0)
+                    intOrDefault(params, "timeoutSecs", 0),
+                    booleanOrDefault(params, "deferLobs", false)
                 )
             );
         }
@@ -407,6 +408,7 @@ public final class JsonRpcServer {
     }
 
     private void ensureLiveConnection(String method) {
+        if (!agent.permitsAutomaticReconnect()) return;
         if (lastConnectParams == null || !shouldValidateConnection(method)) {
             return;
         }
@@ -554,6 +556,11 @@ public final class JsonRpcServer {
             return null;
         }
         return element.getAsInt();
+    }
+
+    private static boolean booleanOrDefault(JsonObject object, String key, boolean defaultValue) {
+        JsonElement element = object.get(key);
+        return element == null || element instanceof JsonNull ? defaultValue : element.getAsBoolean();
     }
 
     private MetadataListConstraints metadataListConstraints(JsonObject params) {

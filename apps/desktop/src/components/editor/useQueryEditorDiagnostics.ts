@@ -339,7 +339,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
       setSemanticDiagnostics([]);
       return;
     }
-    if (props.databaseType === "elasticsearch" || props.databaseType === "easysearch" || props.databaseType === "meilisearch" || props.databaseType === "solr" || props.databaseType === "victoriametrics" || props.databaseType === "salesforce") {
+    if (props.databaseType === "elasticsearch" || props.databaseType === "easysearch" || props.databaseType === "meilisearch" || props.databaseType === "solr" || props.databaseType === "couchdb" || props.databaseType === "victoriametrics" || props.databaseType === "salesforce") {
       setSemanticDiagnostics([]);
       return;
     }
@@ -506,7 +506,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
   onBeforeUnmount(clearScheduledSemanticDiagnostics);
 
   // ==================== Unknown table/column highlighting ====================
-  const NON_SQL_UNKNOWN_OBJECT_DATABASE_TYPES: ReadonlySet<DatabaseType> = new Set(["qdrant", "milvus", "weaviate", "chromadb", "solr"]);
+  const NON_SQL_UNKNOWN_OBJECT_DATABASE_TYPES: ReadonlySet<DatabaseType> = new Set(["qdrant", "milvus", "weaviate", "chromadb", "solr", "couchdb"]);
   const MAX_SQL_UNKNOWN_OBJECT_SQL_LENGTH = 200_000;
   const MAX_SQL_UNKNOWN_OBJECT_STATEMENTS = 80;
   const SQL_UNKNOWN_OBJECT_COLUMN_TABLE_LIMIT = 24;

@@ -3,11 +3,13 @@ import { test } from "vitest";
 import { buildDataGridColumnLookupItems, filterDataGridColumnLookupItems } from "../../apps/desktop/src/lib/dataGrid/dataGridColumnLookup.ts";
 import {
   allNullColumnIndexes,
+  areCellValuesEqual,
   filterColumnVisibilityOptions,
   hiddenColumnIndexesAfterHiding,
   hiddenColumnIndexesForKeys,
   hiddenColumnIndexesWithAllNullColumns,
   hiddenColumnKeysForIndexes,
+  identicalValueColumnIndexes,
   invertedHiddenColumnIndexes,
   nextHiddenColumnIndexes,
   removeAutoHiddenColumnIndexes,
@@ -211,4 +213,70 @@ test("keeps one all-null column visible when every column is NULL", () => {
 
   assert.deepEqual([...result.hiddenIndexes].sort(), [1, 2]);
   assert.deepEqual([...result.autoHiddenIndexes].sort(), [1, 2]);
+});
+
+test("compares cell values for equality correctly", () => {
+  assert.equal(areCellValuesEqual(1, 1), true);
+  assert.equal(areCellValuesEqual(1, 2), false);
+  assert.equal(areCellValuesEqual("a", "a"), true);
+  assert.equal(areCellValuesEqual("a", "b"), false);
+  assert.equal(areCellValuesEqual(null, null), true);
+  assert.equal(areCellValuesEqual(undefined, undefined), true);
+  assert.equal(areCellValuesEqual(null, undefined), false);
+  assert.equal(areCellValuesEqual(null, ""), false);
+  assert.equal(areCellValuesEqual(Number.NaN, Number.NaN), true);
+  assert.equal(areCellValuesEqual(new Date("2026-01-01"), new Date("2026-01-01")), true);
+  assert.equal(areCellValuesEqual(new Date("2026-01-01"), new Date("2026-01-02")), false);
+  assert.equal(areCellValuesEqual({ a: 1 }, { a: 1 }), true);
+  assert.equal(areCellValuesEqual({ a: 1 }, { a: 2 }), false);
+  assert.equal(areCellValuesEqual([1, 2], [1, 2]), true);
+  assert.equal(areCellValuesEqual([1, 2], [1, 3]), false);
+  assert.equal(areCellValuesEqual(new Uint8Array([1, 2]), new Uint8Array([1, 2])), true);
+  assert.equal(areCellValuesEqual(new Uint8Array([1, 2]), new Uint8Array([1, 3])), false);
+});
+
+test("finds columns where all rows have identical values", () => {
+  const rows = [
+    [1, "status_ok", "same", 100],
+    [2, "status_ok", "diff", 100],
+    [3, "status_ok", "diff2", 100],
+  ];
+
+  const identical = identicalValueColumnIndexes(rows, [0, 1, 2, 3]);
+  assert.deepEqual(identical, [1, 3]);
+});
+
+test("returns empty array when fewer than 2 rows exist", () => {
+  assert.deepEqual(identicalValueColumnIndexes([], [0, 1]), []);
+  assert.deepEqual(identicalValueColumnIndexes([[1, "a"]], [0, 1]), []);
+});
+
+test("returns empty array when candidate indexes is empty", () => {
+  assert.deepEqual(identicalValueColumnIndexes([[1, 2], [1, 2]], []), []);
+});
+
+test("returns empty array when no columns have identical values", () => {
+  const rows = [
+    [1, "a"],
+    [2, "b"],
+  ];
+  assert.deepEqual(identicalValueColumnIndexes(rows, [0, 1]), []);
+});
+
+test("detects identical values by original index when middle column is hidden", () => {
+  // 行保持全宽、候选是原始列索引（模拟第 1 列被隐藏后只剩 [0, 2, 3] 可见）
+  const rows = [
+    [1, "hidden_a", "same", 100],
+    [2, "hidden_b", "same", 101],
+    [3, "hidden_c", "same", 102],
+  ];
+  assert.deepEqual(identicalValueColumnIndexes(rows, [0, 2, 3]), [2]);
+});
+
+test("identifies identical columns with null and json objects", () => {
+  const rows = [
+    [null, { k: 1 }, "x"],
+    [null, { k: 1 }, "y"],
+  ];
+  assert.deepEqual(identicalValueColumnIndexes(rows, [0, 1, 2]), [0, 1]);
 });

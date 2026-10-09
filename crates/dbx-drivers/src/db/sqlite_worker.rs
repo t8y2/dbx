@@ -568,6 +568,7 @@ async fn open_final_hop_session(
             &final_ssh.auth_method,
             ssh_tunnel::effective_hop_timeout(final_ssh),
             tunnels.known_hosts_path(),
+            &final_ssh.proxy_command,
         )
         .await;
     }
@@ -603,6 +604,7 @@ async fn open_final_hop_session(
         &final_ssh.auth_method,
         ssh_tunnel::effective_hop_timeout(final_ssh),
         tunnels.known_hosts_path(),
+        &final_ssh.proxy_command,
     )
     .await
     {

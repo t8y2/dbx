@@ -99,8 +99,16 @@ test("double-click follow-up clicks do not repeat side-effecting row actions", (
 });
 
 test("plain metadata leaf rows do nothing on row clicks", () => {
-  assert.equal(treeNodeRowAction("column", false), "none");
   assert.equal(treeNodeRowAction("index", false), "none");
+});
+
+test("column rows locate column on single click and open structure editor on double click", () => {
+  assert.equal(treeNodeRowAction("column", false, "single"), "locate-column");
+  assert.equal(treeNodeRowAction("column", false, "double"), "none");
+  assert.equal(treeNodeRowDoubleClickAction("column", false, "single"), "open-structure-editor");
+  assert.equal(treeNodeRowDoubleClickAction("column", false, "double"), "open-structure-editor");
+  assert.equal(treeNodeRowDoubleClickAction("index", false, "single"), "open-structure-editor");
+  assert.equal(treeNodeRowDoubleClickAction("index", false, "double"), "open-structure-editor");
 });
 
 test("maps source-capable sidebar nodes to object source kinds", () => {
@@ -147,7 +155,7 @@ test("double click does not open object browser for non-browsable rows", () => {
   assert.equal(treeNodeRowDoubleClickAction("database", false), "none");
   assert.equal(treeNodeRowDoubleClickAction("view", true), "none");
   assert.equal(treeNodeRowDoubleClickAction("materialized_view", true), "none");
-  assert.equal(treeNodeRowDoubleClickAction("column", true), "none");
+  assert.equal(treeNodeRowDoubleClickAction("column", true), "open-structure-editor");
 });
 
 test("double click navigation mode copies the selected sidebar row name", () => {
@@ -259,6 +267,119 @@ test("copying a MySQL display path uses connection, database, and object names",
       "dev-mysql",
     ),
     "dev-mysql.app.audit_orders",
+  );
+});
+
+test("copying display paths for schema-enabled databases (PostgreSQL, Oracle, SQL Server, SQLite)", () => {
+  // PostgreSQL schema node
+  assert.equal(
+    copyDisplayPathForTreeNode(
+      {
+        id: "conn:mydb:public",
+        label: "public",
+        type: "schema",
+        connectionId: "conn",
+        database: "mydb",
+        schema: "public",
+      },
+      "prod-pg",
+    ),
+    "prod-pg.mydb.public",
+  );
+  // PostgreSQL table under schema
+  assert.equal(
+    copyDisplayPathForTreeNode(
+      {
+        id: "conn:mydb:public:users",
+        label: "users",
+        type: "table",
+        connectionId: "conn",
+        database: "mydb",
+        schema: "public",
+        tableName: "users",
+      },
+      "prod-pg",
+    ),
+    "prod-pg.mydb.public.users",
+  );
+  // PostgreSQL routine under schema
+  assert.equal(
+    copyDisplayPathForTreeNode(
+      {
+        id: "conn:mydb:public:calculate_total",
+        label: "calculate_total",
+        type: "function",
+        connectionId: "conn",
+        database: "mydb",
+        schema: "public",
+        objectName: "calculate_total",
+      },
+      "prod-pg",
+    ),
+    "prod-pg.mydb.public.calculate_total",
+  );
+  // Oracle table (database equals schema or database omitted)
+  assert.equal(
+    copyDisplayPathForTreeNode(
+      {
+        id: "conn:HR:EMPLOYEES",
+        label: "EMPLOYEES",
+        type: "table",
+        connectionId: "conn",
+        database: "HR",
+        schema: "HR",
+        tableName: "EMPLOYEES",
+      },
+      "dev-oracle",
+    ),
+    "dev-oracle.HR.EMPLOYEES",
+  );
+  // SQL Server procedure with distinct database and schema
+  assert.equal(
+    copyDisplayPathForTreeNode(
+      {
+        id: "conn:master:dbo:sp_audit",
+        label: "sp_audit",
+        type: "procedure",
+        connectionId: "conn",
+        database: "master",
+        schema: "dbo",
+        objectName: "sp_audit",
+      },
+      "dev-mssql",
+    ),
+    "dev-mssql.master.dbo.sp_audit",
+  );
+  // SQLite table (main database)
+  assert.equal(
+    copyDisplayPathForTreeNode(
+      {
+        id: "conn:main:items",
+        label: "items",
+        type: "table",
+        connectionId: "conn",
+        database: "main",
+        tableName: "items",
+      },
+      "local-sqlite",
+    ),
+    "local-sqlite.main.items",
+  );
+  // Additional object types: sequence, package
+  assert.equal(
+    copyDisplayPathForTreeNode(
+      {
+        id: "conn:mydb:public:user_id_seq",
+        label: "user_id_seq",
+        type: "sequence",
+        connectionId: "conn",
+        database: "mydb",
+        schema: "public",
+        objectName: "user_id_seq",
+      },
+      "prod-pg",
+    ),
+    "prod-pg.mydb.public.user_id_seq",
   );
 });
 

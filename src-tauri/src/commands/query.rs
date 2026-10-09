@@ -30,6 +30,19 @@ pub enum ManualTransactionCommandError {
     Legacy(String),
 }
 
+fn manual_transaction_command_error(error: String) -> ManualTransactionCommandError {
+    if let Some(error) = dbx_core::query::sqlserver_manual_transaction::backend_error(&error) {
+        return ManualTransactionCommandError::Structured(Box::new(error));
+    }
+    if dbx_core::query::is_manual_transaction_session_expired_error(&error) {
+        ManualTransactionCommandError::Structured(Box::new(BackendError::from_manual_transaction_session_expired(
+            dbx_core::query::MANUAL_TRANSACTION_IDLE_TIMEOUT_SECS,
+        )))
+    } else {
+        ManualTransactionCommandError::Legacy(error)
+    }
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_query(
@@ -462,12 +475,14 @@ pub async fn begin_manual_transaction(
     database: String,
     schema: Option<String>,
     catalog: Option<String>,
-) -> Result<String, String> {
+) -> Result<String, ManualTransactionCommandError> {
     dbx_core::query::begin_manual_transaction(&state, &connection_id, &database, schema.as_deref(), catalog.as_deref())
         .await
+        .map_err(manual_transaction_command_error)
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_in_manual_transaction(
     state: State<'_, Arc<AppState>>,
     txn_session_id: String,
@@ -479,6 +494,8 @@ pub async fn execute_in_manual_transaction(
     page_size: Option<usize>,
     result_session_id: Option<String>,
     classification_sql: Option<String>,
+    execution_id: Option<String>,
+    timeout_secs: Option<u64>,
 ) -> Result<Vec<dbx_core::query::ExecuteMultiResult>, ManualTransactionCommandError> {
     dbx_core::query::execute_in_manual_transaction_with_options(
         &state,
@@ -492,34 +509,30 @@ pub async fn execute_in_manual_transaction(
             page_size,
             result_session_id,
             classification_sql,
+            execution_id,
+            timeout_secs,
         },
     )
     .await
-    .map_err(|error| {
-        if dbx_core::query::is_manual_transaction_session_expired_error(&error) {
-            ManualTransactionCommandError::Structured(Box::new(BackendError::from_manual_transaction_session_expired(
-                dbx_core::query::MANUAL_TRANSACTION_IDLE_TIMEOUT_SECS,
-            )))
-        } else {
-            ManualTransactionCommandError::Legacy(error)
-        }
-    })
+    .map_err(manual_transaction_command_error)
 }
 
 #[tauri::command]
 pub async fn commit_manual_transaction(
     state: State<'_, Arc<AppState>>,
     txn_session_id: String,
-) -> Result<db::QueryResult, String> {
-    dbx_core::query::commit_manual_transaction(&state, &txn_session_id).await
+) -> Result<db::QueryResult, ManualTransactionCommandError> {
+    dbx_core::query::commit_manual_transaction(&state, &txn_session_id).await.map_err(manual_transaction_command_error)
 }
 
 #[tauri::command]
 pub async fn rollback_manual_transaction(
     state: State<'_, Arc<AppState>>,
     txn_session_id: String,
-) -> Result<db::QueryResult, String> {
-    dbx_core::query::rollback_manual_transaction(&state, &txn_session_id).await
+) -> Result<db::QueryResult, ManualTransactionCommandError> {
+    dbx_core::query::rollback_manual_transaction(&state, &txn_session_id)
+        .await
+        .map_err(manual_transaction_command_error)
 }
 
 #[tauri::command]
@@ -833,14 +846,19 @@ pub async fn extract_data_grid_selection(
     request: dbx_core::data_grid_extractors::DataGridExtractRequest,
 ) -> Result<dbx_core::data_grid_extractors::DataGridExtractResult, dbx_core::data_grid_extractors::DataGridExtractError>
 {
-    tauri::async_runtime::spawn_blocking(move || dbx_core::data_grid_extractors::extract_data_grid_selection(request))
-        .await
-        .map_err(|error| {
-            dbx_core::data_grid_extractors::DataGridExtractError::new(
-                dbx_core::data_grid_extractors::DataGridExtractErrorCode::ExecutionFailed,
-                format!("Data grid extractor worker failed: {error}"),
-            )
-        })?
+    tauri::async_runtime::spawn_blocking(move || {
+        // Cells pasted from the grid land in a spreadsheet, so formula-triggering text
+        // is neutralized before the extractor renders it (see dbx_core::data::grid_clipboard_guard).
+        let request = dbx_core::data::grid_clipboard_guard::neutralize_spreadsheet_formulas(request);
+        dbx_core::data_grid_extractors::extract_data_grid_selection(request)
+    })
+    .await
+    .map_err(|error| {
+        dbx_core::data_grid_extractors::DataGridExtractError::new(
+            dbx_core::data_grid_extractors::DataGridExtractErrorCode::ExecutionFailed,
+            format!("Data grid extractor worker failed: {error}"),
+        )
+    })?
 }
 
 #[tauri::command]

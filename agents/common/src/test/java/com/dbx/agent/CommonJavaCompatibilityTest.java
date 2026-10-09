@@ -437,6 +437,19 @@ class CommonJavaCompatibilityTest {
     }
 
     @Test
+    void jsonRpcServerDispatchesDeferredLobOption() {
+        MinimalAgent agent = new MinimalAgent();
+        JsonRpcServer server = new JsonRpcServer(agent);
+
+        String response = server.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"" + AgentProtocol.METHOD_EXECUTE_QUERY + "\",\"params\":{\"sql\":\"select payload from documents\",\"deferLobs\":true}}"
+        );
+
+        assertTrue(JsonParser.parseString(response).getAsJsonObject().has("result"));
+        assertTrue(agent.lastExecuteOptions.getDeferLobs());
+    }
+
+    @Test
     void jsonRpcServerReconnectsWhenStoredJdbcConnectionIsStale() {
         ReconnectingAgent agent = new ReconnectingAgent();
         JsonRpcServer server = new JsonRpcServer(agent);
@@ -524,14 +537,14 @@ class CommonJavaCompatibilityTest {
         JsonRpcServer server = new JsonRpcServer(agent);
 
         String startResponse = server.handleRequest(
-            "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"" + AgentProtocol.METHOD_START_TABLE_READ + "\",\"params\":{\"sql\":\"select * from orders\",\"schema\":\"public\",\"pageSize\":2,\"fetchSize\":8,\"maxRows\":20,\"timeoutSecs\":3}}"
+            "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"" + AgentProtocol.METHOD_START_TABLE_READ + "\",\"params\":{\"sql\":\"select * from orders\",\"schema\":\"public\",\"pageSize\":2,\"fetchSize\":8,\"maxRows\":20,\"timeoutSecs\":3,\"deferLobs\":true}}"
         );
         JsonObject startJson = JsonParser.parseString(startResponse).getAsJsonObject();
 
         assertTrue(startJson.has("result"));
         assertEquals("select * from orders", agent.lastSql);
         assertEquals("public", agent.lastSchema);
-        assertEquals(new QueryPageOptions(2, 8, 20, 3), agent.lastOptions);
+        assertEquals(new QueryPageOptions(2, 8, 20, 3, true), agent.lastOptions);
         assertEquals("table-session", startJson.getAsJsonObject("result").get("session_id").getAsString());
 
         String fetchResponse = server.handleRequest(
@@ -586,7 +599,9 @@ class CommonJavaCompatibilityTest {
         assertEquals(true, page.getHas_more());
 
         assertEquals(JdbcExecutor.DEFAULT_MAX_ROWS, new ExecuteQueryOptions().getMaxRows());
+        assertFalse(new ExecuteQueryOptions().getDeferLobs());
         assertEquals(100, new QueryPageOptions().getPageSize());
+        assertFalse(new QueryPageOptions().getDeferLobs());
         assertNotNull(JdbcExecutor.INSTANCE);
     }
 
@@ -885,6 +900,8 @@ class CommonJavaCompatibilityTest {
     }
 
     private static class MinimalAgent implements DatabaseAgent {
+        private ExecuteQueryOptions lastExecuteOptions;
+
         @Override
         public void connect(ConnectParams params) {
         }
@@ -934,6 +951,7 @@ class CommonJavaCompatibilityTest {
 
         @Override
         public QueryResult executeQuery(String sql, String schema, ExecuteQueryOptions options) {
+            lastExecuteOptions = options;
             return new QueryResult(Collections.emptyList(), Collections.emptyList(), 0L, 0L);
         }
 

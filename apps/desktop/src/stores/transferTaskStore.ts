@@ -60,6 +60,16 @@ function normalizeFolder(raw: unknown): TransferTaskFolder | null {
   };
 }
 
+/** Keeps only non-empty string entries so a cleared filter never survives a save/load round trip. */
+function normalizeTransferTableFilters(raw: unknown): Record<string, string> | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const result: Record<string, string> = {};
+  for (const [table, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value === "string" && value.trim().length > 0) result[table] = value;
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
 function normalizeTask(raw: unknown): TransferTask | null {
   if (!raw || typeof raw !== "object") return null;
   const candidate = raw as Partial<TransferTask>;
@@ -92,6 +102,7 @@ function normalizeTask(raw: unknown): TransferTask | null {
       targetTableNameCase: config.targetTableNameCase ?? "preserve",
       quoteTargetColumnNames: config.quoteTargetColumnNames ?? true,
       batchSize: typeof config.batchSize === "number" && config.batchSize > 0 ? config.batchSize : 1000,
+      tableFilters: normalizeTransferTableFilters(config.tableFilters),
       dropTargetConfirmed: false,
     },
     createdAt: candidate.createdAt || nowIso(),

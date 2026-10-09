@@ -94,7 +94,7 @@ function fnv1a(value: string, seed: number): number {
 }
 
 export function connectionConfigFingerprint(config: ConnectionConfig, sourceName = config.name): string {
-  const { database_info: _databaseInfo, default_schema: _defaultSchema, note: _note, sidebar_auto_load_all_tables: _sidebarAutoLoadAllTables, ...submittedConfig } = config;
+  const { database_info: _databaseInfo, default_schema: _defaultSchema, note: _note, show_database_links: _showDatabaseLinks, sidebar_auto_load_all_tables: _sidebarAutoLoadAllTables, redis_key_filter: _redisKeyFilter, ...submittedConfig } = config;
   const serialized = JSON.stringify(stableValue({ config: submittedConfig, sourceName }));
   const first = fnv1a(serialized, 0x811c9dc5).toString(16).padStart(8, "0");
   const second = fnv1a(serialized, 0x9e3779b9).toString(16).padStart(8, "0");

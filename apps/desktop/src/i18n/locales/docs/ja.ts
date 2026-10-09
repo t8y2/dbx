@@ -51,7 +51,7 @@ export default {
     },
     noForeignKeyMetadata: {
       title: "リレーションシップを表示できません",
-      detail: "{engine} は外部キーのメタデータを報告しないため、リレーションシップを導出できませんでした。この図はこのエンジンについては完全です。",
+      detail: "{engine} は外部キーのメタデータを返さないため、関係線は表示されません。これはこのエンジンの仕様です。",
     },
     commentsUnsupported: {
       title: "データベースのコメントは利用できません",

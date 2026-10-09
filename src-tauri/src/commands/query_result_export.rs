@@ -13,6 +13,32 @@ use dbx_core::query_result_export::StagedExportTarget;
 use dbx_core::table_export::ExportStatus;
 pub use dbx_core::table_export::TableExportProgress;
 
+/// Allocate a temporary XLSX destination and remove files older than one week.
+#[tauri::command]
+pub async fn create_query_result_temp_file(extension: String) -> Result<String, String> {
+    let extension = extension.trim().trim_start_matches('.');
+    if !matches!(extension, "xlsx" | "html") {
+        return Err("unsupported temporary export extension".to_string());
+    }
+    let dir = std::env::temp_dir().join("dbx-query-results");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let now = std::time::SystemTime::now();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let stale = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| now.duration_since(t).ok())
+                .is_some_and(|age| age.as_secs() > 7 * 24 * 60 * 60);
+            if stale {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    Ok(dir.join(format!("dbx-query-result-{}.{}", uuid::Uuid::new_v4(), extension)).to_string_lossy().to_string())
+}
+
 fn emit_progress(app: &AppHandle, progress: TableExportProgress) {
     let _ = app.emit("query-result-export-progress", progress);
 }
@@ -330,4 +356,18 @@ pub async fn cancel_query_result_export(
         state.running_queries.cancel(&execution_id);
     }
     Ok(())
+}
+
+#[tauri::command]
+pub async fn open_query_result_temp_file(app: AppHandle, path: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let root = std::fs::canonicalize(std::env::temp_dir().join("dbx-query-results")).map_err(|e| e.to_string())?;
+    let resolved = std::fs::canonicalize(&path).map_err(|e| e.to_string())?;
+    if resolved.parent() != Some(root.as_path())
+        || !matches!(resolved.extension().and_then(|e| e.to_str()), Some("xlsx") | Some("html"))
+        || !resolved.is_file()
+    {
+        return Err("invalid temporary query result path".to_string());
+    }
+    app.opener().open_path(resolved.to_string_lossy().to_string(), None::<&str>).map_err(|e| e.to_string())
 }

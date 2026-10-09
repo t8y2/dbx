@@ -15,7 +15,14 @@ import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 
 const REGISTRY_ASSET = "agent-registry.json";
-const NATIVE_MODULES = new Set(["duckdb", "oracle", "xugu", "kingbase", "iotdb", "neo4j", "nebula", "vastbase", "rabbitmq", "rocketmq", "zookeeper", "tdengine", "etcd", "etcd2"]);
+const NATIVE_MODULES = new Set(["duckdb", "oracle", "oracle-oci", "xugu", "kingbase", "iotdb", "neo4j", "nebula", "vastbase", "rabbitmq", "rocketmq", "zookeeper", "tdengine", "etcd", "etcd2"]);
+// Native modules that intentionally publish a subset of the six platforms. The
+// Oracle OCI ("thick") agent links the Oracle Client through CGO and is built
+// for Windows x64 only, so a reused release must cover exactly that platform —
+// requiring all six would reject a perfectly complete release.
+const NATIVE_MODULE_PLATFORMS = {
+  "oracle-oci": ["windows-x64"],
+};
 const PLATFORMS = [
   "macos-aarch64",
   "macos-x64",
@@ -24,6 +31,10 @@ const PLATFORMS = [
   "windows-aarch64",
   "windows-x64",
 ];
+
+function expectedNativePlatforms(moduleName) {
+  return [...(NATIVE_MODULE_PLATFORMS[moduleName] ?? PLATFORMS)].sort();
+}
 
 function artifactFilename(url) {
   return basename(url.split(/[?#]/, 1)[0]);
@@ -78,8 +89,9 @@ export function collectReusableAssetPlan({ registry, release, versions, modules,
 
     const nativePlatforms = Object.keys(driver.native ?? {}).sort();
     if (NATIVE_MODULES.has(moduleName)) {
-      const missingPlatforms = PLATFORMS.filter((platform) => !nativePlatforms.includes(platform));
-      const extraPlatforms = nativePlatforms.filter((platform) => !PLATFORMS.includes(platform));
+      const expectedPlatforms = expectedNativePlatforms(moduleName);
+      const missingPlatforms = expectedPlatforms.filter((platform) => !nativePlatforms.includes(platform));
+      const extraPlatforms = nativePlatforms.filter((platform) => !expectedPlatforms.includes(platform));
       if (missingPlatforms.length > 0 || extraPlatforms.length > 0) {
         throw new Error(
           `Previous native artifacts are incomplete for ${moduleName}: missing=${missingPlatforms.join(",") || "none"}, extra=${extraPlatforms.join(",") || "none"}`,
@@ -223,7 +235,7 @@ export function extractReusableDriverPackages({ packagesDir, outputDir, versions
       extracted += 1;
     }
 
-    if (NATIVE_MODULES.has(moduleName) && nativePlatforms.length !== PLATFORMS.length) {
+    if (NATIVE_MODULES.has(moduleName) && nativePlatforms.length !== expectedNativePlatforms(moduleName).length) {
       throw new Error(`Reusable native package set is incomplete for ${moduleName}.`);
     }
     if (!filenames.has(javaName) && nativePlatforms.length === 0) {

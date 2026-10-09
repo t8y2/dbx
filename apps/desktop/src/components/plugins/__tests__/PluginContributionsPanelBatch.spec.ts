@@ -30,6 +30,9 @@ vi.mock("@/lib/backend/api", () => mocks);
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ connections: [] }) }));
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({}) }));
+vi.mock("@/stores/settingsStore", () => ({
+  useSettingsStore: () => ({ editorSettings: { pluginGraphicsEngineIds: [] }, updateEditorSettings: vi.fn() }),
+}));
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: mocks.isTauriRuntime }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => vi.fn()) }));
 vi.mock("@tauri-apps/plugin-shell", () => ({ open: mocks.openExternal }));
@@ -61,6 +64,9 @@ vi.mock("@/components/plugins/PluginIcon.vue", async () => ({ default: (await im
 // Shortcut preferences have their own component/store tests. Keep this batch
 // harness scoped to plugin mutations and their exact backend call counts.
 vi.mock("@/components/plugins/PluginShortcutSettings.vue", async () => ({ default: (await import("@/components/grid/__tests__/vueHostHarness")).createPassthroughStub("PluginShortcutSettings") }));
+// The graphics-engine grant lives in the settings store; this batch harness has
+// no pinia, so the section is stubbed like the other store-backed child panels.
+vi.mock("@/components/plugins/PluginGraphicsEngineSection.vue", async () => ({ default: (await import("@/components/grid/__tests__/vueHostHarness")).createPassthroughStub("PluginGraphicsEngineSection") }));
 
 import PluginContributionsPanel from "@/components/plugins/PluginContributionsPanel.vue";
 
@@ -1137,14 +1143,22 @@ describe("PluginContributionsPanel marketplace sort", () => {
 });
 
 describe("PluginContributionsPanel marketplace card layout", () => {
-  it("keeps the three-column grid and shows full names and versions in both views", async () => {
+  it("keeps the auto-fill grid and shows full names and versions in both views", async () => {
     state.batchMode = false;
     const longName = "Database Schema Explorer Marketplace Plugin With Deliberately Long Name";
+    const installedLongName = `${longName} Installed`;
     const versionValue = "3.0.0-preview.10483";
-    const plugin = state.catalogResults[0].catalog!.plugins.find((entry) => entry.id === "a")!;
-    plugin.name = longName;
-    plugin.latestVersion = versionValue;
-    plugin.versions[0].version = versionValue;
+    const installedPlugin = state.catalogResults[0].catalog!.plugins.find((entry) => entry.id === "a")!;
+    const freshPlugin = state.catalogResults[0].catalog!.plugins.find((entry) => entry.id === "b")!;
+    installedPlugin.name = installedLongName;
+    installedPlugin.latestVersion = versionValue;
+    installedPlugin.versions[0].version = versionValue;
+    freshPlugin.name = longName;
+    freshPlugin.latestVersion = versionValue;
+    freshPlugin.versions[0].version = versionValue;
+    // Only "a" stays installed (update state); "b" becomes a plain install so the catalog
+    // version line renders on a card that is not installed yet.
+    state.installedPlugins = [installed("a")];
     await flushUi();
 
     for (const view of ["grid", "list"] as const) {
@@ -1158,19 +1172,42 @@ describe("PluginContributionsPanel marketplace card layout", () => {
       expect(pluginName?.classList.contains("text-sm"), `${view}: name size stays fixed`).toBe(true);
 
       const card = pluginName?.closest("article");
-      const versionBadge = [...(card?.querySelectorAll<HTMLElement>("[data-stub='Badge']") ?? [])].find((element) => element.textContent?.trim() === `v${versionValue}`);
-      expect(versionBadge?.textContent?.trim(), `${view}: full version`).toBe(`v${versionValue}`);
-      expect(versionBadge?.classList.contains("max-w-full"), `${view}: version fits the available width`).toBe(true);
+      expect(card, `${view}: listing card renders`).toBeDefined();
+      const versionText = [...(card?.querySelectorAll<HTMLElement>("span") ?? [])].find((element) => element.textContent?.includes(`v${versionValue}`));
+      expect(versionText, `${view}: full catalog version renders`).toBeDefined();
+      expect(versionText?.classList.contains("shrink-0"), `${view}: version never shrinks to an ellipsis`).toBe(true);
 
-      const details = [...(card?.querySelectorAll<HTMLElement>("span") ?? [])].find((element) => element.textContent?.trim() === "DBX · first");
+      const details = [...card.querySelectorAll<HTMLElement>("span")].find((element) => element.textContent?.trim() === "DBX · first");
       expect(details, `${view}: publisher and repository details render`).toBeDefined();
-      expect(versionBadge!.compareDocumentPosition(details!) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+
+      // Update state: versions ride inside the footer i18n sentence instead of a separate badge.
+      const installedCard = cards.find((element) => element.textContent?.includes(installedLongName));
+      expect(installedCard?.textContent, `${view}: update state keeps the catalog latest version`).toContain(versionValue);
 
       if (view === "grid") {
-        expect(card?.parentElement?.classList.contains("md:grid-cols-3"), "grid must not use the viewport breakpoint removed by #10444").toBe(false);
-        expect(card?.parentElement?.className, "grid tracks the panel width via auto-fill").toContain("auto-fill");
+        expect(card.parentElement?.classList.contains("md:grid-cols-3"), "grid must not use the viewport breakpoint removed by #10444").toBe(false);
+        expect(card.parentElement?.className, "grid tracks the panel width via auto-fill").toContain("auto-fill");
       }
     }
+  });
+
+  it("keeps tags and permissions on a single badge line with a trailing overflow counter", async () => {
+    state.batchMode = false;
+    const plugin = state.catalogResults[0].catalog!.plugins.find((entry) => entry.id === "b")!;
+    plugin.tags = ["ssh", "terminal", "sftp", "dev"];
+    plugin.permissions = ["host.binary", "host.clipboard:read", "host.events", "host.filesystem", "host.storage", "host.workbench"];
+    await flushUi();
+
+    state.marketplaceViewMode = "grid";
+    await nextTick();
+
+    const card = [...host.querySelectorAll("article")].find((element) => element.textContent?.includes("sftp"));
+    const badgeRow = card?.querySelector(".marketplace-tags");
+    expect(badgeRow, "badge row renders").toBeDefined();
+    expect(badgeRow?.classList.contains("flex-wrap"), "badge row must stay single-line").toBe(false);
+
+    const badges = [...(badgeRow?.querySelectorAll<HTMLElement>("[data-stub='Badge']") ?? [])].map((element) => element.textContent?.trim());
+    expect(badges, "three visible badges plus the overflow counter").toEqual(["ssh", "terminal", "sftp", "+7"]);
   });
 });
 

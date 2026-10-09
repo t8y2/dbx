@@ -77,6 +77,53 @@ describe("queryStore table data refresh", () => {
     ]);
   });
 
+  it("loads a duplicated data tab with its filter, database sort and page without sharing results", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const id = store.createTab("pg-1", "app", "users", "data", "public");
+    store.setTableMeta(id, {
+      database: "app",
+      schema: "public",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [{ name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      primaryKeys: ["id"],
+    });
+    const original = store.tabs.find((tab) => tab.id === id)!;
+    original.whereInput = "status = 'ACTIVE'";
+    original.orderByInput = "id DESC";
+    original.resultSortColumn = "id";
+    original.resultSortDirection = "desc";
+    original.resultSortMode = "database";
+    original.resultPageLimit = 25;
+    original.resultPageOffset = 50;
+    original.result = { columns: ["id"], rows: [[99]], affected_rows: 0, execution_time_ms: 1 };
+    mocks.executeMulti.mockResolvedValue([{ columns: ["id"], rows: [[42]], affected_rows: 0, execution_time_ms: 1 }]);
+
+    store.duplicateTab(id);
+    const copy = store.tabs[1];
+    await vi.waitFor(() => expect(copy.result?.rows).toEqual([[42]]));
+
+    expect(copy.id).not.toBe(id);
+    expect(copy.mode).toBe("data");
+    expect(copy.connectionId).toBe("pg-1");
+    expect(copy.database).toBe("app");
+    expect(copy.schema).toBe("public");
+    expect(store.activeTabId).toBe(copy.id);
+    expect(store.groups[0].tabIds).toEqual([id, copy.id]);
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(
+      expect.objectContaining({
+        whereInput: "status = 'ACTIVE'",
+        orderBy: "id DESC",
+        limit: 25,
+        offset: 50,
+      }),
+    );
+    expect(mocks.executeMulti).toHaveBeenCalledTimes(1);
+    expect(original.result?.rows).toEqual([[99]]);
+    expect(copy.result).not.toBe(original.result);
+  });
+
   it("refreshes only matching data tabs after a table mutation", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
@@ -139,6 +186,60 @@ describe("queryStore table data refresh", () => {
     expect(mocks.executeMulti).toHaveBeenCalledTimes(1);
     expect(store.tabs.find((tab) => tab.id === publicTabId)?.result?.rows).toEqual([]);
     expect(store.tabs.find((tab) => tab.id === archiveTabId)?.result).toBeUndefined();
+  });
+
+  it("does not build batch INSERT metadata while data-tab metadata is pending", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "users", "data", "public");
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    const result = {
+      columns: ["id"],
+      rows: [[1]],
+      sourceStatement: "SELECT * FROM public.users",
+    };
+    tab.tableMeta = {
+      database: "app",
+      schema: "public",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [],
+      primaryKeys: [],
+    };
+    tab.tableMetaPending = true;
+    tab.result = result;
+    tab.results = [result];
+
+    await expect(store.resolveResultMetadataForBatch(tabId, tab.result!)).resolves.toBeUndefined();
+  });
+
+  it("maps active aliased query results to their source columns", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "Query", "query");
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    const result = {
+      columns: ["id"],
+      rows: [["root"]],
+      sourceStatement: "SELECT name AS id FROM users",
+    };
+    tab.tableMeta = {
+      database: "app",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [
+        { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+        { name: "name", data_type: "text", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+      ],
+      primaryKeys: ["id"],
+    };
+    tab.result = result;
+    tab.results = [result];
+
+    const metadata = await store.resolveResultMetadataForBatch(tabId, tab.result!);
+
+    expect(metadata?.queryAnalysis?.selectStar).toBe(false);
+    expect(metadata?.querySourceColumns).toEqual(["name"]);
   });
 
   it("uses JDBC ResultSet offset pagination for Caché data tabs", async () => {
@@ -536,6 +637,31 @@ describe("queryStore table data refresh", () => {
     expect(store.tabs.find((tab) => tab.id === secondTabId)?.result).toBeUndefined();
   });
 
+  it("rebuilds the structured sort from persisted tab state on refresh", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "users", "data", "public");
+    store.setTableMeta(tabId, {
+      schema: "public",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [
+        { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+        { name: "status", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+        { name: "created_at", data_type: "timestamp", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+      ],
+      primaryKeys: ["id"],
+    });
+    const tab = store.tabs.find((tab) => tab.id === tabId)!;
+    tab.orderByInput = '"status" ASC';
+    tab.structuredOrderByInput = '"created_at" DESC';
+
+    const refreshed = await store.refreshDataTab(tabId);
+
+    expect(refreshed).toBe(true);
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ orderBy: '"status" ASC, "created_at" DESC' }));
+  });
+
   it("keeps the configured MySQL page size when results contain large-value previews", async () => {
     mocks.getConnectionConfig.mockReturnValue({
       id: "mysql-1",
@@ -588,6 +714,59 @@ describe("queryStore table data refresh", () => {
     );
   });
 
+  it("enables bounded DB2 BLOB previews for table refreshes", async () => {
+    mocks.getConnectionConfig.mockReturnValue({
+      id: "db2-1",
+      name: "DB2",
+      db_type: "db2",
+      database: "MAXIMO",
+      query_timeout_secs: 60,
+    });
+    mocks.buildTableSelectSql.mockResolvedValue('SELECT "MAFAPPDATAID", SUBSTR("APP", 1, 8193) AS "APP" FROM "MAXIMO"."MAFAPPDATA";');
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("db2-1", "MAXIMO", "MAFAPPDATA", "data", "MAXIMO");
+    store.setTableMeta(tabId, {
+      database: "MAXIMO",
+      schema: "MAXIMO",
+      tableName: "MAFAPPDATA",
+      tableType: "TABLE",
+      columns: [
+        { name: "MAFAPPDATAID", data_type: "BIGINT", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+        { name: "APP", data_type: "BLOB", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+      ],
+      primaryKeys: ["MAFAPPDATAID"],
+    });
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    tab.resultPageLimit = 100;
+    tab.resultPageOffset = 0;
+
+    await expect(store.refreshDataTab(tabId)).resolves.toBe(true);
+
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(
+      expect.objectContaining({
+        databaseType: "db2",
+        columnTypes: ["BIGINT", "BLOB"],
+        largeValuePreviewSize: 8 * 1024,
+      }),
+    );
+    expect(mocks.executeMulti).toHaveBeenCalledWith(
+      "db2-1",
+      "MAXIMO",
+      expect.any(String),
+      undefined,
+      expect.any(String),
+      expect.objectContaining({
+        maxRows: 100,
+        fetchSize: 100,
+        maxResultBytes: 32 * 1024 * 1024,
+        resultKeyColumns: ["MAFAPPDATAID"],
+        tableDataPreview: true,
+        timeoutSecs: 60,
+      }),
+    );
+  });
+
   it("keeps a MySQL table refresh unqualified in the selected database context", async () => {
     mocks.getConnectionConfig.mockReturnValue({
       id: "mysql-1",
@@ -632,6 +811,7 @@ describe("queryStore table data refresh", () => {
     const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
     tab.whereInput = "id > 0";
     tab.orderByInput = '"old_name" ASC';
+    tab.structuredOrderByInput = '"old_name" DESC';
     tab.resultSortColumn = "old_name";
     tab.resultSortColumnIndex = 1;
     tab.resultSortDirection = "asc";
@@ -665,6 +845,7 @@ describe("queryStore table data refresh", () => {
     expect(tab.resultLocalSortOriginalMongoDocuments).toBeUndefined();
     expect(tab.resultLocalSortOriginalMongoCopyDocuments).toBeUndefined();
     expect(tab.orderByInput).toBeUndefined();
+    expect(tab.structuredOrderByInput).toBeUndefined();
     expect(tab.whereInput).toBe("id > 0");
     expect(tab.resultPageLimit).toBe(25);
     expect(tab.resultPageOffset).toBe(50);

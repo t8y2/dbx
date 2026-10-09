@@ -56,6 +56,36 @@ chmod +x "$package_dir/bin/dbx-web-bin"
 cat > "$package_dir/dbx" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+
+for arg in "$@"; do
+  if [[ "$arg" != "-h" && "$arg" != "--help" && "$arg" != "/help" ]]; then
+    continue
+  fi
+  cat <<'HELP'
+Usage: ./dbx [OPTION]
+
+Start the DBX Web browser service.
+
+Options:
+  -h, --help, /help  Show this help message and exit.
+
+Environment variables:
+  DBX_PORT              Listen port (default: 4224)
+  DBX_DATA_DIR          Data directory (default: package-dir/data)
+  DBX_PUBLIC_BASE_PATH  URL path prefix (default: /)
+  DBX_PASSWORD          Set the Web login password
+  DBX_DISABLE_PASSWORD  Set to 1 to disable login protection
+  RUST_LOG              Configure backend log filtering
+  RUST_BACKTRACE        Set to 1 to include Rust backtraces
+
+Examples:
+  DBX_PORT=8080 ./dbx
+  RUST_LOG=dbx_web=debug,tower_http=info ./dbx
+  RUST_BACKTRACE=1 RUST_LOG=dbx_web=debug ./dbx
+HELP
+  exit 0
+done
+
 SOURCE="${BASH_SOURCE[0]}"
 while [ -h "$SOURCE" ]; do
   DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
@@ -96,9 +126,19 @@ system glibc version (verified down to Ubuntu 14.04).
 
 Useful environment variables:
   DBX_PORT=4224
-  DBX_DATA_DIR=./data
+  DBX_DATA_DIR=/path/to/data
+  DBX_PUBLIC_BASE_PATH=/dbx
   DBX_PASSWORD=your-password
   DBX_DISABLE_PASSWORD=1
+  RUST_LOG=dbx_web=debug,tower_http=info
+  RUST_BACKTRACE=1
+
+Show the available options without starting the server:
+  ./dbx --help
+  ./dbx /help
+
+For troubleshooting, start DBX with a targeted debug filter:
+  RUST_LOG=dbx_web=debug,tower_http=info ./dbx
 EOF
 
 tar -C "$output_dir" -czf "$tarball" "$package_name"

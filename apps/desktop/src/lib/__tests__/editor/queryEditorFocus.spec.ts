@@ -1,3 +1,6 @@
+/**
+ * @vitest-environment happy-dom
+ */
 import { describe, expect, it, vi } from "vitest";
 import { focusEditorView, type EditorViewLike } from "@/lib/editor/queryEditorFocus";
 
@@ -30,5 +33,22 @@ describe("focusEditorView", () => {
 
   it("returns false when view is undefined", () => {
     expect(focusEditorView(undefined)).toBe(false);
+  });
+
+  it("preserves a surrounding input that temporarily owns focus", () => {
+    const input = document.createElement("input");
+    input.dataset.preserveEditorFocus = "";
+    document.body.appendChild(input);
+    input.focus();
+    const view = createMockView();
+
+    try {
+      const result = focusEditorView(view);
+      expect(result).toBe(false);
+      expect(document.activeElement).toBe(input);
+      expect(view.focus).not.toHaveBeenCalled();
+    } finally {
+      input.remove();
+    }
   });
 });

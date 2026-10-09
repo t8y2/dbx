@@ -16,6 +16,7 @@ import com.mongodb.MongoNamespace;
 import com.mongodb.MongoCredential;
 import com.mongodb.MongoClientSettings;
 import com.mongodb.ServerAddress;
+import com.mongodb.connection.ClusterConnectionMode;
 import com.mongodb.bulk.BulkWriteError;
 import com.mongodb.bulk.WriteConcernError;
 import com.mongodb.client.AggregateIterable;
@@ -153,7 +154,17 @@ public final class MongoAgent {
 
         MongoClientSettings.Builder builder = MongoClientSettings.builder();
         if (connectionString != null && !connectionString.isBlank()) {
-            builder.applyConnectionString(new ConnectionString(connectionString));
+            ConnectionString cs = new ConnectionString(connectionString);
+            builder.applyConnectionString(cs);
+            // Driver 3.12 predates the directConnection URI option (introduced in driver 4.x)
+            // and silently ignores it. When directConnection=true is present in the query of a
+            // single-host URI, force ClusterConnectionMode.SINGLE so the driver connects directly
+            // to that host instead of discovering replica-set members that may be unreachable
+            // (e.g. through an SSH tunnel). We preserve requiredReplicaSetName as parsed because
+            // ClusterSettings in 3.12 accepts it in SINGLE mode to validate the replica set name.
+            if (!cs.isSrvProtocol() && cs.getHosts().size() == 1 && hasDirectConnectionTrue(connectionString)) {
+                builder.applyToClusterSettings(settings -> settings.mode(ClusterConnectionMode.SINGLE));
+            }
         } else {
             builder.applyToClusterSettings(
                 settings -> settings.hosts(Collections.singletonList(new ServerAddress(host, port))));
@@ -167,6 +178,46 @@ public final class MongoAgent {
         }
 
         return builder;
+    }
+
+    static boolean hasDirectConnectionTrue(String connectionString) {
+        if (connectionString == null) {
+            return false;
+        }
+        int hashStart = connectionString.indexOf('#');
+        int queryStart = connectionString.indexOf('?');
+        if (queryStart < 0 || (hashStart >= 0 && queryStart > hashStart)) {
+            return false;
+        }
+        int queryEnd = hashStart >= 0 ? hashStart : connectionString.length();
+        String query = connectionString.substring(queryStart + 1, queryEnd);
+        if (query.isEmpty()) {
+            return false;
+        }
+
+        Boolean directConnection = null;
+        for (String param : query.split("[&;]")) {
+            if (param.isEmpty()) {
+                continue;
+            }
+            int eq = param.indexOf('=');
+            String key = eq >= 0 ? param.substring(0, eq) : param;
+            String val = eq >= 0 ? param.substring(eq + 1) : "";
+            String decodedKey = decodeUriComponent(key);
+            String decodedVal = decodeUriComponent(val);
+            if ("directConnection".equalsIgnoreCase(decodedKey)) {
+                directConnection = "true".equalsIgnoreCase(decodedVal);
+            }
+        }
+        return Boolean.TRUE.equals(directConnection);
+    }
+
+    private static String decodeUriComponent(String s) {
+        try {
+            return URLDecoder.decode(s, StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            return s;
+        }
     }
 
     private static MongoClient openClient(JsonObject params) {

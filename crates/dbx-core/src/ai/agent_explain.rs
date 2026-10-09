@@ -305,7 +305,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(plan, "TABLE ACCESS FULL DUAL");
-        session.shutdown().await;
+        session.shutdown().await.unwrap();
         drop(state);
         std::fs::remove_dir_all(dir).unwrap();
     }

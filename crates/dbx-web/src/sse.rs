@@ -1,4 +1,6 @@
 use axum::response::sse::{Event, KeepAlive, Sse};
+use dbx_core::persistence::task_history::TransferTaskJournal;
+use dbx_core::transfer::TransferProgress;
 use futures::stream::Stream;
 use serde_json::Value;
 use std::collections::VecDeque;
@@ -22,6 +24,8 @@ struct TransferReplayHistory {
     failure_bytes: usize,
     latest: Option<String>,
     omitted_failures: usize,
+    task_history_journal: Option<TransferTaskJournal>,
+    terminal_progress: Option<TransferProgress>,
 }
 
 pub struct TransferProgressChannel {
@@ -33,6 +37,24 @@ impl TransferProgressChannel {
     pub fn new() -> Self {
         let (tx, _) = broadcast::channel(256);
         Self { tx, history: Mutex::new(TransferReplayHistory::default()) }
+    }
+
+    pub fn set_task_history_journal(&self, journal: Option<TransferTaskJournal>) {
+        self.history.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).task_history_journal = journal;
+    }
+
+    pub fn remember_terminal_progress(&self, progress: TransferProgress) {
+        self.history.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).terminal_progress = Some(progress);
+    }
+
+    pub async fn finish_task_history(&self) {
+        let (journal, progress) = {
+            let history = self.history.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            (history.task_history_journal.clone(), history.terminal_progress.clone())
+        };
+        if let (Some(journal), Some(progress)) = (journal, progress) {
+            journal.finish(&progress).await;
+        }
     }
 
     pub fn send(&self, data: String, kind: TransferReplayEventKind) {

@@ -188,6 +188,10 @@ export function isCloseOtherTabsShortcut(event: ShortcutLikeEvent, shortcuts?: P
   return matchesShortcut(event, actionShortcut("closeOtherTabs", shortcuts), platform);
 }
 
+export function isCloseWindowShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("closeWindow", shortcuts));
+}
+
 export function isSendSelectionToAiShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("sendSelectionToAi", shortcuts));
 }
@@ -265,6 +269,10 @@ export function isCopyCurrentRowShortcut(event: ShortcutLikeEvent, shortcuts?: P
   return matchesShortcut(event, actionShortcut("copyCurrentRow", shortcuts));
 }
 
+export function isEditCellShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
+  return matchesShortcut(event, actionShortcut("editCell", shortcuts, platform), platform);
+}
+
 export function isEditTableStructureShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
   return matchesShortcut(event, actionShortcut("editTableStructure", shortcuts, platform), platform);
 }
@@ -309,6 +317,10 @@ export function isToggleZenModeShortcut(event: ShortcutLikeEvent, shortcuts?: Pa
   return matchesShortcut(event, actionShortcut("toggleZenMode", shortcuts));
 }
 
+export function isDisconnectAllActiveConnectionsShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("disconnectAllActiveConnections", shortcuts));
+}
+
 export function isCopySidebarSelectionShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("copySidebarSelection", shortcuts));
 }
@@ -319,6 +331,10 @@ export function isPasteSidebarSelectionShortcut(event: ShortcutLikeEvent, shortc
 
 export function isEditSidebarConnectionShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("editSidebarConnection", shortcuts));
+}
+
+export function isDisconnectSidebarConnectionShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("disconnectSidebarConnection", shortcuts));
 }
 
 export function isViewTableDdlShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
@@ -378,4 +394,10 @@ export function isBrowserReloadShortcut(event: ShortcutLikeEvent): boolean {
   const key = normalizeKey(event.key);
   if (key === "F5") return true;
   return key === "r" && (!!event.metaKey || !!event.ctrlKey);
+}
+
+export function isBrowserTaskManagerShortcut(event: ShortcutLikeEvent): boolean {
+  if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey) return false;
+  if (!event.shiftKey) return false;
+  return event.key === "Escape" || event.key === "Esc" || event.code === "Escape";
 }

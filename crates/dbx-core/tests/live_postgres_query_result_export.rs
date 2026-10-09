@@ -17,6 +17,8 @@ fn live_postgres_config(
     database: &str,
 ) -> ConnectionConfig {
     ConnectionConfig {
+        oracle_oci_nls_lang: None,
+        oracle_oci_tns_admin: None,
         docs_notes_path: None,
         id: id.to_string(),
         name: id.to_string(),
@@ -61,6 +63,7 @@ fn live_postgres_config(
         redis_scan_page_size: None,
         redis_database_aliases: Default::default(),
         redis_key_templates: Vec::new(),
+        redis_key_filter: None,
         redis_key_grouping: None,
         etcd_endpoints: String::new(),
         gbase_server: String::new(),
@@ -152,6 +155,7 @@ async fn live_postgres_query_result_export_uses_single_streamed_query() {
         csv_quote_mode: Default::default(),
         null_literal: String::new(),
         export_table_name: None,
+        export_schema: None,
         export_column_types: None,
         selected_columns: None,
         export_column_extras: None,
@@ -241,6 +245,7 @@ async fn live_postgres_query_result_xlsx_preserves_temporal_cell_types() {
         csv_quote_mode: Default::default(),
         null_literal: String::new(),
         export_table_name: None,
+        export_schema: None,
         export_column_types: None,
         selected_columns: None,
         export_column_extras: None,
@@ -319,6 +324,7 @@ async fn live_postgres_numeric_xlsx_ignores_fractional_trailing_zeros() {
         csv_quote_mode: Default::default(),
         null_literal: String::new(),
         export_table_name: None,
+        export_schema: None,
         export_column_types: None,
         selected_columns: None,
         export_column_extras: None,
@@ -402,6 +408,7 @@ async fn live_postgres_truncated_batch_result_export_replays_safe_temp_setup() {
         csv_quote_mode: Default::default(),
         null_literal: String::new(),
         export_table_name: None,
+        export_schema: None,
         export_column_types: None,
         selected_columns: None,
         export_column_extras: None,
@@ -429,6 +436,7 @@ async fn live_postgres_truncated_batch_result_export_replays_safe_temp_setup() {
         format: "xlsx".to_string(),
         client_session_id: Some(format!("temp-export-xlsx-{short_suffix}")),
         execution_id: Some(format!("temp-export-xlsx-{short_suffix}")),
+        export_schema: None,
         ..request
     };
     let xlsx_rows = AtomicU64::new(0);
@@ -487,6 +495,7 @@ async fn live_postgres_xlsx_export_can_outlive_query_timeout_while_rows_keep_arr
         csv_quote_mode: Default::default(),
         null_literal: String::new(),
         export_table_name: None,
+        export_schema: None,
         export_column_types: None,
         selected_columns: None,
         export_column_extras: None,
@@ -563,6 +572,7 @@ async fn live_postgres_stream_still_times_out_without_progress_and_recovers() {
         csv_quote_mode: Default::default(),
         null_literal: String::new(),
         export_table_name: None,
+        export_schema: None,
         export_column_types: None,
         selected_columns: None,
         export_column_extras: None,

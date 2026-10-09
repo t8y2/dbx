@@ -4,7 +4,7 @@ import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMoun
 import { Compartment, StateEffect, StateField } from "@codemirror/state";
 import { ensureSyntaxTree } from "@codemirror/language";
 import { setDiagnostics } from "@codemirror/lint";
-import { Decoration, EditorView } from "@codemirror/view";
+import { Decoration, EditorView, keymap as codeMirrorKeymap } from "@codemirror/view";
 import { Archive, ArrowLeftRight, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Clipboard, Columns3, Download, ExternalLink, FileClock, FileInput, FileText, Loader2, Maximize2, Minimize2, Network, Plus, RefreshCw, ReplaceAll, Save, Search, Send, Server, Trash2, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -57,12 +57,15 @@ import { editorFontTheme, loadEditorTheme } from "@/lib/editor/editorThemes";
 import { clampEditorFontSize, createEditorWheelZoomGestureGuard, createEditorZoomCommitScheduler, fontSizeFromWheelDelta } from "@/lib/editor/editorZoom";
 import { replaceFallbackKey } from "@/lib/editor/queryEditorSearchKeymap";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { matchesShortcut } from "@/lib/editor/keyboardShortcuts";
+import { selectLineEndsDefaultShortcut, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
+import { selectLineEnds } from "@/lib/editor/selectLineEnds";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useTheme } from "@/composables/useTheme";
 import { executeWithProductionContextGuard } from "@/lib/database/productionExecutionGuard";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
-import { validateNacosConfigContent, nacosConfigDiagnosticSeverity, nacosConfigValidationBlocksPublish, type NacosConfigDiagnostic } from "@/lib/nacos/nacosConfigValidation";
+import { validateNacosConfigContent, nacosConfigDiagnosticSeverity, nacosConfigValidationHasErrors, type NacosConfigDiagnostic } from "@/lib/nacos/nacosConfigValidation";
 import { loadNacosConfigLanguage, resolveNacosConfigFormat } from "@/lib/nacos/nacosConfigLanguage";
 import { nacosConfigYamlLintDiagnostics, nacosConfigYamlLintExtension } from "@/lib/nacos/nacosConfigYamlLint";
 import { translateNacosYamlDiagnostic } from "@/lib/nacos/nacosYamlDiagnostics";
@@ -249,6 +252,8 @@ const configEditorFontTheme = new Compartment();
 const configEditorWordWrap = new Compartment();
 const configEditorLanguage = new Compartment();
 const configValidationHighlight = new Compartment();
+const configEditorShortcut = new Compartment();
+const selectLineEndsShortcut = () => settingsStore.editorSettings?.shortcuts?.selectLineEnds ?? selectLineEndsDefaultShortcut();
 const setConfigValidationHighlight = StateEffect.define<NacosConfigDiagnostic[]>();
 const configListRequestGuard = createNacosLatestRequestGuard();
 const configDetailRequestGuard = createNacosLatestRequestGuard();
@@ -593,6 +598,10 @@ function configValidationHighlightExtension() {
   return field;
 }
 
+watch(selectLineEndsShortcut, (shortcut) => {
+  configEditorView.value?.dispatch({ effects: configEditorShortcut.reconfigure(codeMirrorKeymap.of([{ key: shortcutToCodeMirrorKey(shortcut), preventDefault: true, run: selectLineEnds }])) });
+});
+
 async function mountConfigEditor() {
   await nextTick();
   if (!configEditorHost.value || configEditorView.value || !selectedConfig.value) return;
@@ -627,9 +636,15 @@ async function mountConfigEditor() {
       basicSetup,
       EditorState.allowMultipleSelections.of(true),
       trimmedSelectionLayer(),
+      configEditorShortcut.of(keymap.of([{ key: shortcutToCodeMirrorKey(selectLineEndsShortcut()), preventDefault: true, run: selectLineEnds }])),
       Prec.highest(keymap.of([{ key: "Mod-f", run: () => configSearchPanelRef.value?.openSearch() ?? false, preventDefault: true }, { key: replaceFallbackKey(), run: () => configSearchPanelRef.value?.openReplace() ?? false, preventDefault: true }, indentWithTab])),
       keymap.of([...defaultKeymap, ...historyKeymap]),
       EditorView.domEventHandlers({
+        keydown(event, eventView) {
+          if (!matchesShortcut(event, selectLineEndsShortcut())) return false;
+          event.preventDefault();
+          return selectLineEnds(eventView);
+        },
         wheel(event, eventView) {
           if (!configEditorWheelZoomGestureGuard.accepts(event)) return false;
           event.preventDefault();
@@ -864,7 +879,7 @@ function clearConfigValidation(clearHighlight = true) {
 /** True when the open config is YAML, which shows diagnostics through CodeMirror's linter rather than the legacy decoration. */
 const configUsesYamlLint = computed(() => resolveNacosConfigFormat(configType.value, configDataId.value) === "yaml");
 
-const configValidationHasError = computed(() => configValidationDiagnostics.value.some((diagnostic) => nacosConfigDiagnosticSeverity(diagnostic) === "error"));
+const configValidationHasError = computed(() => nacosConfigValidationHasErrors(configValidationDiagnostics.value));
 
 function configDiagnosticTranslate(key: string, params: Record<string, string>) {
   return t(key, params);
@@ -891,25 +906,17 @@ function refreshConfigValidationHighlights(content: string, generation: number, 
   });
 }
 
-function validateCurrentConfig(showSuccess = true): boolean {
-  if (!selectedConfig.value) return true;
+function validateCurrentConfig(): void {
+  if (!selectedConfig.value) return;
   const diagnostics = validateNacosConfigContent(configContent.value, configType.value);
   configValidationDiagnostics.value = diagnostics;
   configValidationHighlightActive = false;
   configEditorView.value?.dispatch({ effects: setConfigValidationHighlight.of([]) });
-  // Only errors block publishing: a parser warning must never trap a config the
-  // user is entitled to publish (#9405).
-  if (nacosConfigValidationBlocksPublish(diagnostics)) {
-    configValidationOpen.value = true;
-    return false;
-  }
-  if (!showSuccess) return true;
   if (diagnostics.length) {
     configValidationOpen.value = true;
-    return true;
+    return;
   }
   toast(t("nacos.validationPassed"), 2000);
-  return true;
 }
 
 function focusConfigValidationDiagnostic() {
@@ -1830,7 +1837,7 @@ async function setConfigFormat(format: string) {
 
 function requestSaveConfig() {
   if (!selectedConfig.value || !canRequestConfigSave.value) return;
-  if (!validateCurrentConfig(false)) return;
+  // Syntax diagnostics are advisory; publish the original content for Nacos to accept or reject.
   if (!isCreatingConfig.value && configContent.value !== originalConfigContent.value) {
     pendingConfigSave.value = true;
     return;

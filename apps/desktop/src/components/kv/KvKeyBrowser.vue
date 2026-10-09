@@ -1512,7 +1512,7 @@ async function exportSelectedKey(): Promise<boolean> {
     null,
     2,
   );
-  return saveTextFile(content, filename, "DBX KV Bundle", "json", { operation: "kv-key-export" });
+  return Boolean(await saveTextFile(content, filename, "DBX KV Bundle", "json", { operation: "kv-key-export" }));
 }
 
 async function exportNode(node: BrowserTreeNode) {

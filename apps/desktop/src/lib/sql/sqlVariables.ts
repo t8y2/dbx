@@ -133,9 +133,12 @@ function collectDeclarations(sql: string, databaseType?: DatabaseType): Declarat
   return declarations;
 }
 
-// Parse `@set name = value` starting at `start` (the `@`). The value runs until
-// the terminating `;` or end of input, honouring nested quotes, comments and
-// parentheses so that `IN (...)` lists and quoted strings survive intact.
+// Parse `@set name = value` starting at `start` (the `@`). Values that start on
+// the line following `=` (i.e. `=` is immediately followed by a newline) are
+// treated as multiline values and continue across lines until a terminating `;`,
+// the next `@set` declaration, or EOF. Values starting on the same line as `=`
+// terminate at newline or comments (honouring nested quotes, dollar quotes,
+// comments and parentheses/brackets).
 function readDeclaration(sql: string, start: number, databaseType?: DatabaseType): DeclarationSpan | null {
   let i = start + 1 + "set".length;
   i = skipInlineWhitespace(sql, i);
@@ -149,8 +152,15 @@ function readDeclaration(sql: string, start: number, databaseType?: DatabaseType
   i += 1;
   i = skipInlineWhitespace(sql, i);
 
+  const isMultiline = sql[i] === "\n" || (sql[i] === "\r" && sql[i + 1] === "\n") || sql[i] === "\r";
+  if (sql[i] === "\r" && sql[i + 1] === "\n") {
+    i += 2;
+  } else if (sql[i] === "\n" || sql[i] === "\r") {
+    i += 1;
+  }
+
   const valueStart = i;
-  const valueEnd = readValueEnd(sql, i, databaseType);
+  const valueEnd = readValueEnd(sql, i, databaseType, isMultiline);
   const value = sql.slice(valueStart, valueEnd).trim();
   if (!value) return null;
 
@@ -161,7 +171,7 @@ function readDeclaration(sql: string, start: number, databaseType?: DatabaseType
   return { name, value, start, end };
 }
 
-function readValueEnd(sql: string, start: number, databaseType?: DatabaseType): number {
+function readValueEnd(sql: string, start: number, databaseType?: DatabaseType, isMultiline = false): number {
   let i = start;
   let depth = 0;
   let bracketDepth = 0;
@@ -182,8 +192,28 @@ function readValueEnd(sql: string, start: number, databaseType?: DatabaseType): 
       continue;
     }
     if (databaseType === "postgres" && ch === "]") bracketDepth = Math.max(0, bracketDepth - 1);
-    if (ch === "-" && next === "-") return i;
-    if (ch === "/" && next === "*") return i;
+    if (ch === "-" && next === "-") {
+      if (!isMultiline && depth === 0 && bracketDepth === 0) {
+        return i;
+      }
+      const lineEnd = skipLine(sql, i + 2);
+      if (depth === 0 && bracketDepth === 0 && isNextDeclaration(sql, lineEnd)) {
+        return i;
+      }
+      i = lineEnd;
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      if (!isMultiline && depth === 0 && bracketDepth === 0) {
+        return i;
+      }
+      const blockEnd = skipBlockComment(sql, i + 2);
+      if (depth === 0 && bracketDepth === 0 && isNextDeclaration(sql, blockEnd)) {
+        return i;
+      }
+      i = blockEnd;
+      continue;
+    }
     if (ch === "$") {
       const marker = readDollarQuoteMarker(sql, i);
       if (marker) {
@@ -194,7 +224,18 @@ function readValueEnd(sql: string, start: number, databaseType?: DatabaseType): 
     }
     if (ch === "(") depth += 1;
     else if (ch === ")") depth = Math.max(0, depth - 1);
-    else if ((ch === ";" || ch === "\n") && depth === 0 && bracketDepth === 0) return i;
+    else if (ch === ";" && depth === 0 && bracketDepth === 0) return i;
+    else if (ch === "\r" && next === "\n" && depth === 0 && bracketDepth === 0) {
+      if (!isMultiline || isNextDeclaration(sql, i + 2)) {
+        return i;
+      }
+      i += 2;
+      continue;
+    } else if ((ch === "\n" || ch === "\r") && depth === 0 && bracketDepth === 0) {
+      if (!isMultiline || isNextDeclaration(sql, i + 1)) {
+        return i;
+      }
+    }
     i += 1;
   }
   return sql.length;
@@ -304,6 +345,28 @@ function matchesWord(sql: string, start: number, word: string): boolean {
   return !VARIABLE_NAME_CHAR_RE.test(sql[start + word.length] ?? "");
 }
 
+function isNextDeclaration(sql: string, start: number): boolean {
+  let j = start;
+  while (j < sql.length) {
+    const ch = sql[j];
+    const next = sql[j + 1];
+    if (ch === " " || ch === "\t" || ch === "\r" || ch === "\n") {
+      j += 1;
+      continue;
+    }
+    if (ch === "-" && next === "-") {
+      j = skipLine(sql, j + 2);
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      j = skipBlockComment(sql, j + 2);
+      continue;
+    }
+    break;
+  }
+  return sql[j] === "@" && matchesWord(sql, j + 1, "set");
+}
+
 function readVariableName(sql: string, start: number): string {
   if (!VARIABLE_NAME_START_RE.test(sql[start] ?? "")) return "";
   let i = start + 1;
@@ -313,7 +376,7 @@ function readVariableName(sql: string, start: number): string {
 
 function skipInlineWhitespace(sql: string, start: number): number {
   let i = start;
-  while (i < sql.length && (sql[i] === " " || sql[i] === "\t" || sql[i] === "\r")) i += 1;
+  while (i < sql.length && (sql[i] === " " || sql[i] === "\t")) i += 1;
   return i;
 }
 

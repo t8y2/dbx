@@ -277,7 +277,7 @@ pub async fn authorize_request(State(auth): State<HttpAuth>, mut request: Reques
                         return unauthorized(Some(oauth));
                     };
                     (
-                        format!("oauth:{}", principal.subject),
+                        format!("oauth:{:x}", Sha256::digest(serde_json::to_vec(&(principal.issuer, principal.subject)).expect("string tuple serializes"))),
                         tokio::time::Instant::now() + remaining.min(Duration::from_secs(300)),
                     )
                 }
@@ -384,6 +384,7 @@ pub async fn authorize_request(State(auth): State<HttpAuth>, mut request: Reques
     };
     let deadline = deadline.min(tokio::time::Instant::now() + session_remaining);
     request.extensions_mut().insert(HttpRequestDeadline {
+        principal: principal.clone(),
         deadline,
         _permit: request_permit.clone(),
         session_cancellation: session_cancellation.clone(),
@@ -437,6 +438,7 @@ pub async fn authorize_request(State(auth): State<HttpAuth>, mut request: Reques
 
 #[derive(Clone)]
 pub(crate) struct HttpRequestDeadline {
+    pub principal: String,
     pub deadline: tokio::time::Instant,
     pub _permit: Arc<OwnedSemaphorePermit>,
     pub session_cancellation: tokio_util::sync::CancellationToken,

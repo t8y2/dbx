@@ -27,6 +27,12 @@ pub(super) fn build_table_comment_sql(options: &TableStructureSqlOptions, warnin
         StructureDialect::Mysql | StructureDialect::GaussdbM => {
             vec![format!("ALTER TABLE {table} COMMENT = {quoted};")]
         }
+        StructureDialect::Postgres if options.foreign_table => {
+            // PostgreSQL foreign tables (relkind = 'f') reject
+            // `COMMENT ON TABLE` ("<name>" is not a table) and require the
+            // FOREIGN form instead.
+            vec![format!("COMMENT ON FOREIGN TABLE {table} IS {quoted};")]
+        }
         StructureDialect::Postgres
         | StructureDialect::Oracle
         | StructureDialect::Dameng
@@ -215,6 +221,54 @@ fn is_sqlserver_legacy_profile(driver_profile: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pg_comment_options(foreign_table: bool) -> TableStructureSqlOptions {
+        TableStructureSqlOptions {
+            database_type: Some(DatabaseType::Postgres),
+            driver_profile: None,
+            schema: Some("de_sk".to_string()),
+            table_name: "vmes_base_destination".to_string(),
+            columns: Vec::new(),
+            indexes: Vec::new(),
+            foreign_keys: Vec::new(),
+            triggers: Vec::new(),
+            table_comment: Some("港口资料".to_string()),
+            original_table_comment: None,
+            mysql_engine: None,
+            transwarp_create: None,
+            partitioned: false,
+            is_gaussdb_m_mode: false,
+            table_collation: None,
+            foreign_table,
+        }
+    }
+
+    #[test]
+    fn postgres_foreign_table_comment_uses_foreign_table_form() {
+        let mut warnings = Vec::new();
+        let statements = build_table_comment_sql(&pg_comment_options(true), &mut warnings);
+
+        assert_eq!(statements, vec!["COMMENT ON FOREIGN TABLE \"de_sk\".\"vmes_base_destination\" IS '港口资料';"]);
+        assert!(warnings.is_empty(), "no warnings expected: {warnings:?}");
+    }
+
+    #[test]
+    fn postgres_regular_table_comment_keeps_table_form() {
+        let mut warnings = Vec::new();
+        let statements = build_table_comment_sql(&pg_comment_options(false), &mut warnings);
+
+        assert_eq!(statements, vec!["COMMENT ON TABLE \"de_sk\".\"vmes_base_destination\" IS '港口资料';"]);
+    }
+
+    #[test]
+    fn foreign_table_flag_is_ignored_by_non_postgres_dialects() {
+        let mut options = pg_comment_options(true);
+        options.database_type = Some(DatabaseType::Oracle);
+        let mut warnings = Vec::new();
+        let statements = build_table_comment_sql(&options, &mut warnings);
+
+        assert_eq!(statements, vec!["COMMENT ON TABLE \"de_sk\".\"vmes_base_destination\" IS '港口资料';"]);
+    }
 
     #[test]
     fn sqlserver_table_comment_updates_or_adds_without_dropping() {

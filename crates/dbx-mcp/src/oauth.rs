@@ -51,6 +51,7 @@ pub enum OAuthError {
 
 #[derive(Clone)]
 pub struct OAuthPrincipal {
+    pub issuer: String,
     pub subject: String,
     pub expires_at: u64,
 }
@@ -183,7 +184,7 @@ impl OAuthVerifier {
         if !claims.scope.split_ascii_whitespace().any(|scope| scope == self.inner.scope) {
             return Err(OAuthError::InsufficientScope);
         }
-        Ok(OAuthPrincipal { subject: claims.sub, expires_at: claims.exp })
+        Ok(OAuthPrincipal { issuer: self.inner.issuer.clone(), subject: claims.sub, expires_at: claims.exp })
     }
 
     pub fn metadata(&self) -> ProtectedResourceMetadata {

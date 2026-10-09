@@ -56,6 +56,18 @@ describe("external SQL file targets", () => {
     });
   });
 
+  it("reuses the active MongoDB tab context for a script file only when explicitly allowed", () => {
+    const tabs = [{ id: "mongo-tab", connectionId: "mongo-connection", database: "app_db", mode: "query" as const }];
+    const lookup = () => ({ db_type: "mongodb" as const });
+    const target = { connectionId: "mongo-connection", database: "app_db", catalog: undefined, schema: undefined };
+
+    expect(activeTabExternalSqlFileTarget(tabs, "mongo-tab", lookup)).toEqual(unassociatedExternalSqlFileTarget());
+    expect(resolveExternalSqlFileTargetForActiveTab("/work/query.js", tabs, "mongo-tab", lookup)).toEqual(unassociatedExternalSqlFileTarget());
+    expect(activeTabExternalSqlFileTarget(tabs, "mongo-tab", lookup, { allowMongoScripts: true })).toEqual(target);
+    expect(resolveExternalSqlFileTargetForActiveTab("/work/query.js", tabs, "mongo-tab", lookup, { allowMongoScripts: true })).toEqual(target);
+    expect(activeTabExternalSqlFileTarget(tabs, "mongo-tab", () => ({ db_type: "redis" }), { allowMongoScripts: true })).toEqual(unassociatedExternalSqlFileTarget());
+  });
+
   it("keeps the fallback unassociated without an active tab", () => {
     const tabs = [{ id: "inactive-tab", connectionId: "sql-connection", database: "analytics", mode: "query" as const }];
 
@@ -63,7 +75,7 @@ describe("external SQL file targets", () => {
     expect(activeTabExternalSqlFileTarget(tabs, "missing-tab", () => ({ db_type: "postgres" }))).toEqual(unassociatedExternalSqlFileTarget());
   });
 
-  it.each(["mq", "zookeeper", "plugin", "redis"] as const)("does not reuse a non-SQL %s tab target", (dbType) => {
+  it.each(["mq", "zookeeper", "plugin", "redis", "mongodb"] as const)("does not reuse a non-SQL %s tab target", (dbType) => {
     const tabs = [{ id: "active-tab", connectionId: "non-sql-connection", database: "invalid", catalog: "invalid", schema: "invalid", mode: "query" as const }];
 
     expect(activeTabExternalSqlFileTarget(tabs, "active-tab", () => ({ db_type: dbType }))).toEqual(unassociatedExternalSqlFileTarget());

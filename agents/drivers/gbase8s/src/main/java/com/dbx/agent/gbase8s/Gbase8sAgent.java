@@ -981,6 +981,8 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
             case 41 -> "BOOLEAN";
             case 43, 52 -> "BIGINT";
             case 44, 53 -> "BIGSERIAL";
+            case 63 -> "VARCHAR2";
+            case 64 -> "NVARCHAR2";
             // MySQL-compat extended types (SQLMODE=mysql); codes match the
             // 3.6.5+ driver's IfxBigIntUnsigned/IfxTinyInt/IfxMediumInt/IfxBit.
             case 66 -> "BIGINT UNSIGNED";
@@ -1107,7 +1109,7 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
 
     private static Integer characterMaximumLength(int baseType, int length) {
         return switch (baseType) {
-            case 0, 13, 15, 16, 40 -> length;
+            case 0, 13, 15, 16, 40, 63, 64 -> length;
             default -> null;
         };
     }

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { supportsDatabaseFeature } from "@/lib/database/databaseDriverManifest";
 import {
   dorisGrantPrivilegesSql,
   dorisGrantsResult,
@@ -15,6 +16,7 @@ import {
   postgresUserAdminProvider,
   resolveDatabaseUserAdminProviderForConnection,
   starrocksTableGrantsResult,
+  supportsDatabaseUserAdmin,
 } from "@/lib/database/databaseUserAdmin";
 import type { ConnectionConfig, QueryResult } from "@/types/database";
 
@@ -34,6 +36,27 @@ function connection(dbType: ConnectionConfig["db_type"], driverProfile?: string)
     password: "",
   };
 }
+
+describe("Vastbase password changes", () => {
+  const user = { user: 'fixture"role', host: "LOGIN" };
+
+  it("quotes both passwords and the role in the exact self-change grammar", () => {
+    const provider = getDatabaseUserAdminProvider("vastbase")!;
+    expect(provider.alterPasswordSql!(user, "new'password", "old'password")).toBe(`ALTER ROLE "fixture""role" IDENTIFIED BY 'new''password' REPLACE 'old''password';`);
+  });
+
+  it("allows the server to authorize a reset without the old password", () => {
+    const provider = getDatabaseUserAdminProvider("vastbase")!;
+    expect(provider.alterPasswordSql!(user, "new", "")).toBe('ALTER ROLE "fixture""role" IDENTIFIED BY \'new\';');
+    expect(provider.alterPasswordSql!(user, "new")).toBe('ALTER ROLE "fixture""role" IDENTIFIED BY \'new\';');
+  });
+
+  it("keeps whitespace in old passwords and preserves PostgreSQL and MySQL defaults", () => {
+    expect(getDatabaseUserAdminProvider("vastbase")!.alterPasswordSql!(user, "new", " ")).toContain(" REPLACE ' ';");
+    expect(getDatabaseUserAdminProvider("postgres")!.alterPasswordSql!(user, "new", "old")).toBe('ALTER ROLE "fixture""role" PASSWORD \'new\';');
+    expect(getDatabaseUserAdminProvider("mysql")!.alterPasswordSql!({ user: "fixture", host: "%" }, "new", "old")).toBe("ALTER USER 'fixture'@'%' IDENTIFIED BY 'new';");
+  });
+});
 
 describe("MySQL grant privilege selection", () => {
   const availablePrivileges = ["SELECT", "INSERT", "UPDATE", "EXECUTE"];
@@ -84,6 +107,13 @@ describe("MySQL grant privilege selection", () => {
 });
 
 describe("database user admin providers", () => {
+  it("keeps Xugu on its dedicated permission surface despite the product capability", () => {
+    expect(supportsDatabaseFeature("xugu", "userAdmin")).toBe(true);
+    expect(supportsDatabaseUserAdmin("xugu")).toBe(false);
+    expect(getDatabaseUserAdminProvider("xugu")).toBeNull();
+    expect(resolveDatabaseUserAdminProviderForConnection(connection("xugu"))).toBeNull();
+  });
+
   it("opts only native MySQL connections into account Host changes", () => {
     const legacyNative = resolveDatabaseUserAdminProviderForConnection(connection("mysql"));
     const blankLegacyNative = resolveDatabaseUserAdminProviderForConnection(connection("mysql", "  "));

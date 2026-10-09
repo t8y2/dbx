@@ -1026,20 +1026,17 @@ function buildCursorIntent(tokens: readonly SqlSemanticToken[], cursor: number, 
     return { kind: "alias_column", prefix: trailing.prefix, replacementRange: trailing.replacementRange, qualifierParts: trailing.qualifierParts, targetSourceId: targetSource.id, expectedObjectKinds: ["column"], confidence: "high" };
   }
 
-  // A table introducer only introduces the slot that follows it, so both checks read
-  // the word before the identifier being completed (wordBeforeTrailing) or before its
-  // whole qualified name (wordBeforeReplacement). `previous` must not be used here: it
-  // is the word at the cursor, so typing `update`/`from`/`join` in full made the
-  // keyword introduce its own slot and dropped its own completion (issue #10415).
   if (TABLE_INTRODUCERS.has(wordBeforeReplacement) || TABLE_INTRODUCERS.has(wordBeforeTrailing) || tableListContinuation) {
     return { kind: "table", prefix: trailing.prefix, replacementRange: trailing.replacementRange, qualifierParts: trailing.qualifierParts, expectedObjectKinds: ["table", "view"], confidence: "high" };
   }
 
-  if (previous === "call" || previous === "exec" || previous === "execute") {
+  const routineIntroducer = wordBeforeTrailing || wordBeforeReplacement;
+  if (routineIntroducer === "call" || routineIntroducer === "exec" || routineIntroducer === "execute") {
     return { kind: "routine", prefix: trailing.prefix, replacementRange: trailing.replacementRange, qualifierParts: trailing.qualifierParts, expectedObjectKinds: ["routine", "procedure", "function"], confidence: "high" };
   }
 
-  if (previous === "set") {
+  const updateColumnIntroducer = wordBeforeTrailing || wordBeforeReplacement;
+  if (updateColumnIntroducer === "set") {
     return {
       kind: "update_column",
       prefix: trailing.prefix,

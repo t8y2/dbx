@@ -147,7 +147,8 @@ class OceanBaseOracleAgentTest {
         List<String> auditSql = new ArrayList<>();
         Connection auditConnection = auditTimingConnection(1, 2, false, auditSql, new ArrayList<>(), auditLimits);
         int[] row = {-1};
-        int[] queryLimit = {0}; // JDBC's default, independent of the client-side cap.
+        int[] queryLimit = {0};
+        int[] queryFetchSize = {0};
         boolean[] queryStarted = {false};
         boolean[] resultClosed = {false};
         boolean[] statementClosed = {false};
@@ -167,6 +168,7 @@ class OceanBaseOracleAgentTest {
         });
         Statement statement = proxy(Statement.class, (method, args) -> {
             if ("setMaxRows".equals(method.getName())) queryLimit[0] = (Integer) args[0];
+            if ("setFetchSize".equals(method.getName())) queryFetchSize[0] = (Integer) args[0];
             if ("execute".equals(method.getName())) {
                 queryStarted[0] = !String.valueOf(args[0]).startsWith("ALTER SESSION");
                 statementClosed[0] = false;
@@ -198,7 +200,8 @@ class OceanBaseOracleAgentTest {
         Assertions.assertFalse(result.getHas_more());
         Assertions.assertEquals(truncated, result.getTruncated());
         Assertions.assertEquals(truncated ? List.of(List.of(1)) : List.of(List.of(1), List.of(2)), rows);
-        Assertions.assertEquals(0, queryLimit[0], "the paging cap must not change the JDBC statement limit");
+        Assertions.assertEquals(maxRows + 1, queryLimit[0]);
+        Assertions.assertTrue(queryFetchSize[0] > 0);
         Assertions.assertTrue(auditSql.isEmpty(), "completed queries must not read trace or audit records");
         Assertions.assertTrue(auditLimits.isEmpty());
         Assertions.assertNull(result.getServer_execute_time_us());

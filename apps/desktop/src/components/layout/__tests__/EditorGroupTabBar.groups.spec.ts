@@ -75,6 +75,8 @@ function mountBar(groupId: string, tabs: ReturnType<ReturnType<typeof useQuerySt
             closeTabGroup: "Close group",
             editTabGroup: "Edit group",
             resetTabGroup: "Reset group",
+            collapseAll: "Collapse all",
+            expandAll: "Expand all",
             pinTab: "Pin",
             unpinTab: "Unpin",
             fullTabTitle: "Full title",
@@ -333,6 +335,138 @@ describe("EditorGroupTabBar group behavior", () => {
     headers[0]!.click();
     await settle();
     expect(host.querySelector(".tab-group-count")?.textContent).toBe("2");
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("renders connection-to-database-to-tab guide segments for multiple databases", async () => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabGroupMode = "sidebar";
+    settings.editorSettings.tabPlacement = "left";
+    store.createTab("mysql-1", "app", "App 1", "query");
+    store.createTab("mysql-1", "app", "App 2", "query");
+    store.createTab("mysql-1", "audit", "Audit", "query");
+    const { app, host } = mountBar(store.groups[0]!.id, store.tabs.slice(), store.activeTabId, pinia);
+    await settle();
+
+    expect(host.querySelectorAll(".tab-group-header")).toHaveLength(3);
+    expect(host.querySelectorAll("[data-tree-level='connection']")).toHaveLength(1);
+    expect(host.querySelectorAll("[data-tree-level='database']")).toHaveLength(2);
+    expect(host.querySelector("[data-tree-level='connection'] .tab-group-connection-icon")).not.toBeNull();
+    expect(host.querySelector("[data-tree-level='database'] .tab-group-library-icon")).not.toBeNull();
+    expect(host.querySelectorAll(".tab-tree-guide--through")).toHaveLength(2);
+    expect(host.querySelectorAll(".tab-tree-guide--branch")).toHaveLength(2);
+    expect(host.querySelectorAll(".tab-tree-guide--last-branch")).toHaveLength(3);
+
+    const databaseHeader = host.querySelector<HTMLElement>("[data-tree-level='database']")!;
+    databaseHeader.click();
+    await settle();
+    expect(databaseHeader.querySelector(".tab-tree-guide--start")).toBeNull();
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("renders standalone plugin workbenches outside the connection hierarchy", async () => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabGroupMode = "sidebar";
+    settings.editorSettings.tabPlacement = "left";
+    const pluginTabId = store.openPluginWorkbench("io.dbx.ssh", "io.dbx.ssh.workbench", { title: "SSH server" });
+    const { app, host } = mountBar(store.groups[0]!.id, store.tabs.slice(), pluginTabId, pinia);
+    await settle();
+
+    expect(host.querySelectorAll(".tab-group-header")).toHaveLength(0);
+    expect(host.querySelector(`[data-tab-id="${pluginTabId}"]`)?.textContent).toContain("SSH server");
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("uses plugin-aware icons for sidebar connection headers", async () => {
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [
+      {
+        id: "ssh-1",
+        name: "SSH",
+        db_type: "plugin",
+        driver_profile: "plugin",
+        host: "127.0.0.1",
+        port: 22,
+        color: "",
+        plugin_id: "io.dbx.ssh",
+        plugin_connection_provider: "io.dbx.ssh.connection",
+      } as ConnectionConfig,
+    ];
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabGroupMode = "sidebar";
+    settings.editorSettings.tabPlacement = "left";
+    const pluginTabId = store.openPluginWorkbench("io.dbx.ssh", "io.dbx.ssh.workbench", { title: "SSH server", connectionId: "ssh-1" });
+    const { app, host } = mountBar(store.groups[0]!.id, store.tabs.slice(), pluginTabId, pinia);
+    for (let index = 0; index < 20 && !host.querySelector("[data-tree-level='connection'] img"); index += 1) {
+      await new Promise((resolveTimeout) => setTimeout(resolveTimeout, 5));
+    }
+
+    expect(host.querySelector("[data-tree-level='connection'] img")).not.toBeNull();
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("labels Redis database branches with their indexes and aliases", async () => {
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [
+      {
+        id: "redis-1",
+        name: "Redis Cache",
+        db_type: "redis",
+        driver_profile: "redis",
+        host: "127.0.0.1",
+        port: 6379,
+        color: "",
+        redis_database_aliases: { "1": "Sessions" },
+      } as ConnectionConfig,
+    ];
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabGroupMode = "sidebar";
+    settings.editorSettings.tabPlacement = "left";
+    const db0 = store.createTab("redis-1", "0", "Redis 0", "redis");
+    store.createTab("redis-1", "1", "Redis 1", "redis");
+    const { app, host } = mountBar(store.groups[0]!.id, store.tabs.slice(), db0, pinia);
+    await settle();
+
+    const headers = Array.from(host.querySelectorAll<HTMLButtonElement>(".tab-group-header"));
+    expect(headers.map((header) => header.title)).toEqual(["Redis Cache", "db0", "db1 · Sessions"]);
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("collapses every sidebar connection and database branch from a header menu", async () => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabGroupMode = "sidebar";
+    settings.editorSettings.tabPlacement = "left";
+    store.createTab("mysql-1", "app", "App", "query");
+    store.createTab("mysql-1", "audit", "Audit", "query");
+    store.createTab("pg-1", "app", "Postgres", "query");
+    const { app, host } = mountBar(store.groups[0]!.id, store.tabs.slice(), store.activeTabId, pinia);
+    await settle();
+
+    host.querySelector<HTMLElement>(".tab-group-header")!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+    await settle();
+    const menu = document.body.querySelector<HTMLElement>("[data-dbx-context-menu]")!;
+    const collapseAll = Array.from(menu.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes("Collapse all"));
+    expect(collapseAll).toBeDefined();
+    collapseAll!.click();
+    await settle();
+
+    expect(Array.from(host.querySelectorAll(".tab-group-header"), (header) => header.getAttribute("aria-expanded"))).toEqual(["false", "false", "false", "false", "false"]);
+    expect(host.querySelectorAll(".tab-group-entry--collapsed")).toHaveLength(3);
 
     app.unmount();
     host.remove();

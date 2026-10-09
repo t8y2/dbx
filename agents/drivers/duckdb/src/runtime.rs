@@ -756,6 +756,15 @@ mod tests {
             .expect("list tables");
         assert!(tables.iter().any(|table| table.name == "facts"));
 
+        let columns = session
+            .list_columns(DuckDbWorkerColumnParams {
+                database: "main".to_string(),
+                schema: "warehouse".to_string(),
+                table: "facts".to_string(),
+            })
+            .expect("list init-script attached columns");
+        assert_eq!(columns.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(), ["id"]);
+
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -831,6 +840,15 @@ mod tests {
             .list_tables(DuckDbWorkerTableParams { database: "sales db".to_string(), schema: "main".to_string() })
             .expect("list tables");
         assert!(tables.iter().any(|table| table.name == "orders"));
+
+        let columns = session
+            .list_columns(DuckDbWorkerColumnParams {
+                database: "main".to_string(),
+                schema: "SALES DB".to_string(),
+                table: "orders".to_string(),
+            })
+            .expect("list SQL-attached columns");
+        assert_eq!(columns.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(), ["id"]);
 
         let _ = std::fs::remove_dir_all(dir);
     }

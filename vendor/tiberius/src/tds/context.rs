@@ -54,6 +54,10 @@ impl Context {
         self.transaction_desc = desc;
     }
 
+    pub fn set_version(&mut self, version: FeatureLevel) {
+        self.version = version;
+    }
+
     pub fn version(&self) -> FeatureLevel {
         self.version
     }

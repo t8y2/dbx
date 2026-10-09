@@ -111,7 +111,9 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
   }
 
   function largeValueOriginalBytes(item: Pick<LargeValueRowItem, "sourceIndex" | "isNew" | "isDraft" | "isDirtyCol"> | undefined, columnIndex: number): number | undefined {
-    if (options.databaseType.value !== "mysql" || !item || item.isNew || item.isDraft || item.sourceIndex === undefined || item.isDirtyCol[columnIndex]) return undefined;
+    // Other PostgreSQL preview types still carry an internal estimate, not an exact size.
+    const hasKnownByteSize = options.databaseType.value === "mysql" || (options.databaseType.value === "postgres" && options.allColumnTypes.value[columnIndex]?.trim().toLowerCase() === "bytea");
+    if (!hasKnownByteSize || !item || item.isNew || item.isDraft || item.sourceIndex === undefined || item.isDirtyCol[columnIndex]) return undefined;
     return largeValueCellsByKey.value.get(largeValueCellKey(item.sourceIndex, columnIndex))?.original_bytes;
   }
 
@@ -383,11 +385,15 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
   options.runtimeScope.addCleanup(pauseVisibleLargeValuePreviewHydration);
 
   function chunkLargeValueRequests(requests: LargeValueCellRequest[]): LargeValueCellRequest[][] {
+    // PostgreSQL full-value SQL uses SELECT *, so this column's exact byte size
+    // cannot bound other large columns in the same row. Keep the one-row batches
+    // used before bytea markers started reporting exact sizes.
+    const maxRows = options.databaseType.value === "postgres" ? 1 : LARGE_VALUE_FETCH_MAX_ROWS;
     const chunks: LargeValueCellRequest[][] = [];
     let chunk: LargeValueCellRequest[] = [];
     let bytes = 0;
     for (const request of requests) {
-      if (chunk.length > 0 && (chunk.length >= LARGE_VALUE_FETCH_MAX_ROWS || bytes + request.originalBytes > LARGE_VALUE_FETCH_TARGET_BYTES)) {
+      if (chunk.length > 0 && (chunk.length >= maxRows || bytes + request.originalBytes > LARGE_VALUE_FETCH_TARGET_BYTES)) {
         chunks.push(chunk);
         chunk = [];
         bytes = 0;
@@ -487,11 +493,16 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
       }
     }
     if (requestsByColumn.size === 0) return resolved;
-    if ((options.databaseType.value !== "mysql" && options.databaseType.value !== "postgres" && options.databaseType.value !== "oracle") || !options.connectionId.value || !options.tableMeta.value?.tableName || options.tableMeta.value.primaryKeys.length === 0) {
-      throw new Error(options.translate("grid.largeValueNeedsStableKey"));
+    if (
+      (options.databaseType.value !== "mysql" && options.databaseType.value !== "postgres" && options.databaseType.value !== "oracle" && options.databaseType.value !== "db2") ||
+      !options.connectionId.value ||
+      !options.tableMeta.value?.tableName ||
+      options.tableMeta.value.primaryKeys.length === 0
+    ) {
+      throw new Error(options.translate("grid.largeValueNeedsRowIdentifier"));
     }
     const primaryKeyIndexes = options.tableMeta.value.primaryKeys.map(largeValueSourceColumnIndex);
-    if (primaryKeyIndexes.some((index) => index < 0)) throw new Error(options.translate("grid.largeValueNeedsStableKey"));
+    if (primaryKeyIndexes.some((index) => index < 0)) throw new Error(options.translate("grid.largeValueNeedsRowIdentifier"));
 
     for (const [columnIndex, requests] of requestsByColumn) {
       for (const chunk of chunkLargeValueRequests(requests)) {

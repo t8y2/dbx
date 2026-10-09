@@ -1684,6 +1684,20 @@ SET t.no = s.no`;
 });
 
 describe("executableStatementRanges", () => {
+  it.each(["\n\n", ";\n", "; "])("keeps SELECT after an IRIS Contains operator separate with separator %j", (separator) => {
+    const first = "select * from oec_order_adminstatus where STAT_Code [ '123'";
+    const second = "select top 10 * from Ens_HOSDocument";
+    const sql = first + separator + second;
+
+    expect(rangeSqlTexts(executableStatementRanges(sql, "iris"))).toEqual([first, second]);
+    expect(currentExecutableStatementRange(sql, sql.indexOf(second) + 7, "iris")?.sql).toBe(second);
+  });
+
+  it("keeps SQL Server bracket identifiers containing semicolons quoted", () => {
+    const sql = "SELECT [name;part] FROM [table;part]; SELECT 2;";
+    expect(rangeSqlTexts(executableStatementRanges(sql, "sqlserver"))).toEqual(["SELECT [name;part] FROM [table;part]", "SELECT 2"]);
+  });
+
   it.each(["doris", "starrocks"] as const)("keeps %s half-open range partitions from swallowing the next statement", (databaseType) => {
     const first = `CREATE TABLE fixed_partitions_1 (
   sale_date date NULL,

@@ -83,5 +83,5 @@ test("normal writes do not require confirmation but destructive commands do", ()
   assert.equal(resolveRedisCommandSpec(["HSET"])?.safety, "write");
   assert.equal(resolveRedisCommandSpec(["LPUSH"])?.safety, "write");
   assert.equal(resolveRedisCommandSpec(["DEL"])?.safety, "confirm");
-  assert.equal(resolveRedisCommandSpec(["FLUSHDB"])?.safety, "confirm");
+  assert.equal(resolveRedisCommandSpec(["FLUSHDB"])?.safety, "blocked");
 });

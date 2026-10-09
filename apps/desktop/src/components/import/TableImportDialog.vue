@@ -32,6 +32,8 @@ import {
 import { importPreviewInput, importSourceDisplayName, uploadedImportSourceFromPreview } from "@/lib/import/importSource";
 import { getDataTypeOptions } from "@/lib/table/tableStructureEditorState";
 import { metadataSchemaForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { isSchemaAware } from "@/lib/database/databaseFeatureSupport";
+import { schemaOptionsForConnection } from "@/composables/useSchemaOptions";
 import type { ColumnInfo, DatabaseType } from "@/types/database";
 import * as api from "@/lib/backend/api";
 
@@ -185,7 +187,21 @@ const importFileExtensions = computed(() => ["csv", "tsv", "txt", "json", "xlsx"
 // ordinary INSERT/error behavior instead of approximating an upsert.
 const IMPORT_CONFLICT_DATABASE_TYPES = new Set<DatabaseType>(["postgres", "kingbase", "opengauss", "sqlite", "cloudflare-d1", "duckdb", "mysql", "doris", "starrocks"]);
 const supportsImportConflictPolicy = computed(() => structureDatabaseType.value !== undefined && IMPORT_CONFLICT_DATABASE_TYPES.has(structureDatabaseType.value));
-const targetSchema = computed(() => metadataSchemaForConnection(selectedConnection.value, props.prefillDatabase || "", props.prefillSchema));
+function defaultInitialSchema() {
+  if (props.prefillSchema !== undefined) return props.prefillSchema;
+  return metadataSchemaForConnection(selectedConnection.value, props.prefillDatabase || "", props.prefillSchema) || "";
+}
+
+const isSchemaCapable = computed(() => isSchemaAware(structureDatabaseType.value));
+const showSchemaSelector = computed(() => isSchemaCapable.value && !!props.prefillConnectionId);
+const selectedSchema = ref(defaultInitialSchema());
+const schemaOptions = ref<string[]>([]);
+const loadingSchemas = ref(false);
+let schemaOptionsRequestId = 0;
+const targetSchema = computed(() => {
+  if (selectedSchema.value) return selectedSchema.value;
+  return metadataSchemaForConnection(selectedConnection.value, props.prefillDatabase || "", props.prefillSchema) || "";
+});
 const dataTypeOptions = computed(() => mergeDataTypeOptions(dynamicDataTypeOptions.value, getDataTypeOptions(structureDatabaseType.value), Object.values(columnDataTypes.value)));
 const hasExistingTarget = computed(() => !!props.prefillTable || loadingExistingTables.value || existingTableNames.value.length > 0);
 const targetTableName = computed(() => (targetMode.value === "create" ? newTableName.value.trim() : selectedExistingTable.value));
@@ -258,7 +274,10 @@ const progressPercentFloor = ref(0);
 const progressPercent = computed(() => Math.max(rawProgressPercent.value, progressPercentFloor.value));
 const currentStepIndex = computed(() => wizardSteps.findIndex((step) => step.value === wizardStep.value));
 const targetLabel = computed(() => {
-  const pieces = [selectedConnection.value?.name, props.prefillDatabase, props.prefillSchema, targetTableName.value].filter(Boolean);
+  // Database-as-schema engines (MySQL/SQLite family) resolve targetSchema to
+  // the database name; keep it out of the label so it does not render twice.
+  const schemaPiece = targetSchema.value && targetSchema.value !== props.prefillDatabase ? targetSchema.value : "";
+  const pieces = [selectedConnection.value?.name, props.prefillDatabase, schemaPiece, targetTableName.value].filter(Boolean);
   return pieces.join(" / ");
 });
 const selectedSourceName = computed(() => {
@@ -383,6 +402,10 @@ function resetState() {
   batchEncodingRequestId++;
   existingTablesRequestId++;
   targetColumnsRequestId++;
+  schemaOptionsRequestId++;
+  schemaOptions.value = [];
+  loadingSchemas.value = false;
+  selectedSchema.value = defaultInitialSchema();
   if (previewReloadTimer) {
     clearTimeout(previewReloadTimer);
     previewReloadTimer = null;
@@ -523,7 +546,8 @@ function applyAutoMapping() {
     columnMapping.value = Object.fromEntries(currentPreview.columns.map((source) => [source, source]));
     return;
   }
-  columnMapping.value = autoMapImportColumns(currentPreview.columns, targetColumnNames.value);
+  const headerless = titleRow.value === 0 && (isDelimitedFormat(sourceFormat.value) || sourceFormat.value === "excel");
+  columnMapping.value = autoMapImportColumns(currentPreview.columns, targetColumnNames.value, headerless ? "position" : "auto");
 }
 
 function applySuggestedColumnDataTypes(currentPreview = preview.value) {
@@ -621,8 +645,60 @@ async function loadDataTypeOptions() {
   }
 }
 
-async function loadExistingTables() {
-  if (props.prefillTable || loadingExistingTables.value || existingTableNames.value.length || !props.prefillConnectionId || !props.prefillDatabase) return;
+async function loadSchemaOptions() {
+  const connectionId = props.prefillConnectionId;
+  const database = props.prefillDatabase || "";
+  if (!connectionId || !isSchemaCapable.value) {
+    schemaOptions.value = [];
+    loadingSchemas.value = false;
+    return;
+  }
+  const requestId = ++schemaOptionsRequestId;
+  loadingSchemas.value = true;
+  try {
+    await store.ensureConnected(connectionId);
+    const rawSchemas = await api.listSchemas(connectionId, database);
+    if (requestId !== schemaOptionsRequestId) return;
+    const filtered = schemaOptionsForConnection(rawSchemas, selectedConnection.value, database);
+    const active = selectedSchema.value || targetSchema.value;
+    if (active && !filtered.includes(active)) {
+      schemaOptions.value = [active, ...filtered];
+    } else {
+      schemaOptions.value = filtered;
+    }
+  } catch {
+    if (requestId === schemaOptionsRequestId) {
+      const active = selectedSchema.value || targetSchema.value;
+      schemaOptions.value = active ? [active] : [];
+    }
+  } finally {
+    if (requestId === schemaOptionsRequestId) {
+      loadingSchemas.value = false;
+    }
+  }
+}
+
+function handleSchemaChange(newSchema: string) {
+  const trimmed = newSchema.trim();
+  if (selectedSchema.value === trimmed) return;
+  selectedSchema.value = trimmed;
+  if (trimmed && !schemaOptions.value.includes(trimmed)) {
+    schemaOptions.value = [trimmed, ...schemaOptions.value];
+  }
+  existingTableNames.value = [];
+  selectedExistingTable.value = "";
+  targetColumns.value = [];
+  loadedTargetTableName.value = "";
+  if (targetMode.value === "existing") {
+    columnMapping.value = {};
+  }
+  if (targetMode.value === "existing" || wizardStep.value === "options") {
+    void loadExistingTables(true);
+  }
+}
+
+async function loadExistingTables(force = false) {
+  if (props.prefillTable || (!force && (loadingExistingTables.value || existingTableNames.value.length > 0)) || !props.prefillConnectionId || !props.prefillDatabase) return;
   const requestId = ++existingTablesRequestId;
   loadingExistingTables.value = true;
   errorMessage.value = "";
@@ -866,6 +942,24 @@ function updateMapping(sourceColumn: string, value: any) {
   };
 }
 
+function mapByPosition() {
+  const currentPreview = preview.value;
+  if (!currentPreview) return;
+  columnMapping.value = autoMapImportColumns(currentPreview.columns, targetColumnNames.value, "position");
+}
+
+function mapByName() {
+  const currentPreview = preview.value;
+  if (!currentPreview) return;
+  columnMapping.value = autoMapImportColumns(currentPreview.columns, targetColumnNames.value, "name");
+}
+
+function skipAllColumns() {
+  const currentPreview = preview.value;
+  if (!currentPreview) return;
+  columnMapping.value = Object.fromEntries(currentPreview.columns.map((source) => [source, ""]));
+}
+
 function updateColumnDataType(sourceColumn: string, value: any) {
   columnDataTypes.value = {
     ...columnDataTypes.value,
@@ -993,9 +1087,9 @@ async function startImport() {
     );
     progress.value = { importId: summary.importId, status: "done", rowsImported: summary.rowsImported, totalRows: summary.totalRows, elapsedMs: summary.elapsedMs };
     toast(t("tableImport.success", { count: summary.rowsImported }), 2500);
-    store.invalidateMetadataCache(props.prefillConnectionId, props.prefillDatabase || "", props.prefillSchema || undefined, tableName);
+    store.invalidateMetadataCache(props.prefillConnectionId, props.prefillDatabase || "", targetSchema.value || undefined, tableName);
     if (targetMode.value === "create") {
-      store.refreshObjectListTreeNode(props.prefillConnectionId, props.prefillDatabase || "", props.prefillSchema || undefined).catch((error) => {
+      store.refreshObjectListTreeNode(props.prefillConnectionId, props.prefillDatabase || "", targetSchema.value || undefined).catch((error) => {
         console.warn("[DBX][table-import:refresh-created-table-failed]", error);
       });
     }
@@ -1101,12 +1195,12 @@ async function startBatchImport() {
       task.rowsImported = summary.rowsImported;
       completedRows += summary.rowsImported;
       completedBytes += task.preview.sizeBytes;
-      store.invalidateMetadataCache(props.prefillConnectionId, props.prefillDatabase || "", props.prefillSchema || undefined, task.tableName);
+      store.invalidateMetadataCache(props.prefillConnectionId, props.prefillDatabase || "", targetSchema.value || undefined, task.tableName);
     }
     refreshImportElapsedClock();
     progress.value = { importId: importId.value, status: "done", phase: "done", rowsImported: completedRows, totalRows: completedRows, totalRowsExact: true, bytesRead: totalBytes, totalBytes, elapsedMs: liveElapsedMs.value };
     toast(t("tableImport.success", { count: completedRows }), 2500);
-    store.refreshObjectListTreeNode(props.prefillConnectionId, props.prefillDatabase || "", props.prefillSchema || undefined).catch((error) => {
+    store.refreshObjectListTreeNode(props.prefillConnectionId, props.prefillDatabase || "", targetSchema.value || undefined).catch((error) => {
       console.warn("[DBX][table-import:refresh-created-table-failed]", error);
     });
   } catch (e: any) {
@@ -1211,31 +1305,46 @@ watch(
   (value) => {
     if (value) {
       resetState();
+      if (showSchemaSelector.value) void loadSchemaOptions();
       void loadTargetColumns();
       void loadDataTypeOptions();
     } else {
       minimized.value = false;
       backgroundMode.value = false;
       dialogDragOffset.value = { x: 0, y: 0 };
+      if (previewReloadTimer) {
+        clearTimeout(previewReloadTimer);
+        previewReloadTimer = null;
+      }
       if (!running.value) void releaseTableImportSources();
     }
   },
   { immediate: true },
 );
 
-onBeforeUnmount(stopDialogDrag);
+onBeforeUnmount(() => {
+  stopDialogDrag();
+  if (previewReloadTimer) {
+    clearTimeout(previewReloadTimer);
+    previewReloadTimer = null;
+  }
+});
 
 watch([sourceFormat, delimiter, titleRow, dataStartRow, lastDataRow, trimValues, emptyStringAsNull, selectedSheet, jsonShape, previewLimit], schedulePreviewReload);
 watch([textEncoding, decimalSeparator], schedulePreviewReloadAfterEncodingChange);
 watch([newTableName, columnMapping, columnDataTypes], saveActiveBatchTask, { deep: true });
 watch(wizardStep, (step) => {
   if (step !== "mapping") closeDataTypePicker();
-  if (step === "options") void loadExistingTables();
+  if (step === "options") {
+    if (showSchemaSelector.value) void loadSchemaOptions();
+    void loadExistingTables();
+  }
 });
 watch(targetMode, (mode) => {
   if (mode === "existing") {
     columnDataTypes.value = {};
     dynamicDataTypeOptions.value = [];
+    if (!existingTableNames.value.length) void loadExistingTables();
     void loadTargetColumns();
   } else {
     targetColumnsRequestId++;
@@ -1401,7 +1510,7 @@ watch(rawProgressPercent, (percent) => {
             </div>
           </div>
 
-          <div class="grid grid-cols-[minmax(0,1fr)_minmax(220px,320px)] gap-3 rounded-md border p-3">
+          <div class="grid gap-3 rounded-md border p-3" :class="showSchemaSelector ? 'grid-cols-1 md:grid-cols-[minmax(0,1.2fr)_minmax(140px,1fr)_minmax(180px,1.2fr)]' : 'grid-cols-[minmax(0,1fr)_minmax(220px,320px)]'">
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.targetMode") }}</Label>
               <div class="grid grid-cols-2 gap-2">
@@ -1415,6 +1524,31 @@ watch(rawProgressPercent, (percent) => {
                 </button>
               </div>
             </div>
+            <div v-if="showSchemaSelector" class="space-y-1.5">
+              <Label class="text-xs">{{ t("transfer.targetSchema") }}</Label>
+              <div v-if="props.prefillTable" class="flex h-8 items-center rounded-md border px-2 text-xs font-mono">
+                <span class="truncate">{{ targetSchema || props.prefillSchema || "-" }}</span>
+              </div>
+              <SearchableSelect
+                v-else
+                data-testid="target-schema-select"
+                :model-value="selectedSchema"
+                :options="schemaOptions.length ? schemaOptions : selectedSchema ? [selectedSchema] : []"
+                :placeholder="t('transfer.selectSchema')"
+                :search-placeholder="t('transfer.searchSchema')"
+                :empty-text="t('common.noResults')"
+                :loading-text="t('common.loading')"
+                :loading="loadingSchemas"
+                :allow-custom="true"
+                trigger-class="h-8 font-mono text-xs"
+                @update:model-value="handleSchemaChange"
+                @update:open="
+                  (isOpen) => {
+                    if (isOpen) void loadSchemaOptions();
+                  }
+                "
+              />
+            </div>
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.targetTableName") }}</Label>
               <Input v-if="targetMode === 'create'" v-model="newTableName" class="h-8 text-xs font-mono" />
@@ -1423,6 +1557,7 @@ watch(rawProgressPercent, (percent) => {
               </div>
               <SearchableSelect
                 v-else
+                data-testid="target-table-select"
                 :model-value="selectedExistingTable"
                 :options="existingTableNames"
                 :placeholder="t('tableImport.noExistingTarget')"
@@ -1559,10 +1694,10 @@ watch(rawProgressPercent, (percent) => {
 
           <div v-if="supportsImportConflictPolicy" class="space-y-1.5 rounded-md border p-3">
             <Label for="table-import-conflict-policy" class="text-xs">{{ t("tableImport.conflictPolicy") }}</Label>
-            <select id="table-import-conflict-policy" v-model="conflictPolicy" data-testid="table-import-conflict-policy" class="flex h-8 w-full rounded-md border border-input bg-background px-2 text-xs">
-              <option value="error">{{ t("tableImport.conflictError") }}</option>
-              <option value="skip">{{ t("tableImport.skipDuplicateRows") }}</option>
-              <option v-if="targetMode === 'existing'" value="updateExisting" :disabled="!canUpdateExistingRows">
+            <select id="table-import-conflict-policy" v-model="conflictPolicy" data-testid="table-import-conflict-policy" class="flex h-8 w-full rounded-md border border-input bg-background text-foreground px-2 text-xs [color-scheme:light] dark:[color-scheme:dark]">
+              <option value="error" class="bg-popover text-popover-foreground">{{ t("tableImport.conflictError") }}</option>
+              <option value="skip" class="bg-popover text-popover-foreground">{{ t("tableImport.skipDuplicateRows") }}</option>
+              <option v-if="targetMode === 'existing'" value="updateExisting" :disabled="!canUpdateExistingRows" class="bg-popover text-popover-foreground">
                 {{ t("tableImport.updateExistingRows") }}
               </option>
             </select>
@@ -1599,9 +1734,24 @@ watch(rawProgressPercent, (percent) => {
             </div>
           </div>
 
-          <div v-if="preview" class="grid gap-3" :class="targetMode === 'create' ? 'grid-cols-[minmax(360px,460px)_1fr]' : 'grid-cols-[minmax(240px,300px)_1fr]'">
+          <div v-if="preview" class="grid gap-3" :class="targetMode === 'create' ? 'grid-cols-[minmax(360px,460px)_1fr]' : 'grid-cols-[minmax(280px,360px)_1fr]'">
             <div class="rounded-md border">
-              <div class="border-b px-3 py-2 text-xs font-medium">{{ t("tableImport.mapping") }}</div>
+              <div class="flex items-center justify-between border-b px-3 py-1.5 text-xs font-medium">
+                <span>{{ t("tableImport.mapping") }}</span>
+                <div v-if="targetMode === 'existing'" class="flex items-center gap-1.5 font-normal">
+                  <button type="button" data-action="map-by-position" class="text-xs text-muted-foreground hover:text-foreground hover:underline" @click="mapByPosition">
+                    {{ t("tableImport.mapByPosition") }}
+                  </button>
+                  <span class="text-muted-foreground/40">·</span>
+                  <button type="button" data-action="map-by-name" class="text-xs text-muted-foreground hover:text-foreground hover:underline" @click="mapByName">
+                    {{ t("tableImport.mapByName") }}
+                  </button>
+                  <span class="text-muted-foreground/40">·</span>
+                  <button type="button" data-action="skip-all" class="text-xs text-muted-foreground hover:text-foreground hover:underline" @click="skipAllColumns">
+                    {{ t("tableImport.skipAll") }}
+                  </button>
+                </div>
+              </div>
               <div class="max-h-[320px] overflow-auto p-2">
                 <div class="grid items-center gap-2 border-b px-1 pb-1 text-[11px] font-medium text-muted-foreground" :class="targetMode === 'create' ? 'grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(92px,120px)]' : 'grid-cols-[1fr_1fr]'">
                   <span>{{ t("tableImport.sourceColumn") }}</span>
@@ -1622,11 +1772,11 @@ watch(rawProgressPercent, (percent) => {
                   <select
                     v-else
                     :value="columnMapping[sourceColumn] || SKIP_VALUE"
-                    class="h-7 w-full min-w-0 rounded-md border bg-background px-2 text-xs font-mono shadow-none hover:bg-muted/30 focus-visible:ring-1 focus-visible:ring-ring/25"
+                    class="h-7 w-full min-w-0 rounded-md border border-input bg-background text-foreground px-2 text-xs font-mono shadow-none hover:bg-muted/30 focus-visible:ring-1 focus-visible:ring-ring/25 [color-scheme:light] dark:[color-scheme:dark]"
                     @change="(e) => updateMapping(sourceColumn, (e.target as HTMLSelectElement).value)"
                   >
-                    <option :value="SKIP_VALUE">{{ t("tableImport.skipColumn") }}</option>
-                    <option v-for="column in targetColumns" :key="column.name" :value="column.name">
+                    <option :value="SKIP_VALUE" class="bg-popover text-popover-foreground">{{ t("tableImport.skipColumn") }}</option>
+                    <option v-for="column in targetColumns" :key="column.name" :value="column.name" class="bg-popover text-popover-foreground">
                       {{ column.name }}
                     </option>
                   </select>

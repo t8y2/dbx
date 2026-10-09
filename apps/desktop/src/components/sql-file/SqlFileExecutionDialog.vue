@@ -15,6 +15,7 @@ import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.v
 import { useToast } from "@/composables/useToast";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { connectionIsEffectivelyReadOnly, ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
@@ -23,10 +24,11 @@ import { formatError, isManualTransactionSessionExpired } from "@/lib/backend/er
 import { fetchSqlFileTargetOptions, namespaceOptionsAreSchemas } from "@/composables/useDatabaseOptions";
 import { requiresSqlFileTargetDatabaseSelection, supportsConnectionLevelDatabaseBootstrap } from "@/lib/connection/connectionLevelDatabaseBootstrap";
 import { beginManualTransaction, commitManualTransaction, rollbackManualTransaction, cancelSqlFileExecution, executeSqlFiles, inspectSqlFileTables, listenSqlFileProgress, previewSqlFile, type SqlFilePreview, type SqlFileProgress, type SqlFileStatus, type SqlFileTable } from "@/lib/backend/api";
-import { activeTabExternalSqlFileTarget, resolveExternalSqlFileTargetForActiveTab, type ExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
+import { activeTabExternalSqlFileTarget, rememberExternalSqlFileTarget, resolveExternalSqlFileTarget, unassociatedExternalSqlFileTarget, type ExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
 import { isSqlFilePath } from "@/lib/sql/sqlFileOpen";
 import { buildDisplayFileNames, tooltipText as computeTooltipText } from "./sqlFilePreviewLabel";
 import { parseSqlFilePathInput } from "./sqlFilePathInput";
+import { orderConnectionsForSidebarDisplay } from "@/lib/sidebar/connectionListSort";
 import SqlFileProgressIndicator from "./SqlFileProgressIndicator.vue";
 import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -48,6 +50,7 @@ const props = defineProps<{
 
 const store = useConnectionStore();
 const queryStore = useQueryStore();
+const settingsStore = useSettingsStore();
 const productionSafetyStore = useProductionSafetyStore();
 // Tauri = real filesystem paths; Web = browser File.name (no path) + server temp paths.
 const isDesktopRuntime = isTauriRuntime();
@@ -177,7 +180,7 @@ function resetPerFileState() {
   currentFileName.value = "";
 }
 
-const sqlConnections = computed(() => store.connections.filter((connection) => supportsSqlFileExecution(connection.db_type)));
+const sqlConnections = computed(() => orderConnectionsForSidebarDisplay(store.connections, store.treeNodes, settingsStore.editorSettings.sidebarConnectionSortMode).filter((connection) => supportsSqlFileExecution(connection.db_type)));
 // Mirrors the core executor gate (`relational_constraint_bypass_kind` in
 // sql_file_import.rs): MySQL-family types use the session-scoped
 // FOREIGN_KEY_CHECKS toggle, PostgreSQL-family types use DISABLE/ENABLE
@@ -424,6 +427,8 @@ function chooseNamespace(names: string[], id: string) {
   const preferred = preferredTarget.value?.connectionId === id ? preferredTarget.value : undefined;
   const preferredNamespace = preferred ? (optionsAreSchemas ? preferred.schema : preferred.database) : optionsAreSchemas ? (id === props.prefillConnectionId ? props.prefillSchema : undefined) : props.prefillDatabase;
   const configuredNamespace = optionsAreSchemas ? (connection?.default_schema ?? "") : (connection?.database ?? "");
+  const currentNamespace = targetNamespace.value.trim();
+  if (currentNamespace && connectionId.value === id && names.includes(currentNamespace)) return currentNamespace;
   if (names.length > 0) {
     if (preferredNamespace && names.includes(preferredNamespace)) return preferredNamespace;
     if (configuredNamespace && names.includes(configuredNamespace)) return configuredNamespace;
@@ -431,6 +436,17 @@ function chooseNamespace(names: string[], id: string) {
   }
   return preferredNamespace ?? configuredNamespace;
 }
+
+watch(targetNamespace, (namespace) => {
+  if (!connectionId.value) return;
+  const connection = store.getConfig(connectionId.value);
+  const optionsAreSchemas = namespaceOptionsAreSchemas(connection);
+  preferredTarget.value = {
+    connectionId: connectionId.value,
+    database: optionsAreSchemas ? connection?.database?.trim() || "" : namespace.trim(),
+    ...(optionsAreSchemas ? { schema: namespace.trim() } : {}),
+  };
+});
 
 function sqlFileExecutionTarget(): SqlFileExecutionTarget {
   const namespace = targetNamespace.value.trim();
@@ -531,10 +547,14 @@ async function loadPreviews(filesOrPaths: Array<string | File>, resolveSelectedF
       nextPreviews.push(await previewSelectedSqlFile(fileOrPath));
     }
     previews.value = nextPreviews;
-    if (resolveSelectedFileTarget) {
+    if (resolveSelectedFileTarget && !props.prefillConnectionId) {
       const firstPath = typeof filesOrPaths[0] === "string" && isSqlFilePath(filesOrPaths[0]) ? filesOrPaths[0] : undefined;
-      const target = firstPath ? resolveExternalSqlFileTargetForActiveTab(firstPath, queryStore.tabs, queryStore.activeTabId, (connectionId) => store.getConfig(connectionId)) : activeTabExternalSqlFileTarget(queryStore.tabs, queryStore.activeTabId, (connectionId) => store.getConfig(connectionId));
-      applyTarget(target);
+      const remembered = firstPath ? resolveExternalSqlFileTarget(firstPath, (id) => sqlConnections.value.some((c) => c.id === id), unassociatedExternalSqlFileTarget()) : undefined;
+      if (remembered?.connectionId) {
+        applyTarget(remembered);
+      } else if (!connectionId.value) {
+        applyTarget(activeTabExternalSqlFileTarget(queryStore.tabs, queryStore.activeTabId, (connectionId) => store.getConfig(connectionId)));
+      }
     }
   } catch (e: any) {
     toast(e?.message || String(e), 5000);
@@ -768,7 +788,20 @@ async function startExecution() {
       unlisten();
     }
 
-    if (completedSuccessfully && !txnSessionId.value) await refreshTargetAfterImport(target);
+    if (completedSuccessfully) {
+      if (isDesktopRuntime) {
+        for (const item of previews.value) {
+          if (item.filePath) {
+            rememberExternalSqlFileTarget(item.filePath, {
+              connectionId: connectionId.value,
+              database: target.database,
+              schema: target.schema,
+            });
+          }
+        }
+      }
+      if (!txnSessionId.value) await refreshTargetAfterImport(target);
+    }
   } catch (e: any) {
     terminalStatus.value = cancelRequested.value ? "cancelled" : "error";
     terminalError.value = e?.message || String(e);

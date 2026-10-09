@@ -52,7 +52,7 @@ pub async fn stop_daemon_by_key(manager: &AgentManager, agent_key: &str) {
 
 pub async fn restart_daemon_by_key(manager: &AgentManager, agent_key: &str) -> Result<(), String> {
     manager.daemons.lock().await.remove(agent_key);
-    let client = spawn_client_for_key(manager, agent_key, &[]).await?;
+    let client = spawn_client_for_key(manager, agent_key, &[], &[]).await?;
     manager.daemons.lock().await.insert(agent_key.to_string(), client);
     Ok(())
 }
@@ -63,9 +63,25 @@ pub async fn spawn_connection_client(
     driver_profile: Option<&str>,
     extra_java_args: &[String],
 ) -> Result<AgentDriverClient, String> {
+    spawn_connection_client_with_env(manager, db_type, driver_profile, extra_java_args, &[]).await
+}
+
+/// Spawns a dedicated agent process whose environment carries `env`.
+///
+/// Oracle OCI ("thick") connections use this to hand process-scoped client
+/// settings (`NLS_LANG`, the Instant Client loader directory) to the agent:
+/// those cannot travel as connection parameters, and two connections that
+/// disagree about them must never share one process.
+pub async fn spawn_connection_client_with_env(
+    manager: &AgentManager,
+    db_type: &DatabaseType,
+    driver_profile: Option<&str>,
+    extra_java_args: &[String],
+    env: &[(String, String)],
+) -> Result<AgentDriverClient, String> {
     let keys = runtime_agent_key_candidates(db_type, driver_profile)
         .ok_or_else(|| format!("{:?} is not an agent-driven database type", db_type))?;
-    spawn_first_available_client(manager, &keys, extra_java_args).await
+    spawn_first_available_client(manager, &keys, extra_java_args, env).await
 }
 
 pub async fn spawn_shared_connection_client(
@@ -73,6 +89,7 @@ pub async fn spawn_shared_connection_client(
     db_type: &DatabaseType,
     driver_profile: Option<&str>,
     extra_java_args: &[String],
+    agent_env: &[(String, String)],
     agent_session_id: String,
     connect_params: serde_json::Value,
     connect_timeout: Duration,
@@ -82,7 +99,7 @@ pub async fn spawn_shared_connection_client(
     let key = first_installed_agent_key(manager, &keys).unwrap_or(keys[0]);
     let state = manager.load_state();
     let jre_key = state.installed_drivers.get(key).map(|driver| driver.jre.as_str()).unwrap_or(DEFAULT_JRE_KEY);
-    let launch = manager.resolve_agent_launch_spec_with_extra_args(&state, key, jre_key, extra_java_args)?;
+    let launch = manager.resolve_agent_launch_spec_with_launch_env(&state, key, jre_key, extra_java_args, agent_env)?;
     let runtime_key = shared_runtime_key(key, &launch);
     let mut session_params = connect_params;
     session_params
@@ -178,12 +195,17 @@ fn reserve_runtime_locked(
 }
 
 fn shared_runtime_key(agent_key: &str, launch: &crate::db::agent_driver::AgentLaunchSpec) -> String {
+    // `env` is part of the fingerprint on purpose: Oracle Client settings such
+    // as `NLS_LANG` are process-scoped, so a connection that declares one must
+    // not reuse a process started without it (or with a different value).
+    let env = launch.env.iter().map(|(key, value)| format!("{key}={value}")).collect::<Vec<_>>().join("\u{1f}");
     format!(
-        "{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}",
         agent_key,
         launch.program.display(),
         launch.args.join("\u{1f}"),
-        launch.working_dir.as_ref().map(|path| path.display().to_string()).unwrap_or_default()
+        launch.working_dir.as_ref().map(|path| path.display().to_string()).unwrap_or_default(),
+        env
     )
 }
 
@@ -201,7 +223,7 @@ pub async fn call_daemon<T: DeserializeOwned + Send + 'static>(
     let mut daemons = manager.daemons.lock().await;
 
     if !daemons.contains_key(&key) {
-        let client = spawn_client_for_key(manager, &key, &[]).await?;
+        let client = spawn_client_for_key(manager, &key, &[], &[]).await?;
         daemons.insert(key.clone(), client);
     }
 
@@ -211,7 +233,7 @@ pub async fn call_daemon<T: DeserializeOwned + Send + 'static>(
         Err(err) => {
             log::warn!("[agent] daemon call failed, respawning: {err}");
             daemons.remove(&key);
-            let mut new_client = spawn_client_for_key(manager, &key, &[]).await?;
+            let mut new_client = spawn_client_for_key(manager, &key, &[], &[]).await?;
             let result = new_client.call::<T>(method, params).await?;
             daemons.insert(key, new_client);
             Ok(result)
@@ -234,7 +256,7 @@ pub async fn call_daemon_with_timeout<T: DeserializeOwned + Send + 'static>(
     let mut daemons = manager.daemons.lock().await;
 
     if !daemons.contains_key(&key) {
-        let client = spawn_client_for_key(manager, &key, &[]).await?;
+        let client = spawn_client_for_key(manager, &key, &[], &[]).await?;
         daemons.insert(key.clone(), client);
     }
 
@@ -244,7 +266,7 @@ pub async fn call_daemon_with_timeout<T: DeserializeOwned + Send + 'static>(
         Err(err) => {
             log::warn!("[agent] daemon call failed, respawning: {err}");
             daemons.remove(&key);
-            let mut new_client = spawn_client_for_key(manager, &key, &[]).await?;
+            let mut new_client = spawn_client_for_key(manager, &key, &[], &[]).await?;
             let result = new_client.call_with_timeout::<T>(method, params, timeout_duration).await?;
             daemons.insert(key, new_client);
             Ok(result)
@@ -273,6 +295,32 @@ pub async fn call_daemon_method_with_timeout<T: DeserializeOwned + Send + 'stati
     call_daemon_with_timeout(manager, db_type, driver_profile, method.as_str(), params, timeout_duration).await
 }
 
+/// Environment-aware sibling of [`call_daemon_method_with_timeout`].
+///
+/// A non-empty `env` gets a dedicated, short-lived process instead of the
+/// shared per-key daemon: process-scoped Oracle OCI settings (`NLS_LANG`, the
+/// Instant Client loader directory) must not leak into a process another
+/// connection is already using.
+pub async fn call_daemon_method_with_timeout_and_env<T: DeserializeOwned + Send + 'static>(
+    manager: &AgentManager,
+    db_type: &DatabaseType,
+    driver_profile: Option<&str>,
+    method: AgentMethod,
+    params: serde_json::Value,
+    timeout_duration: Option<Duration>,
+    env: &[(String, String)],
+) -> Result<T, String> {
+    if env.is_empty() {
+        return call_daemon_with_timeout(manager, db_type, driver_profile, method.as_str(), params, timeout_duration)
+            .await;
+    }
+    let keys = runtime_agent_key_candidates(db_type, driver_profile)
+        .ok_or_else(|| format!("{:?} is not an agent-driven database type", db_type))?;
+    let key = first_installed_agent_key(manager, &keys).unwrap_or(keys[0]).to_string();
+    let mut client = spawn_client_for_key(manager, &key, &[], env).await?;
+    client.call_with_timeout::<T>(method.as_str(), params, timeout_duration).await
+}
+
 fn runtime_agent_key_candidates(db_type: &DatabaseType, driver_profile: Option<&str>) -> Option<Vec<&'static str>> {
     let primary = db_type_to_agent_key(db_type, driver_profile)?;
     Some(vec![primary])
@@ -284,12 +332,13 @@ fn first_installed_agent_key<'a>(manager: &AgentManager, keys: &'a [&'static str
 
 async fn spawn_first_available_client(
     manager: &AgentManager,
-    keys: &[&'static str],
+    keys: &[&str],
     extra_java_args: &[String],
+    env: &[(String, String)],
 ) -> Result<AgentDriverClient, String> {
     let mut last_error = None;
     for key in keys {
-        match spawn_client_for_key(manager, key, extra_java_args).await {
+        match spawn_client_for_key(manager, key, extra_java_args, env).await {
             Ok(client) => return Ok(client),
             Err(err) => last_error = Some(err),
         }
@@ -301,11 +350,14 @@ async fn spawn_client_for_key(
     manager: &AgentManager,
     key: &str,
     extra_java_args: &[String],
+    env: &[(String, String)],
 ) -> Result<AgentDriverClient, String> {
     let state = manager.load_state();
     let jre_key = state.installed_drivers.get(key).map(|driver| driver.jre.as_str()).unwrap_or(DEFAULT_JRE_KEY);
 
-    let launch = manager.resolve_agent_launch_spec_with_extra_args(&state, key, jre_key, extra_java_args)?;
+    let launch = manager
+        .resolve_agent_launch_spec_with_extra_args(&state, key, jre_key, extra_java_args)?
+        .with_env(env.iter().cloned());
     let mut client = AgentDriverClient::spawn(launch).await?;
     client.try_optional_handshake(manager.agent_app_version()).await;
     Ok(client)
@@ -373,6 +425,21 @@ for line in sys.stdin:
 
         assert_eq!(shared_runtime_key("oracle", &base), shared_runtime_key("oracle", &base));
         assert_ne!(shared_runtime_key("oracle", &base), shared_runtime_key("oracle", &different_args));
+    }
+
+    #[test]
+    fn shared_runtime_key_isolates_process_scoped_env() {
+        let base = crate::db::agent_driver::AgentLaunchSpec::new(PathBuf::from("oracle-agent"));
+        let with_nls =
+            base.clone().with_env([("NLS_LANG".to_string(), "SIMPLIFIED CHINESE_CHINA.AL32UTF8".to_string())]);
+        let with_other_nls = base.clone().with_env([("NLS_LANG".to_string(), "AMERICAN_AMERICA.AL32UTF8".to_string())]);
+
+        // Setting a process-scoped variable must route to a dedicated process …
+        assert_ne!(shared_runtime_key("oracle", &base), shared_runtime_key("oracle", &with_nls));
+        // … and two different values must never share one process either.
+        assert_ne!(shared_runtime_key("oracle", &with_nls), shared_runtime_key("oracle", &with_other_nls));
+        // Identical env still reuses the same process.
+        assert_eq!(shared_runtime_key("oracle", &with_nls), shared_runtime_key("oracle", &with_nls.clone()));
     }
 
     #[tokio::test]

@@ -9,7 +9,7 @@ import { useQueryEditorCompletion } from "../useQueryEditorCompletion";
 import { useQueryEditorCompletionMetadata } from "../useQueryEditorCompletionMetadata";
 import type { QueryEditorProps } from "../queryEditorTypes";
 import type { RedisCommandDocumentation } from "@/lib/redis/redisCommandDocs";
-import type { SqlCompletionTable } from "@/lib/sql/sqlCompletion";
+import type { SqlCompletionColumn, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
 import { analyzeSqlCompletion, type SqlCompletionAnalysisResult } from "@/lib/sql/sqlCompletionAnalysis";
 
 vi.mock("@/stores/connectionStore", () => ({ COMPLETION_METADATA_CONCURRENCY: 4 }));
@@ -32,7 +32,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function createHarness(overrides: Partial<QueryEditorProps> = {}, configureMetadata?: (metadata: ReturnType<typeof useQueryEditorCompletionMetadata>) => void) {
+function createHarness(overrides: Partial<QueryEditorProps> = {}, configureMetadata?: (metadata: ReturnType<typeof useQueryEditorCompletionMetadata>) => void, semanticCompletionEnabled = false) {
   const props = reactive<QueryEditorProps>({ modelValue: "SEL", databaseType: "mysql", dialect: "mysql", connectionId: "connection", database: "demo", ...overrides });
   const parent = document.createElement("div");
   document.body.append(parent);
@@ -44,14 +44,14 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}, configureMetad
     lookupLocalCompletionColumns: vi.fn(() => []),
     lookupLocalCompletionColumnsByPrefix: vi.fn(() => []),
     lookupLocalCompletionObjects: vi.fn(() => []),
-    lookupLocalCompletionDatabases: vi.fn(() => []),
-    lookupLocalCompletionSchemas: vi.fn(() => []),
+    lookupLocalCompletionDatabases: vi.fn((): string[] => []),
+    lookupLocalCompletionSchemas: vi.fn((): string[] => []),
     lookupLocalCompletionForeignKeys: vi.fn(() => []),
     listCompletionTables: vi.fn(async (): Promise<SqlCompletionTable[]> => []),
     listCompletionObjects: vi.fn(async () => []),
-    listCompletionColumns: vi.fn(async () => []),
-    listCompletionSchemas: vi.fn(async () => []),
-    listCompletionDatabases: vi.fn(async () => []),
+    listCompletionColumns: vi.fn(async (): Promise<SqlCompletionColumn[]> => []),
+    listCompletionSchemas: vi.fn(async (): Promise<string[]> => []),
+    listCompletionDatabases: vi.fn(async (): Promise<string[]> => []),
     refreshCompletionTables: vi.fn(async () => []),
     refreshCompletionColumns: vi.fn(async () => []),
     refreshCompletionSchemas: vi.fn(async () => []),
@@ -60,12 +60,13 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}, configureMetad
     listRedisCompletionKeys: vi.fn(async () => ["user:1"]),
     listMongoCompletionCollections: vi.fn(async () => ["users"]),
     listMongoCompletionFields: vi.fn(async () => []),
+    listMongoCompletionIndexes: vi.fn(async () => []),
     listElasticsearchCompletionIndices: vi.fn(async () => ["users"]),
     listElasticsearchCompletionFields: vi.fn(async () => []),
   };
   const connectionStore = store as unknown as Options["connectionStore"];
   const settings = reactive({ editorSettings: { completionTriggerMode: "positional", snippets: [], sqlFormatter: { keywordCase: "upper", functionCase: "upper" }, autoAliasTables: false, tableCompletionSchemaQualification: "collision", generateSqlQuoteIdentifiers: false } });
-  const metadata = useQueryEditorCompletionMetadata({ props, view, connectionStore, sqlBehaviorDialect: () => props.dialect, remoteLatencyBudgetMs: 40, maxCompletionTables: 100, onDemandMinPrefix: 2, semanticCompletionEnabled: false });
+  const metadata = useQueryEditorCompletionMetadata({ props, view, connectionStore, sqlBehaviorDialect: () => props.dialect, remoteLatencyBudgetMs: 40, maxCompletionTables: 100, onDemandMinPrefix: 2, semanticCompletionEnabled });
   configureMetadata?.(metadata);
   const startCompletion = vi.fn(() => true);
   const runtime: Options["runtime"] = { codeMirrorStartCompletion: startCompletion, codeMirrorInsertCompletionText: insertCompletionText, codeMirrorSnippetCompletion: snippetCompletion, codeMirrorCompletionStatus: () => null, imeCompositionActive: false };
@@ -91,7 +92,7 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}, configureMetad
     triggerDeferDelayMs: 25,
     maxCompletionTables: 100,
     onDemandTableLimit: 100,
-    semanticCompletionEnabled: false,
+    semanticCompletionEnabled,
   });
   cleanups.push(() => {
     completion.clearDeferredCompletionTrigger();
@@ -102,6 +103,165 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}, configureMetad
   const provide = (explicit = true) => completion.provideSqlCompletions(new CompletionContext(currentView.state, currentView.state.selection.main.head, explicit));
   return { props, currentView, view, store, settings, runtime, completion, provide, startCompletion };
 }
+
+describe.each([false, true])("Snowflake namespace completion (semantic=%s)", (semanticCompletionEnabled) => {
+  beforeEach(() => vi.useRealTimers());
+
+  function snowflakeHarness(sql: string, schema: string | undefined = "PUBLIC") {
+    const harness = createHarness({ databaseType: "snowflake", dialect: "sql", database: "DEFAULT_DB", schema, modelValue: sql }, undefined, semanticCompletionEnabled);
+    const catalogs: Record<string, Record<string, string[]>> = {
+      DEFAULT_DB: { PUBLIC: ["DEFAULT_TABLE"] },
+      OTHER_DB: { PUBLIC: ["OTHER_TABLE"] },
+      ADVENTUREWORKS2025: { PUBLIC: ["DIMCUSTOMER"] },
+      Other_Db: { PUBLIC: ["QUOTED_TABLE"] },
+      "My.DB": { "Sales Area": ["Dim.Customer"], 'A"B': ["ESCAPED_TABLE"] },
+    };
+    const databases = Object.keys(catalogs);
+    harness.store.listCompletionDatabases.mockResolvedValue(databases);
+    harness.store.listCompletionSchemas.mockImplementation(async (...args: unknown[]) => Object.keys(catalogs[String(args[1])] ?? {}));
+    harness.store.listCompletionTables.mockImplementation(async (...args: unknown[]) => (catalogs[String(args[1])]?.[String(args[4])] ?? []).map((name) => ({ name, schema: String(args[4]) })));
+    return { ...harness, catalogs };
+  }
+
+  it.each(["DEFAULT_DB", "OTHER_DB", "ADVENTUREWORKS2025", "Adventureworks2025"])("lists schemas for explicit database %s with no selected schema", async (database) => {
+    const { provide, store, props } = snowflakeHarness(`SELECT * FROM ${database}.`);
+    props.schema = undefined;
+    const result = await provide();
+    expect(result?.options.map((option) => option.label)).toContain("PUBLIC");
+    expect(store.listCompletionSchemas).toHaveBeenCalledWith("connection", database.toUpperCase());
+    expect(result?.options.map((option) => option.label)).toEqual(["PUBLIC"]);
+  });
+
+  it.each([
+    ['"Other_Db"', "Other_Db", ["PUBLIC"]],
+    ['"My.DB"', "My.DB", ['A"B', "Sales Area"]],
+  ] as const)("keeps the exact quoted database %s when listing schemas", async (qualifier, database, schemas) => {
+    const { provide, store } = snowflakeHarness(`SELECT * FROM ${qualifier}.`);
+    expect((await provide())?.options.map((option) => option.label).sort()).toEqual(schemas);
+    expect(store.listCompletionSchemas).toHaveBeenCalledWith("connection", database);
+  });
+
+  it.each([
+    ["DEFAULT_DB.PUBLIC", "DEFAULT_DB", "PUBLIC", "DEFAULT_TABLE"],
+    ["other_db.public", "OTHER_DB", "PUBLIC", "OTHER_TABLE"],
+    ["Adventureworks2025.Public", "ADVENTUREWORKS2025", "PUBLIC", "DIMCUSTOMER"],
+    ['"Other_Db".PUBLIC', "Other_Db", "PUBLIC", "QUOTED_TABLE"],
+    ['"My.DB"."Sales Area"', "My.DB", "Sales Area", "Dim.Customer"],
+    ['"My.DB"."A""B"', "My.DB", 'A"B', "ESCAPED_TABLE"],
+  ])("loads only tables in %s and preserves the typed prefix", async (qualifier, database, schema, table) => {
+    const sql = `SELECT * FROM ${qualifier}.`;
+    const { provide, store, currentView, settings } = snowflakeHarness(sql);
+    settings.editorSettings.tableCompletionSchemaQualification = "always";
+    settings.editorSettings.generateSqlQuoteIdentifiers = true;
+    const result = await provide();
+    expect(store.listCompletionTables.mock.calls.map((args) => (args as unknown[]).slice(0, 5))).toContainEqual(["connection", database, "", 100, schema]);
+    expect(result?.options.map((option) => option.label)).toEqual([table]);
+    const option = result!.options[0]!;
+    if (typeof option.apply === "function") option.apply(currentView, option, result!.from, currentView.state.doc.length);
+    else currentView.dispatch(insertCompletionText(currentView.state, option.apply ?? option.label, result!.from, currentView.state.doc.length));
+    expect(currentView.state.doc.toString()).toBe(`${sql}${table.includes(".") ? `"${table}"` : table}`);
+  });
+
+  it.each(["collision", "always", "never"])("preserves %s schema qualification for default tables", async (setting) => {
+    const { provide, settings, currentView } = snowflakeHarness("SELECT * FROM ");
+    settings.editorSettings.tableCompletionSchemaQualification = setting;
+    const result = (await provide())!;
+    const table = result.options.find((option) => option.label === "DEFAULT_TABLE")!;
+    if (typeof table.apply === "function") table.apply(currentView, table, result.from, currentView.state.doc.length);
+    else currentView.dispatch(insertCompletionText(currentView.state, table.apply ?? table.label, result.from, currentView.state.doc.length));
+    expect(currentView.state.doc.toString()).toBe(`SELECT * FROM ${setting === "always" ? "PUBLIC.DEFAULT_TABLE" : "DEFAULT_TABLE"}`);
+  });
+
+  it("prefers a known schema over a same-name database after uppercase folding", async () => {
+    const { catalogs, provide, store } = snowflakeHarness("SELECT * FROM other_db.");
+    catalogs.DEFAULT_DB!.OTHER_DB = ["SCHEMA_TABLE"];
+    expect((await provide())?.options.map((option) => option.label)).toEqual(["SCHEMA_TABLE"]);
+    expect(store.listCompletionSchemas).not.toHaveBeenCalledWith("connection", "OTHER_DB");
+  });
+
+  it.each(['"other_db".', '"other_db".PUBLIC.', "MISSING_DB.", '"OTHER_DB"."public".'])("does not substitute case-distinct or unknown namespaces for %s", async (qualifier) => {
+    const { provide } = snowflakeHarness(`SELECT * FROM ${qualifier}`);
+    expect((await provide())?.options ?? []).toEqual([]);
+  });
+
+  it.each(["empty", "denied"])("does not invent tables when explicit schema metadata is %s", async (failure) => {
+    const { provide, store } = snowflakeHarness("SELECT * FROM OTHER_DB.PUBLIC.");
+    if (failure === "empty") store.listCompletionTables.mockResolvedValue([]);
+    else store.listCompletionTables.mockRejectedValue(new Error("permission denied"));
+    expect((await provide())?.options ?? []).toEqual([]);
+  });
+
+  it("offers accessible database names alongside the default schema and tables", async () => {
+    const { provide } = snowflakeHarness("SELECT * FROM ");
+    expect((await provide())?.options.map((option) => option.label)).toEqual(expect.arrayContaining(["DEFAULT_DB", "OTHER_DB", "PUBLIC", "DEFAULT_TABLE"]));
+  });
+
+  it("keeps cached table metadata separate when moving between databases", async () => {
+    const { provide, currentView, props } = snowflakeHarness("SELECT * FROM OTHER_DB.PUBLIC.");
+    expect((await provide())?.options.map((option) => option.label)).toEqual(["OTHER_TABLE"]);
+    const sql = "SELECT * FROM DEFAULT_DB.PUBLIC.";
+    props.modelValue = sql;
+    currentView.dispatch({ changes: { from: 0, to: currentView.state.doc.length, insert: sql }, selection: { anchor: sql.length } });
+    expect((await provide())?.options.map((option) => option.label)).toEqual(["DEFAULT_TABLE"]);
+    const quotedSql = 'SELECT * FROM "Other_Db".PUBLIC.';
+    props.modelValue = quotedSql;
+    currentView.dispatch({ changes: { from: 0, to: currentView.state.doc.length, insert: quotedSql }, selection: { anchor: quotedSql.length } });
+    expect((await provide())?.options.map((option) => option.label)).toEqual(["QUOTED_TABLE"]);
+  });
+
+  it.each([false, true])("preserves the quote-identifiers preference (%s) for mixed-case table insertion", async (quoteIdentifiers) => {
+    const { catalogs, provide, currentView, settings } = snowflakeHarness("SELECT * FROM ");
+    catalogs.DEFAULT_DB!.PUBLIC = ["DimCustomer"];
+    settings.editorSettings.generateSqlQuoteIdentifiers = quoteIdentifiers;
+    settings.editorSettings.tableCompletionSchemaQualification = "always";
+    const result = (await provide())!;
+    const table = result.options.find((option) => option.label === "DimCustomer")!;
+    if (typeof table.apply === "function") table.apply(currentView, table, result.from, currentView.state.doc.length);
+    else currentView.dispatch(insertCompletionText(currentView.state, table.apply ?? table.label, result.from, currentView.state.doc.length));
+    expect(currentView.state.doc.toString()).toBe(`SELECT * FROM PUBLIC.${quoteIdentifiers ? '"DimCustomer"' : "DimCustomer"}`);
+  });
+
+  it.each(["collision", "always", "never"])("preserves %s behavior when table names collide across schemas", async (setting) => {
+    const { provide, store, currentView, settings } = snowflakeHarness("SELECT * FROM ");
+    store.listCompletionTables.mockResolvedValue([
+      { name: "SHARED", schema: "PUBLIC" },
+      { name: "SHARED", schema: "SALES" },
+    ]);
+    settings.editorSettings.tableCompletionSchemaQualification = setting;
+    const result = (await provide())!;
+    const table = result.options.find((option) => option.label === "SHARED")!;
+    if (typeof table.apply === "function") table.apply(currentView, table, result.from, currentView.state.doc.length);
+    else currentView.dispatch(insertCompletionText(currentView.state, table.apply ?? table.label, result.from, currentView.state.doc.length));
+    expect(currentView.state.doc.toString()).toBe(`SELECT * FROM ${setting === "never" ? "SHARED" : "PUBLIC.SHARED"}`);
+  });
+
+  it.each([
+    ["other_db.public.other_table", "OTHER_DB", "PUBLIC", "OTHER_TABLE"],
+    ['"Other_Db".PUBLIC.QUOTED_TABLE', "Other_Db", "PUBLIC", "QUOTED_TABLE"],
+    ['"My.DB"."Sales Area"."Dim.Customer"', "My.DB", "Sales Area", "Dim.Customer"],
+  ])("loads columns from the explicit reference %s", async (reference, database, schema, table) => {
+    const { provide, store } = snowflakeHarness(`SELECT * FROM ${reference} t WHERE t.`);
+    store.listCompletionColumns.mockImplementation(async (...args: unknown[]) => (args[1] === database && args[2] === table && args[3] === schema ? [{ name: "ID", table, schema, dataType: "NUMBER" }] : []));
+    const result = await provide();
+    expect(store.listCompletionColumns.mock.calls.map((args) => (args as unknown[]).slice(0, 4))).toContainEqual(["connection", database, table, schema]);
+    expect(result?.options.map((option) => option.label)).toContain("ID");
+  });
+
+  it.each(["empty", "denied"])("does not invent schemas when metadata is %s", async (failure) => {
+    const { provide, store } = snowflakeHarness("SELECT * FROM OTHER_DB.");
+    if (failure === "empty") store.listCompletionSchemas.mockResolvedValue([]);
+    else store.listCompletionSchemas.mockRejectedValue(new Error("permission denied"));
+    expect((await provide())?.options ?? []).toEqual([]);
+  });
+
+  it("uses locally cached database and schema metadata", async () => {
+    const { provide, store } = snowflakeHarness("SELECT * FROM Other_Db.");
+    store.lookupLocalCompletionDatabases.mockReturnValue(["OTHER_DB"]);
+    store.lookupLocalCompletionSchemas.mockImplementation((...args: unknown[]) => (args[1] === "OTHER_DB" ? ["PUBLIC"] : []));
+    expect((await provide())?.options.map((option) => option.label)).toEqual(["PUBLIC"]);
+    expect(store.refreshCompletionSchemas).toHaveBeenCalledWith("connection", "OTHER_DB");
+  });
+});
 
 describe("QueryEditor completion provider ownership", () => {
   it.each(["cursor", "document", "view", "composition", "mode"])("rejects asynchronous analysis after a %s change", async (change) => {
@@ -273,6 +433,21 @@ describe("QueryEditor completion provider ownership", () => {
     // A fresh key still gets its separator.
     expect(await accept("db.users.find({ na", 18)).toEqual({ doc: "db.users.find({ name: ", cursor: 22 });
     expect(await accept("db.users.find({ na })", 18)).toEqual({ doc: "db.users.find({ name:  })", cursor: 22 });
+  });
+
+  it("completes MongoDB index names in dropIndex and replaces closing quote", async () => {
+    const doc = 'db.users.dropIndex("")';
+    const cursor = doc.indexOf('""') + 1;
+    const { store, provide, currentView } = createHarness({ databaseType: "mongodb", modelValue: doc });
+    store.listMongoCompletionIndexes.mockResolvedValue([{ name: "email_1", keyPattern: "{ email: 1 }" }]);
+    currentView.dispatch({ selection: { anchor: cursor } });
+    const result = await provide();
+    expect(store.listMongoCompletionIndexes).toHaveBeenCalledWith("connection", "demo", "users");
+    const option = result?.options.find((candidate) => candidate.displayLabel === "email_1" || candidate.label === "email_1");
+    expect(option).toBeDefined();
+    expect(option?.detail).toBe("{ email: 1 }");
+    (option!.apply as (view: EditorView, completion: unknown, from: number, to: number) => void)(currentView, option, result!.from, cursor);
+    expect(currentView.state.doc.toString()).toBe('db.users.dropIndex("email_1")');
   });
 
   it.each(["redis", "mongodb", "mysql"] as const)("does not query %s metadata without a connection", async (databaseType) => {

@@ -34,6 +34,12 @@ describe("getDataGridConditionSuggestionPosition", () => {
     expect(position.width).toBeLessThanOrEqual(520);
   });
 
+  test("widens commented keyword suggestions within the configured maximum", () => {
+    const preferredWidth = getDataGridConditionSuggestionPreferredWidth([{ value: "BETWEEN", kind: "keyword", comment: "BETWEEN ... AND ..." }]);
+    expect(preferredWidth).toBeGreaterThanOrEqual(360);
+    expect(preferredWidth).toBeLessThanOrEqual(520);
+  });
+
   test("keeps normal width when suggestions have no comments or are keyword/history entries", () => {
     expect(
       getDataGridConditionSuggestionPreferredWidth([

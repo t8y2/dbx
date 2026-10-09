@@ -1,21 +1,24 @@
+#[cfg(feature = "duckdb-sidecar")]
+use super::column_alter::build_duckdb_existing_column_sql;
 use super::column_alter::build_transwarp_existing_column_clause;
 use super::column_alter::{
     build_clickhouse_existing_column_sql, build_dameng_existing_column_sql, build_doris_existing_column_sql,
-    build_duckdb_existing_column_sql, build_h2_existing_column_sql, build_informix_existing_column_sql,
-    build_iris_existing_column_sql, build_mysql_existing_column_clause, build_oracle_like_existing_column_sql,
-    build_oscar_existing_column_sql, build_postgres_existing_column_sql, build_questdb_existing_column_sql,
-    build_sqlite_existing_column_sql, build_sqlserver_existing_column_sql, build_xugu_existing_column_sql,
+    build_h2_existing_column_sql, build_informix_existing_column_sql, build_iris_existing_column_sql,
+    build_mysql_existing_column_clause, build_oracle_like_existing_column_sql, build_oscar_existing_column_sql,
+    build_postgres_existing_column_sql, build_questdb_existing_column_sql, build_sqlite_existing_column_sql,
+    build_sqlserver_drop_default_constraint_sql, build_sqlserver_existing_column_sql, build_xugu_existing_column_sql,
     dameng_drops_identity, has_column_extra_change, has_existing_column_attribute_change,
     validate_dameng_existing_identity_change,
 };
 use super::column_format::{
     column_definition, has_dameng_identity, is_dameng_identity_compatible_type, is_mysql_character_data_type,
-    original_is_mysql_generated_column, original_mysql_generated_clause,
+    normalize_mysql_generated_storage, original_is_mysql_generated_column, original_mysql_generated_clause,
+    original_mysql_generated_values,
 };
 use super::comments::build_sqlserver_column_comment_sql_for_profile;
 use super::dialect::{capabilities_for, database_label, is_oracle_like, StructureDialect};
 use super::indexes::has_existing_index_change;
-use super::types::{EditableStructureColumn, TableStructureSqlOptions};
+use super::types::{ColumnInfo, EditableStructureColumn, TableStructureSqlOptions};
 use super::util::{
     clean, is_protected_manticore_id_column, normalize_default, original_comment, original_default, qualified_table,
     quote_ident, quote_string,
@@ -29,6 +32,78 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
     let table = qualified_table(dialect, options.schema.as_deref(), &options.table_name);
     let database_label = database_label(options.database_type);
     let active_columns: Vec<_> = options.columns.iter().filter(|column| !column.marked_for_drop).collect();
+    if dialect == StructureDialect::Mysql {
+        // A generated column whose expression was left empty renders as a plain
+        // column; surface the silent drop of the user's intent instead.
+        for column in &active_columns {
+            // An empty expression on a formerly generated column is the explicit
+            // "remove the attribute" edit, not a mistake — warn only when the
+            // column was plain before, where a missing expression drops the
+            // user's intent of adding a generated column.
+            let removes_generated_attribute = column
+                .original
+                .as_ref()
+                .and_then(|original| original.extra.as_deref())
+                .and_then(original_mysql_generated_values)
+                .is_some();
+            if !removes_generated_attribute
+                && column
+                    .extra
+                    .as_ref()
+                    .and_then(|extra| extra.generated.as_ref())
+                    .is_some_and(|generated| generated.expression.trim().is_empty())
+            {
+                warnings.push(format!(
+                    "Column \"{}\" is marked as generated but its expression is empty; the generated-column clause was omitted from the DDL.",
+                    column.name
+                ));
+            }
+            // MySQL rejects several generated-column conversions via MODIFY:
+            // a plain column may only become a STORED generated column, only a
+            // STORED generated column may become plain again, and VIRTUAL and
+            // STORED cannot be switched (those need DROP + ADD). Surface the
+            // rejected shape as a warning instead of emitting DDL the server
+            // will refuse.
+            let original_generated = column
+                .original
+                .as_ref()
+                .and_then(|original| original.extra.as_deref())
+                .and_then(original_mysql_generated_values);
+            if let Some(generated) = column.extra.as_ref().and_then(|extra| extra.generated.as_ref()) {
+                if !generated.expression.trim().is_empty() {
+                    match original_generated {
+                        // The conversion restriction applies to MODIFY of an
+                        // existing plain column; ADD accepts VIRTUAL freely.
+                        None if column.original.is_some() => {
+                            if normalize_mysql_generated_storage(generated.storage.as_deref()) == "VIRTUAL" {
+                                warnings.push(format!(
+                                    "Column \"{}\": MySQL only allows converting a plain column into a STORED generated column; a VIRTUAL generated column requires dropping and re-adding the column.",
+                                    column.name
+                                ));
+                            }
+                        }
+                        None => {}
+                        Some((_, original_storage))
+                            if normalize_mysql_generated_storage(generated.storage.as_deref()) != original_storage =>
+                        {
+                            warnings.push(format!(
+                                "Column \"{}\": MySQL cannot switch a generated column between VIRTUAL and STORED in place; the column must be dropped and re-added.",
+                                column.name
+                            ));
+                        }
+                        Some(_) => {}
+                    }
+                }
+            } else if let Some((_, original_storage)) = original_generated {
+                if original_storage == "VIRTUAL" {
+                    warnings.push(format!(
+                        "Column \"{}\": MySQL only allows converting a STORED generated column back to a plain column; removing a VIRTUAL generated attribute requires dropping and re-adding the column.",
+                        column.name
+                    ));
+                }
+            }
+        }
+    }
     if dialect == StructureDialect::Dameng {
         let identity_columns: Vec<_> = active_columns.iter().filter(|column| has_dameng_identity(column)).collect();
         if identity_columns.len() > 1
@@ -111,7 +186,7 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
                 warnings.push("Manticore Search id column cannot be dropped from this editor.".to_string());
                 continue;
             }
-            statements.push(build_drop_column_sql(dialect, &table, &original.name));
+            statements.extend(build_drop_column_sql(dialect, &table, original));
             continue;
         }
 
@@ -189,7 +264,7 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
             .is_some_and(|change| mysql_orphans_auto_increment_column(options, column, change));
 
         if !has_existing_column_attribute_change(column)
-            && !has_column_extra_change(column)
+            && !has_column_extra_change(dialect, column)
             && !has_position_change
             && !clears_orphaned_auto_increment
         {
@@ -205,7 +280,7 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
             || (is_mysql_character_data_type(&column.data_type)
                 && (column.character_set.trim() != original.character_set.as_deref().unwrap_or("")
                     || column.collation.trim() != original.collation.as_deref().unwrap_or("")))
-            || has_column_extra_change(column);
+            || has_column_extra_change(dialect, column);
         if has_comment_change && !capabilities.comment {
             warnings.push(format!(
                 "Column comments are not supported for {database_label} from this editor; the comment change for \"{}\" was ignored.",
@@ -230,6 +305,9 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
         if dialect == StructureDialect::Mysql
             && original_is_mysql_generated_column(column)
             && original_mysql_generated_clause(column).is_none()
+            // An edited generated value no longer depends on the introspected
+            // expression, so the column may be altered (or un-generated) safely.
+            && column.extra.as_ref().and_then(|extra| extra.generated.as_ref()).is_none()
         {
             warnings.push(format!(
                 "Column \"{}\" is generated, but its generation expression could not be loaded; no ALTER statement was generated to avoid removing the generated-column definition.",
@@ -296,6 +374,7 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
                 warnings,
             )),
             StructureDialect::Sqlite => statements.extend(build_sqlite_existing_column_sql(&table, column, warnings)),
+            #[cfg(feature = "duckdb-sidecar")]
             StructureDialect::DuckDb => statements.extend(build_duckdb_existing_column_sql(&table, column)),
             StructureDialect::Questdb => statements.extend(build_questdb_existing_column_sql(&table, column)),
             _ => warnings.push(format!("Editing existing columns is not supported for {database_label} yet.")),
@@ -473,29 +552,35 @@ pub(super) fn build_primary_key_sql(
         return Vec::new();
     }
 
-    let persisted_postgres_primary_key_name = if options.database_type == Some(DatabaseType::Postgres)
-        && !change.old_ids.is_empty()
-    {
-        let mut primary_indexes =
-            options.indexes.iter().filter_map(|index| index.original.as_ref().filter(|original| original.is_primary));
-        match (primary_indexes.next(), primary_indexes.next()) {
-            (Some(primary_index), None) if !primary_index.name.is_empty() => Some(primary_index.name.as_str()),
-            _ => {
-                warnings.push(
-                        "Could not determine the existing PostgreSQL primary key constraint name. Refresh the table structure and try again."
-                            .to_string(),
-                    );
-                return Vec::new();
+    // PostgreSQL and SQL Server replace the persisted primary key by constraint name (neither
+    // engine has a dependable default naming rule), so the name must come from index metadata.
+    let persisted_primary_key_name = match options.database_type {
+        Some(DatabaseType::Postgres) | Some(DatabaseType::SqlServer) if !change.old_ids.is_empty() => {
+            let mut primary_indexes = options
+                .indexes
+                .iter()
+                .filter_map(|index| index.original.as_ref().filter(|original| original.is_primary));
+            match (primary_indexes.next(), primary_indexes.next()) {
+                (Some(primary_index), None) if !primary_index.name.is_empty() => Some(primary_index.name.as_str()),
+                _ => {
+                    let engine = if options.database_type == Some(DatabaseType::SqlServer) {
+                        "SQL Server"
+                    } else {
+                        "PostgreSQL"
+                    };
+                    warnings.push(format!(
+                        "Could not determine the existing {engine} primary key constraint name. Refresh the table structure and try again."
+                    ));
+                    return Vec::new();
+                }
             }
         }
-    } else {
-        None
+        _ => None,
     };
 
     let mut statements = Vec::new();
     if !change.old_ids.is_empty() {
-        let Some(drop_sql) = drop_primary_key_statement(dialect, table, options, persisted_postgres_primary_key_name)
-        else {
+        let Some(drop_sql) = drop_primary_key_statement(dialect, table, options, persisted_primary_key_name) else {
             warnings.push(format!(
                 "Changing primary keys is not supported for {} from this editor.",
                 database_label(options.database_type)
@@ -508,7 +593,7 @@ pub(super) fn build_primary_key_sql(
     if !change.new_names.is_empty() {
         let pk_list = change.new_names.iter().map(|name| quote_ident(dialect, name)).collect::<Vec<_>>().join(", ");
         // DM8: ADD [CONSTRAINT name] PRIMARY KEY; anonymous form matches Navicat/DBeaver/MySQL editors.
-        let constraint = persisted_postgres_primary_key_name
+        let constraint = persisted_primary_key_name
             .map(|name| format!("CONSTRAINT {} ", quote_ident(dialect, name)))
             .unwrap_or_default();
         statements.push(format!("ALTER TABLE {table} ADD {constraint}PRIMARY KEY ({pk_list});"));
@@ -526,22 +611,28 @@ pub(super) fn build_primary_key_sql(
 ///   Cluster primary keys cannot use this path (DM8 restriction) — left to the server.
 /// - Postgres: `DROP CONSTRAINT <persisted primary index name>` for PostgreSQL;
 ///   other Postgres-compatible engines retain the existing default-name behavior.
+/// - SQL Server: `DROP CONSTRAINT <persisted primary index name>`; the caller resolves the name
+///   from the index metadata (server-generated names like `PK__orders__3213E83F` have no rule).
 fn drop_primary_key_statement(
     dialect: StructureDialect,
     table: &str,
     options: &TableStructureSqlOptions,
-    persisted_postgres_primary_key_name: Option<&str>,
+    persisted_primary_key_name: Option<&str>,
 ) -> Option<String> {
     match dialect {
         StructureDialect::Postgres => {
             let fallback_name;
-            let pk_name = if let Some(name) = persisted_postgres_primary_key_name {
+            let pk_name = if let Some(name) = persisted_primary_key_name {
                 name
             } else {
                 let raw_table = options.table_name.split('.').next_back().unwrap_or(&options.table_name);
                 fallback_name = format!("{}_pkey", clean(raw_table));
                 &fallback_name
             };
+            Some(format!("ALTER TABLE {table} DROP CONSTRAINT {};", quote_ident(dialect, pk_name)))
+        }
+        StructureDialect::SqlServer => {
+            let pk_name = persisted_primary_key_name?;
             Some(format!("ALTER TABLE {table} DROP CONSTRAINT {};", quote_ident(dialect, pk_name)))
         }
         // 神通 Oscar 实测支持 `ALTER TABLE ... DROP PRIMARY KEY`（与 Dameng/MySQL 一致）。
@@ -643,11 +734,18 @@ pub(super) fn build_add_column_sql(
     statements
 }
 
-pub(super) fn build_drop_column_sql(dialect: StructureDialect, table: &str, column_name: &str) -> String {
+pub(super) fn build_drop_column_sql(dialect: StructureDialect, table: &str, original: &ColumnInfo) -> Vec<String> {
+    let column_name = &original.name;
     if dialect == StructureDialect::Informix {
-        return format!("ALTER TABLE {table} DROP ({});", quote_ident(dialect, column_name));
+        return vec![format!("ALTER TABLE {table} DROP ({});", quote_ident(dialect, column_name))];
     }
-    format!("ALTER TABLE {table} DROP COLUMN {};", quote_ident(dialect, column_name))
+    let mut statements = Vec::new();
+    // SQL Server refuses to drop a column that a default constraint still depends on (error 5074).
+    if dialect == StructureDialect::SqlServer && !normalize_default(original.column_default.as_ref()).is_empty() {
+        statements.push(build_sqlserver_drop_default_constraint_sql(table, column_name));
+    }
+    statements.push(format!("ALTER TABLE {table} DROP COLUMN {};", quote_ident(dialect, column_name)));
+    statements
 }
 
 pub(super) fn column_position_clause(

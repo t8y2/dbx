@@ -1,16 +1,84 @@
 package com.dbx.agent.firebird;
 
+import com.dbx.agent.ColumnInfo;
 import com.dbx.agent.ConfiguredJdbcAgent;
+import com.dbx.agent.ConnectParams;
 import com.dbx.agent.JdbcAgentProfile;
+import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.MultiSessionJsonRpcServer;
+import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
+import com.dbx.agent.TableInfo;
+import java.nio.charset.Charset;
+import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.Types;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
 public final class FirebirdAgent extends ConfiguredJdbcAgent {
+    private Charset dataCharset;
+
+    @Override
+    protected String buildJdbcUrl(ConnectParams params) {
+        String url = super.buildJdbcUrl(params);
+        LegacyTextDecoder.charsetFromUrl(url); // Fail invalid configuration before opening a connection.
+        return LegacyTextDecoder.jdbcUrl(url);
+    }
+
+    @Override
+    protected void afterConnect(ConnectParams params, Connection connection) {
+        super.afterConnect(params, connection);
+        dataCharset = LegacyTextDecoder.charsetFromUrl(super.buildJdbcUrl(params));
+    }
+
+    @Override
+    protected Object resultValue(ResultSet resultSet, int index, int sqlType) {
+        Object value = super.resultValue(resultSet, index, sqlType);
+        return switch (sqlType) {
+            case Types.CHAR, Types.VARCHAR, Types.LONGVARCHAR,
+                Types.NCHAR, Types.NVARCHAR, Types.LONGNVARCHAR, Types.CLOB, Types.NCLOB ->
+                value instanceof String text ? decodeLegacyText(text) : value;
+            default -> value;
+        };
+    }
+
+    private String decodeLegacyText(String value) {
+        return LegacyTextDecoder.decode(value, dataCharset);
+    }
+
+    @Override
+    public List<ColumnInfo> getColumns(String schema, String table) {
+        List<ColumnInfo> columns = super.getColumns(schema, table);
+        for (ColumnInfo column : columns) column.setComment(decodeLegacyText(column.getComment()));
+        return columns;
+    }
+
+    @Override
+    public List<TableInfo> listTables(String schema) {
+        return listTables(schema, MetadataListConstraints.NONE);
+    }
+
+    @Override
+    public List<TableInfo> listTables(String schema, MetadataListConstraints constraints) {
+        List<TableInfo> tables = super.listTables(schema, constraints);
+        for (TableInfo table : tables) table.setComment(decodeLegacyText(table.getComment()));
+        return tables;
+    }
+
+    @Override
+    public List<ObjectInfo> listObjects(String schema) {
+        return listObjects(schema, MetadataListConstraints.NONE);
+    }
+
+    @Override
+    public List<ObjectInfo> listObjects(String schema, MetadataListConstraints constraints) {
+        List<ObjectInfo> objects = super.listObjects(schema, constraints);
+        for (ObjectInfo object : objects) object.setComment(decodeLegacyText(object.getComment()));
+        return objects;
+    }
     static final String PROCEDURE_SOURCE_SQL = """
         SELECT
             CASE WHEN METADATA_ROW = 1 THEN PROCEDURE_SOURCE ELSE NULL END AS PROCEDURE_SOURCE,
@@ -81,7 +149,7 @@ public final class FirebirdAgent extends ConfiguredJdbcAgent {
                     while (resultSet.next()) {
                         found = true;
                         if (body == null) {
-                            body = resultSet.getString("PROCEDURE_SOURCE");
+                            body = decodeLegacyText(resultSet.getString("PROCEDURE_SOURCE"));
                         }
                         String parameterName = trimToNull(resultSet.getString("PARAMETER_NAME"));
                         if (parameterName == null) {

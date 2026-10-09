@@ -149,7 +149,7 @@ async fn run() -> Result<(), String> {
     }
 
     handle.disconnect().await?;
-    host.stop_all().await;
+    host.stop_all().await?;
     installer.uninstall(PLUGIN_ID)?;
     if !PluginRegistry::new_with_app_version(store.path().to_path_buf(), APP_VERSION).list_installed()?.is_empty() {
         return Err("Plugin store is not empty after uninstall".to_string());

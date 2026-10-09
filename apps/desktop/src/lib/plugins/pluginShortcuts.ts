@@ -80,7 +80,7 @@ export function collectPluginShortcuts(registry: FrontendPluginRegistry): Plugin
       rootUri,
       disabled: command
         ? !evaluatePluginCommandConditions(command.enablement?.all, {
-            surface: command.action.presentation === "panel" ? "panel" : "tab",
+            surface: command.action.presentation === "panel" ? "dock" : "tab",
             "connection.state": "none",
             readOnly: false,
           })

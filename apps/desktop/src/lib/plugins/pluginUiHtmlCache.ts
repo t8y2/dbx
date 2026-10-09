@@ -1,9 +1,11 @@
-// The inlined plugin ui document is multiple megabytes; rebuilding it per
+// The processed plugin UI document is multiple megabytes; rebuilding it per
 // workbench instance (every dock panel, every tab) re-reads the entry through
 // the bridge and re-parses it each time. Module scope is the point: the cache
 // is shared by every PluginWorkbenchHost instance, so only the first boot of a
 // plugin version pays the read/decode/inline pipeline.
 import * as api from "@/lib/backend/api";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { COMPONENT_PLUGINS_UPDATED_EVENT } from "@/lib/updates/componentUpdateEvents";
 
 export interface PluginUiHtml {
   html: string;
@@ -11,12 +13,15 @@ export interface PluginUiHtml {
   /** Final sandbox document (html + CSP/SDK/theme injection); built lazily once
    * per plugin version — regenerating it re-runs megabyte-scale string surgery
    * on every panel/tab boot. The embedded appearance only affects the pre-init
-   * first paint; the init message pushes the live theme right after. */
-  sandboxDoc?: string;
+   * first paint; the init message pushes the live theme right after. Carries the
+   * `unsafe-eval` grant it was built with: that grant is a user setting that can
+   * flip while the html stays valid, and it changes the CSP. */
+  sandboxDoc?: { allowUnsafeEval: boolean; doc: string };
 }
 
 const cache = new Map<string, PluginUiHtml>();
 const LIMIT = 4;
+let cacheGeneration = 0;
 
 export function getCachedPluginUiHtml(key: string): PluginUiHtml | undefined {
   const hit = cache.get(key);
@@ -36,11 +41,35 @@ export function setCachedPluginUiHtml(key: string, value: PluginUiHtml): void {
 
 /** Test and plugin-uninstall escape hatch. */
 export function clearPluginUiHtmlCache(): void {
+  cacheGeneration++;
   cache.clear();
   inFlight.clear();
 }
 
-// --- First-boot pipeline (read → decode → inline local assets) -------------
+// --- First-boot pipeline (read → decode → prepare local assets) -------------
+
+/** Base URL for packaged plugin UI resources on desktop hosts. */
+export function pluginUiAssetBaseUrl(pluginId: string, entryDirectory = ""): string | undefined {
+  if (!isTauriRuntime()) return undefined;
+  const origin = location.protocol === "http:" || location.protocol === "https:" ? `${location.protocol}//dbx-plugin.localhost/${pluginId}/` : `dbx-plugin://localhost/${pluginId}/`;
+  return entryDirectory ? `${origin}${entryDirectory}/` : origin;
+}
+
+function pluginUiAssetUrl(pluginId: string, path: string, source: string): string | undefined {
+  const baseUrl = pluginUiAssetBaseUrl(pluginId);
+  if (!baseUrl) return undefined;
+  const assetUrl = new URL(
+    path
+      .split("/")
+      .map((segment) => encodeURIComponent(segment))
+      .join("/"),
+    baseUrl,
+  );
+  const sourceUrl = new URL(source.trim(), "https://dbx-plugin.invalid/");
+  assetUrl.search = sourceUrl.search;
+  assetUrl.hash = sourceUrl.hash;
+  return assetUrl.href;
+}
 
 function localUiAssetPath(source: string): string | undefined {
   const trimmed = source.trim();
@@ -65,22 +94,39 @@ async function inlineLocalUiAssets(html: string, pluginId: string): Promise<Plug
   }
   const document = new DOMParser().parseFromString(html, "text/html");
   const resources = [...document.querySelectorAll("script[src], link[rel='stylesheet'][href]")];
-  // Dynamic-import chunks and CSS url() references live next to the entry
-  // script; its directory is the <base> the sandbox document needs to resolve
-  // them through the dbx-plugin scheme.
+  // Keep the existing first-local-resource directory for the sandbox <base>
+  // used by document-relative assets such as inlined CSS url(). External
+  // module imports resolve from their own preserved module URLs instead.
   let entryDirectory = "";
   // Fetch every referenced asset concurrently — these are bridge round-trips
   // into the sidecar, and panels reopen this path on every workbench (re)load.
   const fetched = await Promise.all(
-    resources.map((resource) => {
+    resources.map(async (resource) => {
       const source = resource.getAttribute(resource.tagName === "SCRIPT" ? "src" : "href");
       const path = source ? localUiAssetPath(source) : undefined;
-      if (!path) return Promise.resolve({ resource, content: null });
+      if (!source || !path) return { resource, content: null };
       if (!entryDirectory) entryDirectory = path.split("/").slice(0, -1).join("/");
-      return api.readPluginUiAsset(pluginId, path).then((asset) => ({
+      const isModuleScript = resource.tagName === "SCRIPT" && resource.getAttribute("type")?.trim().toLowerCase() === "module";
+      // Keep the external module URL only in packaged builds: `tauri dev` serves
+      // the app from the devUrl (http(s):), which maps module URLs onto the
+      // WebView2-only http-subdomain form that WKWebView/webkit2gtk never serve,
+      // so the entry module would fail to load at all in dev there. Dev keeps
+      // the inline fallback below (nested imports resolve relative to the
+      // srcdoc <base>, as they did before the packaged fix).
+      if (isModuleScript && import.meta.env.PROD) {
+        const url = pluginUiAssetUrl(pluginId, path, source);
+        if (url) {
+          // Keep the module's real URL: browsers resolve its static and dynamic
+          // imports from this URL, not from the srcdoc document's <base>.
+          resource.setAttribute("src", url);
+          return { resource, content: null };
+        }
+      }
+      const asset = await api.readPluginUiAsset(pluginId, path);
+      return {
         resource,
         content: new TextDecoder().decode(Uint8Array.from(atob(asset.dataBase64), (character) => character.charCodeAt(0))),
-      }));
+      };
     }),
   );
   for (const { resource, content } of fetched) {
@@ -94,6 +140,17 @@ async function inlineLocalUiAssets(html: string, pluginId: string): Promise<Plug
       resource.replaceWith(script);
     } else {
       const style = document.createElement("style");
+      // Carry the stylesheet's own attributes over, exactly like the script
+      // branch does: they are how a plugin addresses the sheet later (a theme or
+      // skin switch selects sheets by a data-* marker and toggles `disabled`),
+      // so dropping them here silently breaks every runtime stylesheet lookup in
+      // plugin form. Note that `disabled` does not reflect from the content
+      // attribute on a <style> element the way it does on a <link>, and it cannot
+      // survive serialization as an IDL property either — a plugin that ships a
+      // disabled stylesheet has to re-apply `sheet.disabled` itself.
+      for (const attribute of [...resource.attributes]) {
+        if (attribute.name !== "href" && attribute.name !== "rel") style.setAttribute(attribute.name, attribute.value);
+      }
       style.textContent = content;
       resource.replaceWith(style);
     }
@@ -101,7 +158,7 @@ async function inlineLocalUiAssets(html: string, pluginId: string): Promise<Plug
   return { html: document.documentElement.outerHTML, entryDirectory };
 }
 
-/** Full first-boot pipeline: read the ui entry through the bridge, decode, inline local assets. */
+/** Full first-boot pipeline: read the ui entry through the bridge, decode, and prepare local assets. */
 export async function loadPluginUiHtml(pluginId: string): Promise<PluginUiHtml> {
   const asset = await api.readPluginUiEntry(pluginId);
   const bytes = Uint8Array.from(atob(asset.dataBase64), (character) => character.charCodeAt(0));
@@ -125,15 +182,30 @@ export function getOrLoadPluginUiHtml(key: string, pluginId: string): Promise<Pl
   if (hit) return Promise.resolve(hit);
   let load = inFlight.get(key);
   if (!load) {
+    const generation = cacheGeneration;
     load = loadPluginUiHtml(pluginId)
       .then((value) => {
-        setCachedPluginUiHtml(key, value);
+        // A plugin change may arrive while its old UI document is still being
+        // read. Do not let that pre-invalidation request repopulate the cache.
+        if (cacheGeneration === generation) setCachedPluginUiHtml(key, value);
         return value;
       })
       .finally(() => {
-        inFlight.delete(key);
+        // A post-invalidation load may already own this key.
+        if (cacheGeneration === generation) inFlight.delete(key);
       });
     inFlight.set(key, load);
   }
   return load;
+}
+
+// The plugin set can change from entry points other than the plugin center (the update center
+// dispatches COMPONENT_PLUGINS_UPDATED_EVENT from App.vue while the center is closed; batch
+// uninstall dispatches only dbx:plugins-changed), and a same-version reinstall reuses the
+// id:version key. Invalidate on both events here, at the cache owner — the same contract the
+// icon resolver follows — so workbench tabs opened after an install/update/uninstall read the
+// new ui build instead of the stale inlined bytes.
+if (typeof window !== "undefined") {
+  window.addEventListener(COMPONENT_PLUGINS_UPDATED_EVENT, clearPluginUiHtmlCache);
+  window.addEventListener("dbx:plugins-changed", clearPluginUiHtmlCache);
 }

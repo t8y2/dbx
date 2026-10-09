@@ -31,7 +31,11 @@ export function acceptSelectedOrFirstCompletion(view: EditorView, acceptCompleti
 }
 
 export function acceptSelectedCompletionWithRetry(view: EditorView, options: RetryCompletionAcceptanceOptions): CompletionAcceptanceAttempt {
-  if (options.completionStatus(view.state) !== "active") return { handled: false };
+  // A "pending" status (results still computing, e.g. columns loading from the
+  // database) must also enter the retry loop: bailing out immediately would turn
+  // Enter into a newline while the suggestion popup is about to open. Only a
+  // null status (no completion requested at all) is left to the caller.
+  if (options.completionStatus(view.state) == null) return { handled: false };
   if (acceptSelectedOrFirstCompletion(view, options.acceptCompletion, options.selectedCompletionIndex, options.selectFirstCompletion)) return { handled: true };
 
   const initialDoc = view.state.doc;

@@ -13,7 +13,7 @@ export function supportsDatabaseSchemaQualifier(dbType?: DatabaseType): boolean 
 }
 
 export function supportsDatabaseNameCompletion(dbType?: DatabaseType): boolean {
-  return !!dbType && ((!isSchemaAware(dbType) && !isSingleDatabase(dbType)) || dbType === "sqlserver");
+  return !!dbType && ((!isSchemaAware(dbType) && !isSingleDatabase(dbType)) || dbType === "sqlserver" || dbType === "snowflake");
 }
 
 /**
@@ -268,6 +268,7 @@ export function supportsTableTruncate(dbType?: DatabaseType): boolean {
     dbType !== "victoriametrics" &&
     dbType !== "manticoresearch" &&
     dbType !== "salesforce" &&
+    dbType !== "neo4j" &&
     dbType !== "nebula"
   );
 }
@@ -280,7 +281,7 @@ export function usesPostgresLikeStructureCopy(dbType?: DatabaseType): boolean {
   return !!dbType && PG_LIKE_STRUCTURE_TYPES.has(dbType);
 }
 
-const TRANSACTION_SUPPORTED_TYPES: readonly string[] = ["postgres", "mysql", "oracle", "jdbc", "oceanbase-oracle", "dameng"];
+const TRANSACTION_SUPPORTED_TYPES: readonly string[] = ["postgres", "mysql", "oracle", "jdbc", "oceanbase-oracle", "dameng", "sqlserver"];
 
 /** Oracle-family databases, kept ONLY for the Oracle-specific ALTER SESSION SET
  *  CURRENT_SCHEMA compensation in queryStore. Do not use for toolbar/dirty-bit

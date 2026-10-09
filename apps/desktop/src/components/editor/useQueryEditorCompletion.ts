@@ -20,7 +20,17 @@ import {
 import { originForSqlCompletionProvider, originForTypedSqlCompletionStart, shouldAllowSqlCompletionTrigger, type SqlCompletionTriggerFacts, type SqlCompletionTriggerOrigin } from "@/lib/sql/sqlCompletionTriggerPolicy";
 import { driverProfileHasCompletionCandidates } from "@/lib/database/driverProfileExtensions";
 import { buildElasticsearchCompletionItemsFromContext, elasticsearchCompletionNeedsFields, getElasticsearchCompletionContext, getElasticsearchCompletionResultValidFor, shouldAutoOpenElasticsearchCompletion, type ElasticsearchCompletionField } from "@/lib/elasticsearch/elasticsearchCompletion";
-import { buildMongoCompletionItemsFromContext, foldMongoKeySeparator, getMongoCompletionContext, getMongoCompletionResultValidFor, mongoCompletionNeedsCollections, mongoCompletionNeedsDatabases, mongoCompletionNeedsFields, shouldAutoOpenMongoCompletion } from "@/lib/mongo/mongoCompletion";
+import {
+  buildMongoCompletionItemsFromContext,
+  foldMongoKeySeparator,
+  getMongoCompletionContext,
+  getMongoCompletionResultValidFor,
+  mongoCompletionNeedsCollections,
+  mongoCompletionNeedsDatabases,
+  mongoCompletionNeedsFields,
+  mongoCompletionNeedsIndexes,
+  shouldAutoOpenMongoCompletion,
+} from "@/lib/mongo/mongoCompletion";
 import { buildSoqlCompletionItems, getSoqlCompletionContext, getSoqlCompletionResultValidFor, resolveSoqlFieldCandidates, resolveSoqlValueField, shouldAutoOpenSoqlCompletion, soqlCompletionNeedsObjects, type SoqlCompletionField, type SoqlCompletionObject } from "@/lib/soql/soqlCompletion";
 import {
   buildSqlServerUseDatabaseCompletionItems,
@@ -366,6 +376,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       props.databaseType !== "easysearch" &&
       props.databaseType !== "meilisearch" &&
       props.databaseType !== "solr" &&
+      props.databaseType !== "couchdb" &&
       props.databaseType !== "victoriametrics" &&
       props.databaseType !== "salesforce"
     );
@@ -572,6 +583,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     let databases: string[] = [];
     let collections: string[] = [];
     let fields: Awaited<ReturnType<typeof connectionStore.listMongoCompletionFields>> = [];
+    let indexes: Awaited<ReturnType<typeof connectionStore.listMongoCompletionIndexes>> = [];
 
     // `use` and `getSiblingDB` name a database, which does not depend on the tab having one selected.
     if (mongoCompletionNeedsDatabases(completionContext.mode)) {
@@ -598,12 +610,22 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       }
     }
 
+    const indexDatabase = completionContext.database ?? props.database;
+    if (indexDatabase && mongoCompletionNeedsIndexes(completionContext.mode) && completionContext.collection) {
+      try {
+        indexes = await connectionStore.listMongoCompletionIndexes(props.connectionId, indexDatabase, completionContext.collection);
+      } catch {
+        indexes = [];
+      }
+    }
+
     if (epoch !== completionEpoch) return null;
 
     const items = buildMongoCompletionItemsFromContext(completionContext, {
       databases,
       collections,
       fields,
+      indexes,
     });
     if (items.length === 0) return null;
     return {
@@ -677,7 +699,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     if (props.databaseType === "mongodb") {
       return provideMongoCompletions(currentState, position, explicit);
     }
-    if (props.databaseType === "meilisearch" || props.databaseType === "solr") return null;
+    if (props.databaseType === "meilisearch" || props.databaseType === "solr" || props.databaseType === "couchdb") return null;
     if (props.databaseType === "elasticsearch" || props.databaseType === "easysearch") {
       if (!isSqlLikeCompletionStatement(fullDoc, position, sqlCompletionDialectOptions())) {
         return provideElasticsearchCompletions(currentState, position, explicit);
@@ -825,6 +847,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
           autoAliasTables: settingsStore.editorSettings.autoAliasTables,
           tableCompletionSchemaQualification: settingsStore.editorSettings.tableCompletionSchemaQualification,
           quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
+          functionCompletionIncludeParams: settingsStore.editorSettings.functionCompletionIncludeParams,
         });
         return buildSqlCompletionResult(items, completionContext, fullDoc, position);
       }
@@ -888,6 +911,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
           autoAliasTables: settingsStore.editorSettings.autoAliasTables,
           tableCompletionSchemaQualification: settingsStore.editorSettings.tableCompletionSchemaQualification,
           quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
+          functionCompletionIncludeParams: settingsStore.editorSettings.functionCompletionIncludeParams,
         });
         return buildSqlCompletionResult(items, completionContext, fullDoc, position);
       }
@@ -1014,7 +1038,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     if (props.databaseType === "mongodb") {
       return !!(insertedText || removedText) && shouldAutoOpenMongoCompletion(fullDoc, position);
     }
-    if (props.databaseType === "victoriametrics" || props.databaseType === "meilisearch" || props.databaseType === "solr") return false;
+    if (props.databaseType === "victoriametrics" || props.databaseType === "meilisearch" || props.databaseType === "solr" || props.databaseType === "couchdb") return false;
     if (props.databaseType === "redis" || props.databaseType === "elasticsearch" || props.databaseType === "easysearch") {
       // Preserve old character-based checks for non-SQL providers.
       if (!insertedText && removedText) {
@@ -1050,6 +1074,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     });
     const shouldLoadTables = !schemaLookupDatabase && (completionContext.suggestTables || (!!completionContext.qualifier && !isReferencedTableQualifier(completionContext)));
     const tableLookupTarget = resolveSqlCompletionTableLookupTarget({
+      databaseType: props.databaseType,
       currentDatabase: scope.database,
       currentSchema: scope.schema,
       supportsDatabaseQualifier: supportsDatabaseQualifierCompletion(),
@@ -1191,6 +1216,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       autoAliasTables: settingsStore.editorSettings.autoAliasTables,
       tableCompletionSchemaQualification: settingsStore.editorSettings.tableCompletionSchemaQualification,
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
+      functionCompletionIncludeParams: settingsStore.editorSettings.functionCompletionIncludeParams,
     });
 
     return buildSqlCompletionResult(items, completionContext, fullDoc, position);
@@ -1212,6 +1238,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       knownSchemas: currentDatabaseSchemaNames,
     });
     const tableLookupTarget = resolveSqlCompletionTableLookupTarget({
+      databaseType: props.databaseType,
       currentDatabase: database,
       currentSchema: scope.schema,
       supportsDatabaseQualifier: supportsDatabaseQualifierCompletion(),
@@ -1422,6 +1449,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     });
     const shouldLoadTables = !schemaLookupDatabase && (completionContext.suggestTables || (!!completionContext.qualifier && !isReferencedTableQualifier(completionContext)));
     const tableLookupTarget = resolveSqlCompletionTableLookupTarget({
+      databaseType: props.databaseType,
       currentDatabase: scope.database,
       currentSchema: scope.schema,
       supportsDatabaseQualifier: supportsDatabaseQualifierCompletion(),
@@ -1653,6 +1681,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       autoAliasTables: settingsStore.editorSettings.autoAliasTables,
       tableCompletionSchemaQualification: settingsStore.editorSettings.tableCompletionSchemaQualification,
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
+      functionCompletionIncludeParams: settingsStore.editorSettings.functionCompletionIncludeParams,
     });
 
     return buildSqlCompletionResult(items, completionContext, fullDoc, position);

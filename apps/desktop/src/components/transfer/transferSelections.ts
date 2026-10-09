@@ -17,6 +17,10 @@ export function countTransferObjects(request: Pick<TransferRequest, "tables" | "
  * cross-family matrix does not allow) are dropped at the request boundary
  * even if stale selections are still present in the tree.
  */
+export function buildTransferObjectSelectionField(selectedObjects: Partial<Record<TransferObjectKind, Set<string>>>, disabledGroups: TransferObjectKind[]): { objects: TransferObjectSelectionPayload[] } {
+  return { objects: buildTransferObjectSelections(selectedObjects, disabledGroups) };
+}
+
 export function buildTransferObjectSelections(selectedObjects: Partial<Record<TransferObjectKind, Set<string>>>, disabledGroups: TransferObjectKind[]): TransferObjectSelectionPayload[] {
   return (Object.keys(selectedObjects) as TransferObjectKind[])
     .filter((kind) => kind !== "TABLE" && !disabledGroups.includes(kind))

@@ -352,12 +352,13 @@ pub(crate) mod test_utils {
         type T = BytesMutReader;
 
         fn into_sql_read_bytes(self) -> Self::T {
-            BytesMutReader { buf: self }
+            BytesMutReader { buf: self, context: Context::new() }
         }
     }
 
     pub(crate) struct BytesMutReader {
         buf: BytesMut,
+        context: Context,
     }
 
     impl AsyncRead for BytesMutReader {
@@ -388,11 +389,11 @@ pub(crate) mod test_utils {
         }
 
         fn context(&self) -> &Context {
-            todo!()
+            &self.context
         }
 
         fn context_mut(&mut self) -> &mut Context {
-            todo!()
+            &mut self.context
         }
     }
 }

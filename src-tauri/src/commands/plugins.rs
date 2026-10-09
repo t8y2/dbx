@@ -123,7 +123,7 @@ pub async fn install_marketplace_plugin(
         PluginMarketplace::new(state.plugins.root_dir().to_path_buf(), state.plugins.app_version().to_string())?
             .with_lifecycle(state.plugins.lifecycle());
     let result = marketplace.install(request).await?;
-    stop_replaced_plugin_runtime(&state, &result.plugin).await;
+    stop_replaced_plugin_runtime(&state, &result.plugin).await?;
     emit_plugin_runtime_replaced(&app, &result.plugin);
     Ok(result.response())
 }
@@ -200,7 +200,7 @@ pub async fn install_plugin_package(
     })
     .await
     .map_err(|error| error.to_string())??;
-    stop_replaced_plugin_runtime(&state, &result.plugin).await;
+    stop_replaced_plugin_runtime(&state, &result.plugin).await?;
     emit_plugin_runtime_replaced(&app, &result.plugin);
     Ok(result.response())
 }
@@ -228,7 +228,7 @@ pub async fn install_plugin_package_from_url(
             );
         })
         .await?;
-    stop_replaced_plugin_runtime(&state, &result.plugin).await;
+    stop_replaced_plugin_runtime(&state, &result.plugin).await?;
     emit_plugin_runtime_replaced(&app, &result.plugin);
     Ok(result.response())
 }
@@ -247,7 +247,7 @@ pub async fn rollback_plugin(
     })
     .await
     .map_err(|error| error.to_string())??;
-    stop_replaced_plugin_runtime(&state, &result.plugin).await;
+    stop_replaced_plugin_runtime(&state, &result.plugin).await?;
     emit_plugin_runtime_replaced(&app, &result.plugin);
     Ok(result.response())
 }
@@ -318,7 +318,7 @@ pub async fn stop_plugin(
     // The plugin's workbenches are going away with its runtime; without this
     // sweep, handles it never closed would pin the shared registry quota.
     crate::commands::plugin_file::close_all_plugin_files(&file_state, &plugin_id);
-    state.plugin_host.stop(&plugin_id).await;
+    state.plugin_host.stop(&plugin_id).await?;
     Ok(())
 }
 
@@ -533,10 +533,10 @@ fn emit_plugin_runtime_replaced(app: &AppHandle, plugin: &InstalledPlugin) {
     );
 }
 
-async fn stop_replaced_plugin_runtime(state: &Arc<AppState>, plugin: &InstalledPlugin) {
+async fn stop_replaced_plugin_runtime(state: &Arc<AppState>, plugin: &InstalledPlugin) -> Result<(), String> {
     state.remove_plugin_connection_pools(&plugin.manifest.id).await;
     stop_external_driver_pools(state, plugin).await;
-    state.plugin_host.stop(&plugin.manifest.id).await;
+    state.plugin_host.stop(&plugin.manifest.id).await
 }
 
 async fn stop_external_driver_pools(state: &Arc<AppState>, plugin: &InstalledPlugin) {

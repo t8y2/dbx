@@ -32,12 +32,16 @@ import {
   type DatabaseBackupRun,
   type DatabaseBackupSchedule,
 } from "@/lib/backup/scheduledDatabaseBackup";
+import { databaseBackupTableSelectionScopeKey, normalizeDatabaseBackupTableTargets, type DatabaseBackupTableSelectionState } from "@/lib/backup/scheduledDatabaseBackup";
+import { getLastBackupDirectory, setLastBackupDirectory } from "@/lib/export/exportPath";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
 
 const { t, locale } = useI18n();
 const { toast } = useToast();
 const connectionStore = useConnectionStore();
+const settingsStore = useSettingsStore();
 const { schedules, runs, activeScheduleIds, activeRunIds, cancellingRunIds, activeRuns, heartbeat, destinationRoot, error: backupError, saveSchedule, setScheduleEnabled, deleteSchedule, deleteRuns, renameRun, runSchedule, runOneShot, cancelRun } = useScheduledDatabaseBackups();
 const desktop = isTauriRuntime();
 const backgroundEnabled = ref(false);
@@ -85,6 +89,27 @@ const databaseOptions = ref<string[]>([]);
 const allDatabases = ref(true);
 const selectedDatabases = ref<string[]>([]);
 const tablePatternsInput = ref("");
+const scheduleTableSelectionState = ref<DatabaseBackupTableSelectionState>({ scopeKey: "", ready: false });
+const oneShotTableSelectionState = ref<DatabaseBackupTableSelectionState>({ scopeKey: "", ready: false });
+function tableScopeReady(config: DatabaseBackupExecutionConfig, state: DatabaseBackupTableSelectionState): boolean {
+  if (config.tableFilterMode !== "selected") return config.tableFilterMode === "all" || normalizeDatabaseBackupTablePatterns(tablePatternsInput.value).length > 0;
+  const targets = config.selectedTables ?? [];
+  return (
+    !allDatabases.value &&
+    selectedDatabases.value.length > 0 &&
+    targets.length > 0 &&
+    targets.every((target) => selectedDatabases.value.includes(target.database)) &&
+    state.ready &&
+    state.scopeKey === databaseBackupTableSelectionScopeKey(config.connectionId, connectionStore.getConfig(config.connectionId)?.db_type, selectedDatabases.value)
+  );
+}
+function backupTablePayload(config: DatabaseBackupExecutionConfig) {
+  return {
+    tablePatterns: config.tableFilterMode === "include" || config.tableFilterMode === "exclude" ? normalizeDatabaseBackupTablePatterns(tablePatternsInput.value) : [],
+    // Override any inactive selection carried by the draft before JSON serialization.
+    selectedTables: config.tableFilterMode === "selected" ? normalizeDatabaseBackupTableTargets(config.selectedTables) : undefined,
+  };
+}
 const expandedRunIds = reactive(new Set<string>());
 const selectedRunIds = reactive(new Set<string>());
 const historyConnectionId = ref("");
@@ -133,13 +158,26 @@ watch(historyConnectionPickerOpen, (open) => {
   if (!open) historyConnectionSearch.value = "";
 });
 
+/**
+ * 解析新建备份时的默认「备份目录」。
+ * 优先级：服务端根目录（Web 端） > 上次备份目录 > 设置中的「首选导出路径」。
+ * Desktop 端后端 root 恒为 null（见 src-tauri/background_backup.rs），
+ * 此前默认值恒为空串，导致每次新建备份都要重新选择目录（issue #11317）。
+ */
+function defaultBackupDestinationDirectory(): string {
+  if (destinationRoot.value) return destinationRoot.value;
+  const remembered = getLastBackupDirectory();
+  if (remembered) return remembered;
+  return settingsStore.editorSettings.preferredExportPath?.trim() || "";
+}
+
 function newBackupConfig(connectionId = sqlConnections.value[0]?.id ?? ""): DatabaseBackupExecutionConfig {
   return {
     connectionId,
     databases: [],
     tableFilterMode: "all",
     tablePatterns: [],
-    destinationDirectory: destinationRoot.value || "",
+    destinationDirectory: defaultBackupDestinationDirectory(),
     includeStructure: true,
     includeData: true,
     includeObjects: true,
@@ -187,7 +225,7 @@ function databaseLoadIsCurrent(generation: number, dialog: BackupDialogKind, tar
 const canSave = computed(() => {
   const hasContent = draft.value.includeStructure || draft.value.includeData || draft.value.includeObjects;
   const hasDatabaseScope = allDatabases.value || selectedDatabases.value.length > 0;
-  const hasTableScope = draft.value.tableFilterMode === "all" || normalizeDatabaseBackupTablePatterns(tablePatternsInput.value).length > 0;
+  const hasTableScope = tableScopeReady(draft.value, scheduleTableSelectionState.value);
   return (
     !!draft.value.name.trim() &&
     !!draft.value.connectionId &&
@@ -236,7 +274,7 @@ const oneShotOutputPathPreview = computed(() => {
 const canStartOneShot = computed(() => {
   const hasContent = oneShotDraft.value.includeStructure || oneShotDraft.value.includeData || oneShotDraft.value.includeObjects;
   const hasDatabaseScope = allDatabases.value || selectedDatabases.value.length > 0;
-  const hasTableScope = oneShotDraft.value.tableFilterMode === "all" || normalizeDatabaseBackupTablePatterns(tablePatternsInput.value).length > 0;
+  const hasTableScope = tableScopeReady(oneShotDraft.value, oneShotTableSelectionState.value);
   return !!oneShotDraft.value.connectionId && !!oneShotDraft.value.destinationDirectory.trim() && databaseBackupFileNamePatternIsValid(oneShotDraft.value.fileNamePattern || "") && hasContent && hasDatabaseScope && hasTableScope && !oneShotStarting.value && !loadingDatabases.value;
 });
 
@@ -319,6 +357,7 @@ async function loadDatabases(dialog: BackupDialogKind, targetDraft: DatabaseBack
     allDatabases.value = true;
     targetDraft.tableFilterMode = "all";
     targetDraft.tablePatterns = [];
+    targetDraft.selectedTables = [];
     tablePatternsInput.value = "";
   }
   if (!connectionId) {
@@ -357,12 +396,15 @@ async function loadDatabases(dialog: BackupDialogKind, targetDraft: DatabaseBack
 }
 
 function resetDatabaseScope(targetDraft: DatabaseBackupExecutionConfig) {
+  scheduleTableSelectionState.value = { scopeKey: "", ready: false };
+  oneShotTableSelectionState.value = { scopeKey: "", ready: false };
   databaseOptions.value = [];
   databaseLoadError.value = "";
   allDatabases.value = true;
   selectedDatabases.value = [];
   targetDraft.tableFilterMode = "all";
   targetDraft.tablePatterns = [];
+  targetDraft.selectedTables = [];
   tablePatternsInput.value = "";
 }
 
@@ -376,6 +418,7 @@ async function openCreateSchedule() {
 }
 
 async function openEditSchedule(schedule: DatabaseBackupSchedule) {
+  scheduleTableSelectionState.value = { scopeKey: "", ready: false };
   oneShotDialogOpen.value = false;
   editingScheduleId.value = schedule.id;
   draft.value = { ...schedule, databases: [...schedule.databases], tablePatterns: [...schedule.tablePatterns] };
@@ -397,6 +440,7 @@ async function changeConnection(connectionId: string) {
   selectedDatabases.value = [];
   targetDraft.tableFilterMode = "all";
   targetDraft.tablePatterns = [];
+  targetDraft.selectedTables = [];
   tablePatternsInput.value = "";
   if (!wasSelectingSpecificDatabases) {
     allDatabases.value = true;
@@ -427,8 +471,13 @@ function toggleDatabase(database: string) {
 
 async function chooseDestination() {
   const { open } = await import("@tauri-apps/plugin-dialog");
-  const selected = await open({ directory: true, multiple: false, title: t("databaseBackup.selectDestination") });
-  if (typeof selected === "string") activeDraft.value.destinationDirectory = selected;
+  // 传入当前目录，让系统选择框直接定位到上次使用的位置（issue #11317）
+  const selected = await open({ directory: true, multiple: false, defaultPath: activeDraft.value.destinationDirectory || undefined, title: t("databaseBackup.selectDestination") });
+  if (typeof selected === "string") {
+    activeDraft.value.destinationDirectory = selected;
+    // 记住本次选择，作为下次新建备份的默认目录
+    setLastBackupDirectory(selected);
+  }
 }
 
 async function submitSchedule() {
@@ -436,10 +485,11 @@ async function submitSchedule() {
   saving.value = true;
   try {
     if (desktop) await api.recordDatabaseExportDestination(draft.value.destinationDirectory);
+    if (desktop) setLastBackupDirectory(draft.value.destinationDirectory);
     await saveSchedule({
       ...draft.value,
       databases: allDatabases.value ? [] : [...selectedDatabases.value],
-      tablePatterns: draft.value.tableFilterMode === "all" ? [] : normalizeDatabaseBackupTablePatterns(tablePatternsInput.value),
+      ...backupTablePayload(draft.value),
     });
     scheduleDialogOpen.value = false;
     toast(t(editingScheduleId.value ? "databaseBackup.scheduleUpdated" : "databaseBackup.scheduleCreated"), 2500);
@@ -451,6 +501,7 @@ async function submitSchedule() {
 }
 
 async function openOneShotBackup() {
+  oneShotTableSelectionState.value = { scopeKey: "", ready: false };
   scheduleDialogOpen.value = false;
   const nextDraft = newBackupConfig();
   oneShotDraft.value = nextDraft;
@@ -463,11 +514,12 @@ async function startOneShotBackup() {
   oneShotStarting.value = true;
   try {
     if (desktop) await api.recordDatabaseExportDestination(oneShotDraft.value.destinationDirectory);
+    if (desktop) setLastBackupDirectory(oneShotDraft.value.destinationDirectory);
     const run = await runOneShot(
       {
         ...oneShotDraft.value,
         databases: allDatabases.value ? [] : [...selectedDatabases.value],
-        tablePatterns: oneShotDraft.value.tableFilterMode === "all" ? [] : normalizeDatabaseBackupTablePatterns(tablePatternsInput.value),
+        ...backupTablePayload(oneShotDraft.value),
       },
       t("databaseBackup.oneShotName"),
     );
@@ -898,6 +950,7 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
           @toggle-database="toggleDatabase"
           @update:all-databases="setAllDatabases"
           @update:table-patterns-input="(value: string) => (tablePatternsInput = value)"
+          @table-selection-state="(state) => (scheduleTableSelectionState = state)"
           @update:run-directory-pattern="(value: string) => (draft.runDirectoryPattern = value)"
         />
 
@@ -983,6 +1036,7 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
         @toggle-database="toggleDatabase"
         @update:all-databases="setAllDatabases"
         @update:table-patterns-input="(value: string) => (tablePatternsInput = value)"
+        @table-selection-state="(state) => (oneShotTableSelectionState = state)"
       />
 
       <DialogFooter>

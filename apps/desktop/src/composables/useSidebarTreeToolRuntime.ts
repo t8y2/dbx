@@ -121,11 +121,7 @@ export function useSidebarTreeToolRuntime(options: SidebarTreeToolRuntimeOptions
   function openDatabaseSearch() {
     const node = activeNode.value;
     if (!node.connectionId || !node.database) return;
-    connectionStore.databaseSearchSource = {
-      connectionId: node.connectionId,
-      database: node.database,
-      schema: node.type === "schema" ? node.schema : undefined,
-    };
+    queryStore.openDatabaseSearch(node.connectionId, node.database, node.type === "schema" ? node.schema : undefined);
   }
 
   function openDatabaseExport() {

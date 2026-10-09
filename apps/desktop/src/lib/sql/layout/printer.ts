@@ -1,6 +1,25 @@
 import type { AstNode, ClauseNode, LimitClauseNode, ParenthesisNode, SetOperationNode, StatementNode } from "sql-formatter/dist/esm/parser/ast.js";
 import { createTableLayout, isCreateTable } from "./ddl";
-import { clauseChildContext, collapsedContext, emitText, endsWithLineComment, isBodyNode, isCallParen, isJoinKeyword, isLineComment, isLogicalOperator, isParenthesis, keywordText, limitChildren, renderInline, splitByComma, splitLogicalOperands, Writer, type SqlLayoutContext } from "./primitives";
+import {
+  clauseChildContext,
+  collapsedContext,
+  emitText,
+  endsWithLineComment,
+  isBodyNode,
+  isCallParen,
+  isJoinKeyword,
+  isLineComment,
+  isLogicalOperator,
+  isParenthesis,
+  isProjectionClauseName,
+  keywordText,
+  limitChildren,
+  renderInline,
+  splitByComma,
+  splitLogicalOperands,
+  Writer,
+  type SqlLayoutContext,
+} from "./primitives";
 
 export type { SqlLayoutContext, SqlLayoutOptions } from "./primitives";
 
@@ -13,9 +32,10 @@ export type { SqlLayoutContext, SqlLayoutOptions } from "./primitives";
  *   them.
  * - A clause's first item stays on the keyword's line, and its remaining items
  *   align under the first item's column.
- * - Short element lists stay collapsed.
- * - A statement whose clauses all fit the line width is emitted as a single
- *   line.
+ * - SELECT fields each get their own line; other short element lists stay
+ *   collapsed.
+ * - A statement with a single SELECT field whose clauses all fit the line
+ *   width is emitted as a single line.
  * - Join keywords are indented relative to their FROM clause.
  *
  * Alignment is *column-relative*, not indent-level-relative: a subquery's
@@ -30,19 +50,26 @@ export type { SqlLayoutContext, SqlLayoutOptions } from "./primitives";
 
 /**
  * Emits one clause: its keyword, then its items — the first kept on the keyword's
- * line and the rest aligned under it — unless the whole list is short enough to
- * stay on one line.
+ * line and the rest aligned under it. SELECT fields always split; other lists
+ * stay on one line when they are short enough.
  */
 function printClause(writer: Writer, clause: ClauseNode, baseColumn: number, ctx: SqlLayoutContext): void {
   const keyword = keywordText(clause.nameKw.text, ctx);
   const items = splitByComma(clause.children);
   const itemColumn = baseColumn + keyword.length + 1;
+  const projection = isProjectionClauseName(clause.nameKw.text);
   // `FROM` is the one clause DBX lets users push its first source off of, so it
   // skips both the collapse and the "element on the keyword's line" rule.
   const sourceOnOwnLine = clause.nameKw.text.toUpperCase() === "FROM" && !ctx.options.fromClauseSourceOnSameLine;
   const childCtx = clauseChildContext(ctx, clause);
 
-  if (!sourceOnOwnLine && items.length <= ctx.options.keepElementsOnOneLine) {
+  // Align explicit SELECT aliases to the same column, matching the tabular
+  // layout used by DBX for CREATE TABLE definitions. Only use this path when
+  // every aliased item can be rendered as a single line; otherwise the normal
+  // element printer preserves the formatter's existing wrapping behavior.
+  const alignedAliases = projection && items.length > 1 ? alignedProjectionItems(items, childCtx, ctx.options.lineWidth - itemColumn) : null;
+
+  if (!sourceOnOwnLine && !(projection && items.length > 1) && items.length <= ctx.options.keepElementsOnOneLine) {
     const flat = renderInline(childCtx, clause.children, ctx.options.lineWidth - writer.column - keyword.length - 1);
     if (flat) {
       writer.write(`${keyword} ${flat}`);
@@ -56,11 +83,54 @@ function printClause(writer: Writer, clause: ClauseNode, baseColumn: number, ctx
       if (sourceOnOwnLine) writer.newline(baseColumn + ctx.options.indentWidth);
       else writer.space();
     } else {
-      writer.newline(itemColumn);
+      if (ctx.options.commaPosition === "before") {
+        const leadingIndent = sourceOnOwnLine ? baseColumn + ctx.options.indentWidth : Math.max(baseColumn, itemColumn - 2);
+        writer.newline(leadingIndent);
+        writer.write(", ");
+      } else {
+        writer.newline(itemColumn);
+      }
     }
-    printElement(writer, item, baseColumn, childCtx);
-    if (index < items.length - 1) writer.write(",");
+    if (alignedAliases) {
+      const aligned = alignedAliases[index];
+      if (aligned) {
+        writer.write(aligned.expression);
+        writer.write(" ".repeat(aligned.aliasColumn - aligned.expression.length));
+        writer.write(`${aligned.asKeyword} ${aligned.alias}`);
+      } else {
+        printElement(writer, item, baseColumn, childCtx);
+      }
+    } else {
+      printElement(writer, item, baseColumn, childCtx);
+    }
+    if (ctx.options.commaPosition !== "before" && index < items.length - 1) writer.write(",");
   });
+}
+
+interface AlignedProjectionItem {
+  expression: string;
+  alias: string;
+  asKeyword: string;
+  aliasColumn: number;
+}
+
+function alignedProjectionItems(items: AstNode[][], ctx: SqlLayoutContext, lineWidth: number): Array<AlignedProjectionItem | null> | null {
+  const parsed = items.map((item) => {
+    const asIndex = item.findIndex((node) => node.type === "keyword" && node.text.toUpperCase() === "AS");
+    if (asIndex <= 0 || asIndex >= item.length - 1) return null;
+    const asNode = item[asIndex];
+    if (asNode?.type !== "keyword") return null;
+    const expression = renderInline(ctx, item.slice(0, asIndex), lineWidth);
+    const alias = renderInline(ctx, item.slice(asIndex + 1), lineWidth);
+    if (!expression || !alias) return null;
+    return { expression, alias, asKeyword: keywordText(asNode.text, ctx), aliasColumn: 0 };
+  });
+
+  if (!parsed.some(Boolean)) return null;
+  const expressionWidth = Math.max(...parsed.filter((item): item is AlignedProjectionItem => item !== null).map((item) => item.expression.length));
+  const aliasColumn = expressionWidth + 1;
+  if (parsed.some((item) => item && item.expression.length + (aliasColumn - item.expression.length) + item.asKeyword.length + 1 + item.alias.length > lineWidth)) return null;
+  return parsed.map((item) => (item ? { ...item, aliasColumn } : null));
 }
 
 /** Emits a `LIMIT` clause, which sql-formatter renders as keyword + expressions. */
@@ -282,7 +352,8 @@ function writeBodyNode(writer: Writer, node: AstNode, baseColumn: number, ctx: S
 
 /** Emits a whole statement, one clause per line unless the statement collapses. */
 function printStatement(statement: StatementNode, ctx: SqlLayoutContext): string | null {
-  const collapsed = renderInline(collapsedContext(ctx), statement.children, ctx.options.lineWidth);
+  const hasMultiItemProjection = statement.children.some((node) => node.type === "clause" && isProjectionClauseName(node.nameKw.text) && splitByComma(node.children).length > 1);
+  const collapsed = hasMultiItemProjection ? null : renderInline(collapsedContext(ctx), statement.children, ctx.options.lineWidth);
   if (collapsed) return statement.hasSemicolon ? `${collapsed};` : collapsed;
 
   if (isCreateTable(statement)) return createTableLayout(statement, ctx);

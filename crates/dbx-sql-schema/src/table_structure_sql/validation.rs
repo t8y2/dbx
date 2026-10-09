@@ -2,7 +2,8 @@ use super::column_format::has_dameng_identity;
 use super::dialect::{capabilities_for, StructureDialect};
 use super::indexes::has_existing_index_change;
 use super::types::{EditableStructureColumn, TableStructureSqlOptions};
-use super::util::clean;
+use super::util::{clean, normalize_default, original_default};
+use crate::models::connection::DatabaseType;
 
 /// Hard errors for `CREATE INDEX CONCURRENTLY` requests the editor cannot
 /// honor safely. Unlike the advisory warnings in [`validate_draft`], these
@@ -43,6 +44,7 @@ pub fn validate_draft(options: &TableStructureSqlOptions) -> Vec<String> {
     let active_columns: Vec<_> = options.columns.iter().filter(|column| !column.marked_for_drop).collect();
     validate_columns(&active_columns, &mut warnings);
     validate_dameng_identity(options, &active_columns, &mut warnings);
+    validate_mysql_literal_defaults(options, &active_columns, &mut warnings);
     validate_gin_opclass_warnings(options, &mut warnings);
     for index in options
         .indexes
@@ -60,6 +62,90 @@ pub fn validate_draft(options: &TableStructureSqlOptions) -> Vec<String> {
         }
     }
     warnings
+}
+
+pub(super) fn validate_mysql_literal_defaults(
+    options: &TableStructureSqlOptions,
+    columns: &[&EditableStructureColumn],
+    warnings: &mut Vec<String>,
+) {
+    for column in columns {
+        if let Some(warning) = mysql_literal_default_error(
+            options.database_type,
+            options.driver_profile.as_deref(),
+            options.is_gaussdb_m_mode,
+            column,
+        ) {
+            warnings.push(warning);
+        }
+    }
+}
+
+/// MySQL rejects a literal default on BLOB, TEXT, GEOMETRY and JSON columns
+/// with `ERROR 1101`. The DDL runs statement by statement, so letting it
+/// through leaves the earlier statements of the batch applied. MySQL 8.0.13
+/// and later accept an expression default written in parentheses, such as
+/// `('')`, which the generator passes through unchanged, so only a value that
+/// would be rendered as a literal is refused. MariaDB accepts the literal form
+/// and is not checked.
+///
+/// A column is only checked when the draft would emit its default: a new
+/// column, or an existing one whose type or default changed. An unchanged
+/// default on an existing column came from the server, and refusing it would
+/// block unrelated edits to the table.
+pub(super) fn mysql_literal_default_error(
+    database_type: Option<DatabaseType>,
+    driver_profile: Option<&str>,
+    is_gaussdb_m_mode: bool,
+    column: &EditableStructureColumn,
+) -> Option<String> {
+    if database_type != Some(DatabaseType::Mysql)
+        || is_gaussdb_m_mode
+        || driver_profile.is_some_and(|profile| profile.trim().eq_ignore_ascii_case("mariadb"))
+    {
+        return None;
+    }
+    let base_type = column.data_type.split('(').next().unwrap_or_default().trim().to_ascii_lowercase();
+    if !is_mysql_type_without_literal_default(&base_type) {
+        return None;
+    }
+    let default_value = normalize_default(Some(&column.default_value));
+    if default_value.is_empty() || (default_value.starts_with('(') && default_value.ends_with(')')) {
+        return None;
+    }
+    if let Some(original) = &column.original {
+        if column.data_type.trim() == original.data_type.trim() && default_value == original_default(column) {
+            return None;
+        }
+    }
+    Some(format!(
+        "MySQL does not allow a literal default on {base_type} column \"{}\". Remove the default, or on MySQL 8.0.13 or later use an expression default such as ('').",
+        column.name
+    ))
+}
+
+fn is_mysql_type_without_literal_default(base_type: &str) -> bool {
+    matches!(
+        base_type,
+        "tinytext"
+            | "text"
+            | "mediumtext"
+            | "longtext"
+            | "tinyblob"
+            | "blob"
+            | "mediumblob"
+            | "longblob"
+            | "json"
+            | "geometry"
+            | "point"
+            | "linestring"
+            | "polygon"
+            | "multipoint"
+            | "multilinestring"
+            | "multipolygon"
+            | "geometrycollection"
+            | "geomcollection"
+    )
 }
 
 pub(super) fn validate_dameng_identity(

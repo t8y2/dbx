@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { ChevronDown, ChevronRight, ListTree, Maximize2, PanelBottom, PanelRight, TableProperties, X } from "@lucide/vue";
+import { ChevronDown, ChevronRight, ListTree, Maximize2, PanelBottom, PanelRight, TableProperties, WrapText, X } from "@lucide/vue";
+import { computed } from "vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useSettingsStore } from "@/stores/settingsStore";
 import type { CellDetailTab } from "@/lib/dataGrid/cellDetailPresentation";
 
 interface DataGridCellDetailHeaderProps {
@@ -23,6 +25,12 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+const settingsStore = useSettingsStore();
+const wordWrapEnabled = computed(() => settingsStore.editorSettings.wordWrap);
+
+function toggleWordWrap() {
+  settingsStore.updateEditorSettings({ wordWrap: !wordWrapEnabled.value });
+}
 </script>
 
 <template>
@@ -51,6 +59,18 @@ const { t } = useI18n();
       </TabsList>
     </div>
     <div class="ml-auto flex shrink-0 items-center gap-1">
+      <Button
+        variant="ghost"
+        size="icon"
+        class="h-5 w-5"
+        :class="wordWrapEnabled ? 'bg-sky-500/10 text-sky-700 hover:bg-sky-500/20 hover:text-sky-800 dark:text-sky-300 dark:hover:text-sky-200' : 'text-muted-foreground/70 hover:bg-muted hover:text-muted-foreground'"
+        :title="t('settings.wordWrap')"
+        :aria-label="t('settings.wordWrap')"
+        :aria-pressed="wordWrapEnabled"
+        @click="toggleWordWrap"
+      >
+        <WrapText class="w-3 h-3" />
+      </Button>
       <Button variant="ghost" size="icon" class="h-5 w-5" :title="props.panelIsBottom ? t('grid.cellDetailLayoutRight') : t('grid.cellDetailLayoutBottom')" @click="emit('toggleLayout')">
         <PanelRight v-if="props.panelIsBottom" class="w-3 h-3" />
         <PanelBottom v-else class="w-3 h-3" />

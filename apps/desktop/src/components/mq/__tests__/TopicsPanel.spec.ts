@@ -121,6 +121,7 @@ function rowNames(container: ParentNode): string[] {
 
 beforeEach(() => {
   vi.useRealTimers();
+  localStorage.clear();
   Object.values(backend).forEach((mock) => mock.mockReset());
   backend.mqListTopicsPage.mockResolvedValue({
     items: [
@@ -302,5 +303,34 @@ describe("TopicsPanel RabbitMQ queue messages", () => {
     expect(rowNames(panel)).toEqual(["orders"]);
     expect(backend.mqListTopics).toHaveBeenCalledWith("kafka-1", { tenant: "_flat_mq", namespace: "_flat_mq" }, { includeNonPersistent: false });
     expect(backend.mqListTopicsPage).not.toHaveBeenCalled();
+  });
+});
+
+describe("TopicsPanel column resizing", () => {
+  it("updates the RabbitMQ header and virtual rows together without sorting", async () => {
+    const panel = await mountRabbitMqPanel();
+    expect(panel.querySelectorAll("[data-column-resize-handle]")).toHaveLength(7);
+    const cell = panel.querySelector<HTMLElement>('[data-column="messages"]')!;
+    vi.spyOn(cell, "getBoundingClientRect").mockReturnValue({ width: 90 } as DOMRect);
+    const handle = cell.querySelector<HTMLElement>("[data-column-resize-handle]")!;
+    handle.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: 100 }));
+    document.dispatchEvent(new MouseEvent("mouseup", { clientX: 160 }));
+    handle.click();
+    await flushUi();
+    const header = panel.querySelector<HTMLElement>(".topics-table-header")!;
+    expect(header.style.gridTemplateColumns).toContain("150px 70px");
+    for (const row of panel.querySelectorAll<HTMLElement>(".topics-row")) {
+      expect(row.style.gridTemplateColumns).toBe(header.style.gridTemplateColumns);
+    }
+    expect(backend.mqListTopicsPage).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(localStorage.getItem("dbx-mq-topic-column-widths:rabbitmq")!)).toEqual({ messages: 150 });
+  });
+
+  it("offers resize handles for Kafka and restores its saved name width", async () => {
+    backend.mqListTopics.mockResolvedValue([{ name: "long-topic", shortName: "long-topic", persistent: true, partitioned: true }]);
+    localStorage.setItem("dbx-mq-topic-column-widths:kafka", '{"name":600}');
+    const panel = await mountKafkaPanel();
+    expect(panel.querySelectorAll("[data-column-resize-handle]")).toHaveLength(4);
+    expect(panel.querySelector<HTMLElement>(".topics-table-header")!.style.gridTemplateColumns.startsWith("600px ")).toBe(true);
   });
 });

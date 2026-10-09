@@ -105,4 +105,75 @@ describe("expandSqlVariables", () => {
     const sql = "select @settings from t";
     expect(expandSqlVariables(sql)).toEqual({ sql, expanded: false });
   });
+
+  it("inlines a multiline value starting on a new line after =", () => {
+    const sql = ["@set cond =", "  from users", "  where id = 42;", "select * @cond"].join("\n");
+    expect(expandSqlVariables(sql).sql).toBe("select * from users\n  where id = 42");
+  });
+
+  it("terminates a value starting on the same line as = at newline without spanning lines", () => {
+    const sql = ["@set cond = from users", "where id = 42;", "select * @cond"].join("\n");
+    expect(expandSqlVariables(sql).sql).toBe("where id = 42;\nselect * from users");
+  });
+
+  it("expands a declaration without semicolon followed by an ordinary statement", () => {
+    const sql = ["@set user_id = 42", "select * from users where id = @user_id"].join("\n");
+    expect(expandSqlVariables(sql).sql).toBe("select * from users where id = 42");
+  });
+
+  it("preserves following statement when an unsemicoloned declaration has a line comment", () => {
+    const sql = ["@set user_id = 42 -- user id", "select * from users where id = @user_id"].join("\n");
+    expect(expandSqlVariables(sql).sql).toBe("-- user id\nselect * from users where id = 42");
+  });
+
+  it("preserves subsequent statements when an unsemicoloned declaration is followed by multiple statements", () => {
+    const sql = ["@set user_id = 42", "select * from users where id = @user_id;", "select 1;"].join("\n");
+    expect(expandSqlVariables(sql).sql).toBe("select * from users where id = 42;\nselect 1;");
+  });
+
+  it("does not swallow selected statement into preceding unsemicoloned declaration", () => {
+    const selectedSql = "select * from users where id = @user_id";
+    const declarationSql = ["@set user_id = 42", selectedSql].join("\n");
+    expect(expandSqlVariables(selectedSql, { declarationSql }).sql).toBe("select * from users where id = 42");
+  });
+
+  it("expands an unsemicoloned declaration with CRLF line endings", () => {
+    const sql = ["@set user_id = 42", "select * from users where id = @user_id"].join("\r\n");
+    expect(expandSqlVariables(sql).sql).toBe("select * from users where id = 42");
+  });
+
+  it("expands a semicoloned declaration with CRLF line endings", () => {
+    const sql = ["@set user_id = 42;", "select * from users where id = @user_id"].join("\r\n");
+    expect(expandSqlVariables(sql).sql).toBe("select * from users where id = 42");
+  });
+
+  it("inlines a multiline value with CRLF line endings", () => {
+    const sql = ["@set cond =", "  from users", "  where id = 42;", "select * @cond"].join("\r\n");
+    expect(expandSqlVariables(sql).sql).toBe("select * from users\r\n  where id = 42");
+  });
+
+  it("supports sequential declarations with CRLF line endings", () => {
+    const sql = ["@set a = 1", "@set b = 2;", "select @a, @b"].join("\r\n");
+    expect(expandSqlVariables(sql).sql).toBe("select 1, 2");
+  });
+
+  it("inlines multiline values with line and block comments", () => {
+    const sql = ["@set cond =", "  -- target table", "  from users /* active accounts */", "  where status = 'active';", "select id @cond"].join("\n");
+    expect(expandSqlVariables(sql).sql).toBe("select id -- target table\n  from users /* active accounts */\n  where status = 'active'");
+  });
+
+  it("handles semicolons inside comments within a multiline value", () => {
+    const sql = ["@set cond =", "  from users -- note: filter by id; active only", "  where id = 42;", "select * @cond"].join("\n");
+    expect(expandSqlVariables(sql).sql).toBe("select * from users -- note: filter by id; active only\n  where id = 42");
+  });
+
+  it("supports multiple multiline declarations in sequence", () => {
+    const sql = ["@set cond_a =", "  from users", "  where id = 1;", "@set cond_b =", "  from orders", "  where id = 2;", "select * @cond_a union all select * @cond_b"].join("\n");
+    expect(expandSqlVariables(sql).sql).toBe("select * from users\n  where id = 1 union all select * from orders\n  where id = 2");
+  });
+
+  it("terminates declaration at newline when followed by another @set declaration without semicolon", () => {
+    const sql = ["@set a = 1", "@set b = 2;", "select @a, @b"].join("\n");
+    expect(expandSqlVariables(sql).sql).toBe("select 1, 2");
+  });
 });

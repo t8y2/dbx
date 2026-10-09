@@ -10,6 +10,8 @@ export interface ContextMenuItem {
   title?: string;
   indentLevel?: number;
   checked?: boolean;
+  closeOnSelect?: boolean;
+  checkedStyle?: "check" | "switch";
   // Raw shortcut syntax such as `Mod+C` or `Shift+Alt+U`; display formatting stays in this component.
   shortcut?: string;
   variant?: "default" | "destructive";

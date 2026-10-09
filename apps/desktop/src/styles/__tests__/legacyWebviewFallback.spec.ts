@@ -87,6 +87,7 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(dialogContentSource).toContain('data-slot="dialog-positioner"');
     expect(dialogScrollContentSource).toContain('data-slot="dialog-positioner"');
     expect(fallback).toContain('[data-slot="dialog-positioner"]');
+    expect(fallback).toContain("z-index: var(--dbx-dialog-top-z-index, 50);");
     expect(fallback).toContain("display: flex !important;");
     expect(fallback).toContain("align-items: center !important;");
     expect(fallback).toContain("justify-content: center !important;");

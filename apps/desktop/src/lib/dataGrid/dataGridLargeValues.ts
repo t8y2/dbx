@@ -135,6 +135,9 @@ export function isTableDataVisiblePreviewColumn(databaseType: DatabaseType | und
   if (databaseType === "postgres") {
     return !normalized.includes("[") && (base === "char" || base === "character" || base === "varchar" || base === "text" || base === "citext" || base === "name" || base === "xml" || base === "json" || base === "jsonb" || base === "tsvector" || normalized.startsWith("character varying"));
   }
+  if (databaseType === "db2") {
+    return base === "clob" || base === "dbclob" || base === "char" || base === "character" || base === "varchar" || base === "graphic" || base === "vargraphic";
+  }
   return false;
 }
 
@@ -175,7 +178,11 @@ function matchesMysqlUnboundedLargeValueType(base: string): boolean {
 }
 
 export function canUseTableDataLargeValuePreview(databaseType: DatabaseType | undefined, columns: readonly ColumnInfo[], primaryKeys: readonly string[]): boolean {
-  return (databaseType === "mysql" || databaseType === "postgres") && columns.length > 0 && primaryKeys.length > 0 && !columns.some((column) => column.name.toLocaleUpperCase().startsWith(TABLE_DATA_LARGE_VALUE_MARKER_PREFIX));
+  return supportsTableDataLargeValuePreview(databaseType) && columns.length > 0 && primaryKeys.length > 0 && !columns.some((column) => column.name.toLocaleUpperCase().startsWith(TABLE_DATA_LARGE_VALUE_MARKER_PREFIX));
+}
+
+export function supportsTableDataLargeValuePreview(databaseType: DatabaseType | undefined): boolean {
+  return databaseType === "mysql" || databaseType === "postgres" || databaseType === "db2";
 }
 
 /**

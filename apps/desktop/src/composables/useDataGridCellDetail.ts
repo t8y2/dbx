@@ -22,6 +22,9 @@ export function useDataGridCellDetail(options: { detail: Ref<DataGridCellDetail>
     appPalette: () => themePalette.value,
     fontSize: () => settingsStore.editorSettings.fontSize,
     fontFamily: () => settingsStore.editorSettings.tableFontFamily,
+    lineWrapping: () => settingsStore.editorSettings.wordWrap,
+    lineNumbers: true,
+    folding: true,
   });
 
   watch(geometryPreviewOpen, async (open) => {

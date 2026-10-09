@@ -105,13 +105,13 @@ onMounted(() => {
 function handleItemClick(item: ContextMenuItem) {
   if (itemIsDisabled(item)) return;
   if (item.children?.length) return; // submenu trigger — do nothing on click
-  close();
+  if (item.closeOnSelect !== false) close();
   item.action?.();
 }
 
 function handleSubItemClick(item: ContextMenuItem) {
   if (itemIsDisabled(item)) return;
-  close();
+  if (item.closeOnSelect !== false) close();
   item.action?.();
 }
 
@@ -282,12 +282,24 @@ onBeforeUnmount(() => {
           <div v-if="item.separator" class="-mx-1 my-1 flex items-center px-1">
             <div class="h-px flex-1 bg-border/70" />
           </div>
-          <button v-else :disabled="itemIsDisabled(item)" :title="item.title" :class="[...itemButtonClass(item.variant), activeSubmenuTriggerClass(item, index)]" @click="handleItemClick(item)" @mouseenter="(e) => onItemMouseEnter(index, e)" @mouseleave="onItemMouseLeave">
-            <span class="flex size-4 shrink-0 items-center justify-center">
+          <button
+            v-else
+            :disabled="itemIsDisabled(item)"
+            :aria-pressed="item.checkedStyle === 'switch' ? !!item.checked : undefined"
+            :title="item.title"
+            :class="[...itemButtonClass(item.variant), activeSubmenuTriggerClass(item, index)]"
+            @click="handleItemClick(item)"
+            @mouseenter="(e) => onItemMouseEnter(index, e)"
+            @mouseleave="onItemMouseLeave"
+          >
+            <span v-if="item.checkedStyle !== 'switch'" class="flex size-4 shrink-0 items-center justify-center">
               <Check v-if="item.checked" class="size-4 text-primary" />
               <component :is="item.icon" v-else-if="item.icon" :class="['size-4', item.iconClass]" />
             </span>
             <span class="flex-1 whitespace-nowrap">{{ item.label }}</span>
+            <span v-if="item.checkedStyle === 'switch'" aria-hidden="true" class="ml-3 flex h-3.5 w-6 shrink-0 items-center rounded-full p-0.5 transition-colors" :class="item.checked ? 'bg-primary' : 'bg-input'">
+              <span class="size-2.5 rounded-full bg-primary-foreground shadow-xs transition-transform" :class="item.checked ? 'translate-x-2.5' : 'translate-x-0'" />
+            </span>
             <span v-if="item.shortcut" class="ml-8 inline-flex shrink-0 items-center gap-1 text-muted-foreground">
               <kbd v-for="key in shortcutKeys(item.shortcut)" :key="key" class="min-w-4 rounded border border-border/70 bg-muted/60 px-1 py-0.5 text-center font-mono text-[10px] leading-none text-muted-foreground shadow-xs">{{ key }}</kbd>
             </span>
@@ -313,12 +325,23 @@ onBeforeUnmount(() => {
           <div v-if="child.separator" class="-mx-1 my-1 flex items-center px-1">
             <div class="h-px flex-1 bg-border/70" />
           </div>
-          <button v-else :disabled="itemIsDisabled(child)" :title="child.title" :class="itemButtonClass(child.variant)" :style="{ paddingInlineStart: `${0.5 + (child.indentLevel ?? 0) * 0.75}rem` }" @click="handleSubItemClick(child)">
-            <span class="flex size-4 shrink-0 items-center justify-center">
+          <button
+            v-else
+            :disabled="itemIsDisabled(child)"
+            :aria-pressed="child.checkedStyle === 'switch' ? !!child.checked : undefined"
+            :title="child.title"
+            :class="itemButtonClass(child.variant)"
+            :style="{ paddingInlineStart: `${0.5 + (child.indentLevel ?? 0) * 0.75}rem` }"
+            @click="handleSubItemClick(child)"
+          >
+            <span v-if="child.checkedStyle !== 'switch'" class="flex size-4 shrink-0 items-center justify-center">
               <Check v-if="child.checked" class="size-4 text-primary" />
               <component :is="child.icon" v-else-if="child.icon" :class="['size-4', child.iconClass]" />
             </span>
             <span class="flex-1 whitespace-nowrap">{{ child.label }}</span>
+            <span v-if="child.checkedStyle === 'switch'" aria-hidden="true" class="ml-3 flex h-3.5 w-6 shrink-0 items-center rounded-full p-0.5 transition-colors" :class="child.checked ? 'bg-primary' : 'bg-input'">
+              <span class="size-2.5 rounded-full bg-primary-foreground shadow-xs transition-transform" :class="child.checked ? 'translate-x-2.5' : 'translate-x-0'" />
+            </span>
             <span v-if="child.shortcut" class="ml-8 inline-flex shrink-0 items-center gap-1 text-muted-foreground">
               <kbd v-for="key in shortcutKeys(child.shortcut)" :key="key" class="min-w-4 rounded border border-border/70 bg-muted/60 px-1 py-0.5 text-center font-mono text-[10px] leading-none text-muted-foreground shadow-xs">{{ key }}</kbd>
             </span>

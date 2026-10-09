@@ -2,6 +2,38 @@ export function isSqlFilePath(path: string): boolean {
   return /\.sql$/i.test(path.trim());
 }
 
+export function isScriptFilePath(path: string): boolean {
+  return /\.(sql|js)$/i.test(path.trim());
+}
+
+export interface QueryEditorFileDialogFilter {
+  name: string;
+  extensions: string[];
+}
+
+export function queryEditorOpenFileFilters(databaseType?: string): QueryEditorFileDialogFilter[] {
+  if (databaseType === "mongodb") {
+    return [
+      { name: "MongoDB Script", extensions: ["js"] },
+      { name: "SQL", extensions: ["sql"] },
+      { name: "All Files", extensions: ["*"] },
+    ];
+  }
+  return [{ name: "SQL", extensions: ["sql"] }];
+}
+
+export function queryEditorOpenFileAccept(databaseType?: string): string {
+  return databaseType === "mongodb" ? ".js,.sql" : ".sql";
+}
+
+export function defaultSavedQueryFileName(title: string, databaseType?: string): string {
+  const defaultExt = databaseType === "mongodb" ? "js" : "sql";
+  const trimmed = title.trim() || "query";
+  const normalized = trimmed.replace(/\s+/g, "_");
+  const extSuffix = `.${defaultExt}`;
+  return normalized.toLowerCase().endsWith(extSuffix) ? normalized : `${normalized}${extSuffix}`;
+}
+
 export function sqlFileTitleFromPath(path: string): string {
   const normalized = normalizeExternalSqlPath(path);
   const name = normalized.split("/").filter(Boolean).pop();

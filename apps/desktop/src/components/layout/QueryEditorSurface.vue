@@ -4,6 +4,7 @@ import ContentArea from "./ContentArea.vue";
 import { createContentSurfaceEventForwarders } from "@/lib/tabs/contentSurfaceEvents";
 import type { ContentAreaSurfaceEmits, ContentAreaSurfaceProps, QueryEditorSurfaceHandle, StatementRange } from "./querySurfaces";
 import type { AiConversationBinding } from "@/lib/ai/aiConversationBinding";
+import type { TableInfoTab } from "@/types/database";
 
 const props = defineProps<ContentAreaSurfaceProps & { autoFocus?: boolean }>();
 const emit = defineEmits<ContentAreaSurfaceEmits>();
@@ -26,6 +27,7 @@ defineExpose<QueryEditorSurfaceHandle>({
   focusSearch: (target: Element | null = null) => contentAreaRef.value?.focusSearch(target) ?? false,
   focusWhere: () => contentAreaRef.value?.focusWhere() ?? false,
   openGoToColumn: () => contentAreaRef.value?.openGoToColumn() ?? false,
+  openTableStructureEditor: (initialTab?: TableInfoTab) => contentAreaRef.value?.openTableStructureEditor?.(initialTab) ?? false,
   refreshData: () => contentAreaRef.value?.refreshData() ?? false,
   toggleResultsPane: () => contentAreaRef.value?.toggleResultsPane() ?? false,
   refreshQueryEditorCompletionCache: () => contentAreaRef.value?.refreshQueryEditorCompletionCache() ?? false,
@@ -45,6 +47,8 @@ defineExpose<QueryEditorSurfaceHandle>({
   previewStatementRange: (range: StatementRange | null) => contentAreaRef.value?.previewStatementRange(range) ?? false,
   focusStatementRange: (range: StatementRange | null) => contentAreaRef.value?.focusStatementRange(range) ?? false,
   focusErrorPosition: (offset: number) => contentAreaRef.value?.focusErrorPosition(offset) ?? false,
+  foldAll: () => contentAreaRef.value?.foldAll() ?? false,
+  unfoldAll: () => contentAreaRef.value?.unfoldAll() ?? false,
 });
 </script>
 

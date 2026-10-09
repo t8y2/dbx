@@ -24,6 +24,15 @@ describe("generateId", () => {
 });
 
 describe("AI model options", () => {
+  it("uses discovered or manually added models without a preset default", () => {
+    const config = { model: "" };
+
+    expect(aiModelOptions(config, [])).toEqual([]);
+    expect(aiModelOptions(config, [{ id: "discovered-model" }])).toEqual([{ id: "discovered-model" }]);
+    expect(aiModelOptions({ ...config, models: addConfiguredAiModel(undefined, "manual-model") }, [])).toEqual([expect.objectContaining({ id: "manual-model" })]);
+    expect(config.model).toBe("");
+  });
+
   it("keeps saved models selectable when provider model discovery fails", () => {
     const options = aiModelOptions(
       {

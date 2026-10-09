@@ -39,8 +39,15 @@ pub struct SnippetDownloadResult {
 }
 
 #[tauri::command]
-pub async fn migration_status(state: State<'_, Arc<AppState>>) -> Result<MigrationPreflight, String> {
-    state.storage.inspect_data_migration().await
+pub async fn migration_status(
+    state: State<'_, Arc<AppState>>,
+    retry: Option<bool>,
+) -> Result<MigrationPreflight, String> {
+    if retry.unwrap_or(false) {
+        state.storage.retry_data_migration_inspection().await
+    } else {
+        state.storage.inspect_data_migration().await
+    }
 }
 
 #[tauri::command]

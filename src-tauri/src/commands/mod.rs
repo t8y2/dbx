@@ -64,6 +64,7 @@ pub mod system_fonts;
 pub mod tab_runtime_cache;
 pub mod table_export;
 pub mod table_import;
+pub mod task_history;
 pub mod text_export;
 pub mod transfer;
 pub mod tunnel_profiles;

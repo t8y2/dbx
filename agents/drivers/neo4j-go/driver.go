@@ -60,19 +60,13 @@ func openVerifiedRuntime(params connectParams) (*connectionRuntime, error) {
 		_ = driver.Close(context.Background())
 		return nil, err
 	}
-	return &connectionRuntime{driver: driver, params: params, legacySingleDatabase: usesLegacySingleDatabase(ctx, driver)}, nil
-}
-
-// usesLegacySingleDatabase reports whether the server negotiated Bolt 3 or
-// older. Those servers only expose the default database, and the driver refuses
-// to select a database name for them, so sessions must not send one. Probe
-// failures keep the modern behavior.
-func usesLegacySingleDatabase(ctx context.Context, driver neo4j.Driver) bool {
-	info, err := driver.GetServerInfo(ctx)
-	if err != nil {
-		return false
+	runtime := &connectionRuntime{driver: driver, params: params}
+	if info, err := driver.GetServerInfo(ctx); err == nil {
+		// Older Bolt versions supply numeric IDs in the element-ID fields.
+		runtime.legacySingleDatabase = info.ProtocolVersion().Major < 4
+		runtime.legacyGraphIDs = info.ProtocolVersion().Major < 5
 	}
-	return info.ProtocolVersion().Major < 4
+	return runtime, nil
 }
 
 func openDriver(params connectParams) (neo4j.Driver, error) {

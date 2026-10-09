@@ -10,13 +10,13 @@ const { t } = useI18n();
 function getIntentionActionLabel(kind: string): string {
   switch (kind) {
     case "expand_wildcard":
-      return t("intentionExpandWildcard");
+      return t("settings.intentionExpandWildcard");
     case "qualify_identifier":
-      return t("intentionQualifyIdentifier");
+      return t("settings.intentionQualifyIdentifier");
     case "unqualify_identifier":
-      return t("intentionUnqualifyIdentifier");
+      return t("settings.intentionUnqualifyIdentifier");
     case "batch_qualify_identifiers":
-      return t("intentionBatchQualifyIdentifiers");
+      return t("settings.intentionBatchQualifyIdentifiers");
     default:
       return kind;
   }

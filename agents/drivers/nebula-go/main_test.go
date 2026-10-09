@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"math"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -108,6 +110,65 @@ func TestReadRowsPreservesScalarAndGraphValues(t *testing.T) {
 	metadata, err := metadataRows(value)
 	if err != nil || metadata[0]["name"] != "Ada" || metadata[0]["count"] != "42" {
 		t.Fatalf("metadata=%#v err=%v", metadata, err)
+	}
+}
+
+func TestReadRowsFloatRoundTripDoesNotUseSDKDisplay(t *testing.T) {
+	for _, number := range []float64{0.000001, -0.000001, 1e20, 1.25e-7, math.SmallestNonzeroFloat64, math.MaxFloat64} {
+		t.Run(strconv.FormatFloat(number, 'g', -1, 64), func(t *testing.T) {
+			result := resultSet(t, []string{"dbx_value"}, [][]*wire.Value{{{FVal: &number}}})
+			rows, types, err := readRows(result, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := rows[0][0].(string)
+			got, err := strconv.ParseFloat(text, 64)
+			if err != nil || got != number || types[0] != "float" {
+				t.Fatalf("float round-trip lost: value=%q parsed=%v error=%v types=%v", text, got, err, types)
+			}
+		})
+	}
+}
+
+func TestReadRowsPreservesGraphIdentityAndProperties(t *testing.T) {
+	large := int64(9007199254740993)
+	rank := wire.EdgeRanking(7)
+	src := &wire.Value{SVal: []byte("person:1")}
+	dst := &wire.Value{SVal: []byte("company:1")}
+	person := &wire.Vertex{Vid: src, Tags: []*wire.Tag{{Name: []byte("Person"), Props: map[string]*wire.Value{
+		"name": {SVal: []byte("Ada")}, "visits": {IVal: &large},
+	}}}}
+	company := &wire.Vertex{Vid: dst, Tags: []*wire.Tag{{Name: []byte("Company")}}}
+	edge := &wire.Edge{Src: src, Dst: dst, Type: 1, Name: []byte("WORK_IN"), Ranking: rank, Props: map[string]*wire.Value{"since": {IVal: &large}}}
+	path := &wire.Path{Src: person, Steps: []*wire.Step{{Dst: company, Type: 1, Name: []byte("WORK_IN"), Ranking: rank, Props: edge.Props}}}
+	reversed := &wire.Edge{Src: src, Dst: dst, Type: -1, Name: []byte("WORK_IN"), Ranking: rank}
+	result := resultSet(t, []string{"vertex", "edge", "path", "items", "reverse_edge"}, [][]*wire.Value{{
+		{VVal: person}, {EVal: edge}, {PVal: path}, {LVal: &wire.NList{Values: []*wire.Value{{VVal: person}, {EVal: edge}}}}, {EVal: reversed},
+	}})
+	rows, _, err := readRows(result, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vertex := rows[0][0].(*graphCell)
+	if vertex.Kind != "vertex" || vertex.Nodes[0].VID.Value != "person:1" || vertex.Nodes[0].Properties[1].Value != "9007199254740993" {
+		t.Fatalf("vertex lost identity or large integer: %#v", vertex)
+	}
+	relationship := rows[0][1].(*graphCell)
+	if relationship.Kind != "edge" || relationship.Edges[0].SourceVID.Value != "person:1" || relationship.Edges[0].TargetVID.Value != "company:1" || relationship.Edges[0].Rank != "7" {
+		t.Fatalf("edge lost direction or rank: %#v", relationship)
+	}
+	if pathCell := rows[0][2].(*graphCell); pathCell.Kind != "path" || len(pathCell.Nodes) != 2 || len(pathCell.Edges) != 1 {
+		t.Fatalf("path was not preserved: %#v", pathCell)
+	}
+	if items := rows[0][3].(*graphCell); len(items.Nodes) < 1 || len(items.Edges) != 1 {
+		t.Fatalf("nested graph values were not preserved: %#v", items)
+	}
+	if reverse := rows[0][4].(*graphCell); reverse.Edges[0].SourceVID.Value != "company:1" || reverse.Edges[0].TargetVID.Value != "person:1" {
+		t.Fatalf("reverse edge direction was lost: %#v", reverse)
+	}
+	data, err := json.Marshal(rows)
+	if err != nil || !strings.Contains(string(data), `"__dbx_graph_cell":"nebula-v1"`) {
+		t.Fatalf("graph envelope cannot cross the agent protocol: %s, %v", data, err)
 	}
 }
 

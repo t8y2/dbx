@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import { supportsTransfer } from "@/lib/database/databaseCapabilities";
 import { transferDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { supportsTransferUpsert } from "../transferStrategy";
 import type { ConnectionConfig, SidebarLayout } from "@/types/database";
 
 vi.mock("@/components/ui/button", async () => {
@@ -29,6 +30,8 @@ const connections: ConnectionConfig[] = [
   { id: "h2-local-id", name: "Local H2", db_type: "h2", driver_profile: "h2-v3", host: "", port: 0, username: "sa", password: "", database: "mem:transfer-test" },
   { id: "h2-jdbc-id", name: "JDBC H2", db_type: "jdbc", connection_string: "jdbc:h2:mem:transfer-test", host: "", port: 0, username: "sa", password: "" },
   { id: "yashandb-id", name: "YashanDB", db_type: "yashandb", host: "localhost", port: 1688, username: "test", password: "" },
+  { id: "iris-id", name: "InterSystems IRIS", db_type: "iris", host: "localhost", port: 1972, username: "test", password: "" },
+  { id: "cache-id", name: "InterSystems Caché", db_type: "iris", driver_profile: "cache", host: "localhost", port: 1972, username: "test", password: "" },
   { id: "redis-id", name: "Redis", db_type: "redis", host: "localhost", port: 6379, username: "", password: "" },
   { id: "unknown-jdbc-id", name: "Unknown JDBC", db_type: "jdbc", host: "localhost", port: 0, username: "", password: "" },
 ];
@@ -78,6 +81,22 @@ afterEach(() => {
 });
 
 describe("data transfer connection choices", () => {
+  it.each(["iris-id", "cache-id"])("offers %s as source and target without upsert", async (id) => {
+    const { container, selection } = await mountTransferPickers("mysql-source");
+    const connection = connections.find((connection) => connection.id === id)!;
+    const databaseType = transferDatabaseTypeForConnection(connection);
+    expect(databaseType).toBe("iris");
+    expect(supportsTransfer(databaseType)).toBe(true);
+    expect(supportsTransferUpsert(databaseType)).toBe(false);
+    for (const side of ["source", "target"] as const) {
+      const option = container.querySelector(`[data-side="${side}"] [data-picker-connection="${id}"]`) as HTMLButtonElement;
+      expect(option?.textContent).toContain(connection.name);
+      option.click();
+      await nextTick();
+      expect(selection[side]).toBe(id);
+    }
+  });
+
   it.each(["mysql-source", "pg-source"])("offers H2 on both sides when opened from %s", async (source) => {
     const { container, selection } = await mountTransferPickers(source);
     for (const side of ["source", "target"]) {
@@ -96,7 +115,7 @@ describe("data transfer connection choices", () => {
     expect(selection.source).toBe(source);
   });
 
-  it.each(["h2-local-id", "h2-jdbc-id", "yashandb-id"])("resolves the prefilled %s to its connection name", async (source) => {
+  it.each(["h2-local-id", "h2-jdbc-id", "yashandb-id", "iris-id", "cache-id"])("resolves the prefilled %s to its connection name", async (source) => {
     const { container } = await mountTransferPickers(source);
     const trigger = container.querySelector('[data-side="source"] button');
     expect(trigger?.textContent).toContain(connections.find((connection) => connection.id === source)!.name);

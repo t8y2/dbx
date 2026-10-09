@@ -5,6 +5,7 @@ use serde_json::json;
 use serde_json::Value;
 
 use crate::agent_events::{ToolCall, ToolDefinition, ToolResult};
+use crate::ai::skill_tools;
 use crate::connection::AppState;
 use crate::db::redis_driver::{classify_command, parse_command_argv, RedisCommandResult, RedisCommandSafety};
 use crate::db::vector_driver;
@@ -792,6 +793,13 @@ pub async fn execute_tool_scoped(
     } else {
         None
     };
+    // `use_skill` reports which skill it actually resolved. That identity leaves
+    // through the tool result's `explain_data`, which is frontend-only (the model
+    // sees `content` alone — see the follow-up message built in `agent_loop`), so
+    // the UI can record a load from the backend's own answer instead of
+    // re-deriving it from the call arguments, which describe an intent and not an
+    // outcome. Every other tool leaves this `None`.
+    let mut skill_explain: Option<serde_json::Value> = None;
     let result = match tool_call.name.as_str() {
         "list_databases" => execute_list_databases(tool_call, state, connection_id).await,
         "list_tables" => execute_list_tables(tool_call, state, connection_id, database, default_schema, db_type).await,
@@ -833,6 +841,17 @@ pub async fn execute_tool_scoped(
             execute_redis_command(tool_call, state, connection_id, database, database_scope).await
         }
         "get_current_time" => execute_get_current_time(tool_call),
+        // Skill tools are filesystem-only: `tool_uses_database` must keep
+        // returning false for them, or they would serialize on a connection lock
+        // they have no reason to hold (see the test below).
+        skill_tools::USE_SKILL_TOOL => match skill_tools::execute_use_skill(tool_call, state).await {
+            Ok(outcome) => {
+                skill_explain = outcome.loaded_skill_id.map(|id| serde_json::json!({ "skillId": id }));
+                Ok(outcome.text)
+            }
+            Err(err) => Err(err),
+        },
+        skill_tools::READ_SKILL_FILE_TOOL => skill_tools::execute_read_skill_file(tool_call, state).await,
         _ => Err(format!("Unknown tool: {}", tool_call.name)),
     };
 
@@ -842,7 +861,7 @@ pub async fn execute_tool_scoped(
             tool_name: tool_call.name.clone(),
             content,
             is_error: false,
-            explain_data: None,
+            explain_data: skill_explain,
         },
         Err(err) => ToolResult {
             tool_call_id: tool_call.id.clone(),
@@ -1977,6 +1996,8 @@ for line in sys.stdin:
     #[cfg(unix)]
     fn agent_test_connection(id: &str, name: &str, db_type: DatabaseType, database: &str) -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: id.to_string(),
             name: name.to_string(),
@@ -2023,6 +2044,7 @@ for line in sys.stdin:
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_filter: None,
             redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
@@ -3076,6 +3098,17 @@ for line in sys.stdin:
         let tool = get_current_time_tool();
         assert!(tool.read_only, "get_current_time must be read_only");
         assert!(tool.parallel_ok, "get_current_time must be parallel_ok");
+    }
+
+    /// `tool_uses_database` is a closed whitelist, so this pins the whole
+    /// classification: the skill tools read the filesystem, and taking a
+    /// per-connection lock for them would serialize unrelated runs for nothing.
+    #[test]
+    fn skill_tools_do_not_take_the_connection_lock() {
+        for name in [skill_tools::USE_SKILL_TOOL, skill_tools::READ_SKILL_FILE_TOOL] {
+            assert!(!tool_uses_database(name), "{name} must not be classified as a database tool");
+        }
+        assert!(tool_uses_database("execute_query"), "the whitelist must still contain real database tools");
     }
 
     #[test]

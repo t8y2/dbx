@@ -2,6 +2,7 @@ import { computed, getCurrentScope, onScopeDispose, ref, toValue, watch, type Ma
 import { forgetDataGridConditionHistory, loadDataGridConditionHistory, rememberDataGridConditionHistory, type DataGridConditionHistoryKind, type DataGridConditionHistoryScope } from "@/lib/dataGrid/dataGridConditionHistory";
 import { pinyinAwareMatchScore } from "@/lib/common/pinyin";
 import { matchesIdentifierSearch } from "@/lib/sql/identifierSearch";
+import type { DatabaseType } from "@/types/database";
 
 export type DataGridConditionSuggestionKind = "column" | "keyword" | "history";
 
@@ -46,14 +47,85 @@ export interface UseDataGridConditionEditorOptions {
   suggestionDebounceMs?: number;
   suggestionLimit?: number;
   suggestionsEnabled?: MaybeRefOrGetter<boolean>;
+  databaseType?: MaybeRefOrGetter<DatabaseType | undefined>;
 }
 
 const WHERE_TOKEN_PATTERN = /([^\s,()><=!&|]+)$/;
 const ORDER_BY_TOKEN_PATTERN = /([^\s,()]+)$/;
 const WHERE_TOKEN_FORWARD_PATTERN = /^([^\s,()><=!&|]+)/;
 const ORDER_BY_TOKEN_FORWARD_PATTERN = /^([^\s,()]+)/;
+export interface DataGridConditionKeyword {
+  value: string;
+  comment?: string;
+}
+
+export const WHERE_SYNTAX_KEYWORDS: readonly DataGridConditionKeyword[] = [
+  { value: "AND" },
+  { value: "OR" },
+  { value: "BETWEEN", comment: "BETWEEN ... AND ..." },
+  { value: "NOT BETWEEN", comment: "NOT BETWEEN ... AND ..." },
+  { value: "LIKE" },
+  { value: "NOT LIKE" },
+  { value: "ILIKE" },
+  { value: "NOT ILIKE" },
+  { value: "IN" },
+  { value: "NOT IN" },
+  { value: "IS NULL" },
+  { value: "IS NOT NULL" },
+  { value: "IS" },
+  { value: "NOT" },
+  { value: "REGEXP" },
+];
+
+export const WHERE_IS_KEYWORDS: readonly DataGridConditionKeyword[] = [{ value: "NULL" }, { value: "NOT NULL" }, { value: "TRUE" }, { value: "FALSE" }];
+
+export const WHERE_IS_NOT_KEYWORDS: readonly DataGridConditionKeyword[] = [{ value: "NULL" }, { value: "TRUE" }, { value: "FALSE" }];
+
+export const WHERE_AFTER_NOT_KEYWORDS: readonly DataGridConditionKeyword[] = [{ value: "BETWEEN", comment: "BETWEEN ... AND ..." }, { value: "IN" }, { value: "LIKE" }, { value: "ILIKE" }];
+
+const ILIKE_SUPPORTED_DATABASES: ReadonlySet<DatabaseType> = new Set<DatabaseType>(["postgres", "redshift", "duckdb", "snowflake", "clickhouse", "databend", "kingbase", "highgo", "uxdb", "vastbase", "gaussdb", "opengauss", "questdb", "vertica", "databricks", "kwdb", "h2"]);
+
+// SQLite parses `x REGEXP y` but needs a driver-registered regexp() function,
+// which DBX does not provide, so the SQLite family is excluded; Hive-family
+// dialects ship the REGEXP/RLIKE binary operator.
+const REGEXP_OPERATOR_SUPPORTED_DATABASES: ReadonlySet<DatabaseType> = new Set<DatabaseType>(["mysql", "doris", "starrocks", "goldendb", "manticoresearch", "gbase", "hive", "spark", "kyuubi", "impala"]);
+
+export function supportsConditionIlike(databaseType?: DatabaseType): boolean {
+  return !databaseType || ILIKE_SUPPORTED_DATABASES.has(databaseType);
+}
+
+export function supportsConditionRegexp(databaseType?: DatabaseType): boolean {
+  return !databaseType || REGEXP_OPERATOR_SUPPORTED_DATABASES.has(databaseType);
+}
+
+export function isConditionKeywordSupported(keyword: string, databaseType?: DatabaseType): boolean {
+  if (!databaseType) return true;
+  if (keyword === "ILIKE" || keyword === "NOT ILIKE") {
+    return supportsConditionIlike(databaseType);
+  }
+  if (keyword === "REGEXP") {
+    return supportsConditionRegexp(databaseType);
+  }
+  return true;
+}
+
+function filterKeywordSuggestions(keywords: readonly (DataGridConditionKeyword | string)[], normalizedToken: string, predicate?: (value: string) => boolean): DataGridConditionSuggestion[] {
+  const result: DataGridConditionSuggestion[] = [];
+  for (const keyword of keywords) {
+    const value = typeof keyword === "string" ? keyword : keyword.value;
+    const comment = typeof keyword === "string" ? undefined : keyword.comment;
+    if (predicate && !predicate(value)) continue;
+    const lower = value.toLowerCase();
+    if (normalizedToken && (!lower.startsWith(normalizedToken) || lower === normalizedToken)) continue;
+    result.push({ value, kind: "keyword", ...(comment ? { comment } : {}) });
+  }
+  return result;
+}
+
 const WHERE_CONNECTOR_KEYWORDS = ["AND", "OR"] as const;
-const WHERE_VALUE_OPERATOR_PATTERN = /(?:^|[\s(])(?:IS(?:\s+NOT)?|(?:NOT\s+)?(?:LIKE|ILIKE|IN|BETWEEN)|SIMILAR\s+TO|REGEXP|RLIKE|GLOB|MATCH)\s*$/i;
+const WHERE_IS_NOT_OPERATOR_PATTERN = /(?:^|[\s(])IS\s+NOT$/i;
+const WHERE_IS_OPERATOR_PATTERN = /(?:^|[\s(])IS$/i;
+const WHERE_VALUE_OPERATOR_PATTERN = /(?:^|[\s(])(?:(?:NOT\s+)?(?:LIKE|ILIKE|IN|BETWEEN)|SIMILAR\s+TO|REGEXP|RLIKE|GLOB|MATCH)\s*$/i;
 /**
  * 比较类符号运算符。它们后面同样是「值」位置，不应再提示列名，
  * 否则用户输入值时会看到列名补全、回车/接受后输入被改写（issue #10595）。
@@ -222,16 +294,19 @@ function insideInValueList(value: string, cursor: number, identifierQuote: strin
   return /(?:^|[\s(])IN$/i.test(before) || /(?:^|[\s(])NOT\s+IN$/i.test(before);
 }
 
-function whereSuggestionRole(target: DataGridConditionCompletionTarget, identifierQuote: string | undefined): "field" | "connector" | "none" {
+function whereSuggestionRole(target: DataGridConditionCompletionTarget, identifierQuote: string | undefined): "field" | "connector" | "is_value" | "is_not_value" | "after_not" | "none" {
   if (target.insideString) return "none";
   if (target.quotedIdentifier) return "field";
   const prefix = target.value.slice(0, target.from).trimEnd();
+  if (WHERE_IS_NOT_OPERATOR_PATTERN.test(prefix)) return "is_not_value";
+  if (WHERE_IS_OPERATOR_PATTERN.test(prefix)) return "is_value";
   if (WHERE_VALUE_OPERATOR_PATTERN.test(prefix)) return "none";
   // 符号比较运算符之后是值位置：`v_id = v` 时不提示列名，只在 AND/OR 等字段位置提示
   if (WHERE_SYMBOLIC_COMPARISON_PATTERN.test(prefix)) return "none";
   // `mi_id IN (v` / `mi_id IN ('a', v` 同样是值列表，不能提示列名
   if (insideInValueList(target.value, target.from, identifierQuote)) return "none";
-  if (!prefix || /(?:^|\s)(?:AND|OR|NOT)$/i.test(prefix) || /[,(+\-*/~]$/.test(prefix)) return "field";
+  if (!prefix || /(?:^|\s)(?:AND|OR)$/i.test(prefix) || /[,(+\-*/~]$/.test(prefix)) return "field";
+  if (/(?:^|\s)NOT$/i.test(prefix)) return "after_not";
   return "connector";
 }
 
@@ -296,41 +371,58 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
     dismiss();
   }
 
+  function columnSuggestions(columns: readonly DataGridConditionColumnOption[], normalizedToken: string, target: DataGridConditionCompletionTarget, seen: Set<string>): DataGridConditionSuggestion[] {
+    if (normalizedToken && columns.some((column) => (typeof column === "string" ? column : column.name).toLowerCase() === normalizedToken)) return [];
+    const scored: Array<{ suggestion: DataGridConditionSuggestion; score: number; index: number }> = [];
+    let index = 0;
+    for (const column of columns) {
+      const columnValue = typeof column === "string" ? column : column.name;
+      if (seen.has(columnValue)) continue;
+      seen.add(columnValue);
+      // Keep the existing prefix/pinyin/substring ranking stable, then append
+      // new camel-initial and ordered-fuzzy matches behind those tiers.
+      const existingScore = normalizedToken ? pinyinAwareMatchScore(columnValue, normalizedToken) : 0;
+      if (existingScore < 0 && !matchesIdentifierSearch(columnValue, normalizedToken)) continue;
+      const score = existingScore < 0 ? 50 : existingScore;
+      const comment = normalizedColumnComment(column);
+      const insertText = target.quotedIdentifier ? columnValue : typeof column === "string" ? columnValue : column.insertText;
+      scored.push({ suggestion: { value: columnValue, kind: "column", ...(insertText !== undefined && insertText !== columnValue ? { insertText } : {}), ...(comment ? { comment } : {}) }, score, index: index++ });
+    }
+    scored.sort((a, b) => b.score - a.score || a.index - b.index);
+    return scored.map((entry) => entry.suggestion);
+  }
+
   function defaultSuggestions(target: DataGridConditionCompletionTarget): DataGridConditionSuggestion[] {
     const role = options.kind === "where" ? whereSuggestionRole(target, toValue(options.identifierQuote)) : orderBySuggestionRole(target);
     if (role === "none") return [];
     const normalizedToken = target.token.toLowerCase();
     const seen = new Set<string>();
-    const suggestions: DataGridConditionSuggestion[] = [];
+    const isKeywordSupported = (keyword: string) => isConditionKeywordSupported(keyword, toValue(options.databaseType));
     if (role === "field") {
       const columns = toValue(options.columns) ?? [];
-      if (normalizedToken && columns.some((column) => (typeof column === "string" ? column : column.name).toLowerCase() === normalizedToken)) return [];
-      const scored: Array<{ suggestion: DataGridConditionSuggestion; score: number; index: number }> = [];
-      let index = 0;
-      for (const column of columns) {
-        const columnValue = typeof column === "string" ? column : column.name;
-        if (seen.has(columnValue)) continue;
-        seen.add(columnValue);
-        // Keep the existing prefix/pinyin/substring ranking stable, then append
-        // new camel-initial and ordered-fuzzy matches behind those tiers.
-        const existingScore = normalizedToken ? pinyinAwareMatchScore(columnValue, normalizedToken) : 0;
-        if (existingScore < 0 && !matchesIdentifierSearch(columnValue, normalizedToken)) continue;
-        const score = existingScore < 0 ? 50 : existingScore;
-        const comment = normalizedColumnComment(column);
-        const insertText = target.quotedIdentifier ? columnValue : typeof column === "string" ? columnValue : column.insertText;
-        scored.push({ suggestion: { value: columnValue, kind: "column", ...(insertText !== undefined && insertText !== columnValue ? { insertText } : {}), ...(comment ? { comment } : {}) }, score, index: index++ });
-      }
-      scored.sort((a, b) => b.score - a.score || a.index - b.index);
-      return scored.map((entry) => entry.suggestion);
-    } else {
-      // WHERE 已写完一个表达式时提示连接符；ORDER BY 已写出排序列时提示排序方向。
-      const keywords = options.kind === "where" ? WHERE_CONNECTOR_KEYWORDS : ORDER_BY_DIRECTION_KEYWORDS;
-      for (const keyword of keywords) {
-        if (!keyword.toLowerCase().startsWith(normalizedToken) || keyword.toLowerCase() === normalizedToken) continue;
-        suggestions.push({ value: keyword, kind: "keyword" });
-      }
+      return columnSuggestions(columns, normalizedToken, target, seen);
     }
-    return suggestions;
+    if (role === "after_not") {
+      const columns = toValue(options.columns) ?? [];
+      const suggestions = columnSuggestions(columns, normalizedToken, target, seen);
+      if (normalizedToken) {
+        suggestions.push(...filterKeywordSuggestions(WHERE_AFTER_NOT_KEYWORDS, normalizedToken, isKeywordSupported));
+      }
+      return suggestions;
+    }
+    if (role === "is_value") {
+      return normalizedToken ? filterKeywordSuggestions(WHERE_IS_KEYWORDS, normalizedToken) : [];
+    }
+    if (role === "is_not_value") {
+      return normalizedToken ? filterKeywordSuggestions(WHERE_IS_NOT_KEYWORDS, normalizedToken) : [];
+    }
+    if (options.kind === "where") {
+      // WHERE 已写完一个表达式时提示连接符；在列或操作符位置提示 SQL 语法及连接符
+      const keywords = normalizedToken ? WHERE_SYNTAX_KEYWORDS : WHERE_CONNECTOR_KEYWORDS;
+      return filterKeywordSuggestions(keywords, normalizedToken, isKeywordSupported);
+    }
+    // ORDER BY 已写出排序列时提示排序方向。
+    return filterKeywordSuggestions(ORDER_BY_DIRECTION_KEYWORDS, normalizedToken);
   }
 
   async function loadSuggestions(target: DataGridConditionCompletionTarget, requestId: number, controller: AbortController) {
@@ -339,7 +431,7 @@ export function useDataGridConditionEditor(options: UseDataGridConditionEditorOp
     try {
       const role = options.kind === "where" ? whereSuggestionRole(target, toValue(options.identifierQuote)) : orderBySuggestionRole(target);
       const values =
-        options.suggestionProvider && target.token && role === "field"
+        options.suggestionProvider && target.token && (role === "field" || role === "after_not")
           ? await options.suggestionProvider({ kind: options.kind, value: target.value, valueBeforeCursor: target.valueBeforeCursor, token: target.token, from: target.from, to: target.to, selectionStart: target.selectionStart, selectionEnd: target.selectionEnd, signal: controller.signal })
           : undefined;
       // A slower request must never replace suggestions for a newer editor value.

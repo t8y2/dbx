@@ -199,6 +199,26 @@ public final class GoldendbAgent extends AbstractJdbcAgent {
     }
 
     @Override
+    public String getTableDdl(String schema, String table) {
+        return unchecked(() -> {
+            String qualifiedTable = JdbcIdentifiers.INSTANCE.backtick(table);
+            if (schema != null && !schema.isBlank()) {
+                qualifiedTable = JdbcIdentifiers.INSTANCE.backtick(schema) + "." + qualifiedTable;
+            }
+            try (java.sql.Statement statement = requireConnected().createStatement();
+                 ResultSet result = statement.executeQuery("SHOW CREATE TABLE " + qualifiedTable)) {
+                if (result.next()) {
+                    String ddl = result.getString(2);
+                    if (ddl != null && !ddl.isBlank()) {
+                        return ddl;
+                    }
+                }
+                throw new IllegalStateException("DDL not found for " + qualifiedTable);
+            }
+        });
+    }
+
+    @Override
     public ObjectSource getObjectSource(String schema, String name, String objectType) {
         return unchecked(() -> {
             String quotedName = JdbcIdentifiers.INSTANCE.backtick(name);
@@ -436,6 +456,12 @@ public final class GoldendbAgent extends AbstractJdbcAgent {
                 case Types.BOOLEAN:
                 case Types.BIT:
                     value = rs.getBoolean(index);
+                    break;
+                case Types.BINARY:
+                case Types.VARBINARY:
+                case Types.LONGVARBINARY:
+                case Types.BLOB:
+                    value = JdbcExecutor.bytesToHex(rs.getBytes(index));
                     break;
                 default:
                     value = rs.getString(index);

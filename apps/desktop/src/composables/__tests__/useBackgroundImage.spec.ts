@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { reactive } from "vue";
-import { BACKGROUND_IMAGE_ACTIVE_CLASS, useBackgroundImage } from "@/composables/useBackgroundImage";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { effectScope, reactive, type EffectScope } from "vue";
+import { BACKGROUND_IMAGE_ACTIVE_CLASS, useBackgroundImage as createBackgroundImage } from "@/composables/useBackgroundImage";
 import { useTheme } from "@/composables/useTheme";
 import { defaultBackgroundImageSettings, type BackgroundImageSettings } from "@/lib/app/appBackgroundImage";
 
@@ -13,6 +13,12 @@ vi.mock("@/lib/backend/api", () => ({
 
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
 
+let scope: EffectScope;
+
+function useBackgroundImage(settings: Parameters<typeof createBackgroundImage>[0]) {
+  return scope.run(() => createBackgroundImage(settings))!;
+}
+
 function settingsWith(overrides: Partial<BackgroundImageSettings>) {
   const base = defaultBackgroundImageSettings();
   return { editorSettings: reactive({ backgroundImage: { ...base, ...overrides } }) } as Parameters<typeof useBackgroundImage>[0];
@@ -20,12 +26,15 @@ function settingsWith(overrides: Partial<BackgroundImageSettings>) {
 
 describe("useBackgroundImage", () => {
   beforeEach(() => {
+    scope = effectScope();
     vi.resetModules();
     readBackgroundImageMock.mockReset();
     (globalThis as Record<string, unknown>).__TAURI_INTERNALS__ = {};
     document.documentElement.className = "";
     document.documentElement.removeAttribute("style");
   });
+
+  afterEach(() => scope.stop());
 
   it("reports no active background without a configured file", () => {
     const bg = useBackgroundImage(settingsWith({}));

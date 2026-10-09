@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   repushPluginConnection: vi.fn(),
   ensureConnected: vi.fn(),
   openPluginWorkbench: vi.fn(),
+  connectedIds: new Set<string>(["conn-1"]),
 }));
 
 vi.mock("@/lib/backend/api", () => ({
@@ -29,7 +30,7 @@ vi.mock("@/composables/useTheme", () => ({ useTheme: () => ({ isDark: ref(false)
 vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { uiFontFamily: "", fontFamily: "", fontSize: 14 } }) }));
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
-    connectedIds: new Set(["conn-1"]),
+    connectedIds: mocks.connectedIds,
     getConfig: () => undefined,
     ensureConnected: mocks.ensureConnected,
     repushPluginConnection: mocks.repushPluginConnection,
@@ -152,5 +153,66 @@ describe("PluginWorkbenchTab contribution resolution", () => {
 
     expect(root.querySelector("iframe")).toBeNull();
     expect(root.textContent).toContain("pluginPlatform.workbenchUnavailable");
+  });
+});
+
+// Restored-tab self-heal (dbx-plugin-ssh#144): a page refresh used to park the
+// tab on the reload prompt from a one-shot `start()` snapshot, so the plugin
+// could never re-establish its session even after the SPA's boot connect
+// replay landed. `start()` now recovers silently and only parks when silent
+// recovery cannot proceed.
+describe("PluginWorkbenchTab restore self-heal", () => {
+  let app: App<Element> | undefined;
+  let root: HTMLDivElement;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => window.setTimeout(() => callback(0), 0));
+    vi.stubGlobal("getComputedStyle", () => Object.assign([], { getPropertyValue: () => "" }));
+    mocks.listPlugins.mockResolvedValue([plugin]);
+    mocks.readPluginUiEntry.mockResolvedValue({ dataBase64: btoa("<!doctype html><html><body></body></html>"), contentType: "text/html" });
+    mocks.subscribePluginEvents.mockResolvedValue(vi.fn());
+    mocks.repushPluginConnection.mockResolvedValue(undefined);
+    mocks.ensureConnected.mockResolvedValue(undefined);
+    mocks.connectedIds.clear();
+    root = document.createElement("div");
+    document.body.appendChild(root);
+  });
+
+  afterEach(() => {
+    app?.unmount();
+    root.remove();
+    vi.unstubAllGlobals();
+  });
+
+  it("self-heals a restored tab: silent ensureConnected, then the workbench loads", async () => {
+    app = createApp(PluginWorkbenchTab, { pluginId: "com.example.graph", contributionId: "graph.main", connectionId: "conn-1" });
+    app.mount(root);
+
+    await vi.waitFor(() => expect(mocks.ensureConnected).toHaveBeenCalledWith("conn-1", { allowPasswordPrompt: false }));
+    await vi.waitFor(() => expect(root.querySelector("iframe")).toBeInstanceOf(HTMLIFrameElement));
+    expect(root.textContent).not.toContain("pluginPlatform.reloadRequired");
+  });
+
+  it("keeps an already-connected restore on the direct load path", async () => {
+    mocks.connectedIds.add("conn-1");
+    app = createApp(PluginWorkbenchTab, { pluginId: "com.example.graph", contributionId: "graph.main", connectionId: "conn-1" });
+    app.mount(root);
+
+    await vi.waitFor(() => expect(root.querySelector("iframe")).toBeInstanceOf(HTMLIFrameElement));
+    // The direct load path must not reconnect behind the user's back. (The
+    // host's PluginWorkbenchHost re-pushes credentials on its own mount; that
+    // is not start()'s concern here.)
+    expect(mocks.ensureConnected).not.toHaveBeenCalled();
+    expect(root.textContent).not.toContain("pluginPlatform.reloadRequired");
+  });
+
+  it("parks on the reload prompt without an error card when silent recovery fails", async () => {
+    mocks.ensureConnected.mockRejectedValue(new Error("interactive password required"));
+    app = createApp(PluginWorkbenchTab, { pluginId: "com.example.graph", contributionId: "graph.main", connectionId: "conn-1" });
+    app.mount(root);
+
+    await vi.waitFor(() => expect(root.textContent).toContain("pluginPlatform.reloadRequired"));
+    expect(root.querySelector("iframe")).toBeNull();
   });
 });

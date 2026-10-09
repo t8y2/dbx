@@ -56,4 +56,45 @@ describe("saved SQL execution targets", () => {
       catalog: "runtime_catalog",
     });
   });
+
+  it("inherits currentTarget database when saved file database is empty", () => {
+    const unassociatedTarget = { connectionId: "saved-connection", database: "", schema: undefined, catalog: undefined };
+    expect(
+      resolveSavedSqlExecutionTarget(unassociatedTarget, "saved", {
+        connectionId: "saved-connection",
+        database: "active_db",
+        schema: "active_schema",
+        catalog: "active_catalog",
+      }),
+    ).toEqual({
+      connectionId: "saved-connection",
+      database: "active_db",
+      schema: "active_schema",
+      catalog: "active_catalog",
+    });
+  });
+
+  it("extracts candidate database from file name when saved database is empty", () => {
+    const fileWithPrefix = {
+      connectionId: "saved-connection",
+      database: "",
+      name: "aisp_aikf - 全量呼入数据.sql",
+    };
+    expect(resolveSavedSqlExecutionTarget(fileWithPrefix, "saved")).toEqual({
+      connectionId: "saved-connection",
+      database: "aisp_aikf",
+      schema: undefined,
+      catalog: undefined,
+    });
+  });
+
+  it("uses fallbackDatabase when saved file database is empty and no candidate exists", () => {
+    const emptyTarget = { connectionId: "saved-connection", database: "", name: "plain_query.sql" };
+    expect(resolveSavedSqlExecutionTarget(emptyTarget, "saved", undefined, "default_db")).toEqual({
+      connectionId: "saved-connection",
+      database: "default_db",
+      schema: undefined,
+      catalog: undefined,
+    });
+  });
 });

@@ -13,6 +13,7 @@ import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import type { SqlErrorPosition } from "@/lib/backend/errorUtils";
 import { queryResultSourceNameParts } from "@/lib/sql/queryResultSource";
 import type { BatchSqlExecution, ConnectionConfig, DatabaseType, QueryResult, QueryResultRun, QueryTab } from "@/types/database";
+import type { ResultTabNamingMode } from "@/stores/settingsStore";
 
 type Translate = (key: string, params?: Record<string, unknown>) => string;
 export type OutputView = "result" | "summary" | "explain" | "chart";
@@ -198,14 +199,24 @@ export function tabDisplayTitle(tab: QueryTab, t: Translate): string {
   }
   if (tab.mode === "data" && tab.tableMeta?.tableName) {
     if (compact) return tab.tableMeta.tableName;
-    const suffix = tab.tableMeta.schema && tab.tableMeta.schema !== tab.database ? `@${database}.${tab.tableMeta.schema}` : `@${database}`;
+    const schema = tab.tableMeta.schema || tab.schema;
+    const suffix = schema && schema !== tab.database ? `@${database}.${schema}` : `@${database}`;
     return `${tab.tableMeta.tableName}${suffix}`;
   }
   if (tab.mode === "query") {
     const title = queryTitle(tab);
     if (title) return title;
     if (compact) return connectionDisplayName(tab.connectionId);
-    return `${connectionDisplayName(tab.connectionId)}@${database}`;
+    const hasDatabase = Boolean(tab.database?.trim());
+    const schema = tab.schema?.trim();
+    let scope = database;
+    if (schema && schema !== tab.database) {
+      scope = hasDatabase ? `${database}.${schema}` : schema;
+    }
+    if (tab.catalog?.trim()) {
+      scope = `${tab.catalog.trim()}.${scope}`;
+    }
+    return `${connectionDisplayName(tab.connectionId)}@${scope}`;
   }
   if (tab.mode === "mongo" && tab.sql) {
     if (compact) return tab.sql;
@@ -286,6 +297,11 @@ export function tabDisplayTitle(tab: QueryTab, t: Translate): string {
     if (compact) return t("tabs.users");
     return `${t("tabs.users")}@${connectionDisplayName(tab.connectionId)}`;
   }
+  if (tab.mode === "database-search") {
+    const scope = tab.schema ? `${database}.${tab.schema}` : database;
+    if (compact) return t("databaseSearch.title");
+    return `${t("databaseSearch.title")}@${scope}`;
+  }
   return tab.title;
 }
 
@@ -301,6 +317,10 @@ export function tabTooltipLines(tab: QueryTab, t: Translate): { label: string; v
     ...(groupName ? [{ label: t("tabs.tooltipGroup"), value: groupName }] : []),
     ...(showDatabase ? [{ label: t("tabs.tooltipDatabase"), value: databaseDisplayNameForTab(tab.connectionId, database, t) }] : []),
   ];
+  const schema = tab.schema?.trim() || (tab.mode === "objects" ? tab.objectBrowser?.schema?.trim() : tab.tableMeta?.schema?.trim());
+  if (schema && (tab.mode === "objects" || schema !== database)) {
+    lines.push({ label: t("tabs.tooltipSchema"), value: schema });
+  }
   if (tab.mode === "query" && queryTitle(tab)) {
     lines.unshift({ label: t("tabs.tooltipTitle"), value: tab.title });
   }
@@ -330,14 +350,26 @@ export function tabTooltipLines(tab: QueryTab, t: Translate): { label: string; v
   if (tab.mode === "hbase" && tab.sql) {
     lines.push({ label: t("tabs.tooltipTable"), value: tab.sql });
   }
-  if (tab.mode === "objects" && tab.objectBrowser?.schema) {
-    lines.push({ label: t("tabs.tooltipSchema"), value: tab.objectBrowser.schema });
-  }
   return lines;
 }
 
-export function queryResultStatementLabel(result: Pick<QueryResult, "sourceLabel">): string | undefined {
-  return result.sourceLabel;
+type ResultSourceFields = Pick<QueryResult, "sourceLabel" | "sourceLabelKind" | "sourceQualifier" | "sourceName">;
+type ResultNamingOptions = { includeSourceDatabase?: boolean; namingMode?: ResultTabNamingMode; preferComments?: boolean };
+
+function resultSourceLabel(result: ResultSourceFields, includeSourceDatabase: boolean): string | undefined {
+  if (result.sourceName) {
+    if (!includeSourceDatabase) return result.sourceName;
+    return result.sourceQualifier ? `${result.sourceQualifier}.${result.sourceName}` : result.sourceName;
+  }
+  return result.sourceLabelKind === "comment" ? undefined : result.sourceLabel;
+}
+
+function resultNamingLabel(result: ResultSourceFields, options: ResultNamingOptions): string | undefined {
+  if (options.namingMode === "ordinal") return undefined;
+  const commentLabel = result.sourceLabelKind === "comment" ? result.sourceLabel : undefined;
+  if (options.namingMode === "comment") return commentLabel;
+  if (options.preferComments !== false && commentLabel) return commentLabel;
+  return resultSourceLabel(result, options.includeSourceDatabase !== false);
 }
 
 export function middleEllipsis(value: string, maxLength = 24): string {
@@ -475,19 +507,13 @@ export function queryResultExecutionSql(tab: Pick<QueryTab, "result" | "resultBa
   return tab.resultSortedSql || resultSqlForGrid(tab);
 }
 
-export function tabularResultItems(results: QueryResult[] | undefined, options: { includeSourceDatabase?: boolean } = {}): { result: QueryResult; index: number; n: number; label?: string; displayLabel?: string; labelTruncated: boolean; title?: string }[] {
+export function tabularResultItems(results: QueryResult[] | undefined, options: ResultNamingOptions = {}): { result: QueryResult; index: number; n: number; label?: string; displayLabel?: string; labelTruncated: boolean; title?: string }[] {
   if (!results) return [];
   return results
     .map((result, index) => ({ result, index }))
     .filter((item) => item.result.columns.length > 0 && item.result.server_message !== true)
     .map((item, ordinal) => {
-      const label = queryResultStatementLabel(item.result);
-      const { sourceName, sourceQualifier } = item.result;
-      // 只有在标签确实由“库名.对象名”拼成时才启用短名称，避免覆盖 `-- name: xxx` 之类的自定义名称
-      const qualifiedLabel = sourceName ? (sourceQualifier ? `${sourceQualifier}.${sourceName}` : sourceName) : undefined;
-      // 关闭“结果集名称包含数据库名”时，页签与结果列表只展示对象名；
-      // 完整名称（含库名）仍保留在 title，供悬浮提示与搜索使用。
-      const displaySource = options.includeSourceDatabase === false && sourceName && qualifiedLabel === label ? sourceName : label;
+      const displaySource = resultNamingLabel(item.result, options);
       const displayLabel = displaySource ? middleEllipsis(displaySource) : undefined;
       return {
         ...item,
@@ -508,31 +534,33 @@ export function activeResultRun(tab: Pick<QueryTab, "resultRuns" | "activeResult
  * 执行批次默认显示名：取该批次主结果的来源（库名.表名 / 表名）。
  * 连表查询同样取 FROM 之后的第一个物理表，与结果集页签的来源解析保持一致。
  */
-function resultRunSourceLabel(run: QueryResultRun, includeSourceDatabase: boolean, fallback: { database?: string; databaseType?: DatabaseType }): string | undefined {
+function resultRunSourceLabel(run: QueryResultRun, options: ResultNamingOptions, fallback: { database?: string; databaseType?: DatabaseType }): string | undefined {
+  const includeSourceDatabase = options.includeSourceDatabase !== false;
+  const namingMode = options.namingMode ?? "source";
+  if (namingMode === "ordinal") return undefined;
   // 优先用批次自带的来源：非活动批次的结果 payload 会被回收，payload 里的来源会丢失
-  const own = includeSourceDatabase ? run.sourceLabel || run.sourceName : run.sourceName || run.sourceLabel;
+  const own = run.sourceLabelKind === "comment" ? (namingMode === "comment" || options.preferComments !== false ? run.sourceLabel : undefined) : namingMode === "comment" ? undefined : includeSourceDatabase ? run.sourceLabel || run.sourceName : run.sourceName || run.sourceLabel;
   if (own) return own;
   const candidates = run.result ? [run.result, ...(run.results ?? [])] : (run.results ?? []);
   for (const result of candidates) {
     if (!result) continue;
     // 批次级来源缺失时回退到结果本身；关闭“结果集名称包含数据库名”时优先用对象名
-    const label = includeSourceDatabase ? result.sourceLabel || result.sourceName : result.sourceName || result.sourceLabel;
+    const label = resultNamingLabel(result, options);
     if (label) return label;
   }
   // 历史批次（功能上线前创建的）没有来源信息：用批次 SQL 重新解析，连表查询同样取第一个物理表
-  if (run.sql && fallback.databaseType) {
+  if (namingMode === "source" && run.sql && fallback.databaseType) {
     const parts = queryResultSourceNameParts(run.sql, { database: fallback.database, databaseType: fallback.databaseType });
     if (parts) return includeSourceDatabase ? (parts.qualifier ? `${parts.qualifier}.${parts.name}` : parts.name) : parts.name;
   }
   return undefined;
 }
 
-export function resultRunItems(tab: Pick<QueryTab, "resultRuns" | "activeResultRunId">, options: { includeSourceDatabase?: boolean; database?: string; databaseType?: DatabaseType } = {}): { id: string; title: string; sequence: number; active: boolean; pinned: boolean; sourceLabel?: string }[] {
-  const includeSourceDatabase = options.includeSourceDatabase !== false;
+export function resultRunItems(tab: Pick<QueryTab, "resultRuns" | "activeResultRunId">, options: ResultNamingOptions & { database?: string; databaseType?: DatabaseType } = {}): { id: string; title: string; sequence: number; active: boolean; pinned: boolean; sourceLabel?: string }[] {
   const fallback = { database: options.database, databaseType: options.databaseType };
   const seenBySource = new Map<string, number>();
   return (tab.resultRuns ?? []).map((run) => {
-    const source = resultRunSourceLabel(run, includeSourceDatabase, fallback);
+    const source = resultRunSourceLabel(run, options, fallback);
     let sourceLabel = source;
     if (source) {
       // 同一张表被查询多次时用序号后缀区分页签（users、users (2)…）
@@ -665,6 +693,7 @@ export function tabModeLabel(tab: QueryTab, t: Translate): string {
   if (tab.mode === "objects") return t("tabs.objects");
   if (tab.mode === "users") return t("tabs.users");
   if (tab.mode === "dolt-version-control") return t("doltVersionControl.title");
+  if (tab.mode === "database-search") return t("databaseSearch.title");
   return tab.mode;
 }
 

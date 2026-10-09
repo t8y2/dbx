@@ -1607,6 +1607,7 @@ mod tests {
         let state = Arc::new(WebState {
             app,
             data_dir: dir.clone(),
+            notes_roots: Vec::new(),
             public_base_path: "/".to_string(),
             password_disabled: false,
             demo_mode: false,

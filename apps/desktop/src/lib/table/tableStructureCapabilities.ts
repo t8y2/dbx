@@ -186,6 +186,9 @@ const sqlserverCapabilities = capabilities({
   indexInclude: true,
   indexFilter: true,
   indexComment: true,
+  // T-SQL: ALTER TABLE ... DROP CONSTRAINT <name> / ADD [CONSTRAINT name] PRIMARY KEY (...);
+  // the backend drops the persisted constraint by its index-metadata name (issue #10758).
+  alterPrimaryKey: true,
 });
 
 const oracleCompatibleCapabilities = capabilities({

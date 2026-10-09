@@ -2,6 +2,8 @@ import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 
+const app = readFileSync("apps/desktop/src/App.vue", "utf8");
+const dangerHost = readFileSync("apps/desktop/src/components/sidebar/SidebarDangerDialogHost.vue", "utf8");
 const connectionTree = readFileSync("apps/desktop/src/components/sidebar/ConnectionTree.vue", "utf8");
 const treeItem = readFileSync("apps/desktop/src/components/sidebar/TreeItem.vue", "utf8");
 const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
@@ -15,19 +17,21 @@ function occurrences(source: string, value: string): number {
   return source.split(value).length - 1;
 }
 
-test("sidebar routes destructive confirmations through one tree-level host", () => {
+test("sidebar routes destructive confirmations through one application-level host", () => {
   assert.match(runtimeHost, /emit\("open-danger-dialog", route\.createRequest\(\)\)/);
-  assert.match(connectionTree, /function openSidebarDangerDialog\(request: SidebarDangerDialogRequest\)/);
-  assert.equal(occurrences(connectionTree, "<SidebarDangerConfirmDialog"), 1);
+  assert.match(dangerHost, /function showSidebarDangerDialog\(request: SidebarDangerDialogRequest\)/);
+  assert.match(connectionTree, /@open-danger-dialog="openSidebarDangerDialog"/);
+  assert.equal(occurrences(app, "<SidebarDangerDialogHost"), 1);
+  assert.equal(occurrences(dangerHost, "<SidebarDangerConfirmDialog"), 1);
   assert.doesNotMatch(treeItem, /<DangerConfirmDialog/);
 });
 
-test("tree-level danger routing preserves cancel and close-on-confirm behavior", () => {
-  assert.match(connectionTree, /v-model:open="sidebarDangerDialogOpen"/);
-  assert.match(connectionTree, /if \(request\.closeOnConfirm !== false\) sidebarDangerDialogOpen\.value = false/);
-  assert.match(connectionTree, /await request\.confirm\(\)/);
-  assert.match(connectionTree, /sidebarDangerDialogOpen\.value = false/);
-  assert.match(connectionTree, /sidebarDangerDialogConfirming\.value = false/);
+test("application-level danger routing preserves cancel and close-on-confirm behavior", () => {
+  assert.match(dangerHost, /v-model:open="sidebarDangerDialogOpen"/);
+  assert.match(dangerHost, /if \(request\.closeOnConfirm !== false\) sidebarDangerDialogOpen\.value = false/);
+  assert.match(dangerHost, /await request\.confirm\(\)/);
+  assert.match(dangerHost, /sidebarDangerDialogOpen\.value = false/);
+  assert.match(dangerHost, /sidebarDangerDialogConfirming\.value = false/);
 });
 
 test("remaining form dialogs render once at tree level and keep confirm/cancel bindings", () => {

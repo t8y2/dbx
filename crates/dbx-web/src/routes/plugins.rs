@@ -239,7 +239,7 @@ pub async fn install_marketplace_plugin(
     let result = marketplace.install(request).await.map_err(AppError::bad_request)?;
     state.app.remove_plugin_connection_pools(&result.plugin.manifest.id).await;
     stop_external_driver_pools(&state, &result.plugin).await;
-    state.app.plugin_host.stop(&result.plugin.manifest.id).await;
+    state.app.plugin_host.stop(&result.plugin.manifest.id).await.map_err(AppError::internal)?;
     Ok(Json(result.response()))
 }
 
@@ -322,7 +322,7 @@ pub async fn install_plugin(
     .map_err(AppError::bad_request)?;
     state.app.remove_plugin_connection_pools(&result.plugin.manifest.id).await;
     stop_external_driver_pools(&state, &result.plugin).await;
-    state.app.plugin_host.stop(&result.plugin.manifest.id).await;
+    state.app.plugin_host.stop(&result.plugin.manifest.id).await.map_err(AppError::internal)?;
     Ok(Json(result.response()))
 }
 
@@ -341,7 +341,7 @@ pub async fn rollback_plugin(
     .map_err(AppError::bad_request)?;
     state.app.remove_plugin_connection_pools(&result.plugin.manifest.id).await;
     stop_external_driver_pools(&state, &result.plugin).await;
-    state.app.plugin_host.stop(&result.plugin.manifest.id).await;
+    state.app.plugin_host.stop(&result.plugin.manifest.id).await.map_err(AppError::internal)?;
     Ok(Json(result.response()))
 }
 
@@ -402,7 +402,7 @@ pub async fn stop_plugin(
     State(state): State<Arc<WebState>>,
     Json(request): Json<PluginIdRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    state.app.plugin_host.stop(&request.plugin_id).await;
+    state.app.plugin_host.stop(&request.plugin_id).await.map_err(AppError::internal)?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

@@ -2,7 +2,6 @@ package com.dbx.agent.sundb;
 
 import com.dbx.agent.DatabaseAgent;
 import com.dbx.agent.test.JdbcFakeExecutionBehaviorTest;
-import java.lang.reflect.Method;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -18,13 +17,11 @@ class SundbAgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     @Test
-    void usesTheSunDbJdbcDriverClass() throws Exception {
-        Method driverClass = SundbAgent.class.getDeclaredMethod("driverClass");
-        driverClass.setAccessible(true);
-
+    void usesTheSunDbJdbcDriverClass() {
+        Assertions.assertEquals("csii.sundb.jdbc.SundbDriver", SundbAgent.SUNDB_PROFILE.getDriverClass());
         Assertions.assertEquals(
             "csii.sundb.jdbc.SundbDriver",
-            driverClass.invoke(new SundbAgent())
+            ((SundbAgent) createAgent()).getProfile().getDriverClass()
         );
     }
 }

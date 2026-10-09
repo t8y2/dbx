@@ -12,6 +12,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr};
 
+mod webdav_snapshot;
+
 use crate::ai::AiConfigItem;
 use crate::connection_secrets::{
     plugin_connection_secret_key, CASSANDRA_KEYSTORE_PASSWORD_KEY, CASSANDRA_TRUSTSTORE_PASSWORD_KEY,
@@ -69,6 +71,10 @@ const DESKTOP_DEVICE_LOCAL_SETTINGS: &[&str] = &[
     "agent_store_dir",
     "custom_ai_skill_root_enabled",
     "custom_ai_skill_root",
+    // Device-local like the two above: it gates which of *this* device's skill
+    // files reach the prompt, so a synced "on" would inject another machine's
+    // catalog here.
+    "custom_ai_skill_auto_enabled",
 ];
 const NON_SYNCABLE_DESKTOP_SETTINGS: &[&str] = &["debug_logging_enabled"];
 const NON_SYNCABLE_EDITOR_SETTINGS: &[&str] = &[
@@ -90,6 +96,11 @@ pub struct WebDavConfig {
     pub username: Option<String>,
     pub password: Option<String>,
     pub remote_path: Option<String>,
+    /// Optional User-Agent override for WebDAV gateways that only allow
+    /// specific client applications. When empty no User-Agent is sent,
+    /// matching the long-standing default behavior.
+    #[serde(default)]
+    pub user_agent: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -954,6 +965,7 @@ fn syncable_desktop_settings(mut settings: DesktopSettings) -> DesktopSettings {
     settings.agent_store_dir = None;
     settings.custom_ai_skill_root_enabled = false;
     settings.custom_ai_skill_root = None;
+    settings.custom_ai_skill_auto_enabled = false;
     settings.debug_logging_enabled = false;
     settings
 }
@@ -1784,6 +1796,10 @@ impl WebDavClient {
         let builder = Client::builder();
         let builder =
             if webdav_endpoint_uses_direct_connection(&config.endpoint) { builder.no_proxy() } else { builder };
+        let builder = match config.user_agent.as_deref().map(str::trim).filter(|ua| !ua.is_empty()) {
+            Some(user_agent) => builder.user_agent(user_agent),
+            None => builder,
+        };
         let http = builder.build().expect("failed to build WebDAV HTTP client");
         Self { http, config }
     }
@@ -1805,22 +1821,23 @@ impl WebDavClient {
 
     pub async fn put_snapshot(&self, snapshot: &SyncSnapshot) -> Result<WebDavSyncSummary, String> {
         let remote_path = self.remote_path();
+        let (bytes, content_type) = webdav_snapshot::encode(snapshot, &remote_path)?;
+        let byte_count = bytes.len();
         self.ensure_parent_collections(&remote_path).await?;
-        let bytes = serde_json::to_vec_pretty(snapshot).map_err(|e| e.to_string())?;
         let response = self
             .request(Method::PUT, &remote_path)?
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(bytes.clone())
+            .header(header::CONTENT_TYPE, content_type)
+            .body(bytes)
             .send()
             .await
             .map_err(|e| e.to_string())?;
         let status = response.status();
         if !status.is_success() {
-            return Err(format!("WebDAV upload failed with HTTP {status}"));
+            return Err(webdav_snapshot::upload_error(status, content_type));
         }
         Ok(WebDavSyncSummary {
             remote_path,
-            bytes: bytes.len(),
+            bytes: byte_count,
             exported_at: Some(snapshot.exported_at.clone()),
             app_version: Some(snapshot.app_version.clone()),
         })
@@ -1833,8 +1850,8 @@ impl WebDavClient {
         if !status.is_success() {
             return Err(format!("WebDAV download failed with HTTP {status}"));
         }
-        let bytes = response.bytes().await.map_err(|e| e.to_string())?;
-        let snapshot: SyncSnapshot = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        let bytes = webdav_snapshot::read_response(response).await?;
+        let snapshot = webdav_snapshot::decode(&bytes)?;
         let summary = WebDavSyncSummary {
             remote_path,
             bytes: bytes.len(),
@@ -3422,6 +3439,29 @@ mod tests {
         (format!("http://{address}/"), server)
     }
 
+    /// Single-request WebDAV server that returns the complete request head
+    /// (request line plus headers) instead of just the request line.
+    async fn spawn_webdav_request_capture_server() -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = socket.read(&mut chunk).await.unwrap();
+                assert!(read > 0, "request ended before headers were complete");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let response = "HTTP/1.1 207 Multi-Status\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            socket.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        (format!("http://{address}/"), server)
+    }
+
     fn github_snippet_response(content: &str) -> String {
         serde_json::json!({
             "files": { DEFAULT_SNIPPET_FILE_NAME: { "content": content } }
@@ -3440,6 +3480,8 @@ mod tests {
 
     fn postgres_connection(id: &str, password: &str) -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: id.to_string(),
             name: "Postgres".to_string(),
@@ -3486,6 +3528,7 @@ mod tests {
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_filter: None,
             redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
@@ -3524,6 +3567,8 @@ mod tests {
 
     fn nacos_connection(id: &str, password: &str) -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: id.to_string(),
             name: "Nacos".to_string(),
@@ -3570,6 +3615,7 @@ mod tests {
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_filter: None,
             redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
@@ -3671,6 +3717,7 @@ mod tests {
             username: None,
             password: None,
             remote_path: Some("DBX-home/sync/snapshot.json".to_string()),
+            user_agent: None,
         });
 
         client.put_snapshot(&snapshot).await.unwrap();
@@ -3696,6 +3743,7 @@ mod tests {
             username: None,
             password: None,
             remote_path: Some("DBX-home/sync/snapshot.json".to_string()),
+            user_agent: None,
         });
 
         client.put_snapshot(&snapshot).await.unwrap();
@@ -3721,6 +3769,7 @@ mod tests {
             username: None,
             password: None,
             remote_path: Some("DBX-home/sync/snapshot.json".to_string()),
+            user_agent: None,
         });
 
         let error = client.put_snapshot(&snapshot).await.unwrap_err();
@@ -3739,6 +3788,7 @@ mod tests {
             username: None,
             password: None,
             remote_path: Some("snapshot.json".to_string()),
+            user_agent: None,
         });
 
         client.put_snapshot(&snapshot).await.unwrap();
@@ -3754,6 +3804,7 @@ mod tests {
             username: None,
             password: None,
             remote_path: Some("DBX-home/sync/snapshot.json".to_string()),
+            user_agent: None,
         });
 
         client.test().await.unwrap();
@@ -3761,9 +3812,46 @@ mod tests {
         assert_eq!(server.await.unwrap(), vec!["PROPFIND / HTTP/1.1"]);
     }
 
+    #[tokio::test]
+    async fn webdav_requests_send_configured_user_agent() {
+        let (endpoint, server) = spawn_webdav_request_capture_server().await;
+        let client = WebDavClient::new(WebDavConfig {
+            endpoint,
+            username: None,
+            password: None,
+            remote_path: None,
+            user_agent: Some("Zotero/7.0.15".to_string()),
+        });
+
+        client.test().await.unwrap();
+
+        let request = server.await.unwrap();
+        assert!(request.starts_with("PROPFIND / "));
+        assert!(request.lines().any(|line| line.eq_ignore_ascii_case("user-agent: Zotero/7.0.15")));
+    }
+
+    #[tokio::test]
+    async fn webdav_requests_omit_user_agent_by_default() {
+        let (endpoint, server) = spawn_webdav_request_capture_server().await;
+        let client = WebDavClient::new(WebDavConfig {
+            endpoint,
+            username: None,
+            password: None,
+            remote_path: None,
+            user_agent: None,
+        });
+
+        client.test().await.unwrap();
+
+        let request = server.await.unwrap();
+        assert!(!request.to_ascii_lowercase().contains("user-agent:"));
+    }
+
     #[test]
     fn scrubs_connection_secret_fields() {
         let mut config = ConnectionConfig {
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: "id".to_string(),
             name: "name".to_string(),
@@ -3804,6 +3892,7 @@ mod tests {
                     ssh_agent_sock_path: String::new(),
                     auth_method: "password".to_string(),
                     allow_exec_channel_proxy: false,
+                    proxy_command: String::new(),
                 }),
                 TransportLayerConfig::HttpTunnel(crate::models::connection::HttpTunnelConfig {
                     profile_id: String::new(),
@@ -3838,6 +3927,7 @@ mod tests {
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_filter: None,
             redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
@@ -4655,6 +4745,7 @@ mod tests {
             username: Some("alice".to_string()),
             password: None,
             remote_path: None,
+            user_agent: None,
         };
         let snippet = SnippetSyncConfig {
             provider: SnippetProvider::GitHub,
@@ -4833,6 +4924,7 @@ mod tests {
             username: Some("alice".to_string()),
             password: None,
             remote_path: Some("DBX/sync/snapshot.json".to_string()),
+            user_agent: None,
         };
         save_webdav_password(&source, &webdav, "webdav-secret").await.unwrap();
         let snippet = SnippetSyncConfig {
@@ -5157,6 +5249,243 @@ mod tests {
         assert_eq!(source.get_secret("nacos", NACOS_RNACOS_CONSOLE_PASSWORD_KEY).await.unwrap(), None);
     }
 
+    fn ssh_profile_defaults() -> SshTunnelConfig {
+        serde_json::from_value(serde_json::json!({})).unwrap()
+    }
+
+    #[tokio::test]
+    async fn selected_tunnel_restore_updates_existing_id_and_is_repeatable() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("dbx.db")).await.unwrap();
+        let profile = TransportLayerConfig::Ssh(SshTunnelConfig {
+            id: "same-id".to_string(),
+            name: "Bastion".to_string(),
+            host: "bastion.example.com".to_string(),
+            ..ssh_profile_defaults()
+        });
+        storage.save_tunnel_profiles(std::slice::from_ref(&profile)).await.unwrap();
+        let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
+        assert!(snapshot.connections.is_empty());
+        let selection = super::SyncSelection {
+            connections: Some(vec![]),
+            tunnel_profiles: Some(vec!["same-id".to_string()]),
+            ..Default::default()
+        };
+
+        for _ in 0..2 {
+            super::apply_sync_snapshot_with_selection(
+                &storage,
+                &snapshot,
+                ApplySnapshotOptions { secrets_passphrase: None, restore_secrets: false },
+                Some(&selection),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(storage.load_tunnel_profiles().await.unwrap(), vec![profile.clone()]);
+        }
+    }
+
+    #[tokio::test]
+    async fn selected_tunnel_restore_preserves_unselected_profiles_and_local_paths() {
+        for restore_secrets in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let source = crate::persistence::test_storage::open(&directory.path().join("source.db")).await.unwrap();
+            let target = crate::persistence::test_storage::open(&directory.path().join("target.db")).await.unwrap();
+            let remote = TransportLayerConfig::Ssh(SshTunnelConfig {
+                id: "same-id".to_string(),
+                name: "Remote bastion".to_string(),
+                host: "remote.example.com".to_string(),
+                password: "remote-secret".to_string(),
+                ..ssh_profile_defaults()
+            });
+            let local = TransportLayerConfig::Ssh(SshTunnelConfig {
+                id: "same-id".to_string(),
+                name: "Local bastion".to_string(),
+                password: "local-secret".to_string(),
+                key_path: "C:\\keys\\bastion.pem".to_string(),
+                ssh_agent_sock_path: "local-agent".to_string(),
+                ..ssh_profile_defaults()
+            });
+            let untouched = TransportLayerConfig::Ssh(SshTunnelConfig {
+                id: "local-only".to_string(),
+                password: "untouched-secret".to_string(),
+                ..ssh_profile_defaults()
+            });
+            source.save_tunnel_profiles(std::slice::from_ref(&remote)).await.unwrap();
+            target.save_tunnel_profiles(&[local, untouched.clone()]).await.unwrap();
+            let mut snapshot = build_sync_snapshot(&source, "test-version", None, Some("sync-pass")).await.unwrap();
+            snapshot.selection = Some(super::SyncSelection {
+                connections: Some(vec![]),
+                tunnel_profiles: Some(vec!["same-id".to_string()]),
+                include_secrets: restore_secrets,
+                ..Default::default()
+            });
+            for _ in 0..2 {
+                apply_sync_snapshot(
+                    &target,
+                    &snapshot,
+                    ApplySnapshotOptions { secrets_passphrase: Some("sync-pass"), restore_secrets },
+                )
+                .await
+                .unwrap();
+                let profiles = target.load_tunnel_profiles().await.unwrap();
+                assert_eq!(profiles.len(), 2);
+                assert!(profiles.contains(&untouched));
+                let TransportLayerConfig::Ssh(restored) = profiles.iter().find(|p| p.id() == "same-id").unwrap() else {
+                    panic!("expected SSH profile");
+                };
+                assert_eq!(restored.name, "Remote bastion");
+                assert_eq!(restored.host, "remote.example.com");
+                assert_eq!(restored.key_path, "C:\\keys\\bastion.pem");
+                assert_eq!(restored.ssh_agent_sock_path, "local-agent");
+                assert_eq!(restored.password, if restore_secrets { "remote-secret" } else { "local-secret" });
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn selected_tunnel_restore_after_webdav_upload_and_download_is_repeatable() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("dbx.db")).await.unwrap();
+        let profile = TransportLayerConfig::Ssh(SshTunnelConfig {
+            id: "same-id".to_string(),
+            host: "bastion.example.com".to_string(),
+            ..ssh_profile_defaults()
+        });
+        storage.save_tunnel_profiles(std::slice::from_ref(&profile)).await.unwrap();
+        let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
+        assert!(snapshot.connections.is_empty());
+        let body = serde_json::to_string_pretty(&snapshot).unwrap();
+        // Reuse the HTTP fixture, which captures complete request bodies.
+        let (endpoint, server) = spawn_gitlab_server(vec![String::new(), body.clone()]).await;
+        let client = WebDavClient::new(WebDavConfig {
+            endpoint: format!("{endpoint}/"),
+            username: None,
+            password: None,
+            remote_path: Some("snapshot.json".to_string()),
+            user_agent: None,
+        });
+        client.put_snapshot(&snapshot).await.unwrap();
+        let (downloaded, _) = client.get_snapshot().await.unwrap();
+        let requests = server.await.unwrap();
+        assert!(requests[0].starts_with("PUT /api/v4/snapshot.json "));
+        assert_eq!(requests[0].split_once("\r\n\r\n").unwrap().1, body);
+        assert!(requests[1].starts_with("GET /api/v4/snapshot.json "));
+        let selection = super::SyncSelection {
+            connections: Some(vec![]),
+            tunnel_profiles: Some(vec!["same-id".to_string()]),
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            super::apply_sync_snapshot_with_selection(
+                &storage,
+                &downloaded,
+                ApplySnapshotOptions { secrets_passphrase: None, restore_secrets: false },
+                Some(&selection),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(storage.load_tunnel_profiles().await.unwrap(), vec![profile.clone()]);
+        }
+    }
+
+    #[tokio::test]
+    async fn selected_tunnel_restore_empty_selection_and_new_id_preserve_local_profiles() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = crate::persistence::test_storage::open(&directory.path().join("source.db")).await.unwrap();
+        let target = crate::persistence::test_storage::open(&directory.path().join("target.db")).await.unwrap();
+        let local = TransportLayerConfig::Ssh(SshTunnelConfig {
+            id: "local-only".to_string(),
+            password: "local-secret".to_string(),
+            ..ssh_profile_defaults()
+        });
+        let remote = TransportLayerConfig::Ssh(SshTunnelConfig {
+            id: "new-id".to_string(),
+            host: "new.example.com".to_string(),
+            ..ssh_profile_defaults()
+        });
+        target.save_tunnel_profiles(std::slice::from_ref(&local)).await.unwrap();
+        source.save_tunnel_profiles(std::slice::from_ref(&remote)).await.unwrap();
+        let snapshot = build_sync_snapshot(&source, "test-version", None, None).await.unwrap();
+        let mut selection =
+            super::SyncSelection { connections: Some(vec![]), tunnel_profiles: Some(vec![]), ..Default::default() };
+        for selected_ids in [vec![], vec!["new-id".to_string()]] {
+            selection.tunnel_profiles = Some(selected_ids);
+            super::apply_sync_snapshot_with_selection(
+                &target,
+                &snapshot,
+                ApplySnapshotOptions { secrets_passphrase: None, restore_secrets: false },
+                Some(&selection),
+                None,
+            )
+            .await
+            .unwrap();
+            let profiles = target.load_tunnel_profiles().await.unwrap();
+            assert!(profiles.contains(&local));
+            assert_eq!(profiles.contains(&remote), !selection.tunnel_profiles.as_ref().unwrap().is_empty());
+        }
+        // No selection means replacement rather than merge.
+        apply_sync_snapshot(
+            &target,
+            &snapshot,
+            ApplySnapshotOptions { secrets_passphrase: None, restore_secrets: false },
+        )
+        .await
+        .unwrap();
+        assert_eq!(target.load_tunnel_profiles().await.unwrap(), vec![remote]);
+        assert_eq!(target.get_secret("tunnel_profile.local-only", "config").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn selected_tunnel_restore_rolls_back_metadata_and_secrets_on_later_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = crate::persistence::test_storage::open(&directory.path().join("source.db")).await.unwrap();
+        let target = crate::persistence::test_storage::open(&directory.path().join("target.db")).await.unwrap();
+        let local = TransportLayerConfig::Ssh(SshTunnelConfig {
+            id: "same-id".to_string(),
+            host: "local.example.com".to_string(),
+            password: "local-secret".to_string(),
+            ..ssh_profile_defaults()
+        });
+        let remote = TransportLayerConfig::Ssh(SshTunnelConfig {
+            id: "same-id".to_string(),
+            host: "remote.example.com".to_string(),
+            password: "remote-secret".to_string(),
+            ..ssh_profile_defaults()
+        });
+        target.save_tunnel_profiles(std::slice::from_ref(&local)).await.unwrap();
+        source.save_tunnel_profiles(std::slice::from_ref(&remote)).await.unwrap();
+        let mut snapshot = build_sync_snapshot(&source, "test-version", None, Some("sync-pass")).await.unwrap();
+        snapshot.selection = Some(super::SyncSelection {
+            connections: Some(vec![]),
+            tunnel_profiles: Some(vec!["same-id".to_string()]),
+            include_secrets: true,
+            ..Default::default()
+        });
+        let folder = crate::saved_sql::SavedSqlFolder {
+            id: "duplicate-folder".to_string(),
+            connection_id: String::new(),
+            parent_folder_id: None,
+            name: "test".to_string(),
+            order_index: 0,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        // Saved SQL is written after tunnel metadata and secrets in the same transaction.
+        snapshot.saved_sql.folders = vec![folder.clone(), folder];
+        let error = apply_sync_snapshot(
+            &target,
+            &snapshot,
+            ApplySnapshotOptions { secrets_passphrase: Some("sync-pass"), restore_secrets: true },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("duplicate saved SQL folder id"), "unexpected failure: {error}");
+        assert_eq!(target.load_tunnel_profiles().await.unwrap(), vec![local]);
+    }
+
     #[tokio::test]
     async fn sync_snapshot_round_trips_tunnel_profiles() {
         let storage = crate::persistence::test_storage::open(&temp_db_path("tunnel-profiles-src")).await.unwrap();
@@ -5176,6 +5505,7 @@ mod tests {
             ssh_agent_sock_path: String::new(),
             auth_method: "password".to_string(),
             allow_exec_channel_proxy: false,
+            proxy_command: String::new(),
             profile_id: String::new(),
         });
         storage.save_tunnel_profiles(std::slice::from_ref(&profile)).await.unwrap();

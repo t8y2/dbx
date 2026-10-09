@@ -6,13 +6,13 @@ import { CanvasRenderer } from "echarts/renderers";
 import { LineChart, BarChart, PieChart } from "echarts/charts";
 import { GridComponent, TooltipComponent, LegendComponent } from "echarts/components";
 import VChart from "vue-echarts";
-import { BarChart3, ChevronDown } from "@lucide/vue";
+import { BarChart3, Check, ChevronDown } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
-import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import type { QueryResult } from "@/types/database";
 import { useTheme } from "@/composables/useTheme";
-import { axisColumnLabel, chartableColumnIndexes, toChartNumber } from "@/lib/dataGrid/chartData";
+import { axisColumnLabel, chartableColumnIndexes, buildQueryChartOption, type ChartType } from "@/lib/dataGrid/chartData";
 
 use([CanvasRenderer, LineChart, BarChart, PieChart, GridComponent, TooltipComponent, LegendComponent]);
 
@@ -23,10 +23,28 @@ const props = defineProps<{
 const { t } = useI18n();
 const { isDark } = useTheme();
 
-type ChartType = "line" | "bar" | "pie";
+const QUERY_CHART_SHOW_LABELS_KEY = "dbx-query-chart-show-labels";
+
+function readShowLabelsPreference(): boolean {
+  try {
+    return typeof localStorage !== "undefined" && localStorage.getItem(QUERY_CHART_SHOW_LABELS_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
 const chartType = ref<ChartType>("bar");
 const xColumnIndex = ref(0);
 const yColumnIndexes = ref<number[]>([]);
+const showLabels = ref(readShowLabelsPreference());
+
+watch(showLabels, (val) => {
+  try {
+    localStorage.setItem(QUERY_CHART_SHOW_LABELS_KEY, String(val));
+  } catch {
+    // ignore
+  }
+});
 
 const numericColumnIndexes = computed(() => chartableColumnIndexes(props.result));
 
@@ -60,65 +78,23 @@ watch(
   { immediate: true },
 );
 
-function setYColumn(index: number, selected: boolean | "indeterminate") {
+function toggleYColumn(index: number) {
   const isSelected = yColumnIndexes.value.includes(index);
-  if (selected === true && !isSelected) {
-    yColumnIndexes.value = [...yColumnIndexes.value, index];
-  } else if (selected !== true && isSelected) {
+  if (isSelected) {
     yColumnIndexes.value = yColumnIndexes.value.filter((selected) => selected !== index);
+  } else {
+    yColumnIndexes.value = [...yColumnIndexes.value, index];
   }
 }
 
 const chartOption = computed(() => {
-  const xIdx = xColumnIndex.value;
-  if (xIdx < 0 || yColumnIndexes.value.length === 0) return null;
-
-  const xData = props.result.rows.map((row) => String(row[xIdx] ?? ""));
-
-  if (chartType.value === "pie") {
-    const yIdx = yColumnIndexes.value[0];
-    if (yIdx < 0) return null;
-    return {
-      tooltip: { trigger: "item" },
-      legend: { bottom: 0, textStyle: { color: isDark.value ? "#ccc" : "#333" } },
-      series: [
-        {
-          type: "pie",
-          radius: ["30%", "60%"],
-          data: xData.map((name, i) => ({
-            name,
-            value: toChartNumber(props.result.rows[i][yIdx]) ?? 0,
-          })),
-        },
-      ],
-    };
-  }
-
-  const yIndices = yColumnIndexes.value.filter((index) => index >= 0 && index < props.result.columns.length);
-
-  return {
-    tooltip: { trigger: "axis" },
-    legend: {
-      bottom: 0,
-      textStyle: { color: isDark.value ? "#ccc" : "#333" },
-    },
-    grid: { left: 60, right: 20, top: 20, bottom: 40 },
-    xAxis: {
-      type: "category" as const,
-      data: xData,
-      axisLabel: { color: isDark.value ? "#aaa" : "#666" },
-    },
-    yAxis: {
-      type: "value" as const,
-      axisLabel: { color: isDark.value ? "#aaa" : "#666" },
-    },
-    series: yIndices.map((yIdx) => ({
-      name: axisColumnLabel(props.result.columns, yIdx),
-      type: chartType.value,
-      data: props.result.rows.map((row) => toChartNumber(row[yIdx]) ?? 0),
-      smooth: chartType.value === "line",
-    })),
-  };
+  return buildQueryChartOption(props.result, {
+    chartType: chartType.value,
+    xColumnIndex: xColumnIndex.value,
+    yColumnIndexes: yColumnIndexes.value,
+    showLabels: showLabels.value,
+    isDark: isDark.value,
+  });
 });
 
 const hasData = computed(() => props.result.rows.length > 0 && numericColumnIndexes.value.length > 0);
@@ -163,12 +139,27 @@ const hasData = computed(() => props.result.rows.length > 0 && numericColumnInde
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent class="w-56" align="start" @close-auto-focus.prevent>
-              <DropdownMenuCheckboxItem v-for="col in numericColumnOptions" :key="col.index" :model-value="yColumnIndexes.includes(col.index)" :class="['text-xs', yColumnIndexes.includes(col.index) ? 'bg-primary/10' : '']" @select.prevent @update:model-value="setYColumn(col.index, $event)">
+              <DropdownMenuItem
+                v-for="col in numericColumnOptions"
+                :key="col.index"
+                role="menuitemcheckbox"
+                :aria-checked="yColumnIndexes.includes(col.index)"
+                class="text-xs flex items-center gap-2 cursor-pointer"
+                :class="yColumnIndexes.includes(col.index) ? 'bg-primary/10' : ''"
+                @select.prevent="toggleYColumn(col.index)"
+              >
+                <span class="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border" :class="yColumnIndexes.includes(col.index) ? 'border-primary bg-primary text-primary-foreground' : 'border-input'">
+                  <Check v-if="yColumnIndexes.includes(col.index)" class="h-2.5 w-2.5" />
+                </span>
                 <span class="truncate">{{ col.label }}</span>
-              </DropdownMenuCheckboxItem>
+              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
+        <span class="h-4 w-px bg-border" />
+        <Button size="sm" :variant="showLabels ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs" data-testid="query-chart-show-labels-btn" @click="showLabels = !showLabels">
+          {{ t("chart.showLabels") }}
+        </Button>
       </div>
       <div class="flex-1 min-h-0 p-2">
         <VChart v-if="chartOption" :option="chartOption" autoresize class="h-full w-full" />

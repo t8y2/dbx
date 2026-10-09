@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { BarChart3, ListChecks, MessageSquareText, SquareTerminal } from "@lucide/vue";
+import { BarChart3, ListChecks, MessageSquareText, Network, SquareTerminal } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import type { RedisResultViewMode } from "@/types/database";
 
-type OutputView = "result" | "summary" | "explain" | "chart" | "messages" | "profile";
+type OutputView = "result" | "graph" | "summary" | "explain" | "chart" | "messages" | "profile";
 type PrimaryResultView = Exclude<OutputView, "explain" | "profile">;
 
 const props = withDefaults(
@@ -15,6 +15,7 @@ const props = withDefaults(
     canShowResult: boolean;
     canShowSummary: boolean;
     canShowChart: boolean;
+    canShowGraph?: boolean;
     canShowMessages: boolean;
     canShowRedisConsole?: boolean;
     resultMode?: RedisResultViewMode;
@@ -58,6 +59,13 @@ function selectResultMode(mode: RedisResultViewMode) {
     >
       <span class="inline-flex h-4 items-center leading-none">{{ t("tabs.tableData") }}</span>
     </Button>
+
+    <LightTooltip v-if="canShowGraph" :text="t('graph.title')" :disabled="!compact" side="bottom" :delay="0" :close-delay="0" nowrap>
+      <Button size="sm" :variant="activeView === 'graph' ? 'secondary' : 'ghost'" class="h-5 shrink-0 px-2 text-xs leading-none" :class="compact ? 'w-6 px-0' : 'gap-1'" :title="t('graph.title')" :aria-label="t('graph.title')" :aria-pressed="activeView === 'graph'" @click="selectView('graph')">
+        <Network class="h-3.5 w-3.5" />
+        <span v-if="!compact">{{ t("graph.title") }}</span>
+      </Button>
+    </LightTooltip>
 
     <LightTooltip v-if="canShowRedisConsole" :text="t('redis.commandLine')" :disabled="!compact" side="bottom" :delay="0" :close-delay="0" nowrap>
       <Button

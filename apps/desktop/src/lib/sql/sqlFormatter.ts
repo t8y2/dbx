@@ -9,6 +9,37 @@ export const MAX_SQL_FORMAT_CHARS = 1_000_000;
 
 type SqlFormatterModule = typeof import("sql-formatter");
 
+// MySQL's REPLACE is both a write statement and a string function. The
+// upstream tokenizer prioritizes the statement token, which cannot appear in
+// a CASE branch. Resolve calls by the next non-comment token without changing
+// REPLACE INTO / LOW_PRIORITY / DELAYED statements or the source text.
+let mysqlFunctionSafeDialect: SqlFormatterModule["mysql"] | null = null;
+
+function resolveMysqlFunctionSafeDialect(sqlFormatter: SqlFormatterModule): SqlFormatterModule["mysql"] {
+  if (mysqlFunctionSafeDialect) return mysqlFunctionSafeDialect;
+
+  const options = sqlFormatter.mysql.tokenizerOptions;
+  mysqlFunctionSafeDialect = {
+    ...sqlFormatter.mysql,
+    tokenizerOptions: {
+      ...options,
+      postProcess: (inputTokens) => {
+        const tokens = options.postProcess?.(inputTokens) ?? inputTokens;
+        return tokens.map((token, index) => {
+          if (token.type !== "RESERVED_CLAUSE" || token.text !== "REPLACE") return token;
+
+          let nextIndex = index + 1;
+          while (tokens[nextIndex]?.type === "LINE_COMMENT" || tokens[nextIndex]?.type === "BLOCK_COMMENT") nextIndex += 1;
+          if (tokens[nextIndex]?.type !== "OPEN_PAREN") return token;
+
+          return { ...token, type: "RESERVED_FUNCTION_NAME" as (typeof tokens)[number]["type"] };
+        });
+      },
+    },
+  };
+  return mysqlFunctionSafeDialect;
+}
+
 // sql-formatter classifies ClickHouse date-part abbreviations as reserved
 // keywords even where ClickHouse accepts them as ordinary identifiers. Keep
 // them identifier-like so keyword casing cannot rewrite aliases such as `m`.
@@ -26,6 +57,28 @@ function resolveClickHouseIdentifierSafeDialect(sqlFormatter: SqlFormatterModule
     },
   };
   return clickHouseIdentifierSafeDialect;
+}
+
+// sql-formatter's plsql dialect only registers a minimal subset of character
+// functions (e.g. SUBSTR, INSTR, LENGTH) and omits Oracle's byte/multibyte/code-point
+// variants. Register them as reserved function names so functionCase normalizes them.
+const ORACLE_EXTENDED_FUNCTION_NAMES = ["SUBSTRB", "SUBSTR2", "SUBSTR4", "SUBSTRC", "INSTRB", "INSTR2", "INSTR4", "INSTRC", "LENGTHB", "LENGTH2", "LENGTH4", "LENGTHC"];
+let oracleExtendedDialect: SqlFormatterModule["plsql"] | null = null;
+
+function resolveOracleExtendedDialect(sqlFormatter: SqlFormatterModule): SqlFormatterModule["plsql"] {
+  if (oracleExtendedDialect) return oracleExtendedDialect;
+
+  const existingFunctions = new Set(sqlFormatter.plsql.tokenizerOptions.reservedFunctionNames);
+  const extraFunctions = ORACLE_EXTENDED_FUNCTION_NAMES.filter((name) => !existingFunctions.has(name));
+
+  oracleExtendedDialect = {
+    ...sqlFormatter.plsql,
+    tokenizerOptions: {
+      ...sqlFormatter.plsql.tokenizerOptions,
+      reservedFunctionNames: [...sqlFormatter.plsql.tokenizerOptions.reservedFunctionNames, ...extraFunctions],
+    },
+  };
+  return oracleExtendedDialect;
 }
 
 export function canFormatSqlForDatabaseType(dbType: string | null | undefined): boolean {
@@ -367,7 +420,7 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
           },
         }
       : options;
-  const resolvedDialect = dialect === "clickhouse" ? resolveClickHouseIdentifierSafeDialect(sqlFormatter) : undefined;
+  const resolvedDialect = dialect === "mysql" ? resolveMysqlFunctionSafeDialect(sqlFormatter) : dialect === "clickhouse" ? resolveClickHouseIdentifierSafeDialect(sqlFormatter) : dialect === "oracle" ? resolveOracleExtendedDialect(sqlFormatter) : undefined;
   const formatWithFallback = (input: string): string => {
     try {
       if (resolvedDialect) {
@@ -409,6 +462,7 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
     fromClauseSourceOnSameLine: normalizedSettings.fromClauseLayout === "sameLine",
     keywordCase: normalizedSettings.keywordCase,
     logicalOperatorNewline: normalizedSettings.logicalOperatorNewline,
+    commaPosition: normalizedSettings.commaPosition,
   };
   const usesDefaultStyle = normalizedSettings.indentStyle === "standard";
 
@@ -668,6 +722,56 @@ function keepFromClauseAndFirstSourceOnSameLine(sql: string): string {
   return lines.join("\n");
 }
 
+function formatLeadingCommas(sql: string, dialect: SqlFormatDialect = "generic"): string {
+  const { masked, spans } = maskStringAndCommentSpans(sql, dialect);
+  const lines = masked.split("\n");
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const match = lines[i].match(/^(.*),\s*((?:\x00\d+\x00\s*)*)$/);
+    if (!match || match[1].trim().length === 0) continue;
+
+    let j = i + 1;
+    while (j < lines.length) {
+      const trimmed = lines[j].trim();
+      if (!trimmed) {
+        j += 1;
+        continue;
+      }
+      if (/^(?:\x00\d+\x00\s*)+$/.test(trimmed)) {
+        j += 1;
+        continue;
+      }
+      break;
+    }
+    if (j >= lines.length) continue;
+
+    const nextTrimmed = lines[j].trim();
+    if (nextTrimmed.startsWith(")") || nextTrimmed.startsWith("]") || nextTrimmed.startsWith(";") || nextTrimmed.startsWith(",")) {
+      continue;
+    }
+
+    const codeBeforeComma = match[1].trimEnd();
+    const trailingComments = match[2] ? (codeBeforeComma.endsWith(" ") ? match[2] : ` ${match[2]}`) : "";
+    lines[i] = codeBeforeComma + trailingComments;
+
+    const nextIndentMatch = lines[j].match(/^(\s*)/);
+    const nextIndent = nextIndentMatch ? nextIndentMatch[1] : "";
+    const nextRest = lines[j].slice(nextIndent.length);
+    const currentIndentMatch = lines[i].match(/^(\s*)/);
+    const currentIndent = currentIndentMatch ? currentIndentMatch[1] : "";
+
+    if (currentIndent === nextIndent) {
+      lines[j] = `${nextIndent}, ${nextRest}`;
+    } else if (nextIndent.length >= 2) {
+      lines[j] = `${nextIndent.slice(0, -2)}, ${nextRest}`;
+    } else {
+      lines[j] = `${nextIndent}, ${nextRest}`;
+    }
+  }
+
+  return restoreSpans(lines.join("\n"), spans);
+}
+
 /**
  * The text-level passes applied to whatever the formatter produced, whether the
  * default style's layout printer or sql-formatter itself.
@@ -684,6 +788,7 @@ function applySqlFormatterLayout(sql: string, settings: SqlFormatterSettings, di
   let formatted = normalizeLikeOperatorCase(sql, settings, dialect);
   if (settings.logicalOperatorNewline === "none") formatted = keepLogicalOperatorsOnSameLine(formatted, dialect);
   if (settings.fromClauseLayout === "sameLine") formatted = keepFromClauseAndFirstSourceOnSameLine(formatted);
+  if (settings.commaPosition === "before") formatted = formatLeadingCommas(formatted, dialect);
   return formatted;
 }
 

@@ -66,6 +66,8 @@ interface CodeMirrorBindings {
   codeMirrorToggleBlockComment: typeof import("@codemirror/commands").toggleBlockComment | null;
   codeMirrorDefaultKeymap: readonly import("@codemirror/view").KeyBinding[] | null;
   codeMirrorToggleFold: typeof import("@codemirror/language").toggleFold | null;
+  codeMirrorFoldAll: typeof import("@codemirror/language").foldAll | null;
+  codeMirrorUnfoldAll: typeof import("@codemirror/language").unfoldAll | null;
   setSqlDiagnosticsEffect: import("@codemirror/state").StateEffectType<SqlSemanticDiagnostic[]> | null;
   setPreviewRangeEffect:
     | import("@codemirror/state").StateEffectType<{
@@ -148,6 +150,8 @@ type ReadyCodeMirrorBindings = CodeMirrorBindings & {
     | "codeMirrorToggleBlockComment"
     | "codeMirrorDefaultKeymap"
     | "codeMirrorToggleFold"
+    | "codeMirrorFoldAll"
+    | "codeMirrorUnfoldAll"
     | "codeMirrorIndentUnit"]: NonNullable<CodeMirrorBindings[Key]>;
 };
 
@@ -216,6 +220,8 @@ export function createQueryEditorCodeMirrorRuntime() {
     codeMirrorToggleBlockComment: null,
     codeMirrorDefaultKeymap: null,
     codeMirrorToggleFold: null,
+    codeMirrorFoldAll: null,
+    codeMirrorUnfoldAll: null,
     setSqlDiagnosticsEffect: null,
     setPreviewRangeEffect: null,
     setResultSourceRangeEffect: null,
@@ -277,7 +283,7 @@ export function createQueryEditorCodeMirrorRuntime() {
           setSelectedCompletion,
         },
         { copyLineDown, copyLineUp, deleteLine, indentLess, indentMore, insertNewlineKeepIndent, moveLineDown, moveLineUp, redo, selectAll, undo, toggleLineComment, toggleBlockComment, history, defaultKeymap, historyKeymap },
-        { bracketMatching, foldGutter, indentOnInput, indentUnit, syntaxHighlighting, defaultHighlightStyle, foldKeymap, toggleFold, ensureSyntaxTree, highlightingFor, syntaxTree },
+        { bracketMatching, foldGutter, indentOnInput, indentUnit, syntaxHighlighting, defaultHighlightStyle, foldKeymap, toggleFold, foldAll, unfoldAll, ensureSyntaxTree, highlightingFor, syntaxTree },
         { searchKeymap },
       ] = await Promise.all([import("@codemirror/view"), import("@codemirror/state"), import("@codemirror/lang-sql"), import("@codemirror/autocomplete"), import("@codemirror/commands"), import("@codemirror/language"), import("@codemirror/search")]);
       runtime.editorViewModule = {
@@ -345,6 +351,8 @@ export function createQueryEditorCodeMirrorRuntime() {
       runtime.codeMirrorToggleBlockComment = toggleBlockComment;
       runtime.codeMirrorDefaultKeymap = defaultKeymap;
       runtime.codeMirrorToggleFold = toggleFold;
+      runtime.codeMirrorFoldAll = foldAll;
+      runtime.codeMirrorUnfoldAll = unfoldAll;
       runtime.codeMirrorIndentUnit = indentUnit;
       return {
         runtime: runtime as ReadyCodeMirrorBindings,

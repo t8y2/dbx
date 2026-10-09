@@ -44,3 +44,6 @@ crates/dbx-core/assets/docs-export.css -text -diff linguist-generated
 # parser must not depend on the contributor's core.autocrlf: a CRLF checkout
 # silently rewrites all three files.
 src-tauri/tests/fixtures/** text eol=lf
+
+# Preserve the upstream SQL attachment bytes used by the live MySQL regression.
+crates/dbx-core/tests/fixtures/qrtz.sql -text

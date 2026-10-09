@@ -60,8 +60,10 @@ Thumbs.db
 # GitHub (keep workflows)
 .github/*
 !.github/CODEOWNERS
+!.github/FUNDING.yml
 !.github/workflows/
 !.github/scripts/
+!.github/ui-preview/
 !.github/ISSUE_TEMPLATE/
 
 # Env

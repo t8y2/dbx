@@ -2,6 +2,7 @@
 
 import { createApp, defineComponent, h, nextTick, reactive } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { TreeNode } from "@/types/database";
 
 const mocks = vi.hoisted(() => ({
   desktop: true,
@@ -24,6 +25,8 @@ const mocks = vi.hoisted(() => ({
   progressHandler: undefined as undefined | ((progress: Record<string, unknown>) => void),
   changeDialogOpen: undefined as undefined | ((open: boolean) => void),
   connections: [{ id: "mysql-1", name: "MySQL", db_type: "mysql", driver_profile: "mysql", database: "" }] as Array<{ id: string; name: string; db_type: string; driver_profile: string; database: string }>,
+  treeNodes: [] as TreeNode[],
+  editorSettings: { sidebarConnectionSortMode: "manual" as "manual" | "asc" | "desc" },
   getConfig: vi.fn(),
   refreshDatabaseTreeNode: vi.fn(),
   refreshObjectListTreeNode: vi.fn(),
@@ -46,6 +49,14 @@ function passthrough(tag: string) {
       return () => h(tag, attrs, slots.default?.());
     },
   });
+}
+
+function connectionNode(id: string, label: string): TreeNode {
+  return { id, label, type: "connection", connectionId: id, children: [] };
+}
+
+function connectionGroupNode(id: string, label: string, children: TreeNode[]): TreeNode {
+  return { id, label, type: "connection-group", isExpanded: true, children };
 }
 
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
@@ -78,6 +89,9 @@ vi.mock("@/stores/connectionStore", () => ({
     get connections() {
       return mocks.connections;
     },
+    get treeNodes() {
+      return mocks.treeNodes;
+    },
     ensureConnected: mocks.ensureConnected,
     getConfig: mocks.getConfig,
     refreshDatabaseTreeNode: mocks.refreshDatabaseTreeNode,
@@ -85,6 +99,7 @@ vi.mock("@/stores/connectionStore", () => ({
   }),
 }));
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => mocks.queryStore }));
+vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: mocks.editorSettings }) }));
 vi.mock("@/lib/backend/api", () => ({
   beginManualTransaction: mocks.beginManualTransaction,
   commitManualTransaction: mocks.commitManualTransaction,
@@ -130,9 +145,34 @@ vi.mock("@/components/ui/input", () => ({
 }));
 vi.mock("@/components/ui/label", () => ({ Label: passthrough("label") }));
 vi.mock("@/components/ui/select", () => ({
-  Select: passthrough("div"),
+  Select: defineComponent({
+    inheritAttrs: false,
+    props: ["modelValue"],
+    emits: ["update:modelValue"],
+    setup(props, { attrs, slots, emit }) {
+      return () =>
+        h(
+          "div",
+          {
+            ...attrs,
+            "data-select-value": props.modelValue ?? "",
+            onClick: (e: MouseEvent) => {
+              const target = (e.target as HTMLElement)?.closest?.("[data-select-item]") as HTMLElement | null;
+              if (target?.dataset?.selectItem) emit("update:modelValue", target.dataset.selectItem);
+            },
+          },
+          slots.default?.(),
+        );
+    },
+  }),
   SelectContent: passthrough("div"),
-  SelectItem: passthrough("div"),
+  SelectItem: defineComponent({
+    inheritAttrs: false,
+    props: ["value"],
+    setup(props, { attrs, slots }) {
+      return () => h("div", { ...attrs, "data-select-item": props.value }, slots.default?.());
+    },
+  }),
   SelectTrigger: passthrough("div"),
   SelectValue: passthrough("span"),
 }));
@@ -140,7 +180,7 @@ vi.mock("@/components/icons/DatabaseIcon.vue", () => ({ default: passthrough("sp
 vi.mock("@/components/connection/ConnectionGroupBadge.vue", () => ({ default: passthrough("span") }));
 
 import SqlFileExecutionDialog from "./SqlFileExecutionDialog.vue";
-import { rememberExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
+import { rememberExternalSqlFileTarget, resolveExternalSqlFileTarget, unassociatedExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
 
 let app: ReturnType<typeof createApp> | undefined;
 let root: HTMLDivElement | undefined;
@@ -247,6 +287,8 @@ beforeEach(() => {
   ]);
   mocks.fetchSqlFileTargetOptions.mockResolvedValue([]);
   mocks.connections = [{ id: "mysql-1", name: "MySQL", db_type: "mysql", driver_profile: "mysql", database: "" }];
+  mocks.treeNodes = reactive<TreeNode[]>([]);
+  mocks.editorSettings = reactive({ sidebarConnectionSortMode: "manual" as "manual" | "asc" | "desc" });
   mocks.getConfig.mockImplementation((connectionId: string) => mocks.connections.find((connection) => connection.id === connectionId));
   mocks.openFileDialog.mockResolvedValue(["/tmp/first.sql", "/tmp/second.sql"]);
   mocks.previewSqlFile.mockImplementation(async (filePath: string) => ({
@@ -844,6 +886,44 @@ describe("SqlFileExecutionDialog retries", () => {
   });
 });
 
+describe("SqlFileExecutionDialog connection order", () => {
+  function connectionOptionIds(): string[] {
+    return Array.from(root!.querySelectorAll<HTMLElement>("[data-select-item]"), (item) => item.dataset.selectItem!);
+  }
+
+  it("tracks nested sidebar order and sort mode while keeping missing SQL connections and the selection", async () => {
+    mocks.connections = [
+      { id: "alpha", name: "Alpha", db_type: "mysql", driver_profile: "mysql", database: "" },
+      { id: "message-queue", name: "Messages", db_type: "mq", driver_profile: "kafka", database: "" },
+      { id: "zebra", name: "Zebra", db_type: "postgres", driver_profile: "postgres", database: "" },
+      { id: "beta", name: "Beta", db_type: "mysql", driver_profile: "mysql", database: "" },
+      { id: "new", name: "New connection", db_type: "mysql", driver_profile: "mysql", database: "" },
+    ];
+    mocks.treeNodes = reactive<TreeNode[]>([connectionGroupNode("parent", "Parent", [connectionNode("zebra", "Zebra"), connectionGroupNode("nested", "Nested", [connectionNode("beta", "Beta")]), connectionNode("alpha", "Alpha")])]);
+
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(SqlFileExecutionDialog, { open: true, prefillConnectionId: "beta" });
+    app.mount(root);
+    await nextTick();
+
+    expect(connectionOptionIds()).toEqual(["zebra", "beta", "alpha", "new"]);
+    expect(root.querySelector('[data-select-value="beta"]')).not.toBeNull();
+
+    mocks.treeNodes.splice(0, 1, connectionGroupNode("parent", "Parent", [connectionNode("alpha", "Alpha"), connectionGroupNode("nested", "Nested", [connectionNode("beta", "Beta")]), connectionNode("zebra", "Zebra")]));
+    await nextTick();
+
+    expect(connectionOptionIds()).toEqual(["alpha", "beta", "zebra", "new"]);
+    expect(root.querySelector('[data-select-value="beta"]')).not.toBeNull();
+
+    mocks.editorSettings.sidebarConnectionSortMode = "desc";
+    await nextTick();
+
+    expect(connectionOptionIds()).toEqual(["zebra", "beta", "alpha", "new"]);
+    expect(root.querySelector('[data-select-value="beta"]')).not.toBeNull();
+  });
+});
+
 describe("SqlFileExecutionDialog selected-table restore", () => {
   async function mountBackup() {
     root = document.createElement("div");
@@ -967,5 +1047,97 @@ describe("SqlFileExecutionDialog selected-table restore", () => {
     await vi.waitFor(() => expect(mocks.toast).toHaveBeenCalledWith("no such file", 5000));
     await nextTick();
     expect(input.value).toBe("/tmp/missing.sql");
+  });
+});
+
+describe("SqlFileExecutionDialog target preservation (#4844)", () => {
+  it("preserves prefilled database when browsing for a new unassociated SQL file", async () => {
+    mocks.connections = [{ id: "mysql-1", name: "MySQL", db_type: "mysql", driver_profile: "mysql", database: "" }];
+    mocks.queryStore.tabs = [{ id: "tab-1", connectionId: "mysql-1", database: "first_db" }];
+    mocks.queryStore.activeTabId = "tab-1";
+    mocks.fetchSqlFileTargetOptions.mockResolvedValue(["first_db", "target_db"]);
+    mocks.openFileDialog.mockResolvedValueOnce(["/tmp/unassociated.sql"]);
+
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(SqlFileExecutionDialog, { open: true, prefillConnectionId: "mysql-1", prefillDatabase: "target_db" });
+    app.mount(root);
+
+    await vi.waitFor(() => expect(mocks.fetchSqlFileTargetOptions).toHaveBeenCalledWith("mysql-1", expect.anything()));
+    expect(root.querySelector('[data-select-value="target_db"]')).not.toBeNull();
+
+    findButton("sqlFile.browse").click();
+    await vi.waitFor(() => expect(mocks.previewSqlFile).toHaveBeenCalledWith("/tmp/unassociated.sql"));
+
+    // Target database MUST NOT have been overwritten by activeTab database ("first_db")
+    expect(root.querySelector('[data-select-value="target_db"]')).not.toBeNull();
+
+    mocks.executeSqlFiles.mockImplementationOnce(async (request) => {
+      mocks.progressHandler?.(progress(request.executionId, "done"));
+    });
+    findButton("sqlFile.execute").click();
+
+    await vi.waitFor(() => expect(mocks.executeSqlFiles).toHaveBeenCalledWith(expect.objectContaining({ connectionId: "mysql-1", database: "target_db" }), ["/tmp/unassociated.sql"]));
+    expect(resolveExternalSqlFileTarget("/tmp/unassociated.sql", () => true, unassociatedExternalSqlFileTarget())).toMatchObject({
+      connectionId: "mysql-1",
+      database: "target_db",
+    });
+  });
+
+  it("does not overwrite prefilled connection and database even if the selected file has a saved target", async () => {
+    mocks.connections = [
+      { id: "mysql-1", name: "MySQL", db_type: "mysql", driver_profile: "mysql", database: "" },
+      { id: "mysql-2", name: "MySQL 2", db_type: "mysql", driver_profile: "mysql", database: "" },
+    ];
+    rememberExternalSqlFileTarget("/tmp/saved_other.sql", { connectionId: "mysql-2", database: "other_db" });
+    mocks.fetchSqlFileTargetOptions.mockResolvedValue(["first_db", "explicit_prefill_db"]);
+    mocks.openFileDialog.mockResolvedValueOnce(["/tmp/saved_other.sql"]);
+
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(SqlFileExecutionDialog, { open: true, prefillConnectionId: "mysql-1", prefillDatabase: "explicit_prefill_db" });
+    app.mount(root);
+
+    await vi.waitFor(() => expect(mocks.fetchSqlFileTargetOptions).toHaveBeenCalledWith("mysql-1", expect.anything()));
+    findButton("sqlFile.browse").click();
+    await vi.waitFor(() => expect(mocks.previewSqlFile).toHaveBeenCalledWith("/tmp/saved_other.sql"));
+
+    expect(root.querySelector('[data-select-value="mysql-1"]')).not.toBeNull();
+    expect(root.querySelector('[data-select-value="explicit_prefill_db"]')).not.toBeNull();
+  });
+
+  it("preserves user-selected database in the dialog when browsing an unassociated file", async () => {
+    mocks.connections = [{ id: "mysql-1", name: "MySQL", db_type: "mysql", driver_profile: "mysql", database: "" }];
+    mocks.queryStore.tabs = [{ id: "tab-1", connectionId: "mysql-1", database: "first_db" }];
+    mocks.queryStore.activeTabId = "tab-1";
+    mocks.fetchSqlFileTargetOptions.mockResolvedValue(["first_db", "second_db", "chosen_db"]);
+    mocks.openFileDialog.mockResolvedValueOnce(["/tmp/brand_new.sql"]);
+
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(SqlFileExecutionDialog, { open: true });
+    app.mount(root);
+
+    await vi.waitFor(() => expect(mocks.fetchSqlFileTargetOptions).toHaveBeenCalledWith("mysql-1", expect.anything()));
+
+    // User selects "chosen_db" from the database dropdown
+    const chosenDbItem = root.querySelector('[data-select-item="chosen_db"]') as HTMLElement;
+    expect(chosenDbItem).not.toBeNull();
+    chosenDbItem.click();
+    await nextTick();
+    expect(root.querySelector('[data-select-value="chosen_db"]')).not.toBeNull();
+
+    findButton("sqlFile.browse").click();
+    await vi.waitFor(() => expect(mocks.previewSqlFile).toHaveBeenCalledWith("/tmp/brand_new.sql"));
+
+    // Selection MUST be preserved, not overwritten with "first_db" from activeTab
+    expect(root.querySelector('[data-select-value="chosen_db"]')).not.toBeNull();
+
+    mocks.executeSqlFiles.mockImplementationOnce(async (request) => {
+      mocks.progressHandler?.(progress(request.executionId, "done"));
+    });
+    findButton("sqlFile.execute").click();
+
+    await vi.waitFor(() => expect(mocks.executeSqlFiles).toHaveBeenCalledWith(expect.objectContaining({ connectionId: "mysql-1", database: "chosen_db" }), ["/tmp/brand_new.sql"]));
   });
 });

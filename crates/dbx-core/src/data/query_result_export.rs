@@ -112,6 +112,9 @@ pub struct QueryResultExportRequest {
     // -- new fields for SQL INSERT export --
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub export_table_name: Option<String>,
+    /// Explicit INSERT target schema; separate from `schema`, which scopes query execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export_schema: Option<String>,
     /// Column type overrides for SQL INSERT export. Each entry may be `null`
     /// (meaning "infer from the query result") so the inner element is `Option`.
     /// Frontend sends these in original full-query column order.
@@ -250,6 +253,7 @@ fn query_sql_worksheets(request: &QueryResultExportRequest) -> Vec<XlsxWorksheet
         column_comments: Vec::new(),
         rows: split_excel_cell_text(&request.sql).into_iter().map(|sql| vec![Value::String(sql)]).collect(),
         numeric_column_right_align: false,
+        auto_filter: Some(false),
     }]
 }
 
@@ -441,7 +445,7 @@ impl SqlInsertWriter {
             column_extras: Vec::new(),
             spatial_columns: Vec::new(),
             database_type: request.database_type,
-            schema: request.schema.clone(),
+            schema: request.export_schema.clone(),
             table_name,
             identifier_quote: request.identifier_quote.clone(),
             projection: None,
@@ -518,6 +522,7 @@ impl SqlInsertWriter {
                 spatial_values: mem::take(&mut self.pending_spatial_values),
                 rows: mem::take(&mut self.pending_rows),
                 batch_size: Some(self.insert_mode.batch_size(SQL_INSERT_BATCH_SIZE)),
+                preserve_original_language: false,
             },
             &self.exclude_columns,
         )?;
@@ -998,6 +1003,9 @@ async fn export_query_result_core_inner(
                     use_agent_cursor: request.use_agent_cursor,
                     first_page_uses_actual_sql: true,
                 });
+                if let Some(error) = plan.pagination_error {
+                    return Err(error);
+                }
                 let Some(plan_limit) = plan.page_limit else {
                     return Err("Failed to build query pagination plan for export".to_string());
                 };
@@ -1095,6 +1103,11 @@ async fn export_query_result_core_inner(
             result.rows.truncate(this_page);
         }
         let row_count = result.rows.len();
+        if request.database_type == DatabaseType::Nebula {
+            crate::text_export::normalize_nebula_export_rows(&mut result.rows);
+        } else if request.database_type == DatabaseType::Neo4j {
+            crate::text_export::normalize_neo4j_export_rows(&mut result.rows);
+        }
         let formatted_rows = crate::temporal_format::format_temporal_export_rows_with_string_types_cow(
             &result.rows,
             &page_column_types,
@@ -2229,6 +2242,7 @@ mod tests {
             execution_id: None,
             date_time_format: None,
             export_table_name: Some("gen_table".to_string()),
+            export_schema: Some("dbo".to_string()),
             export_column_types: Some(vec![Some("int".to_string()), Some("nvarchar(200)".to_string())]),
             selected_columns: None,
             export_column_extras,
@@ -2320,6 +2334,7 @@ mod tests {
             execution_id: None,
             date_time_format: None,
             export_table_name: Some("users".to_string()),
+            export_schema: Some("public".to_string()),
             export_column_types: None,
             selected_columns: None,
             export_column_extras: None,
@@ -2408,6 +2423,7 @@ mod tests {
             csv_quote_mode: CsvQuoteMode::All,
             null_literal: String::new(),
             export_table_name: None,
+            export_schema: None,
             export_column_types: None,
             selected_columns: None,
             export_column_extras: None,
@@ -2418,6 +2434,29 @@ mod tests {
             exclude_primary_keys: false,
             primary_keys: Vec::new(),
         }
+    }
+
+    #[test]
+    fn oracle_sql_insert_uses_export_schema_not_query_execution_schema() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let destination = dir.path().join("users.sql");
+        let mut req = request("sql", None, None);
+        req.database_type = DatabaseType::Oracle;
+        req.file_path = destination.to_string_lossy().into_owned();
+        req.schema = Some("CURRENT_USER".to_string());
+        req.export_table_name = Some("USERS".to_string());
+        req.export_schema = Some("APP_OWNER".to_string());
+
+        let mut writer = SqlInsertWriter::create(&req).expect("create SQL writer");
+        assert_eq!(writer.schema.as_deref(), Some("APP_OWNER"));
+        writer.set_columns(vec!["ID".to_string()], &["NUMBER".to_string()], &[], &req).expect("set SQL export columns");
+        writer.write_row(vec![serde_json::json!(1)], None).expect("write export row");
+        writer.finish().expect("finish export");
+
+        assert_eq!(
+            std::fs::read_to_string(destination).expect("read SQL export"),
+            "INSERT INTO \"APP_OWNER\".\"USERS\" (\"ID\") VALUES (1);\n"
+        );
     }
 
     fn rendered_sql_insert_output(mode: SqlInsertMode) -> String {
@@ -2595,6 +2634,24 @@ mod tests {
         req.query_base_sql = req.sql.clone();
 
         assert_eq!(streaming_pagination_preflight_error(&req, 100, false, false), None);
+    }
+
+    #[test]
+    fn oceanbase_duplicate_projection_export_requires_cursor_and_follows_its_end() {
+        let mut req = request("csv", None, None);
+        req.database_type = DatabaseType::OceanbaseOracle;
+        req.sql = "SELECT a.name, a.* FROM people a ORDER BY a.id".into();
+        req.query_base_sql = req.sql.clone();
+        req.use_agent_cursor = true;
+        assert!(!supports_streaming_offset_pagination(&req, 100));
+        assert_eq!(streaming_pagination_preflight_error(&req, 100, false, false), None);
+        assert!(should_fetch_next_page(true, true, 100, 100, 100));
+        assert!(!should_fetch_next_page(true, false, 100, 100, 100));
+        req.use_agent_cursor = false;
+        assert_eq!(
+            streaming_pagination_preflight_error(&req, 100, false, false),
+            Some(STREAMING_PAGINATION_UNSUPPORTED_ERROR)
+        );
     }
 
     #[test]

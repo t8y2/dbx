@@ -3,9 +3,9 @@ use std::{collections::HashMap, sync::Arc, time::Duration, time::Instant};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolResult, ContentBlock, ErrorData, Implementation, ListResourceTemplatesResult, ListResourcesResult,
-        ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents, ResourceTemplate,
-        ServerCapabilities, ServerInfo,
+        CallToolResponse, CallToolResult, ContentBlock, ErrorData, Implementation, ListResourceTemplatesResult,
+        ListResourcesResult, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource,
+        ResourceContents, ResourceTemplate, ServerCapabilities, ServerConfig,
     },
     schemars, tool, tool_handler, tool_router, ServerHandler,
 };
@@ -491,7 +491,7 @@ pub struct SalesforceApplyWriteRequest {
 /// agent to show the summary and for a human to answer, short enough that a
 /// token left in a transcript cannot be replayed much later against a changed
 /// org.
-const SALESFORCE_WRITE_CONFIRM_TTL: Duration = Duration::from_secs(300);
+pub(crate) const SALESFORCE_WRITE_CONFIRM_TTL: Duration = Duration::from_secs(300);
 /// Ceiling on simultaneously pending confirmations. Prepared writes live in
 /// process memory, so an agent that prepares in a loop must not be able to grow
 /// the map without bound.
@@ -521,13 +521,13 @@ struct PendingSalesforceWrite {
 }
 
 #[derive(Debug)]
-struct PendingSalesforceWrites {
+pub(crate) struct PendingSalesforceWrites {
     ttl: Duration,
     entries: tokio::sync::Mutex<HashMap<String, PendingSalesforceWrite>>,
 }
 
 impl PendingSalesforceWrites {
-    fn new(ttl: Duration) -> Arc<Self> {
+    pub(crate) fn new(ttl: Duration) -> Arc<Self> {
         Arc::new(Self { ttl, entries: tokio::sync::Mutex::new(HashMap::new()) })
     }
 
@@ -831,6 +831,46 @@ impl DbxMcpServer {
         web_mode: bool,
         plugin_tools_mode: PluginToolsMode,
     ) -> Self {
+        Self::build(
+            backend,
+            scope,
+            web_mode,
+            plugin_tools_mode,
+            McpSessionStore::new(),
+            PendingSalesforceWrites::new(SALESFORCE_WRITE_CONFIRM_TTL),
+        )
+    }
+
+    /// Same as [`with_plugin_tools_mode`], but reuses session and pending-write
+    /// state that outlives this instance.
+    ///
+    /// The Streamable HTTP transport drives a `Stateful` (protocol `< 2026-07-28`)
+    /// conversation through one long-lived service, but it calls the service
+    /// factory **per request** for every other mode: stateless `2026-07-28`
+    /// requests, tool-schema discovery, and session restoration. Tools that hand
+    /// state back to the model — `dbx_open_session` and the transaction tools,
+    /// `dbx_salesforce_prepare_write` and its confirmation — must therefore keep
+    /// that state in `Arc`s owned by the transport, not in the per-instance
+    /// defaults, or the next request would not find its own session.
+    pub(crate) fn with_shared_state(
+        backend: Arc<dyn DbxBackend>,
+        scope: McpScope,
+        web_mode: bool,
+        plugin_tools_mode: PluginToolsMode,
+        sessions: Arc<McpSessionStore>,
+        pending_salesforce_writes: Arc<PendingSalesforceWrites>,
+    ) -> Self {
+        Self::build(backend, scope, web_mode, plugin_tools_mode, sessions, pending_salesforce_writes)
+    }
+
+    fn build(
+        backend: Arc<dyn DbxBackend>,
+        scope: McpScope,
+        web_mode: bool,
+        plugin_tools_mode: PluginToolsMode,
+        sessions: Arc<McpSessionStore>,
+        pending_salesforce_writes: Arc<PendingSalesforceWrites>,
+    ) -> Self {
         // The workspace enables more than one rustls crypto feature through
         // transitive dependencies. Native MCP runs outside the desktop/web
         // startup paths, so select the same provider before any TLS tool call.
@@ -860,14 +900,7 @@ impl DbxMcpServer {
             tool_router.disable_route("dbx_plugin_tools");
             tool_router.disable_route("dbx_plugin_call");
         }
-        Self {
-            backend,
-            scope,
-            plugin_tools_mode,
-            sessions: McpSessionStore::new(),
-            pending_salesforce_writes: PendingSalesforceWrites::new(SALESFORCE_WRITE_CONFIRM_TTL),
-            tool_router,
-        }
+        Self { backend, scope, plugin_tools_mode, sessions, pending_salesforce_writes, tool_router }
     }
 
     fn spawn_session_cleanup(&self, session: McpSession) -> tokio::sync::oneshot::Receiver<SessionCleanupResult> {
@@ -908,7 +941,7 @@ impl DbxMcpServer {
         result_rx
     }
 
-    async fn close_backend_sessions_best_effort(&self, sessions: Vec<McpSession>) {
+    pub(crate) async fn close_backend_sessions_best_effort(&self, sessions: Vec<McpSession>) {
         let cleanups = sessions.into_iter().map(|session| self.spawn_session_cleanup(session)).collect::<Vec<_>>();
         for cleanup in cleanups {
             let _ = cleanup.await;
@@ -1174,7 +1207,7 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_list_connections",
-        description = "List database connections configured in DBX. Returns connection IDs, names, group paths, database types, endpoints, and selected databases."
+        description = "List database connections configured in DBX. Returns connection IDs, names, group paths, database types, endpoints, selected databases, and saved connection notes."
     )]
     async fn list_connections(
         &self,
@@ -3761,7 +3794,7 @@ impl ServerHandler for DbxMcpServer {
         &self,
         request: rmcp::model::CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<CallToolResponse, rmcp::ErrorData> {
         let started = Instant::now();
         let args = serde_json::Value::Object(request.arguments.clone().unwrap_or_default());
         let arg = |name: &str| args.get(name).and_then(|value| value.as_str()).unwrap_or_default().to_string();
@@ -3792,26 +3825,33 @@ impl ServerHandler for DbxMcpServer {
         let is_plugin_tool = crate::plugin_tools::is_plugin_tool_name(&tool_name);
         CALL_HISTORY.scope(std::sync::Mutex::new(entry), async {
             let cancellation = context.ct.clone();
-            let result = if is_plugin_tool {
+            let result: Result<CallToolResponse, rmcp::ErrorData> = if is_plugin_tool {
                 tokio::select! {
-                    result = self.call_plugin_tool_dispatch(&tool_name, args) => result,
-                    _ = cancellation.cancelled() => Ok(tool_error("REQUEST_CANCELLED", "The MCP request was cancelled.")),
+                    result = self.call_plugin_tool_dispatch(&tool_name, args) => result.map(Into::into),
+                    _ = cancellation.cancelled() => Ok(tool_error("REQUEST_CANCELLED", "The MCP request was cancelled.").into()),
                 }
             } else {
                 let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
                 tokio::select! {
                     result = self.tool_router.call(tcc) => result,
-                    _ = cancellation.cancelled() => Ok(tool_error("REQUEST_CANCELLED", "The MCP request was cancelled.")),
+                    _ = cancellation.cancelled() => Ok(tool_error("REQUEST_CANCELLED", "The MCP request was cancelled.").into()),
                 }
             };
             let mut entry = CALL_HISTORY.with(|entry| entry.lock().unwrap().clone());
             entry.execution_time_ms = started.elapsed().as_millis();
-            entry.success = result.as_ref().is_ok_and(|result| result.is_error != Some(true));
+            entry.success = result.as_ref().is_ok_and(|response| match response {
+                CallToolResponse::Complete(result) => result.is_error != Some(true),
+                // MRTR and task results are never terminal tool failures.
+                _ => true,
+            });
             // Keep the complete response within a bounded, redacted payload so
             // the history detail view can be used for troubleshooting without
             // allowing a large result to grow the local database indefinitely.
+            // Only a completed call has a concrete payload to archive; interim
+            // MRTR or task results carry a handle the client resolves later.
             entry.mcp_response_json = Some(match &result {
-                Ok(result) => bounded_history_response(result),
+                Ok(CallToolResponse::Complete(result)) => bounded_history_response(result),
+                Ok(response) => format!("{response:?}"),
                 Err(error) => bounded_history_response(error),
             });
             if !entry.success {
@@ -3831,8 +3871,8 @@ impl ServerHandler for DbxMcpServer {
         }).await
     }
 
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().enable_resources().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().enable_resources().build())
             .with_server_info(Implementation::new("dbx", env!("CARGO_PKG_VERSION")))
             .with_instructions("Use DBX connections to inspect schemas and query databases safely.")
     }
@@ -3849,12 +3889,14 @@ impl ServerHandler for DbxMcpServer {
             .then(|| {
                 Resource::new(CONNECTIONS_RESOURCE_URI, "dbx_connections")
                     .with_title("DBX connections")
-                    .with_description("Database connections visible to the current DBX MCP scope")
+                    .with_description(
+                        "Database connections visible to the current DBX MCP scope, including saved notes",
+                    )
                     .with_mime_type("text/markdown")
             })
             .into_iter()
             .collect();
-        Ok(ListResourcesResult { resources, meta: None, next_cursor: None })
+        Ok(ListResourcesResult::with_all_items(resources))
     }
 
     async fn list_resource_templates(
@@ -3889,14 +3931,14 @@ impl ServerHandler for DbxMcpServer {
                     .with_mime_type("text/markdown"),
             );
         }
-        Ok(ListResourceTemplatesResult { resource_templates, meta: None, next_cursor: None })
+        Ok(ListResourceTemplatesResult::with_all_items(resource_templates))
     }
 
     async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
         _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
-    ) -> Result<ReadResourceResult, ErrorData> {
+    ) -> Result<ReadResourceResponse, ErrorData> {
         let uri = request.uri;
         let result = match parse_dbx_resource_uri(&uri)? {
             DbxResourceRequest::Connections => self.list_connections(Parameters(ListConnectionsRequest {})).await,
@@ -3924,7 +3966,7 @@ impl ServerHandler for DbxMcpServer {
                 .await
             }
         };
-        resource_result_from_tool(uri, result)
+        resource_result_from_tool(uri, result).map(Into::into)
     }
 
     /// Hide tools the global policy disallows from the advertised list, the
@@ -3939,7 +3981,7 @@ impl ServerHandler for DbxMcpServer {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
-        Ok(rmcp::model::ListToolsResult { tools: self.policy_filtered_tools().await, meta: None, next_cursor: None })
+        Ok(rmcp::model::ListToolsResult::with_all_items(self.policy_filtered_tools().await))
     }
 }
 
@@ -5096,11 +5138,11 @@ fn ambiguous_connections(name: &str, connections: &[dbx_core::models::connection
 
 fn format_connections(connections: &[ConnectionSummary]) -> String {
     let mut output = String::from(
-        "| ID | Name | Group Path | Type | Host | Port | Database | Read only |\n| --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| ID | Name | Group Path | Type | Host | Port | Database | Read only | Note |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     );
     for connection in connections {
         output.push_str(&format!(
-            "\n| {} | {} | {} | {} | {} | {} | {} | {} |",
+            "\n| {} | {} | {} | {} | {} | {} | {} | {} | {} |",
             escape_cell(&connection.id),
             escape_cell(&connection.name),
             escape_cell(&connection.group_path.join(" / ")),
@@ -5109,6 +5151,7 @@ fn format_connections(connections: &[ConnectionSummary]) -> String {
             connection.port,
             escape_cell(&connection.database),
             connection.read_only,
+            escape_cell(&connection.note),
         ));
     }
     output
@@ -6348,10 +6391,14 @@ mod tests {
             database: "app".to_string(),
             group_path: vec!["Project|A".to_string(), "Staging\nWest".to_string()],
             read_only: true,
+            note: "Application | staging\nRead-only queries".to_string(),
         }]);
         assert!(output.contains("id\\|1"));
         assert!(output.contains("local pg"));
         assert!(output.contains("Project\\|A / Staging West"));
+        assert!(output.contains("| Database | Read only | Note |"));
+        assert!(output.contains("| true | Application \\| staging Read-only queries |"));
+        assert_eq!(output.lines().count(), 3);
     }
 
     #[test]

@@ -13,6 +13,7 @@ use crate::ai_cli_agent::CliAgentCommandSpec;
 use crate::connection::AppState;
 use crate::models::connection::DatabaseType;
 use crate::plugin_tools::{self, PluginToolSet, PreparedPluginToolCall};
+use crate::skill_tools;
 use crate::token_usage::TokenUsage;
 use crate::tool_approval::{self, ToolApprovalWait};
 
@@ -50,6 +51,17 @@ fn chunk_to_events(chunk: &AiStreamChunk) -> Vec<AgentEvent> {
     }
     if let Some(ref reasoning) = chunk.reasoning_delta {
         events.push(AgentEvent::ReasoningDelta { delta: reasoning.clone() });
+    }
+    // Providers spell the same condition differently — OpenAI `length`, Anthropic
+    // `max_tokens`, Gemini `MAX_TOKENS`, the Responses API `max_output_tokens` — so
+    // compare case-insensitively: a provider wired up later must not silently miss
+    // the notice over a capital letter.
+    if let Some(reason) = chunk
+        .finish_reason
+        .as_deref()
+        .filter(|reason| matches!(reason.to_ascii_lowercase().as_str(), "length" | "max_tokens" | "max_output_tokens"))
+    {
+        events.push(AgentEvent::OutputTruncated { finish_reason: reason.to_string() });
     }
     events
 }
@@ -96,6 +108,12 @@ pub struct AgentLoopContext {
     /// Runtime that owns plugin sidecar sessions. The web server runs each
     /// agent loop on a runtime of its own, so plugin calls are spawned here.
     pub host_runtime: Option<tokio::runtime::Handle>,
+    /// True when this request's prompt carries a skill listing (`use_skill` /
+    /// `read_skill_file` ship only with it). Tool schemas are re-sent with every
+    /// request, so registering the skill tools unconditionally would charge every
+    /// skill-free run for tools that have nothing to resolve, and would put them
+    /// in front of a model with no listing to look at (ADR Decision 10).
+    pub allow_skills: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,6 +179,31 @@ pub async fn run_agent_loop(
     )
     .boxed()
     .await
+}
+
+/// The built-in provider's tool table for one run.
+///
+/// The skill tools are APPENDED here rather than registered in
+/// `read_only_tools` / `all_tools`, so those two keep their exact output for
+/// every skill-free request — the listing gate is the only thing that can widen
+/// this table (ADR Decision 10). Ask and agent mode both get them: the gate is
+/// the listing, not the mode, because reading a skill is read-only by
+/// construction.
+fn run_tools(
+    db_type: DatabaseType,
+    sql_permissions: &agent_tools::AgentSqlPermissions,
+    is_agent_mode: bool,
+    allow_skills: bool,
+) -> Vec<ToolDefinition> {
+    let mut tools = if is_agent_mode {
+        agent_tools::all_tools(db_type, sql_permissions.clone())
+    } else {
+        agent_tools::read_only_tools(db_type)
+    };
+    if allow_skills {
+        tools.extend(skill_tools::tool_definitions());
+    }
+    tools
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -289,11 +332,7 @@ async fn run_agent_loop_inner(
         .await;
     }
     let mut sql_permissions = agent_ctx.sql_permissions.clone();
-    let mut tools = if is_agent_mode {
-        agent_tools::all_tools(agent_ctx.db_type, sql_permissions.clone())
-    } else {
-        agent_tools::read_only_tools(agent_ctx.db_type)
-    };
+    let mut tools = run_tools(agent_ctx.db_type, &sql_permissions, is_agent_mode, agent_ctx.allow_skills);
     // Plugin tools join agent runs only; ask mode keeps its database-only
     // read tools.
     let plugin_tool_set = if is_agent_mode {
@@ -1506,6 +1545,17 @@ Use this result to continue the original user task. Do not summarize this tool r
 }
 
 fn compact_tool_result_for_context(tool_name: &str, content: &str) -> String {
+    // Both skill tools bound their own output — a page plus a cursor — so this
+    // compactor has nothing to save here and everything to lose: it keeps only the
+    // head and the tail, and for an instructions file the middle it drops is the
+    // part that says what to do. `use_skill` needs this as much as the file reader
+    // does: its answer is a body page plus a file listing, which can still cross the
+    // budget, and compacting it would throw away the middle of the page the paging
+    // exists to deliver.
+    if matches!(tool_name, skill_tools::USE_SKILL_TOOL | skill_tools::READ_SKILL_FILE_TOOL) {
+        return content.to_string();
+    }
+
     if content.chars().count() <= MAX_TOOL_RESULT_CONTEXT_CHARS {
         return content.to_string();
     }
@@ -1722,6 +1772,7 @@ mod tests {
             prompt_cache_key: None,
             session_id: session_id.map(str::to_string),
             host_runtime: None,
+            allow_skills: false,
         };
         (temp_dir, ctx)
     }
@@ -1785,6 +1836,50 @@ mod tests {
         let cancelled = Notify::new();
         cancelled.notify_one();
         assert!(gate_plugin_tool_calls(&set, &calls, &ctx, &|_event| {}, &cancelled).await.is_none());
+    }
+
+    /// Full tool identity, not just names: two tables differing in a description
+    /// or a schema are not "the same tools".
+    fn describe(tools: &[ToolDefinition]) -> Vec<String> {
+        tools
+            .iter()
+            .map(|tool| {
+                format!(
+                    "{}|{}|{}|{}|{}",
+                    tool.name, tool.description, tool.parameters, tool.read_only, tool.parallel_ok
+                )
+            })
+            .collect()
+    }
+
+    /// ADR Decision 10: the skill tools ship with the listing, in both modes, and
+    /// a request without one gets exactly the tool table it got before they
+    /// existed.
+    #[test]
+    fn skill_tools_ship_only_with_a_skill_listing() {
+        let permissions = agent_tools::AgentSqlPermissions::default();
+        for is_agent_mode in [false, true] {
+            let plain = run_tools(DatabaseType::Postgres, &permissions, is_agent_mode, false);
+            let unchanged = if is_agent_mode {
+                agent_tools::all_tools(DatabaseType::Postgres, permissions.clone())
+            } else {
+                agent_tools::read_only_tools(DatabaseType::Postgres)
+            };
+            assert_eq!(describe(&plain), describe(&unchanged), "a skill-free request must keep its old tool table");
+
+            let with_skills = run_tools(DatabaseType::Postgres, &permissions, is_agent_mode, true);
+            let listed = describe(&with_skills);
+            assert_eq!(
+                listed.len(),
+                plain.len() + 2,
+                "both skill tools must be appended in agent_mode={is_agent_mode}"
+            );
+            let names: Vec<&str> = with_skills.iter().map(|tool| tool.name.as_ref()).collect();
+            assert!(names.contains(&skill_tools::USE_SKILL_TOOL), "{names:?}");
+            assert!(names.contains(&skill_tools::READ_SKILL_FILE_TOOL), "{names:?}");
+            // Appending must not disturb the tools that were already there.
+            assert_eq!(&listed[..plain.len()], &describe(&plain)[..]);
+        }
     }
 
     #[test]
@@ -2106,6 +2201,7 @@ mod tests {
             session_id: "test".to_string(),
             delta: "hello".to_string(),
             reasoning_delta: None,
+            finish_reason: None,
             done: false,
         };
         let events = chunk_to_events(&chunk);
@@ -2119,6 +2215,7 @@ mod tests {
             session_id: "test".to_string(),
             delta: String::new(),
             reasoning_delta: Some("thinking...".to_string()),
+            finish_reason: None,
             done: false,
         };
         let events = chunk_to_events(&chunk);
@@ -2132,6 +2229,7 @@ mod tests {
             session_id: "test".to_string(),
             delta: "answer".to_string(),
             reasoning_delta: Some("thinking...".to_string()),
+            finish_reason: None,
             done: false,
         };
         let events = chunk_to_events(&chunk);
@@ -2142,10 +2240,28 @@ mod tests {
 
     #[test]
     fn chunk_to_events_returns_empty_for_empty_chunk() {
-        let chunk =
-            AiStreamChunk { session_id: "test".to_string(), delta: String::new(), reasoning_delta: None, done: false };
+        let chunk = AiStreamChunk {
+            session_id: "test".to_string(),
+            delta: String::new(),
+            reasoning_delta: None,
+            finish_reason: None,
+            done: false,
+        };
         let events = chunk_to_events(&chunk);
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn chunk_to_events_surfaces_output_limit_truncation() {
+        let chunk = AiStreamChunk {
+            session_id: "test".to_string(),
+            delta: String::new(),
+            reasoning_delta: None,
+            finish_reason: Some("length".to_string()),
+            done: true,
+        };
+        let events = chunk_to_events(&chunk);
+        assert!(matches!(&events[0], AgentEvent::OutputTruncated { finish_reason } if finish_reason == "length"));
     }
 
     #[test]
@@ -2154,6 +2270,7 @@ mod tests {
             session_id: "test".to_string(),
             delta: String::new(),
             reasoning_delta: Some("reasoning".to_string()),
+            finish_reason: None,
             done: false,
         };
         let events = chunk_to_events(&chunk);
@@ -2167,6 +2284,7 @@ mod tests {
             session_id: "test".to_string(),
             delta: "text only".to_string(),
             reasoning_delta: None,
+            finish_reason: None,
             done: false,
         };
         let events = chunk_to_events(&chunk);

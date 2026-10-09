@@ -7132,6 +7132,64 @@ pub async fn list_foreign_keys(pool: &MySqlPool, database: &str, table: &str) ->
         .collect())
 }
 
+/// Reads all foreign keys for a database with two catalog queries. The
+/// per-table variant above is intentionally kept for table metadata panels;
+/// destructive database-wide operations use this bounded variant instead.
+pub async fn list_foreign_keys_for_database(
+    pool: &MySqlPool,
+    database: &str,
+) -> Result<HashMap<String, Vec<ForeignKeyInfo>>, String> {
+    let column_sql = format!(
+        "SELECT TABLE_NAME, CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_TABLE_SCHEMA, \
+         REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME \
+         FROM information_schema.KEY_COLUMN_USAGE \
+         WHERE TABLE_SCHEMA = {} AND REFERENCED_TABLE_NAME IS NOT NULL \
+         ORDER BY TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION",
+        quote_value(database),
+    );
+    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let column_result = conn.query_iter(&column_sql).await.map_err(|e| e.to_string())?;
+    let column_rows: Vec<mysql_async::Row> = column_result.collect_and_drop().await.map_err(|e| e.to_string())?;
+    if column_rows.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let rule_sql = format!(
+        "SELECT TABLE_NAME, CONSTRAINT_NAME, UPDATE_RULE, DELETE_RULE \
+         FROM information_schema.REFERENTIAL_CONSTRAINTS \
+         WHERE CONSTRAINT_SCHEMA = {}",
+        quote_value(database),
+    );
+    let rule_result = conn.query_iter(&rule_sql).await.map_err(|e| e.to_string())?;
+    let rule_rows: Vec<mysql_async::Row> = rule_result.collect_and_drop().await.map_err(|e| e.to_string())?;
+    let rules = rule_rows
+        .iter()
+        .map(|row| {
+            (
+                (get_str_by_name(row, "TABLE_NAME"), get_str_by_name(row, "CONSTRAINT_NAME")),
+                (get_str_by_name(row, "UPDATE_RULE"), get_str_by_name(row, "DELETE_RULE")),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+
+    let mut result: HashMap<String, Vec<ForeignKeyInfo>> = HashMap::new();
+    for row in &column_rows {
+        let table = get_str_by_name(row, "TABLE_NAME");
+        let name = get_str_by_name(row, "CONSTRAINT_NAME");
+        let (on_update, on_delete) = rules.get(&(table.clone(), name.clone())).cloned().unwrap_or_default();
+        result.entry(table).or_default().push(ForeignKeyInfo {
+            name,
+            column: get_str_by_name(row, "COLUMN_NAME"),
+            ref_schema: Some(get_str_by_name(row, "REFERENCED_TABLE_SCHEMA")),
+            ref_table: get_str_by_name(row, "REFERENCED_TABLE_NAME"),
+            ref_column: get_str_by_name(row, "REFERENCED_COLUMN_NAME"),
+            on_update: Some(on_update).filter(|value| !value.is_empty()),
+            on_delete: Some(on_delete).filter(|value| !value.is_empty()),
+        });
+    }
+    Ok(result)
+}
+
 pub async fn list_triggers(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<TriggerInfo>, String> {
     let sql = format!(
         "SELECT TRIGGER_NAME, EVENT_MANIPULATION, ACTION_TIMING, ACTION_STATEMENT \

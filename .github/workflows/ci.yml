@@ -68,6 +68,8 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       NPM_CONFIG_LOGLEVEL: error
+      # Cold vue-tsc runs exceed 4 GiB; public Linux runners provide 16 GiB RAM.
+      NODE_OPTIONS: --max-old-space-size=8192
     steps:
       - uses: actions/checkout@v7
 
@@ -169,9 +171,7 @@ jobs:
       NPM_CONFIG_LOGLEVEL: error
       # sccache cannot reuse Cargo incremental artifacts, so avoid generating them in CI.
       CARGO_INCREMENTAL: "0"
-      # Fork PRs cannot read repository secrets, so they build without sccache
-      # (see rust-fmt-clippy) and lean on the rust-cache restore from main.
-      RUSTC_WRAPPER: ${{ secrets.SCCACHE_S3_BUCKET != '' && 'sccache' || '' }}
+      RUSTC_WRAPPER: sccache
     steps:
       - uses: actions/checkout@v7
 
@@ -188,8 +188,16 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libsecret-1-dev
+          sudo timeout --kill-after=30s 10m apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            update
+          sudo timeout --kill-after=30s 10m apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libsecret-1-dev
 
       # Pin mold because runner image updates can change bundled DuckDB C++ links.
       # The pinned build prevents duckdb_create_config runtime failures.
@@ -218,8 +226,7 @@ jobs:
         with:
           version: "v0.16.0"
 
-      - name: Configure S3 sccache
-        if: env.RUSTC_WRAPPER == 'sccache'
+      - name: Configure sccache
         shell: bash
         env:
           CACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
@@ -230,13 +237,15 @@ jobs:
           CACHE_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
         run: |
           {
-            echo "SCCACHE_BUCKET=${CACHE_BUCKET}"
-            echo "SCCACHE_ENDPOINT=${CACHE_ENDPOINT}"
-            echo "SCCACHE_REGION=${CACHE_REGION}"
-            echo "SCCACHE_S3_KEY_PREFIX=${CACHE_KEY_PREFIX}"
-            echo "SCCACHE_S3_USE_SSL=true"
-            echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
-            echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
+            if [[ -n "$CACHE_BUCKET" ]]; then
+              echo "SCCACHE_BUCKET=${CACHE_BUCKET}"
+              echo "SCCACHE_ENDPOINT=${CACHE_ENDPOINT}"
+              echo "SCCACHE_REGION=${CACHE_REGION}"
+              echo "SCCACHE_S3_KEY_PREFIX=${CACHE_KEY_PREFIX}"
+              echo "SCCACHE_S3_USE_SSL=true"
+              echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
+              echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
+            fi
             # Keep the server alive through post-compile test/lint phases so
             # "Show sccache stats" reflects the real counters.
             echo "SCCACHE_IDLE_TIMEOUT=0"
@@ -247,15 +256,18 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Rust cache
+        env:
+          RUST_FEATURE_MODE: ""
+          RUST_TEST_GROUP: ""
         uses: swatinem/rust-cache@v2
         with:
+          prefix-key: v1-rust-complete
           workspaces: "./ -> target"
           shared-key: ci-packages-x86_64-unknown-linux-gnu
           # Release-linking (LTO) dominates this job and sccache cannot cache
           # those crate types.
           cache-workspace-crates: true
-          # Preserve completed dependency builds when a later test step fails.
-          cache-on-failure: true
+          cache-on-failure: false
           # PR caches are large and branch-scoped; restore them from main without saving per-PR copies.
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -351,10 +363,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/win7-aws-lc-install
-          # Key covers the workspace Cargo.lock too: a main-workspace aws-lc-sys
-          # bump must rebuild the prebuilt artifacts instead of reusing the
-          # cached headers/lib for a stale version.
-          key: win7-aws-lc-v3-${{ runner.os }}-${{ env.WIN7_NIGHTLY_TOOLCHAIN }}-${{ hashFiles('Cargo.lock', '.github/fixtures/win7-aws-lc-cache/Cargo.lock') }}
+          # The fixture manifest and lockfile define the prebuilt AWS-LC artifact.
+          key: win7-aws-lc-v3-${{ runner.os }}-${{ env.WIN7_NIGHTLY_TOOLCHAIN }}-${{ hashFiles('.github/fixtures/win7-aws-lc-cache/Cargo.toml', '.github/fixtures/win7-aws-lc-cache/Cargo.lock') }}
 
       - name: Build Win7 AWS-LC cache
         if: steps.aws-lc-cache.outputs.cache-hit != 'true'
@@ -449,7 +459,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/win7-openssl-install
-          key: win7-openssl-v1-${{ runner.os }}-${{ env.WIN7_NIGHTLY_TOOLCHAIN }}-${{ hashFiles('Cargo.lock', '.github/fixtures/win7-openssl-cache/Cargo.lock') }}
+          key: win7-openssl-v1-${{ runner.os }}-${{ env.WIN7_NIGHTLY_TOOLCHAIN }}-${{ hashFiles('.github/fixtures/win7-openssl-cache/Cargo.toml', '.github/fixtures/win7-openssl-cache/Cargo.lock') }}
 
       - name: Build Win7 OpenSSL cache
         if: steps.openssl-cache.outputs.cache-hit != 'true'
@@ -519,7 +529,10 @@ jobs:
         shell: pwsh
         run: |
           $env:TAURI_CONFIG = Get-Content src-tauri/tauri.webview2-win7-fixed.conf.json -Raw
-          cargo build --locked --package dbx --release --features custom-protocol --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort --timings
+          cargo -Z host-config -Z target-applies-to-host -Z build-std=std,panic_abort `
+            --config .github/fixtures/win7-host-repro-config.toml `
+            build --locked --package dbx --release --features custom-protocol `
+            --target x86_64-win7-windows-msvc --timings
 
       - name: Upload Windows 7 Cargo timings
         if: always()
@@ -538,11 +551,13 @@ jobs:
         shell: pwsh
         run: ./.github/scripts/assert-webview2-win7-loader.ps1 -BinaryPath target/x86_64-win7-windows-msvc/release/dbx.exe
 
-      - name: Bundle Windows 7 fixed-runtime installer
+      - name: Bundle Windows 7 fixed-runtime test installer with zlib
         shell: pwsh
         run: |
           $bundleDir = "target/x86_64-win7-windows-msvc/release/bundle/nsis"
-          pnpm tauri bundle --bundles nsis --target x86_64-win7-windows-msvc --config src-tauri/tauri.webview2-win7-fixed.conf.json
+          pnpm tauri bundle --bundles nsis --target x86_64-win7-windows-msvc `
+            --config src-tauri/tauri.webview2-win7-fixed.conf.json `
+            --config .github/fixtures/win7-nsis-zlib-config.json
           $installer = Get-ChildItem $bundleDir -Filter "*.exe" |
             Sort-Object LastWriteTimeUtc -Descending |
             Select-Object -First 1
@@ -747,10 +762,7 @@ jobs:
     env:
       # sccache cannot reuse Cargo incremental artifacts, so avoid generating them in CI.
       CARGO_INCREMENTAL: "0"
-      # Fork PRs cannot read repository secrets, and the GHA sccache backend can
-      # never hold entries for this repo because main only populates S3, so fork
-      # builds run without sccache and lean on the rust-cache restore from main.
-      RUSTC_WRAPPER: ${{ secrets.SCCACHE_S3_BUCKET != '' && 'sccache' || '' }}
+      RUSTC_WRAPPER: sccache
       # The fast lane skips only system font discovery while retaining the other default capabilities.
       RUST_FEATURE_MODE: ${{ github.event_name == 'pull_request' && needs.changes.outputs.rust_full != 'true' && 'fast' || 'full' }}
     steps:
@@ -758,8 +770,16 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libsecret-1-dev
+          sudo timeout --kill-after=30s 10m apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            update
+          sudo timeout --kill-after=30s 10m apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libsecret-1-dev
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97.1
@@ -771,8 +791,7 @@ jobs:
         with:
           version: "v0.16.0"
 
-      - name: Configure S3 sccache
-        if: env.RUSTC_WRAPPER == 'sccache'
+      - name: Configure sccache
         shell: bash
         env:
           CACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
@@ -783,13 +802,15 @@ jobs:
           CACHE_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
         run: |
           {
-            echo "SCCACHE_BUCKET=${CACHE_BUCKET}"
-            echo "SCCACHE_ENDPOINT=${CACHE_ENDPOINT}"
-            echo "SCCACHE_REGION=${CACHE_REGION}"
-            echo "SCCACHE_S3_KEY_PREFIX=${CACHE_KEY_PREFIX}"
-            echo "SCCACHE_S3_USE_SSL=true"
-            echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
-            echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
+            if [[ -n "$CACHE_BUCKET" ]]; then
+              echo "SCCACHE_BUCKET=${CACHE_BUCKET}"
+              echo "SCCACHE_ENDPOINT=${CACHE_ENDPOINT}"
+              echo "SCCACHE_REGION=${CACHE_REGION}"
+              echo "SCCACHE_S3_KEY_PREFIX=${CACHE_KEY_PREFIX}"
+              echo "SCCACHE_S3_USE_SSL=true"
+              echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
+              echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
+            fi
             # Keep the server alive through post-compile test/lint phases so
             # "Show sccache stats" reflects the real counters.
             echo "SCCACHE_IDLE_TIMEOUT=0"
@@ -800,18 +821,30 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Rust cache
+        env:
+          RUST_FEATURE_MODE: ""
+          RUST_TEST_GROUP: ""
         uses: swatinem/rust-cache@v2
         with:
+          prefix-key: v1-rust-complete
           workspaces: "./ -> target"
           shared-key: ci-rust-fmt-clippy-x86_64-unknown-linux-gnu
-          # Preserve completed dependency builds when a later lint step fails.
-          cache-on-failure: true
+          cache-on-failure: false
           # PR caches are large and branch-scoped; restore them from main without saving per-PR copies.
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Cargo clippy
         run: |-
           node .github/scripts/ci-rust.mjs clippy workspace "$RUST_FEATURE_MODE"
+
+      - name: Upload Rust Cargo timings
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@v6
+        with:
+          name: DBX-clippy-cargo-timings
+          path: target/cargo-timings/
+          if-no-files-found: ignore
+          retention-days: 3
 
       - name: Show sccache stats
         if: always()
@@ -829,10 +862,7 @@ jobs:
       CARGO_INCREMENTAL: "0"
       # Deep async export tests exceed the Rust test harness's default thread stack on Linux.
       RUST_MIN_STACK: 8388608
-      # Fork PRs cannot read repository secrets, and the GHA sccache backend can
-      # never hold entries for this repo because main only populates S3, so fork
-      # builds run without sccache and lean on the rust-cache restore from main.
-      RUSTC_WRAPPER: ${{ secrets.SCCACHE_S3_BUCKET != '' && 'sccache' || '' }}
+      RUSTC_WRAPPER: sccache
       # The fast lane skips only system font discovery while retaining the other default capabilities.
       RUST_FEATURE_MODE: ${{ github.event_name == 'pull_request' && needs.changes.outputs.rust_full != 'true' && 'fast' || 'full' }}
       RUST_TEST_GROUP: ${{ matrix.group }}
@@ -841,8 +871,16 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libsecret-1-dev
+          sudo timeout --kill-after=30s 10m apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            update
+          sudo timeout --kill-after=30s 10m apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libsecret-1-dev
         if: matrix.group != 'foundation'
 
       # Pin mold because runner image updates can change bundled C++ links.
@@ -861,8 +899,7 @@ jobs:
         with:
           version: "v0.16.0"
 
-      - name: Configure S3 sccache
-        if: env.RUSTC_WRAPPER == 'sccache'
+      - name: Configure sccache
         shell: bash
         env:
           CACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
@@ -873,13 +910,15 @@ jobs:
           CACHE_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
         run: |
           {
-            echo "SCCACHE_BUCKET=${CACHE_BUCKET}"
-            echo "SCCACHE_ENDPOINT=${CACHE_ENDPOINT}"
-            echo "SCCACHE_REGION=${CACHE_REGION}"
-            echo "SCCACHE_S3_KEY_PREFIX=${CACHE_KEY_PREFIX}"
-            echo "SCCACHE_S3_USE_SSL=true"
-            echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
-            echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
+            if [[ -n "$CACHE_BUCKET" ]]; then
+              echo "SCCACHE_BUCKET=${CACHE_BUCKET}"
+              echo "SCCACHE_ENDPOINT=${CACHE_ENDPOINT}"
+              echo "SCCACHE_REGION=${CACHE_REGION}"
+              echo "SCCACHE_S3_KEY_PREFIX=${CACHE_KEY_PREFIX}"
+              echo "SCCACHE_S3_USE_SSL=true"
+              echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
+              echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
+            fi
             # Keep the server alive through post-compile test/lint phases so
             # "Show sccache stats" reflects the real counters.
             echo "SCCACHE_IDLE_TIMEOUT=0"
@@ -890,14 +929,17 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Rust cache
+        env:
+          RUST_FEATURE_MODE: ""
+          RUST_TEST_GROUP: ""
         uses: swatinem/rust-cache@v2
         with:
+          prefix-key: v1-rust-complete
           workspaces: "./ -> target"
           shared-key: ci-rust-test-v2-x86_64-unknown-linux-gnu
           # Test linking dominates this job and sccache cannot cache those crate types.
           cache-workspace-crates: true
-          # Preserve completed dependency builds when a later test step fails.
-          cache-on-failure: true
+          cache-on-failure: false
           # PR caches are large and branch-scoped; restore them from main without saving per-PR copies.
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -915,6 +957,15 @@ jobs:
       - name: Rust doc tests
         run: |-
           mold -run node .github/scripts/ci-rust.mjs doctest "$RUST_TEST_GROUP" "$RUST_FEATURE_MODE"
+
+      - name: Upload Rust Cargo timings
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@v6
+        with:
+          name: DBX-rust-${{ matrix.group }}-cargo-timings
+          path: target/cargo-timings/
+          if-no-files-found: ignore
+          retention-days: 3
 
       - name: Show sccache stats
         if: always()
@@ -1036,6 +1087,9 @@ jobs:
       duckdb_windows: ${{ steps.filter.outputs.duckdb_windows == 'true' || steps.plan.outputs.duckdb_windows == 'true' }}
       nix: ${{ steps.filter.outputs.nix }}
       windows_win7_bundle: ${{ steps.filter.outputs.windows_win7_bundle }}
+      windows_win7_candidate: ${{ steps.plan.outputs.windows_win7_candidate }}
+      windows_win7_affected_packages: ${{ steps.plan.outputs.windows_win7_affected_packages }}
+      windows_win7_reasons: ${{ steps.plan.outputs.windows_win7_reasons }}
       github_scripts: ${{ steps.filter.outputs.github_scripts }}
       fast: ${{ steps.plan.outputs.fast }}
       rust_matrix: ${{ steps.plan.outputs.rust_matrix }}
@@ -1192,6 +1246,7 @@ jobs:
           BASE_SHA: ${{ steps.change-base.outputs.sha }}
           RUST_CHANGED: ${{ steps.filter.outputs.rust }}
           AGENTS_CHANGED: ${{ steps.filter.outputs.agents }}
+          WIN7_CURRENT: ${{ steps.filter.outputs.windows_win7_bundle }}
         run: node .github/scripts/ci-plan.mjs
 
   agents:
@@ -1310,9 +1365,7 @@ jobs:
     env:
       # sccache cannot reuse Cargo incremental artifacts, so avoid generating them in CI.
       CARGO_INCREMENTAL: "0"
-      # Fork PRs cannot read repository secrets, so they build without sccache
-      # (see rust-fmt-clippy) and lean on the rust-cache restore from main.
-      RUSTC_WRAPPER: ${{ secrets.SCCACHE_S3_BUCKET != '' && 'sccache' || '' }}
+      RUSTC_WRAPPER: sccache
     defaults:
       run:
         working-directory: agents
@@ -1321,8 +1374,16 @@ jobs:
       - name: Install system dependencies
         if: matrix.driver == 'duckdb'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libdbus-1-dev pkg-config
+          sudo timeout --kill-after=30s 10m apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            update
+          sudo timeout --kill-after=30s 10m apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            install -y libdbus-1-dev pkg-config
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97.1
       # Pin mold because runner image updates can change bundled DuckDB C++ links.
@@ -1336,8 +1397,7 @@ jobs:
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: "v0.16.0"
-      - name: Configure S3 sccache
-        if: env.RUSTC_WRAPPER == 'sccache'
+      - name: Configure sccache
         shell: bash
         env:
           CACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
@@ -1348,13 +1408,15 @@ jobs:
           CACHE_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
         run: |
           {
-            echo "SCCACHE_BUCKET=${CACHE_BUCKET}"
-            echo "SCCACHE_ENDPOINT=${CACHE_ENDPOINT}"
-            echo "SCCACHE_REGION=${CACHE_REGION}"
-            echo "SCCACHE_S3_KEY_PREFIX=${CACHE_KEY_PREFIX}"
-            echo "SCCACHE_S3_USE_SSL=true"
-            echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
-            echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
+            if [[ -n "$CACHE_BUCKET" ]]; then
+              echo "SCCACHE_BUCKET=${CACHE_BUCKET}"
+              echo "SCCACHE_ENDPOINT=${CACHE_ENDPOINT}"
+              echo "SCCACHE_REGION=${CACHE_REGION}"
+              echo "SCCACHE_S3_KEY_PREFIX=${CACHE_KEY_PREFIX}"
+              echo "SCCACHE_S3_USE_SSL=true"
+              echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
+              echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
+            fi
             # Keep the server alive through post-compile test/lint phases so
             # "Show sccache stats" reflects the real counters.
             echo "SCCACHE_IDLE_TIMEOUT=0"
@@ -1365,8 +1427,12 @@ jobs:
             echo "CXX=${SCCACHE_PATH} c++"
           } >> "$GITHUB_ENV"
       - name: Rust cache
+        env:
+          RUST_FEATURE_MODE: ""
+          RUST_TEST_GROUP: ""
         uses: swatinem/rust-cache@v2
         with:
+          prefix-key: v1-rust-complete
           workspaces: agents/drivers/${{ matrix.driver }} -> target
           # A failed bundled native build can leave link-compatible but invalid artifacts.
           shared-key: ci-agent-rust-v2-${{ matrix.driver }}
@@ -1382,11 +1448,19 @@ jobs:
         env:
           DRIVER: ${{ matrix.driver }}
         run: |
-          mold -run cargo nextest run --manifest-path "drivers/$DRIVER/Cargo.toml" --locked --no-fail-fast
+          mold -run cargo nextest run --manifest-path "drivers/$DRIVER/Cargo.toml" --locked --no-fail-fast --timings
           mold -run cargo test --doc --manifest-path "drivers/$DRIVER/Cargo.toml" --locked
       - name: TDengine native agent build
         if: matrix.driver == 'tdengine'
         run: mold -run cargo build --manifest-path drivers/tdengine/Cargo.toml --locked --release --bin dbx-tdengine-driver
+      - name: Upload Rust Cargo timings
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@v6
+        with:
+          name: DBX-agent-${{ matrix.driver }}-cargo-timings
+          path: agents/drivers/${{ matrix.driver }}/target/cargo-timings/
+          if-no-files-found: ignore
+          retention-days: 3
       # Diagnostics only; agent jobs must not swallow build/test failures
       # (ci-workflow.test.mjs), so keep this step best-effort at the command level.
       - name: Show sccache stats
@@ -1453,8 +1527,9 @@ jobs:
         if: matrix.driver == 'tdengine'
         uses: swatinem/rust-cache@v2
         with:
+          prefix-key: v1-rust-complete
           workspaces: agents/drivers/tdengine -> target
-          cache-on-failure: true
+          cache-on-failure: false
           save-if: ${{ github.ref == 'refs/heads/main' && matrix.version == '3.4.2.2' }}
       - name: Run one live engine and version
         env:

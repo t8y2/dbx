@@ -109,7 +109,16 @@ export function createTableLayout(statement: StatementNode, ctx: SqlLayoutContex
   const modifierWidth = Math.max(0, ...columns.map((column) => column.modifiers.length));
 
   definitions.forEach((definition, index) => {
-    writer.newline(indent);
+    if (ctx.options.commaPosition === "before") {
+      if (index === 0) {
+        writer.newline(indent + 2);
+      } else {
+        writer.newline(indent);
+        writer.write(", ");
+      }
+    } else {
+      writer.newline(indent);
+    }
     if (definition.kind === "column") {
       const { name: columnName, type, modifiers, tail } = definition.column;
       writer.write(columnName.padEnd(nameWidth));
@@ -117,9 +126,9 @@ export function createTableLayout(statement: StatementNode, ctx: SqlLayoutContex
       if (modifiers) writer.write(` ${modifiers.padStart(modifierWidth)}`);
       if (tail) writer.write(` ${tail}`);
     } else {
-      emitDefinition(writer, definition.nodes, indent, ctx);
+      emitDefinition(writer, definition.nodes, ctx.options.commaPosition === "before" ? indent + 2 : indent, ctx);
     }
-    if (index < definitions.length - 1) writer.write(",");
+    if (ctx.options.commaPosition !== "before" && index < definitions.length - 1) writer.write(",");
   });
 
   writer.newline(0);

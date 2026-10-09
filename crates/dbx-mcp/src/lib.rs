@@ -12,7 +12,7 @@ pub mod session;
 pub mod transaction;
 pub mod transport;
 
-pub use backend::{ConnectionSummary, DbxBackend, LocalBackend, WebBackend};
+pub use backend::{ConnectionSummary, DbxBackend, LocalBackend, UnavailableBackend, WebBackend};
 pub use dbx_core::mongo_shell as mongo;
 pub use http::{serve_streamable_http_on_listener, serve_streamable_http_with_shutdown, streamable_http_router};
 pub use http_auth::HttpAuth;

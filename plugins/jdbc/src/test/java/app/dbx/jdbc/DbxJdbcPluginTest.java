@@ -42,6 +42,7 @@ import java.util.regex.Pattern;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class DbxJdbcPluginTest {
@@ -1916,7 +1917,10 @@ final class DbxJdbcPluginTest {
                 explainCall.indexOf("'", explainCall.indexOf("'") + 1)
             );
             assertEquals(1, calls.stream().filter(call -> call.startsWith("prepare:SELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY")).count());
-            assertEquals(1, calls.stream().filter(call -> call.equals("prepare:DELETE FROM PLAN_TABLE WHERE STATEMENT_ID = ?")).count());
+            // EXPLAIN PLAN resolves its plan table in the session user's schema, so the plugin
+            // reads and cleans up that exact table instead of the CURRENT_SCHEMA-relative name.
+            assertEquals(1, calls.stream().filter(call -> call.startsWith("prepare:SELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY('SYSTEM.PLAN_TABLE'")).count());
+            assertEquals(1, calls.stream().filter(call -> call.equals("prepare:DELETE FROM SYSTEM.PLAN_TABLE WHERE STATEMENT_ID = ?")).count());
             assertEquals(2, calls.stream().filter(call -> call.equals("bind:1:" + statementId)).count());
         } finally {
             closeAndDeregister(connection, driver);
@@ -1955,7 +1959,7 @@ final class DbxJdbcPluginTest {
             int begin = callIndex(calls, call -> call.equals("setAutoCommit:false"));
             int explain = callIndex(calls, call -> call.startsWith("prepare:EXPLAIN PLAN SET STATEMENT_ID = 'DBX_"));
             int display = callIndex(calls, call -> call.startsWith("prepare:SELECT PLAN_TABLE_OUTPUT FROM TABLE(DBMS_XPLAN.DISPLAY"));
-            int cleanup = callIndex(calls, call -> call.equals("prepare:DELETE FROM PLAN_TABLE WHERE STATEMENT_ID = ?"));
+            int cleanup = callIndex(calls, call -> call.equals("prepare:DELETE FROM SYSTEM.PLAN_TABLE WHERE STATEMENT_ID = ?"));
             int commit = callIndex(calls, call -> call.equals("commit"));
             int restore = callIndex(calls, call -> call.equals("setAutoCommit:true"));
             assertTrue(begin >= 0 && begin < explain, calls.toString());
@@ -1975,6 +1979,49 @@ final class DbxJdbcPluginTest {
             }
         }
         return -1;
+    }
+
+    @Test
+    void oracleExplainPlanTableMirrorsTheNameExplainPlanResolves() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("oracleExplainPlanTable", Connection.class);
+        method.setAccessible(true);
+
+        // A session user PLAN_TABLE wins, because that is what EXPLAIN PLAN resolves first.
+        assertEquals(
+            "SYSTEM.PLAN_TABLE",
+            method.invoke(null, oraclePlanTableProbeConnection("SYSTEM.PLAN_TABLE", "SYS.PLAN_TABLE$"))
+        );
+        // Without one, EXPLAIN PLAN falls through to the PUBLIC synonym, whose target must be
+        // named explicitly: a bare PLAN_TABLE would follow CURRENT_SCHEMA instead.
+        assertEquals(
+            "SYS.PLAN_TABLE$",
+            method.invoke(null, oraclePlanTableProbeConnection(null, "SYS.PLAN_TABLE$"))
+        );
+        // Nothing resolvable keeps the caller on the plain unqualified name.
+        assertNull(method.invoke(null, oraclePlanTableProbeConnection(null, null)));
+    }
+
+    private static Connection oraclePlanTableProbeConnection(String sessionPlanTable, String publicPlanTable) {
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "prepareStatement" -> (PreparedStatement) Proxy.newProxyInstance(
+                    DbxJdbcPluginTest.class.getClassLoader(),
+                    new Class<?>[] { PreparedStatement.class },
+                    (statement, statementMethod, statementArgs) -> switch (statementMethod.getName()) {
+                        case "executeQuery" -> rowsResultSet(
+                            new String[] { "SESSION_PLAN_TABLE", "PUBLIC_PLAN_TABLE" },
+                            new Object[][] { { sessionPlanTable, publicPlanTable } }
+                        );
+                        case "close" -> null;
+                        default -> defaultValue(statementMethod.getReturnType());
+                    }
+                );
+                case "close" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
     }
 
     @Test
@@ -5013,6 +5060,21 @@ final class DbxJdbcPluginTest {
         boolean parameterMetadataSupported
     ) {
         calls.add("prepare:" + sql);
+        if (sql.contains("FROM ALL_SYNONYMS")) {
+            // The plugin resolves the plan table EXPLAIN PLAN will use before reading it back.
+            return (PreparedStatement) Proxy.newProxyInstance(
+                DbxJdbcPluginTest.class.getClassLoader(),
+                new Class<?>[] { PreparedStatement.class },
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "executeQuery" -> rowsResultSet(
+                        new String[] { "SESSION_PLAN_TABLE", "PUBLIC_PLAN_TABLE" },
+                        new Object[][] { { "SYSTEM.PLAN_TABLE", "SYS.PLAN_TABLE$" } }
+                    );
+                    case "setQueryTimeout", "close" -> null;
+                    default -> defaultValue(method.getReturnType());
+                }
+            );
+        }
         int parameterCount = oracleExplainMockParameterCount(sql);
         return (PreparedStatement) Proxy.newProxyInstance(
             DbxJdbcPluginTest.class.getClassLoader(),

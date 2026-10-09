@@ -1,3 +1,4 @@
+import { hasShortDataGridSqlPage } from "@/lib/dataGrid/dataGridPagination";
 import { createQueryRequestTiming } from "@/lib/queryRequestTiming";
 import { appendNeo4jNodeCells, extractNeo4jNodeCells } from "@/lib/neo4j/neo4jNodeResult";
 import { UPDATE_RESTORE_KEY, assertUpdateAllowsInteraction } from "@/lib/app/updatePreparation";
@@ -8327,7 +8328,10 @@ export const useQueryStore = defineStore("query", () => {
           current.resultTotalRowCount = undefined;
         }
         const resultRowCount = current.result?.rows.length ?? 0;
-        const resultLimitReached = !!current.result && queryResultLimitReached(pageOffset, resultRowCount, queryResultMaxRows);
+        // Appends already include all earlier rows. Measure the merged result
+        // from its logical start, not from the offset of the latest tail page.
+        const resultStartOffset = shouldAppendResult ? current.resultPageOffset : pageOffset;
+        const resultLimitReached = !!current.result && queryResultLimitReached(resultStartOffset, resultRowCount, queryResultMaxRows);
         if (resultLimitReached && current.result) {
           current.result.has_more = false;
           current.result.truncated = true;
@@ -9334,7 +9338,7 @@ export const useQueryStore = defineStore("query", () => {
     });
   }
 
-  async function fetchTabResultForExport(id: string, onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void): Promise<QueryResult | undefined> {
+  async function fetchTabResultForExport(id: string, onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void, probeRowLimit = false): Promise<QueryResult | undefined> {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab?.result) return undefined;
 
@@ -9450,8 +9454,71 @@ export const useQueryStore = defineStore("query", () => {
 
     if (tab.mode !== "query") return tab.result;
 
+    const sourceResult = probeRowLimit
+      ? { ...tab.result, columns: [...tab.result.columns], column_types: tab.result.column_types ? [...tab.result.column_types] : undefined, hidden_column_indexes: tab.result.hidden_column_indexes ? [...tab.result.hidden_column_indexes] : undefined, rows: tab.result.rows.map((row) => [...row]) }
+      : tab.result;
+    const sourcePageOffset = tab.resultPageOffset ?? 0;
+    const sourceTotalRows = tab.resultTotalRowCount;
+    const sourceClientSessionId = tab.resultClientSessionId ?? tabClientSessionId(tab);
+    const sourcePageLimit = tab.resultExecutedPageLimit ?? tab.resultPageLimit;
+    const sourceLastPageOffset = tab.resultExecutedPageOffset ?? sourcePageOffset;
+    // Native drivers also report has_more=false for SELECT ... LIMIT n: it
+    // exhausts that SQL statement, not the original query. resultPageSql records
+    // a rewritten SQL page; cursors execute the original query and clear their
+    // session_id on exhaustion. A SQL page needs a short tail: background COUNT
+    // can use another session and see a different table behind a temporary name.
+    // Appended segments retain resultPageOffset=0, so inspect their last page.
+    const sourceSnapshotComplete =
+      sourceResult.has_more === false &&
+      !sourceResult.truncated &&
+      !sourceResult.large_value_cells?.length &&
+      !sourceResult.execution_error &&
+      sourcePageOffset === 0 &&
+      (typeof sourceTotalRows !== "number" || sourceTotalRows <= sourceResult.rows.length) &&
+      (!tab.resultPageSql || hasShortDataGridSqlPage({ rowCount: sourceResult.rows.length, pageOffset: sourcePageOffset, executedPageOffset: sourceLastPageOffset, executedPageLimit: sourcePageLimit }));
+    const sourceHiddenNames = new Set((sourceResult.hidden_column_indexes ?? []).map((index) => sourceResult.columns[index]).filter((name): name is string => name !== undefined && sourceResult.columns.filter((column) => column === name).length === 1));
+    const resultForTransfer = (result: QueryResult): QueryResult => {
+      if (!probeRowLimit) return result;
+      const hidden = new Set(result.hidden_column_indexes ?? []);
+      result.columns.forEach((name, index) => {
+        if (sourceHiddenNames.has(name)) hidden.add(index);
+      });
+      if (hidden.size === 0) return result;
+      const indexes = result.columns.map((_, index) => index).filter((index) => !hidden.has(index));
+      const indexMap = new Map(indexes.map((index, ordinal) => [index, ordinal]));
+      return {
+        ...result,
+        columns: indexes.map((index) => result.columns[index]!),
+        column_types: result.column_types ? indexes.map((index) => result.column_types?.[index] ?? "") : undefined,
+        column_sortables: result.column_sortables ? indexes.map((index) => result.column_sortables?.[index] ?? true) : undefined,
+        rows: result.rows.map((row) => indexes.map((index) => row[index])),
+        spatial_values: result.spatial_values?.map((row) => indexes.map((index) => row[index] ?? null)),
+        spatial_columns: result.spatial_columns?.filter((column) => indexMap.has(column.column_index)).map((column) => ({ ...column, column_index: indexMap.get(column.column_index)! })),
+        neo4j_node_cells: result.neo4j_node_cells?.filter((cell) => indexMap.has(cell.column_index)).map((cell) => ({ ...cell, column_index: indexMap.get(cell.column_index)! })),
+        hidden_column_indexes: undefined,
+      };
+    };
+    const cachedResultForExport = (): QueryResult => {
+      // A last page (has_more=false) is not a complete result. Nor is a LOB
+      // preview safe to write as if it were the underlying value.
+      if (probeRowLimit && !sourceSnapshotComplete) {
+        throw new Error(i18n.global.t("grid.exportDatabaseIncomplete"));
+      }
+      return resultForTransfer(sourceResult);
+    };
+    // Reuse a result explicitly known to be complete. Re-executing it on the
+    // export session can lose temporary tables, session settings or uncommitted
+    // values, and would no longer transfer the snapshot shown to the user.
+    if (probeRowLimit && sourceSnapshotComplete) return resultForTransfer(sourceResult);
+    // A separate execution cannot see this transaction's uncommitted values.
+    // Keep its writes and cursor untouched; only a fully loaded snapshot is
+    // safe to transfer without re-entering the manual transaction protocol.
+    // An Agent timeout cancels every cursor on its client session. Do not
+    // borrow that session while the grid still owns a live cursor either.
+    if (probeRowLimit && ((tab.autoCommit === false && tab.txnSessionId) || tab.resultSessionId || sourceResult.session_id)) throw new Error(i18n.global.t("grid.exportDatabaseLoadComplete"));
     const sql = queryResultExecutionSql(tab);
-    if (!sql.trim()) return tab.result;
+    const baseSql = queryResultBaseSql(tab);
+    if (!sql.trim()) return cachedResultForExport();
 
     const location = queryResultExecutionLocation(tab);
     const connStore = useConnectionStore();
@@ -9459,14 +9526,23 @@ export const useQueryStore = defineStore("query", () => {
     const conn = connStore.getConfig(location.connectionId);
     const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
     const executableSql = effectiveDbType === "mysql" ? stripMysqlClientDisplayCommand(sql) : sql;
+    if (probeRowLimit && effectiveDbType !== "mongodb") {
+      const assessment = classifySqlRisk(executableSql, { dialect: effectiveDbType });
+      const statement = assessment.statements[0];
+      // CALL and DML RETURNING/OUTPUT may return rows, but exporting them must
+      // never repeat their source-side mutations just to obtain those rows.
+      if (assessment.risk !== "read" || assessment.statements.length !== 1 || (statement?.firstKeyword !== "select" && statement?.firstKeyword !== "with")) return cachedResultForExport();
+    }
     const executionDatabase = location.database;
     // main 引入全局查询超时：queryTimeoutSecsForConnection 现需传入全局默认值；
     // settingsStore 取 defineStore 顶层声明的实例（本函数无局部覆盖）。
     const queryTimeoutSecs = queryTimeoutSecsForConnection(conn, settingsStore.editorSettings.globalQueryTimeoutSecs);
     const useAgentCursor = usesAgentCursorForQuery(conn?.db_type, conn?.driver_profile);
-    const queryBaseSql = effectiveDbType === "mysql" ? stripMysqlClientDisplayCommand(queryResultBaseSql(tab)) : queryResultBaseSql(tab);
+    const queryBaseSql = effectiveDbType === "mysql" ? stripMysqlClientDisplayCommand(baseSql) : baseSql;
     const exportSettings = useSettingsStore().editorSettings;
-    const exportRowLimit = exportSettings.exportRowLimitEnabled ? exportSettings.exportRowLimit : Number.POSITIVE_INFINITY;
+    // Database transfers read one extra row to distinguish a complete result at
+    // the limit from a partial export, without relying on a cached COUNT.
+    const exportRowLimit = exportSettings.exportRowLimitEnabled ? exportSettings.exportRowLimit + (probeRowLimit ? 1 : 0) : Number.POSITIVE_INFINITY;
 
     if (effectiveDbType === "mongodb") {
       let mongoCommand;
@@ -9528,28 +9604,33 @@ export const useQueryStore = defineStore("query", () => {
       // BSON-faithful cell encoding.
       const result = mongoDocumentsToQueryResult(documents, performance.now() - exportStartedAt, totalRows ?? documents.length, copyDocuments, totalRows !== null, { documentGridValues: false });
       if (result.columns.length === 0) {
-        result.columns = tab.result.columns;
-        result.column_types = tab.result.column_types;
+        result.columns = sourceResult.columns;
+        result.column_types = sourceResult.column_types;
       }
       result.affected_rows = documents.length;
       result.truncated = false;
       result.has_more = false;
-      return result;
+      return resultForTransfer(result);
     }
 
-    const agentExportMaxRows = exportSettings.exportRowLimitEnabled ? exportSettings.exportRowLimit : 2_147_483_647;
+    const agentExportMaxRows = Math.min(exportRowLimit, 2_147_483_647);
     // Use the already-computed total row count as a progress estimate so the
     // export dialog shows a moving bar instead of a stuck 0 while paginating.
     const totalRows = typeof tab.resultTotalRowCount === "number" ? Math.min(tab.resultTotalRowCount, exportRowLimit) : null;
     const pageLimit = Math.max(tab.resultPageLimit ?? 0, TABLE_DATA_EXPORT_PAGE_SIZE);
     const rows: QueryResult["rows"] = [];
     let columns: string[] = [];
+    let columnTypes: string[] = [];
     let executionTimeMs = 0;
     let offset = 0;
     let sessionId: string | undefined;
-    const clientSessionId = tabClientSessionId(tab, "export");
+    // A database transfer must retain session-local tables and settings. The
+    // file-export path owns a separate client session; this path borrows the
+    // source session and must not close it when exporting finishes.
+    const clientSessionId = probeRowLimit ? sourceClientSessionId : tabClientSessionId(tab, "export");
     const exportExecutionId = uuid();
 
+    let incomplete = false;
     try {
       while (rows.length < exportRowLimit) {
         const remaining = exportRowLimit - rows.length;
@@ -9562,7 +9643,8 @@ export const useQueryStore = defineStore("query", () => {
           useAgentCursor,
           firstPageUsesActualSql: true,
         });
-        if (typeof plan.pageLimit !== "number" || typeof plan.pageOffset !== "number") return tab.result;
+        if (probeRowLimit && plan.paginationError) throw new Error(plan.paginationError);
+        if (typeof plan.pageLimit !== "number" || typeof plan.pageOffset !== "number") return cachedResultForExport();
         const executionOptions = plan.useAgentResultSession
           ? {
               maxRows: agentExportMaxRows,
@@ -9575,30 +9657,53 @@ export const useQueryStore = defineStore("query", () => {
             }
           : { maxRows: plan.pageLimit, fetchSize: plan.pageLimit, clientSessionId, catalog: location.catalog, timeoutSecs: queryTimeoutSecs };
         const results = await api.executeMulti(location.connectionId, executionDatabase, plan.sqlToExecute, location.schema, exportExecutionId, executionOptions);
-        if (!results[0]) break;
+        if (!results[0]) {
+          if (probeRowLimit) throw new Error(i18n.global.t("grid.exportDatabaseIncomplete"));
+          break;
+        }
         const result = stripPaginationRowNumber(results[0], plan.paginationRowNumberColumn);
+        // Capture ownership before validating the page. A first page with a
+        // preview/error still owns a new cursor that must be closed without
+        // closing the borrowed source client session.
+        const nextSessionId = result.session_id?.trim() || sessionId;
+        sessionId = nextSessionId;
+        if (probeRowLimit && (result.execution_error || result.server_message || result.large_value_cells?.length)) throw new Error(i18n.global.t("grid.exportDatabaseIncomplete"));
+        if (probeRowLimit && columns.length > 0 && (result.columns.length !== columns.length || result.columns.some((column, index) => column !== columns[index]))) throw new Error(i18n.global.t("grid.exportDatabaseIncomplete"));
+        if (probeRowLimit && columnTypes.length > 0 && result.column_types?.length && (columnTypes.length !== result.column_types.length || result.column_types.some((type, index) => type !== columnTypes[index]))) throw new Error(i18n.global.t("grid.exportDatabaseIncomplete"));
+        if (probeRowLimit && plan.useAgentResultSession && (typeof result.has_more !== "boolean" || (result.has_more && (!nextSessionId || result.rows.length === 0)))) throw new Error(i18n.global.t("grid.exportDatabaseIncomplete"));
+        if (probeRowLimit && result.has_more && result.rows.length === 0) throw new Error(i18n.global.t("grid.exportDatabaseIncomplete"));
+        // `has_more` only describes the current page. It is expected to be true
+        // for every page except the last one, so it must not be accumulated as
+        // an incomplete-export marker.
+        incomplete = incomplete || result.truncated === true;
         if (columns.length === 0) columns = result.columns;
+        if (columnTypes.length === 0 && result.column_types?.length) columnTypes = result.column_types;
         rows.push(...result.rows);
         executionTimeMs += result.execution_time_ms ?? 0;
         onProgress?.({ rowsExported: rows.length, totalRows });
-        sessionId = result.session_id ?? undefined;
-        const shouldFetchNextPage = plan.useAgentResultSession ? result.has_more === true : result.rows.length >= plan.pageLimit;
+        const shouldFetchNextPage = plan.useAgentResultSession ? result.has_more === true : result.rows.length >= plan.pageLimit || (probeRowLimit && result.has_more === true);
         if (!shouldFetchNextPage || rows.length >= exportRowLimit) break;
         offset += result.rows.length;
       }
     } finally {
-      if (sessionId) void api.closeQuerySession(location.connectionId, location.database, sessionId, clientSessionId, location.catalog);
-      void closeClientSessionId(location.connectionId, location.database, clientSessionId, location.catalog, { tabId: tab.id });
+      try {
+        if (sessionId) await api.closeQuerySession(location.connectionId, location.database, sessionId, clientSessionId, location.catalog);
+      } catch (error) {
+        queryExecutionLog("warn", "query-export-session-close:error", { sessionId, error });
+      } finally {
+        if (!probeRowLimit) void closeClientSessionId(location.connectionId, location.database, clientSessionId, location.catalog, { tabId: tab.id });
+      }
     }
 
-    return {
-      columns: columns.length ? columns : tab.result.columns,
+    return resultForTransfer({
+      columns: columns.length ? columns : sourceResult.columns,
+      column_types: columnTypes.length ? columnTypes : sourceResult.column_types,
       rows,
       affected_rows: 0,
       execution_time_ms: executionTimeMs,
-      truncated: false,
-      has_more: false,
-    };
+      truncated: probeRowLimit && (incomplete || (exportSettings.exportRowLimitEnabled && rows.length > exportSettings.exportRowLimit)),
+      has_more: probeRowLimit && (incomplete || (exportSettings.exportRowLimitEnabled && rows.length > exportSettings.exportRowLimit)),
+    });
   }
 
   async function buildQueryResultExportRequest(id: string, options: BuildQueryResultExportRequestOptions) {

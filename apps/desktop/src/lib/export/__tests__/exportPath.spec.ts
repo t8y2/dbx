@@ -4,16 +4,20 @@ import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   autoRevealExportedPathIfConfigured,
+  clearLastBackupDirectory,
   clearLastExportDirectory,
+  getLastBackupDirectory,
   getLastExportDirectory,
   getParentDirectory,
   isAbsolutePath,
   joinExportPath,
+  LAST_BACKUP_DIRECTORY_STORAGE_KEY,
   LAST_EXPORT_DIRECTORY_STORAGE_KEY,
   promptExportSavePath,
   rememberLastExportPath,
   resolveExportDefaultPath,
   revealExportedPath,
+  setLastBackupDirectory,
   setLastExportDirectory,
 } from "../exportPath";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -138,6 +142,32 @@ describe("exportPath", () => {
 
       rememberLastExportPath("");
       expect(getLastExportDirectory()).toBe("/initial/dir");
+    });
+  });
+
+  describe("backup directory storage", () => {
+    it("reads empty string when no backup directory is stored", () => {
+      expect(getLastBackupDirectory()).toBe("");
+    });
+
+    it("stores, retrieves and clears the last backup directory", () => {
+      setLastBackupDirectory("/mnt/backups");
+      expect(getLastBackupDirectory()).toBe("/mnt/backups");
+      expect(localStorage.getItem(LAST_BACKUP_DIRECTORY_STORAGE_KEY)).toBe("/mnt/backups");
+
+      clearLastBackupDirectory();
+      expect(getLastBackupDirectory()).toBe("");
+    });
+
+    it("ignores blank values and stays independent from the export directory", () => {
+      setLastExportDirectory("/export/dir");
+      setLastBackupDirectory("   ");
+      expect(getLastBackupDirectory()).toBe("");
+
+      setLastBackupDirectory("/backup/dir");
+      expect(getLastExportDirectory()).toBe("/export/dir");
+      expect(localStorage.getItem(LAST_EXPORT_DIRECTORY_STORAGE_KEY)).toBe("/export/dir");
+      expect(localStorage.getItem(LAST_BACKUP_DIRECTORY_STORAGE_KEY)).toBe("/backup/dir");
     });
   });
 

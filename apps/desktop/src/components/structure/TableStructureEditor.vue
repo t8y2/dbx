@@ -1209,7 +1209,7 @@ const structureCheckboxClass = "h-[var(--structure-checkbox-size)] w-[var(--stru
 const structureHeaderCellClass = "relative min-w-0 overflow-hidden border-b border-r px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-left last:border-r-0";
 const structureCellClass = "min-w-0 overflow-hidden border-b border-r px-[var(--structure-cell-px)] py-[var(--structure-cell-py)] last:border-r-0";
 const structureLastCellClass = "min-w-0 overflow-hidden border-b px-[var(--structure-cell-px)] py-[var(--structure-cell-py)]";
-const structurePropertyListClass = "flex min-w-0 items-center gap-0 overflow-hidden";
+const structurePropertyListClass = "flex w-max min-w-0 items-center gap-0 overflow-hidden";
 const structurePropertyLabelClass = "flex min-w-0 items-center gap-1 whitespace-nowrap";
 const structureActionButtonClass = `${structureIconButtonClass} shrink-0`;
 const structureDensityMenuOpen = ref(false);
@@ -1527,6 +1527,9 @@ function columnCollation(column: EditableStructureColumn): string {
 }
 
 const extendedPropertiesColumnIndex = 10;
+// Widest extended-properties content seen so far. The column is last (no resize
+// handle) and its controls differ per dialect/locale, so a fixed width clips them.
+const extendedPropertiesContentWidth = ref(0);
 const actionButtonGap = 2;
 const columnOrdinalIndicatorGap = 4;
 const columnOrdinalIndicatorTrailingChrome = 3;
@@ -1551,6 +1554,7 @@ const visibleColWidths = computed(() =>
   colLabels.value.map((column) => {
     if (column.key === "actions") return columnActionsWidth.value;
     const width = colWidths.value[column.widthIndex] ?? structureDensityMetric.value.minColumnWidth;
+    if (column.key === "extendedProperties") return Math.max(width, extendedPropertiesContentWidth.value);
     return column.key === "length" && supportsCharacterLengthUnits.value ? Math.max(width, structureDensityMetric.value.minLengthColumnWidth) : width;
   }),
 );
@@ -2187,9 +2191,21 @@ function updateColumnVirtualRowsDuringScroll(scroller: HTMLElement) {
   virtualScroller.updateVisibleItems?.(false, true);
 }
 
+function updateExtendedPropertiesContentWidth() {
+  const scroller = structureScrollerElement(columnsScrollerRef.value);
+  if (!scroller) return;
+  const chromeWidth = structureDensityMetric.value.cellPaddingX * 2 + 1;
+  let width = extendedPropertiesContentWidth.value;
+  for (const content of scroller.querySelectorAll<HTMLElement>("[data-structure-extended-properties]")) {
+    width = Math.max(width, content.offsetWidth + chromeWidth);
+  }
+  extendedPropertiesContentWidth.value = width;
+}
+
 function onColumnVirtualRowsUpdated() {
   const scroller = structureScrollerElement(columnsScrollerRef.value);
   if (scroller) lastColumnVirtualRenderScrollTop = scroller.scrollTop;
+  void nextTick(updateExtendedPropertiesContentWidth);
 }
 
 function columnVirtualRowsNeedSynchronousUpdate(scroller: HTMLElement): boolean {
@@ -5423,6 +5439,12 @@ watch(activeTab, () => {
 
 watch([activeTab, loading, indexesLoading, visibleColWidths, indexColWidths], observeStructureHorizontalScroller, { deep: true, flush: "post", immediate: true });
 
+// Font sizes change with density, so start measuring again instead of keeping a stale maximum.
+watch(localStructureDensity, () => {
+  extendedPropertiesContentWidth.value = 0;
+});
+watch([columns, localStructureDensity], updateExtendedPropertiesContentWidth, { deep: true, flush: "post" });
+
 watch(
   columns,
   (items) => {
@@ -6065,7 +6087,7 @@ watch(
                           />
                         </td>
                         <td v-if="showExtendedProperties" :class="[structureCellClass, structureColumnSelectionClass('extendedProperties')]">
-                          <div :class="structurePropertyListClass">
+                          <div :class="structurePropertyListClass" data-structure-extended-properties>
                             <!-- Manticore Search: character data type properties -->
                             <template v-if="databaseType === 'manticoresearch'">
                               <template v-if="isManticoreTextColumn(column)">
@@ -6177,9 +6199,9 @@ watch(
                                   <p class="text-xs leading-5 text-muted-foreground">{{ t("contextMenu.mysqlAutoIncrementNonemptyHint") }}</p>
                                 </PopoverContent>
                               </Popover>
-                              <label :class="[structurePropertyLabelClass, 'flex-1 basis-0']" :title="t('structureEditor.onUpdateCurrentTimestamp')">
+                              <label :class="[structurePropertyLabelClass, 'shrink-0']" :title="t('structureEditor.onUpdateCurrentTimestamp')">
                                 <input v-model="column.extra.onUpdateCurrentTimestamp" type="checkbox" :class="[structureCheckboxClass, 'shrink-0']" :disabled="isMysqlGeneratedActive(column)" />
-                                <span class="min-w-0 truncate">{{ t("structureEditor.onUpdateCurrentTimestamp") }}</span>
+                                <span>{{ t("structureEditor.onUpdateCurrentTimestamp") }}</span>
                               </label>
                             </template>
                             <!-- Dameng: IDENTITY -->

@@ -681,6 +681,8 @@ describe("SELECT star expansion", () => {
   it.each([
     ["oracle", "mysql"],
     ["oracle", undefined],
+    ["oceanbase-oracle", "mysql"],
+    ["oceanbase-oracle", undefined],
     [undefined, "oracle"],
   ] as const)("preserves required Oracle column quotes with databaseType %s and dialect %s", (databaseType, dialect) => {
     const columnsByTable = new Map([["orders", ["OrderId", "order_id", "AGENT_NAME", "SELECT", "created at", "ACCOUNT$SYS"].map((name) => ({ name, table: "orders" }))]]);

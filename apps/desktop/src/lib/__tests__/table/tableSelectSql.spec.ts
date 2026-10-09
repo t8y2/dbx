@@ -286,6 +286,10 @@ describe("quoteTableIdentifier", () => {
     expect(quoteTableIdentifierIfNeeded("oracle", "DBX_TEST")).toBe("DBX_TEST");
     expect(quoteTableIdentifierIfNeeded("oracle", "Order")).toBe('"Order"');
     expect(quoteTableIdentifierIfNeeded("oracle", "ORDER")).toBe('"ORDER"');
+    expect(quoteTableIdentifierIfNeeded("oceanbase-oracle", "DBX_TEST")).toBe("DBX_TEST");
+    expect(quoteTableIdentifierIfNeeded("oceanbase-oracle", "Order")).toBe('"Order"');
+    expect(quoteTableIdentifierIfNeeded("oceanbase-oracle", "order_id")).toBe('"order_id"');
+    expect(quoteTableIdentifierIfNeeded("oceanbase-oracle", "ORDER")).toBe('"ORDER"');
     expect(quoteTableIdentifierIfNeeded("dameng", "DBX_TEST")).toBe("DBX_TEST");
     expect(quoteTableIdentifierIfNeeded("dameng", "order detail")).toBe('"order detail"');
     expect(quoteTableIdentifierIfNeeded("postgres", "dbx_test")).toBe("dbx_test");

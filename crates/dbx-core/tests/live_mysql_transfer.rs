@@ -94,6 +94,7 @@ fn transfer_request(
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
+        object_conflict_policy: Default::default(),
         batch_size: 2,
     }
 }
@@ -201,6 +202,7 @@ async fn run_live_mysql_cross_version_transfer_completes_on_small_stack() {
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
+        object_conflict_policy: Default::default(),
         batch_size: 100,
     };
 
@@ -357,6 +359,7 @@ async fn live_mysql_transfer_keeps_columns_whose_comment_mentions_foreign_key() 
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
+        object_conflict_policy: Default::default(),
         batch_size: 10,
     };
 
@@ -517,6 +520,7 @@ async fn live_mysql_transfer_downgrades_unsupported_source_collations() {
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
+        object_conflict_policy: Default::default(),
         batch_size: 10,
     };
 
@@ -582,6 +586,7 @@ async fn live_mysql_transfer_downgrades_unsupported_source_collations() {
             target_table_name_case: TransferTableNameCase::Preserve,
             quote_target_column_names: true,
             ownership_policy: TransferOwnershipPolicy::Preserve,
+            object_conflict_policy: Default::default(),
             batch_size: 10,
         };
         assert_eq!(
@@ -890,6 +895,7 @@ async fn live_mysql_transfer_structure_overwrite_rejects_incompatible_target_col
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
+        object_conflict_policy: Default::default(),
         batch_size: 10,
     };
 
@@ -947,6 +953,7 @@ async fn live_mysql_transfer_structure_overwrite_rejects_incompatible_target_col
             target_table_name_case: TransferTableNameCase::Preserve,
             quote_target_column_names: true,
             ownership_policy: TransferOwnershipPolicy::Preserve,
+            object_conflict_policy: Default::default(),
             batch_size: 10,
         };
         let required_result = transfer_table(
@@ -1045,6 +1052,7 @@ async fn live_mysql_transfer_structure_only_rejects_incompatible_target_columns(
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
+        object_conflict_policy: Default::default(),
         batch_size: 10,
     };
 
@@ -1145,6 +1153,7 @@ async fn live_mysql_transfer_drop_target_parent_child_foreign_key() {
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
+        object_conflict_policy: Default::default(),
         batch_size: 10,
     };
 
@@ -1339,6 +1348,7 @@ async fn live_mysql_transfer_drop_target_rebuilds_incompatible_structure() {
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
+        object_conflict_policy: Default::default(),
         batch_size: 10,
     };
 
@@ -1528,6 +1538,7 @@ async fn live_mysql_transfer_drop_target_rejects_external_incoming_fk() {
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
+        object_conflict_policy: Default::default(),
         batch_size: 10,
     };
 
@@ -1620,6 +1631,7 @@ async fn live_mysql_transfer_drop_target_circular_foreign_keys() {
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
+        object_conflict_policy: Default::default(),
         batch_size: 10,
     };
 
@@ -1850,6 +1862,7 @@ async fn live_mysql_transfer_drop_target_retains_backup_on_failure() {
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
+        object_conflict_policy: Default::default(),
         batch_size: 10,
     };
 
@@ -2029,6 +2042,7 @@ async fn live_mysql_keyset_pagination_copies_every_row() {
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
+        object_conflict_policy: Default::default(),
         batch_size: 3,
     };
 
@@ -2154,6 +2168,7 @@ async fn live_mysql_progress_read_survives_total_duration_beyond_timeout() {
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
+        object_conflict_policy: Default::default(),
         batch_size: 10000,
     };
 
@@ -2255,6 +2270,7 @@ async fn live_mysql_transfer_drop_target_inspects_dependent_views_without_the_us
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
+        object_conflict_policy: Default::default(),
         batch_size: 10,
     };
 

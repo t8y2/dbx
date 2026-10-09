@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { buildTransferObjectSelectionField, countTransferObjects } from "./transferSelections";
 import { createTaskLoadTracker } from "./taskLoadTracker";
 import { describeTransferStructureOperation, summarizeTransferStructureOperations } from "./structurePlanSummary";
+import { describeTransferSchemaObjects } from "./schemaObjectPlanSummary";
 import {
   confirmTransferWithProductionSafety,
   createTransferSubmission,
@@ -18,6 +19,7 @@ import {
   transferPreviewSql,
   transferStrategyOptions,
   TRANSFER_STRUCTURE_PREVIEW_UNAVAILABLE,
+  TRANSFER_OBJECT_PREVIEW_UNAVAILABLE,
   type TransferStrategy,
 } from "./transferStrategy";
 import { Input } from "@/components/ui/input";
@@ -100,6 +102,7 @@ const objectGroups = ref<Partial<Record<TransferObjectKind, string[]>>>({});
 const selectedObjects = ref<Partial<Record<TransferObjectKind, Set<string>>>>({});
 const objectSearch = ref("");
 const loadingObjects = ref(false);
+const objectLoadErrors = ref<string[]>([]);
 const transferContent = ref<TransferContent>("structureAndData");
 
 const selectedTables = computed(() => new Set(selectedObjects.value.TABLE ?? []));
@@ -114,6 +117,8 @@ const OBJECT_KIND_LABEL_KEY: Record<TransferObjectKind, string> = {
   TRIGGER: "objectTypeTrigger",
   SEQUENCE: "objectTypeSequence",
   EVENT: "objectTypeEvent",
+  PACKAGE: "objectTypePackage",
+  PACKAGE_BODY: "objectTypePackageBody",
 };
 
 const treeSelection = computed<Record<string, string[]>>({
@@ -197,6 +202,8 @@ const targetTableStrategy = computed<TransferStrategy>({
 const targetTableNameCase = ref<TransferTableNameCase>("preserve");
 const quoteTargetColumnNames = ref(true);
 const batchSize = ref(1000);
+const objectConflictPolicy = ref<api.TransferObjectConflictPolicy>("skip");
+const hasSelectedPackages = computed(() => transferContent.value !== "dataOnly" && ((selectedObjects.value.PACKAGE?.size ?? 0) > 0 || (selectedObjects.value.PACKAGE_BODY?.size ?? 0) > 0));
 const showSqlPreviewConfirm = ref(false);
 // Per-source-table filter: table name -> bare WHERE predicate or full SELECT.
 const tableFilters = ref<Record<string, string>>({});
@@ -505,6 +512,7 @@ async function loadObjects(isCancelled: () => boolean = () => false) {
   const database = sourceDatabaseName.value;
   if (!connectionId || !isTransferDatabaseSelected(databaseOption)) {
     objectGroups.value = {};
+    objectLoadErrors.value = [];
     return;
   }
   // 竞态防护：捕获发起时的上下文快照，加载期间用户切换连接/数据库/Schema 后，
@@ -513,6 +521,7 @@ async function loadObjects(isCancelled: () => boolean = () => false) {
   const schemaValue = sourceSchema.value;
   const isStale = () => isCancelled() || sourceConnectionId.value !== connectionId || sourceDatabase.value !== databaseOption || (sourceCatalog.value || undefined) !== catalog || sourceSchema.value !== schemaValue;
   loadingObjects.value = true;
+  objectLoadErrors.value = [];
   try {
     if (isMongoConnection(connectionId)) {
       const collections = await api.mongoListCollections(connectionId, database);
@@ -536,7 +545,8 @@ async function loadObjects(isCancelled: () => boolean = () => false) {
           const objects = await api.listObjects(connectionId, database, schema, [kind], undefined, undefined, undefined, catalog);
           groups[kind] = objects.map((o) => o.name);
         }
-      } catch {
+      } catch (error) {
+        if (!isStale() && (kind === "PACKAGE" || kind === "PACKAGE_BODY")) objectLoadErrors.value.push(`${t(`transfer.${OBJECT_KIND_LABEL_KEY[kind]}`)}: ${String(error)}`);
         groups[kind] = [];
       }
     }
@@ -763,6 +773,8 @@ function resetState(cancelTaskLoad = true) {
   targetTableNameCase.value = "preserve";
   quoteTargetColumnNames.value = true;
   batchSize.value = 1000;
+  objectConflictPolicy.value = "skip";
+  objectLoadErrors.value = [];
   tableFilters.value = {};
   filterDialogOpen.value = false;
   filterEditingTable.value = "";
@@ -883,6 +895,7 @@ async function requestStartTransfer() {
     targetTableNameCase: targetTableNameCase.value,
     quoteTargetColumnNames: quoteTargetColumnNames.value,
     ownershipPolicy: "preserve",
+    objectConflictPolicy: hasSelectedPackages.value ? objectConflictPolicy.value : "skip",
     batchSize: batchSize.value,
     tableFilters: requestedTableFilters(),
     dropTargetConfirmed: false,
@@ -966,6 +979,7 @@ function currentConfig(): TransferTaskConfig {
     targetTableNameCase: targetTableNameCase.value,
     quoteTargetColumnNames: quoteTargetColumnNames.value,
     batchSize: batchSize.value,
+    objectConflictPolicy: objectConflictPolicy.value,
     tableFilters: requestedTableFilters(),
     dropTargetConfirmed: false,
   };
@@ -1019,6 +1033,7 @@ async function loadTaskIntoForm(task: TransferTask) {
   targetTableNameCase.value = config.targetTableNameCase;
   quoteTargetColumnNames.value = config.quoteTargetColumnNames;
   batchSize.value = config.batchSize;
+  objectConflictPolicy.value = config.objectConflictPolicy === "replace" ? "replace" : "skip";
   pendingSelectedObjectsPrefill.value = Object.keys(config.objects).length > 0 ? JSON.parse(JSON.stringify(config.objects)) : null;
   pendingTableFiltersPrefill.value = config.tableFilters && Object.keys(config.tableFilters).length > 0 ? { ...config.tableFilters } : null;
 
@@ -1205,24 +1220,32 @@ const confirmationDetails = computed(() => {
     }
     lines.push(t("transfer.structurePlanSqlPreview"));
 
-    const unexpandedObjects = request.objects.filter((selection) => selection.objectType !== "TABLE" && selection.names.length > 0);
+    const unexpandedObjects = request.objects.filter((selection) => selection.objectType !== "TABLE" && selection.names.some((name) => !preview.schemaObjects?.items.some((item) => item.objectType === selection.objectType && item.name === name)));
     if (unexpandedObjects.length > 0) {
       lines.push(t("transfer.structurePreviewUnexpandedObjects", { objects: unexpandedObjects.map((selection) => selection.names.join(", ")).join("; ") }));
     }
     lines.push(t("transfer.structurePreviewRevalidation"));
   }
+  lines.push(...describeTransferSchemaObjects(preview.schemaObjects, (key) => t(key)));
   return lines.filter(Boolean).join("\n");
 });
 
 function transferPreviewFailureMessage(message: string): string {
   if (message === "TRANSFER_REBUILD_PREVIEW_UNAVAILABLE") return t("transfer.rebuildPreviewUnavailable");
   if (message === TRANSFER_STRUCTURE_PREVIEW_UNAVAILABLE) return t("transfer.structurePreviewUnavailable");
+  if (message === TRANSFER_OBJECT_PREVIEW_UNAVAILABLE) return t("transfer.objectPreviewUnavailable");
   return t("transfer.previewFailed", { message });
 }
 
 function requestTransferConfirmation(request: api.TransferRequest, preview: api.TransferOwnershipPreview): Promise<boolean> {
   confirmationRequest.value = request;
   confirmationPreview.value = preview;
+  if (preview.schemaObjects?.canExecute === false || preview.schemaObjects?.items.some((item) => item.action === "blocked")) {
+    return new Promise((resolve) => {
+      resolveTransferConfirmation = resolve;
+      showSqlPreviewConfirm.value = true;
+    });
+  }
   const reviewText = hasTransferSqlPreview(preview)
     ? transferPlanReviewText(confirmationStrategy.value, confirmationDetails.value, preview)
     : [confirmationSummary.value, `${t("transfer.targetTableHandling")}: ${confirmationStrategy.value}`, ...request.objects.map((selection) => selection.names.join(", "))].join("\n");
@@ -1241,6 +1264,7 @@ function requestTransferConfirmation(request: api.TransferRequest, preview: api.
 }
 
 function resolveStartDecision(confirmed: boolean) {
+  if (confirmed && (confirmationPreview.value?.schemaObjects?.canExecute === false || confirmationPreview.value?.schemaObjects?.items.some((item) => item.action === "blocked"))) return;
   const resolve = resolveTransferConfirmation;
   resolveTransferConfirmation = undefined;
   showStartConfirm.value = false;
@@ -1482,6 +1506,8 @@ async function saveConfigTask() {
                 {{ t("transfer.selectSourceFirst") }}
               </div>
               <ObjectSelectionTree v-model="treeSelection" :groups="treeGroups" :disabled-groups="treeDisabledGroups" :disabled-hints="treeDisabledHints" :qualifiers="objectQualifiers" v-model:search="objectSearch" :loading="loadingObjects" class="min-h-0 flex-1" />
+              <p v-if="objectLoadErrors.length" role="alert" class="whitespace-pre-line text-xs text-destructive">{{ objectLoadErrors.join("\n") }}</p>
+              <p v-if="hasSelectedPackages" class="text-xs text-muted-foreground">{{ t("transfer.packageDependencyHint") }}</p>
               <!-- Per-table SQL filters (MySQL / PostgreSQL sources) -->
               <div v-if="tableFilterSupported && transferContent !== 'structureOnly' && selectedTableList.length" class="shrink-0 rounded-lg border border-border/60 bg-card/60 p-1.5">
                 <div class="flex items-center justify-between gap-2 px-1 pb-1">
@@ -1547,6 +1573,16 @@ async function saveConfigTask() {
                 </Select>
               </div>
               <p v-if="rebuildDisabledHint" class="text-xs text-muted-foreground">{{ rebuildDisabledHint }}</p>
+              <div v-if="hasSelectedPackages" class="flex items-center gap-3">
+                <Label class="text-xs shrink-0">{{ t("transfer.objectConflictPolicy") }}</Label>
+                <Select v-model="objectConflictPolicy">
+                  <SelectTrigger class="h-7 text-xs"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="skip">{{ t("transfer.objectActionSkip") }}</SelectItem>
+                    <SelectItem value="replace">{{ t("transfer.objectActionReplace") }}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
               <div class="flex items-center gap-3">
                 <Label class="text-xs shrink-0">{{ t("transfer.targetTableNameCase") }}</Label>
                 <Select v-model="targetTableNameCase">
@@ -1628,7 +1664,7 @@ async function saveConfigTask() {
     </DialogContent>
   </Dialog>
 
-  <DangerConfirmDialog v-model:open="showSqlPreviewConfirm" :sql="confirmationSql" :title="confirmationTitle" :message="confirmationDangerMessage" :details-text="confirmationDetails" :confirm-label="t('transfer.start')" :close-on-confirm="false" @confirm="resolveStartDecision(true)" />
+  <DangerConfirmDialog v-model:open="showSqlPreviewConfirm" :sql="confirmationSql" :title="confirmationTitle" :message="confirmationDangerMessage" :details-text="confirmationDetails" :confirm-label="t('transfer.start')" :confirm-disabled="confirmationPreview?.schemaObjects?.canExecute === false || confirmationPreview?.schemaObjects?.items.some((item) => item.action === 'blocked')" :close-on-confirm="false" @confirm="resolveStartDecision(true)" />
 
   <Dialog v-model:open="ownershipDialogOpen">
     <DialogContent class="sm:max-w-[520px]" @interact-outside.prevent>

@@ -7,6 +7,7 @@ export type TransferStrategy = TransferMode | "rebuild";
 
 /** Fail-closed discriminator: a structure-only transfer may not run without its SQL preview. */
 export const TRANSFER_STRUCTURE_PREVIEW_UNAVAILABLE = "TRANSFER_STRUCTURE_PREVIEW_UNAVAILABLE";
+export const TRANSFER_OBJECT_PREVIEW_UNAVAILABLE = "TRANSFER_OBJECT_PREVIEW_UNAVAILABLE";
 
 export function resolveTransferStrategy(options: { mode?: TransferMode; dropTargetBeforeCreate?: boolean }): TransferStrategy {
   return options.dropTargetBeforeCreate ? "rebuild" : (options.mode ?? "append");
@@ -55,7 +56,8 @@ function freezeTransferRequest(request: TransferRequest): TransferRequest {
  * existing `rebuild.sql`.
  */
 export function transferPreviewSql(preview: TransferOwnershipPreview): string {
-  const sections = [preview.rebuild?.backupSql, preview.structure?.sql, preview.rebuild?.cleanupSql].filter((section): section is string => Boolean(section));
+  const objectSql = preview.schemaObjects?.items.filter((item) => item.action === "create" || item.action === "replace").map((item) => item.ddl).filter(Boolean).join("\n\n");
+  const sections = [preview.rebuild?.backupSql, preview.structure?.sql, objectSql, preview.rebuild?.cleanupSql].filter((section): section is string => Boolean(section));
   if (sections.length > 0) return sections.join("\n\n");
   return preview.rebuild?.sql ?? "";
 }
@@ -67,7 +69,7 @@ export function transferPlanReviewText(strategy: string, summary: string, previe
 
 /** Whether this preview has SQL the user must review in a read-only confirmation. */
 export function hasTransferSqlPreview(preview: TransferOwnershipPreview): boolean {
-  return Boolean(preview.rebuild || preview.structure);
+  return Boolean(preview.rebuild || preview.structure || preview.schemaObjects);
 }
 
 interface TransferSubmissionOptions {
@@ -106,7 +108,12 @@ export function createTransferSubmission(options: TransferSubmissionOptions) {
         // A structure-only transfer changes the target schema; never fall back to the plain
         // start confirmation when the backend did not say what it is going to run.
         if (request.content === "structureOnly" && !preview.structure) throw new Error(TRANSFER_STRUCTURE_PREVIEW_UNAVAILABLE);
+        const plannedObjects = request.objects.filter((selection) => (selection.objectType === "PACKAGE" || selection.objectType === "PACKAGE_BODY") && selection.names.length > 0);
+        if (request.content !== "dataOnly" && plannedObjects.some((selection) => selection.names.some((name) => !preview.schemaObjects?.items.some((item) => item.objectType === selection.objectType && item.name === name)))) {
+          throw new Error(TRANSFER_OBJECT_PREVIEW_UNAVAILABLE);
+        }
         if (!(await options.confirm(request, preview)) || !isCurrent()) return false;
+        if (preview.schemaObjects?.canExecute === false || preview.schemaObjects?.items.some((item) => item.action === "blocked")) return false;
         options.execute(Object.freeze({ ...request, dropTargetConfirmed: request.dropTargetBeforeCreate }));
         return true;
       } catch (error) {

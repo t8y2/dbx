@@ -24,6 +24,15 @@ describe("countTransferObjects", () => {
 });
 
 describe("buildTransferObjectSelections", () => {
+  it("keeps package specification and body selections separate", () => {
+    expect(buildTransferObjectSelections({ PACKAGE: setOf(["Case P"]) }, [])).toEqual([{ objectType: "PACKAGE", names: ["Case P"] }]);
+    expect(buildTransferObjectSelections({ PACKAGE_BODY: setOf(["Case P"]) }, [])).toEqual([{ objectType: "PACKAGE_BODY", names: ["Case P"] }]);
+  });
+
+  it("drops stale package selections when the mode or target disables them", () => {
+    expect(buildTransferObjectSelections({ TABLE: setOf(["T"]), PACKAGE: setOf(["P"]), PACKAGE_BODY: setOf(["P"]) }, ["PACKAGE", "PACKAGE_BODY"])).toEqual([]);
+  });
+
   it("serializes non-table selections in request order", () => {
     const result = buildTransferObjectSelections(
       {

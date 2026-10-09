@@ -101,6 +101,7 @@ function normalizeTask(raw: unknown): TransferTask | null {
       ...transferStrategyOptions(resolveTransferStrategy(config)),
       targetTableNameCase: config.targetTableNameCase ?? "preserve",
       quoteTargetColumnNames: config.quoteTargetColumnNames ?? true,
+      objectConflictPolicy: config.objectConflictPolicy === "replace" ? "replace" : "skip",
       batchSize: typeof config.batchSize === "number" && config.batchSize > 0 ? config.batchSize : 1000,
       tableFilters: normalizeTransferTableFilters(config.tableFilters),
       dropTargetConfirmed: false,

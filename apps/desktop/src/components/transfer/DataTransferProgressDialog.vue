@@ -77,6 +77,16 @@ onBeforeUnmount(() => {
         <div v-if="task.errorMessage" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
           {{ translateBackendError(t, task.errorMessage) }}
         </div>
+        <div v-if="task.transferObjectResults?.length" class="max-h-64 space-y-2 overflow-auto text-xs">
+          <p class="font-medium">{{ t("transfer.objectResults") }}</p>
+          <div v-for="result in task.transferObjectResults" :key="`${result.objectType}:${result.schema}:${result.name}`" class="rounded-md border px-3 py-2" :class="result.status === 'failed' ? 'border-destructive/30 text-destructive' : ''">
+            <p>{{ result.objectType }} {{ result.schema }}.{{ result.name }} — {{ t(`transfer.objectResult_${result.status}`) }}</p>
+            <p v-if="result.compileStatus">{{ t("transfer.objectCompilation") }}: {{ result.compileStatus }}</p>
+            <p v-if="result.sourceVerified !== undefined">{{ t(result.sourceVerified ? "transfer.objectSourceVerified" : "transfer.objectSourceUnverified") }}</p>
+            <p v-if="result.error" class="whitespace-pre-line">{{ translateBackendError(t, result.error) }}</p>
+            <p v-if="result.recovery" class="whitespace-pre-line">{{ result.recovery }}</p>
+          </div>
+        </div>
       </div>
 
       <DialogFooter>

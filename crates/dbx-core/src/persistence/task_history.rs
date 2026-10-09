@@ -295,6 +295,8 @@ pub enum TaskItemKind {
     Trigger,
     Sequence,
     Event,
+    Package,
+    PackageBody,
     Object,
 }
 
@@ -309,6 +311,8 @@ impl TaskItemKind {
             Self::Trigger => "trigger",
             Self::Sequence => "sequence",
             Self::Event => "event",
+            Self::Package => "package",
+            Self::PackageBody => "package_body",
             Self::Object => "object",
         }
     }
@@ -323,6 +327,8 @@ impl TaskItemKind {
             "trigger" => Some(Self::Trigger),
             "sequence" => Some(Self::Sequence),
             "event" => Some(Self::Event),
+            "package" => Some(Self::Package),
+            "package_body" => Some(Self::PackageBody),
             "object" => Some(Self::Object),
             _ => None,
         }
@@ -341,6 +347,8 @@ impl TaskItemKind {
             "Trigger" => Self::Trigger,
             "Sequence" => Self::Sequence,
             "Event" => Self::Event,
+            "Package" => Self::Package,
+            "PackageBody" => Self::PackageBody,
             _ => return (Self::Object, value.to_string()),
         };
         (kind, name.to_string())
@@ -779,6 +787,19 @@ impl TransferTaskJournal {
         ] {
             for raw in items {
                 let (item_kind, source_object) = TaskItemKind::from_transfer(raw);
+                let object_result = outcome
+                    .object_results
+                    .iter()
+                    .find(|result| format!("{:?}:{}", result.object_type, result.name) == *raw);
+                let safe_summary = object_result.map(|result| {
+                    format!(
+                        "Package result: {}; compile status: {}; source verified: {}. {}",
+                        result.status,
+                        result.compile_status.as_deref().unwrap_or("not checked"),
+                        result.source_verified.map_or("not checked", |verified| if verified { "yes" } else { "no" }),
+                        result.recovery.as_deref().unwrap_or("")
+                    )
+                });
                 self.persist_item(TaskRunItem {
                     run_id: self.run_id.clone(),
                     item_index: next_index as i64,
@@ -791,7 +812,7 @@ impl TransferTaskJournal {
                     target_row_count: None,
                     row_count_state: RowCountState::NotApplicable,
                     has_table_filter: false,
-                    safe_error_summary: safe_item_summary(status),
+                    safe_error_summary: safe_summary.or_else(|| safe_item_summary(status)),
                 })
                 .await;
                 next_index += 1;
@@ -961,6 +982,7 @@ mod tests {
             target_table_name_case: TransferTableNameCase::Preserve,
             quote_target_column_names: true,
             ownership_policy: TransferOwnershipPolicy::Preserve,
+            object_conflict_policy: Default::default(),
             batch_size: 500,
             table_filters: HashMap::from([
                 ("orders".to_string(), format!("WHERE note = '{filter_secret}'")),
@@ -980,6 +1002,33 @@ mod tests {
         journal.observe_source_count(0, None);
         journal.observe_table_progress(0, 2);
         journal.finish_table(0, TaskItemStatus::Failed, None, None).await;
+        journal.record_object_outcome(&TransferObjectOutcome {
+            transferred: vec!["Package:P".into()],
+            skipped: Vec::new(),
+            failed: vec!["PackageBody:P".into()],
+            object_results: vec![
+                crate::transfer::TransferSchemaObjectResult {
+                    object_type: crate::transfer::TransferObjectKind::Package,
+                    name: "P".into(),
+                    schema: "main".into(),
+                    status: "transferred".into(),
+                    compile_status: Some("VALID".into()),
+                    source_verified: Some(true),
+                    error: None,
+                    recovery: None,
+                },
+                crate::transfer::TransferSchemaObjectResult {
+                    object_type: crate::transfer::TransferObjectKind::PackageBody,
+                    name: "P".into(),
+                    schema: "main".into(),
+                    status: "failed".into(),
+                    compile_status: Some("INVALID".into()),
+                    source_verified: Some(false),
+                    error: Some(driver_secret.into()),
+                    recovery: Some("Target definitions restored and verified".into()),
+                },
+            ],
+        }).await;
         journal
             .finish(&TransferProgress {
                 transfer_id: request.transfer_id.clone(),
@@ -991,6 +1040,7 @@ mod tests {
                 status: TransferStatus::Error,
                 error: Some(driver_secret.to_string()),
                 terminal: true,
+                object_result: None,
             })
             .await;
 
@@ -1005,6 +1055,15 @@ mod tests {
         assert_eq!(items.items[0].target_row_count, None);
         assert_eq!(items.items[0].row_count_state, RowCountState::Incomplete);
         assert_eq!(items.items[0].safe_error_summary.as_deref(), Some(ITEM_FAILED_SUMMARY));
+        assert_eq!(items.items[1].item_kind, TaskItemKind::Package);
+        assert_eq!(items.items[1].status, TaskItemStatus::Succeeded);
+        assert!(items.items[1].safe_error_summary.as_deref().unwrap().contains("source verified: yes"));
+        assert_eq!(items.items[2].item_kind, TaskItemKind::PackageBody);
+        assert_eq!(items.items[2].status, TaskItemStatus::Failed);
+        let package_summary = items.items[2].safe_error_summary.as_deref().unwrap();
+        assert!(package_summary.contains("compile status: INVALID"));
+        assert!(package_summary.contains("source verified: no"));
+        assert!(package_summary.contains("restored and verified"));
 
         let serialized = serde_json::to_string(&(detail, items)).unwrap();
         assert!(!serialized.contains(filter_secret));

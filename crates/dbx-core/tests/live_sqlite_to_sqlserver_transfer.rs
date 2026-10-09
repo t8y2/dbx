@@ -175,6 +175,7 @@ async fn live_sqlite_to_sqlserver_keeps_sixty_four_bit_integer_values() {
         target_table_name_case: TransferTableNameCase::Preserve,
         quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
+        object_conflict_policy: Default::default(),
         batch_size: 100,
     };
 

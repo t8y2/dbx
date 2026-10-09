@@ -8,7 +8,7 @@ export enum TransferObjectFamily {
   SqlServer = "sqlserver",
 }
 
-export type TransferObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "SEQUENCE" | "EVENT";
+export type TransferObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "SEQUENCE" | "EVENT" | "PACKAGE" | "PACKAGE_BODY";
 
 const MYSQL_KINDS: TransferObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "EVENT"];
 const POSTGRES_KINDS: TransferObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE"];
@@ -40,6 +40,7 @@ export function isSameTransferFamily(a?: DatabaseType, b?: DatabaseType): boolea
 }
 
 export function transferObjectKindsForDatabase(dbType?: DatabaseType): TransferObjectKind[] {
+  if (dbType === "oracle" || dbType === "oceanbase-oracle") return [...ORACLE_KINDS, "PACKAGE", "PACKAGE_BODY"];
   switch (transferObjectFamily(dbType)) {
     case TransferObjectFamily.Mysql:
       return [...MYSQL_KINDS];
@@ -56,7 +57,7 @@ export function transferObjectKindsForDatabase(dbType?: DatabaseType): TransferO
 
 /**
  * Kinds selectable for a transfer between the two databases. Within one
- * family every kind of the source is allowed; across families only
+ * family only kinds supported by both databases are allowed; across families only
  * sequences are allowed (plain DDL without a query body), and only when
  * both sides support the type. Views are excluded: the backend rewrites
  * only the DDL wrapper, quoting and schema qualifiers, not the view
@@ -65,7 +66,8 @@ export function transferObjectKindsForDatabase(dbType?: DatabaseType): TransferO
  */
 export function crossFamilyTransferableKinds(a?: DatabaseType, b?: DatabaseType): TransferObjectKind[] {
   if (isSameTransferFamily(a, b)) {
-    return transferObjectKindsForDatabase(a);
+    const targetKinds = transferObjectKindsForDatabase(b);
+    return transferObjectKindsForDatabase(a).filter((kind) => targetKinds.includes(kind));
   }
   const aFam = transferObjectFamily(a);
   const bFam = transferObjectFamily(b);

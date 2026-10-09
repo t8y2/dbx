@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { TransferOwnershipPreview, TransferRequest } from "@/lib/backend/api";
 import type { ConnectionConfig } from "@/types/database";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
-import { confirmTransferWithProductionSafety, createTransferSubmission, rebuildUnavailableReason, resolveTransferStrategy, supportsTransferUpsert, transferStrategyOptions } from "../transferStrategy";
+import { confirmTransferWithProductionSafety, createTransferSubmission, rebuildUnavailableReason, resolveTransferStrategy, supportsTransferUpsert, transferStrategyOptions, transferPreviewSql } from "../transferStrategy";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -91,6 +91,41 @@ describe("transfer strategies", () => {
 });
 
 describe("transfer submission", () => {
+  it("requires a complete package plan without adding an unselected body", async () => {
+    const execute = vi.fn();
+    const confirm = vi.fn().mockResolvedValue(true);
+    const plan: TransferOwnershipPreview = {
+      missingOwners: [], targetOwner: "TARGET",
+      schemaObjects: { canExecute: true, items: [{ objectType: "PACKAGE", name: "Keep Case", sourceSchema: "SOURCE", targetSchema: "TARGET", action: "replace", ddl: 'CREATE OR REPLACE PACKAGE "TARGET"."Keep Case" AS PROCEDURE p; END;', dependencies: [], warnings: [], errors: [] }] },
+    };
+    const submission = createTransferSubmission({ preview: async () => plan, confirmOwnership: async () => "preserve", confirm, execute });
+    const input = request({ tables: [], objects: [{ objectType: "PACKAGE", names: ["Keep Case"] }], dropTargetBeforeCreate: false, objectConflictPolicy: "replace" });
+    await expect(submission.start(input)).resolves.toBe(true);
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({ objects: input.objects, objectConflictPolicy: "replace" }));
+    expect(transferPreviewSql(plan)).toBe(plan.schemaObjects!.items[0]!.ddl);
+    expect(confirm).toHaveBeenCalledWith(expect.anything(), plan);
+  });
+
+  it("refuses a selected package body missing from the backend plan", async () => {
+    const execute = vi.fn();
+    const confirm = vi.fn();
+    const submission = createTransferSubmission({ preview: async () => ({ missingOwners: [], targetOwner: "TARGET", schemaObjects: { canExecute: true, items: [] } }), confirmOwnership: async () => "preserve", confirm, execute });
+    await expect(submission.start(request({ tables: [], objects: [{ objectType: "PACKAGE_BODY", names: ["P"] }], dropTargetBeforeCreate: false }))).rejects.toThrow("TRANSFER_OBJECT_PREVIEW_UNAVAILABLE");
+    expect(confirm).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("shows blocked package dependencies but cannot execute even if confirmation returns true", async () => {
+    const execute = vi.fn();
+    const confirm = vi.fn().mockResolvedValue(true);
+    const plan: TransferOwnershipPreview = { missingOwners: [], targetOwner: "TARGET", schemaObjects: { canExecute: false, items: [{ objectType: "PACKAGE_BODY", name: "P", sourceSchema: "SOURCE", targetSchema: "TARGET", action: "blocked", ddl: "", dependencies: [{ owner: "TARGET", name: "P", objectType: "PACKAGE", available: false }], warnings: [], errors: ["Package specification missing"] }] } };
+    const submission = createTransferSubmission({ preview: async () => plan, confirmOwnership: async () => "preserve", confirm, execute });
+    await expect(submission.start(request({ tables: [], objects: [{ objectType: "PACKAGE_BODY", names: ["P"] }], dropTargetBeforeCreate: false }))).resolves.toBe(false);
+    expect(confirm).toHaveBeenCalledWith(expect.anything(), plan);
+    expect(execute).not.toHaveBeenCalled();
+    expect(transferPreviewSql(plan)).toBe("");
+  });
+
   it("reviews backend SQL and executes the frozen request only after confirmation", async () => {
     const decision = deferred<boolean>();
     const reviewed: Array<{ request: TransferRequest; preview: TransferOwnershipPreview }> = [];

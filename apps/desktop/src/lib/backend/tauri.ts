@@ -5422,7 +5422,7 @@ export interface HistoryConnectionOption extends HistoryConnectionFilter {
 export type TaskType = "transfer";
 export type TaskLifecycleOwner = "tauri" | "web";
 export type TaskRunStatus = "running" | "succeeded" | "partial_failed" | "failed" | "cancelled";
-export type TaskItemKind = "table" | "view" | "materialized_view" | "procedure" | "function" | "trigger" | "sequence" | "event" | "object";
+export type TaskItemKind = "table" | "view" | "materialized_view" | "procedure" | "function" | "trigger" | "sequence" | "event" | "object" | "package" | "package_body";
 export type TaskItemStatus = "pending" | "running" | "succeeded" | "skipped" | "failed" | "cancelled" | "not_started" | "incomplete";
 export type TaskRowCountState = "not_applicable" | "known" | "unknown" | "incomplete";
 export type TransferRunContent = "structure_and_data" | "structure_only" | "data_only";
@@ -5654,7 +5654,8 @@ export type TransferMode = "append" | "overwrite" | "upsert";
 export type TransferTableNameCase = "preserve" | "lower" | "upper";
 export type TransferOwnershipPolicy = "preserve" | "skip" | "reassignMissing";
 export type TransferContent = "structureAndData" | "structureOnly" | "dataOnly";
-export type TransferObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "SEQUENCE" | "EVENT";
+export type TransferObjectConflictPolicy = "skip" | "replace";
+export type TransferObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "SEQUENCE" | "EVENT" | "PACKAGE" | "PACKAGE_BODY";
 
 export interface TransferObjectSelection {
   objectType: TransferObjectKind;
@@ -5679,6 +5680,7 @@ export interface TransferRequest {
   targetTableNameCase: TransferTableNameCase;
   quoteTargetColumnNames: boolean;
   ownershipPolicy?: TransferOwnershipPolicy;
+  objectConflictPolicy?: TransferObjectConflictPolicy;
   batchSize: number;
   /**
    * Optional per-source-table transfer filter.
@@ -5727,6 +5729,35 @@ export interface TransferOwnershipPreview {
   };
   /** Structure-plan preview: present for structure-only transfers. */
   structure?: TransferStructurePreview;
+  schemaObjects?: TransferSchemaObjectPreview;
+}
+
+export interface TransferSchemaObjectPlan {
+  objectType: TransferObjectKind;
+  name: string;
+  sourceSchema: string;
+  targetSchema: string;
+  action: "create" | "replace" | "skip" | "blocked";
+  ddl: string;
+  dependencies: Array<{ owner: string; name: string; objectType: string; available: boolean }>;
+  warnings: string[];
+  errors: string[];
+}
+
+export interface TransferSchemaObjectPreview {
+  items: TransferSchemaObjectPlan[];
+  canExecute: boolean;
+}
+
+export interface TransferObjectResult {
+  objectType: TransferObjectKind;
+  name: string;
+  schema: string;
+  status: "transferred" | "skipped" | "failed";
+  compileStatus?: string;
+  sourceVerified?: boolean;
+  error?: string;
+  recovery?: string;
 }
 
 export interface TransferProgress {
@@ -5740,6 +5771,7 @@ export interface TransferProgress {
   error: string | null;
   terminal: boolean;
   transferFailuresOmitted?: number;
+  objectResult?: TransferObjectResult;
 }
 
 export async function startTransfer(request: TransferRequest, onProgress: (progress: TransferProgress) => void, onStarted?: () => void): Promise<void> {

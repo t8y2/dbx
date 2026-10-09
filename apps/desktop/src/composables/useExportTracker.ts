@@ -66,6 +66,7 @@ export interface ExportTask {
   targetTables?: string[];
   transferFailures?: DataTransferFailure[];
   transferFailuresOmitted?: number;
+  transferObjectResults?: api.TransferObjectResult[];
   sqlFileFailures?: SqlFileFailure[];
   sqlFileFailuresOmitted?: number;
   multiDbSourceTabId?: string;
@@ -758,6 +759,11 @@ export function useExportTracker() {
   function updateDataTransferTask(transferId: string, progress: api.TransferProgress) {
     const task = taskMap.get(transferId);
     if (!task) return;
+    if (progress.objectResult) {
+      const result = progress.objectResult;
+      const previous = task.transferObjectResults ?? [];
+      task.transferObjectResults = [...previous.filter((item) => item.objectType !== result.objectType || item.schema !== result.schema || item.name !== result.name), result];
+    }
     if (progress.transferFailuresOmitted !== undefined) {
       const state = getTransferFailureState(task);
       state.replayOmittedCount = Math.max(state.replayOmittedCount, progress.transferFailuresOmitted);
@@ -767,7 +773,7 @@ export function useExportTracker() {
       recordTransferFailure(task, progress.table, progress.error);
     }
     const nextStatus = normalizeTransferStatus(progress.status, progress.terminal);
-    const hadError = task.status === "Error";
+    const hadError = task.status === "Error" || task.transferObjectResults?.some((result) => result.status === "failed");
     task.status = hadError && nextStatus === "Done" ? "Error" : nextStatus;
     if (isTerminalTransferProgress(progress)) finishDataTransferTask(task);
     task.errorMessage = progress.error || task.errorMessage || null;

@@ -18,7 +18,7 @@ describe("transferObjectKinds", () => {
   it("returns per-family object kinds", () => {
     expect(transferObjectKindsForDatabase("mysql")).toEqual(["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "EVENT"]);
     expect(transferObjectKindsForDatabase("postgres")).toEqual(["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE"]);
-    expect(transferObjectKindsForDatabase("oracle")).toEqual(["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE"]);
+    expect(transferObjectKindsForDatabase("oracle")).toEqual(["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "PACKAGE", "PACKAGE_BODY"]);
     expect(transferObjectKindsForDatabase("sqlserver")).toEqual(["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE"]);
   });
 
@@ -42,6 +42,13 @@ describe("transferObjectKinds", () => {
     expect(isSameTransferFamily("postgres", "sqlite")).toBe(false);
     expect(isSameTransferFamily("sqlserver", "sqlserver")).toBe(true);
     expect(isSameTransferFamily("sqlserver", "mysql")).toBe(false);
+  });
+
+  it.each(["oracle", "oceanbase-oracle"] as const)("selects package parts for %s without widening Dameng support", (databaseType) => {
+    expect(transferObjectKindsForDatabase(databaseType)).toEqual(expect.arrayContaining(["PACKAGE", "PACKAGE_BODY"]));
+    expect(crossFamilyTransferableKinds(databaseType, "oceanbase-oracle")).toEqual(expect.arrayContaining(["PACKAGE", "PACKAGE_BODY"]));
+    expect(crossFamilyTransferableKinds(databaseType, "dameng")).not.toContain("PACKAGE");
+    expect(crossFamilyTransferableKinds("dameng", databaseType)).not.toContain("PACKAGE_BODY");
   });
 
   it("limits cross-family transferable kinds to sequences only", () => {

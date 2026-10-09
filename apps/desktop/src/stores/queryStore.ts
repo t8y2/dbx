@@ -902,7 +902,7 @@ function bindColumnsForSource(
       if (!column.sourceName) return column;
       if (column.sourceKey) {
         if (column.sourceKey !== source.key) return column;
-        if (dbType === "oracle" && !column.sourceNameQuoted && column.sourceName.toUpperCase() === "ROWID") return column;
+        if ((dbType === "oracle" || dbType === "oceanbase-oracle") && !column.sourceNameQuoted && column.sourceName.toUpperCase() === "ROWID") return column;
         const canonicalName = resolveSourceColumnName(dbType, column.sourceName, column.sourceNameQuoted, tableColumns);
         return { ...column, sourceName: canonicalName };
       }
@@ -6319,7 +6319,7 @@ export const useQueryStore = defineStore("query", () => {
     const selectedColumns = new Set(
       analysis.columns.flatMap((column) => {
         if (!column.sourceName || column.sourceKey !== sourceKey) return [];
-        if (databaseType === "oracle" && !column.sourceNameQuoted && column.sourceName.toUpperCase() === "ROWID") return [DBX_ROWID_COLUMN, column.sourceName];
+        if ((databaseType === "oracle" || databaseType === "oceanbase-oracle") && !column.sourceNameQuoted && column.sourceName.toUpperCase() === "ROWID") return [DBX_ROWID_COLUMN, column.sourceName];
         return [column.sourceName];
       }),
     );
@@ -6345,9 +6345,9 @@ export const useQueryStore = defineStore("query", () => {
   async function resolveOracleRowIdSafety(tab: QueryTab, loaded: LoadedEditableSource, databaseType: DatabaseType): Promise<boolean> {
     if (oracleRowIdIsSafeForQuery(tab, loaded)) return true;
     if (loaded.tableMeta.tableType?.trim()) return false;
-    // Never enumerate an Oracle schema on the query execution path: large
+    // Never enumerate an Oracle/OB schema on the query execution path: large
     // schemas can make this optional editability check take minutes (#8462).
-    if (databaseType === "oracle") return false;
+    if (databaseType === "oracle" || databaseType === "oceanbase-oracle") return false;
 
     const connection = useConnectionStore().getConfig(tab.connectionId!);
     const schema = loaded.tableMeta.schema?.trim() || tab.schema?.trim() || connection?.default_schema?.trim() || "";
@@ -6382,7 +6382,9 @@ export const useQueryStore = defineStore("query", () => {
     const unchanged = { sql, metadataSql: sql, hiddenPrimaryKeys: [], largeValuePreview };
     const missingPrimaryKeys =
       declaredPrimaryKeys.length === 0
-        ? primaryKeys.filter((primaryKey) => !(databaseType === "oracle" && primaryKey === DBX_ROWID_COLUMN && metadataAnalysis.columns.some((column) => column.sourceKey === loaded.source.key && !column.sourceNameQuoted && column.sourceName?.toUpperCase() === "ROWID")))
+        ? primaryKeys.filter(
+            (primaryKey) => !((databaseType === "oracle" || databaseType === "oceanbase-oracle") && primaryKey === DBX_ROWID_COLUMN && metadataAnalysis.columns.some((column) => column.sourceKey === loaded.source.key && !column.sourceNameQuoted && column.sourceName?.toUpperCase() === "ROWID")),
+          )
         : missingPrimaryKeysForSource(databaseType, primaryKeys, metadataAnalysis, loaded.source.key);
     if (missingPrimaryKeys.length === 0) return unchanged;
     const primaryKeySet = new Set(primaryKeys);
@@ -6394,7 +6396,7 @@ export const useQueryStore = defineStore("query", () => {
       databaseType,
       primaryKeys: missingPrimaryKeys,
       existingResultNames: metadataAnalysis.selectStar ? loaded.tableMeta.columns.map((column) => column.name) : metadataAnalysis.columns.map((column) => column.resultName),
-      sourceExpressions: missingPrimaryKeys.includes(DBX_ROWID_COLUMN) && (databaseType === "oracle" || databaseType === "xugu") ? { [DBX_ROWID_COLUMN]: databaseType === "oracle" ? "ROWIDTOCHAR(ROWID)" : "ROWID" } : undefined,
+      sourceExpressions: missingPrimaryKeys.includes(DBX_ROWID_COLUMN) && (databaseType === "oracle" || databaseType === "oceanbase-oracle" || databaseType === "xugu") ? { [DBX_ROWID_COLUMN]: databaseType === "xugu" ? "ROWID" : "ROWIDTOCHAR(ROWID)" } : undefined,
     });
     if (!rewritten) return unchanged;
     queryExecutionLog("info", "hidden-primary-keys", {
@@ -6474,9 +6476,9 @@ export const useQueryStore = defineStore("query", () => {
       if (loaded.tableMeta.columns.length === 0) return unchanged;
       if (loaded.tableMeta.tableType?.toUpperCase().includes("VIEW")) return unchanged;
       const primaryKeys = loaded.tableMeta.primaryKeys;
-      const syntheticRowId = (databaseType === "oracle" || databaseType === "xugu") && usesSyntheticRowIdKey(databaseType, primaryKeys, loaded.tableMeta.tableType);
+      const syntheticRowId = (databaseType === "oracle" || databaseType === "oceanbase-oracle" || databaseType === "xugu") && usesSyntheticRowIdKey(databaseType, primaryKeys, loaded.tableMeta.tableType);
       // Base tables without a natural identifier use the same ROWID identity
-      // as table-data tabs (Oracle and Xugu). Confirm the object is a base
+      // as table-data tabs (Oracle, OceanBase Oracle and Xugu). Confirm the object is a base
       // table because selecting ROWID from a view can fail with ORA-01445.
       if (syntheticRowId && !(await resolveOracleRowIdSafety(tab, loaded, databaseType))) return unchanged;
       const declaredPrimaryKeys = syntheticRowId ? [] : primaryKeys;

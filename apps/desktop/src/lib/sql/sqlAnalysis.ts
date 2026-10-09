@@ -897,7 +897,7 @@ export function allPrimaryKeysPresent(primaryKeys: string[], resultColumns: stri
       analysis.columns.flatMap((column) => {
         if (!column.sourceName) return [];
         if (sourceKey && column.sourceKey !== sourceKey) return [];
-        if (databaseType === "oracle" && !column.sourceNameQuoted && column.sourceName.toUpperCase() === "ROWID" && column.sourceKey === sourceKey) return [DBX_ROWID_COLUMN, column.sourceName];
+        if ((databaseType === "oracle" || databaseType === "oceanbase-oracle") && !column.sourceNameQuoted && column.sourceName.toUpperCase() === "ROWID" && column.sourceKey === sourceKey) return [DBX_ROWID_COLUMN, column.sourceName];
         return [column.sourceName];
       }),
     );
@@ -981,7 +981,7 @@ export function sourceColumnsForResult(analysis: EditableQueryInfo, resultColumn
   return matchedColumns.map((column) => {
     if (!column) return undefined;
     if (sourceKey && column.sourceKey !== sourceKey) return undefined;
-    if (databaseType === "oracle" && !column.sourceNameQuoted && column.sourceName?.toUpperCase() === "ROWID" && column.sourceKey === sourceKey) {
+    if ((databaseType === "oracle" || databaseType === "oceanbase-oracle") && !column.sourceNameQuoted && column.sourceName?.toUpperCase() === "ROWID" && column.sourceKey === sourceKey) {
       return primaryKeys?.length === 1 && primaryKeys[0] === DBX_ROWID_COLUMN ? DBX_ROWID_COLUMN : undefined;
     }
     return column.sourceName;

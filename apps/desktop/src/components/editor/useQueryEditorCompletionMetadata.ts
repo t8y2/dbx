@@ -5,6 +5,9 @@ import { COMPLETION_METADATA_CONCURRENCY } from "@/stores/connectionStore";
 import { getSqlCompletionContext } from "@/lib/sql/sqlCompletion";
 import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
 import type { SqlSemanticModel } from "@/lib/sql/semantic/types";
+import { analyzeSqlCompletion, type SqlCompletionAnalysisResult } from "@/lib/sql/sqlCompletionAnalysis";
+import { createSqlCompletionAnalysisWorker } from "@/lib/sql/sqlCompletionAnalysisWorker";
+import { shouldUseQueryEditorLargeDocumentModeForSize } from "@/lib/editor/queryEditorLargeDocument";
 import { usesOracleSessionCompletionColumns as shouldUseOracleSessionCompletionColumns } from "@/lib/sql/oracleCompletionSession";
 import { mergeSqlObjectNavigationType } from "@/lib/sql/sqlNavigation";
 import { requestInsertValueHintsRefresh, supportsInsertValueHints } from "@/lib/editor/codemirrorInsertValueHints";
@@ -59,6 +62,7 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
   const cachedForeignKeysByTable = new Map<string, SqlCompletionForeignKey[]>();
 
   const loadedColumnsByTable = new Set<string>();
+  const completionAnalysisWorker = createSqlCompletionAnalysisWorker();
 
   function sqlCompletionDialectOptions() {
     return {
@@ -100,6 +104,64 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
       };
     }
     return context;
+  }
+
+  let editorCompletionAnalysisCache: {
+    doc: Text;
+    editorState: EditorState;
+    position: number;
+    databaseType: DatabaseType | undefined;
+    dialect: QueryEditorProps["dialect"];
+    driverProfile: string | undefined;
+    syntaxDialect: QueryEditorProps["syntaxDialect"];
+    result: Promise<SqlCompletionAnalysisResult | null>;
+  } | null = null;
+
+  function getEditorSqlCompletionAnalysis(sql: string, position: number, editorState = view.value?.state): Promise<SqlCompletionAnalysisResult | null> {
+    const dialect = sqlBehaviorDialect();
+    const doc = editorState?.doc;
+    const driverProfile = props.connectionId ? connectionStore.getConfig(props.connectionId)?.driver_profile : undefined;
+    if (
+      doc &&
+      editorCompletionAnalysisCache?.doc === doc &&
+      editorCompletionAnalysisCache.editorState === editorState &&
+      editorCompletionAnalysisCache.position === position &&
+      editorCompletionAnalysisCache.databaseType === props.databaseType &&
+      editorCompletionAnalysisCache.dialect === dialect &&
+      editorCompletionAnalysisCache.driverProfile === driverProfile &&
+      editorCompletionAnalysisCache.syntaxDialect === props.syntaxDialect
+    ) {
+      return editorCompletionAnalysisCache.result;
+    }
+
+    const request = {
+      sql,
+      cursor: position,
+      databaseType: props.databaseType,
+      dialect,
+      semanticCompletionEnabled: SEMANTIC_SQL_COMPLETION_ENABLED,
+      syntaxDialect: props.syntaxDialect,
+      driverProfile,
+    };
+    const result = editorState && shouldUseQueryEditorLargeDocumentModeForSize(editorState.doc.length, editorState.doc.lines) ? completionAnalysisWorker.analyze(request, editorState) : Promise.resolve(analyzeSqlCompletion(request, editorState));
+    if (doc && editorState) {
+      editorCompletionAnalysisCache = {
+        doc,
+        editorState,
+        position,
+        databaseType: props.databaseType,
+        dialect,
+        driverProfile,
+        syntaxDialect: props.syntaxDialect,
+        result,
+      };
+    }
+    return result;
+  }
+
+  function cancelEditorSqlCompletionAnalysis() {
+    editorCompletionAnalysisCache = null;
+    completionAnalysisWorker.cancel();
   }
 
   // CTE definition metadata is cursor-independent, but hover/ctrl-click models still carry the
@@ -541,6 +603,7 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
   }
 
   function refreshCompletionCache() {
+    cancelEditorSqlCompletionAnalysis();
     cachedTables = [];
     cachedCompletionObjectsByScope.clear();
     cachedColumnsByTable.clear();
@@ -553,6 +616,9 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
   return {
     sqlCompletionDialectOptions,
     getEditorSqlCompletionContext,
+    getEditorSqlCompletionAnalysis,
+    cancelEditorSqlCompletionAnalysis,
+    disposeCompletionAnalysis: completionAnalysisWorker.dispose,
     ensureColumnsForTable,
     cachedColumnsByTable,
     completionCacheKey,

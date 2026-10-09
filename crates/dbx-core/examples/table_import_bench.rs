@@ -102,6 +102,7 @@ fn write_xlsx(path: &Path, row_count: usize, column_count: usize) -> Result<(), 
         column_comments: vec![],
         rows: (0..row_count).map(|row_index| row(row_index, column_count)).collect(),
         numeric_column_right_align: false,
+        auto_filter: None,
     })?;
     fs::write(path, workbook).map_err(|error| error.to_string())
 }
@@ -127,6 +128,8 @@ async fn benchmark_file(
     let preview_started = Instant::now();
     let preview = preview_table_import_file_with_request(TableImportPreviewRequest {
         file_path: path_text.to_string(),
+        connection_id: None,
+        database: None,
         source_ref: None,
         source_format: Some(format),
         parse_options: parse_options.clone(),

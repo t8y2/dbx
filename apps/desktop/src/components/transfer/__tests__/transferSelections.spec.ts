@@ -1,9 +1,27 @@
 import { describe, expect, it } from "vitest";
-import { buildTransferObjectSelections, matchBulkObjectNames, parseBulkObjectNames } from "../transferSelections";
+import { buildTransferObjectSelectionField, buildTransferObjectSelections, countTransferObjects, matchBulkObjectNames, parseBulkObjectNames } from "../transferSelections";
 
 function setOf(names: string[]): Set<string> {
   return new Set(names);
 }
+
+describe("countTransferObjects", () => {
+  it("counts selected tables and non-table objects from their separate request fields", () => {
+    expect(
+      countTransferObjects({
+        tables: ["orders", "users"],
+        objects: [
+          { objectType: "VIEW", names: ["active_users"] },
+          { objectType: "SEQUENCE", names: ["order_id_seq"] },
+        ],
+      }),
+    ).toBe(4);
+  });
+
+  it("keeps a table-only multi-selection nonzero", () => {
+    expect(countTransferObjects({ tables: ["orders", "users"], objects: [] })).toBe(2);
+  });
+});
 
 describe("buildTransferObjectSelections", () => {
   it("serializes non-table selections in request order", () => {
@@ -24,6 +42,23 @@ describe("buildTransferObjectSelections", () => {
   it("drops TABLE selections (handled by the tables field)", () => {
     const result = buildTransferObjectSelections({ TABLE: setOf(["t1", "t2"]) }, []);
     expect(result).toEqual([]);
+  });
+
+  it("keeps an explicit empty objects field for a saved TABLE-only request", () => {
+    const request = {
+      tables: ["orders"],
+      ...buildTransferObjectSelectionField({ TABLE: setOf(["orders"]) }, []),
+    };
+    expect(Object.hasOwn(request, "objects")).toBe(true);
+    expect(request.objects).toEqual([]);
+  });
+
+  it("keeps only the non-table selection for a saved TABLE + VIEW request", () => {
+    const request = {
+      tables: ["orders"],
+      ...buildTransferObjectSelectionField({ TABLE: setOf(["orders"]), VIEW: setOf(["v_orders"]) }, []),
+    };
+    expect(request.objects).toEqual([{ objectType: "VIEW", names: ["v_orders"] }]);
   });
 
   it("filters disabled object types even when stale selections remain", () => {

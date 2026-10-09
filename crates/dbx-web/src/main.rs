@@ -5,35 +5,86 @@ mod routes;
 mod sse;
 mod ssh_prompt;
 mod state;
+mod web_mcp;
 
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::process::ExitCode;
 use std::sync::Arc;
 
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHasher};
 use axum::extract::DefaultBodyLimit;
+
+/// Login/setup payloads are one password field; 64 KiB is generous.
+const AUTH_BODY_LIMIT_BYTES: usize = 64 * 1024;
 use axum::http::{Request, StatusCode, Uri};
 use axum::middleware;
 use axum::response::{IntoResponse, Redirect, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 use dbx_core::connection::AppState;
 use dbx_core::persistence::secret_codec::SecretKeyPolicy;
 use dbx_core::sql_dialect::dialect_loader::{register_core_dialects, DialectPluginLoader, DialectRegistry};
 use dbx_core::sql_dialect::hot_reload::DialectHotReload;
 use dbx_core::storage::Storage;
-use dbx_mcp::{streamable_http_router, DbxBackend, HttpAuth, LocalBackend};
+use dbx_mcp::{streamable_http_router, DbxBackend, LocalBackend};
 use state::WebState;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::RwLock;
 use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
 use tower_http::compression::CompressionLayer;
 use utoipa::OpenApi;
+use web_mcp::WebMcpRuntime;
 
 const XLSX_CONTENT_TYPE: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 const DATA_GRID_EXTRACTOR_BODY_LIMIT_BYTES: usize = 96 * 1024 * 1024;
+const NON_WINDOWS_HELP_TEXT: &str = r#"Usage: dbx-web [OPTION]
+
+Start the DBX Web browser service.
+
+Options:
+  -h, --help, /help  Show this help message and exit.
+
+Environment variables:
+  DBX_PORT              Listen port (default: 4224)
+  DBX_DATA_DIR          Data directory (default: ~/.dbx-web)
+  DBX_PUBLIC_BASE_PATH  URL path prefix (default: /)
+  DBX_PASSWORD          Set the Web login password
+  DBX_DISABLE_PASSWORD  Set to 1 to disable login protection
+  DBX_STATIC_DIR        Serve frontend assets from this directory
+  RUST_LOG              Configure backend log filtering
+  RUST_BACKTRACE        Set to 1 to include Rust backtraces
+
+Examples:
+  DBX_PORT=8080 dbx-web
+  RUST_LOG=dbx_web=debug,tower_http=info dbx-web
+  RUST_BACKTRACE=1 RUST_LOG=dbx_web=debug dbx-web
+"#;
+const WINDOWS_HELP_TEXT: &str = r#"Usage: dbx-web [OPTION]
+
+Start the DBX Web browser service.
+
+Options:
+  -h, --help, /help  Show this help message and exit.
+
+Environment variables:
+  DBX_PORT              Listen port (default: 4224)
+  DBX_DATA_DIR          Data directory (default: %HOME%\.dbx-web; .\.dbx-web if HOME is unset)
+  DBX_PUBLIC_BASE_PATH  URL path prefix (default: /)
+  DBX_PASSWORD          Set the Web login password
+  DBX_DISABLE_PASSWORD  Set to 1 to disable login protection
+  DBX_STATIC_DIR        Serve frontend assets from this directory
+  RUST_LOG              Configure backend log filtering
+  RUST_BACKTRACE        Set to 1 to include Rust backtraces
+
+Examples:
+  set "DBX_PORT=8080" && dbx-web.exe
+  set "RUST_LOG=dbx_web=debug,tower_http=info" && dbx-web.exe
+  set "RUST_BACKTRACE=1" && set "RUST_LOG=dbx_web=debug" && dbx-web.exe
+"#;
+const HELP_TEXT: &str = if cfg!(windows) { WINDOWS_HELP_TEXT } else { NON_WINDOWS_HELP_TEXT };
 
 #[derive(OpenApi)]
 #[openapi(
@@ -50,6 +101,29 @@ async fn openapi_json() -> axum::Json<utoipa::openapi::OpenApi> {
 #[cfg(test)]
 mod data_grid_extractor_openapi_tests {
     use super::*;
+
+    #[test]
+    fn help_flags_are_detected_without_starting_the_server() {
+        for flag in ["-h", "--help", "/help"] {
+            assert!(help_requested(&[flag.to_string()]));
+        }
+        assert!(help_requested(&["extra".to_string(), "--help".to_string()]));
+        assert!(!help_requested(&["--helpful".to_string()]));
+    }
+
+    #[test]
+    fn native_help_matches_the_target_shell() {
+        assert!(WINDOWS_HELP_TEXT.contains(r".\.dbx-web if HOME is unset"));
+        assert!(WINDOWS_HELP_TEXT.contains(r#"set "DBX_PORT=8080" && dbx-web.exe"#));
+        assert!(!WINDOWS_HELP_TEXT.contains("DBX_PORT=8080 dbx-web\n"));
+        if cfg!(windows) {
+            assert!(HELP_TEXT.contains(r#"set "DBX_PORT=8080" && dbx-web.exe"#));
+            assert!(!HELP_TEXT.contains("DBX_PORT=8080 dbx-web\n"));
+        } else {
+            assert!(HELP_TEXT.contains("DBX_PORT=8080 dbx-web\n"));
+            assert!(!HELP_TEXT.contains("dbx-web.exe"));
+        }
+    }
 
     #[test]
     fn extractor_openapi_contains_the_versioned_request_and_error_responses() {
@@ -106,6 +180,17 @@ async fn migration_gate(
     next.run(request).await
 }
 
+async fn web_mcp_demo_gate(
+    state: axum::extract::State<Arc<WebState>>,
+    request: Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    if state.demo_mode {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    next.run(request).await
+}
+
 async fn storage_migration_ready(app: &Arc<AppState>) -> bool {
     app.storage.inspect_data_migration().await.map(|status| status.is_ready()).unwrap_or(false)
 }
@@ -157,6 +242,10 @@ where
             }
         }),
     )
+}
+
+fn help_requested(args: &[String]) -> bool {
+    args.iter().any(|arg| matches!(arg.as_str(), "-h" | "--help" | "/help"))
 }
 
 /// Frontend build output compiled into the binary by the `embed-static` feature.
@@ -271,54 +360,16 @@ fn mount_static_assets(mut app: Router, public_base_path: &str, source: Option<S
     app
 }
 
-/// Builds the native Web MCP endpoint. It is intentionally opt-in: exposing a
-/// token-bearing MCP server on a Web listener must never happen merely because
-/// DBX Web itself was started.
-fn web_mcp_router(web_state: &Arc<WebState>) -> Result<Option<Router>, String> {
-    let token = web_mcp_token()?;
-    let Some(token) = token else {
-        return Ok(None);
-    };
-
-    let allowed_hosts = comma_separated_env("DBX_WEB_MCP_ALLOWED_HOSTS");
-    if allowed_hosts.is_empty() {
-        return Err("DBX_WEB_MCP_ALLOWED_HOSTS is required when DBX Web MCP is enabled".into());
-    }
-
-    let allowed_origins = comma_separated_env("DBX_WEB_MCP_ALLOWED_ORIGINS");
-    let auth = HttpAuth::new(token, allowed_origins, false)?;
+/// Builds the native Web MCP endpoint. The route remains mounted while the
+/// feature is disabled so an authenticated settings action can enable it
+/// without restarting the Web process; the shared auth middleware returns 404
+/// until a token is configured.
+fn web_mcp_router(web_state: &Arc<WebState>) -> Result<Router, String> {
+    let auth = web_state.web_mcp.auth();
     let backend: Arc<dyn DbxBackend> =
         Arc::new(LocalBackend::from_app_state(web_state.app.clone(), web_state.data_dir.clone()));
 
-    Ok(Some(streamable_http_router(backend, "/mcp", auth, allowed_hosts, true)))
-}
-
-fn web_mcp_token() -> Result<Option<String>, String> {
-    let inline_token = std::env::var("DBX_WEB_MCP_TOKEN").ok();
-    let token_file = std::env::var("DBX_WEB_MCP_TOKEN_FILE").ok();
-    match (inline_token, token_file) {
-        (Some(_), Some(_)) => Err("set only one of DBX_WEB_MCP_TOKEN or DBX_WEB_MCP_TOKEN_FILE".into()),
-        (Some(token), None) if !token.trim().is_empty() => Ok(Some(token)),
-        (Some(_), None) => Err("DBX_WEB_MCP_TOKEN must not be empty".into()),
-        (None, Some(path)) => std::fs::read_to_string(&path)
-            .map_err(|error| format!("failed to read DBX_WEB_MCP_TOKEN_FILE: {error}"))
-            .map(|token| token.trim_end_matches(['\r', '\n']).to_owned())
-            .and_then(|token| {
-                (!token.is_empty()).then_some(token).ok_or_else(|| "DBX_WEB_MCP_TOKEN_FILE is empty".into())
-            })
-            .map(Some),
-        (None, None) => Ok(None),
-    }
-}
-
-fn comma_separated_env(name: &str) -> Vec<String> {
-    std::env::var(name)
-        .ok()
-        .into_iter()
-        .flat_map(|value| {
-            value.split(',').map(str::trim).filter(|value| !value.is_empty()).map(ToOwned::to_owned).collect::<Vec<_>>()
-        })
-        .collect()
+    streamable_http_router(backend, "/mcp", auth, web_state.web_mcp.allowed_hosts(), true)
 }
 
 #[cfg(feature = "mq-admin")]
@@ -335,6 +386,7 @@ fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
         .route("/mq/namespaces/delete", post(routes::mq::delete_namespace))
         .route("/mq/namespaces/policies", post(routes::mq::get_namespace_policies))
         .route("/mq/topics/list", post(routes::mq::list_topics))
+        .route("/mq/topics/list-page", post(routes::mq::list_topics_page))
         .route("/mq/topics/create", post(routes::mq::create_topic))
         .route("/mq/topics/delete", post(routes::mq::delete_topic))
         .route("/mq/topics/update-partitions", post(routes::mq::update_partitions))
@@ -344,6 +396,7 @@ fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
         .route("/mq/topics/alter-config", post(routes::mq::alter_topic_config))
         .route("/mq/topics/skip-accumulation", post(routes::mq::skip_topic_accumulation))
         .route("/mq/exchanges/list", post(routes::mq::list_exchanges))
+        .route("/mq/exchanges/list-page", post(routes::mq::list_exchanges_page))
         .route("/mq/exchanges/create", post(routes::mq::create_exchange))
         .route("/mq/exchanges/delete", post(routes::mq::delete_exchange))
         .route("/mq/bindings/list", post(routes::mq::list_bindings))
@@ -404,12 +457,28 @@ fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
     router
 }
 
-fn main() {
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if help_requested(&args) {
+        print!("{HELP_TEXT}");
+        return ExitCode::SUCCESS;
+    }
+
     let runtime = dbx_core::scheduled_backup::worker_runtime().expect("Failed to build tokio runtime");
-    runtime.block_on(serve());
+    match runtime.block_on(serve()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
-async fn serve() {
+fn web_mcp_startup_error(error: String) -> String {
+    format!("Failed to start DBX Web: invalid Web MCP configuration: {error}")
+}
+
+async fn serve() -> Result<(), String> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -481,9 +550,17 @@ async fn serve() {
     let demo_mode = demo::demo_mode_from_env();
 
     let migration_ready = storage_migration_ready(&app_state).await;
+    let web_mcp = Arc::new(if migration_ready {
+        WebMcpRuntime::load(&app_state.storage, !password_disabled && password_hash.is_some())
+            .await
+            .map_err(web_mcp_startup_error)?
+    } else {
+        WebMcpRuntime::disabled()
+    });
     let web_state = Arc::new(WebState {
         app: app_state,
         data_dir,
+        notes_roots: routes::docs::notes_roots_from_env(std::env::var_os("DBX_DOCS_NOTES_ROOTS").as_deref()),
         public_base_path: public_base_path.clone(),
         demo_mode,
         password_disabled,
@@ -499,6 +576,7 @@ async fn serve() {
         export_files: RwLock::new(HashMap::new()),
         ssh_prompts: Arc::new(ssh_prompt::SshPromptHub::new()),
         migration_ready: Arc::new(AtomicBool::new(migration_ready)),
+        web_mcp,
     });
 
     ssh_prompt::install_web_ssh_prompt_bridge(web_state.ssh_prompts.clone());
@@ -522,10 +600,13 @@ async fn serve() {
         .route("/database-backups/{id}/files/{index}", get(routes::scheduled_backup::download))
         .route("/database-backups/{id}/files/{index}/restore", post(routes::scheduled_backup::prepare_restore))
         // Auth
-        .route("/auth/login", post(auth::login))
+        // Auth payloads are tiny password strings: cap them far below the
+        // global limit so the extractor cannot buffer an unauthenticated DoS
+        // body before any rate limiting runs.
+        .route("/auth/login", post(auth::login).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)))
         .route("/auth/check", get(auth::check))
-        .route("/auth/setup", post(auth::setup))
-        .route("/auth/change-password", post(auth::change_password))
+        .route("/auth/setup", post(auth::setup).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)))
+        .route("/auth/change-password", post(auth::change_password).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)))
         .route("/auth/logout", post(auth::logout))
         // Connection
         .route("/connection/test", post(routes::connection::test_connection))
@@ -540,6 +621,8 @@ async fn serve() {
         .route("/connection/final-proxy-port", post(routes::connection::connection_final_proxy_port))
         .route("/connection/disconnect", post(routes::connection::disconnect_db))
         .route("/connection/check-health", post(routes::connection::check_connection_health))
+        .route("/connection/is-open", post(routes::connection::connection_is_open))
+        .route("/connection/liveness-events", get(routes::connection::connection_liveness_events))
         .route("/connection/prewarm", post(routes::connection::prewarm_connection))
         .route("/connection/session-credential-status", post(routes::connection::session_credential_status))
         .route("/connection/forget-session-credential", post(routes::connection::forget_session_credential))
@@ -677,6 +760,7 @@ async fn serve() {
         .route("/schema/reference-key-columns", get(routes::schema::list_reference_key_columns))
         .route("/schema/reference-keys", get(routes::schema::list_reference_keys))
         .route("/schema/foreign-keys", get(routes::schema::list_foreign_keys))
+        .route("/schema/foreign-keys-for-database", get(routes::schema::list_foreign_keys_for_database))
         .route("/schema/triggers", get(routes::schema::list_triggers))
         .route("/schema/constraints", get(routes::schema::list_constraints))
         .route("/schema/partitions", get(routes::schema::list_partitions))
@@ -839,6 +923,7 @@ async fn serve() {
         .route("/redis/scan-keys-batch", post(routes::redis::scan_keys_batch))
         .route("/redis/scan-values", post(routes::redis::scan_values))
         .route("/redis/get-value", post(routes::redis::get_value))
+        .route("/redis/get-raw-value", post(routes::redis::get_raw_value))
         .route("/redis/get-ttl", post(routes::redis::get_ttl))
         .route("/redis/get-stream-entries", post(routes::redis::get_stream_entries))
         .route("/redis/get-stream-groups", post(routes::redis::get_stream_groups))
@@ -1237,6 +1322,9 @@ async fn serve() {
         // Transfer
         .route("/transfer/start", post(routes::transfer::start_transfer))
         .route("/transfer/ownership-preview", post(routes::transfer::preview_transfer_ownership))
+        .route("/task-runs", get(routes::task_history::list_task_runs))
+        .route("/task-runs/{run_id}", get(routes::task_history::get_task_run))
+        .route("/task-runs/{run_id}/items", get(routes::task_history::list_task_run_items))
         .route("/transfer/progress/{transferId}", get(routes::transfer::transfer_progress))
         .route("/transfer/cancel", post(routes::transfer::cancel_transfer))
         .route("/transfer/sort-tables-by-fk", post(routes::transfer::sort_tables_by_fk_dependency))
@@ -1310,6 +1398,8 @@ async fn serve() {
             get(routes::app_settings::load_mcp_global_policy).put(routes::app_settings::save_mcp_global_policy),
         )
         .route("/app-settings/mcp-http-status", get(routes::app_settings::load_web_mcp_http_status))
+        .route("/app-settings/mcp-http", put(routes::app_settings::save_web_mcp_http_settings))
+        .route("/app-settings/mcp-http/rotate-token", post(routes::app_settings::rotate_web_mcp_token))
         .route(
             "/app-settings/max-agent-turns",
             get(routes::app_settings::load_max_agent_turns).put(routes::app_settings::save_max_agent_turns),
@@ -1319,6 +1409,12 @@ async fn serve() {
             get(routes::app_settings::load_history_retention_limit)
                 .put(routes::app_settings::save_history_retention_limit),
         )
+        .route(
+            "/app-settings/mcp-history-retention-limit",
+            get(routes::app_settings::load_mcp_history_retention_limit)
+                .put(routes::app_settings::save_mcp_history_retention_limit),
+        )
+        .route("/app-settings/mcp-history-retention-cleanup", post(routes::app_settings::cleanup_mcp_history_retention))
         .route(
             "/app-settings/max-retries",
             get(routes::app_settings::load_max_retries).put(routes::app_settings::save_max_retries),
@@ -1344,6 +1440,8 @@ async fn serve() {
             post(routes::cloud_sync::forget_webdav_sync_secrets_passphrase),
         )
         .route("/cloud-sync/webdav/upload", post(routes::cloud_sync::webdav_sync_upload))
+        .route("/cloud-sync/catalog/local", post(routes::cloud_sync::cloud_sync_local_catalog))
+        .route("/cloud-sync/webdav/inspect", post(routes::cloud_sync::webdav_sync_inspect))
         .route("/cloud-sync/webdav/download", post(routes::cloud_sync::webdav_sync_download))
         .route("/cloud-sync/snippet/test", post(routes::cloud_sync::snippet_sync_test))
         .route("/cloud-sync/snippet/token-status", post(routes::cloud_sync::snippet_token_status))
@@ -1353,6 +1451,7 @@ async fn serve() {
         .route("/cloud-sync/snippet/save-id", post(routes::cloud_sync::save_snippet_sync_id))
         .route("/cloud-sync/snippet/retry-legacy-cleanup", post(routes::cloud_sync::retry_snippet_legacy_cleanup))
         .route("/cloud-sync/snippet/upload", post(routes::cloud_sync::snippet_sync_upload))
+        .route("/cloud-sync/snippet/inspect", post(routes::cloud_sync::snippet_sync_inspect))
         .route("/cloud-sync/snippet/download", post(routes::cloud_sync::snippet_sync_download));
 
     // Do not expose DuckDB-only handlers from builds that omit DuckDB sidecar support.
@@ -1373,10 +1472,13 @@ async fn serve() {
         .layer(CompressionLayer::new().compress_when(web_compression_predicate()))
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
-    if let Some(mcp_router) = web_mcp_router(&web_state).expect("Invalid DBX Web MCP configuration") {
-        app = app.merge(mcp_router.layer(middleware::from_fn_with_state(web_state.clone(), migration_gate)));
-        tracing::info!("DBX Web MCP is enabled at /mcp");
-    }
+    let mcp_router = web_mcp_router(&web_state).map_err(web_mcp_startup_error)?;
+    app = app.merge(
+        mcp_router
+            .layer(middleware::from_fn_with_state(web_state.clone(), web_mcp_demo_gate))
+            .layer(middleware::from_fn_with_state(web_state.clone(), migration_gate)),
+    );
+    tracing::info!("DBX Web MCP endpoint is available at /mcp when enabled");
 
     let static_dir = std::env::var_os("DBX_STATIC_DIR").map(std::path::PathBuf::from);
     // DBX_STATIC_DIR always wins (frontend development); otherwise serve the
@@ -1399,7 +1501,19 @@ async fn serve() {
 
     // Bind address
     let port: u16 = std::env::var("DBX_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(4224);
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    // Defaults to all interfaces for container deployments; operators who
+    // expose the service through a local reverse proxy can pin the listener
+    // (DBX_BIND_ADDR=127.0.0.1) without a firewall change. The value is an
+    // IP only — the port always comes from DBX_PORT so the HTTP listener and
+    // the Redis PubSub server (which reads DBX_PORT independently) stay in
+    // sync.
+    let ip = match std::env::var("DBX_BIND_ADDR").ok().as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => {
+            value.parse::<IpAddr>().unwrap_or_else(|error| panic!("invalid DBX_BIND_ADDR \"{value}\": {error}"))
+        }
+        None => IpAddr::from([0, 0, 0, 0]),
+    };
+    let addr = SocketAddr::new(ip, port);
 
     tracing::info!("DBX Web server starting on http://{}", addr);
     if public_base_path != "/" {
@@ -1416,22 +1530,80 @@ async fn serve() {
 
     let listener = tokio::net::TcpListener::bind(addr).await.expect("Failed to bind address");
     let shutdown_state = web_state.app.clone();
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            #[cfg(unix)]
-            {
-                let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                    .expect("Failed to listen for SIGTERM");
-                tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
+    let server_shutdown = tokio_util::sync::CancellationToken::new();
+    let server_shutdown_trigger = server_shutdown.clone();
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            let mut terminate: Option<tokio::signal::unix::Signal> =
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        tracing::error!("Failed to install SIGTERM handler: {e}; continuing with Ctrl+C only");
+                        None
+                    }
+                };
+            tokio::select! {
+                res = tokio::signal::ctrl_c() => {
+                    if let Err(e) = res {
+                        tracing::error!("Failed to listen for Ctrl+C: {e}");
+                    } else {
+                        tracing::info!("Shutdown signal received (Ctrl+C)");
+                    }
+                }
+                _ = async {
+                    match terminate.as_mut() {
+                        Some(signal) => {
+                            signal.recv().await;
+                        }
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    tracing::info!("Shutdown signal received (SIGTERM)");
+                }
             }
-            #[cfg(not(unix))]
-            let _ = tokio::signal::ctrl_c().await;
-            backup_stop.cancel();
-        })
-        .await
-        .expect("Server error");
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(60), backup_worker).await;
+        }
+        #[cfg(not(unix))]
+        {
+            if let Err(e) = tokio::signal::ctrl_c().await {
+                tracing::error!("Failed to listen for Ctrl+C: {e}");
+            } else {
+                tracing::info!("Shutdown signal received (Ctrl+C)");
+            }
+        }
+        backup_stop.cancel();
+        server_shutdown_trigger.cancel();
+    });
+
+    let shutdown_wait = server_shutdown.clone();
+    let serve_future = axum::serve(listener, app).with_graceful_shutdown(async move {
+        shutdown_wait.cancelled().await;
+    });
+
+    // If graceful shutdown of HTTP connections takes longer than 5 seconds, abort to ensure prompt termination on Ctrl+C.
+    // Non-zero exit codes keep systemd's Restart=on-failure meaningful: a serve error or an
+    // undrained backup worker must not look like a clean stop.
+    let mut exit_code = 0i32;
+    tokio::select! {
+        res = serve_future => {
+            if let Err(e) = res {
+                tracing::error!("Server error: {e}");
+                exit_code = 1;
+            }
+        }
+        _ = async {
+            server_shutdown.cancelled().await;
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        } => {
+            tracing::warn!("Graceful HTTP shutdown timed out after 5s; proceeding with teardown");
+        }
+    }
+    if tokio::time::timeout(std::time::Duration::from_secs(5), backup_worker).await.is_err() {
+        tracing::warn!("Scheduled backup worker did not drain within 5s; exiting with failure status");
+        exit_code = 1;
+    }
     shutdown_state.shutdown(std::time::Duration::from_secs(3)).await;
+    std::process::exit(exit_code);
 }
 
 #[cfg(test)]

@@ -135,6 +135,9 @@ export function isTableDataVisiblePreviewColumn(databaseType: DatabaseType | und
   if (databaseType === "postgres") {
     return !normalized.includes("[") && (base === "char" || base === "character" || base === "varchar" || base === "text" || base === "citext" || base === "name" || base === "xml" || base === "json" || base === "jsonb" || base === "tsvector" || normalized.startsWith("character varying"));
   }
+  if (databaseType === "db2") {
+    return base === "clob" || base === "dbclob" || base === "char" || base === "character" || base === "varchar" || base === "graphic" || base === "vargraphic";
+  }
   return false;
 }
 
@@ -175,7 +178,28 @@ function matchesMysqlUnboundedLargeValueType(base: string): boolean {
 }
 
 export function canUseTableDataLargeValuePreview(databaseType: DatabaseType | undefined, columns: readonly ColumnInfo[], primaryKeys: readonly string[]): boolean {
-  return (databaseType === "mysql" || databaseType === "postgres") && columns.length > 0 && primaryKeys.length > 0 && !columns.some((column) => column.name.toLocaleUpperCase().startsWith(TABLE_DATA_LARGE_VALUE_MARKER_PREFIX));
+  return supportsTableDataLargeValuePreview(databaseType) && columns.length > 0 && primaryKeys.length > 0 && !columns.some((column) => column.name.toLocaleUpperCase().startsWith(TABLE_DATA_LARGE_VALUE_MARKER_PREFIX));
+}
+
+export function supportsTableDataLargeValuePreview(databaseType: DatabaseType | undefined): boolean {
+  return databaseType === "mysql" || databaseType === "postgres" || databaseType === "db2";
+}
+
+/**
+ * Rows one fetch is expected to return, used to spread the large-value byte
+ * budget over the rows that will actually arrive. "Load all" and infinite scroll
+ * ask for the whole remaining table in one segment, so dividing the budget by
+ * that request shrinks every preview to a couple of characters even when the
+ * table only holds a few hundred rows.
+ */
+export function tableDataPreviewRowBudget(options: { limit: number; offset: number; expectedTotalRows: number | undefined; loadedRowCount: number }): number {
+  const { limit, offset, expectedTotalRows, loadedRowCount } = options;
+  // A total below the rows already on screen is not a usable row estimate (e.g.
+  // an `affected_rows` hint of 1), so keep the requested limit.
+  if (typeof expectedTotalRows !== "number" || !Number.isFinite(expectedTotalRows) || expectedTotalRows < loadedRowCount) return limit;
+  const remainingRows = expectedTotalRows - offset;
+  if (remainingRows <= 0 || remainingRows >= limit) return limit;
+  return remainingRows;
 }
 
 export function tableDataLargeValuePreviewOptions(databaseType: DatabaseType | undefined, columns: readonly ColumnInfo[], primaryKeys: readonly string[], pageSize?: number): { columnTypes: string[]; largeValuePreviewSize: number } | Record<string, never> {

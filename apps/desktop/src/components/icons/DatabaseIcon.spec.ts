@@ -55,6 +55,17 @@ describe("DatabaseIcon", () => {
     app.unmount();
   });
 
+  it.each(["transwarp", "transwarp-inceptor"])("uses the Inceptor asset for %s", async (dbType) => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const app = createApp(DatabaseIcon, { dbType });
+    app.mount(container);
+    await nextTick();
+
+    expect(container.querySelector("img")?.getAttribute("src")).toBe("/icons/database/transwarp-inceptor.png");
+    app.unmount();
+  });
+
   it("uses the Meilisearch asset", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);

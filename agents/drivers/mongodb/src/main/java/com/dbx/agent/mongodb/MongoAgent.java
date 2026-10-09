@@ -11,10 +11,12 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.mongodb.ConnectionString;
 import com.mongodb.MongoBulkWriteException;
+import com.mongodb.MongoCommandException;
 import com.mongodb.MongoNamespace;
 import com.mongodb.MongoCredential;
 import com.mongodb.MongoClientSettings;
 import com.mongodb.ServerAddress;
+import com.mongodb.connection.ClusterConnectionMode;
 import com.mongodb.bulk.BulkWriteError;
 import com.mongodb.bulk.WriteConcernError;
 import com.mongodb.client.AggregateIterable;
@@ -74,6 +76,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -110,6 +113,8 @@ public final class MongoAgent {
     private static final int MAX_FIND_CURSORS_PER_OWNER = 16;
     private static final int MAX_FIND_CURSORS_TOTAL = 64;
     private static final int MAX_SESSIONS = 256;
+    /** MongoDB error code 13 (Unauthorized), returned when the account may not run listDatabases. */
+    private static final int LIST_DATABASES_UNAUTHORIZED_CODE = 13;
     private static final ThreadLocal<MongoClient> CURRENT_CLIENT = new ThreadLocal<>();
     private static final ThreadLocal<Set<String>> CURRENT_FIND_CURSOR_OWNER = new ThreadLocal<>();
     private static final ConcurrentHashMap<String, MongoCursor<Document>> FIND_CURSORS = new ConcurrentHashMap<>();
@@ -149,7 +154,17 @@ public final class MongoAgent {
 
         MongoClientSettings.Builder builder = MongoClientSettings.builder();
         if (connectionString != null && !connectionString.isBlank()) {
-            builder.applyConnectionString(new ConnectionString(connectionString));
+            ConnectionString cs = new ConnectionString(connectionString);
+            builder.applyConnectionString(cs);
+            // Driver 3.12 predates the directConnection URI option (introduced in driver 4.x)
+            // and silently ignores it. When directConnection=true is present in the query of a
+            // single-host URI, force ClusterConnectionMode.SINGLE so the driver connects directly
+            // to that host instead of discovering replica-set members that may be unreachable
+            // (e.g. through an SSH tunnel). We preserve requiredReplicaSetName as parsed because
+            // ClusterSettings in 3.12 accepts it in SINGLE mode to validate the replica set name.
+            if (!cs.isSrvProtocol() && cs.getHosts().size() == 1 && hasDirectConnectionTrue(connectionString)) {
+                builder.applyToClusterSettings(settings -> settings.mode(ClusterConnectionMode.SINGLE));
+            }
         } else {
             builder.applyToClusterSettings(
                 settings -> settings.hosts(Collections.singletonList(new ServerAddress(host, port))));
@@ -163,6 +178,46 @@ public final class MongoAgent {
         }
 
         return builder;
+    }
+
+    static boolean hasDirectConnectionTrue(String connectionString) {
+        if (connectionString == null) {
+            return false;
+        }
+        int hashStart = connectionString.indexOf('#');
+        int queryStart = connectionString.indexOf('?');
+        if (queryStart < 0 || (hashStart >= 0 && queryStart > hashStart)) {
+            return false;
+        }
+        int queryEnd = hashStart >= 0 ? hashStart : connectionString.length();
+        String query = connectionString.substring(queryStart + 1, queryEnd);
+        if (query.isEmpty()) {
+            return false;
+        }
+
+        Boolean directConnection = null;
+        for (String param : query.split("[&;]")) {
+            if (param.isEmpty()) {
+                continue;
+            }
+            int eq = param.indexOf('=');
+            String key = eq >= 0 ? param.substring(0, eq) : param;
+            String val = eq >= 0 ? param.substring(eq + 1) : "";
+            String decodedKey = decodeUriComponent(key);
+            String decodedVal = decodeUriComponent(val);
+            if ("directConnection".equalsIgnoreCase(decodedKey)) {
+                directConnection = "true".equalsIgnoreCase(decodedVal);
+            }
+        }
+        return Boolean.TRUE.equals(directConnection);
+    }
+
+    private static String decodeUriComponent(String s) {
+        try {
+            return URLDecoder.decode(s, StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            return s;
+        }
     }
 
     private static MongoClient openClient(JsonObject params) {
@@ -357,11 +412,89 @@ public final class MongoAgent {
 
     private static Object listDatabases() {
         MongoClient c = requireClient();
+        try {
+            return databaseNameEntries(c.listDatabaseNames());
+        } catch (RuntimeException error) {
+            if (!isListDatabasesAuthorizationFailure(error)) {
+                throw error;
+            }
+            // MongoDB servers older than 4.0.4 have no "authorizedDatabases" option, so
+            // listDatabases always requires the cluster-wide listDatabases privilege there.
+            // Accounts limited to database-scoped roles are readable but still get an
+            // Unauthorized error, which used to break the whole database list. Fall back to the
+            // databases those accounts are actually authorized for.
+            List<Map<String, String>> authorized = authorizedDatabaseNames(c);
+            if (authorized.isEmpty()) {
+                throw error;
+            }
+            return authorized;
+        }
+    }
+
+    private static List<Map<String, String>> databaseNameEntries(Iterable<String> names) {
         List<Map<String, String>> result = new ArrayList<>();
-        for (String name : c.listDatabaseNames()) {
+        for (String name : names) {
             result.add(Collections.singletonMap("name", name));
         }
         return result;
+    }
+
+    static boolean isListDatabasesAuthorizationFailure(Throwable error) {
+        for (Throwable current = error; current != null; current = current.getCause()) {
+            if (!(current instanceof MongoCommandException command)) {
+                continue;
+            }
+            if (command.getErrorCode() == LIST_DATABASES_UNAUTHORIZED_CODE) {
+                return true;
+            }
+            String codeName = command.getErrorCodeName();
+            if (codeName != null && "unauthorized".equalsIgnoreCase(codeName)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static List<Map<String, String>> authorizedDatabaseNames(MongoClient client) {
+        Document status;
+        try {
+            status = client.getDatabase("admin")
+                .runCommand(new Document("connectionStatus", 1).append("showPrivileges", true));
+        } catch (RuntimeException error) {
+            return Collections.emptyList();
+        }
+        return databaseNameEntries(databaseNamesFromConnectionStatus(status));
+    }
+
+    /**
+     * Reads the databases an authenticated account is authorized for from a {@code connectionStatus}
+     * response. Only the account's own resolved privileges are used, so a database is reported when
+     * the account really holds an action on it, regardless of where the granting role is defined.
+     */
+    static List<String> databaseNamesFromConnectionStatus(Document status) {
+        Object authInfo = status == null ? null : status.get("authInfo");
+        if (!(authInfo instanceof Document authInfoDocument)) {
+            return Collections.emptyList();
+        }
+        Object privileges = authInfoDocument.get("authenticatedUserPrivileges");
+        if (!(privileges instanceof List<?> privilegeList)) {
+            return Collections.emptyList();
+        }
+        Set<String> names = new TreeSet<>();
+        for (Object item : privilegeList) {
+            if (!(item instanceof Document privilege)) {
+                continue;
+            }
+            Object resource = privilege.get("resource");
+            if (!(resource instanceof Document resourceDocument)) {
+                continue;
+            }
+            Object database = resourceDocument.get("db");
+            if (database instanceof String name && !name.isEmpty()) {
+                names.add(name);
+            }
+        }
+        return new ArrayList<>(names);
     }
 
     private static Object listCollections(JsonObject params) {

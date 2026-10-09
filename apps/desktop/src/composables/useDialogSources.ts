@@ -9,6 +9,7 @@ import type { ConnectionConfigBundle } from "@/lib/connection/connectionConfigTr
 import type { ConnectionConfig, SidebarLayout } from "@/types/database";
 
 const showTransferDialog = ref(false);
+const transferTaskId = ref<string | null>(null);
 const showSchemaDiffDialog = ref(false);
 const showDataCompareDialog = ref(false);
 const showSqlFileDialog = ref(false);
@@ -22,6 +23,7 @@ const mongoDatabaseDumpPrefillConnectionId = ref("");
 const mongoDatabaseDumpPrefillDatabase = ref("");
 const mongoDatabaseDumpMode = ref<"dump" | "restore">("dump");
 const showTableDataGenerateDialog = ref(false);
+const tableDataGenerateSessionId = ref<string | null>(null);
 const showFieldLineageDialog = ref(false);
 const showDatabaseSearchDialog = ref(false);
 const showDatabaseExportDialog = ref(false);
@@ -36,6 +38,7 @@ const pendingImportContent = ref("");
 const showConfigConnectionSelectDialog = ref(false);
 const configConnectionSelectMode = ref<"export" | "import">("export");
 const configConnectionSelectList = ref<ConnectionConfig[]>([]);
+const configConnectionSelectLayout = ref<SidebarLayout | null>(null);
 const pendingExportConnectionIds = ref<string[]>([]);
 const pendingImportPreview = ref<ConnectionConfigBundle | null>(null);
 const pendingImportSource = ref<"dbx" | "navicat" | "dbeaver" | "datagrip">("dbx");
@@ -62,6 +65,7 @@ const dataComparePrefillTable = ref("");
 const dataCompareSessionId = ref<string | null>(null);
 const sqlFilePrefillConnectionId = ref("");
 const sqlFilePrefillDatabase = ref("");
+const sqlFilePrefillSchema = ref<string>();
 const sqlFilePrefillFilePath = ref("");
 const sqlFilePrefillPreview = ref<SqlFilePreview>();
 const diagramPrefillConnectionId = ref("");
@@ -125,6 +129,20 @@ export function openDataCompareSession(sessionId: string): void {
   showDataCompareDialog.value = true;
 }
 
+export function openDataTransferTask(taskId: string): void {
+  transferTaskId.value = taskId;
+  showTransferDialog.value = true;
+}
+
+export function openDataGenerateSession(sessionId: string, target: { connectionId: string; database: string; schema?: string; tableName?: string }): void {
+  tableDataGenerateSessionId.value = sessionId;
+  tableDataGeneratePrefillConnectionId.value = target.connectionId;
+  tableDataGeneratePrefillDatabase.value = target.database;
+  tableDataGeneratePrefillSchema.value = target.schema ?? "";
+  tableDataGeneratePrefillTable.value = target.tableName ?? "";
+  showTableDataGenerateDialog.value = true;
+}
+
 export function useDialogSources() {
   const { t } = useI18n();
   const connectionStore = useConnectionStore();
@@ -138,6 +156,7 @@ export function useDialogSources() {
       () => connectionStore.transferSource,
       (v) => {
         if (v) {
+          transferTaskId.value = null;
           transferPrefillConnectionId.value = v.connectionId;
           transferPrefillDatabase.value = v.database;
           transferPrefillCatalog.value = v.catalog ?? "";
@@ -153,7 +172,10 @@ export function useDialogSources() {
     );
 
     watch(showTransferDialog, (open) => {
-      if (!open) clearTransferPrefill();
+      if (!open) {
+        transferTaskId.value = null;
+        clearTransferPrefill();
+      }
     });
 
     watch(
@@ -201,6 +223,7 @@ export function useDialogSources() {
         if (v) {
           sqlFilePrefillConnectionId.value = v.connectionId;
           sqlFilePrefillDatabase.value = v.database;
+          sqlFilePrefillSchema.value = v.schema;
           sqlFilePrefillFilePath.value = v.filePath ?? "";
           sqlFilePrefillPreview.value = v.preview;
           showSqlFileDialog.value = true;
@@ -209,13 +232,14 @@ export function useDialogSources() {
       },
     );
 
-    // Clear the pre-filled file path once the dialog closes so a later open
-    // via the toolbar (which doesn't go through sqlFileSource) doesn't re-load
-    // the previously previewed file. prefillConnectionId/database are harmless
-    // when stale (they only preselect dropdowns), but a stale path triggers an
-    // async file read + preview render — a visible side effect.
+    // Clear the complete prefill once the dialog closes. A later toolbar open
+    // derives its target from the then-active SQL tab, so neither the old path
+    // nor its connection context may leak into that session.
     watch(showSqlFileDialog, (open) => {
       if (!open) {
+        sqlFilePrefillConnectionId.value = "";
+        sqlFilePrefillDatabase.value = "";
+        sqlFilePrefillSchema.value = undefined;
         sqlFilePrefillFilePath.value = "";
         sqlFilePrefillPreview.value = undefined;
       }
@@ -308,6 +332,7 @@ export function useDialogSources() {
       () => connectionStore.tableDataGenerateSource,
       (v) => {
         if (v) {
+          tableDataGenerateSessionId.value = null;
           tableDataGeneratePrefillConnectionId.value = v.connectionId;
           tableDataGeneratePrefillDatabase.value = v.database;
           tableDataGeneratePrefillSchema.value = v.schema ?? "";
@@ -317,6 +342,10 @@ export function useDialogSources() {
         }
       },
     );
+
+    watch(showTableDataGenerateDialog, (open) => {
+      if (!open) tableDataGenerateSessionId.value = null;
+    });
 
     watch(
       () => connectionStore.fieldLineageSource,
@@ -368,18 +397,21 @@ export function useDialogSources() {
     pendingImportPreview.value = null;
     pendingImportSource.value = "dbx";
     configConnectionSelectList.value = [];
+    configConnectionSelectLayout.value = null;
     configPassphraseError.value = "";
   }
 
   function clearPendingExportState() {
     pendingExportConnectionIds.value = [];
     configConnectionSelectList.value = [];
+    configConnectionSelectLayout.value = null;
     configPassphraseError.value = "";
   }
 
-  function openConnectionSelect(mode: "export" | "import", connections: ConnectionConfig[]) {
+  function openConnectionSelect(mode: "export" | "import", connections: ConnectionConfig[], layout?: SidebarLayout | null) {
     configConnectionSelectMode.value = mode;
     configConnectionSelectList.value = connections;
+    configConnectionSelectLayout.value = layout ?? null;
     showConfigConnectionSelectDialog.value = true;
   }
 
@@ -407,7 +439,7 @@ export function useDialogSources() {
   // Config export/import helpers
   function onExportClick() {
     clearPendingExportState();
-    openConnectionSelect("export", connectionStore.connections);
+    openConnectionSelect("export", connectionStore.connections, connectionStore.sidebarLayout);
   }
 
   function onExportConnectionsSelected(connectionIds: string[]) {
@@ -488,7 +520,7 @@ export function useDialogSources() {
       const preview = await connectionStore.parseConnectionsImport(result.content, null);
       pendingImportPreview.value = preview;
       if (source === "dbx") {
-        openConnectionSelect("import", preview.connections);
+        openConnectionSelect("import", preview.connections, preview.layout);
         return;
       }
       const { count, layout } = await connectionStore.applyConnectionsImport(preview);
@@ -505,7 +537,7 @@ export function useDialogSources() {
       pendingImportPreview.value = preview;
       showConfigPassphraseDialog.value = false;
       configPassphraseError.value = "";
-      openConnectionSelect("import", preview.connections);
+      openConnectionSelect("import", preview.connections, preview.layout);
     } catch (e: any) {
       configPassphraseError.value = e?.message === "wrong_passphrase" ? t("configExport.wrongPassphrase") : e?.message === "crypto_unavailable" ? t("configExport.cryptoUnavailable") : e?.message || String(e);
     }
@@ -553,6 +585,7 @@ export function useDialogSources() {
 
   return {
     showTransferDialog,
+    transferTaskId,
     showSchemaDiffDialog,
     showDataCompareDialog,
     showSqlFileDialog,
@@ -566,6 +599,7 @@ export function useDialogSources() {
     mongoDatabaseDumpPrefillDatabase,
     mongoDatabaseDumpMode,
     showTableDataGenerateDialog,
+    tableDataGenerateSessionId,
     showFieldLineageDialog,
     showDatabaseSearchDialog,
     showDatabaseExportDialog,
@@ -581,6 +615,7 @@ export function useDialogSources() {
     applyingImportSelection,
     configConnectionSelectMode,
     configConnectionSelectList,
+    configConnectionSelectLayout,
     transferPrefillConnectionId,
     transferPrefillDatabase,
     transferPrefillCatalog,
@@ -602,6 +637,7 @@ export function useDialogSources() {
     dataCompareSessionId,
     sqlFilePrefillConnectionId,
     sqlFilePrefillDatabase,
+    sqlFilePrefillSchema,
     sqlFilePrefillFilePath,
     sqlFilePrefillPreview,
     diagramPrefillConnectionId,

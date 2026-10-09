@@ -1,7 +1,7 @@
 import { ref, shallowRef, computed, watch, type ComputedRef, type Ref } from "vue";
 import { calculateDataGridColumnWidth, DATA_GRID_AUTO_FIT_VALUE_TEXT_LIMIT, DATA_GRID_COL_AUTO_FIT_MAX_WIDTH, DATA_GRID_COL_MIN_WIDTH, COLUMN_WIDTH_DENSITY_PRESETS, sampleDataGridColumnValues } from "@/lib/dataGrid/dataGridColumnWidth";
 import { createDataGridColumnMeasurementSignature, loadDataGridColumnWidthState, removeDataGridColumnWidthState, saveDataGridColumnWidthState } from "@/lib/dataGrid/dataGridColumnWidthState";
-import type { ColumnWidthDensity } from "@/stores/settingsStore";
+import type { ColumnWidthDensity, DataGridColumnWidthMode } from "@/stores/settingsStore";
 
 type CellValue = string | number | boolean | null;
 
@@ -35,6 +35,7 @@ export interface UseDataGridColumnResizeOptions {
   sourceRows: ComputedRef<CellValue[][]>;
   columnIndexes: ComputedRef<number[]>;
   density: Ref<ColumnWidthDensity>;
+  widthMode: Ref<DataGridColumnWidthMode>;
   compactColumnHeaderActions: ComputedRef<boolean>;
   columnIndexIndicators?: ComputedRef<readonly boolean[]>;
   cacheKey?: ComputedRef<string | undefined>;
@@ -250,6 +251,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
 
   const renderedColumnWidths = computed(() => {
     const widths = columnWidths.value.slice();
+    if (options.widthMode.value === "content") return widths;
     const viewportWidth = options.viewportWidth?.value ?? 0;
     const surplus = viewportWidth - resolvedRowNumberWidth.value - widths.reduce((sum, width) => sum + width, 0);
     if (surplus <= 0) return widths;

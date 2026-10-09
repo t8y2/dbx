@@ -5,9 +5,26 @@ import { AlertTriangle, ArrowUp, File, FileCode2, Folder, Loader2, RefreshCw } f
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import * as api from "@/lib/backend/api";
+import { beginPanelResize, endPanelResize } from "@/lib/app/panelResizeState";
+import { safeLocalStorageGet, safeLocalStorageRemove, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { pluginFilesystemParentUri, pluginFilesystemRootUri, sortPluginFilesystemEntries, uniquePluginFilesystemEntries } from "@/lib/plugins/pluginFilesystem";
 import type { PluginFilesystemEntry, PluginFilesystemProviderContribution } from "@/types/database";
 import { useI18n } from "vue-i18n";
+
+const FILE_LIST_SIZE_STORAGE_KEY = "dbx-plugin-file-manager-split-size";
+const FILE_LIST_DEFAULT_SIZE = 42;
+const FILE_LIST_MIN_SIZE = 20;
+const FILE_LIST_MAX_SIZE = 80;
+const FILE_LIST_KEYBOARD_STEP = 2;
+
+function clampFileListSize(size: number) {
+  return Math.min(FILE_LIST_MAX_SIZE, Math.max(FILE_LIST_MIN_SIZE, size));
+}
+
+function restoredFileListSize() {
+  const saved = Number(safeLocalStorageGet(FILE_LIST_SIZE_STORAGE_KEY));
+  return Number.isFinite(saved) && saved >= FILE_LIST_MIN_SIZE && saved <= FILE_LIST_MAX_SIZE ? saved : FILE_LIST_DEFAULT_SIZE;
+}
 
 const props = defineProps<{
   pluginId: string;
@@ -33,8 +50,17 @@ const previewContentType = ref("");
 const previewTruncated = ref(false);
 const previewLoading = ref(false);
 const previewError = ref("");
+const paneGroup = ref<HTMLElement>();
+const fileListSize = ref(restoredFileListSize());
+const resizingPanes = ref(false);
+const paneGridStyle = computed(() => ({ gridTemplateColumns: `minmax(0, ${fileListSize.value}fr) 0.375rem minmax(0, ${100 - fileListSize.value}fr)` }));
 let listGeneration = 0;
 let previewGeneration = 0;
+let resizeHandle: HTMLElement | null = null;
+let resizePointerId: number | null = null;
+let resizeStartX = 0;
+let resizeStartSize = FILE_LIST_DEFAULT_SIZE;
+let resizeAvailableWidth = 0;
 
 const rootUri = computed(() => pluginFilesystemRootUri(props.provider));
 const canRead = computed(() => (props.provider.capabilities || []).includes("read"));
@@ -153,8 +179,98 @@ function formatSize(size?: number) {
   return `${(size / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
+function setFileListSize(size: number) {
+  fileListSize.value = Math.round(clampFileListSize(size) * 10) / 10;
+}
+
+function persistFileListSize() {
+  safeLocalStorageSet(FILE_LIST_SIZE_STORAGE_KEY, String(fileListSize.value));
+}
+
+function cleanupPaneResize() {
+  window.removeEventListener("pointermove", resizeFilePanes, true);
+  window.removeEventListener("pointerup", finishPaneResize, true);
+  window.removeEventListener("pointercancel", cancelPaneResize);
+  window.removeEventListener("blur", cancelPaneResize);
+  window.removeEventListener("keydown", cancelPaneResizeWithEscape, true);
+  resizeHandle?.removeEventListener("lostpointercapture", cancelPaneResize);
+  if (resizePointerId !== null && resizeHandle?.hasPointerCapture?.(resizePointerId)) resizeHandle.releasePointerCapture(resizePointerId);
+  resizeHandle = null;
+  resizePointerId = null;
+  if (resizingPanes.value) endPanelResize();
+  resizingPanes.value = false;
+}
+
+function cancelPaneResize() {
+  if (!resizingPanes.value) return;
+  setFileListSize(resizeStartSize);
+  cleanupPaneResize();
+}
+
+function cancelPaneResizeWithEscape(event: KeyboardEvent) {
+  if (event.key !== "Escape") return;
+  event.preventDefault();
+  event.stopPropagation();
+  cancelPaneResize();
+}
+
+function resizeFilePanes(event: PointerEvent) {
+  if (event.pointerId !== resizePointerId) return;
+  event.preventDefault();
+  setFileListSize(resizeStartSize + ((event.clientX - resizeStartX) / resizeAvailableWidth) * 100);
+}
+
+function finishPaneResize(event: PointerEvent) {
+  if (event.pointerId !== resizePointerId) return;
+  resizeFilePanes(event);
+  const changed = fileListSize.value !== resizeStartSize;
+  cleanupPaneResize();
+  if (changed) persistFileListSize();
+}
+
+function startPaneResize(event: PointerEvent) {
+  if (event.button !== 0 || resizingPanes.value) return;
+  const groupWidth = paneGroup.value?.getBoundingClientRect().width ?? 0;
+  const handleWidth = (event.currentTarget as HTMLElement | null)?.getBoundingClientRect().width ?? 0;
+  resizeAvailableWidth = groupWidth - handleWidth;
+  if (resizeAvailableWidth <= 0) return;
+  event.preventDefault();
+  resizeStartX = event.clientX;
+  resizeStartSize = fileListSize.value;
+  resizeHandle = event.currentTarget as HTMLElement;
+  resizePointerId = event.pointerId;
+  resizeHandle.setPointerCapture?.(resizePointerId);
+  resizeHandle.addEventListener("lostpointercapture", cancelPaneResize);
+  resizingPanes.value = true;
+  beginPanelResize();
+  window.addEventListener("pointermove", resizeFilePanes, { capture: true, passive: false });
+  window.addEventListener("pointerup", finishPaneResize, true);
+  window.addEventListener("pointercancel", cancelPaneResize);
+  window.addEventListener("blur", cancelPaneResize);
+  window.addEventListener("keydown", cancelPaneResizeWithEscape, true);
+}
+
+function resizeFilePanesWithKeyboard(event: KeyboardEvent) {
+  let nextSize: number;
+  if (event.key === "ArrowLeft") nextSize = fileListSize.value - (event.shiftKey ? FILE_LIST_KEYBOARD_STEP * 5 : FILE_LIST_KEYBOARD_STEP);
+  else if (event.key === "ArrowRight") nextSize = fileListSize.value + (event.shiftKey ? FILE_LIST_KEYBOARD_STEP * 5 : FILE_LIST_KEYBOARD_STEP);
+  else if (event.key === "Home") nextSize = FILE_LIST_MIN_SIZE;
+  else if (event.key === "End") nextSize = FILE_LIST_MAX_SIZE;
+  else return;
+  event.preventDefault();
+  setFileListSize(nextSize);
+  persistFileListSize();
+}
+
+function resetFilePaneSize() {
+  cancelPaneResize();
+  fileListSize.value = FILE_LIST_DEFAULT_SIZE;
+  safeLocalStorageRemove(FILE_LIST_SIZE_STORAGE_KEY);
+}
+
 onMounted(() => void load(props.initialUri || rootUri.value));
 onBeforeUnmount(() => {
+  cancelPaneResize();
   revokePreviewImage();
 });
 watch(
@@ -183,21 +299,21 @@ defineExpose({ refresh: () => load(currentUri.value) });
       <span>{{ error }}</span>
     </div>
 
-    <div v-else class="grid min-h-0 flex-1 grid-cols-[minmax(18rem,42%)_minmax(0,1fr)] divide-x">
-      <div class="flex min-h-0 flex-col">
+    <div v-else ref="paneGroup" data-file-manager-panes class="grid min-h-0 min-w-0 flex-1 overflow-hidden" :style="paneGridStyle">
+      <div data-file-list-pane class="flex min-h-0 min-w-0 flex-col overflow-hidden">
         <div v-if="loading && !entries.length" class="flex h-full items-center justify-center text-sm text-muted-foreground"><Loader2 class="mr-2 size-4 animate-spin" />{{ t("pluginPlatform.loadingFiles") }}</div>
         <div v-else-if="!sortedEntries.length" class="flex h-full items-center justify-center text-sm text-muted-foreground">{{ t("pluginPlatform.emptyDirectory") }}</div>
-        <RecycleScroller v-else class="min-h-0 flex-1 min-w-[28rem] text-sm" :items="sortedEntries" :item-size="46" :buffer="300" key-field="uri">
+        <RecycleScroller v-else data-file-list class="plugin-file-list min-h-0 min-w-0 flex-1 overflow-x-hidden text-sm" :items="sortedEntries" :item-size="46" :buffer="300" key-field="uri">
           <template #default="{ item: entry }">
-            <button type="button" class="grid h-[46px] w-full grid-cols-[minmax(0,1fr)_7rem_10rem] items-center gap-3 border-b px-3 text-left hover:bg-muted/50" :class="selected?.uri === entry.uri ? 'bg-muted' : ''" @click="selected = entry" @dblclick="activateEntry(entry)">
+            <button type="button" class="plugin-file-row grid h-[46px] w-full min-w-0 items-center gap-3 border-b px-3 text-left hover:bg-muted/50" :class="selected?.uri === entry.uri ? 'bg-muted' : ''" :data-file-entry-uri="entry.uri" @click="selected = entry" @dblclick="activateEntry(entry)">
               <span class="flex min-w-0 items-center gap-2">
                 <Folder v-if="entry.kind === 'directory'" class="size-4 shrink-0 text-amber-500" />
                 <FileCode2 v-else-if="entry.contentType?.startsWith('text/')" class="size-4 shrink-0 text-sky-500" />
                 <File v-else class="size-4 shrink-0 text-muted-foreground" />
                 <span class="truncate" :title="entry.name">{{ entry.name }}</span>
               </span>
-              <span class="text-right text-xs tabular-nums text-muted-foreground">{{ entry.kind === "directory" ? "" : formatSize(entry.size) }}</span>
-              <span class="truncate text-xs text-muted-foreground" :title="entry.modifiedAt">{{ entry.modifiedAt || "" }}</span>
+              <span class="plugin-file-size min-w-0 truncate text-right text-xs tabular-nums text-muted-foreground">{{ entry.kind === "directory" ? "" : formatSize(entry.size) }}</span>
+              <span class="plugin-file-modified min-w-0 truncate text-xs text-muted-foreground" :title="entry.modifiedAt">{{ entry.modifiedAt || "" }}</span>
             </button>
           </template>
         </RecycleScroller>
@@ -206,7 +322,25 @@ defineExpose({ refresh: () => load(currentUri.value) });
         </div>
       </div>
 
-      <div class="flex min-h-0 min-w-0 flex-col">
+      <div
+        data-file-preview-resize
+        role="separator"
+        tabindex="0"
+        aria-orientation="vertical"
+        :aria-label="t('pluginPlatform.filePreviewResize')"
+        :aria-valuemin="FILE_LIST_MIN_SIZE"
+        :aria-valuemax="FILE_LIST_MAX_SIZE"
+        :aria-valuenow="Math.round(fileListSize)"
+        :title="t('pluginPlatform.filePreviewResize')"
+        class="group relative z-10 h-full w-1.5 cursor-col-resize touch-none border-x border-border/70 bg-background transition-colors hover:bg-primary/25 focus-visible:bg-primary/25 focus-visible:outline-none"
+        @pointerdown="startPaneResize"
+        @dblclick="resetFilePaneSize"
+        @keydown="resizeFilePanesWithKeyboard"
+      >
+        <span class="pointer-events-none absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border transition-colors group-hover:bg-primary group-focus-visible:bg-primary" />
+      </div>
+
+      <div data-file-preview-pane class="flex min-h-0 min-w-0 flex-col overflow-hidden">
         <div v-if="!selected" class="m-auto max-w-sm px-6 text-center text-sm text-muted-foreground">{{ t("pluginPlatform.fileManagerHint") }}</div>
         <template v-else>
           <div class="shrink-0 border-b px-4 py-3">
@@ -232,5 +366,43 @@ defineExpose({ refresh: () => load(currentUri.value) });
         </template>
       </div>
     </div>
+
+    <Teleport to="body">
+      <div v-if="resizingPanes" class="plugin-file-resize-overlay fixed inset-0 cursor-col-resize touch-none select-none" aria-hidden="true" />
+    </Teleport>
   </div>
 </template>
+
+<style scoped>
+.plugin-file-list {
+  container: plugin-file-list / inline-size;
+}
+
+.plugin-file-row {
+  grid-template-columns: minmax(0, 1fr) 7rem 10rem;
+}
+
+@container plugin-file-list (max-width: 28rem) {
+  .plugin-file-row {
+    grid-template-columns: minmax(0, 1fr) 6rem;
+  }
+
+  .plugin-file-modified {
+    display: none;
+  }
+}
+
+@container plugin-file-list (max-width: 20rem) {
+  .plugin-file-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .plugin-file-size {
+    display: none;
+  }
+}
+
+.plugin-file-resize-overlay {
+  z-index: 2147483646;
+}
+</style>

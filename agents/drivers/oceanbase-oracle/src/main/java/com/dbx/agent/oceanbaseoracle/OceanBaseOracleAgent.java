@@ -10,6 +10,7 @@ import com.dbx.agent.CompletionAssistantRequest;
 import com.dbx.agent.CompletionAssistantResponse;
 import com.dbx.agent.ConfiguredJdbcAgent;
 import com.dbx.agent.ConnectParams;
+import com.dbx.agent.ConstraintInfo;
 import com.dbx.agent.DatabaseInfo;
 import com.dbx.agent.DdlBuilder;
 import com.dbx.agent.ExecuteQueryOptions;
@@ -100,7 +101,13 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     @Override
     public QueryPageResult executeQueryPage(String sql, String schema, QueryPageOptions options) {
         try (QueryTiming timing = QueryTiming.begin()) {
-            QueryPageResult result = super.executeQueryPage(sql, schema, options);
+            long prepareStarted = System.nanoTime();
+            Connection connection = requireConnected();
+            uncheckedVoid(() -> beforeQueryExecution(connection, options.getTimeoutSecs()));
+            QueryTiming.record("session_prepare", prepareStarted);
+            QueryPageResult result = JdbcExecutor.current().executeBoundedPage(
+                connection, sql, schema, this::setSchemaSQL, this::resetSchemaSQL, options, resultValueReader()
+            );
             result.setQuery_timings_ms(timing.finish());
             return result;
         }
@@ -307,8 +314,9 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                     WHEN 'PROCEDURE' THEN 2
                     WHEN 'FUNCTION' THEN 3
                     WHEN 'PACKAGE' THEN 4
-                    WHEN 'SEQUENCE' THEN 5
-                    ELSE 6
+                    WHEN 'PACKAGE BODY' THEN 5
+                    WHEN 'SEQUENCE' THEN 6
+                    ELSE 7
                 END, OBJECT_NAME
                 """.stripIndent().trim(),
                 owner,
@@ -317,11 +325,17 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             );
 
             List<ObjectInfo> result = new ArrayList<>();
-            try (var stmt = requireConnection().prepareStatement(query.sql)) {
+            String sql = query.sql;
+            if (constraints.hasLimit() || constraints.hasOffset()) {
+                sql += "\nORDER BY DBX_RN";
+            }
+            try (var stmt = requireConnection().prepareStatement(sql)) {
                 bind(stmt, query.args);
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
-                        result.add(new ObjectInfo(rs.getString(1), rs.getString(2), owner, null));
+                        String objectType = rs.getString(2);
+                        result.add(new ObjectInfo(rs.getString(1),
+                            "PACKAGE BODY".equals(objectType) ? "PACKAGE_BODY" : objectType, owner, null));
                     }
                 }
             }
@@ -703,7 +717,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     }
 
     private static List<String> oceanBaseObjectTypes(MetadataListConstraints constraints) {
-        List<String> supported = List.of("TABLE", "VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "SEQUENCE", "SYNONYM");
+        List<String> supported = List.of("TABLE", "VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE BODY", "SEQUENCE", "SYNONYM");
         if (!constraints.hasObjectTypes()) {
             return supported;
         }
@@ -722,6 +736,9 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             String owner = normalizeSchema(schema);
             String objectName = normalizeObjectName(name);
             String normalizedType = normalizeObjectSourceType(objectType);
+            if (prefersDictionarySource(normalizedType)) {
+                return getDictionaryFirstObjectSource(owner, objectName, normalizedType);
+            }
             String source;
             SQLException metadataError = null;
             try {
@@ -749,6 +766,30 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             }
             return new ObjectSource(objectName, normalizedType, owner, source == null ? "" : source);
         });
+    }
+
+    private ObjectSource getDictionaryFirstObjectSource(String owner, String name, String objectType) throws SQLException {
+        String source;
+        SQLException dictionaryError = null;
+        try {
+            source = queryDictionarySource(owner, name, objectType);
+        } catch (SQLException e) {
+            dictionaryError = e;
+            source = null;
+        }
+
+        if (source == null || source.trim().isEmpty()) {
+            try {
+                source = queryDbmsMetadataSource(owner, name, objectType);
+            } catch (SQLException metadataError) {
+                if (dictionaryError != null) {
+                    dictionaryError.addSuppressed(metadataError);
+                    throw dictionaryError;
+                }
+                throw metadataError;
+            }
+        }
+        return new ObjectSource(name, objectType, owner, source == null ? "" : source);
     }
 
     private String queryDbmsMetadataSource(String owner, String name, String objectType) throws SQLException {
@@ -794,6 +835,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             stmt.setString(1, owner);
             stmt.setString(2, name);
             stmt.setString(3, sourceType);
+            stmt.setFetchSize(256);
             try (ResultSet rs = stmt.executeQuery()) {
                 while (rs.next()) {
                     String line = rs.getString(1);
@@ -820,6 +862,13 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     private static boolean supportsDictionarySource(String objectType) {
         return switch (objectType) {
             case "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY", "SEQUENCE" -> true;
+            default -> false;
+        };
+    }
+
+    private static boolean prefersDictionarySource(String objectType) {
+        return switch (objectType) {
+            case "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE_BODY", "TRIGGER", "TYPE", "TYPE_BODY" -> true;
             default -> false;
         };
     }
@@ -1267,6 +1316,84 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             }
             return result;
         });
+    }
+
+    @Override
+    public List<ConstraintInfo> listConstraints(String schema, String table) {
+        return unchecked(() -> {
+            String owner = normalizeSchema(schema);
+            String tableName = normalizeObjectName(table);
+            String sql = """
+                SELECT c.CONSTRAINT_NAME, c.CONSTRAINT_TYPE, c.SEARCH_CONDITION,
+                       c.STATUS, c.VALIDATED, c.DEFERRABLE, c.DEFERRED, c.GENERATED,
+                       cc.COLUMN_NAME, tc.NULLABLE
+                FROM ALL_TABLES t
+                LEFT JOIN ALL_CONSTRAINTS c ON c.OWNER = t.OWNER AND c.TABLE_NAME = t.TABLE_NAME
+                    AND c.CONSTRAINT_TYPE IN ('P', 'U', 'C')
+                LEFT JOIN ALL_CONS_COLUMNS cc ON cc.OWNER = c.OWNER
+                    AND cc.TABLE_NAME = c.TABLE_NAME AND cc.CONSTRAINT_NAME = c.CONSTRAINT_NAME
+                LEFT JOIN ALL_TAB_COLUMNS tc ON tc.OWNER = t.OWNER
+                    AND tc.TABLE_NAME = t.TABLE_NAME AND tc.COLUMN_NAME = cc.COLUMN_NAME
+                WHERE t.OWNER = ? AND t.TABLE_NAME = ?
+                ORDER BY c.CONSTRAINT_NAME, cc.POSITION
+                """.stripIndent().trim();
+            Map<String, ConstraintInfo> result = new LinkedHashMap<>();
+            try (var stmt = requireConnection().prepareStatement(sql)) {
+                stmt.setString(1, owner);
+                stmt.setString(2, tableName);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    boolean visible = false;
+                    while (rs.next()) {
+                        visible = true;
+                        String name = rs.getString("CONSTRAINT_NAME");
+                        if (name == null) continue;
+                        String column = rs.getString("COLUMN_NAME");
+                        String condition = rs.getString("SEARCH_CONDITION");
+                        // NOT NULL already appears in the columns tab, as for native Oracle.
+                        if ("C".equals(rs.getString("CONSTRAINT_TYPE"))
+                            && "GENERATED NAME".equals(rs.getString("GENERATED"))
+                            && "N".equals(rs.getString("NULLABLE"))
+                            && column != null && condition != null
+                            && condition.matches("\\s*" + Pattern.quote(quoteIdentifier(column))
+                                + "\\s+(?i:IS\\s+NOT\\s+NULL)\\s*")) continue;
+                        ConstraintInfo constraint = result.get(name);
+                        if (constraint == null) {
+                            String type = switch (rs.getString("CONSTRAINT_TYPE")) {
+                                case "P" -> "PRIMARY KEY";
+                                case "U" -> "UNIQUE";
+                                default -> "CHECK";
+                            };
+                            constraint = new ConstraintInfo(name, type, condition,
+                                new ArrayList<>(),
+                                constraintState(rs.getString("DEFERRABLE"), "DEFERRABLE", "NOT DEFERRABLE"),
+                                constraintState(rs.getString("DEFERRED"), "DEFERRED", "IMMEDIATE"),
+                                constraintState(rs.getString("STATUS"), "ENABLED", "DISABLED"),
+                                constraintState(rs.getString("VALIDATED"), "VALIDATED", "NOT VALIDATED"));
+                            result.put(name, constraint);
+                        }
+                        if (column != null) constraint.columns().add(column);
+                    }
+                    if (!visible) throw new SQLException("Table does not exist or is not accessible", "42000");
+                }
+            }
+            return result.values().stream().map(constraint -> {
+                String definition = constraint.definition();
+                if (definition == null) definition = "";
+                if (!constraint.constraint_type().equals("CHECK")) {
+                    definition = constraint.constraint_type() + " (" + String.join(", ",
+                        constraint.columns().stream().map(OceanBaseOracleAgent::quoteIdentifier).toList()) + ")";
+                }
+                return new ConstraintInfo(constraint.name(), constraint.constraint_type(), definition,
+                    constraint.columns(), constraint.deferrable(), constraint.initially_deferred(),
+                    constraint.enabled(), constraint.valid());
+            }).toList();
+        });
+    }
+
+    private static Boolean constraintState(String value, String yes, String no) {
+        if (yes.equals(value)) return true;
+        if (no.equals(value)) return false;
+        return null;
     }
 
     @Override

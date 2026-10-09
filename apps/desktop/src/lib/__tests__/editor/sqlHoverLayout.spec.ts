@@ -57,6 +57,21 @@ describe("constrainSqlHoverLayout", () => {
     expect(wheelEvent.defaultPrevented).toBe(true);
   });
 
+  it("translates Alt plus deltaY into horizontal scrolling", () => {
+    const root = document.createElement("div");
+    const content = document.createElement("div");
+    Object.defineProperty(content, "clientWidth", { configurable: true, value: 600 });
+    Object.defineProperty(content, "scrollWidth", { configurable: true, value: 1200 });
+    constrainSqlHoverLayout(root, content);
+
+    const wheelEvent = new WheelEvent("wheel", { cancelable: true, deltaY: 120 });
+    Object.defineProperty(wheelEvent, "altKey", { value: true });
+    content.dispatchEvent(wheelEvent);
+
+    expect(content.scrollLeft).toBe(120);
+    expect(wheelEvent.defaultPrevented).toBe(true);
+  });
+
   it("starts the scrollbar on mount and stops responding after destroy", () => {
     const root = document.createElement("div");
     const content = document.createElement("div");

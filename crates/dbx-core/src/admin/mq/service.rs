@@ -153,6 +153,18 @@ pub async fn mq_list_topics_core(
     adapter.list_topics(&ns, opts).await
 }
 
+pub async fn mq_list_topics_page_core(
+    state: &AppState,
+    conn_id: &str,
+    ns: NamespaceRef,
+    opts: ListTopicsOpts,
+    pagination: MqListPageRequest,
+) -> Result<MqListPage<TopicInfo>, String> {
+    pagination.validate()?;
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.list_topics_page(&ns, opts, pagination).await
+}
+
 pub async fn mq_create_topic_core(
     state: &AppState,
     conn_id: &str,
@@ -204,6 +216,17 @@ pub async fn mq_list_exchanges_core(
 ) -> Result<Vec<MqExchangeInfo>, String> {
     let adapter = get_adapter(state, conn_id).await?;
     adapter.list_exchanges(&ns).await
+}
+
+pub async fn mq_list_exchanges_page_core(
+    state: &AppState,
+    conn_id: &str,
+    ns: NamespaceRef,
+    pagination: MqListPageRequest,
+) -> Result<MqListPage<MqExchangeInfo>, String> {
+    pagination.validate()?;
+    let adapter = get_adapter(state, conn_id).await?;
+    adapter.list_exchanges_page(&ns, pagination).await
 }
 
 pub async fn mq_create_exchange_core(
@@ -898,6 +921,8 @@ mod tests {
 
     fn mq_connection(read_only: bool) -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: "readonly-mq".to_string(),
             name: "Read only MQ".to_string(),
@@ -917,6 +942,7 @@ mod tests {
             visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
+            sidebar_auto_load_all_tables: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -943,6 +969,7 @@ mod tests {
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_filter: None,
             redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),

@@ -3,6 +3,8 @@ import type { TransferContent, TransferMode, TransferObjectKind, TransferTableNa
 import type { SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import type { MultiDbExecutionTarget, MultiDbResultRunExecution } from "@/types/sqlExecution";
 import type { DatabaseType } from "@/types/generated/databaseTypes";
+import type { PluginAiRecommendation } from "@/types/pluginAiRecommendations";
+import type { GraphResult } from "@/lib/graph/graphResult";
 
 export type { DatabaseType } from "@/types/generated/databaseTypes";
 
@@ -16,6 +18,10 @@ export function isMeilisearchDatabaseType(dbType?: DatabaseType): boolean {
 
 export function isSolrDatabaseType(dbType?: DatabaseType): boolean {
   return dbType === "solr";
+}
+
+export function isCouchDbDatabaseType(dbType?: DatabaseType): boolean {
+  return dbType === "couchdb";
 }
 
 export interface SqlSnippet {
@@ -104,6 +110,10 @@ export interface ConnectionConfig {
   visible_database_patterns?: string[];
   visible_schemas?: Record<string, string[]>;
   show_system_schemas?: boolean;
+  /** Whether to show Oracle / OceanBase-Oracle database links node in the sidebar tree. Defaults to true. */
+  show_database_links?: boolean;
+  /** Load every page when the sidebar's Tables group is opened for this connection. */
+  sidebar_auto_load_all_tables?: boolean;
   attached_databases?: AttachedDatabaseConfig[];
   init_script?: string;
   color?: string;
@@ -126,6 +136,13 @@ export interface ConnectionConfig {
   client_key_path?: string;
   sysdba?: boolean;
   oracle_connection_type?: "service_name" | "sid" | "tns";
+  /** Connection-level NLS_LANG override; empty follows the global default. */
+  oracle_oci_nls_lang?: string;
+  /**
+   * Connection-level TNS_ADMIN override for OCI (tnsnames.ora / sqlnet.ora /
+   * wallet directory); empty follows the global default.
+   */
+  oracle_oci_tns_admin?: string;
   connection_string?: string;
   jdbc_driver_class?: string;
   jdbc_driver_paths?: string[];
@@ -141,6 +158,8 @@ export interface ConnectionConfig {
   redis_database_aliases?: Record<string, string>;
   /** Key-search templates for the Redis browser. Non-empty overrides global settings. */
   redis_key_templates?: string[];
+  /** Default Redis glob pattern applied when opening a new key-browser tab. */
+  redis_key_filter?: string;
   redis_key_grouping?: import("@/lib/redis/redisKeyGrouping").RedisKeyGrouping;
   etcd_endpoints?: string;
   gbase_server?: string;
@@ -187,6 +206,26 @@ export interface ConnectionTestResult {
   databaseInfo?: DatabaseConnectionInfo;
 }
 
+/**
+ * Why the backend declared a connection's pools dead while the app was idle (#4339).
+ * A stable enum by design: raw driver/network error text must not reach a background
+ * UI notification.
+ */
+export type ConnectionLivenessFailureKind = "probe_failed" | "timed_out";
+
+/**
+ * A message on the backend connection-liveness channel (#4339).
+ *
+ * Mirrors the Rust `ConnectionLivenessMessage`, and both transports deliver this exact shape:
+ * the desktop shell forwards it unwrapped and the web SSE stream sends the object itself, so
+ * there is no envelope beyond the message's own `kind` discriminator.
+ *
+ * `resync` means the transport skipped messages, so the frontend must re-check every
+ * connection it still shows as connected — without it, a dropped `lost` would leave a
+ * sidebar green indefinitely.
+ */
+export type ConnectionLivenessMessage = { kind: "lost"; connectionId: string; failureKind: ConnectionLivenessFailureKind } | { kind: "resync" };
+
 export type TransportLayerConfig = ({ type: "ssh" } & SshTunnelConfig) | ({ type: "proxy" } & ProxyTunnelConfig) | ({ type: "http_tunnel" } & HttpTunnelConfig);
 
 /**
@@ -226,6 +265,15 @@ export interface SshTunnelConfig {
   /** Allow `nc` through an SSH exec channel when direct-tcpip is prohibited. */
   allow_exec_channel_proxy?: boolean;
   /**
+   * OpenSSH-style `ProxyCommand` used to reach this host instead of a direct
+   * TCP connection, e.g. `nc %h %p` or
+   * `cloudflared access ssh --hostname %h`. `%h`/`%p`/`%r`/`%%` expand from
+   * the effective host, port and user. The executable must be one of the
+   * helpers the backend allowlists (`nc`, `ncat`, `netcat`, `cloudflared`,
+   * `socat`, `connect`, `corkscrew`, `ssh`). Empty means a direct connection.
+   */
+  proxy_command?: string;
+  /**
    * When set, this layer references a shared tunnel profile; the profile's
    * configuration replaces this layer's fields at connect time (only `id`
    * and `enabled` are kept).
@@ -239,6 +287,7 @@ export interface SshConfigHostEntry {
   port?: number;
   user?: string;
   identity_file?: string;
+  proxy_command?: string | null;
 }
 
 export interface ProxyTunnelConfig {
@@ -359,7 +408,9 @@ export interface PluginFormField {
   default?: PluginFormFieldValue | null;
   options?: PluginFormFieldOption[];
   /** Plugin method returning `{ options: [{ value, label }] }` for dynamic
-   * select rendering; falls back to the declared type when unavailable. */
+   * select rendering; the host calls it with `{ locale }` (the current DBX UI
+   * locale) so plugins can localize the labels. Falls back to the declared
+   * type when unavailable. */
   options_action?: string;
   /** Host API 1.1: offer a local-file action on this field. */
   picker?: PluginFormFieldPicker;
@@ -418,6 +469,11 @@ export interface PluginWorkbenchContribution {
   label: string;
   description?: string;
   icon?: string;
+  ai?: PluginWorkbenchAiContribution;
+}
+
+export interface PluginWorkbenchAiContribution {
+  recommendations?: PluginAiRecommendation[];
 }
 
 export interface PluginFilesystemProviderContribution {
@@ -476,6 +532,7 @@ export interface PluginContextMenuContribution {
   description?: string;
   icon?: string;
   menu: PluginContextMenuTarget;
+  dynamic?: boolean;
   action?: PluginOpenWorkbenchTarget;
 }
 
@@ -509,8 +566,10 @@ export interface PluginOpenWorkbenchAction extends PluginOpenWorkbenchTarget {
   /**
    * Generic launch-options extension point: sidecar method returning
    * `{ entries: [{ label, description?, context? }] }` for the dock "+" picker.
-   * The host renders labels and merges the chosen context into the
-   * host-authored panel context — never interpreting the business meaning.
+   * The host calls it with `{ locale }` (the current DBX UI locale, e.g.
+   * "en"/"zh-CN") so plugins can localize the returned labels, renders the
+   * labels and merges the chosen context into the host-authored panel
+   * context — never interpreting the business meaning.
    */
   options_action?: string;
   /** When true, the host also offers the plugin's own saved connections as launch targets. */
@@ -571,6 +630,20 @@ export interface PluginMenusContribution {
 }
 
 /**
+ * Declares that the plugin sidecar speaks the optional MCP tool bridge
+ * (`mcp/tools` + `mcp/call`) and opts its tools into the host's automatic
+ * surfaces: the built-in AI agent and the external `dbx` MCP server. Both
+ * default to true; the Plugin Center switch still overrides the AI surface.
+ */
+export interface PluginMcpContribution {
+  type: "mcp";
+  id: string;
+  description?: string;
+  ai_tools?: boolean;
+  external_tools?: boolean;
+}
+
+/**
  * Contribution types the host renders through the plugin's own UI entrypoint in
  * a plugin tab. A `workbench` is launched from the sidebar, the plugin center,
  * or `host.openWorkbench`; a `result-view` is launched from the query-result
@@ -580,7 +653,7 @@ export interface PluginMenusContribution {
  */
 export type PluginUiContribution = PluginWorkbenchContribution | PluginResultViewContribution;
 
-export type PluginContribution = PluginConnectionProviderContribution | PluginWorkbenchContribution | PluginFilesystemProviderContribution | PluginContextMenuContribution | PluginResultViewContribution | PluginCommandContribution | PluginMenusContribution;
+export type PluginContribution = PluginConnectionProviderContribution | PluginWorkbenchContribution | PluginFilesystemProviderContribution | PluginContextMenuContribution | PluginResultViewContribution | PluginCommandContribution | PluginMenusContribution | PluginMcpContribution;
 
 export interface PluginEngines {
   dbx: string;
@@ -958,12 +1031,28 @@ export interface ObjectStatistics {
 
 export type ObjectSourceKind = "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "SYNONYM" | "JOB" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
 
+export type RoutineParameterMetadataMode = "IN" | "OUT" | "INOUT" | "RETURN" | "UNKNOWN";
+
+export interface RoutineParameterMetadata {
+  name?: string | null;
+  mode: RoutineParameterMetadataMode;
+  jdbc_type?: number | null;
+  type_name?: string | null;
+  precision?: number | null;
+  length?: number | null;
+  scale?: number | null;
+  nullable?: boolean | null;
+  ordinal?: number | null;
+}
+
 export interface ObjectSource {
   name: string;
   object_type: ObjectSourceKind;
   schema?: string | null;
   source: string;
   editable?: boolean;
+  /** Optional structured metadata exposed by generic JDBC sidecars. */
+  routine_parameters?: RoutineParameterMetadata[];
 }
 
 export interface MysqlEventInfo {
@@ -1128,10 +1217,10 @@ export interface ConstraintInfo {
   match_type?: string | null;
   on_update?: string | null;
   on_delete?: string | null;
-  deferrable: boolean;
-  initially_deferred: boolean;
-  enabled: boolean;
-  valid: boolean;
+  deferrable?: boolean | null;
+  initially_deferred?: boolean | null;
+  enabled?: boolean | null;
+  valid?: boolean | null;
 }
 
 export interface PartitionInfo {
@@ -1212,8 +1301,13 @@ export interface QueryMessage {
   hint?: string;
 }
 
+export type QueryResultSourceLabelKind = "source" | "comment";
+
 export interface QueryResult {
   columns: string[];
+  /** Typed Neo4j node properties; source columns remain unchanged for paging. */
+  neo4j_node_cells?: import("@/lib/neo4j/neo4jNodeResult").Neo4jNodeCell[];
+  graph_data?: GraphResult;
   /** One SRID per geometry/geography column (first non-null observed). */
   spatial_columns?: SpatialColumn[];
   /**
@@ -1302,7 +1396,11 @@ export interface QueryResult {
    *  this carries the raw HTTP response body so the UI can toggle between
    *  the tabular view and the original JSON. */
   elasticsearch_raw_body?: string;
+  /** Preformatted Redis command output retained alongside the default grid rows. */
+  redis_console_output?: string;
   sourceLabel?: string;
+  /** Identifies whether sourceLabel came from a parsed object source or a SQL preamble comment. */
+  sourceLabelKind?: QueryResultSourceLabelKind;
   /** 结果集来源的库名 / schema（与 sourceLabel 同时写入），供结果集页签按设置决定是否展示。 */
   sourceQualifier?: string;
   /** 结果集来源的对象名（通常为表名），关闭“结果集名称包含数据库名”时用于展示短名称。 */
@@ -1385,6 +1483,8 @@ export interface QueryResultRun {
    */
   sourceLabel?: string;
   sourceName?: string;
+  /** Identifies whether sourceLabel came from a parsed object source or a SQL preamble comment. */
+  sourceLabelKind?: QueryResultSourceLabelKind;
   /**
    * Logical-result identity for the tab-switch view snapshot cache. Distinct
    * from `resultGridRevision` (the grid remount key): this one changes on every
@@ -1412,6 +1512,8 @@ export interface QueryResultRun {
   resultPageSql?: string;
   resultPageLimit?: number;
   resultPageOffset?: number;
+  resultExecutedPageLimit?: number;
+  resultExecutedPageOffset?: number;
   resultCountSql?: string;
   resultTotalRowCount?: number;
   resultTotalRowCountLoading?: boolean;
@@ -1476,6 +1578,12 @@ export interface SqlColumnReference {
   scope_id?: number;
 }
 
+export interface SqlGroupByViolation {
+  span: SqlTextSpan;
+  column: string;
+  qualifier?: string | null;
+}
+
 export interface SqlReferenceScope {
   id: number;
   parent_id?: number | null;
@@ -1485,6 +1593,7 @@ export interface SqlReferenceAnalysis {
   tables: SqlTableReference[];
   columns: SqlColumnReference[];
   scopes?: SqlReferenceScope[];
+  group_by_violations?: SqlGroupByViolation[];
 }
 
 export type TreeNodeType =
@@ -1543,6 +1652,7 @@ export type TreeNodeType =
   | "event-trigger"
   | "object-browser"
   | "user-admin"
+  | "xugu-user-admin"
   | "dameng-users"
   | "dameng-roles"
   | "dameng-job-admin"
@@ -1672,6 +1782,14 @@ export interface TreeNode {
     parentId: string;
     offset: number;
     pageSize: number;
+    /**
+     * Identity of the row that was expected to open this page: the peek row the
+     * previous page fetched but did not display. Offset paging is not snapshot
+     * consistent, so when objects are created or dropped above the window the
+     * same offset points at a different row; comparing against this anchor lets
+     * the page notice that and re-read the window instead of leaving a gap.
+     */
+    anchor?: string;
   };
 }
 
@@ -1746,6 +1864,7 @@ export interface TableStructureEditorDraft {
   originalMysqlAutoIncrementValue?: string;
   mysqlTableEngine?: string;
   originalMysqlTableEngine?: string;
+  physicalOptions?: import("@/lib/table/tablePhysicalOptions").TablePhysicalOptionsDraft;
   tableOwner?: string;
   originalTableOwner?: string;
   columns: import("@/lib/table/tableStructureEditorSql").EditableStructureColumn[];
@@ -1804,16 +1923,49 @@ export interface QueryPageJumpProgress {
   targetPage: number;
 }
 
-export type TabOutputView = "result" | "summary" | "explain" | "chart" | "messages" | "profile";
+export type TabOutputView = "result" | "graph" | "summary" | "explain" | "chart" | "messages" | "profile";
+
+export type RedisResultViewMode = "grid" | "console";
 
 export type TabPageUiState = Record<string, unknown>;
 
 /** UI-only state that must survive an inactive tab's component being unmounted. */
 export interface TabUiState {
   activeOutputView?: TabOutputView;
+  /** Redis query results default to grid; a per-tab override selects command-line output. */
+  redisResultViewMode?: RedisResultViewMode;
   resultPaneOpen?: boolean;
   /** Small JSON-compatible snapshots owned by special-page components. */
   page?: Record<string, TabPageUiState>;
+}
+
+export interface DatabaseSearchResultItem {
+  id: string;
+  schema?: string;
+  tableName: string;
+  tableType?: string;
+  matchedColumns: string[];
+  preview: string;
+  whereInput: string;
+}
+
+export interface DatabaseSearchTableTask {
+  schema?: string;
+  table: TableInfo;
+}
+
+export interface DatabaseSearchTabState {
+  keyword: string;
+  perTableLimit: number;
+  progressDone: number;
+  progressTotal: number;
+  results: DatabaseSearchResultItem[];
+  tableErrors: Array<{ tableName: string; message: string }>;
+  generalError: string;
+  tableTasks: DatabaseSearchTableTask[];
+  nextTableIndex: number;
+  activeKeyword: string;
+  activePerTableLimit: number;
 }
 
 export interface QueryTab {
@@ -1850,6 +2002,7 @@ export interface QueryTab {
   sql: string;
   savedSqlId?: string;
   externalSqlPath?: string;
+  externalSqlEncoding?: "auto" | "utf8" | "utf8Bom" | "utf16le" | "utf16be" | "gbk";
   externalSqlFileVersion?: ExternalSqlFileVersion;
   externalSqlIgnoredFileVersion?: ExternalSqlFileVersion;
   externalSqlFileMissing?: boolean;
@@ -1868,9 +2021,24 @@ export interface QueryTab {
   resultLocalSortOriginalMongoDocuments?: QueryResult["mongo_documents"];
   resultLocalSortOriginalMongoCopyDocuments?: QueryResult["mongo_copy_documents"];
   orderByInput?: string;
+  /**
+   * Structured (sort builder) ORDER BY applied on top of `orderByInput`. Kept as
+   * a sibling field so the manual input stays editable while store-side SQL
+   * rebuilds (refresh/export/restore) still reproduce the composite sort.
+   */
+  structuredOrderByInput?: string;
   resultPageSql?: string;
   resultPageLimit?: number;
   resultPageOffset?: number;
+  /**
+   * Pagination of the execution that actually produced (or extended) the
+   * displayed result. `resultPageLimit`/`resultPageOffset` deliberately stay on
+   * the logical first page so a later refresh never re-runs only the appended
+   * tail segment; this pair mirrors the segment that ran instead, which the grid
+   * needs to show the SQL behind the current rows after "load all".
+   */
+  resultExecutedPageLimit?: number;
+  resultExecutedPageOffset?: number;
   resultCountSql?: string;
   resultTotalRowCount?: number;
   resultTotalRowCountLoading?: boolean;
@@ -1923,6 +2091,11 @@ export interface QueryTab {
     line: number;
     column?: number;
   };
+  /** Ephemeral request to reveal/scroll to a specific column in the data grid. */
+  gridRevealColumnRequest?: {
+    id: number;
+    columnName: string;
+  };
   executionId?: string;
   /** Ephemeral result run targeted by the current execution; null means a new run is being produced. */
   executingResultRunId?: string | null;
@@ -1959,6 +2132,7 @@ export interface QueryTab {
     | "objects"
     | "structure"
     | "users"
+    | "xugu-users"
     | "dameng-users"
     | "dameng-roles"
     | "dameng-jobs"
@@ -1970,7 +2144,8 @@ export interface QueryTab {
     | "solr-admin"
     | "dolt-version-control"
     | "plugin-workbench"
-    | "plugin-filesystem";
+    | "plugin-filesystem"
+    | "database-search";
   pluginWorkbench?: {
     /** Host command that created this tab; distinct commands can share a workbench. */
     commandId?: string;
@@ -2003,6 +2178,7 @@ export interface QueryTab {
   structureInitialTabRequestId?: number;
   structureInitialTarget?: TableStructureEditorTarget;
   structureDraft?: TableStructureEditorDraft;
+  databaseSearchState?: DatabaseSearchTabState;
   objectBrowser?: {
     catalog?: string;
     schema?: string;
@@ -2078,6 +2254,8 @@ export interface QueryTab {
     database?: string;
     columns: ColumnInfo[];
     primaryKeys: string[];
+    /** User-declared row identifier columns, used only when no automatic stable identifier exists. */
+    virtualPrimaryKeys?: string[];
     /** Physical primary keys used for table-open default sorting; excludes unique and synthetic row identifiers. */
     physicalPrimaryKeys?: string[];
   };
@@ -2175,6 +2353,10 @@ export interface QueryTab {
   autoCommit?: boolean;
   /** Session ID for an active manual transaction, set after beginManualTransaction */
   txnSessionId?: string;
+  /** Runtime-only SQL Server transaction lifecycle and last terminal notice. */
+  txnStatus?: "opening" | "active" | "executing" | "ending" | "lost" | "unknown";
+  txnNotice?: string;
+  txnIndependentConnectionExplained?: boolean;
   /** Set to true when a manual transaction was auto-rolled back due to inactivity */
   txnAutoRolledBack?: boolean;
   /** Sticky proven-read-only dialects (Oracle/OceanBase-Oracle/MySQL/PostgreSQL),
@@ -2254,6 +2436,8 @@ export interface TransferTaskConfig {
   targetTableNameCase: TransferTableNameCase;
   quoteTargetColumnNames: boolean;
   batchSize: number;
+  /** Optional per-source-table transfer filter (bare WHERE or a full SELECT). */
+  tableFilters?: Record<string, string>;
   /** Legacy-compatible rebuild flag; true takes precedence over the saved DML mode. */
   dropTargetBeforeCreate?: boolean;
   /** Legacy field only. Saved confirmation is always ignored and reset to false. */

@@ -11,6 +11,8 @@ import type {
   TopicRef,
   TopicInfo,
   ListTopicsOpts,
+  MqListPage,
+  MqListPageRequest,
   TopicStats,
   SubscriptionInfo,
   KafkaConsumerGroupSnapshot,
@@ -62,6 +64,10 @@ export async function mqTestConnection(connectionId: string): Promise<MqClusterI
 // Exchanges / Bindings (RabbitMQ)
 export async function mqListExchanges(connectionId: string, ns: NamespaceRef): Promise<MqExchangeInfo[]> {
   return invoke("mq_list_exchanges", { connectionId, ns });
+}
+
+export async function mqListExchangesPage(connectionId: string, ns: NamespaceRef, pagination: MqListPageRequest): Promise<MqListPage<MqExchangeInfo>> {
+  return invoke("mq_list_exchanges_page", { connectionId, ns, pagination });
 }
 
 export async function mqCreateExchange(connectionId: string, ns: NamespaceRef, exchange: MqExchangeCreateRequest): Promise<void> {
@@ -185,6 +191,10 @@ export async function mqGetNamespacePolicies(connectionId: string, ns: Namespace
 // Topics
 export async function mqListTopics(connectionId: string, ns: NamespaceRef, opts: ListTopicsOpts): Promise<TopicInfo[]> {
   return invoke("mq_list_topics", { connectionId, ns, opts });
+}
+
+export async function mqListTopicsPage(connectionId: string, ns: NamespaceRef, opts: ListTopicsOpts, pagination: MqListPageRequest): Promise<MqListPage<TopicInfo>> {
+  return invoke("mq_list_topics_page", { connectionId, ns, opts, pagination });
 }
 
 export async function mqCreateTopic(connectionId: string, topic: TopicRef, partitions?: number): Promise<void> {

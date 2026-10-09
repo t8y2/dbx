@@ -6,7 +6,8 @@ import ts from "typescript";
 
 export interface McpQueryTimeoutHarness {
   onMcpQueryTimeoutInput: (event: Event) => void;
-  flushMcpQueryTimeoutSave: () => void;
+  stageMcpQueryTimeoutDraft: () => void;
+  draft: { value: { queryTimeoutSecs: number | null } };
 }
 
 export function extractMcpQueryTimeoutDebounceBlock(source: string): string {
@@ -16,28 +17,13 @@ export function extractMcpQueryTimeoutDebounceBlock(source: string): string {
   return source.slice(start, end);
 }
 
-export function createMcpQueryTimeoutHarness(options: {
-  source: string;
-  input: { value: string };
-  policyQueryTimeoutSecs: number | null;
-  saveMcpPolicy: (partial: { queryTimeoutSecs: number | null }, callbacks?: { onSuccess?: () => void; onFailure?: () => void }) => void;
-  policyMutationBlocked?: { value: boolean };
-  setSaveStatus?: (status: "idle" | "saving" | "saved" | "failed") => void;
-  toast?: (message: string, duration: number) => void;
-  t?: (key: string) => string;
-}): McpQueryTimeoutHarness {
+export function createMcpQueryTimeoutHarness(options: { source: string; input: { value: string }; policyQueryTimeoutSecs: number | null; toast?: (message: string, duration: number) => void; t?: (key: string) => string }): McpQueryTimeoutHarness {
   const block = extractMcpQueryTimeoutDebounceBlock(options.source);
   const javascript = ts.transpileModule(block, {
     compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
   }).outputText;
-  const factory = new Function("mcpQueryTimeoutInput", "settingsStore", "saveMcpPolicy", "toast", "t", "mcpPolicyControlsDisabled", "setMcpQueryTimeoutSaveStatus", `${javascript}\nreturn { onMcpQueryTimeoutInput, flushMcpQueryTimeoutSave };`);
-  return factory(
-    options.input,
-    { mcpGlobalPolicy: { queryTimeoutSecs: options.policyQueryTimeoutSecs } },
-    options.saveMcpPolicy,
-    options.toast ?? (() => {}),
-    options.t ?? ((key: string) => key),
-    options.policyMutationBlocked ?? { value: false },
-    options.setSaveStatus ?? (() => {}),
-  ) as McpQueryTimeoutHarness;
+  const draft = { value: { queryTimeoutSecs: options.policyQueryTimeoutSecs } };
+  const factory = new Function("mcpQueryTimeoutInput", "mcpPolicyDraft", "toast", "t", `${javascript}\nreturn { onMcpQueryTimeoutInput, stageMcpQueryTimeoutDraft };`);
+  const harness = factory(options.input, draft, options.toast ?? (() => {}), options.t ?? ((key: string) => key)) as Omit<McpQueryTimeoutHarness, "draft">;
+  return { ...harness, draft };
 }

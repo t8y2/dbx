@@ -5,6 +5,12 @@ import { analyzeSqlSemanticSelectionRanges, sqlStringContentRangeAt, trimSqlStri
 export interface QueryEditorStringMouseSelectionOptions extends SqlSemanticSelectionOptions {
   language?: "sql" | "text";
   composing?: boolean;
+  /**
+   * When false the double click keeps the platform default "select one word"
+   * behaviour instead of selecting the whole string literal. Defaults to true
+   * so callers that do not opt in keep the historical behaviour.
+   */
+  selectStringContent?: boolean;
 }
 
 interface PointerPosition {
@@ -47,6 +53,7 @@ function semanticOrDefaultRange(state: EditorState, position: PointerPosition, o
 }
 
 export function createQueryEditorStringMouseSelection(view: EditorView, event: MouseEvent, options: QueryEditorStringMouseSelectionOptions = {}): MouseSelectionStyle | null {
+  if (options.selectStringContent === false) return null;
   if (event.button !== 0 || event.detail !== 2 || event.altKey || options.composing || options.language === "text") return null;
   let start = view.posAndSideAtCoords({ x: event.clientX, y: event.clientY }, false);
   let analysis = analyzeSqlSemanticSelectionRanges(view.state.doc.toString(), options);

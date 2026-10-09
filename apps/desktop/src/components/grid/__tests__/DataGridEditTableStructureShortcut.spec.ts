@@ -1,12 +1,10 @@
 // @vitest-environment happy-dom
 
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { createApp, defineComponent, h, markRaw, nextTick, type App, type PropType } from "vue";
+import { createApp, defineComponent, h, markRaw, nextTick, ref, type App, type PropType } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
-import type { ColumnInfo, DatabaseType, QueryResult } from "@/types/database";
+import type { ColumnInfo, DatabaseType, QueryResult, TableInfoTab } from "@/types/database";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
 vi.mock("@/composables/useDataGridColumnResize", async (importOriginal) => {
@@ -30,7 +28,6 @@ import DataGrid from "../DataGrid.vue";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 
-const dataGridSource = readFileSync(resolve(import.meta.dirname, "../DataGrid.vue"), "utf8");
 const mountedApps: Array<{ app: App; host: HTMLElement }> = [];
 
 const RecycleScroller = defineComponent({
@@ -66,6 +63,8 @@ function mountGrid(
     database?: string;
     tableMeta?: TableMeta | null;
     shortcut?: string;
+    tableInfoTab?: TableInfoTab;
+    autoShowTableInfo?: boolean;
   } = {},
 ) {
   const pinia = createPinia();
@@ -73,6 +72,7 @@ function mountGrid(
   const settingsStore = useSettingsStore();
   settingsStore.updateEditorSettings({
     dataGridRenderMode: "canvas",
+    tableInfoActiveTab: options.tableInfoTab ?? "ddl",
     shortcuts: {
       ...settingsStore.editorSettings.shortcuts,
       editTableStructure: options.shortcut ?? "Mod+D",
@@ -95,6 +95,7 @@ function mountGrid(
   };
 
   const host = document.createElement("div");
+  const grid = ref<{ canOpenTableStructureEditor: boolean; openTableStructureEditor: (tab?: TableInfoTab) => boolean }>();
   document.body.append(host);
   const Root = defineComponent({
     setup() {
@@ -105,12 +106,14 @@ function mountGrid(
           {
             default: () =>
               h(DataGrid, {
+                ref: grid,
                 result,
                 databaseType: options.databaseType ?? "mysql",
                 context: options.context ?? "table-data",
                 connectionId: options.connectionId ?? "connection-1",
                 database: options.database ?? "app",
                 tableMeta: options.tableMeta === null ? undefined : (options.tableMeta ?? defaultTableMeta),
+                autoShowTableInfo: options.autoShowTableInfo ?? false,
               }),
           },
         );
@@ -122,7 +125,7 @@ function mountGrid(
   app.component("RecycleScroller", RecycleScroller);
   app.mount(host);
   mountedApps.push({ app, host });
-  return { host, openTableStructure };
+  return { host, openTableStructure, grid };
 }
 
 async function settle() {
@@ -152,6 +155,23 @@ afterEach(() => {
 });
 
 describe("DataGrid edit-table-structure shortcut", () => {
+  it("exposes columns navigation to the table header even when the information drawer is closed", async () => {
+    const { host, openTableStructure, grid } = mountGrid({ tableInfoTab: "indexes" });
+    await settle();
+    expect(host.querySelector("[data-edit-table-structure]")).toBeNull();
+    expect(grid.value?.canOpenTableStructureEditor).toBe(true);
+    expect(grid.value!.openTableStructureEditor()).toBe(true);
+    expect(openTableStructure).toHaveBeenCalledExactlyOnceWith("connection-1", "app", "public", "users", "columns", undefined, "warehouse", "table");
+  });
+
+  it("returns false from openTableStructureEditor when table structure editing is not available", async () => {
+    const { grid, openTableStructure } = mountGrid({ databaseType: "redis" });
+    await settle();
+    expect(grid.value?.canOpenTableStructureEditor).toBe(false);
+    expect(grid.value!.openTableStructureEditor()).toBe(false);
+    expect(openTableStructure).not.toHaveBeenCalled();
+  });
+
   it("opens the existing structure editor route for an eligible table-data grid", async () => {
     const { host, openTableStructure } = mountGrid();
     await settle();
@@ -167,7 +187,18 @@ describe("DataGrid edit-table-structure shortcut", () => {
     expect(event.defaultPrevented).toBe(true);
     expect(bubbled).not.toHaveBeenCalled();
     expect(openTableStructure).toHaveBeenCalledOnce();
-    expect(openTableStructure).toHaveBeenCalledWith("connection-1", "app", "public", "users", "ddl", undefined, "warehouse", "table");
+    expect(openTableStructure).toHaveBeenCalledWith("connection-1", "app", "public", "users", "columns", undefined, "warehouse", "table");
+  });
+
+  it.each(["triggers", "indexes"] as const)("opens columns even when the drawer remembers %s", async (tableInfoTab) => {
+    const { host, openTableStructure } = mountGrid({ tableInfoTab });
+    await settle();
+
+    dispatchModShortcut(gridRoot(host), "d");
+    await settle();
+
+    expect(openTableStructure).toHaveBeenCalledExactlyOnceWith("connection-1", "app", "public", "users", "columns", undefined, "warehouse", "table");
+    expect(useSettingsStore().editorSettings.tableInfoActiveTab).toBe(tableInfoTab);
   });
 
   it("uses a configured shortcut and leaves the default key untouched", async () => {
@@ -185,6 +216,7 @@ describe("DataGrid edit-table-structure shortcut", () => {
     expect(customEvent.defaultPrevented).toBe(true);
     expect(bubbled).toHaveBeenCalledOnce();
     expect(openTableStructure).toHaveBeenCalledOnce();
+    expect(openTableStructure).toHaveBeenCalledWith("connection-1", "app", "public", "users", "columns", undefined, "warehouse", "table");
   });
 
   it.each([
@@ -206,6 +238,7 @@ describe("DataGrid edit-table-structure shortcut", () => {
     expect(event.defaultPrevented).toBe(false);
     expect(bubbled).toHaveBeenCalledOnce();
     expect(openTableStructure).not.toHaveBeenCalled();
+    expect(host.querySelector("[data-edit-table-structure]")).toBeNull();
   });
 
   it("leaves editable text targets untouched", async () => {
@@ -251,14 +284,15 @@ describe("DataGrid edit-table-structure shortcut", () => {
     expect(openTableStructure).not.toHaveBeenCalled();
   });
 
-  it("routes through the existing guarded action and keeps the button path", () => {
-    const start = dataGridSource.indexOf("async function onGridKeydown");
-    const end = dataGridSource.indexOf("function copyDetailValue", start);
-    const keydown = dataGridSource.slice(start, end);
+  it("keeps the drawer's edit button on its current facet", async () => {
+    const { host, openTableStructure } = mountGrid({ tableInfoTab: "triggers", autoShowTableInfo: true });
+    await settle();
 
-    expect(keydown).toMatch(
-      /if \(!targetAllowsNativeClipboard && props\.context === "table-data" && canOpenTableStructureEditor\.value && isEditTableStructureShortcut\(event, settingsStore\.editorSettings\.shortcuts\)\) \{[\s\S]*?event\.preventDefault\(\);[\s\S]*?event\.stopPropagation\(\);[\s\S]*?openTableStructureEditor\(\);[\s\S]*?return;/,
-    );
-    expect(dataGridSource).toMatch(/<Button v-if="canOpenTableStructureEditor"[^>]*@click="openTableStructureEditor">/);
+    const editButton = host.querySelector<HTMLButtonElement>(`.table-info-action-button[aria-label="${i18n.global.t("contextMenu.editStructure")}"]`);
+    expect(editButton).not.toBeNull();
+    editButton!.click();
+    await settle();
+
+    expect(openTableStructure).toHaveBeenCalledExactlyOnceWith("connection-1", "app", "public", "users", "triggers", undefined, "warehouse", "table");
   });
 });

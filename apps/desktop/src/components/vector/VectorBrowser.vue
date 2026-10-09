@@ -549,7 +549,7 @@ onBeforeUnmount(() => {
         <ErrorBanner v-if="error" :message="error" copy-mode="label" dismissible @dismiss="error = ''" />
         <div v-else-if="statusMessage" class="border-b bg-emerald-50 px-3 py-1.5 text-xs text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-300">{{ statusMessage }}</div>
         <QueryLoadingState v-if="loading && result.columns.length === 0" class="h-full" label-key="editor.fetching" :elapsed-seconds="elapsedSeconds" show-cancel :cancel-disabled="!executionId || cancelling" :cancelling="cancelling" @cancel="cancelRequest" />
-        <DataGrid v-else class="h-full" :result="result" context="results" :sql="requestText" :loading="loading" @reload="refreshResult" />
+        <DataGrid v-else class="h-full" :result="result" context="results" :sql="requestText" :connection-id="props.connectionId" :database="props.database" :database-type="props.databaseType" :loading="loading" @reload="refreshResult" />
       </div>
     </div>
   </div>

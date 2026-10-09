@@ -2,7 +2,7 @@
 import { computed, ref, shallowRef, nextTick, watch, onMounted, onBeforeUnmount, toRaw } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
-import { RefreshCw, Trash2, Plus, Save, ChevronDown, ChevronLeft, ChevronRight, Table2, Braces, X, Search, Wrench, Filter, Columns3Cog, SquareDashed, Minus, Rows3, AlignLeft, AlignRight, EyeOff, Palette, Copy } from "@lucide/vue";
+import { RefreshCw, Trash2, Plus, Save, ChevronDown, ChevronLeft, ChevronRight, Table2, Braces, X, Search, Wrench, Filter, Columns3, Columns3Cog, SquareDashed, Minus, Rows3, AlignLeft, AlignRight, EyeOff, Palette, Copy } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -14,6 +14,7 @@ import DataGrid from "@/components/grid/DataGrid.vue";
 import DataGridColumnLayoutPopover from "@/components/grid/DataGridColumnLayoutPopover.vue";
 import DataGridCopyFormatControl from "@/components/grid/DataGridCopyFormatControl.vue";
 import DataGridFontFamilyControl from "@/components/grid/DataGridFontFamilyControl.vue";
+import DataGridColumnWidthModeControl from "@/components/grid/DataGridColumnWidthModeControl.vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import { Switch } from "@/components/ui/switch";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
@@ -715,7 +716,9 @@ async function exportAllDocumentStoreDocuments(onProgress?: (info: { rowsExporte
     }
   }
 
-  const result = mongoDocumentsToQueryResult(exportedDocuments, performance.now() - exportStartedAt, totalRows ?? exportedDocuments.length, exportedCopyDocuments, totalRows !== null);
+  // Exports consume source text (CSV/SQL), not the live grid's BSON-faithful
+  // cell encoding, so every document store keeps plain JSON cells here.
+  const result = mongoDocumentsToQueryResult(exportedDocuments, performance.now() - exportStartedAt, totalRows ?? exportedDocuments.length, exportedCopyDocuments, totalRows !== null, { documentGridValues: false });
   if (result.columns.length === 0) result.columns = gridResult.value.columns;
   result.column_types = kind === "mongodb" ? mongoDocumentGridColumnTypes(exportedDocuments, result.columns) : kind === "elasticsearch" ? elasticsearchGridColumnTypesFor(result.columns) : kind === "solr" ? solrGridColumnTypesFor(result.columns) : undefined;
   result.affected_rows = exportedDocuments.length;
@@ -2785,6 +2788,20 @@ defineExpose({ focusSearch });
 
       <DataGridColumnLayoutPopover v-if="viewMode === 'table' && gridResult.columns.length" :grid="dataGridRef" />
 
+      <Button
+        v-if="viewMode === 'table' && dataGridRef?.goToColumnToolbarCapability?.visible"
+        variant="ghost"
+        size="icon"
+        class="h-6 w-7 shrink-0 text-foreground hover:bg-accent"
+        :class="{ 'bg-accent': dataGridRef?.goToColumnToolbarCapability?.active }"
+        :title="dataGridRef?.goToColumnToolbarCapability?.label"
+        :aria-label="dataGridRef?.goToColumnToolbarCapability?.label"
+        :aria-pressed="dataGridRef?.goToColumnToolbarCapability?.active"
+        @click="dataGridRef?.goToColumnToolbarCapability?.onTrigger()"
+      >
+        <Columns3 class="h-4 w-4" />
+      </Button>
+
       <Popover v-if="viewMode === 'table' && gridResult.columns.length" v-model:open="viewOptionsOpen">
         <PopoverTrigger as-child>
           <Button variant="ghost" size="icon" class="h-6 w-7 shrink-0 text-foreground hover:bg-accent" :class="{ 'bg-accent text-foreground': dataGridRef?.nullColumnsHidden }" :title="t('grid.viewOptions')" :aria-label="t('grid.viewOptions')">
@@ -2833,6 +2850,7 @@ defineExpose({ focusSearch });
               </button>
             </div>
           </div>
+          <DataGridColumnWidthModeControl />
           <DataGridFontFamilyControl />
           <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
             <div class="min-w-0 flex items-center gap-2 font-medium">

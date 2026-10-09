@@ -55,16 +55,16 @@ async fn run() -> Result<(), String> {
 
     // Nothing reaches the model before the user opts the plugin in, and
     // nothing for a connection that is not open.
-    if !plugin_tools::discover_plugin_tools(&state, None).await.is_empty() {
+    if !plugin_tools::discover_plugin_tools(&state, None, None).await.is_empty() {
         return Err("tools were exposed before the plugin was enabled for the AI".to_string());
     }
     state.storage.set_ai_plugin_tool_plugin_enabled(PLUGIN_ID, true).await?;
-    if !plugin_tools::discover_plugin_tools(&state, None).await.is_empty() {
+    if !plugin_tools::discover_plugin_tools(&state, None, None).await.is_empty() {
         return Err("tools were exposed without an open plugin connection".to_string());
     }
 
     state.get_or_create_pool(CONNECTION_ID, None).await?;
-    let tools = plugin_tools::discover_plugin_tools(&state, None).await;
+    let tools = plugin_tools::discover_plugin_tools(&state, None, None).await;
     let definitions = tools.definitions();
     let names = definitions.iter().map(|definition| definition.name.as_ref()).collect::<Vec<_>>();
     if names != ["hello__hello_greet", "hello__hello_set_greeting"] {

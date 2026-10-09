@@ -1,14 +1,32 @@
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    response::IntoResponse,
+    Json,
+};
 use dbx_core::storage::{MigrationPreflight, MigrationReport};
+use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 
 use crate::state::WebState;
 
+#[derive(Debug, Default, Deserialize)]
+pub struct MigrationStatusQuery {
+    #[serde(default)]
+    retry: bool,
+}
+
 pub async fn status(
     State(state): State<Arc<WebState>>,
+    Query(query): Query<MigrationStatusQuery>,
 ) -> Result<Json<MigrationPreflight>, (StatusCode, Json<serde_json::Value>)> {
-    state.app.storage.inspect_data_migration().await.map(Json).map_err(error_response)
+    let status = if query.retry {
+        state.app.storage.retry_data_migration_inspection().await
+    } else {
+        state.app.storage.inspect_data_migration().await
+    };
+    status.map(Json).map_err(error_response)
 }
 
 pub async fn start(
@@ -19,6 +37,12 @@ pub async fn start(
         Ok(report) => {
             let ready =
                 state.app.storage.inspect_data_migration().await.map(|status| status.is_ready()).unwrap_or(false);
+            if ready {
+                let allow_managed = !state.password_disabled && state.password_hash.read().await.is_some();
+                if let Err(error) = state.web_mcp.reload(&state.app.storage, allow_managed).await {
+                    log::error!("Web MCP remained disabled after data migration: {error}");
+                }
+            }
             state.migration_ready.store(ready, std::sync::atomic::Ordering::Release);
             Ok(Json(report))
         }

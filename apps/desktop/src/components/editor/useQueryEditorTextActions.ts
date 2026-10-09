@@ -8,6 +8,7 @@ import { copyToClipboard, readTextFromClipboard } from "@/lib/common/clipboard";
 import { blankLineDeletionChanges, replaceSelectedEditorText } from "@/lib/editor/queryEditorTextEdits";
 import { queryEditorClipboardPasteChange } from "@/lib/editor/queryEditorClipboardPaste";
 import { buildSqlInConditionFromPasteSource, insertTextForSqlInCondition } from "@/lib/sql/sqlInListPaste";
+import { restoreSqlFromSourcePaste } from "@/lib/sql/sqlSourcePaste";
 import { convertSqlSelectionCase, type SqlSelectionCaseMode } from "@/lib/sql/sqlSelectionCase";
 import { convertToNextNamingStyle } from "@/lib/naming/namingStyleConverter";
 import { copySqlAsRichText } from "@/lib/sql/sqlRichText";
@@ -119,6 +120,29 @@ export function useQueryEditorTextActions(options: QueryEditorTextActionsOptions
         scrollIntoView: true,
         userEvent: "input.paste",
       });
+      focusEditor();
+    } catch (e: any) {
+      toast(t("editor.contextMenu.pasteClipboardReadFailed", { message: e?.message || String(e) }), 5000);
+    }
+  }
+
+  // 粘贴并还原源码 SQL：显式入口，即使「粘贴时自动还原」开关关闭也可以使用
+  async function pasteClipboardSqlRestoringSource() {
+    if (props.readOnly) return;
+    const currentView = view.value;
+    if (!currentView) return;
+    try {
+      const text = await readTextFromClipboard();
+      if (!text) return;
+      const result = restoreSqlFromSourcePaste(text);
+      const selection = currentView.state.selection.main;
+      currentView.dispatch({
+        ...queryEditorClipboardPasteChange(result.sql, selection.from, selection.to),
+        scrollIntoView: true,
+        userEvent: "input.paste",
+      });
+      // 未识别时也照常插入原文，但要提示用户没有发生还原
+      toast(result.changed ? t("editor.sqlSourcePasteRestored") : t("editor.sqlSourcePasteNotDetected"), result.changed ? 2000 : 3000);
       focusEditor();
     } catch (e: any) {
       toast(t("editor.contextMenu.pasteClipboardReadFailed", { message: e?.message || String(e) }), 5000);
@@ -291,6 +315,7 @@ export function useQueryEditorTextActions(options: QueryEditorTextActionsOptions
     copySelectedSqlAsRichTextFromContextMenu,
     cutSelectedSqlFromContextMenu,
     pasteClipboardSqlFromContextMenu,
+    pasteClipboardSqlRestoringSource,
     toggleCommentFromContextMenu,
     toggleBlockCommentFromContextMenu,
     selectAllSqlFromContextMenu,

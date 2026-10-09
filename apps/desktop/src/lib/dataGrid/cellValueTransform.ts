@@ -5,7 +5,7 @@ import { applyColumnFormatter, DataGridDateTimePatterns } from "@/lib/dataGrid/c
 export const CELL_TRANSFORM_MAX_INPUT = 50_000;
 export const CELL_TRANSFORM_MAX_OUTPUT = 200_000;
 export const CELL_TRANSFORM_MAX_RADIX_DIGITS = 4_096;
-export const CELL_TRANSFORM_KINDS = ["timestamp", "json", "jsonCompact", "xml", "base64Encode", "base64Decode", "urlEncode", "urlDecode", "radix"] as const;
+export const CELL_TRANSFORM_KINDS = ["timestamp", "json", "jsonCompact", "xml", "html", "base64Encode", "base64Decode", "urlEncode", "urlDecode", "radix"] as const;
 export type CellTransformKind = (typeof CELL_TRANSFORM_KINDS)[number];
 export type CellTransformError = "tooLarge" | "invalid" | "invalidTimestamp" | "ambiguousUnit" | "invalidInteger" | "invalidBase64";
 export interface CellTransformOptions {
@@ -64,6 +64,9 @@ export function transformCellValue(source: string, options: CellTransformOptions
         break;
       case "xml":
         text = formatXmlSource(source);
+        break;
+      case "html":
+        text = source;
         break;
       case "urlEncode":
         text = encodeURIComponent(source);

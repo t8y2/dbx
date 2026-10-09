@@ -64,6 +64,41 @@ describe("usePanelResize", () => {
     expect(localStorage.getItem("dbx-ai-panel-width")).toBe("1060");
   });
 
+  it.each([0, 360])("lets history use the editor width with a %ipx AI sibling", (aiWidth) => {
+    const editor = document.createElement("div");
+    editor.setAttribute("data-editor-content", "");
+    const ai = document.createElement("div");
+    const panel = document.createElement("div");
+    const handle = document.createElement("div");
+    panel.append(handle);
+    document.body.append(editor, ai, panel);
+    vi.spyOn(editor, "getBoundingClientRect").mockReturnValue(rect(300, 900));
+    vi.spyOn(ai, "getBoundingClientRect").mockReturnValue(rect(1200, aiWidth));
+    vi.spyOn(panel, "getBoundingClientRect").mockReturnValue(rect(1200 + aiWidth, 288));
+
+    const { historyWidth, startHistoryResize } = usePanelResize();
+    handle.addEventListener("pointerdown", startHistoryResize);
+    handle.dispatchEvent(pointerEvent("pointerdown", 1200 + aiWidth));
+    document.dispatchEvent(pointerEvent("pointermove", -1000));
+    expect(panel.style.width).toBe("1188px");
+    document.dispatchEvent(pointerEvent("pointerup", -1000));
+    expect(historyWidth.value).toBe(1188);
+    expect(localStorage.getItem("dbx-history-width")).toBeNull();
+
+    vi.spyOn(panel, "getBoundingClientRect").mockReturnValue(rect(300 + aiWidth, 1188));
+    vi.spyOn(editor, "getBoundingClientRect").mockReturnValue(rect(300, 0));
+    handle.dispatchEvent(pointerEvent("pointerdown", 300 + aiWidth));
+    document.dispatchEvent(pointerEvent("pointermove", 500 + aiWidth));
+    document.dispatchEvent(pointerEvent("pointerup", 500 + aiWidth));
+    expect(historyWidth.value).toBe(988);
+  });
+
+  it("starts at 60% on every application launch even when a legacy width is stored", () => {
+    localStorage.setItem("dbx-history-width", String(window.innerWidth));
+    const { historyWidth } = usePanelResize();
+    expect(historyWidth.value).toBe(Math.round(window.innerWidth * 0.6));
+  });
+
   it("resizes from the flex-shrunk width after a wide panel is restored in a narrow window", () => {
     localStorage.setItem("dbx-ai-panel-width", "1060");
 

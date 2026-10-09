@@ -11,12 +11,29 @@ const configs = ref<SchemaDiffConfig[]>(loadConfigsFromStorage());
 const activeConfigId = ref<string>("");
 const recentConfigs = ref<SchemaDiffConfig[]>(loadHistoryFromStorage());
 
+function migrateStoredConfig(config: SchemaDiffConfig): SchemaDiffConfig {
+  return {
+    ...config,
+    options: {
+      ...config.options,
+      compareCharset: config.options?.compareCharset ?? true,
+    },
+  };
+}
+
+function parseStoredConfigs(raw: string | null, storageKey: string): SchemaDiffConfig[] {
+  if (!raw) return [];
+  const parsed = JSON.parse(raw) as SchemaDiffConfig[];
+  if (!Array.isArray(parsed)) return [];
+  const migrated = parsed.map(migrateStoredConfig);
+  const serialized = JSON.stringify(migrated);
+  if (serialized !== raw) localStorage.setItem(storageKey, serialized);
+  return migrated;
+}
+
 function loadConfigsFromStorage(): SchemaDiffConfig[] {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as SchemaDiffConfig[];
-    return Array.isArray(parsed) ? parsed : [];
+    return parseStoredConfigs(localStorage.getItem(STORAGE_KEY), STORAGE_KEY);
   } catch {
     return [];
   }
@@ -24,10 +41,7 @@ function loadConfigsFromStorage(): SchemaDiffConfig[] {
 
 function loadHistoryFromStorage(): SchemaDiffConfig[] {
   try {
-    const raw = localStorage.getItem(HISTORY_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as SchemaDiffConfig[];
-    return Array.isArray(parsed) ? parsed : [];
+    return parseStoredConfigs(localStorage.getItem(HISTORY_KEY), HISTORY_KEY);
   } catch {
     return [];
   }
@@ -136,7 +150,8 @@ export function useSchemaDiffConfig() {
     }
 
     for (const item of items) {
-      let name = item.name;
+      const migrated = migrateStoredConfig(item);
+      let name = migrated.name;
       if (configs.value.some((c) => c.name === name && c.id !== item.id)) {
         let counter = 1;
         let candidate = `${name} (${counter})`;
@@ -149,7 +164,7 @@ export function useSchemaDiffConfig() {
       }
       const newId = uuid();
       configs.value.push({
-        ...item,
+        ...migrated,
         id: newId,
         name,
         createdAt: Date.now(),

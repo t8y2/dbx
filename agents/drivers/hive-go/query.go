@@ -386,7 +386,7 @@ func (server *server) applySchemaContext(ctx context.Context, connection *sql.Co
 	if schema == "" || strings.EqualFold(schema, server.config.Database) {
 		return nil
 	}
-	_, err := connection.ExecContext(ctx, "USE "+quoteHiveIdentifier(schema))
+	_, err := connection.ExecContext(ctx, "USE "+server.quoteIdentifier(schema))
 	return err
 }
 
@@ -527,6 +527,7 @@ func trimStatementSQL(sqlText string) string {
 	return strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(sqlText), ";"))
 }
 
-func quoteHiveIdentifier(value string) string {
-	return "`" + strings.ReplaceAll(value, "`", "``") + "`"
+func (server *server) quoteIdentifier(value string) string {
+	quote := server.config.identifierQuote()
+	return quote + strings.ReplaceAll(value, quote, quote+quote) + quote
 }

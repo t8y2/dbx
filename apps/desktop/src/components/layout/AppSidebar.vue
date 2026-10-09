@@ -87,6 +87,7 @@ const moveGroupItems = computed(() => [
 
 async function refreshTree() {
   try {
+    await connectionStore.reloadFromDisk();
     await connectionStore.refreshAllTree();
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
@@ -119,6 +120,10 @@ function focusSearch(target: Element | null = null): boolean {
 
 function locateTabInSidebar(tab: QueryTab) {
   return connectionTreeRef.value?.locateTabInSidebar(tab);
+}
+
+function disconnectAllActiveConnections() {
+  return connectionTreeRef.value?.disconnectAllActiveConnections();
 }
 
 function clearConnectionMultiSelection() {
@@ -197,7 +202,7 @@ function confirmCreateSelectedGroup() {
   showCreateSelectedGroupDialog.value = false;
 }
 
-defineExpose({ focusSearch, locateTabInSidebar });
+defineExpose({ focusSearch, locateTabInSidebar, disconnectAllActiveConnections });
 </script>
 
 <template>

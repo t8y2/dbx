@@ -15,7 +15,9 @@ import type { PluginToolPreview } from "@/types/pluginAiTools";
 /**
  * Plugin Center controls for what a plugin may reach beyond its own UI:
  * built-in AI access to its MCP tools, and the connections it may read
- * through `host.data:read`. Both are off until the user turns them on.
+ * through `host.data:read`. AI tool access is opt-in — off until the user
+ * turns it on, and the choice survives restarts and plugin updates. Data
+ * reads are off until the user consents.
  */
 const props = defineProps<{ plugin: InstalledPlugin }>();
 

@@ -1,14 +1,14 @@
 // @vitest-environment happy-dom
 
-import { createApp, defineComponent, h, ref, type App } from "vue";
+import { createApp, defineComponent, h, inject, provide, ref, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InstalledPlugin } from "@/types/database";
 
-const mocks = vi.hoisted(() => ({ listPlugins: vi.fn(), invokePlugin: vi.fn() }));
+const mocks = vi.hoisted(() => ({ listPlugins: vi.fn(), invokePlugin: vi.fn(), useConnectionStore: vi.fn() }));
 
 vi.mock("@/lib/backend/api", () => ({ listPlugins: mocks.listPlugins, invokePlugin: mocks.invokePlugin }));
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ locale: ref("en"), t: (key: string) => key }) }));
-vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ connections: [] }) }));
+vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: mocks.useConnectionStore }));
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({}) }));
 vi.mock("@/components/ui/button", () => ({
   Button: defineComponent(
@@ -35,6 +35,37 @@ vi.mock("@/components/ui/tooltip", () => ({
   ),
 }));
 vi.mock("./PluginIcon.vue", () => ({ default: defineComponent(() => () => h("span")) }));
+vi.mock("@/components/icons/ConnectionIcon.vue", () => ({ default: defineComponent(() => () => h("span", { "data-connection-icon-stub": "" })) }));
+// DropdownMenu harness: content renders unconditionally and the trigger's
+// click forwards `update:open`, so picker tests assert menu content and item
+// selection without depending on reka-ui's floating/portal behavior.
+vi.mock("@/components/ui/dropdown-menu", () => ({
+  DropdownMenu: defineComponent({
+    props: { open: { type: Boolean, default: false } },
+    emits: ["update:open"],
+    setup(_, { slots, emit }) {
+      provide("dbxDropdownTestSetOpen", (value: boolean) => emit("update:open", value));
+      return () => h("div", { "data-dropdown-menu-stub": "" }, slots.default?.());
+    },
+  }),
+  DropdownMenuTrigger: defineComponent({
+    setup(_, { slots }) {
+      const setOpen = inject<(value: boolean) => void>("dbxDropdownTestSetOpen")!;
+      return () => h("div", { onClick: () => setOpen(true) }, slots.default?.());
+    },
+  }),
+  DropdownMenuContent: defineComponent(
+    (_, { slots }) =>
+      () =>
+        h("div", { "data-plugin-dock-plus-menu": "" }, slots.default?.()),
+  ),
+  DropdownMenuItem: defineComponent({
+    emits: ["select"],
+    setup(_, { slots, emit }) {
+      return () => h("div", { "data-dropdown-item-stub": "", onClick: () => emit("select", {}) }, slots.default?.());
+    },
+  }),
+}));
 // Mirrors the real PluginWorkbenchHost, whose title computed dereferences
 // props.contribution.label unconditionally — an undefined contribution must
 // never reach it, otherwise the whole dock subtree crashes during render.
@@ -70,6 +101,7 @@ describe("PluginBottomDock workbench contribution guard", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.useConnectionStore.mockReturnValue({ connections: [], sidebarLayout: { groups: [], order: [] }, ensureConnected: vi.fn(() => Promise.resolve()) });
     root = document.createElement("div");
     document.body.appendChild(root);
   });
@@ -137,9 +169,74 @@ describe("PluginBottomDock workbench contribution guard", () => {
       expect(renderError).toBeUndefined();
       expect(mocks.invokePlugin).not.toHaveBeenCalled();
       expect(warnSpy.mock.calls.filter((call) => String(call[0]).includes("[DBX][plugin:dock]"))).toEqual([]);
+      // Without options_action the command doesn't own the picker, so the
+      // generic replay item stays visible.
+      expect(root.querySelector("[data-plugin-dock-plus-menu]")?.textContent).toContain("pluginDock.newTerminal");
     } finally {
       warnSpy.mockRestore();
     }
+  });
+
+  it("passes the current UI locale to the options_action fetch", async () => {
+    // Sidecars need the UI language to localize launch-option labels; the host
+    // used to call options_action with an empty payload.
+    const plugin = installedPlugin("sample.panel");
+    plugin.manifest.contributions!.push({
+      type: "command",
+      id: "sample.open",
+      label: "Open sample",
+      action: { type: "open-workbench", workbench: "sample.panel", presentation: "panel", options_action: "local/terminal/launch-options" },
+    });
+    mocks.listPlugins.mockResolvedValue([plugin]);
+    mocks.invokePlugin.mockResolvedValue({ entries: [{ label: "Local terminal (auto-detect)", description: "Default shell: /bin/zsh", context: {} }] });
+    entryIds.push(dock.addPluginDockEntry({ pluginId: "io.dbx.sample", workbenchContributionId: "sample.panel", kind: "command", commandId: "sample.open", title: "Sample terminal" }));
+    await mountDock();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(mocks.invokePlugin).toHaveBeenCalledWith("io.dbx.sample", "local/terminal/launch-options", { locale: "en" });
+    const menu = root.querySelector("[data-plugin-dock-plus-menu]");
+    expect(menu?.textContent).toContain("Local terminal (auto-detect)");
+    expect(menu?.textContent).toContain("Default shell: /bin/zsh");
+    // The plugin owns the picker now: the generic replay item hides.
+    expect(menu?.textContent).not.toContain("pluginDock.newTerminal");
+  });
+
+  it("renders the + picker connection targets as sidebar-grouped rows and opens them on pick", async () => {
+    const plugin = installedPlugin("sample.panel");
+    plugin.manifest.contributions!.push(
+      { type: "connection-provider", id: "ssh", label: "SSH", database_type: "plugin", fields: [] },
+      {
+        type: "command",
+        id: "sample.open",
+        label: "Open sample",
+        action: { type: "open-workbench", workbench: "sample.panel", presentation: "panel", connection_targets: true },
+      },
+    );
+    mocks.listPlugins.mockResolvedValue([plugin]);
+    mocks.useConnectionStore.mockReturnValue({
+      connections: [{ id: "conn-1", name: "my-server", plugin_connection_provider: "ssh" }],
+      sidebarLayout: {
+        groups: [{ id: "g1", name: "Prod", collapsed: false }],
+        order: [{ type: "group", id: "g1", children: [{ type: "connection", id: "conn-1" }] }],
+      },
+      ensureConnected: vi.fn(() => Promise.resolve()),
+    });
+    entryIds.push(dock.addPluginDockEntry({ pluginId: "io.dbx.sample", workbenchContributionId: "sample.panel", kind: "command", commandId: "sample.open", title: "Sample terminal" }));
+    await mountDock();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const menu = root.querySelector("[data-plugin-dock-plus-menu]")!;
+    expect(menu.textContent).toContain("Prod");
+    expect(menu.textContent).toContain("my-server");
+    // The flat "connection · name" prefix is gone; rows carry icons instead.
+    expect(menu.textContent).not.toContain("pluginDock.connectionTerminal");
+
+    const row = [...menu.querySelectorAll("[data-dropdown-item-stub]")].find((element) => element.textContent?.includes("my-server")) as HTMLElement;
+    row.click();
+    const state = dock.usePluginBottomDock();
+    const picked = state.entries.value[state.entries.value.length - 1]!;
+    entryIds.push(picked.id);
+    expect(picked).toMatchObject({ kind: "connection", context: { connectionId: "conn-1" } });
   });
 
   it("degrades to an empty frame instead of crashing when the plugin no longer declares the entry's workbench contribution", async () => {

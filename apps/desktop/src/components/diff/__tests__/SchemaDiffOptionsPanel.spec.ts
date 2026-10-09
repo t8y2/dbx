@@ -58,6 +58,33 @@ describe("SchemaDiffOptionsPanel", () => {
     expect(normalized.ignoreColumnNameCase).toBe(false);
   });
 
+  it("exposes charset comparison only for supported MySQL targets and defaults it on", () => {
+    expect(getSchemaDiffOptionsForDbType("mysql").map((item) => item.id)).toContain("compareCharset");
+    expect(getSchemaDiffOptionsForDbType("goldendb").map((item) => item.id)).toContain("compareCharset");
+    expect(getSchemaDiffOptionsForDbType("starrocks").map((item) => item.id)).not.toContain("compareCharset");
+    expect(getSchemaDiffOptionsForDbType("doris").map((item) => item.id)).not.toContain("compareCharset");
+    expect(getSchemaDiffOptionsForDbType("postgres").map((item) => item.id)).not.toContain("compareCharset");
+    expect(normalizeSchemaDiffCompareOptions({}, "mysql").compareCharset).toBe(true);
+  });
+
+  it("groups MySQL charset comparison with table structure options", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+
+    const app = createApp(SchemaDiffOptionsPanel, {
+      options: normalizeSchemaDiffCompareOptions({}, "mysql"),
+      optionTree: getSchemaDiffOptionsForDbType("mysql"),
+    });
+    mountedApps.push(app);
+    app.mount(host);
+    await nextTick();
+
+    const tableStructure = host.querySelector('[data-section="table-structure"]');
+    const behavior = host.querySelector('[data-section="compare-behavior"]');
+    expect(tableStructure?.textContent).toContain("schemaDiff.options.compareCharset");
+    expect(behavior?.textContent).not.toContain("schemaDiff.options.compareCharset");
+  });
+
   it("keeps unsaved checkbox edits when the parent refreshes equivalent options", async () => {
     const options = ref<SchemaDiffCompareOptions>({ ...DEFAULT_POSTGRES_OPTIONS });
     const optionTree: SchemaDiffOptionItem[] = [{ id: "views", labelKey: "views", defaultChecked: true }];

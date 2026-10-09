@@ -438,7 +438,7 @@ describe("PluginConnectionFields", () => {
     await mountContribution(dynamic, { sudo_profile: "ghost" }, "io.dbx.ssh");
     await flushAsync();
 
-    expect(invokePluginMock).toHaveBeenCalledWith("io.dbx.ssh", "sudo/profiles/options");
+    expect(invokePluginMock).toHaveBeenCalledWith("io.dbx.ssh", "sudo/profiles/options", { locale: "en" });
     expect(document.querySelector("input#dyn-connection-sudo_profile")).toBeNull();
     const trigger = document.querySelector<HTMLButtonElement>('#dyn-connection-sudo_profile, button[role="combobox"]');
     expect(trigger).not.toBeNull();

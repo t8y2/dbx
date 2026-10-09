@@ -5,6 +5,7 @@ import {
   DEFAULT_SHORTCUT_SETTINGS,
   findCrossScopeShortcutConflicts,
   findShortcutConflict,
+  foldAllDefaultShortcut,
   formatShortcut,
   gotoLineDefaultShortcut,
   isReservedShortcut,
@@ -13,6 +14,7 @@ import {
   normalizeShortcutSettings,
   resolveCapturedShortcutEdit,
   selectionOccurrenceDefaultShortcut,
+  selectLineEndsDefaultShortcut,
   SHORTCUT_DEFINITIONS,
   shortcutToCodeMirrorKey,
   toggleAiPanelDefaultShortcut,
@@ -40,10 +42,13 @@ describe("shortcutRegistry editor actions", () => {
     "selectAllSelectionOccurrences",
     "uppercaseSelection",
     "lowercaseSelection",
+    "toggleCaseSelection",
     "exPasteSqlInCondition",
     "toggleFold",
+    "foldAll",
+    "unfoldAll",
   ];
-  const sidebarShortcutActionIds: ShortcutActionId[] = ["copySidebarSelection", "pasteSidebarSelection", "editSidebarConnection", "viewTableDdl"];
+  const sidebarShortcutActionIds: ShortcutActionId[] = ["copySidebarSelection", "pasteSidebarSelection", "editSidebarConnection", "disconnectSidebarConnection", "viewTableDdl"];
 
   it("registers pagination navigation as unassigned grid shortcuts", () => {
     const paginationActions = [
@@ -82,6 +87,16 @@ describe("shortcutRegistry editor actions", () => {
     expect(findShortcutConflict("goToFirstPage", "Mod+F", shortcuts)).toBeNull();
   });
 
+  it("leaves focus-WHERE unassigned for new and existing settings and detects grid conflicts", () => {
+    expect(DEFAULT_SHORTCUT_SETTINGS.focusWhere).toBe("");
+    expect(normalizeShortcutSettings().focusWhere).toBe("");
+    expect(normalizeShortcutSettings({ executeSql: "Mod+Enter" }).focusWhere).toBe("");
+    expect(normalizeShortcutSettings({ focusWhere: "" }).focusWhere).toBe("");
+    const shortcuts = normalizeShortcutSettings({ focusWhere: "Mod+D" });
+    expect(shortcuts.focusWhere).toBe("Mod+D");
+    expect(findShortcutConflict("focusWhere", shortcuts.focusWhere, shortcuts)).toBe("copyCurrentRow");
+  });
+
   it("registers go to column as an unassigned grid shortcut", () => {
     const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "goToColumn");
 
@@ -105,6 +120,18 @@ describe("shortcutRegistry editor actions", () => {
 
     expect(findShortcutConflict("goToColumn", shortcuts.goToColumn, shortcuts)).toBe("copyCurrentRow");
     expect(findShortcutConflict("goToColumn", "Mod+F", shortcuts)).toBeNull();
+  });
+
+  it("registers edit-cell F2 as a conflict-free grid default", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "editCell");
+
+    expect(definition).toMatchObject({
+      labelKey: "settings.shortcutEditCell",
+      scope: "grid",
+      defaultShortcut: "F2",
+    });
+    expect(DEFAULT_SHORTCUT_SETTINGS.editCell).toBe("F2");
+    expect(findShortcutConflict("editCell", DEFAULT_SHORTCUT_SETTINGS.editCell, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
   });
 
   it("registers copy-current-row Mod+D and edit-table-structure Mod+Shift+D as conflict-free grid defaults", () => {
@@ -164,6 +191,16 @@ describe("shortcutRegistry editor actions", () => {
     expect(definition).toMatchObject({ labelKey: "toolbar.explainPlan", scope: "editor", defaultShortcut: "Mod+E" });
     expect(shortcutToCodeMirrorKey(DEFAULT_SHORTCUT_SETTINGS.explainSql)).toBe("Mod-e");
     expect(findShortcutConflict("explainSql", "Mod+E", DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+  });
+
+  it("registers a configurable editor shortcut for selecting the current statement", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "selectCurrentStatement");
+
+    expect(definition).toMatchObject({ labelKey: "settings.shortcutSelectCurrentStatement", scope: "editor", defaultShortcut: "Mod+Shift+E" });
+    expect(shortcutToCodeMirrorKey(DEFAULT_SHORTCUT_SETTINGS.selectCurrentStatement)).toBe("Mod-Shift-e");
+    expect(findShortcutConflict("selectCurrentStatement", DEFAULT_SHORTCUT_SETTINGS.selectCurrentStatement, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+    // 与侧栏「断开连接」同键属于有意的跨作用域复用（仅提示，不影响编辑器内触发）
+    expect(findCrossScopeShortcutConflicts(DEFAULT_SHORTCUT_SETTINGS).selectCurrentStatement).toContain("disconnectSidebarConnection");
   });
 
   it("keeps current-view search and editor find contextual on Mod+F", () => {
@@ -238,6 +275,21 @@ describe("shortcutRegistry editor actions", () => {
     expect(normalizeShortcutSettings({ closeTab: "" }).closeTab).toBe("");
   });
 
+  it("registers closeWindow as a global shortcut with Shift+Mod+W default", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "closeWindow");
+    expect(definition).toMatchObject({
+      id: "closeWindow",
+      labelKey: "settings.shortcutCloseWindow",
+      scope: "global",
+      defaultShortcut: "Shift+Mod+W",
+    });
+    expect(DEFAULT_SHORTCUT_SETTINGS.closeWindow).toBe("Shift+Mod+W");
+    expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.closeWindow, "Win32")).toBe("Ctrl+Shift+W");
+    expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.closeWindow, "MacIntel")).toBe("Shift+Cmd+W");
+    expect(normalizeShortcutSettings({ closeWindow: "Mod+Alt+W" }).closeWindow).toBe("Mod+Alt+W");
+    expect(normalizeShortcutSettings({ closeWindow: "" }).closeWindow).toBe("");
+  });
+
   it("normalizes custom, cleared, and invalid modifier-only shortcuts", () => {
     expect(normalizeShortcutSettings({ openDataInNewTab: "Shift" }).openDataInNewTab).toBe("Shift");
     expect(normalizeShortcutSettings({ openDataInNewTab: "" }).openDataInNewTab).toBe("");
@@ -279,8 +331,28 @@ describe("shortcutRegistry editor actions", () => {
     expect(shortcuts.selectAllSelectionOccurrences).toBe(selectionOccurrenceDefaultShortcut("selectAllSelectionOccurrences"));
     expect(shortcuts.uppercaseSelection).toBe("Shift+Alt+U");
     expect(shortcuts.lowercaseSelection).toBe("Shift+Alt+L");
+    expect(shortcuts.toggleCaseSelection).toBe("Mod+Shift+U");
     expect(shortcuts.exPasteSqlInCondition).toBe("");
     expect(shortcuts.toggleFold).toBe("Mod+.");
+    expect(shortcuts.foldAll).toBe(foldAllDefaultShortcut("foldAll"));
+    expect(shortcuts.unfoldAll).toBe(foldAllDefaultShortcut("unfoldAll"));
+  });
+
+  it("uses platform-safe fold-all defaults and migrates the colliding defaults", () => {
+    expect(foldAllDefaultShortcut("foldAll", "MacIntel")).toBe("Ctrl+Alt+[");
+    expect(foldAllDefaultShortcut("unfoldAll", "MacIntel")).toBe("Ctrl+Alt+]");
+    expect(foldAllDefaultShortcut("foldAll", "Win32")).toBe("Shift+Alt+[");
+    expect(foldAllDefaultShortcut("unfoldAll", "Linux x86_64")).toBe("Shift+Alt+]");
+    expect(normalizeShortcutSettings({ foldAll: "Mod+Alt+[", unfoldAll: "Mod+Alt+]" }, "MacIntel")).toMatchObject({ foldAll: "Ctrl+Alt+[", unfoldAll: "Ctrl+Alt+]" });
+    expect(normalizeShortcutSettings({ foldAll: "Ctrl+Alt+[", unfoldAll: "Ctrl+Alt+]" }, "Win32")).toMatchObject({ foldAll: "Shift+Alt+[", unfoldAll: "Shift+Alt+]" });
+    expect(normalizeShortcutSettings({ foldAll: "", unfoldAll: "" }, "Win32")).toMatchObject({ foldAll: "", unfoldAll: "" });
+  });
+
+  it("registers toggle case as a configurable editor shortcut (#5085)", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "toggleCaseSelection");
+
+    expect(definition).toMatchObject({ scope: "editor", defaultShortcut: "Mod+Shift+U", labelKey: "settings.shortcutToggleCaseSelection" });
+    expect(DEFAULT_SHORTCUT_SETTINGS.toggleCaseSelection).toBe("Mod+Shift+U");
   });
 
   it("registers IntelliJ-style extend selection as a configurable editor shortcut", () => {
@@ -297,6 +369,14 @@ describe("shortcutRegistry editor actions", () => {
     expect(next).toMatchObject({ scope: "editor", defaultShortcut: "Ctrl+G" });
     expect(all).toMatchObject({ scope: "editor", defaultShortcut: "Ctrl+Mod+G" });
     expect(findShortcutConflict("selectAllSelectionOccurrences", DEFAULT_SHORTCUT_SETTINGS.selectAllSelectionOccurrences, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+  });
+
+  it("registers the VS Code-style select-line-ends shortcut", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "selectLineEnds");
+    expect(definition).toMatchObject({ scope: "editor", defaultShortcut: "Alt+Shift+I", labelKey: "settings.shortcutSelectLineEnds" });
+    expect(selectLineEndsDefaultShortcut("MacIntel")).toBe("Alt+Shift+I");
+    expect(selectLineEndsDefaultShortcut("Win32")).toBe("Alt+Shift+I");
+    expect(shortcutToCodeMirrorKey(selectLineEndsDefaultShortcut("MacIntel"))).toBe("Alt-Shift-i");
   });
 
   it("resolves occurrence selection defaults per platform", () => {
@@ -539,6 +619,8 @@ describe("shortcutRegistry editor actions", () => {
       ["selectAllSelectionOccurrences", "Ctrl+Alt+Shift+J"],
       ["toggleAiPanel", "Ctrl+Alt+I"],
       ["gotoLine", "Mod+G"],
+      ["foldAll", "Shift+Alt+["],
+      ["unfoldAll", "Shift+Alt+]"],
     ];
 
     it("flags combinations that are another platform's default for the same action", () => {

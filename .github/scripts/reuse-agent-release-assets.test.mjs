@@ -132,6 +132,39 @@ test("requires all RocketMQ native platforms when reusing a release", () => {
   );
 });
 
+test("reuses the Windows-only Oracle OCI native package", () => {
+  const native = { "windows-x64": artifact("dbx-agent-oracle-oci-0.1.0-windows-x64.tar.zst", "a") };
+  const registry = { drivers: { "oracle-oci": { version: "0.1.0", native } }, jres: {} };
+
+  const plan = collectReusableAssetPlan({
+    registry,
+    release: releaseFor(Object.values(native)),
+    versions: { "oracle-oci": "0.1.0" },
+    modules: ["oracle-oci"],
+    reuseJre: false,
+  });
+
+  // Windows-only is the complete platform set for this module, so requiring all
+  // six platforms would reject a correct release.
+  assert.deepEqual(plan.driverAssets.map((asset) => asset.platform), ["windows-x64"]);
+});
+
+test("rejects an Oracle OCI release that lost its Windows native package", () => {
+  const native = { "linux-x64": artifact("dbx-agent-oracle-oci-0.1.0-linux-x64.tar.zst", "a") };
+  const registry = { drivers: { "oracle-oci": { version: "0.1.0", native } }, jres: {} };
+
+  assert.throws(
+    () => collectReusableAssetPlan({
+      registry,
+      release: releaseFor(Object.values(native)),
+      versions: { "oracle-oci": "0.1.0" },
+      modules: ["oracle-oci"],
+      reuseJre: false,
+    }),
+    /missing=windows-x64, extra=linux-x64/,
+  );
+});
+
 test("ignores zero-size legacy JAR placeholders for native-only modules", () => {
   const native = Object.fromEntries(
     platforms.map((platform, index) => [platform, artifact(`dbx-agent-duckdb-0.1.2-${platform}.tar.zst`, String(index + 1))]),

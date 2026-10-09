@@ -96,6 +96,12 @@ vi.mock("@/stores/queryStore", () => ({
     executeTabSql: mocks.executeTabSql,
     sortTabResultLocally: mocks.sortTabResultLocally,
     setErrorResult: mocks.setErrorResult,
+    requestGridRevealColumn: vi.fn((tabId: string, columnName: string) => {
+      const tab = mocks.tabs.find((item) => item.id === tabId);
+      if (tab) {
+        tab.gridRevealColumnRequest = { id: 1, columnName };
+      }
+    }),
   }),
 }));
 
@@ -423,6 +429,40 @@ describe("useSidebarDataOpenRuntime", () => {
       expect(mocks.callOrder).toEqual(["metadata", "query"]);
       expect(mocks.tabs[0]?.tableMeta?.primaryKeys).toEqual(["id"]);
     });
+  });
+
+  it.each(["nebula", "neo4j"])("waits for %s properties before building the first table query", async (databaseType) => {
+    mocks.databaseType = databaseType;
+    let releaseMetadata: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      releaseMetadata = resolve;
+    });
+    mocks.loadTableMetadata.mockImplementation(async () => {
+      await gate;
+      return {
+        metadata: {
+          schema: "public",
+          tableName: "users",
+          tableType: "TABLE",
+          database: "app",
+          columns: [{ name: "name", data_type: "string", is_nullable: true, column_default: null, is_primary_key: false, extra: null }],
+          indexes: [],
+          primaryKeys: [],
+          cachedAt: Date.now(),
+        },
+        cacheStatus: "miss",
+        ageMs: 0,
+      };
+    });
+
+    const opening = useSidebarDataOpenRuntime().openData(tableNode);
+    await vi.waitFor(() => expect(mocks.loadTableMetadata).toHaveBeenCalled());
+    expect(mocks.buildTableSelectSql).not.toHaveBeenCalled();
+    releaseMetadata();
+    await opening;
+
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ databaseType, columns: ["name"] }));
+    expect(mocks.callOrder).toEqual(["query"]);
   });
 
   it("keeps Dameng metadata deferred until after the table query", async () => {
@@ -821,5 +861,20 @@ describe("useSidebarDataOpenRuntime", () => {
     // 占位元数据未被旧列覆盖：freshness 保持在失效后的"冷"状态
     expect(mocks.tabs[0]?.tableMeta?.columns).toEqual([]);
     expect(mocks.tabs[0]?.tableMetaGeneration).toBe(0);
+  });
+
+  it("requests grid column reveal when opening a table with revealColumn option", async () => {
+    await useSidebarDataOpenRuntime().openData(tableNode, undefined, "default", { revealColumn: "email" });
+
+    expect(mocks.tabs[0]?.gridRevealColumnRequest).toEqual({ id: 1, columnName: "email" });
+  });
+
+  it("requests grid column reveal when activating an existing same-table tab with revealColumn option", async () => {
+    mocks.dataTabReuseMode = "same-table";
+    await useSidebarDataOpenRuntime().openData(tableNode);
+    expect(mocks.tabs[0]?.gridRevealColumnRequest).toBeUndefined();
+
+    await useSidebarDataOpenRuntime().openData(tableNode, undefined, "default", { revealColumn: "created_at" });
+    expect(mocks.tabs[0]?.gridRevealColumnRequest).toEqual({ id: 1, columnName: "created_at" });
   });
 });

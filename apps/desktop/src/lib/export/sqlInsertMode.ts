@@ -3,16 +3,30 @@ import SqlInsertModeDialog from "@/components/export/SqlInsertModeDialog.vue";
 import i18n from "@/i18n";
 
 export type SqlInsertMode = "batch" | "single";
+export type SqlInsertDialect = "source" | "standard";
+
+export interface SqlExportColumnSelection {
+  sourceIndex: number;
+  name: string;
+  nameOccurrence: number;
+}
 
 export interface SqlExportOptions {
   insertMode: SqlInsertMode;
   splitMaxMb?: number;
+  selectedColumns?: SqlExportColumnSelection[];
 }
 
 export const DEFAULT_SQL_INSERT_MODE: SqlInsertMode = "batch";
+export const DEFAULT_SQL_INSERT_DIALECT: SqlInsertDialect = "source";
 
-export function showSqlInsertModeDialog(options: { allowSplit?: boolean } = {}): Promise<SqlExportOptions | null> {
-  if (typeof document === "undefined") return Promise.resolve({ insertMode: DEFAULT_SQL_INSERT_MODE });
+export function showSqlInsertModeDialog(options: { allowSplit?: boolean; columns?: SqlExportColumnSelection[] } = {}): Promise<SqlExportOptions | null> {
+  if (typeof document === "undefined") {
+    return Promise.resolve({
+      insertMode: DEFAULT_SQL_INSERT_MODE,
+      ...(options.columns ? { selectedColumns: [...options.columns] } : {}),
+    });
+  }
 
   return new Promise((resolve) => {
     const container = document.createElement("div");
@@ -29,6 +43,7 @@ export function showSqlInsertModeDialog(options: { allowSplit?: boolean } = {}):
     app = createApp(SqlInsertModeDialog, {
       open: true,
       allowSplit: options.allowSplit === true,
+      columns: options.columns,
       onConfirm: (options: SqlExportOptions) => finish(options),
       onCancel: () => finish(null),
     });

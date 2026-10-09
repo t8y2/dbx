@@ -53,6 +53,8 @@ function mockTextareaMetrics(input: HTMLTextAreaElement, options: { clientWidth:
 }
 
 afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
   for (const { app, host } of mountedApps.splice(0)) {
     app.unmount();
     host.remove();
@@ -157,20 +159,138 @@ describe("DataGridConditionEditor quote completion", () => {
     expect(orderBy.value.value).toBe("id DESC");
   });
 
-  it("passes the textarea caret range through when accepting a suggestion", async () => {
-    const { value, input } = mountEditor("where", "status = cus AND enabled = 1", { columns: ["customer_id"] });
+  it("collapses a continuous typing run into a single undo step", async () => {
+    const { value, input } = mountEditor("where", "id = 123");
     input.focus();
-    input.setSelectionRange(12, 12);
-    input.dispatchEvent(new Event("select", { bubbles: true }));
+
+    for (const next of ["id = 1", "id = 12", "id = 124"]) {
+      input.value = next;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    await nextTick();
+    expect(value.value).toBe("id = 124");
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, bubbles: true, cancelable: true }));
+    await nextTick();
+
+    expect(value.value).toBe("id = 123");
+  });
+
+  it("starts a new undo step once the condition is applied", async () => {
+    const { value, input } = mountEditor("where", "id = 123");
+    input.focus();
+    input.value = "id = 124";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await nextTick();
+
+    input.value = "id = 125";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(value.value).toBe("id = 124");
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(value.value).toBe("id = 123");
+  });
+
+  it("keeps one undo step across the expanded/collapsed focus swap", async () => {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const textWidth = (this.textContent?.length ?? 0) * 8;
+      const width = this.classList.contains("data-grid-topbar-condition-pane--expanded") ? 160 : textWidth;
+      return { x: 0, y: 0, left: 0, top: 0, right: width, bottom: 24, width, height: 24, toJSON: () => ({}) } as DOMRect;
+    });
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    });
+    const start = "abcdefghijklmnopqrstuvwxyz0123456789";
+    const { value, input } = mountEditor("where", start);
+    mockTextareaMetrics(input, { clientWidth: 80, scrollWidth: 320 });
+    input.focus();
+    input.dispatchEvent(new Event("focus", { bubbles: true }));
+    await nextTick();
+    await nextTick();
+    const overlay = document.body.querySelector(".data-grid-topbar-condition-input--expanded") as HTMLTextAreaElement | null;
+    expect(overlay).toBeTruthy();
+
+    input.value = `${start}x`;
+    input.setSelectionRange(37, 37);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    // Swapping focus to the teleported overlay blurs the collapsed textarea
+    // mid-run; that must not split the typing run into a second undo step.
+    overlay!.dispatchEvent(new Event("blur", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const activeOverlay = document.body.querySelector(".data-grid-topbar-condition-input--expanded") as HTMLTextAreaElement;
+    activeOverlay.value = `${start}xy`;
+    activeOverlay.setSelectionRange(38, 38);
+    activeOverlay.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+    await nextTick();
+    expect(value.value).toBe(`${start}xy`);
+
+    activeOverlay.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, bubbles: true, cancelable: true }));
+    await nextTick();
+
+    expect(value.value).toBe(start);
+  });
+
+  it("keeps the caret at the end when the text shrinks below the expanded selection", async () => {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const textWidth = (this.textContent?.length ?? 0) * 8;
+      const width = this.classList.contains("data-grid-topbar-condition-pane--expanded") ? 160 : textWidth;
+      return { x: 0, y: 0, left: 0, top: 0, right: width, bottom: 24, width, height: 24, toJSON: () => ({}) } as DOMRect;
+    });
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    });
+    const { value, input } = mountEditor("where", "abcdefghijklmnopqrstuvwxyz0123456789");
+    mockTextareaMetrics(input, { clientWidth: 80, scrollWidth: 320 });
+    input.focus();
+    input.dispatchEvent(new Event("focus", { bubbles: true }));
+    await nextTick();
+    await nextTick();
+    const overlay = document.body.querySelector(".data-grid-topbar-condition-input--expanded") as HTMLTextAreaElement | null;
+    expect(overlay).toBeTruthy();
+    overlay!.focus();
+    overlay!.setSelectionRange(0, 36);
+    overlay!.dispatchEvent(new Event("select", { bubbles: true }));
+    await nextTick();
+
+    // The whole selected text is replaced by a much shorter value without a
+    // fresh caret sync, and the editor collapses again.
+    mockTextareaMetrics(input, { clientWidth: 320, scrollWidth: 80 });
+    value.value = "i";
+    await nextTick();
+    await nextTick();
+    await nextTick();
+
+    expect(input.selectionStart).toBe(1);
+    expect(input.selectionEnd).toBe(1);
+  });
+
+  it("passes the textarea caret range through when accepting a suggestion", async () => {
+    const { value, input } = mountEditor("where", "", { columns: ["customer_id"] });
+    input.focus();
+    input.value = "status = 1 AND cus";
+    input.setSelectionRange(18, 18);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
     await nextTick();
     await vi.waitFor(() => expect(document.querySelector('[role="option"]')?.textContent).toContain("customer_id"));
 
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }));
     await nextTick();
 
-    expect(value.value).toBe("status = customer_id AND enabled = 1");
-    expect(input.selectionStart).toBe(20);
-    expect(input.selectionEnd).toBe(20);
+    expect(value.value).toBe("status = 1 AND customer_id");
+    expect(input.selectionStart).toBe(26);
+    expect(input.selectionEnd).toBe(26);
   });
 
   it("starts without an active suggestion and selects the first item on ArrowDown", async () => {
@@ -193,7 +313,7 @@ describe("DataGridConditionEditor quote completion", () => {
     expect(value.value).toBe("name");
   });
 
-  it("selects the first WHERE field suggestion with Enter", async () => {
+  it("keeps the first WHERE field suggestion unselected and only applies on Enter", async () => {
     const { value, input } = mountEditor("where", "", { columns: ["customer_id", "customer_name"] });
     input.focus();
     input.value = "cus";
@@ -201,11 +321,13 @@ describe("DataGridConditionEditor quote completion", () => {
     input.dispatchEvent(new Event("input", { bubbles: true }));
 
     await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(2));
-    expect(document.querySelector('[role="option"][aria-selected="true"]')?.textContent).toContain("customer_id");
+    // 不再默认高亮：回车只用于应用筛选，不会把列名写进输入框（issue #10595）
+    expect(document.querySelector('[role="option"][aria-selected="true"]')).toBeNull();
 
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
     await nextTick();
-    expect(value.value).toBe("customer_id");
+    expect(value.value).toBe("cus");
+    expect(document.querySelector('[role="listbox"]')).toBeNull();
   });
 
   it("does not select a suggestion just because the dropdown appears under the mouse", async () => {
@@ -242,8 +364,8 @@ describe("DataGridConditionEditor quote completion", () => {
   it("keeps suggestions closed after Enter applies a complete condition", async () => {
     const { input } = mountEditor("where", "", { columns: ["id", "order0", "status"] });
     input.focus();
-    input.value = "id > 0";
-    input.setSelectionRange(6, 6);
+    input.value = "order";
+    input.setSelectionRange(5, 5);
     input.dispatchEvent(new Event("input", { bubbles: true }));
     await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(1));
 
@@ -377,6 +499,49 @@ describe("DataGridConditionEditor quote completion", () => {
     const expandedHighlight = document.body.querySelector(".data-grid-condition-highlight--expanded") as HTMLElement | null;
     expect(expandedHighlight).toBeTruthy();
     expect(expandedHighlight?.style.transform).toBe("translate(0px, 0px)");
+    vi.unstubAllGlobals();
+  });
+
+  it("compensates the expanded highlight layer for the textarea scrollbar", async () => {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const textWidth = (this.textContent?.length ?? 0) * 8;
+      const width = this.classList.contains("data-grid-topbar-condition-pane--expanded") ? 160 : textWidth;
+      return { x: 0, y: 0, left: 0, top: 0, right: width, bottom: 24, width, height: 24, toJSON: () => ({}) } as DOMRect;
+    });
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    });
+    const { input } = mountEditor("where", "test_item_id=12 and test_item_name=''");
+    mockTextareaMetrics(input, { clientWidth: 80, scrollWidth: 320 });
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+    input.dispatchEvent(new Event("focus", { bubbles: true }));
+
+    await nextTick();
+    await nextTick();
+
+    const overlay = document.body.querySelector(".data-grid-topbar-condition-input--expanded") as HTMLTextAreaElement | null;
+    const expandedHighlight = document.body.querySelector(".data-grid-condition-highlight--expanded") as HTMLElement | null;
+    expect(overlay).toBeTruthy();
+    expect(expandedHighlight).toBeTruthy();
+
+    // A vertical scrollbar takes content width away from the textarea but not
+    // from the plain-div highlight layer. Both wrap with `pre-wrap` +
+    // `overflow-wrap: anywhere`, so unless the layer gives up the same width the
+    // two break at different characters and the caret drifts off the visible text.
+    Object.defineProperties(overlay as HTMLTextAreaElement, {
+      offsetWidth: { configurable: true, value: 178 },
+      clientWidth: { configurable: true, value: 168 },
+    });
+    overlay?.dispatchEvent(new Event("input", { bubbles: true }));
+
+    await nextTick();
+    await nextTick();
+    await nextTick();
+
+    expect(expandedHighlight?.style.getPropertyValue("--data-grid-condition-highlight-scrollbar")).toBe("10px");
     vi.unstubAllGlobals();
   });
 });

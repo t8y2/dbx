@@ -1030,6 +1030,8 @@ mod tests {
 
     fn connection(id: &str, password: &str, _ssh_password: &str) -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: id.to_string(),
             name: format!("{id} connection"),
@@ -1049,6 +1051,7 @@ mod tests {
             visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
+            sidebar_auto_load_all_tables: false,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -1075,6 +1078,7 @@ mod tests {
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_filter: None,
             redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
@@ -1113,6 +1117,7 @@ mod tests {
             ssh_agent_sock_path: String::new(),
             auth_method: "key".to_string(),
             allow_exec_channel_proxy: false,
+            proxy_command: String::new(),
         }
     }
 

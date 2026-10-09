@@ -10,6 +10,7 @@ mod assets;
 mod filesystem;
 mod host;
 mod installer;
+mod jdbc_sessions;
 mod lifecycle;
 mod manifest;
 mod marketplace;
@@ -157,6 +158,7 @@ pub struct PluginRegistry {
     root_dir: PathBuf,
     app_version: String,
     lifecycle: PluginLifecycle,
+    jdbc_runtimes: jdbc_sessions::JdbcRuntimeCache,
 }
 
 impl PluginRegistry {
@@ -165,7 +167,12 @@ impl PluginRegistry {
     }
 
     pub fn new_with_app_version(root_dir: PathBuf, app_version: impl Into<String>) -> Self {
-        Self { root_dir, app_version: app_version.into(), lifecycle: PluginLifecycle::default() }
+        Self {
+            root_dir,
+            app_version: app_version.into(),
+            lifecycle: PluginLifecycle::default(),
+            jdbc_runtimes: Default::default(),
+        }
     }
 
     pub fn lifecycle(&self) -> PluginLifecycle {
@@ -198,6 +205,11 @@ impl PluginRegistry {
         let mut plugins = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|err| err.to_string())?;
+            if entry.file_name() == std::ffi::OsStr::new(installer::PLUGIN_TRASH_DIR) {
+                // Logical uninstall tombstones are not plugin containers: never discover one, not
+                // even while its physical delete is still pending.
+                continue;
+            }
             let container_path = entry.path();
             if !container_path.is_dir() {
                 continue;
@@ -292,11 +304,25 @@ impl PluginRegistry {
         let plugin =
             self.find_driver(driver_id)?.ok_or_else(|| format!("Plugin driver '{driver_id}' is not installed"))?;
         ensure_plugin_compatible(&plugin)?;
+        // This is a short-lived, one-shot driver invocation: it starts its own sidecar instead of
+        // going through `PluginHost`, so it is not in `PluginHost::sessions` and needs its own
+        // lease. `begin_operation` matches those semantics (not a connection the user keeps open)
+        // and makes the whole start -> invoke -> shutdown sequence mutually exclusive with an
+        // install, rollback, or uninstall of the same plugin.
+        let _operation = self.lifecycle.begin_operation(&plugin.manifest.id)?;
         let env = env.with_plugin_data_dir(&self.plugin_data_dir(&plugin.manifest.id));
         let session = PluginSidecarSession::start(plugin, self.app_version.clone(), env).await?;
         let result = session.invoke_with_timeout(method, params, Some(driver_id), timeout_duration).await;
-        session.shutdown().await;
-        result
+        match (result, session.shutdown().await) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(invoke_error), Ok(())) => Err(invoke_error),
+            (Ok(_), Err(shutdown_error)) => {
+                Err(format!("Plugin invocation completed but shutdown failed: {shutdown_error}"))
+            }
+            (Err(invoke_error), Err(shutdown_error)) => {
+                Err(format!("{invoke_error}; additionally failed to stop plugin: {shutdown_error}"))
+            }
+        }
     }
 
     pub async fn start_driver_session(&self, driver_id: &str) -> Result<Arc<PluginDriverSession>, String> {
@@ -370,7 +396,8 @@ fn ensure_plugin_compatible(plugin: &InstalledPlugin) -> Result<(), String> {
 pub struct PluginDriverSession {
     sidecar: Arc<PluginSidecarSession>,
     driver_id: String,
-    _activity: lifecycle::PluginUsageGuard,
+    _activity: Option<lifecycle::PluginUsageGuard>,
+    logical: Option<Arc<jdbc_sessions::JdbcLogicalSession>>,
 }
 
 impl PluginDriverSession {
@@ -382,7 +409,7 @@ impl PluginDriverSession {
         activity: lifecycle::PluginUsageGuard,
     ) -> Result<Self, String> {
         let sidecar = PluginSidecarSession::start(plugin, app_version, env).await?;
-        Ok(Self { sidecar, driver_id, _activity: activity })
+        Ok(Self { sidecar, driver_id, _activity: Some(activity), logical: None })
     }
 
     pub async fn invoke<T>(&self, method: &str, params: serde_json::Value) -> Result<T, String>
@@ -401,11 +428,22 @@ impl PluginDriverSession {
     where
         T: DeserializeOwned,
     {
+        if let Some(logical) = &self.logical {
+            return logical.invoke(method, params, timeout_duration).await;
+        }
         self.sidecar.invoke_with_timeout(method, params, Some(&self.driver_id), timeout_duration).await
     }
 
-    pub async fn shutdown(&self) {
-        self.sidecar.shutdown().await;
+    pub async fn shutdown(&self) -> Result<(), String> {
+        if let Some(logical) = &self.logical {
+            logical.close().await;
+            return Ok(());
+        }
+        self.sidecar.shutdown().await
+    }
+
+    pub fn is_available(&self) -> bool {
+        self.logical.as_ref().is_none_or(|logical| logical.is_available())
     }
 
     pub async fn pid(&self) -> Option<u32> {
@@ -432,6 +470,14 @@ impl PluginDriverSession {
     ) -> Result<Self, String> {
         let activity = PluginLifecycle::default().begin_connection(&plugin.manifest.id, &driver_id)?;
         Self::start(plugin, driver_id, env!("CARGO_PKG_VERSION").to_string(), env, activity).await
+    }
+}
+
+impl Drop for PluginDriverSession {
+    fn drop(&mut self) {
+        if let Some(logical) = &self.logical {
+            logical.close_in_background();
+        }
     }
 }
 
@@ -546,7 +592,7 @@ sleep 30
         pending.abort();
         assert!(pending.await.unwrap_err().is_cancelled());
         assert!(lifecycle.begin_update("sample.sidecar").is_ok());
-        host.stop_all().await;
+        host.stop_all().await.unwrap();
     }
 
     #[cfg(unix)]
@@ -589,7 +635,7 @@ sleep 30
             .expect("session should start");
         let pid = session.pid().await.expect("child should have a pid");
 
-        session.shutdown().await;
+        session.shutdown().await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         assert!(!process_exists(pid));
@@ -691,6 +737,65 @@ sleep 30
                 && !plugin.compatibility.compatible
                 && plugin.compatibility.errors.iter().any(|error| error.contains("Failed to parse"))
         }));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn driver_invocations_are_gated_by_the_update_lease_for_their_whole_session() {
+        let root = std::env::temp_dir().join(format!("dbx-plugin-driver-lease-test-{}", uuid::Uuid::new_v4()));
+        let plugin_dir = root.join("sample");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("manifest.json"),
+            // External drivers only exist on the legacy manifest shape, which is what
+            // `PluginRegistry::find_driver` resolves.
+            serde_json::json!({
+                "id": "sample",
+                "name": "Sample",
+                "version": "1.0.0",
+                "publisher": "example",
+                "protocol_version": 1,
+                "executable": "plugin.sh",
+                "drivers": [{ "id": "sample-driver", "label": "Sample", "kind": "external", "database_type": "sample" }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // Present but never executable: the manifest stays compatible so the invocation gets past
+        // the lease, while starting the sidecar fails immediately and deterministically on every
+        // platform (no exec bit on unix, not a valid image on Windows).
+        std::fs::write(plugin_dir.join("plugin.sh"), "#!/bin/sh\nexit 1\n").unwrap();
+        let registry = PluginRegistry::new_with_app_version(root.clone(), "0.5.67");
+
+        let update = registry.lifecycle().begin_update("sample").unwrap();
+        let refused = registry
+            .invoke_driver_with_env_and_timeout::<serde_json::Value>(
+                "sample-driver",
+                "testConnection",
+                serde_json::json!({}),
+                PluginRuntimeEnv::default(),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(refused.contains("Plugin update is in progress"), "{refused}");
+        drop(update);
+
+        // Once the update released the lease the invocation runs, and because the sidecar cannot
+        // start it must report that instead of the update error: the guard covered the start
+        // attempt and was released on the way out.
+        let failed_start = registry
+            .invoke_driver_with_env_and_timeout::<serde_json::Value>(
+                "sample-driver",
+                "testConnection",
+                serde_json::json!({}),
+                PluginRuntimeEnv::default(),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(!failed_start.contains("Plugin update is in progress"), "{failed_start}");
+        assert!(registry.lifecycle().begin_update("sample").is_ok(), "a failed invocation must not leak its lease");
         let _ = std::fs::remove_dir_all(root);
     }
 

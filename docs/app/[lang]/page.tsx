@@ -39,13 +39,13 @@ function metrics(starLabel: string) {
   return {
     en: [
       { value: "~25 MB", label: "desktop installer" },
-      { value: "90+", label: "database engines" },
+      { value: "100+", label: "database engines" },
       { value: "3 modes", label: "desktop, Docker and CLI" },
       { value: starLabel, label: "GitHub stars, fully open-source" },
     ],
     cn: [
       { value: "~25 MB", label: "桌面安装包" },
-      { value: "90+", label: "数据库引擎" },
+      { value: "100+", label: "数据库引擎" },
       { value: "3 种模式", label: "桌面、Docker 与 CLI" },
       { value: starLabel, label: "GitHub Star，完全开源" },
     ],
@@ -358,7 +358,7 @@ const localizedTestimonials = testimonials;
 
 const i18nText = {
   en: {
-    heroTitle: "25 MB to manage 90+ databases!",
+    heroTitle: "25 MB to manage 100+ databases!",
     heroSubtitle: "DBX brings connections, SQL editing, data grids, schema tools, AI assistance, and self-hosted access into one lightweight product.",
     download: "Download DBX",
     downloadName: "Download DBX",
@@ -367,7 +367,7 @@ const i18nText = {
     docsStartDesc: "Install DBX, create your first connection, and learn the main workflow.",
     workflowsTitle: "Core workflows",
     workflowsDesc: "The docs are organized around what you actually do in a database client.",
-    supportTitle: "Supports 90+ databases",
+    supportTitle: "Supports 100+ databases",
     supportDesc: "Connect SQL, NoSQL, vector, time-series, and embedded databases, message queues, and compatible engines in one place.",
     supportLink: "View all",
     testimonialsTitle: "What DBX is good at",
@@ -381,6 +381,8 @@ const i18nText = {
     qiniuSponsorAction: "Visit",
     rainyunSponsorDesc: "RainYun is a cloud service provider offering cloud servers, physical servers, game hosting, and developer-friendly infrastructure services.",
     rainyunSponsorAction: "Visit",
+    jumpserverSponsorDesc: "JumpServer is a widely popular open-source bastion host.",
+    jumpserverSponsorAction: "Visit",
     easysearchSponsorDesc: "Easysearch is an enterprise-grade distributed search engine compatible with Elasticsearch APIs, combining full-text, vector, geospatial search, real-time analytics, and AI capabilities in one platform.",
     easysearchSponsorAction: "Visit",
     atlasCloudSponsorDesc: "Atlas Cloud gives developers one unified API for 400+ AI models across chat, image, video, and audio.",
@@ -403,7 +405,7 @@ const i18nText = {
     docker: "Docker setup",
   },
   cn: {
-    heroTitle: "25MB，管理90+种数据库！",
+    heroTitle: "25MB，管理100+种数据库！",
     heroSubtitle: "DBX 将连接管理、SQL 编辑、数据表格、结构工具、AI 助手和自托管访问放进一个轻量产品里。",
     download: "下载 DBX",
     downloadName: "下载 DBX",
@@ -412,7 +414,7 @@ const i18nText = {
     docsStartDesc: "安装 DBX、创建第一个连接，并了解主要工作流。",
     workflowsTitle: "核心工作流",
     workflowsDesc: "文档围绕数据库客户端里的真实任务组织，而不是堆功能清单。",
-    supportTitle: "支持90+种数据库",
+    supportTitle: "支持100+种数据库",
     supportDesc: "统一连接和管理 SQL、NoSQL、向量、时序、嵌入式数据库、消息队列及兼容引擎。",
     supportLink: "查看全部",
     testimonialsTitle: "DBX 适合什么样的工作",
@@ -426,6 +428,8 @@ const i18nText = {
     qiniuSponsorAction: "访问",
     rainyunSponsorDesc: "雨云是面向开发者和站长的云服务提供商，提供云服务器、物理服务器、游戏云和配套基础设施服务。",
     rainyunSponsorAction: "访问",
+    jumpserverSponsorDesc: "广受欢迎的开源堡垒机",
+    jumpserverSponsorAction: "访问",
     easysearchSponsorDesc: "Easysearch 是一款企业级分布式搜索引擎，兼容 ES API、融合全文检索、向量检索、地理空间位置检索、实时分析与 AI 能力，为企业提供统一的数据检索与智能分析基础设施。",
     easysearchSponsorAction: "访问",
     atlasCloudSponsorDesc: "Atlas Cloud 为开发者提供统一的多模态 AI API，可通过一个接口访问聊天、图像、视频和音频等 400+ 模型。",
@@ -451,12 +455,12 @@ const i18nText = {
 
 const landingMeta = {
   en: {
-    title: "DBX - 25 MB to manage 90+ databases!",
-    description: "Manage MySQL, PostgreSQL, SQLite, Redis and 90+ data systems with DBX, a free open-source database client. Desktop, Docker self-hosting, optional AI and MCP.",
+    title: "DBX - 25 MB to manage 100+ databases!",
+    description: "Manage MySQL, PostgreSQL, SQLite, Redis and 100+ data systems with DBX, a free open-source database client. Desktop, Docker self-hosting, optional AI and MCP.",
   },
   cn: {
-    title: "DBX - 25MB，管理90+种数据库！",
-    description: "DBX 是免费开源的数据库管理工具，支持 MySQL、PostgreSQL、SQLite、Redis 等 90+ 种数据系统，提供 SQL 编辑、可选 AI 助手、MCP 和 Docker 自托管，覆盖 Windows、macOS 与 Linux。",
+    title: "DBX - 25MB，管理100+种数据库！",
+    description: "DBX 是免费开源的数据库管理工具，支持 MySQL、PostgreSQL、SQLite、Redis 等 100+ 种数据系统，提供 SQL 编辑、可选 AI 助手、MCP 和 Docker 自托管，覆盖 Windows、macOS 与 Linux。",
   },
 };
 
@@ -491,20 +495,20 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
   const softwareStructuredData = buildSoftwareApplicationStructuredData(l, initialDownloadVersion);
   const sponsorItems = [
     {
+      name: "JumpServer",
+      href: "https://www.jumpserver.org/",
+      logo: "/sponsors/jumpserver-card.png",
+      logoClass: "w-full max-w-[120px] object-contain",
+      description: t.jumpserverSponsorDesc,
+      action: t.jumpserverSponsorAction,
+    },
+    {
       name: "RainYun",
       href: "https://www.rainyun.com/MTE5Mjc4Ng==_",
       logo: "https://www.rainyun.com/img/logo.d193755d.png",
       logoClass: "h-10 w-auto max-w-[100px]",
       description: t.rainyunSponsorDesc,
       action: t.rainyunSponsorAction,
-    },
-    {
-      name: "TrustAsia",
-      href: "https://www.trustasia.com/ssl/trustasia/code-signing",
-      logo: "/sponsors/trustasia.png",
-      logoClass: "w-full max-w-[120px] object-contain",
-      description: t.trustasiaSponsorDesc,
-      action: t.trustasiaSponsorAction,
     },
     {
       name: "Jalapeño Cloud",
@@ -537,6 +541,14 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
       logoClass: "w-full max-w-[100px] object-contain",
       description: t.astraflowSponsorDesc,
       action: t.astraflowSponsorAction,
+    },
+    {
+      name: "TrustAsia",
+      href: "https://www.trustasia.com/ssl/trustasia/code-signing",
+      logo: "/sponsors/trustasia.png",
+      logoClass: "w-full max-w-[120px] object-contain",
+      description: t.trustasiaSponsorDesc,
+      action: t.trustasiaSponsorAction,
     },
     {
       name: "Atlas Cloud",

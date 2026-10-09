@@ -31,6 +31,34 @@ function bodyOf(fnSignature: string): string {
 }
 
 describe("AI conversation owns its connection binding (#9902)", () => {
+  it("renders plugin recommendation chips and sends the selected snapshot immediately", () => {
+    expect(source).toContain("pluginRecommendations?: PluginAiRecommendationHostUpdate");
+    expect(source).toContain('v-for="recommendation in pluginRecommendations.items"');
+    expect(source).toContain('@click="sendPluginRecommendation(recommendation)"');
+    expect(source).toContain("`history:${recommendation.id}`");
+    const recommendationStart = source.indexOf("function sendPluginRecommendation(");
+    expect(source.slice(recommendationStart, recommendationStart + 900)).toContain("send: true");
+    expect(source.slice(recommendationStart, recommendationStart + 900)).toContain("context: update.context");
+  });
+
+  it("keeps the connection selector available after a plugin recommendation is selected", () => {
+    const contextStart = source.lastIndexOf("data-ai-composer-context-row");
+    const contextEnd = source.indexOf("data-ai-composer-actions", contextStart);
+    const contextMarkup = source.slice(contextStart, contextEnd);
+
+    expect(contextMarkup).toContain('v-if="pluginContext && !connectionStore.connections.length"');
+    expect(contextMarkup).toContain("data-ai-plugin-context");
+    expect(contextMarkup).toContain('v-if="connectionStore.connections.length"');
+    expect(contextMarkup).toContain("<ConnectionTreeSelect");
+    expect(contextMarkup).toContain('@update:model-value="(v) => changeConnection(v)"');
+  });
+
+  it("does not expose Agent mode for a plugin conversation without a connection", () => {
+    expect(source).toContain("function canUsePluginAgentMode");
+    expect(source).toContain('if (mode === "agent" && !canUsePluginAgentMode()) return;');
+    expect(source).toContain('request.mode === "agent" && !pluginConnection ? "ask"');
+  });
+
   it("rebinding the conversation never rewrites the editor tab or the global active connection", () => {
     const body = bodyOf("async function changeConnection(connectionId: string)");
 

@@ -7,6 +7,7 @@
   "publisher": "{{PUBLISHER_JSON}}",
   "description": "{{DESCRIPTION_JSON}}",
   "icon": "assets/plugin.svg",
+  "permissions": ["host.ai"],
   "engines": {
     "dbx": ">=0.5.68",
     "host_api": "1"
@@ -23,7 +24,17 @@
       "id": "{{PLUGIN_ID}}.workbench",
       "label": "{{PLUGIN_NAME_JSON}}",
       "description": "Sandboxed frontend workbench contributed by {{PLUGIN_NAME_JSON}}.",
-      "icon": "assets/plugin.svg"
+      "icon": "assets/plugin.svg",
+      "ai": {
+        "recommendations": [
+          {
+            "id": "inspect-context",
+            "label": "Inspect current workbench",
+            "prompt": "Analyze the current workbench context and list the most important risks.",
+            "order": 10
+          }
+        ]
+      }
     }
   ],
   "localizations": {

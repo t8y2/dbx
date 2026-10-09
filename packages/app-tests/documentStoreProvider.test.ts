@@ -55,6 +55,31 @@ test("providers build store-specific query previews", () => {
   );
 });
 
+test("reads zone-less date filter values as local time and sends them as UTC", () => {
+  const local = (year: number, month: number, day: number, hour = 0, minute = 0, second = 0, ms = 0) => new Date(year, month - 1, day, hour, minute, second, ms).toISOString();
+  const dated = { kind: "mongodb" as const, sampleValue: { $date: "2025-01-01T00:00:00Z" } };
+  const condition = (rawValue: string, options: Parameters<typeof buildDocumentFilterCondition>[1] = dated) => buildDocumentFilterCondition(rule({ fieldName: "createdAt", rawValue }), options);
+
+  // What a grid cell or a log line shows, read in the person's own zone.
+  assert.deepEqual(condition("2025-04-01 19:46:03"), { createdAt: { $date: local(2025, 4, 1, 19, 46, 3) } });
+  assert.deepEqual(condition("2025-04-01T19:46:03"), { createdAt: { $date: local(2025, 4, 1, 19, 46, 3) } });
+  assert.deepEqual(condition("2025-04-01 19:46:03.718"), { createdAt: { $date: local(2025, 4, 1, 19, 46, 3, 718) } });
+  assert.deepEqual(condition("2025-04-01 19:46"), { createdAt: { $date: local(2025, 4, 1, 19, 46) } });
+  assert.deepEqual(condition("2025/4/1"), { createdAt: { $date: local(2025, 4, 1) } });
+  assert.deepEqual(condition("2025-04-01"), { createdAt: { $date: local(2025, 4, 1) } });
+  // Text that names its zone is kept as written when the server accepts that spelling, and canonicalised otherwise.
+  assert.deepEqual(condition("2025-04-01T19:46:03+08:00"), { createdAt: { $date: "2025-04-01T19:46:03+08:00" } });
+  assert.deepEqual(condition("2025-04-01T19:46:03.5Z"), { createdAt: { $date: "2025-04-01T19:46:03.5Z" } });
+  assert.deepEqual(condition("2025-04-01T19:46:03+0800"), { createdAt: { $date: "2025-04-01T11:46:03.000Z" } });
+  // Epoch milliseconds and an explicit value type still work.
+  assert.deepEqual(condition("1752364800000"), { createdAt: { $date: { $numberLong: "1752364800000" } } });
+  assert.deepEqual(buildDocumentFilterCondition(rule({ fieldName: "createdAt", rawValue: "2025-04-01 19:46:03", valueType: "date" }), { kind: "mongodb" }), { createdAt: { $date: local(2025, 4, 1, 19, 46, 3) } });
+  // A day that does not exist, or text that is no date, is rejected rather than sent as a string.
+  assert.throws(() => condition("2025-02-30"), /Invalid MongoDB date filter value/);
+  assert.throws(() => condition("2025-04-01 25:00:00"), /Invalid MongoDB date filter value/);
+  assert.throws(() => condition("yesterday"), /Invalid MongoDB date filter value/);
+});
+
 test("builds reusable document filter conditions", () => {
   assert.deepEqual(buildDocumentFilterCondition(rule({})), { city: "长治" });
   assert.deepEqual(buildDocumentFilterCondition(rule({ mode: "like", rawValue: "a.b[0]*" })), {

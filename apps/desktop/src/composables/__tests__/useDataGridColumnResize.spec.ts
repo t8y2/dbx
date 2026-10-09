@@ -1,11 +1,12 @@
 // @vitest-environment happy-dom
 
-import { computed, isRef, nextTick, ref } from "vue";
+import { computed, isRef, nextTick, ref, type Ref } from "vue";
 import { beforeEach, describe, expect, it } from "vitest";
 import { DATA_GRID_COL_AUTO_FIT_MAX_WIDTH, DATA_GRID_COL_MIN_WIDTH, sampleDataGridColumnValues } from "@/lib/dataGrid/dataGridColumnWidth";
 import { clearDataGridColumnWidthStates, createDataGridColumnMeasurementSignature, createDataGridColumnStructureSignature, DATA_GRID_COLUMN_WIDTH_STATE_LIMIT, dataGridColumnWidthStateCount, loadDataGridColumnWidthState, saveDataGridColumnWidthState } from "@/lib/dataGrid/dataGridColumnWidthState";
 import { DATA_GRID_ROW_NUM_WIDTH, dataGridRowNumberColumnWidth, resizeDataGridColumnWidth, useDataGridColumnResize } from "@/composables/useDataGridColumnResize";
 import { resultGridColumnWidthCacheKey } from "@/lib/tabs/tabPresentation";
+import type { DataGridColumnWidthMode } from "@/stores/settingsStore";
 
 function createResizeState(options: {
   columns: string[];
@@ -18,6 +19,7 @@ function createResizeState(options: {
   indexIndicatorColumnIndexes?: number[] | ReturnType<typeof ref<number[]>>;
   headerTextWidth?: number;
   viewportWidth?: number | ReturnType<typeof ref<number>>;
+  widthMode?: DataGridColumnWidthMode | Ref<DataGridColumnWidthMode>;
   displayValue?: (value: string | number | boolean | null, columnIndex: number) => string | number | boolean | null;
 }) {
   const compact = ref(options.compactColumnHeaderActions ?? true);
@@ -27,11 +29,13 @@ function createResizeState(options: {
   const rows = isRef(options.rows) ? options.rows : ref(options.rows);
   const indexIndicatorColumnIndexes = isRef(options.indexIndicatorColumnIndexes) ? options.indexIndicatorColumnIndexes : ref(options.indexIndicatorColumnIndexes ?? []);
   const viewportWidth = isRef(options.viewportWidth) ? options.viewportWidth : ref(options.viewportWidth ?? 0);
+  const widthMode = isRef(options.widthMode) ? options.widthMode : ref(options.widthMode ?? "fill");
   const state = useDataGridColumnResize({
     columns: computed(() => options.columns),
     sourceRows: computed(() => rows.value),
     columnIndexes: computed(() => options.columnIndexes ?? options.columns.map((_, index) => index)),
     density,
+    widthMode,
     compactColumnHeaderActions: computed(() => compact.value),
     columnIndexIndicators: computed(() => options.columns.map((_, index) => indexIndicatorColumnIndexes.value.includes(index))),
     cacheKey: computed(() => options.cacheKey),
@@ -49,6 +53,9 @@ function createResizeState(options: {
     },
     setDensity(value: "compact" | "standard" | "comfortable") {
       density.value = value;
+    },
+    setWidthMode(value: DataGridColumnWidthMode) {
+      widthMode.value = value;
     },
     setHeaderTextWidth(width: number) {
       headerTextWidth.value = width;
@@ -106,6 +113,39 @@ describe("useDataGridColumnResize", () => {
     document.dispatchEvent(new MouseEvent("mouseup", { clientX: 100 }));
     expect(state.renderedColumnWidths.value[0]).toBeGreaterThan(intrinsic[0]);
     expect(state.renderedColumnWidths.value[1]).toBeGreaterThan(intrinsic[1]);
+  });
+
+  it("keeps measured content widths without distributing spare viewport space", () => {
+    const state = createResizeState({
+      columns: ["id", "name"],
+      rows: [[1, "a"]],
+      viewportWidth: 400,
+      widthMode: "content",
+    });
+    state.initColumnWidths();
+
+    expect(state.renderedColumnWidths.value).toEqual(state.columnWidths.value);
+    expect(state.totalWidth.value).toBeLessThan(400);
+  });
+
+  it("switches the open grid layout immediately without changing a manual width", () => {
+    const state = createResizeState({
+      columns: ["id", "name"],
+      rows: [[1, "a"]],
+      viewportWidth: 600,
+    });
+    state.initColumnWidths();
+    state.onResizeStart(0, new MouseEvent("mousedown", { clientX: 100, cancelable: true }));
+    document.dispatchEvent(new MouseEvent("mouseup", { clientX: 140 }));
+    const manualWidth = state.columnWidths.value[0];
+
+    state.setWidthMode("content");
+    expect(state.renderedColumnWidths.value).toEqual(state.columnWidths.value);
+    expect(state.renderedColumnWidths.value[0]).toBe(manualWidth);
+
+    state.setWidthMode("fill");
+    expect(state.renderedColumnWidths.value[0]).toBe(manualWidth);
+    expect(state.totalWidth.value).toBe(600);
   });
 
   it("tracks the cursor while dragging under spare width and stores the final width without stale rendering", async () => {

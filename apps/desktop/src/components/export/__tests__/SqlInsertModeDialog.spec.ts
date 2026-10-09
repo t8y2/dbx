@@ -3,6 +3,8 @@
 import { createApp, h, nextTick, type App, defineComponent } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
+import { sqlExportColumnChoices } from "@/lib/export/sqlExportColumns";
+import type { SqlExportColumnSelection } from "@/lib/export/sqlInsertMode";
 
 vi.mock("@/components/ui/dialog", async () => {
   const { defineComponent, h } = await import("vue");
@@ -37,13 +39,13 @@ afterEach(() => {
   i18n.global.locale.value = "en";
 });
 
-async function mountDialog(onConfirm = () => {}, onCancel = () => {}, allowSplit = false) {
+async function mountDialog(onConfirm = () => {}, onCancel = () => {}, allowSplit = false, columns?: SqlExportColumnSelection[]) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const app = createApp(
     defineComponent({
       setup() {
-        return () => h(SqlInsertModeDialog, { open: true, allowSplit, onConfirm, onCancel });
+        return () => h(SqlInsertModeDialog, { open: true, allowSplit, columns, onConfirm, onCancel });
       },
     }),
   );
@@ -54,6 +56,37 @@ async function mountDialog(onConfirm = () => {}, onCancel = () => {}, allowSplit
 }
 
 describe("SqlInsertModeDialog", () => {
+  it("defaults to every column and allows deselecting one duplicate independently", async () => {
+    const onConfirm = vi.fn();
+    const choices = sqlExportColumnChoices(["id", "name", "id"]);
+    await mountDialog(onConfirm, () => {}, false, choices);
+    expect([...document.querySelectorAll<HTMLInputElement>("[data-sql-export-column]")].every((input) => input.checked)).toBe(true);
+    expect(document.body.textContent).toContain("#1");
+    expect(document.body.textContent).toContain("#2");
+    document.querySelector<HTMLInputElement>('[data-sql-export-column="0"]')?.click();
+    await nextTick();
+    document.querySelector<HTMLButtonElement>("[data-sql-insert-mode-confirm]")?.click();
+    expect(onConfirm).toHaveBeenCalledWith({ insertMode: "batch", splitMaxMb: undefined, selectedColumns: choices.slice(1) });
+  });
+
+  it("blocks an empty selection and restores every column with select all", async () => {
+    const onConfirm = vi.fn();
+    const choices = sqlExportColumnChoices(["id", "name"]);
+    await mountDialog(onConfirm, () => {}, true, choices);
+    document.querySelector<HTMLButtonElement>("[data-sql-export-clear]")?.click();
+    await nextTick();
+    const confirm = document.querySelector<HTMLButtonElement>("[data-sql-insert-mode-confirm]");
+    expect(confirm?.disabled).toBe(true);
+    expect(document.querySelector("[data-sql-export-column-error]")).not.toBeNull();
+    confirm?.click();
+    expect(onConfirm).not.toHaveBeenCalled();
+    document.querySelector<HTMLButtonElement>("[data-sql-export-select-all]")?.click();
+    await nextTick();
+    expect(confirm?.disabled).toBe(false);
+    confirm?.click();
+    expect(onConfirm).toHaveBeenCalledWith({ insertMode: "batch", splitMaxMb: undefined, selectedColumns: choices });
+  });
+
   it("defaults to batch mode and emits the selected single-row mode", async () => {
     const onConfirm = vi.fn();
     await mountDialog(onConfirm);

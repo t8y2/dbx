@@ -15,6 +15,7 @@ import {
   type DataGridCopyPreference,
   type DataGridExtractPreview,
   type DataGridExtractRequest,
+  type DataGridExtractResult,
   type DataGridExtractorOptions,
   type DataGridExtractWarningCode,
 } from "@/lib/dataGrid/dataGridCopyExtractor";
@@ -39,6 +40,12 @@ interface ExtractorRequestSource {
   keepUnsafeJsonText: boolean;
   presentBinaryText: boolean;
   rawRows: unknown[][];
+}
+
+interface ResolvedDataGridExtraction {
+  initialRequest: DataGridExtractRequest;
+  request: DataGridExtractRequest;
+  result: DataGridExtractResult;
 }
 
 interface UseDataGridExtractorOptions {
@@ -223,6 +230,10 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     const presentBinaryText = descriptor.category !== "sql";
     const rawRows = sourceRows.map((row) => requiredSourceIndexes.map((sourceIndex) => row[sourceIndex]));
     const rows = rawRows.map((row) => row.map((value, index) => extractorCellValue(value, columnTypes[index], normalizeValues, keepUnsafeJsonText, presentBinaryText, index)));
+    // 「包含数据库名称」：复制/导出 SQL 时，提取器自身的勾选框与编辑器全局设置
+    // （`generateSqlIncludeDatabaseName`）任一开启都保留库名/模式名；后者还会影响
+    // 保存 SQL、侧栏导出等其它路径，因此这里取“或”，不覆盖全局偏好。
+    const extractorOptionValues = normalizeDataGridExtractorOptions(extractorOptions);
     const tableMeta =
       descriptor.category === "sql"
         ? tableMetaWithoutOptionalDatabaseQualifier(
@@ -231,7 +242,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
               columns.map((column) => column.sourceName ?? column.displayName),
             ),
             options.databaseType.value,
-            options.includeDatabaseName?.value,
+            options.includeDatabaseName?.value === true || extractorOptionValues.sql.includeDatabaseName === true,
           )
         : undefined;
     const request: DataGridExtractRequest = {
@@ -244,7 +255,12 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       selectedColumnIndexes,
       rows,
       selectionKind,
-      options: normalizeDataGridExtractorOptions(extractorOptions),
+      // For dialects whose tableMeta keeps the schema qualifier regardless of
+      // the flag (DATABASE_SCHEMA_QUALIFIED_TYPES), the backend strips every
+      // namespace prefix when include_database_name=false, which would regress
+      // the default output to a bare table name; keep the flag aligned with
+      // the qualified tableMeta we intentionally preserved.
+      options: tableMeta && (tableMeta.schema !== undefined || tableMeta.database !== undefined) ? { ...extractorOptionValues, sql: { ...extractorOptionValues.sql, includeDatabaseName: true } } : extractorOptionValues,
     };
     requestSources.set(request, {
       rowIds: sourceRowIds,
@@ -376,19 +392,27 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     return { text, mimeType: "application/javascript", fileExtension: "js", rowCount: rowLimit ?? request.rows.length, columnCount: request.selectedColumnIndexes.length, warnings: undefined, omittedColumns: undefined };
   }
 
+  async function extractWithExtractor(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = options.extractorOptions?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, maxRows?: number): Promise<ResolvedDataGridExtraction | null> {
+    const initialRequest = buildRequest(extractor, extractorOptions);
+    if (!initialRequest) return null;
+    const rowLimit = maxRows === undefined ? undefined : Math.min(initialRequest.rows.length, maxRows);
+    const request = await resolveRequestSourceValues(initialRequest, rowLimit);
+    const mongoResult = await resolveMongoExtractorResult(extractor, request, rowLimit);
+    const result = mongoResult ?? (await api.extractDataGridSelection(request));
+    if (!result.text && !extractorAllowsEmptyOutput(extractor)) return null;
+    return { initialRequest, request, result };
+  }
+
   async function copyWithExtractor(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = options.extractorOptions?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS): Promise<boolean> {
     if (hasUnsupportedDiscreteSelection.value && !hasContextPredicateTarget(extractor)) {
       toast(t("grid.copyExtractorUnsupportedSelection"), 5000);
       return false;
     }
     if (!canCopyWithExtractor(extractor, extractorOptions)) return false;
-    const initialRequest = buildRequest(extractor, extractorOptions);
-    if (!initialRequest) return false;
     try {
-      const request = await resolveRequestSourceValues(initialRequest);
-      const mongoResult = await resolveMongoExtractorResult(extractor, request);
-      const result = mongoResult ?? (await api.extractDataGridSelection(request));
-      if (!result.text && !extractorAllowsEmptyOutput(extractor)) return false;
+      const extraction = await extractWithExtractor(extractor, extractorOptions);
+      if (!extraction) return false;
+      const { request, result } = extraction;
       // Derive the grid paste-back payload from the effective request schema so
       // hidden support columns, row headers, NULLs, tabs, and newlines keep the
       // same shape and values as the rendered raw text or TSV.
@@ -418,14 +442,10 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
 
   async function previewWithExtractor(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions): Promise<DataGridExtractPreview> {
     if (hasUnsupportedDiscreteSelection.value && !hasContextPredicateTarget(extractor)) throw new Error(t("grid.copyExtractorUnsupportedSelection"));
-    const initialRequest = buildRequest(extractor, extractorOptions);
-    if (!initialRequest) throw new Error(t("grid.copyExtractorEmptySelection"));
+    const extraction = await extractWithExtractor(extractor, extractorOptions, DATA_GRID_EXTRACTOR_PREVIEW_MAX_ROWS);
+    if (!extraction) throw new Error(t("grid.copyExtractorEmptySelection"));
+    const { initialRequest, result } = extraction;
     const sourceRowCount = initialRequest.rows.length;
-    const previewRowCount = Math.min(sourceRowCount, DATA_GRID_EXTRACTOR_PREVIEW_MAX_ROWS);
-    const request = await resolveRequestSourceValues(initialRequest, previewRowCount);
-    const mongoResult = await resolveMongoExtractorResult(extractor, request, previewRowCount);
-    const result = mongoResult ?? (await api.extractDataGridSelection(request));
-    if (!result.text && !extractorAllowsEmptyOutput(extractor)) throw new Error(t("grid.copyExtractorEmptySelection"));
     return { ...result, sourceRowCount, truncated: sourceRowCount > result.rowCount };
   }
 
@@ -453,7 +473,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     }
   }
 
-  return { copyWithExtractor, copyWithPreference, previewWithExtractor, previewWithPreference, canCopyWithExtractor };
+  return { extractWithExtractor, copyWithExtractor, copyWithPreference, previewWithExtractor, previewWithPreference, canCopyWithExtractor };
 }
 
 function extractorAllowsEmptyOutput(extractor: DataGridCopyExtractorId): boolean {

@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { CELL_TRANSFORM_KINDS, CELL_TRANSFORM_MAX_INPUT, CELL_TRANSFORM_MAX_OUTPUT, CELL_TRANSFORM_MAX_RADIX_DIGITS, transformCellValue, type CellTransformKind, type CellTransformResult } from "@/lib/dataGrid/cellValueTransform";
 import { DataGridDateTimePatterns, getSupportedTimeZoneOptions } from "@/lib/dataGrid/columnFormatter";
+import { buildSafeHtmlPreview } from "@/lib/common/safeHtmlPreview";
 
 const props = defineProps<{
   source: string | null;
@@ -81,6 +82,8 @@ function convert() {
   if (blockedReason.value || props.source === null) return;
   result.value = transformCellValue(props.source, { kind: kind.value, unit: unit.value, timezone: timezone.value, pattern: pattern.value, fromBase: fromBase.value, toBase: toBase.value });
 }
+const htmlPreviewDocument = computed(() => (kind.value === "html" && result.value?.ok ? buildSafeHtmlPreview(result.value.text) : ""));
+
 async function copyResult() {
   if (!result.value?.ok) return;
   try {
@@ -155,6 +158,7 @@ async function copyResult() {
           >
           <Button variant="outline" size="sm" class="h-6 text-xs" @click="copyResult">{{ t("cellTransform.copy") }}</Button>
         </div>
+        <iframe v-if="kind === 'html'" :srcdoc="htmlPreviewDocument" sandbox="" :title="t('cellTransform.htmlPreview')" class="h-64 min-h-24 w-full rounded border bg-white" />
         <textarea :value="result.text" :aria-label="t('cellTransform.result')" readonly class="dbx-data-grid-value-font h-64 min-h-24 w-full resize-y rounded border bg-muted/20 p-3 text-xs" spellcheck="false" />
       </template>
     </DialogContent>

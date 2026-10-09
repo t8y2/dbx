@@ -9,6 +9,11 @@ vi.mock("@/lib/backend/api", () => ({
   cancelTableExport: vi.fn(),
 }));
 
+const mockAutoRevealExportedPathIfConfigured = vi.fn();
+vi.mock("@/lib/export/exportPath", () => ({
+  autoRevealExportedPathIfConfigured: (...args: unknown[]) => mockAutoRevealExportedPathIfConfigured(...args),
+}));
+
 import * as api from "@/lib/backend/api";
 import {
   formatDataTransferDuration,
@@ -35,10 +40,14 @@ function transferRequest(transferId: string, tables = ["users"]): TransferReques
     targetSchema: "public",
     tables,
     createTable: true,
+    content: "structureAndData",
+    objects: [],
     mode: "append",
     targetTableNameCase: "preserve",
     quoteTargetColumnNames: true,
     batchSize: 1000,
+    dropTargetBeforeCreate: false,
+    dropTargetConfirmed: false,
   };
 }
 
@@ -138,14 +147,47 @@ describe("data transfer task duration", () => {
   it("records an immediate start failure as a terminal duration", async () => {
     vi.mocked(api.startTransfer).mockRejectedValueOnce(new Error("start failed"));
     const tracker = useExportTracker();
+    const onStarted = vi.fn();
     now = 10_000;
-    const task = tracker.startDataTransferTask(transferRequest("start-failure"), "users");
+    const task = tracker.startDataTransferTask(transferRequest("start-failure"), "users", { onStarted });
     now = 10_025;
 
     await vi.waitFor(() => expect(task.status).toBe("Error"));
 
+    expect(onStarted).not.toHaveBeenCalled();
     expect(task.finishedAt! - task.startedAt!).toBe(25);
     expect(task.errorMessage).toBe("start failed");
+  });
+
+  it.each([
+    ["append", { content: "structureAndData", mode: "append", createTable: true, dropTargetBeforeCreate: false }],
+    ["rebuild", { content: "structureAndData", mode: "append", createTable: true, dropTargetBeforeCreate: true }],
+    ["data-only", { content: "dataOnly", mode: "append", createTable: false, dropTargetBeforeCreate: false }],
+  ] as const)("launches one %s task and acknowledges its accepted submission once", async (_flow, overrides) => {
+    let finishTransfer!: () => void;
+    vi.mocked(api.startTransfer).mockImplementationOnce((_request, _onProgress, onStarted) => {
+      onStarted?.();
+      onStarted?.();
+      return new Promise<void>((resolve) => {
+        finishTransfer = resolve;
+      });
+    });
+    const tracker = useExportTracker();
+    const onStarted = vi.fn();
+    const onOpen = vi.fn();
+    const request = { ...transferRequest(`start-${_flow}`), ...overrides };
+
+    const task = tracker.startDataTransferTask(request, _flow, { onStarted, onOpen });
+
+    expect(task.status).toBe("Running");
+    expect(api.startTransfer).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(api.startTransfer).mock.calls[0]?.[0]).toMatchObject(overrides);
+    expect(onStarted).toHaveBeenCalledTimes(1);
+    task.onOpen?.();
+    expect(onOpen).toHaveBeenCalledTimes(1);
+
+    finishTransfer();
+    await Promise.resolve();
   });
 
   it("freezes an overlapping transfer failure without starting another request", async () => {
@@ -155,11 +197,13 @@ describe("data transfer task duration", () => {
     now = 100;
     tracker.startDataTransferTask(transferRequest("active"), "active");
     now = 130;
-    const overlapping = tracker.startDataTransferTask(transferRequest("overlap"), "overlap");
+    const onStarted = vi.fn();
+    const overlapping = tracker.startDataTransferTask(transferRequest("overlap"), "overlap", { onStarted });
 
     expect(overlapping.status).toBe("Error");
     expect(overlapping.finishedAt! - overlapping.startedAt!).toBe(0);
     expect(api.startTransfer).toHaveBeenCalledTimes(1);
+    expect(onStarted).not.toHaveBeenCalled();
 
     resolveFirst();
     await Promise.resolve();
@@ -446,5 +490,46 @@ describe("formatDataTransferDuration", () => {
     expect(formatDataTransferDuration(3_599_999)).toBe("59m 59s");
     expect(formatDataTransferDuration(3_600_000)).toBe("1h 0m 0s");
     expect(formatDataTransferDuration(3_661_000)).toBe("1h 1m 1s");
+  });
+});
+
+describe("auto-revealing export directory on completion", () => {
+  it("triggers auto-reveal when manual export task succeeds with a file path", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDatabaseExportTask("db-export-1", "mydb", "/tmp/backup.sql", "manual");
+    tracker.updateDatabaseExportTask(task.exportId, {
+      exportId: task.exportId,
+      status: "Done",
+      rowsExported: 100,
+      totalRows: 100,
+    } as any);
+
+    expect(mockAutoRevealExportedPathIfConfigured).toHaveBeenCalledTimes(1);
+    expect(mockAutoRevealExportedPathIfConfigured).toHaveBeenCalledWith("/tmp/backup.sql");
+  });
+
+  it("does not trigger auto-reveal for scheduled exports", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDatabaseExportTask("db-export-sched", "mydb", "/tmp/backup.sql", "scheduled");
+    tracker.updateDatabaseExportTask(task.exportId, {
+      exportId: task.exportId,
+      status: "Done",
+      rowsExported: 100,
+      totalRows: 100,
+    } as any);
+
+    expect(mockAutoRevealExportedPathIfConfigured).not.toHaveBeenCalled();
+  });
+
+  it("does not trigger auto-reveal when export ends with error or cancellation", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDatabaseExportTask("db-export-err", "mydb", "/tmp/backup.sql", "manual");
+    tracker.updateDatabaseExportTask(task.exportId, {
+      exportId: task.exportId,
+      status: "Error",
+      errorMessage: "disk full",
+    } as any);
+
+    expect(mockAutoRevealExportedPathIfConfigured).not.toHaveBeenCalled();
   });
 });

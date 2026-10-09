@@ -1,6 +1,7 @@
 // This function is serialized into the sandbox. It must not capture module state.
 function installBridge(channel) {
   let sequence = 0,
+    contributionId,
     context = {},
     locale = "zh-CN",
     theme;
@@ -102,6 +103,9 @@ function installBridge(channel) {
   }
   window.dbxPlugin = Object.freeze({
     ready,
+    get contributionId() {
+      return contributionId;
+    },
     get context() {
       return context;
     },
@@ -114,6 +118,11 @@ function installBridge(channel) {
     request,
     invoke: (method, params, options = {}) => request("backend.invoke", { method, params, timeoutMs: options.timeoutMs }),
     stream,
+    ai: Object.freeze({
+      openConversation: (options) => request("host.ai.openConversation", options),
+      setRecommendations: (update) => request("host.ai.setRecommendations", update),
+      clearRecommendations: () => request("host.ai.clearRecommendations"),
+    }),
     notify: (method, params) => request("backend.notify", { method, params }),
     sendBinary: (channel, data) => request("backend.sendBinary", { channel, dataBase64: typeof data === "string" ? data : encode(data) }),
     readAsset: (path) => request("ui.readAsset", { path }),
@@ -145,6 +154,7 @@ function installBridge(channel) {
     const m = event.data;
     if (event.source !== parent || m?.source !== "dbx-host" || m.channel !== channel || m.version !== 1) return;
     if (m.type === "init") {
+      contributionId = m.contributionId;
       initialized = true;
       clearInterval(readyTimer);
       context = m.context || {};

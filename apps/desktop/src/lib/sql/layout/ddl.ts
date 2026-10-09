@@ -1,5 +1,5 @@
 import type { AstNode, ClauseNode, ParenthesisNode, StatementNode } from "sql-formatter/dist/esm/parser/ast.js";
-import { CREATE_TABLE_KEYWORD, keywordText, renderInline, splitByComma, Writer, type SqlLayoutContext } from "./primitives";
+import { CREATE_TABLE_KEYWORD, endsWithLineComment, keywordText, renderInline, splitByComma, Writer, type SqlLayoutContext } from "./primitives";
 
 /**
  * Column alignment for `CREATE TABLE`.
@@ -109,7 +109,16 @@ export function createTableLayout(statement: StatementNode, ctx: SqlLayoutContex
   const modifierWidth = Math.max(0, ...columns.map((column) => column.modifiers.length));
 
   definitions.forEach((definition, index) => {
-    writer.newline(indent);
+    if (ctx.options.commaPosition === "before") {
+      if (index === 0) {
+        writer.newline(indent + 2);
+      } else {
+        writer.newline(indent);
+        writer.write(", ");
+      }
+    } else {
+      writer.newline(indent);
+    }
     if (definition.kind === "column") {
       const { name: columnName, type, modifiers, tail } = definition.column;
       writer.write(columnName.padEnd(nameWidth));
@@ -117,9 +126,9 @@ export function createTableLayout(statement: StatementNode, ctx: SqlLayoutContex
       if (modifiers) writer.write(` ${modifiers.padStart(modifierWidth)}`);
       if (tail) writer.write(` ${tail}`);
     } else {
-      emitDefinition(writer, definition.nodes, indent, ctx);
+      emitDefinition(writer, definition.nodes, ctx.options.commaPosition === "before" ? indent + 2 : indent, ctx);
     }
-    if (index < definitions.length - 1) writer.write(",");
+    if (ctx.options.commaPosition !== "before" && index < definitions.length - 1) writer.write(",");
   });
 
   writer.newline(0);
@@ -131,6 +140,7 @@ export function createTableLayout(statement: StatementNode, ctx: SqlLayoutContex
     } else {
       writer.newline(indent);
       writer.write(ctx.renderers.block(rest).trim());
+      if (endsWithLineComment(rest)) writer.markLineComment();
     }
   }
   if (statement.hasSemicolon) writer.write(";");
@@ -153,8 +163,10 @@ function emitDefinition(writer: Writer, nodes: AstNode[], indent: number, ctx: S
     writer.write(`${keywordText(first.text, ctx)} ${renderInline(ctx, [second], ctx.options.lineWidth) ?? second.text}`);
     writer.newline(indent + ctx.options.indentWidth);
     writer.write(ctx.renderers.block(nodes.slice(2)).trim());
+    if (endsWithLineComment(nodes.slice(2))) writer.markLineComment();
     return;
   }
 
   writer.write(ctx.renderers.block(nodes).trim());
+  if (endsWithLineComment(nodes)) writer.markLineComment();
 }

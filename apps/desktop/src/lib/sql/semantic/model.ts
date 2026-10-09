@@ -1010,12 +1010,11 @@ function buildCursorIntent(tokens: readonly SqlSemanticToken[], cursor: number, 
     };
   }
 
+  // Same rule as the unqualified table slot below: the introducer is the word before the
+  // identifier being completed, never the identifier itself (issue #10415).
   if (
     trailing.qualifierParts.length > 0 &&
-    (previous === "from" ||
-      previous === "join" ||
-      TABLE_INTRODUCERS.has(previous) ||
-      TABLE_INTRODUCERS.has(wordBeforeReplacement) ||
+    (TABLE_INTRODUCERS.has(wordBeforeReplacement) ||
       TABLE_INTRODUCERS.has(wordBeforeTrailing) ||
       (!!targetSource && !targetSource.alias && trailing.replacementRange.start >= targetSource.sourceSpan.start && trailing.replacementRange.start <= targetSource.sourceSpan.end + 1 && TABLE_INTRODUCERS.has(wordBeforePosition(tokens, targetSource.sourceSpan.start))))
   ) {
@@ -1027,15 +1026,17 @@ function buildCursorIntent(tokens: readonly SqlSemanticToken[], cursor: number, 
     return { kind: "alias_column", prefix: trailing.prefix, replacementRange: trailing.replacementRange, qualifierParts: trailing.qualifierParts, targetSourceId: targetSource.id, expectedObjectKinds: ["column"], confidence: "high" };
   }
 
-  if (TABLE_INTRODUCERS.has(previous) || TABLE_INTRODUCERS.has(wordBeforeReplacement) || TABLE_INTRODUCERS.has(wordBeforeTrailing) || previous === "from" || previous === "join" || wordBeforeReplacement === "from" || wordBeforeReplacement === "join" || tableListContinuation) {
-    return { kind: previous === "join" ? "table" : "table", prefix: trailing.prefix, replacementRange: trailing.replacementRange, qualifierParts: trailing.qualifierParts, expectedObjectKinds: ["table", "view"], confidence: "high" };
+  if (TABLE_INTRODUCERS.has(wordBeforeReplacement) || TABLE_INTRODUCERS.has(wordBeforeTrailing) || tableListContinuation) {
+    return { kind: "table", prefix: trailing.prefix, replacementRange: trailing.replacementRange, qualifierParts: trailing.qualifierParts, expectedObjectKinds: ["table", "view"], confidence: "high" };
   }
 
-  if (previous === "call" || previous === "exec" || previous === "execute") {
+  const routineIntroducer = wordBeforeTrailing || wordBeforeReplacement;
+  if (routineIntroducer === "call" || routineIntroducer === "exec" || routineIntroducer === "execute") {
     return { kind: "routine", prefix: trailing.prefix, replacementRange: trailing.replacementRange, qualifierParts: trailing.qualifierParts, expectedObjectKinds: ["routine", "procedure", "function"], confidence: "high" };
   }
 
-  if (previous === "set") {
+  const updateColumnIntroducer = wordBeforeTrailing || wordBeforeReplacement;
+  if (updateColumnIntroducer === "set") {
     return {
       kind: "update_column",
       prefix: trailing.prefix,

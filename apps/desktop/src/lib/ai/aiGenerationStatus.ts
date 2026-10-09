@@ -68,6 +68,7 @@ export const STATUS_TOOL_LABEL_KEYS: Record<string, string> = {
   get_sample_data: "ai.status.toolLabels.getSampleData",
   list_collections: "ai.status.toolLabels.listCollections",
   browse_collection: "ai.status.toolLabels.browseCollection",
+  execute_redis_command: "ai.status.toolLabels.executeRedisCommand",
 };
 
 /** Initial status at `send()` time: `phase=preparing`, `startedAt=now`. */

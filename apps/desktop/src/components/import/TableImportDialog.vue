@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, shallowRef, watch } from "vue";
+import { computed, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { AlertTriangle, ArrowLeft, ArrowRight, Check, CheckCircle2, FileCode, FileJson, FileSpreadsheet, FileText, FileUp, Loader2, RefreshCw, Square, Upload, X } from "@lucide/vue";
+import { AlertTriangle, ArrowLeft, ArrowRight, Check, CheckCircle2, FileCode, FileJson, FileSpreadsheet, FileText, FileUp, Loader2, Maximize2, Minimize2, RefreshCw, Square, Upload, X } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -32,7 +32,9 @@ import {
 import { importPreviewInput, importSourceDisplayName, uploadedImportSourceFromPreview } from "@/lib/import/importSource";
 import { getDataTypeOptions } from "@/lib/table/tableStructureEditorState";
 import { metadataSchemaForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
-import type { ColumnInfo } from "@/types/database";
+import { isSchemaAware } from "@/lib/database/databaseFeatureSupport";
+import { schemaOptionsForConnection } from "@/composables/useSchemaOptions";
+import type { ColumnInfo, DatabaseType } from "@/types/database";
 import * as api from "@/lib/backend/api";
 
 const { t } = useI18n();
@@ -40,6 +42,27 @@ const store = useConnectionStore();
 const settingsStore = useSettingsStore();
 const { toast } = useToast();
 const open = defineModel<boolean>("open", { default: false });
+const minimized = ref(false);
+const backgroundMode = ref(false);
+const dialogDragOffset = ref({ x: 0, y: 0 });
+const isDraggingDialog = ref(false);
+let activeDialogDrag:
+  | {
+      pointerId: number;
+      startX: number;
+      startY: number;
+      startLeft: number;
+      startTop: number;
+      width: number;
+      height: number;
+      offsetX: number;
+      offsetY: number;
+    }
+  | undefined;
+const dialogStyle = computed(() => ({
+  transform: dialogDragOffset.value.x || dialogDragOffset.value.y ? `translate(${dialogDragOffset.value.x}px, ${dialogDragOffset.value.y}px)` : undefined,
+  transition: isDraggingDialog.value ? "none" : undefined,
+}));
 
 const props = defineProps<{
   prefillConnectionId?: string;
@@ -114,11 +137,13 @@ const errorMessage = ref("");
 const wizardStep = ref<TableImportWizardStep>("source");
 const fileInput = ref<HTMLInputElement | null>(null);
 const delimiter = ref(",");
+const decimalSeparator = ref<"." | ",">(".");
 const textEncoding = ref<api.TableImportTextEncoding>("auto");
 const titleRow = ref(1);
 const dataStartRow = ref(2);
 const lastDataRow = ref(0);
 const trimValues = ref(false);
+const conflictPolicy = ref<api.TableImportConflictPolicy>("error");
 const emptyStringAsNull = ref(defaultTableImportEmptyStringAsNull(sourceFormat.value));
 const selectedSheet = ref("");
 const jsonShape = ref<api.TableImportJsonShape>("auto");
@@ -140,6 +165,7 @@ const formatOptions: Array<{ value: api.TableImportSourceFormat; icon: any; labe
   { value: "json", icon: FileJson, labelKey: "tableImport.formatJson", descriptionKey: "tableImport.formatJsonDescription" },
   { value: "excel", icon: FileSpreadsheet, labelKey: "tableImport.formatExcel", descriptionKey: "tableImport.formatExcelDescription" },
   { value: "sql", icon: FileCode, labelKey: "tableImport.formatSql", descriptionKey: "tableImport.formatSqlDescription" },
+  { value: "parquet", icon: FileText, labelKey: "tableImport.formatParquet", descriptionKey: "tableImport.formatParquetDescription" },
 ];
 
 const encodingOptions = TABLE_IMPORT_ENCODING_OPTIONS;
@@ -154,7 +180,28 @@ const wizardSteps: Array<{ value: TableImportWizardStep; labelKey: string }> = [
 
 const selectedConnection = computed(() => (props.prefillConnectionId ? store.getConfig(props.prefillConnectionId) : undefined));
 const structureDatabaseType = computed(() => tableStructureDatabaseTypeForConnection(selectedConnection.value));
-const targetSchema = computed(() => metadataSchemaForConnection(selectedConnection.value, props.prefillDatabase || "", props.prefillSchema));
+const supportsDuckDbParquetImport = computed(() => structureDatabaseType.value === "duckdb");
+const availableFormatOptions = computed(() => formatOptions.filter((format) => format.value !== "parquet" || supportsDuckDbParquetImport.value));
+const importFileExtensions = computed(() => ["csv", "tsv", "txt", "json", "xlsx", "xlsm", "xls", "sql", ...(supportsDuckDbParquetImport.value ? ["parquet"] : [])]);
+// Mirrors the conflict SQL dispatch in transfer.rs. Other dialects must keep
+// ordinary INSERT/error behavior instead of approximating an upsert.
+const IMPORT_CONFLICT_DATABASE_TYPES = new Set<DatabaseType>(["postgres", "kingbase", "opengauss", "sqlite", "cloudflare-d1", "duckdb", "mysql", "doris", "starrocks"]);
+const supportsImportConflictPolicy = computed(() => structureDatabaseType.value !== undefined && IMPORT_CONFLICT_DATABASE_TYPES.has(structureDatabaseType.value));
+function defaultInitialSchema() {
+  if (props.prefillSchema !== undefined) return props.prefillSchema;
+  return metadataSchemaForConnection(selectedConnection.value, props.prefillDatabase || "", props.prefillSchema) || "";
+}
+
+const isSchemaCapable = computed(() => isSchemaAware(structureDatabaseType.value));
+const showSchemaSelector = computed(() => isSchemaCapable.value && !!props.prefillConnectionId);
+const selectedSchema = ref(defaultInitialSchema());
+const schemaOptions = ref<string[]>([]);
+const loadingSchemas = ref(false);
+let schemaOptionsRequestId = 0;
+const targetSchema = computed(() => {
+  if (selectedSchema.value) return selectedSchema.value;
+  return metadataSchemaForConnection(selectedConnection.value, props.prefillDatabase || "", props.prefillSchema) || "";
+});
 const dataTypeOptions = computed(() => mergeDataTypeOptions(dynamicDataTypeOptions.value, getDataTypeOptions(structureDatabaseType.value), Object.values(columnDataTypes.value)));
 const hasExistingTarget = computed(() => !!props.prefillTable || loadingExistingTables.value || existingTableNames.value.length > 0);
 const targetTableName = computed(() => (targetMode.value === "create" ? newTableName.value.trim() : selectedExistingTable.value));
@@ -176,6 +223,20 @@ const mappedColumns = computed<api.TableImportColumnMapping[]>(() => {
 });
 const mappedCount = computed(() => mappedColumns.value.length);
 const mappingValidation = computed(() => validateImportMappings(mappedColumns.value));
+const primaryKeyColumns = computed(() => targetColumns.value.filter((column) => column.is_primary_key));
+const updateExistingUnavailableReason = computed(() => {
+  if (targetMode.value !== "existing") return t("tableImport.updateExistingRequiresExistingTable");
+  if (!supportsImportConflictPolicy.value) return t("tableImport.updateExistingUnsupportedDialect");
+  if (!existingTargetMetadataReady.value || primaryKeyColumns.value.length === 0) return t("tableImport.updateExistingRequiresPrimaryKey");
+  const mappedTargets = mappedColumns.value.map((mapping) => mapping.targetColumn.toLowerCase());
+  const missingKeys = primaryKeyColumns.value.filter((column) => !mappedTargets.includes(column.name.toLowerCase()));
+  if (missingKeys.length > 0) return t("tableImport.updateExistingRequiresMappedPrimaryKey", { columns: missingKeys.map((column) => column.name).join(", ") });
+  const primaryKeyNames = primaryKeyColumns.value.map((column) => column.name.toLowerCase());
+  if (!mappedTargets.some((column) => !primaryKeyNames.includes(column))) return t("tableImport.updateExistingRequiresMappedValue");
+  return "";
+});
+const canUpdateExistingRows = computed(() => updateExistingUnavailableReason.value === "");
+const conflictPolicyError = computed(() => (conflictPolicy.value === "updateExisting" ? updateExistingUnavailableReason.value : ""));
 const requiredUnmappedColumns = computed(() =>
   requiredImportTargetColumns(
     targetColumns.value,
@@ -189,7 +250,7 @@ const batchTargetNamesValid = computed(() => {
   return tableNames.length > 0 && tableNames.every(Boolean) && new Set(tableNames).size === tableNames.length;
 });
 const canImport = computed(() => {
-  if (running.value || !props.prefillConnectionId || !existingTargetMetadataReady.value) return false;
+  if (running.value || !props.prefillConnectionId || !existingTargetMetadataReady.value || conflictPolicyError.value) return false;
   if (!isBatchImport.value) return !!preview.value && !!targetTableName.value && mappingValidation.value.valid;
   if (!batchTargetNamesValid.value) return false;
   return selectedBatchTasks.value.every((task) => {
@@ -205,7 +266,7 @@ const canGoNext = computed(() => {
     if (wizardStep.value === "mapping") return canImport.value;
   }
   if (wizardStep.value === "options") return !!preview.value && !!targetTableName.value && existingTargetMetadataReady.value;
-  if (wizardStep.value === "mapping") return existingTargetMetadataReady.value && mappingValidation.value.valid;
+  if (wizardStep.value === "mapping") return existingTargetMetadataReady.value && mappingValidation.value.valid && !conflictPolicyError.value;
   return false;
 });
 const rawProgressPercent = computed(() => tableImportProgressPercent(progress.value));
@@ -213,7 +274,10 @@ const progressPercentFloor = ref(0);
 const progressPercent = computed(() => Math.max(rawProgressPercent.value, progressPercentFloor.value));
 const currentStepIndex = computed(() => wizardSteps.findIndex((step) => step.value === wizardStep.value));
 const targetLabel = computed(() => {
-  const pieces = [selectedConnection.value?.name, props.prefillDatabase, props.prefillSchema, targetTableName.value].filter(Boolean);
+  // Database-as-schema engines (MySQL/SQLite family) resolve targetSchema to
+  // the database name; keep it out of the label so it does not render twice.
+  const schemaPiece = targetSchema.value && targetSchema.value !== props.prefillDatabase ? targetSchema.value : "";
+  const pieces = [selectedConnection.value?.name, props.prefillDatabase, schemaPiece, targetTableName.value].filter(Boolean);
   return pieces.join(" / ");
 });
 const selectedSourceName = computed(() => {
@@ -233,6 +297,7 @@ const terminalStatus = computed(() => !!progress.value?.status && ["done", "erro
 const displayedElapsedMs = computed(() => resolveTableImportElapsed(liveElapsedMs.value, progress.value?.elapsedMs, terminalStatus.value));
 const progressLabelKey = computed(() => {
   if (terminalStatus.value) return `tableImport.status_${progress.value?.status || "idle"}`;
+  if (!running.value && !progress.value) return "tableImport.status_idle";
   return `tableImport.phase_${progress.value?.phase || "writing"}`;
 });
 
@@ -249,6 +314,67 @@ function stopImportElapsedClock() {
   }
 }
 
+function stopDialogDrag() {
+  activeDialogDrag = undefined;
+  isDraggingDialog.value = false;
+  window.removeEventListener("pointermove", onDialogDragMove);
+  window.removeEventListener("pointerup", stopDialogDrag);
+  window.removeEventListener("pointercancel", stopDialogDrag);
+}
+
+function onDialogDragMove(event: PointerEvent) {
+  const drag = activeDialogDrag;
+  if (!drag || event.pointerId !== drag.pointerId) return;
+
+  const maxLeft = Math.max(8, window.innerWidth - drag.width - 8);
+  const maxTop = Math.max(8, window.innerHeight - drag.height - 8);
+  const left = Math.min(maxLeft, Math.max(8, drag.startLeft + event.clientX - drag.startX));
+  const top = Math.min(maxTop, Math.max(8, drag.startTop + event.clientY - drag.startY));
+  dialogDragOffset.value = {
+    x: drag.offsetX + left - drag.startLeft,
+    y: drag.offsetY + top - drag.startTop,
+  };
+}
+
+function startDialogDrag(event: PointerEvent) {
+  if (event.button !== 0 || !(event.target instanceof Element) || event.target.closest("button, a, input, select, textarea")) return;
+  const content = (event.currentTarget as HTMLElement).closest<HTMLElement>('[data-slot="dialog-content"]');
+  if (!content) return;
+
+  const rect = content.getBoundingClientRect();
+  activeDialogDrag = {
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    startLeft: rect.left,
+    startTop: rect.top,
+    width: rect.width,
+    height: rect.height,
+    offsetX: dialogDragOffset.value.x,
+    offsetY: dialogDragOffset.value.y,
+  };
+  isDraggingDialog.value = true;
+  window.addEventListener("pointermove", onDialogDragMove);
+  window.addEventListener("pointerup", stopDialogDrag);
+  window.addEventListener("pointercancel", stopDialogDrag);
+  event.preventDefault();
+}
+
+function handleOpenChange(value: boolean) {
+  if (!value && running.value) return;
+  open.value = value;
+}
+
+function minimizeImport() {
+  minimized.value = true;
+  backgroundMode.value = true;
+}
+
+function restoreImport() {
+  minimized.value = false;
+  if (!running.value) backgroundMode.value = false;
+}
+
 function refreshImportElapsedClock() {
   if (importStartedAt > 0) {
     liveElapsedMs.value = Math.max(0, Math.round(performance.now() - importStartedAt));
@@ -263,6 +389,11 @@ function startImportElapsedClock() {
 }
 
 function resetState() {
+  stopDialogDrag();
+  minimized.value = false;
+  backgroundMode.value = false;
+  dialogDragOffset.value = { x: 0, y: 0 };
+  progressPercentFloor.value = 0;
   stopImportElapsedClock();
   closeDataTypePicker();
   importStartedAt = 0;
@@ -271,6 +402,10 @@ function resetState() {
   batchEncodingRequestId++;
   existingTablesRequestId++;
   targetColumnsRequestId++;
+  schemaOptionsRequestId++;
+  schemaOptions.value = [];
+  loadingSchemas.value = false;
+  selectedSchema.value = defaultInitialSchema();
   if (previewReloadTimer) {
     clearTimeout(previewReloadTimer);
     previewReloadTimer = null;
@@ -286,11 +421,13 @@ function resetState() {
   activeTaskIndex.value = 0;
   sourceFormat.value = "csv";
   delimiter.value = ",";
+  decimalSeparator.value = ".";
   textEncoding.value = "auto";
   titleRow.value = 1;
   dataStartRow.value = 2;
   lastDataRow.value = 0;
   trimValues.value = false;
+  conflictPolicy.value = "error";
   emptyStringAsNull.value = defaultTableImportEmptyStringAsNull(sourceFormat.value);
   selectedSheet.value = "";
   jsonShape.value = "auto";
@@ -318,6 +455,7 @@ function detectFormat(name: string): api.TableImportSourceFormat {
   if (lower.endsWith(".json")) return "json";
   if (lower.endsWith(".xls") || lower.endsWith(".xlsx") || lower.endsWith(".xlsm")) return "excel";
   if (lower.endsWith(".sql")) return "sql";
+  if (lower.endsWith(".parquet")) return "parquet";
   return "csv";
 }
 
@@ -352,6 +490,7 @@ function taskParseOptions(format: api.TableImportSourceFormat, sheetName = ""): 
   return buildTableImportParseOptions({
     format,
     delimiter: delimiter.value,
+    decimalSeparator: decimalSeparator.value,
     textEncoding: textEncoding.value,
     titleRow: titleRow.value,
     dataStartRow: dataStartRow.value,
@@ -407,7 +546,8 @@ function applyAutoMapping() {
     columnMapping.value = Object.fromEntries(currentPreview.columns.map((source) => [source, source]));
     return;
   }
-  columnMapping.value = autoMapImportColumns(currentPreview.columns, targetColumnNames.value);
+  const headerless = titleRow.value === 0 && (isDelimitedFormat(sourceFormat.value) || sourceFormat.value === "excel");
+  columnMapping.value = autoMapImportColumns(currentPreview.columns, targetColumnNames.value, headerless ? "position" : "auto");
 }
 
 function applySuggestedColumnDataTypes(currentPreview = preview.value) {
@@ -505,8 +645,60 @@ async function loadDataTypeOptions() {
   }
 }
 
-async function loadExistingTables() {
-  if (props.prefillTable || loadingExistingTables.value || existingTableNames.value.length || !props.prefillConnectionId || !props.prefillDatabase) return;
+async function loadSchemaOptions() {
+  const connectionId = props.prefillConnectionId;
+  const database = props.prefillDatabase || "";
+  if (!connectionId || !isSchemaCapable.value) {
+    schemaOptions.value = [];
+    loadingSchemas.value = false;
+    return;
+  }
+  const requestId = ++schemaOptionsRequestId;
+  loadingSchemas.value = true;
+  try {
+    await store.ensureConnected(connectionId);
+    const rawSchemas = await api.listSchemas(connectionId, database);
+    if (requestId !== schemaOptionsRequestId) return;
+    const filtered = schemaOptionsForConnection(rawSchemas, selectedConnection.value, database);
+    const active = selectedSchema.value || targetSchema.value;
+    if (active && !filtered.includes(active)) {
+      schemaOptions.value = [active, ...filtered];
+    } else {
+      schemaOptions.value = filtered;
+    }
+  } catch {
+    if (requestId === schemaOptionsRequestId) {
+      const active = selectedSchema.value || targetSchema.value;
+      schemaOptions.value = active ? [active] : [];
+    }
+  } finally {
+    if (requestId === schemaOptionsRequestId) {
+      loadingSchemas.value = false;
+    }
+  }
+}
+
+function handleSchemaChange(newSchema: string) {
+  const trimmed = newSchema.trim();
+  if (selectedSchema.value === trimmed) return;
+  selectedSchema.value = trimmed;
+  if (trimmed && !schemaOptions.value.includes(trimmed)) {
+    schemaOptions.value = [trimmed, ...schemaOptions.value];
+  }
+  existingTableNames.value = [];
+  selectedExistingTable.value = "";
+  targetColumns.value = [];
+  loadedTargetTableName.value = "";
+  if (targetMode.value === "existing") {
+    columnMapping.value = {};
+  }
+  if (targetMode.value === "existing" || wizardStep.value === "options") {
+    void loadExistingTables(true);
+  }
+}
+
+async function loadExistingTables(force = false) {
+  if (props.prefillTable || (!force && (loadingExistingTables.value || existingTableNames.value.length > 0)) || !props.prefillConnectionId || !props.prefillDatabase) return;
   const requestId = ++existingTablesRequestId;
   loadingExistingTables.value = true;
   errorMessage.value = "";
@@ -563,6 +755,8 @@ async function loadTargetColumns() {
 async function previewSelectedImportFile(fileOrPath: string | File) {
   const input = importPreviewInput(uploadedImportSourceFromPreview(preview.value), fileOrPath);
   return api.previewTableImportFile(input.fileOrPath, {
+    connectionId: props.prefillConnectionId,
+    database: props.prefillDatabase || "",
     sourceRef: input.sourceRef,
     sourceFormat: sourceFormat.value,
     parseOptions: parseOptions.value,
@@ -596,6 +790,13 @@ async function loadPreview(fileOrPath = selectedSource.value) {
 }
 
 function assignSelectedSource(source: string | File) {
+  const detectedFormat = detectFormat(typeof source === "string" ? source : source.name);
+  if (detectedFormat === "parquet" && !supportsDuckDbParquetImport.value) {
+    selectedSource.value = null;
+    preview.value = null;
+    errorMessage.value = t("tableImport.parquetOnlyDuckdb");
+    return;
+  }
   batchTasks.value = [];
   selectedSource.value = source;
   preview.value = null;
@@ -604,7 +805,7 @@ function assignSelectedSource(source: string | File) {
   progress.value = null;
   errorMessage.value = "";
   const name = typeof source === "string" ? source : source.name;
-  sourceFormat.value = detectFormat(name);
+  sourceFormat.value = detectedFormat;
   emptyStringAsNull.value = defaultTableImportEmptyStringAsNull(sourceFormat.value);
   if (!newTableName.value.trim()) {
     newTableName.value = suggestedTableName(name);
@@ -642,11 +843,18 @@ async function prepareBatchSources(sources: ImportSource[]) {
   const tasks: BatchImportTask[] = [];
   const usedNames = new Set<string>();
   const formats = sources.map((source) => detectFormat(sourceName(source)));
-  emptyStringAsNull.value = formats.length && formats.every((format) => format === formats[0]) ? defaultTableImportEmptyStringAsNull(formats[0]!) : true;
+  if (formats.includes("parquet") && !supportsDuckDbParquetImport.value) {
+    errorMessage.value = t("tableImport.parquetOnlyDuckdb");
+    loadingPreview.value = false;
+    return;
+  }
+  emptyStringAsNull.value = formats.length && formats.every((format) => format === formats[0]) ? defaultTableImportEmptyStringAsNull(formats[0]!) : defaultTableImportEmptyStringAsNull(formats[0] ?? "csv");
   try {
     for (const [index, source] of sources.entries()) {
       const format = formats[index]!;
       const initialPreview = await api.previewTableImportFile(source, {
+        connectionId: props.prefillConnectionId,
+        database: props.prefillDatabase || "",
         sourceFormat: format,
         parseOptions: taskParseOptions(format),
         previewLimit: Math.max(1, Number(previewLimit.value) || 50),
@@ -657,6 +865,8 @@ async function prepareBatchSources(sources: ImportSource[]) {
         const effectiveSheetName = sheetName && sheetName === initialPreview.sheets?.[0] ? "" : sheetName;
         const taskPreview = effectiveSheetName
           ? await api.previewTableImportFile(input.fileOrPath, {
+              connectionId: props.prefillConnectionId,
+              database: props.prefillDatabase || "",
               sourceRef: input.sourceRef,
               sourceFormat: format,
               parseOptions: taskParseOptions(format, effectiveSheetName),
@@ -701,11 +911,12 @@ async function selectFile() {
   const selected = await open({
     multiple: targetMode.value === "create",
     filters: [
-      { name: "Data files", extensions: ["csv", "tsv", "txt", "json", "xlsx", "xlsm", "xls", "sql"] },
+      { name: "Data files", extensions: importFileExtensions.value },
       { name: "Text", extensions: ["csv", "tsv", "txt"] },
       { name: "JSON", extensions: ["json"] },
       { name: "Excel", extensions: ["xlsx", "xlsm", "xls"] },
       { name: "SQL", extensions: ["sql"] },
+      ...(supportsDuckDbParquetImport.value ? [{ name: "Parquet", extensions: ["parquet"] }] : []),
     ],
   });
   if (!selected) return;
@@ -729,6 +940,24 @@ function updateMapping(sourceColumn: string, value: any) {
     ...columnMapping.value,
     [sourceColumn]: target === SKIP_VALUE ? "" : target,
   };
+}
+
+function mapByPosition() {
+  const currentPreview = preview.value;
+  if (!currentPreview) return;
+  columnMapping.value = autoMapImportColumns(currentPreview.columns, targetColumnNames.value, "position");
+}
+
+function mapByName() {
+  const currentPreview = preview.value;
+  if (!currentPreview) return;
+  columnMapping.value = autoMapImportColumns(currentPreview.columns, targetColumnNames.value, "name");
+}
+
+function skipAllColumns() {
+  const currentPreview = preview.value;
+  if (!currentPreview) return;
+  columnMapping.value = Object.fromEntries(currentPreview.columns.map((source) => [source, ""]));
 }
 
 function updateColumnDataType(sourceColumn: string, value: any) {
@@ -757,7 +986,7 @@ function canOpenStep(step: TableImportWizardStep) {
     if (step === "review") return canImport.value;
   }
   if (step === "mapping") return !!preview.value && existingTargetMetadataReady.value;
-  if (step === "review") return !!preview.value && existingTargetMetadataReady.value && mappingValidation.value.valid;
+  if (step === "review") return !!preview.value && existingTargetMetadataReady.value && mappingValidation.value.valid && !conflictPolicyError.value;
   return false;
 }
 
@@ -810,6 +1039,7 @@ async function startImport() {
   const currentPreview = preview.value;
   const tableName = targetTableName.value;
   if (!canImport.value || !currentPreview || !props.prefillConnectionId || !tableName) return;
+  backgroundMode.value = true;
   running.value = true;
   progressPercentFloor.value = 0;
   cancelling.value = false;
@@ -846,6 +1076,8 @@ async function startImport() {
         mode: targetMode.value === "create" ? "append" : importMode.value,
         createTable: targetMode.value === "create",
         batchSize: Math.max(1, Number(batchSize.value) || 500),
+        conflictPolicy: conflictPolicy.value,
+        skipDuplicateRows: conflictPolicy.value === "skip",
         dateTimeFormat: settingsStore.editorSettings.globalDateTimeImportFormat || undefined,
         preparedSource: preparedImportSource(currentPreview),
       },
@@ -855,9 +1087,9 @@ async function startImport() {
     );
     progress.value = { importId: summary.importId, status: "done", rowsImported: summary.rowsImported, totalRows: summary.totalRows, elapsedMs: summary.elapsedMs };
     toast(t("tableImport.success", { count: summary.rowsImported }), 2500);
-    store.invalidateMetadataCache(props.prefillConnectionId, props.prefillDatabase || "", props.prefillSchema || undefined, tableName);
+    store.invalidateMetadataCache(props.prefillConnectionId, props.prefillDatabase || "", targetSchema.value || undefined, tableName);
     if (targetMode.value === "create") {
-      store.refreshObjectListTreeNode(props.prefillConnectionId, props.prefillDatabase || "", props.prefillSchema || undefined).catch((error) => {
+      store.refreshObjectListTreeNode(props.prefillConnectionId, props.prefillDatabase || "", targetSchema.value || undefined).catch((error) => {
         console.warn("[DBX][table-import:refresh-created-table-failed]", error);
       });
     }
@@ -877,6 +1109,7 @@ async function startImport() {
     stopImportElapsedClock();
     running.value = false;
     cancelling.value = false;
+    if (!minimized.value) backgroundMode.value = false;
   }
 }
 
@@ -885,6 +1118,7 @@ async function startBatchImport() {
   // Keep original indices for the active preview and error state, even when
   // the import queue excludes worksheets between selected tasks.
   const tasks = batchTasks.value.map((task, index) => ({ task, index })).filter(({ task }) => task.selected);
+  backgroundMode.value = true;
   running.value = true;
   progressPercentFloor.value = 0;
   cancelling.value = false;
@@ -933,6 +1167,8 @@ async function startBatchImport() {
           mode: "append",
           createTable: true,
           batchSize: Math.max(1, Number(batchSize.value) || 500),
+          conflictPolicy: conflictPolicy.value,
+          skipDuplicateRows: conflictPolicy.value === "skip",
           dateTimeFormat: settingsStore.editorSettings.globalDateTimeImportFormat || undefined,
           preparedSource: preparedImportSource(task.preview),
           retainSource: true,
@@ -959,12 +1195,12 @@ async function startBatchImport() {
       task.rowsImported = summary.rowsImported;
       completedRows += summary.rowsImported;
       completedBytes += task.preview.sizeBytes;
-      store.invalidateMetadataCache(props.prefillConnectionId, props.prefillDatabase || "", props.prefillSchema || undefined, task.tableName);
+      store.invalidateMetadataCache(props.prefillConnectionId, props.prefillDatabase || "", targetSchema.value || undefined, task.tableName);
     }
     refreshImportElapsedClock();
     progress.value = { importId: importId.value, status: "done", phase: "done", rowsImported: completedRows, totalRows: completedRows, totalRowsExact: true, bytesRead: totalBytes, totalBytes, elapsedMs: liveElapsedMs.value };
     toast(t("tableImport.success", { count: completedRows }), 2500);
-    store.refreshObjectListTreeNode(props.prefillConnectionId, props.prefillDatabase || "", props.prefillSchema || undefined).catch((error) => {
+    store.refreshObjectListTreeNode(props.prefillConnectionId, props.prefillDatabase || "", targetSchema.value || undefined).catch((error) => {
       console.warn("[DBX][table-import:refresh-created-table-failed]", error);
     });
   } catch (e: any) {
@@ -989,6 +1225,7 @@ async function startBatchImport() {
     await releaseTableImportSources();
     running.value = false;
     cancelling.value = false;
+    if (!minimized.value) backgroundMode.value = false;
   }
 }
 
@@ -1040,6 +1277,8 @@ async function reloadBatchPreviewsForEncoding() {
       if (!isDelimitedFormat(task.format) && task.format !== "sql") continue;
       const input = importPreviewInput(uploadedImportSourceFromPreview(task.preview), task.source);
       const nextPreview = await api.previewTableImportFile(input.fileOrPath, {
+        connectionId: props.prefillConnectionId,
+        database: props.prefillDatabase || "",
         sourceRef: input.sourceRef,
         sourceFormat: task.format,
         parseOptions: taskParseOptions(task.format, task.sheetName),
@@ -1066,26 +1305,46 @@ watch(
   (value) => {
     if (value) {
       resetState();
+      if (showSchemaSelector.value) void loadSchemaOptions();
       void loadTargetColumns();
       void loadDataTypeOptions();
-    } else if (!running.value) {
-      void releaseTableImportSources();
+    } else {
+      minimized.value = false;
+      backgroundMode.value = false;
+      dialogDragOffset.value = { x: 0, y: 0 };
+      if (previewReloadTimer) {
+        clearTimeout(previewReloadTimer);
+        previewReloadTimer = null;
+      }
+      if (!running.value) void releaseTableImportSources();
     }
   },
   { immediate: true },
 );
 
+onBeforeUnmount(() => {
+  stopDialogDrag();
+  if (previewReloadTimer) {
+    clearTimeout(previewReloadTimer);
+    previewReloadTimer = null;
+  }
+});
+
 watch([sourceFormat, delimiter, titleRow, dataStartRow, lastDataRow, trimValues, emptyStringAsNull, selectedSheet, jsonShape, previewLimit], schedulePreviewReload);
-watch(textEncoding, schedulePreviewReloadAfterEncodingChange);
+watch([textEncoding, decimalSeparator], schedulePreviewReloadAfterEncodingChange);
 watch([newTableName, columnMapping, columnDataTypes], saveActiveBatchTask, { deep: true });
 watch(wizardStep, (step) => {
   if (step !== "mapping") closeDataTypePicker();
-  if (step === "options") void loadExistingTables();
+  if (step === "options") {
+    if (showSchemaSelector.value) void loadSchemaOptions();
+    void loadExistingTables();
+  }
 });
 watch(targetMode, (mode) => {
   if (mode === "existing") {
     columnDataTypes.value = {};
     dynamicDataTypeOptions.value = [];
+    if (!existingTableNames.value.length) void loadExistingTables();
     void loadTargetColumns();
   } else {
     targetColumnsRequestId++;
@@ -1093,13 +1352,17 @@ watch(targetMode, (mode) => {
     loadedTargetTableName.value = "";
     loadingTarget.value = false;
     importMode.value = "append";
+    conflictPolicy.value = "error";
     applyAutoMapping();
     applySuggestedColumnDataTypes();
     void loadDataTypeOptions();
   }
 });
 watch(selectedExistingTable, () => {
-  if (targetMode.value === "existing") void loadTargetColumns();
+  if (targetMode.value === "existing") {
+    conflictPolicy.value = "error";
+    void loadTargetColumns();
+  }
 });
 
 watch(rawProgressPercent, (percent) => {
@@ -1112,18 +1375,24 @@ watch(rawProgressPercent, (percent) => {
 </script>
 
 <template>
-  <Dialog v-model:open="open">
-    <DialogScrollContent class="flex max-h-[calc(var(--dbx-viewport-height)-6rem)] min-h-0 flex-col overflow-hidden sm:max-w-[980px]" :trap-focus="false" @interact-outside.prevent>
-      <DialogHeader class="shrink-0 pr-8">
-        <DialogTitle class="flex items-center gap-2 text-base">
+  <Dialog :open="open" :modal="!backgroundMode" @update:open="handleOpenChange">
+    <DialogScrollContent v-if="!minimized" class="flex max-h-[calc(var(--dbx-viewport-height)-6rem)] min-h-0 flex-col overflow-hidden sm:max-w-[980px]" :style="dialogStyle" :trap-focus="false" :show-overlay="!backgroundMode" :show-close-button="false" @interact-outside.prevent>
+      <DialogHeader class="shrink-0 flex-row items-center pr-8" @pointerdown="startDialogDrag">
+        <DialogTitle class="flex min-w-0 flex-1 items-center gap-2 text-base">
           <FileUp class="h-4 w-4" />
           {{ t("tableImport.title") }}
         </DialogTitle>
+        <Button variant="ghost" size="icon-sm" :aria-label="t('tableImport.minimize')" :title="t('tableImport.minimize')" @pointerdown.stop @click="minimizeImport">
+          <Minimize2 class="h-4 w-4" />
+        </Button>
+        <Button v-if="!running" variant="ghost" size="icon-sm" :aria-label="t('common.close')" :title="t('common.close')" @pointerdown.stop @click="handleOpenChange(false)">
+          <X class="h-4 w-4" />
+        </Button>
       </DialogHeader>
 
       <div class="min-h-0 flex-1 space-y-4 overflow-y-auto py-2 pr-1">
         <div class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
-          <input ref="fileInput" type="file" accept=".csv,.tsv,.txt,.json,.xlsx,.xlsm,.xls,.sql" :multiple="targetMode === 'create'" class="hidden" @change="handleFileInputChange" />
+          <input ref="fileInput" type="file" :accept="importFileExtensions.map((extension) => `.${extension}`).join(',')" :multiple="targetMode === 'create'" class="hidden" @change="handleFileInputChange" />
           <div class="flex h-10 min-w-0 items-center gap-2 rounded-md border bg-muted/20 px-3">
             <span class="shrink-0 text-xs text-muted-foreground">{{ t("tableImport.target") }}</span>
             <span class="min-w-0 truncate text-sm font-medium">
@@ -1198,8 +1467,15 @@ watch(rawProgressPercent, (percent) => {
               {{ t("tableImport.selectFile") }}
             </Button>
           </div>
-          <div class="grid grid-cols-6 gap-2">
-            <button v-for="format in formatOptions" :key="format.value" type="button" class="min-h-20 rounded-md border px-3 py-2 text-left" :class="sourceFormat === format.value ? 'border-primary bg-primary/5' : 'hover:bg-muted/30'" @click="sourceFormat = format.value">
+          <div
+            data-testid="table-import-format-options"
+            class="grid grid-cols-2 gap-2 sm:grid-cols-3"
+            :class="{
+              'lg:grid-cols-6': availableFormatOptions.length === 6,
+              'lg:grid-cols-7': availableFormatOptions.length === 7,
+            }"
+          >
+            <button v-for="format in availableFormatOptions" :key="format.value" type="button" class="min-h-20 rounded-md border px-3 py-2 text-left" :class="sourceFormat === format.value ? 'border-primary bg-primary/5' : 'hover:bg-muted/30'" @click="sourceFormat = format.value">
               <component :is="format.icon" class="mb-2 h-4 w-4 text-muted-foreground" />
               <div class="text-xs font-medium">{{ t(format.labelKey) }}</div>
               <div class="mt-1 text-[11px] leading-snug text-muted-foreground">{{ t(format.descriptionKey) }}</div>
@@ -1216,7 +1492,7 @@ watch(rawProgressPercent, (percent) => {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem v-for="format in formatOptions" :key="format.value" :value="format.value">
+                  <SelectItem v-for="format in availableFormatOptions" :key="format.value" :value="format.value">
                     {{ t(format.labelKey) }}
                   </SelectItem>
                 </SelectContent>
@@ -1234,7 +1510,7 @@ watch(rawProgressPercent, (percent) => {
             </div>
           </div>
 
-          <div class="grid grid-cols-[minmax(0,1fr)_minmax(220px,320px)] gap-3 rounded-md border p-3">
+          <div class="grid gap-3 rounded-md border p-3" :class="showSchemaSelector ? 'grid-cols-1 md:grid-cols-[minmax(0,1.2fr)_minmax(140px,1fr)_minmax(180px,1.2fr)]' : 'grid-cols-[minmax(0,1fr)_minmax(220px,320px)]'">
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.targetMode") }}</Label>
               <div class="grid grid-cols-2 gap-2">
@@ -1248,6 +1524,31 @@ watch(rawProgressPercent, (percent) => {
                 </button>
               </div>
             </div>
+            <div v-if="showSchemaSelector" class="space-y-1.5">
+              <Label class="text-xs">{{ t("transfer.targetSchema") }}</Label>
+              <div v-if="props.prefillTable" class="flex h-8 items-center rounded-md border px-2 text-xs font-mono">
+                <span class="truncate">{{ targetSchema || props.prefillSchema || "-" }}</span>
+              </div>
+              <SearchableSelect
+                v-else
+                data-testid="target-schema-select"
+                :model-value="selectedSchema"
+                :options="schemaOptions.length ? schemaOptions : selectedSchema ? [selectedSchema] : []"
+                :placeholder="t('transfer.selectSchema')"
+                :search-placeholder="t('transfer.searchSchema')"
+                :empty-text="t('common.noResults')"
+                :loading-text="t('common.loading')"
+                :loading="loadingSchemas"
+                :allow-custom="true"
+                trigger-class="h-8 font-mono text-xs"
+                @update:model-value="handleSchemaChange"
+                @update:open="
+                  (isOpen) => {
+                    if (isOpen) void loadSchemaOptions();
+                  }
+                "
+              />
+            </div>
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.targetTableName") }}</Label>
               <Input v-if="targetMode === 'create'" v-model="newTableName" class="h-8 text-xs font-mono" />
@@ -1256,6 +1557,7 @@ watch(rawProgressPercent, (percent) => {
               </div>
               <SearchableSelect
                 v-else
+                data-testid="target-table-select"
                 :model-value="selectedExistingTable"
                 :options="existingTableNames"
                 :placeholder="t('tableImport.noExistingTarget')"
@@ -1270,7 +1572,7 @@ watch(rawProgressPercent, (percent) => {
             </div>
           </div>
 
-          <div v-if="sourceFormat === 'csv' || sourceFormat === 'tsv' || sourceFormat === 'delimited'" class="grid grid-cols-5 gap-3 rounded-md border p-3">
+          <div v-if="sourceFormat === 'csv' || sourceFormat === 'tsv' || sourceFormat === 'delimited'" class="grid grid-cols-2 gap-3 rounded-md border p-3 md:grid-cols-3 xl:grid-cols-6">
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.encoding") }}</Label>
               <Select :model-value="textEncoding" @update:model-value="(value: any) => (textEncoding = value)">
@@ -1292,6 +1594,18 @@ watch(rawProgressPercent, (percent) => {
               <Input v-model="delimiter" :disabled="sourceFormat !== 'delimited'" class="h-8 text-xs font-mono" />
             </div>
             <div class="space-y-1.5">
+              <Label class="text-xs">{{ t("tableImport.decimalSeparator") }}</Label>
+              <Select v-model="decimalSeparator">
+                <SelectTrigger class="h-8 text-xs font-mono" :aria-label="t('tableImport.decimalSeparator')">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value=".">.</SelectItem>
+                  <SelectItem value=",">,</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.titleRow") }}</Label>
               <Input v-model.number="titleRow" type="number" min="0" class="h-8 text-xs" />
             </div>
@@ -1307,10 +1621,13 @@ watch(rawProgressPercent, (percent) => {
               <input v-model="trimValues" type="checkbox" class="h-3.5 w-3.5 accent-primary" />
               {{ t("tableImport.trimValues") }}
             </label>
-            <label class="flex items-center gap-2 text-xs">
-              <input v-model="emptyStringAsNull" type="checkbox" class="h-3.5 w-3.5 accent-primary" />
-              {{ t("tableImport.emptyStringAsNull") }}
-            </label>
+            <div class="space-y-1">
+              <label class="flex items-center gap-2 text-xs">
+                <input v-model="emptyStringAsNull" type="checkbox" class="h-3.5 w-3.5 accent-primary" />
+                {{ t("tableImport.emptyStringAsNull") }}
+              </label>
+              <p class="text-[11px] text-muted-foreground">{{ t("tableImport.emptyStringAsNullHint") }}</p>
+            </div>
           </div>
 
           <div v-else-if="sourceFormat === 'sql'" class="grid grid-cols-5 gap-3 rounded-md border p-3">
@@ -1375,6 +1692,20 @@ watch(rawProgressPercent, (percent) => {
             </div>
           </div>
 
+          <div v-if="supportsImportConflictPolicy" class="space-y-1.5 rounded-md border p-3">
+            <Label for="table-import-conflict-policy" class="text-xs">{{ t("tableImport.conflictPolicy") }}</Label>
+            <select id="table-import-conflict-policy" v-model="conflictPolicy" data-testid="table-import-conflict-policy" class="flex h-8 w-full rounded-md border border-input bg-background text-foreground px-2 text-xs [color-scheme:light] dark:[color-scheme:dark]">
+              <option value="error" class="bg-popover text-popover-foreground">{{ t("tableImport.conflictError") }}</option>
+              <option value="skip" class="bg-popover text-popover-foreground">{{ t("tableImport.skipDuplicateRows") }}</option>
+              <option v-if="targetMode === 'existing'" value="updateExisting" :disabled="!canUpdateExistingRows" class="bg-popover text-popover-foreground">
+                {{ t("tableImport.updateExistingRows") }}
+              </option>
+            </select>
+            <p v-if="targetMode === 'existing' && !canUpdateExistingRows" class="text-[11px] text-muted-foreground">
+              {{ updateExistingUnavailableReason }}
+            </p>
+          </div>
+
           <div class="flex items-center gap-2">
             <Button size="sm" :disabled="!selectedSource || loadingPreview" @click="loadPreview()">
               <Loader2 v-if="loadingPreview" class="mr-1.5 h-3.5 w-3.5 animate-spin" />
@@ -1403,9 +1734,24 @@ watch(rawProgressPercent, (percent) => {
             </div>
           </div>
 
-          <div v-if="preview" class="grid gap-3" :class="targetMode === 'create' ? 'grid-cols-[minmax(360px,460px)_1fr]' : 'grid-cols-[minmax(240px,300px)_1fr]'">
+          <div v-if="preview" class="grid gap-3" :class="targetMode === 'create' ? 'grid-cols-[minmax(360px,460px)_1fr]' : 'grid-cols-[minmax(280px,360px)_1fr]'">
             <div class="rounded-md border">
-              <div class="border-b px-3 py-2 text-xs font-medium">{{ t("tableImport.mapping") }}</div>
+              <div class="flex items-center justify-between border-b px-3 py-1.5 text-xs font-medium">
+                <span>{{ t("tableImport.mapping") }}</span>
+                <div v-if="targetMode === 'existing'" class="flex items-center gap-1.5 font-normal">
+                  <button type="button" data-action="map-by-position" class="text-xs text-muted-foreground hover:text-foreground hover:underline" @click="mapByPosition">
+                    {{ t("tableImport.mapByPosition") }}
+                  </button>
+                  <span class="text-muted-foreground/40">·</span>
+                  <button type="button" data-action="map-by-name" class="text-xs text-muted-foreground hover:text-foreground hover:underline" @click="mapByName">
+                    {{ t("tableImport.mapByName") }}
+                  </button>
+                  <span class="text-muted-foreground/40">·</span>
+                  <button type="button" data-action="skip-all" class="text-xs text-muted-foreground hover:text-foreground hover:underline" @click="skipAllColumns">
+                    {{ t("tableImport.skipAll") }}
+                  </button>
+                </div>
+              </div>
               <div class="max-h-[320px] overflow-auto p-2">
                 <div class="grid items-center gap-2 border-b px-1 pb-1 text-[11px] font-medium text-muted-foreground" :class="targetMode === 'create' ? 'grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(92px,120px)]' : 'grid-cols-[1fr_1fr]'">
                   <span>{{ t("tableImport.sourceColumn") }}</span>
@@ -1426,11 +1772,11 @@ watch(rawProgressPercent, (percent) => {
                   <select
                     v-else
                     :value="columnMapping[sourceColumn] || SKIP_VALUE"
-                    class="h-7 w-full min-w-0 rounded-md border bg-background px-2 text-xs font-mono shadow-none hover:bg-muted/30 focus-visible:ring-1 focus-visible:ring-ring/25"
+                    class="h-7 w-full min-w-0 rounded-md border border-input bg-background text-foreground px-2 text-xs font-mono shadow-none hover:bg-muted/30 focus-visible:ring-1 focus-visible:ring-ring/25 [color-scheme:light] dark:[color-scheme:dark]"
                     @change="(e) => updateMapping(sourceColumn, (e.target as HTMLSelectElement).value)"
                   >
-                    <option :value="SKIP_VALUE">{{ t("tableImport.skipColumn") }}</option>
-                    <option v-for="column in targetColumns" :key="column.name" :value="column.name">
+                    <option :value="SKIP_VALUE" class="bg-popover text-popover-foreground">{{ t("tableImport.skipColumn") }}</option>
+                    <option v-for="column in targetColumns" :key="column.name" :value="column.name" class="bg-popover text-popover-foreground">
                       {{ column.name }}
                     </option>
                   </select>
@@ -1481,6 +1827,9 @@ watch(rawProgressPercent, (percent) => {
 
           <div v-if="mappingValidation.errors.length" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
             {{ mappingValidation.errors.join("; ") }}
+          </div>
+          <div v-else-if="conflictPolicyError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+            {{ conflictPolicyError }}
           </div>
           <div v-else-if="requiredUnmappedColumns.length" class="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950/20 dark:text-amber-300">
             <AlertTriangle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
@@ -1580,6 +1929,10 @@ watch(rawProgressPercent, (percent) => {
               <div class="h-full bg-primary transition-all" :style="{ width: `${progressPercent}%` }" />
             </div>
           </div>
+          <div v-if="running" class="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-950/20 dark:text-amber-300">
+            <AlertTriangle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>{{ t("tableImport.backgroundWarning") }}</span>
+          </div>
           <div v-if="errorMessage || progress?.error" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
             {{ errorMessage || progress?.error }}
           </div>
@@ -1646,4 +1999,19 @@ watch(rawProgressPercent, (percent) => {
       </DialogFooter>
     </DialogScrollContent>
   </Dialog>
+
+  <Teleport to="body">
+    <div v-if="minimized" class="fixed bottom-4 right-4 z-[100] flex max-w-[calc(100vw-2rem)] items-center gap-2 rounded-md border bg-popover px-3 py-2 text-popover-foreground shadow-lg" :title="running ? t('tableImport.backgroundWarning') : undefined">
+      <Loader2 v-if="running" class="h-4 w-4 shrink-0 animate-spin text-primary" />
+      <CheckCircle2 v-else-if="progress?.status === 'done'" class="h-4 w-4 shrink-0 text-emerald-600" />
+      <AlertTriangle v-else class="h-4 w-4 shrink-0 text-destructive" />
+      <span class="min-w-0 truncate text-xs">{{ t(progressLabelKey) }} · {{ progressPercent }}%</span>
+      <Button variant="ghost" size="icon-sm" :aria-label="t('tableImport.restoreImport')" :title="t('tableImport.restoreImport')" @click="restoreImport">
+        <Maximize2 class="h-4 w-4" />
+      </Button>
+      <Button v-if="!running" variant="ghost" size="icon-sm" :aria-label="t('common.close')" :title="t('common.close')" @click="handleOpenChange(false)">
+        <X class="h-4 w-4" />
+      </Button>
+    </div>
+  </Teleport>
 </template>

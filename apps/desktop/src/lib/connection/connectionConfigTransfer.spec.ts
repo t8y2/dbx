@@ -83,6 +83,16 @@ describe("connectionConfigTransfer", () => {
     });
   });
 
+  it("preserves the per-connection automatic table loading opt-in", () => {
+    const source = conn("large-schema", "Large schema", { sidebar_auto_load_all_tables: true });
+    const serialized = JSON.parse(JSON.stringify(buildConnectionConfigBundle([source], null, [])));
+    const parsed = parseConnectionConfigObject(serialized);
+    const imported = prepareConnectionConfigImport(parsed, [], [], () => "imported-id");
+
+    expect(parsed.connections[0].sidebar_auto_load_all_tables).toBe(true);
+    expect(imported.connections[0]).toMatchObject({ id: "imported-id", sidebar_auto_load_all_tables: true });
+  });
+
   it("keeps stable ids and removes secrets from plaintext exports", () => {
     const exported = scrubConnectionForPlaintextExport(
       conn("stable", "A", {

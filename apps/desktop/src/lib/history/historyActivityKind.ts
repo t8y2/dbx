@@ -1,4 +1,4 @@
-export type HistoryActivityKind = "query" | "data_change" | "schema_change" | "import" | "transfer" | "redis_command";
+export type HistoryActivityKind = "query" | "data_change" | "schema_change" | "import" | "transfer" | "redis_command" | "mcp";
 
 export type HistoryActivitySource = {
   activity_kind?: HistoryActivityKind;
@@ -40,4 +40,10 @@ export function resolveHistoryActivityKind(entry: HistoryActivitySource): Histor
   if (operation && WRITE_RE.test(operation)) return "data_change";
 
   return entry.sql ? classifySqlActivityKind(entry.sql) : "query";
+}
+
+export function primarySqlOperation(sql: string): string {
+  const statements = statementsFor(sql);
+  const first = statements[0];
+  return first?.match(/^([a-z]+)/i)?.[1]?.toUpperCase() || "SQL";
 }

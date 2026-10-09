@@ -3,9 +3,11 @@ import { computed, ref } from "vue";
 import { uuid } from "@/lib/common/utils";
 import * as api from "@/lib/backend/api";
 import { forgetSavedSqlEditorPosition } from "@/lib/app/savedSqlEditorPosition";
-import { ensureSqlExtension } from "@/lib/savedSql/savedSqlFileName";
+import { ensureSqlExtension, nextAvailableSqlName } from "@/lib/savedSql/savedSqlFileName";
 import { nextSavedSqlCopyName } from "@/lib/savedSql/savedSqlClipboard";
+import { savedSqlBatchReassignment, type SavedSqlBatchTargetSelection } from "@/lib/savedSql/savedSqlBatchTarget";
 import { savedSqlDatabaseScopeKey } from "@/lib/savedSql/savedSqlDatabaseTree";
+import { normalizeSqlExecutionTarget, sqlExecutionTargetCapabilities } from "@/lib/database/sqlExecutionTargetCapabilities";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useSettingsStore } from "@/stores/settingsStore";
 import type { SavedSqlFile, SavedSqlFolder, SavedSqlLibrary } from "@/types/database";
@@ -33,6 +35,34 @@ interface SavedSqlExecutionTargetInput {
   database: string;
   catalog?: string;
   schema?: string;
+  /** Explicit destination folder used by SQL-library paste. */
+  folderId?: string;
+}
+
+interface SavedSqlExecutionTargetUpdateOptions {
+  folderId?: string;
+  metadataOnly?: boolean;
+  orderIndex?: number;
+  updateFolder?: boolean;
+  syncLocalDirectory?: boolean;
+}
+
+interface PersistedSavedSqlFileTarget extends SavedSqlExecutionTargetInput {
+  folderId?: string;
+  orderIndex?: number;
+  updatedAt: string;
+}
+
+export interface SavedSqlBatchTargetFailure {
+  fileId: string;
+  fileName: string;
+  error: unknown;
+}
+
+export interface SavedSqlBatchTargetResult {
+  succeeded: SavedSqlFile[];
+  updated: SavedSqlFile[];
+  failures: SavedSqlBatchTargetFailure[];
 }
 
 interface SavedSqlNameScope {
@@ -44,6 +74,14 @@ interface SavedSqlNameScope {
   name: string;
 }
 
+/** Where a saved SQL name has to be unique: one folder of one database scope. */
+interface SavedSqlNameScopeInput {
+  connectionId: string;
+  catalog?: string;
+  database: string;
+  folderId?: string;
+}
+
 interface PendingSavedSqlName {
   owners: Map<string, number>;
 }
@@ -51,7 +89,16 @@ interface PendingSavedSqlName {
 export class SavedSqlNameConflictError extends Error {
   readonly code = "SAVED_SQL_NAME_CONFLICT";
 
-  constructor(readonly fileName: string) {
+  /**
+   * The next free name in the same scope, so a caller that generated the
+   * colliding name can retry automatically instead of dead-ending the user on
+   * an error. Absent when the caller supplied the name itself and silently
+   * saving under a different one would be wrong.
+   */
+  constructor(
+    readonly fileName: string,
+    readonly suggestedName?: string,
+  ) {
     super(`SQL "${fileName}" already exists in this location.`);
     this.name = "SavedSqlNameConflictError";
   }
@@ -74,6 +121,30 @@ function sortFilesByOrder(items: SavedSqlFile[]) {
     const orderDiff = (a.orderIndex ?? 0) - (b.orderIndex ?? 0);
     if (orderDiff !== 0) return orderDiff;
     return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+  });
+}
+
+export type SavedSqlFileSortMode = "name-asc" | "name-desc" | "updated-desc" | "updated-asc";
+export type SavedSqlFolderSortMode = "name-asc" | "name-desc";
+
+function sortFilesByCriteria(items: SavedSqlFile[], mode: SavedSqlFileSortMode): SavedSqlFile[] {
+  return [...items].sort((a, b) => {
+    switch (mode) {
+      case "name-asc":
+        return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+      case "name-desc":
+        return b.name.localeCompare(a.name, undefined, { numeric: true, sensitivity: "base" });
+      case "updated-desc": {
+        const timeDiff = b.updatedAt.localeCompare(a.updatedAt);
+        if (timeDiff !== 0) return timeDiff;
+        return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+      }
+      case "updated-asc": {
+        const timeDiff = a.updatedAt.localeCompare(b.updatedAt);
+        if (timeDiff !== 0) return timeDiff;
+        return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+      }
+    }
   });
 }
 
@@ -154,7 +225,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
   const pendingFolderCreates = new Map<string, Promise<SavedSqlFolder>>();
   const fileTargetRevisions = new Map<string, number>();
   const pendingFileTargetSaves = new Map<string, Promise<SavedSqlFile | undefined>>();
-  const persistedFileTargets = new Map<string, SavedSqlExecutionTargetInput & { updatedAt: string }>();
+  const persistedFileTargets = new Map<string, PersistedSavedSqlFileTarget>();
   const persistedFileTargetNameReleases = new Map<string, () => void>();
   const pendingNamesByScope = new Map<string, Map<string, PendingSavedSqlName>>();
 
@@ -230,7 +301,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     const nameKey = savedSqlNameKey(file.name);
     if (!options.allowExisting) {
       const persistedConflict = files.value.some((candidate) => candidate.id !== file.id && savedSqlNameScopeKey(candidate) === scopeKey && savedSqlNameKey(candidate.name) === nameKey);
-      if (persistedConflict) throw new SavedSqlNameConflictError(file.name);
+      if (persistedConflict) throw savedSqlNameConflict(file);
     }
 
     let pendingNames = pendingNamesByScope.get(scopeKey);
@@ -239,7 +310,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
       pendingNamesByScope.set(scopeKey, pendingNames);
     }
     const pending = pendingNames.get(nameKey);
-    if (!options.allowExisting && pending && [...pending.owners.keys()].some((ownerId) => ownerId !== file.id)) throw new SavedSqlNameConflictError(file.name);
+    if (!options.allowExisting && pending && [...pending.owners.keys()].some((ownerId) => ownerId !== file.id)) throw savedSqlNameConflict(file);
     if (pending) pending.owners.set(file.id, (pending.owners.get(file.id) ?? 0) + 1);
     else pendingNames.set(nameKey, { owners: new Map([[file.id, 1]]) });
 
@@ -260,6 +331,23 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
 
   function pendingFileNames(scopeKey: string): string[] {
     return [...(pendingNamesByScope.get(scopeKey)?.keys() ?? [])];
+  }
+
+  /**
+   * A conflict that tells the caller where to go next. The suggestion is
+   * resolved against the same scope `reserveFileName` just rejected, including
+   * names reserved by saves that are still in flight, so it is free at the
+   * moment of the conflict. A concurrent writer can still take it in between,
+   * which is why callers retry rather than assume the name is reserved.
+   */
+  function savedSqlNameConflict(file: SavedSqlNameScope): SavedSqlNameConflictError {
+    return new SavedSqlNameConflictError(file.name, nextAvailableSqlName(file.name, takenFileNames(file)));
+  }
+
+  /** Names already occupied in one library scope, including in-flight saves. */
+  function takenFileNames(scope: SavedSqlNameScopeInput): Set<string> {
+    const scopeKey = savedSqlNameScopeKey(scope);
+    return new Set([...files.value.filter((file) => savedSqlNameScopeKey(file) === scopeKey).map((file) => file.name), ...pendingFileNames(scopeKey)]);
   }
 
   async function ensureFileContent(id: string) {
@@ -383,15 +471,26 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
       catalog: normalizedCatalog(file.catalog),
       database: file.database,
       schema: file.schema,
+      folderId: file.folderId,
+      orderIndex: file.orderIndex,
       updatedAt: file.updatedAt,
     });
   }
 
-  function updateFileExecutionTarget(id: string, target: SavedSqlExecutionTargetInput): Promise<SavedSqlFile | undefined> {
+  function updateFileExecutionTarget(id: string, target: SavedSqlExecutionTargetInput, options: SavedSqlExecutionTargetUpdateOptions = {}): Promise<SavedSqlFile | undefined> {
     const existing = getFile(id);
     if (!existing) return Promise.resolve(undefined);
     const normalizedTarget = { ...target, catalog: normalizedCatalog(target.catalog) };
-    if (existing.connectionId === normalizedTarget.connectionId && normalizedCatalog(existing.catalog) === normalizedTarget.catalog && existing.database === normalizedTarget.database && existing.schema === normalizedTarget.schema) {
+    const folderId = options.updateFolder ? options.folderId || undefined : existing.folderId;
+    const orderIndex = options.updateFolder ? options.orderIndex : existing.orderIndex;
+    if (
+      existing.connectionId === normalizedTarget.connectionId &&
+      normalizedCatalog(existing.catalog) === normalizedTarget.catalog &&
+      existing.database === normalizedTarget.database &&
+      existing.schema === normalizedTarget.schema &&
+      existing.folderId === folderId &&
+      existing.orderIndex === orderIndex
+    ) {
       return Promise.resolve(existing);
     }
 
@@ -400,7 +499,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     }
     const revision = (fileTargetRevisions.get(id) ?? 0) + 1;
     fileTargetRevisions.set(id, revision);
-    files.value = files.value.map((file) => (file.id === id ? { ...file, ...normalizedTarget, updatedAt: nowIso() } : file));
+    files.value = files.value.map((file) => (file.id === id ? { ...file, ...normalizedTarget, folderId, orderIndex, updatedAt: nowIso() } : file));
     bumpVersion({ tree: true });
 
     const previousSave = pendingFileTargetSaves.get(id) ?? Promise.resolve(undefined);
@@ -411,13 +510,14 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
 
         let releaseName: (() => void) | undefined;
         try {
-          const loaded = await ensureFileContent(id);
-          if (!loaded || fileTargetRevisions.get(id) !== revision) return getFile(id);
+          const currentFile = options.metadataOnly ? getFile(id) : await ensureFileContent(id);
+          if (!currentFile || fileTargetRevisions.get(id) !== revision) return currentFile;
 
           const candidate: SavedSqlFile = {
-            ...loaded,
+            ...currentFile,
             ...normalizedTarget,
-            sqlLoaded: true,
+            folderId,
+            orderIndex,
             updatedAt: nowIso(),
           };
           files.value = files.value.map((file) => (file.id === id ? candidate : file));
@@ -430,17 +530,18 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
                 connectionId: persistedTarget.connectionId,
                 catalog: persistedTarget.catalog,
                 database: persistedTarget.database,
+                folderId: persistedTarget.folderId,
               })
             : savedSqlNameIdentity(candidate);
           if (persistedNameIdentity !== savedSqlNameIdentity(candidate)) releaseName = reserveFileName(candidate);
           const saved = normalizeSavedSqlFile(await api.saveSavedSqlFile(candidate));
           setPersistedFileTarget(saved);
           if (fileTargetRevisions.get(id) !== revision) return getFile(id);
-          const current = getFile(id);
-          const persisted = { ...saved, sql: current?.sql ?? saved.sql, sqlLoaded: current?.sqlLoaded ?? true };
+          const latest = getFile(id);
+          const persisted = { ...saved, sql: latest?.sql ?? saved.sql, sqlLoaded: latest?.sqlLoaded ?? true };
           files.value = files.value.map((file) => (file.id === id ? persisted : file));
           bumpVersion();
-          await syncToLocalDirectory();
+          if (options.syncLocalDirectory !== false) await syncToLocalDirectory();
           return persisted;
         } catch (error) {
           if (fileTargetRevisions.get(id) === revision) {
@@ -464,6 +565,68 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     };
     void save.then(cleanup, cleanup);
     return save;
+  }
+
+  async function updateFilesExecutionTarget(fileIds: readonly string[], target: SavedSqlBatchTargetSelection): Promise<SavedSqlBatchTargetResult> {
+    const uniqueFileIds = [...new Set(fileIds)];
+    if (uniqueFileIds.length === 0 || !target.connectionId) return { succeeded: [], updated: [], failures: [] };
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const targetConnection = useConnectionStore().getConfig(target.connectionId);
+    const targetCapabilities = sqlExecutionTargetCapabilities(targetConnection);
+    if (!targetConnection || !targetCapabilities || (targetCapabilities.databaseRequired && !target.database)) return { succeeded: [], updated: [], failures: [] };
+    const normalizedTarget = normalizeSqlExecutionTarget(targetConnection, target);
+
+    const selectedFiles = uniqueFileIds.map((id) => getFile(id)).filter((file): file is SavedSqlFile => Boolean(file));
+    if (selectedFiles.length === 0) return { succeeded: [], updated: [], failures: [] };
+
+    let nextUnfiledOrder = maxOrderIndex(files.value.filter((file) => !file.folderId)) + 1;
+    const succeeded: SavedSqlFile[] = [];
+    const updated: SavedSqlFile[] = [];
+    const failures: SavedSqlBatchTargetFailure[] = [];
+
+    for (const file of selectedFiles) {
+      const folder = file.folderId ? folders.value.find((candidate) => candidate.id === file.folderId) : undefined;
+      const reassignment = savedSqlBatchReassignment(file, folder, normalizedTarget);
+      const leavesFolder = !!file.folderId && !reassignment.folderId;
+      const orderIndex = leavesFolder ? nextUnfiledOrder++ : file.orderIndex;
+      const targetChanged =
+        file.connectionId !== reassignment.target.connectionId ||
+        normalizedCatalog(file.catalog) !== normalizedCatalog(reassignment.target.catalog) ||
+        file.database !== reassignment.target.database ||
+        file.schema !== reassignment.target.schema ||
+        file.folderId !== reassignment.folderId ||
+        file.orderIndex !== orderIndex;
+
+      try {
+        const saved = await updateFileExecutionTarget(file.id, reassignment.target, {
+          folderId: reassignment.folderId,
+          metadataOnly: true,
+          orderIndex,
+          updateFolder: true,
+          syncLocalDirectory: false,
+        });
+        if (!saved) continue;
+        succeeded.push(saved);
+        if (targetChanged) updated.push(saved);
+      } catch (error) {
+        failures.push({ fileId: file.id, fileName: file.name, error });
+      }
+    }
+
+    if (succeeded.length > 0) {
+      const { useQueryStore } = await import("@/stores/queryStore");
+      useQueryStore().syncSavedSqlExecutionTargets(succeeded);
+    }
+    if (updated.length > 0) {
+      try {
+        await syncToLocalDirectory();
+      } catch (error) {
+        console.warn("[DBX][saved-sql:sync:error]", error);
+      }
+    }
+
+    return { succeeded, updated, failures };
   }
 
   async function renameFile(id: string, name: string) {
@@ -503,11 +666,10 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
       const source = await ensureFileContent(fileId);
       if (!source) continue;
       const sourceFolder = source.folderId ? folders.value.find((folder) => folder.id === source.folderId) : undefined;
-      const folderId = sourceFolder?.connectionId === normalizedTarget.connectionId ? source.folderId : undefined;
+      const requestedFolder = normalizedTarget.folderId ? folders.value.find((folder) => folder.id === normalizedTarget.folderId) : undefined;
+      const folderId = requestedFolder?.connectionId === normalizedTarget.connectionId ? requestedFolder.id : sourceFolder?.connectionId === normalizedTarget.connectionId ? source.folderId : undefined;
       const copyScope = { ...normalizedTarget, folderId };
-      const scopeKey = savedSqlNameScopeKey(copyScope);
-      const takenNames = new Set([...files.value.filter((file) => savedSqlNameScopeKey(file) === scopeKey).map((file) => file.name), ...pendingFileNames(scopeKey)]);
-      const name = nextSavedSqlCopyName(source.name, takenNames);
+      const name = nextSavedSqlCopyName(source.name, takenFileNames(copyScope));
       const keepSourceScope = savedSqlDatabaseScopeKey(source) === savedSqlDatabaseScopeKey(normalizedTarget);
       const saved = await saveFile({
         connectionId: normalizedTarget.connectionId,
@@ -587,8 +749,9 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     }
   }
 
-  async function syncEntries() {
-    if (files.value.some((file) => file.sqlLoaded === false)) {
+  async function ensureAllFilesLoaded() {
+    if (!files.value.some((file) => file.sqlLoaded === false)) return;
+    try {
       const loadedFiles = await api.loadSavedSqlFilesForSync();
       const loadedById = new Map(loadedFiles.map((file) => [file.id, file]));
       files.value = files.value.map((file) => {
@@ -597,7 +760,14 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
         return loaded ? { ...file, sql: loaded.sql, sqlLoaded: true } : file;
       });
       bumpVersion();
+    } catch {
+      const unloaded = files.value.filter((file) => file.sqlLoaded === false);
+      await Promise.allSettled(unloaded.map((file) => ensureFileContent(file.id)));
     }
+  }
+
+  async function syncEntries() {
+    await ensureAllFilesLoaded();
 
     const folderById = new Map(folders.value.map((folder) => [folder.id, folder]));
     const folderPath = (folderId?: string): string | undefined => {
@@ -825,6 +995,52 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     return allFiles.value.filter((f) => !f.folderId);
   }
 
+  async function sortFolderFiles(folderId: string | undefined, mode: SavedSqlFileSortMode) {
+    const targetFolderId = folderId || undefined;
+    const groupFiles = files.value.filter((file) => (file.folderId || undefined) === targetFolderId);
+    if (groupFiles.length <= 1) return;
+
+    const sortedGroup = sortFilesByCriteria(groupFiles, mode);
+    const reindexed = reindexFiles(sortedGroup, targetFolderId);
+    const untouched = files.value.filter((file) => (file.folderId || undefined) !== targetFolderId);
+    await persistFiles([...untouched, ...reindexed]);
+  }
+
+  async function sortFolderChildren(parentFolderId: string | undefined, mode: SavedSqlFolderSortMode) {
+    const targetParentId = parentFolderId || undefined;
+    const groupFolders = folders.value.filter((folder) => (folder.parentFolderId || undefined) === targetParentId);
+    if (groupFolders.length <= 1) return;
+
+    const sortedGroup = [...groupFolders].sort((a, b) => {
+      if (mode === "name-asc") {
+        return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+      }
+      return b.name.localeCompare(a.name, undefined, { numeric: true, sensitivity: "base" });
+    });
+
+    const reindexed = reindexFolders(sortedGroup).map((folder) => ({
+      ...folder,
+      parentFolderId: targetParentId,
+    }));
+    const untouched = folders.value.filter((folder) => (folder.parentFolderId || undefined) !== targetParentId);
+    await persistFolders([...untouched, ...reindexed]);
+  }
+
+  async function sortAllFolderFiles(mode: SavedSqlFileSortMode) {
+    const folderIds = new Set<string | undefined>([undefined, ...folders.value.map((f) => f.id)]);
+    const nextFiles: SavedSqlFile[] = [];
+    for (const fId of folderIds) {
+      const groupFiles = files.value.filter((file) => (file.folderId || undefined) === fId);
+      if (groupFiles.length <= 1) {
+        nextFiles.push(...groupFiles);
+      } else {
+        const sorted = sortFilesByCriteria(groupFiles, mode);
+        nextFiles.push(...reindexFiles(sorted, fId));
+      }
+    }
+    await persistFiles(nextFiles);
+  }
+
   return {
     folders,
     files,
@@ -838,11 +1054,13 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     listFiles,
     getFile,
     ensureFileContent,
+    ensureAllFilesLoaded,
     createFolder,
     renameFolder,
     deleteFolder,
     saveFile,
     updateFileExecutionTarget,
+    updateFilesExecutionTarget,
     renameFile,
     copyFilesToDatabase,
     recordFileUsage,
@@ -852,6 +1070,9 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     reorderFiles,
     moveFileToFolder,
     moveFilesToFolder,
+    sortFolderFiles,
+    sortFolderChildren,
+    sortAllFolderFiles,
     syncToLocalDirectory,
     allFolders,
     allFoldersTreeOrder,

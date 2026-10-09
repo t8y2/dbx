@@ -2,6 +2,7 @@ import { computed, reactive } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useDataGridActions } from "@/composables/useDataGridActions";
 import { clearTableMetadataCache } from "@/lib/metadata/tableMetadataCache";
+import { MAX_QUERY_RESULT_MAX_ROWS } from "@/lib/dataGrid/queryResultRowLimit";
 import { restoredDataTabReloadFilters } from "@/lib/table/tableDataRefresh";
 import type { IndexInfo, QueryTab } from "@/types/database";
 
@@ -589,6 +590,130 @@ describe("useDataGridActions", () => {
     expect(mocks.executeTabSql).toHaveBeenCalledWith("tab-1", "SELECT * FROM public.users LIMIT 100 OFFSET 100", expect.objectContaining({ appendResult: { maxRows: 10_000 } }));
   });
 
+  it("budgets a load-all large-value preview against the rows the table still has", async () => {
+    const columns = [
+      { name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      ...Array.from({ length: 10 }, (_, index) => ({ name: `payload_${index}`, data_type: "varchar(64)", is_nullable: true, column_default: null, is_primary_key: false, extra: null })),
+    ];
+    const tab = tableDataTab({
+      resultTotalRowCount: 506,
+      resultPageLimit: 100,
+      resultPageOffset: 0,
+      result: {
+        columns: ["id", "payload_0"],
+        rows: Array.from({ length: 100 }, (_, index) => [index + 1, "19999386"]),
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+      tableMeta: { schema: "ads", tableName: "ads_platform_order_receiver", tableType: "TABLE", columns, primaryKeys: ["id"] },
+    });
+    mocks.buildTableSelectSql.mockResolvedValueOnce('SELECT * FROM "ads"."ads_platform_order_receiver" LIMIT 99900 OFFSET 100;');
+    mocks.tabs.push(tab);
+    const actions = useDataGridActions(computed(() => tab));
+
+    // "Load all" asks for the whole remaining table; the preview budget has to be
+    // spread over the 406 rows that can still arrive, not over the 99_900 asked for.
+    await actions.onPaginate(tab.id, 100, 99_900, "", undefined, true);
+
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ limit: 99_900, offset: 100, largeValuePreviewSize: 1033 }));
+    expect(mocks.executeTabSql).toHaveBeenCalledWith("tab-1", expect.any(String), expect.objectContaining({ pagination: { offset: 100, limit: 99_900, sessionId: undefined, clientSessionId: undefined } }));
+  });
+
+  it("allows load-all to append rows past the continuous query result cap", async () => {
+    mocks.queryResultMaxRows = 100_000;
+    const tab = tableDataTab({
+      id: "tab-large",
+      resultTotalRowCount: 260_000,
+      resultPageLimit: 100,
+      resultPageOffset: 0,
+      result: {
+        columns: ["id"],
+        rows: Array.from({ length: 100_000 }, (_, index) => [index + 1]),
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+    });
+    mocks.buildTableSelectSql.mockResolvedValueOnce('SELECT * FROM "public"."users" LIMIT 100000 OFFSET 100000;');
+    mocks.tabs.push(tab);
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onPaginate(tab.id, 100_000, 100_000, "", undefined, true);
+
+    expect(mocks.executeTabSql).toHaveBeenCalledWith(
+      "tab-large",
+      expect.any(String),
+      expect.objectContaining({
+        appendResult: {
+          maxRows: MAX_QUERY_RESULT_MAX_ROWS,
+        },
+      }),
+    );
+  });
+
+  it("continues the matching Cassandra table cursor and client session", async () => {
+    mocks.infiniteScroll = false;
+    mocks.getConfig.mockReturnValue({ id: "cassandra-1", db_type: "cassandra" });
+    mocks.buildTableSelectSql.mockResolvedValueOnce('SELECT * FROM "paged_rows";');
+    const active = tableDataTab({ id: "tab-a" });
+    const target = tableDataTab({
+      id: "tab-b",
+      connectionId: "cassandra-1",
+      resultPageLimit: 100,
+      resultPageOffset: 0,
+      resultClientSessionId: "tab-b",
+      result: {
+        columns: ["id"],
+        rows: Array.from({ length: 100 }, (_, index) => [index]),
+        affected_rows: 0,
+        execution_time_ms: 1,
+        session_id: "cassandra-page-1",
+        has_more: true,
+      },
+    });
+    mocks.tabs.push(active, target);
+    const actions = useDataGridActions(computed(() => active));
+
+    await actions.onPaginate(target.id, 100, 100);
+
+    expect(mocks.executeTabSql).toHaveBeenCalledWith(
+      "tab-b",
+      'SELECT * FROM "paged_rows";',
+      expect.objectContaining({
+        pagination: { offset: 100, limit: 100, sessionId: "cassandra-page-1", clientSessionId: "tab-b" },
+      }),
+    );
+  });
+
+  it("restarts Cassandra table cursors for jumps and page-size changes", async () => {
+    mocks.infiniteScroll = false;
+    mocks.getConfig.mockReturnValue({ id: "cassandra-1", db_type: "cassandra" });
+    mocks.buildTableSelectSql.mockResolvedValue('SELECT * FROM "paged_rows";');
+    const tab = tableDataTab({
+      connectionId: "cassandra-1",
+      resultPageLimit: 100,
+      resultPageOffset: 0,
+      resultClientSessionId: "tab-1",
+      result: {
+        columns: ["id"],
+        rows: Array.from({ length: 100 }, (_, index) => [index]),
+        affected_rows: 0,
+        execution_time_ms: 1,
+        session_id: "cassandra-page-1",
+        has_more: true,
+      },
+    });
+    mocks.tabs.push(tab);
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onPaginate(tab.id, 300, 100);
+    await actions.onPaginate(tab.id, 100, 50);
+
+    expect(mocks.executeTabSql.mock.calls.map((call) => call[2].pagination)).toEqual([
+      { offset: 300, limit: 100, sessionId: undefined, clientSessionId: undefined },
+      { offset: 100, limit: 50, sessionId: undefined, clientSessionId: undefined },
+    ]);
+  });
+
   it("ignores a stale structured order when its column was renamed", async () => {
     const tab = tableDataTab({
       resultSortColumn: "old_name",
@@ -1146,6 +1271,29 @@ describe("useDataGridActions", () => {
     expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ orderBy, whereInput: "status = 'active'", limit: 7, offset: 0 }));
     expect(mocks.executeTabSql).toHaveBeenCalledWith("tab-1", "SELECT sorted", expect.objectContaining({ pagination: { limit: 7, offset: 0 }, preserveTotalRowCountDuringExecution: true }));
     expect(tab.resultSortMode).toBe("database");
+  });
+
+  it("executes a column sort through the effective ORDER BY channel without exposing the structured part in the input", async () => {
+    const tab = tableDataTab({
+      resultPageLimit: 7,
+      tableMeta: {
+        schema: "public",
+        tableName: "users",
+        tableType: "TABLE",
+        columns: [
+          { name: "sort_value", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+          { name: "created_at", data_type: "timestamp", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+        ],
+        primaryKeys: [],
+      },
+    });
+    mocks.buildTableSelectSql.mockResolvedValueOnce("SELECT sorted");
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onSort(tab.id, "sort_value", 0, "asc", undefined, "database", '"sort_value" ASC, "created_at" DESC');
+
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ orderBy: '"sort_value" ASC, "created_at" DESC', limit: 7, offset: 0 }));
+    expect(tab.orderByInput).toBe('"sort_value" ASC');
   });
 
   it("clears paginated table sorting by querying the first page without the generated order", async () => {

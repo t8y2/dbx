@@ -319,7 +319,7 @@ watch(
     is a blocking prompt, so keep it above every other layer in the app (the
     tallest today are the image preview at 80/81 and the sidebar overlays at
     100). -->
-    <DialogContent class="flex max-h-[min(36rem,calc(var(--dbx-viewport-height)-2rem))] w-full max-w-[32rem] flex-col gap-4 overflow-hidden" overlay-class="z-[200]" portal-class="z-[200]" :show-close-button="false" @interact-outside.prevent @escape-key-down.prevent>
+    <DialogContent class="flex max-h-[min(36rem,calc(var(--dbx-viewport-height)-2rem))] w-full max-w-[32rem] flex-col gap-4 overflow-hidden" overlay-class="!z-[200]" portal-class="!z-[200]" :show-close-button="false" @interact-outside.prevent @escape-key-down.prevent>
       <DialogHeader class="shrink-0">
         <DialogTitle>{{ dialogTitle }}</DialogTitle>
         <DialogDescription class="text-muted-foreground">
@@ -327,7 +327,10 @@ watch(
         </DialogDescription>
       </DialogHeader>
 
-      <div v-if="current" class="min-h-0 flex-1 space-y-3 overflow-y-auto py-1">
+      <!-- px-1 leaves room for the 2px focus ring (focus:ring-2) of the inputs
+           below: `overflow-y-auto` clips the horizontal axis too, and without
+           padding the ring would be cut off on the left/right edges. -->
+      <div v-if="current" class="min-h-0 flex-1 space-y-3 overflow-y-auto px-1 py-1">
         <div v-if="isHostKeyChanged" class="space-y-3">
           <div class="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
             <TriangleAlert class="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />

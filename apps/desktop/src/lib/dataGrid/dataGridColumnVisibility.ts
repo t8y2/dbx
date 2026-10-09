@@ -149,3 +149,49 @@ export function removeAutoHiddenColumnIndexes(hiddenIndexes: ReadonlySet<number>
   }
   return next;
 }
+
+export function areCellValuesEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a === "number" && typeof b === "number" && Number.isNaN(a) && Number.isNaN(b)) return true;
+  if (a === null || b === null || a === undefined || b === undefined) return false;
+  if (typeof a !== "object" || typeof b !== "object") return false;
+  if (a instanceof Date && b instanceof Date) return a.getTime() === b.getTime();
+  if (a instanceof Uint8Array && b instanceof Uint8Array) {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] !== b[i]) return false;
+    }
+    return true;
+  }
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    return false;
+  }
+}
+
+export function identicalValueColumnIndexes(rows: ReadonlyArray<ReadonlyArray<unknown>>, candidateIndexes: readonly number[]): number[] {
+  if (rows.length < 2) return [];
+  const candidates = [...candidateIndexes];
+  let count = candidates.length;
+  if (count === 0) return [];
+
+  const firstRow = rows[0];
+  if (!firstRow) return [];
+
+  for (let rowIndex = 1; rowIndex < rows.length; rowIndex++) {
+    const row = rows[rowIndex];
+    if (!row) continue;
+    let write = 0;
+    for (let read = 0; read < count; read++) {
+      const col = candidates[read]!;
+      if (areCellValuesEqual(row[col], firstRow[col])) {
+        candidates[write++] = col;
+      }
+    }
+    count = write;
+    if (count === 0) return [];
+  }
+  candidates.length = count;
+  return candidates;
+}

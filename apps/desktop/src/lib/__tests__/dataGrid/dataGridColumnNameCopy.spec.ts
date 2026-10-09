@@ -48,11 +48,18 @@ describe("dataGridColumnNameCopy", () => {
     expect(supportsColumnNameQuoting(undefined)).toBe(false);
   });
 
-  it("keeps hidden columns when copying all column names", () => {
+  it("keeps user-hidden columns when copying all column names", () => {
     const allColumns = ["id", "hidden_value", "created_at"];
     const visibleColumns = ["id", "created_at"];
-    expect(columnNamesForCopy(allColumns, visibleColumns, "all")).toEqual(allColumns);
-    expect(columnNamesForCopy(allColumns, visibleColumns, "visible")).toEqual(visibleColumns);
+    expect(columnNamesForCopy({ allColumnNames: allColumns, displayableIndexes: [0, 1, 2], visibleColumnNames: visibleColumns, scope: "all" })).toEqual(allColumns);
+    expect(columnNamesForCopy({ allColumnNames: allColumns, displayableIndexes: [0, 1, 2], visibleColumnNames: visibleColumns, scope: "visible" })).toEqual(visibleColumns);
+  });
+
+  it("leaves grid-internal columns out of the copyable names (#10464)", () => {
+    // 可编辑行定位用的 `__DBX_PK_*` 别名只存在于结果集里，网格把它藏起来，
+    // 「复制列名」也必须一样：用户看到的是一列，复制出来就该是一列。
+    const columns = ["rep_def_sql", "__DBX_PK_0"];
+    expect(columnNamesForCopy({ allColumnNames: columns, displayableIndexes: [0], visibleColumnNames: ["rep_def_sql"], scope: "all" })).toEqual(["rep_def_sql"]);
   });
 
   it("validates separator values", () => {

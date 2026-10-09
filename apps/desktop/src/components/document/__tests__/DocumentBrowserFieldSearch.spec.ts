@@ -1113,6 +1113,7 @@ describe("DocumentBrowser MongoDB filter value types", () => {
     buttonWithTitle("grid.viewOptions").click();
     await flushUi();
     expect(document.body.textContent).toContain("grid.renderMode");
+    expect(document.body.textContent).toContain("grid.columnWidthMode");
     expect(document.body.textContent).toContain("grid.tableFontFamily");
     expect(document.body.textContent).toContain("grid.tableFontSize");
     expect(document.body.textContent).toContain("grid.transposeMultiRowToggle");
@@ -1120,6 +1121,9 @@ describe("DocumentBrowser MongoDB filter value types", () => {
 
     buttonWithText("grid.columnWidthCompact").click();
     expect(settings.updateEditorSettings).toHaveBeenCalledWith({ columnWidthDensity: "compact" });
+
+    buttonWithText("grid.columnWidthModeContent").click();
+    expect(settings.updateEditorSettings).toHaveBeenCalledWith({ dataGridColumnWidthMode: "content" });
 
     buttonWithText("grid.domRenderMode").click();
     expect(settings.updateEditorSettings).toHaveBeenCalledWith({ dataGridRenderMode: "dom" });

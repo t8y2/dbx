@@ -2,7 +2,7 @@ import type { SqlCompletionColumn, SqlCompletionTable } from "@/lib/sql/sqlCompl
 import { getSqlCompletionContext, isOracleSystemValueName } from "@/lib/sql/sqlCompletion";
 import { executableStatementRanges, keepsOracleStyleBlockTogether, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { DBX_TDENGINE_TBNAME_COLUMN, isTdengineStableTableType } from "@/lib/table/tableEditing";
-import type { DatabaseType, SqlColumnReference, SqlReferenceAnalysis, SqlReferenceScope, SqlTableReference, SqlTextSpan } from "@/types/database";
+import type { DatabaseType, SqlColumnReference, SqlGroupByViolation, SqlReferenceAnalysis, SqlReferenceScope, SqlTableReference, SqlTextSpan } from "@/types/database";
 
 export interface SqlSemanticDiagnostic {
   span: SqlTextSpan;
@@ -318,7 +318,24 @@ export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, sche
     });
   }
 
+  for (const violation of analysis.group_by_violations ?? []) {
+    diagnostics.push(buildSqlGroupByViolationDiagnostic(violation, schema.sql, schema.databaseType));
+  }
+
   return diagnostics;
+}
+
+function buildSqlGroupByViolationDiagnostic(violation: SqlGroupByViolation, sql?: string, databaseType?: DatabaseType): SqlSemanticDiagnostic {
+  const displayName = violation.qualifier ? `${violation.qualifier}.${violation.column}` : violation.column;
+  return {
+    span: trimSqlTextSpanWhitespace(sql, violation.span),
+    message: `Column ${displayName} must appear in the GROUP BY clause or be used in an aggregate function`,
+    // PostgreSQL additionally accepts columns functionally dependent on the
+    // GROUP BY key (e.g. projecting other columns of the primary-key table),
+    // which the analyzer cannot see from column metadata alone; keep the hint
+    // there, but as a warning instead of an error.
+    severity: databaseType === "postgres" ? "warning" : "error",
+  };
 }
 
 function tdengineStableTableKeys(tables: readonly SqlCompletionTable[]): Set<string> {

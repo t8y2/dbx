@@ -20,7 +20,7 @@ impl TokenInfo {
     where
         R: SqlReadBytes + Unpin,
     {
-        let _length = src.read_u16_le().await?;
+        let length = src.read_u16_le().await? as usize;
 
         let number = src.read_u32_le().await?;
         let state = src.read_u8().await?;
@@ -28,7 +28,10 @@ impl TokenInfo {
         let message = src.read_us_varchar().await?;
         let server = src.read_b_varchar().await?;
         let procedure = src.read_b_varchar().await?;
-        let line = src.read_u32_le().await?;
+        // INFO can precede LOGINACK, so the negotiated dialect is not yet
+        // available. Its declared length disambiguates 7.1 and 7.2+ safely.
+        let width = super::message_line_number_bytes(length, &message, &server, &procedure)?;
+        let line = if width == 2 { src.read_u16_le().await? as u32 } else { src.read_u32_le().await? };
 
         Ok(TokenInfo {
             number,

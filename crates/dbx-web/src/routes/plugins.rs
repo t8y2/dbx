@@ -25,6 +25,12 @@ use crate::state::WebState;
 
 const MAX_PLUGIN_UPLOAD_BYTES: usize = 512 * 1024 * 1024;
 
+fn unsigned_plugins_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED
+        .get_or_init(|| matches!(std::env::var("DBX_ALLOW_UNSIGNED_PLUGINS").ok().as_deref(), Some("1") | Some("true")))
+}
+
 #[derive(Debug, Deserialize, Default)]
 pub struct PluginInstallQuery {
     #[serde(default)]
@@ -233,7 +239,7 @@ pub async fn install_marketplace_plugin(
     let result = marketplace.install(request).await.map_err(AppError::bad_request)?;
     state.app.remove_plugin_connection_pools(&result.plugin.manifest.id).await;
     stop_external_driver_pools(&state, &result.plugin).await;
-    state.app.plugin_host.stop(&result.plugin.manifest.id).await;
+    state.app.plugin_host.stop(&result.plugin.manifest.id).await.map_err(AppError::internal)?;
     Ok(Json(result.response()))
 }
 
@@ -285,8 +291,20 @@ pub async fn install_plugin(
         break;
     }
     let package = package.ok_or_else(|| AppError::bad_request("Missing plugin package field 'file'"))?;
-    let policy =
-        if query.allow_unsigned { PluginInstallPolicy::LocalDevelopment } else { PluginInstallPolicy::LocalSigned };
+    // An unsigned plugin sidecar is a native process on this host: over HTTP
+    // that is remote code execution for whoever holds the password. The
+    // desktop's local-development escape hatch does not carry to a server
+    // deployment — the operator must explicitly opt in per environment.
+    let policy = if query.allow_unsigned {
+        if !unsigned_plugins_enabled() {
+            return Err(AppError::bad_request(
+                "Installing unsigned plugins over the web API is disabled; set DBX_ALLOW_UNSIGNED_PLUGINS=1 on the server to allow it",
+            ));
+        }
+        PluginInstallPolicy::LocalDevelopment
+    } else {
+        PluginInstallPolicy::LocalSigned
+    };
     let root_dir = state.app.plugins.root_dir().to_path_buf();
     let app_version = state.app.plugins.app_version().to_string();
     let lifecycle = state.app.plugins.lifecycle();
@@ -304,7 +322,7 @@ pub async fn install_plugin(
     .map_err(AppError::bad_request)?;
     state.app.remove_plugin_connection_pools(&result.plugin.manifest.id).await;
     stop_external_driver_pools(&state, &result.plugin).await;
-    state.app.plugin_host.stop(&result.plugin.manifest.id).await;
+    state.app.plugin_host.stop(&result.plugin.manifest.id).await.map_err(AppError::internal)?;
     Ok(Json(result.response()))
 }
 
@@ -323,7 +341,7 @@ pub async fn rollback_plugin(
     .map_err(AppError::bad_request)?;
     state.app.remove_plugin_connection_pools(&result.plugin.manifest.id).await;
     stop_external_driver_pools(&state, &result.plugin).await;
-    state.app.plugin_host.stop(&result.plugin.manifest.id).await;
+    state.app.plugin_host.stop(&result.plugin.manifest.id).await.map_err(AppError::internal)?;
     Ok(Json(result.response()))
 }
 
@@ -353,22 +371,15 @@ pub async fn uninstall_plugin(
     }
     let plugin = state.app.plugins.find_plugin(&request.plugin_id).map_err(AppError::from)?;
     state.app.remove_plugin_connection_pools(&request.plugin_id).await;
-    state.app.plugin_host.stop(&request.plugin_id).await;
     if let Some(plugin) = &plugin {
         stop_external_driver_pools(&state, plugin).await;
     }
-    let root_dir = state.app.plugins.root_dir().to_path_buf();
-    let app_version = state.app.plugins.app_version().to_string();
-    let plugin_id = request.plugin_id.clone();
-    tokio::task::spawn_blocking(move || {
-        PluginPackageInstaller::new(root_dir, app_version)?.uninstall(&request.plugin_id)
-    })
-    .await
-    .map_err(|error| AppError::internal(error.to_string()))?
-    .map_err(AppError::bad_request)?;
+    // Stops the runtime and uninstalls the store under one lifecycle update lease, so a plugin
+    // call cannot re-activate the sidecar (and re-lock its container) in between.
+    state.app.plugin_host.uninstall_plugin(&request.plugin_id).await.map_err(AppError::bad_request)?;
     // A reinstall must ask for AI tool access and data grants again.
-    if let Err(error) = state.app.storage.forget_plugin_permissions(&plugin_id).await {
-        log::warn!("Failed to clear permissions of uninstalled plugin {plugin_id}: {error}");
+    if let Err(error) = state.app.storage.forget_plugin_permissions(&request.plugin_id).await {
+        log::warn!("Failed to clear permissions of uninstalled plugin {}: {error}", request.plugin_id);
     }
     list_plugins(State(state)).await
 }
@@ -391,7 +402,7 @@ pub async fn stop_plugin(
     State(state): State<Arc<WebState>>,
     Json(request): Json<PluginIdRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    state.app.plugin_host.stop(&request.plugin_id).await;
+    state.app.plugin_host.stop(&request.plugin_id).await.map_err(AppError::internal)?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

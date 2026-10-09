@@ -129,6 +129,24 @@ export function useQueryEditorCompletionKeys(options: QueryEditorCompletionKeysO
     return handled;
   }
 
+  function getTargetCompletion(view: EditorViewType): QueryCompletionOption | null {
+    const selected = codeMirrorRuntime.codeMirrorSelectedCompletion?.(view.state) as QueryCompletionOption | null | undefined;
+    if (selected) return selected;
+    const current = codeMirrorRuntime.codeMirrorCurrentCompletions?.(view.state) as QueryCompletionOption[] | undefined;
+    if (current && current.length > 0) {
+      return current[0] ?? null;
+    }
+    return null;
+  }
+
+  function canAcceptCurrentCompletionOnTab(view: EditorViewType): boolean {
+    if (settingsStore.editorSettings.snippetTriggerKey === "space") {
+      const target = getTargetCompletion(view);
+      if (target?.type === "snippet") return false;
+    }
+    return true;
+  }
+
   function acceptCompletionOrNextSnippetField(view: EditorViewType): boolean {
     // A non-empty selection belongs to snippet navigation or block indentation,
     // not word completion. A popup opened by an indent edit must not hijack Tab.
@@ -136,10 +154,24 @@ export function useQueryEditorCompletionKeys(options: QueryEditorCompletionKeysO
     if (view.state.selection.ranges.every((range) => range.empty)) {
       const completionStatus = codeMirrorRuntime.codeMirrorCompletionStatus?.(view.state) ?? null;
       if (isBatchColumnSelectionCompletionActive(completionStatus) && applySelectedBatchColumnSelection(view)) return true;
-      if (completionStatus === "active" && acceptSelectedOrFirstCompletion(view, codeMirrorRuntime.codeMirrorAcceptCompletion, codeMirrorRuntime.codeMirrorSelectedCompletionIndex, codeMirrorRuntime.codeMirrorSelectFirstCompletion)) return true;
-      if (completionStatus) return waitForCompletionTab(view);
+      if (completionStatus === "active" && canAcceptCurrentCompletionOnTab(view) && acceptSelectedOrFirstCompletion(view, codeMirrorRuntime.codeMirrorAcceptCompletion, codeMirrorRuntime.codeMirrorSelectedCompletionIndex, codeMirrorRuntime.codeMirrorSelectFirstCompletion)) return true;
+      if (completionStatus && canAcceptCurrentCompletionOnTab(view)) return waitForCompletionTab(view);
     }
     return codeMirrorRuntime.codeMirrorNextSnippetField?.(view) ?? false;
+  }
+
+  function acceptSnippetCompletionOnSpace(view: EditorViewType): boolean {
+    if (isEditorComposing(view)) return false;
+    const triggerKey = settingsStore.editorSettings.snippetTriggerKey;
+    if (triggerKey !== "space" && triggerKey !== "both") return false;
+    if (codeMirrorRuntime.codeMirrorCompletionStatus?.(view.state) !== "active") return false;
+    if (!view.state.selection.main.empty) return false;
+
+    const target = getTargetCompletion(view);
+    if (target?.type !== "snippet") return false;
+    if (target?.dbxBatchColumnSelection || target?.dbxBatchColumnSelectionAction) return false;
+
+    return acceptSelectedOrFirstCompletion(view, codeMirrorRuntime.codeMirrorAcceptCompletion, codeMirrorRuntime.codeMirrorSelectedCompletionIndex, codeMirrorRuntime.codeMirrorSelectFirstCompletion);
   }
 
   function acceptSqlServerCompletionOnSpace(view: EditorViewType): boolean {
@@ -174,6 +206,13 @@ export function useQueryEditorCompletionKeys(options: QueryEditorCompletionKeysO
     return true;
   }
 
+  function handleSpace(view: EditorViewType): boolean {
+    if (isEditorComposing(view)) return false;
+    if (!view.state.selection.main.empty) return false;
+    if (acceptSnippetCompletionOnSpace(view)) return true;
+    return acceptSqlServerCompletionOnSpace(view);
+  }
+
   function clearPendingCompletionTab() {
     if (pendingCompletionTabTimer === null) return;
     clearTimeout(pendingCompletionTabTimer);
@@ -196,8 +235,8 @@ export function useQueryEditorCompletionKeys(options: QueryEditorCompletionKeysO
       if (view.state.doc !== initialDoc || selectionRanges.length !== initialSelectionRanges.length || selectionRanges.some((range, index) => !range.empty || range.anchor !== initialSelectionRanges[index]?.anchor || range.head !== initialSelectionRanges[index]?.head)) return;
 
       const completionStatus = codeMirrorRuntime.codeMirrorCompletionStatus?.(view.state) ?? null;
-      if (completionStatus === "active" && acceptSelectedOrFirstCompletion(view, codeMirrorRuntime.codeMirrorAcceptCompletion, codeMirrorRuntime.codeMirrorSelectedCompletionIndex, codeMirrorRuntime.codeMirrorSelectFirstCompletion)) return;
-      if (completionStatus && Date.now() - startedAt < COMPLETION_TAB_MAX_WAIT_MS) {
+      if (completionStatus === "active" && canAcceptCurrentCompletionOnTab(view) && acceptSelectedOrFirstCompletion(view, codeMirrorRuntime.codeMirrorAcceptCompletion, codeMirrorRuntime.codeMirrorSelectedCompletionIndex, codeMirrorRuntime.codeMirrorSelectFirstCompletion)) return;
+      if (completionStatus && Date.now() - startedAt < COMPLETION_TAB_MAX_WAIT_MS && canAcceptCurrentCompletionOnTab(view)) {
         pendingCompletionTabTimer = setTimeout(retry, COMPLETION_TAB_RETRY_DELAY_MS);
         return;
       }
@@ -212,5 +251,5 @@ export function useQueryEditorCompletionKeys(options: QueryEditorCompletionKeysO
     return true;
   }
 
-  return { editorIndentUnit, handleTab, handleEnter, acceptCompletionOrNextSnippetField, acceptSqlServerCompletionOnSpace, clearPendingCompletionEnter, clearPendingCompletionTab };
+  return { editorIndentUnit, handleTab, handleEnter, acceptCompletionOrNextSnippetField, acceptSqlServerCompletionOnSpace, acceptSnippetCompletionOnSpace, handleSpace, clearPendingCompletionEnter, clearPendingCompletionTab };
 }

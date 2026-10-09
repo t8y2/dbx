@@ -78,6 +78,15 @@ public final class IrisAgent extends ConfiguredJdbcAgent {
                     Object value = rs.getBigDecimal(index);
                     return rs.wasNull() ? null : value;
                 });
+            case Types.BIT:
+            case Types.BOOLEAN:
+                // IRIS has no boolean type: %Boolean is stored as 1/0 and only
+                // the JDBC driver turns it into a Java boolean, which would
+                // surface as true/false in the grid. Report the stored 1/0.
+                return unchecked(() -> {
+                    int value = rs.getInt(index);
+                    return rs.wasNull() ? null : value;
+                });
             case Types.OTHER:
                 return unchecked(() -> JdbcExecutor.normalizeResultValue(rs.getObject(index)));
             default:

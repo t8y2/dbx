@@ -1,0 +1,196 @@
+name: UI preview
+
+# A pull request that changes the UI gets screenshots — and a screen
+# recording, the mouse drawn in, when the change needs clicking to see — of
+# the real app built from it, in a fixed block at the foot of its
+# description. See .github/ui-preview/.
+#
+# Pull requests come from forks, so this runs on pull_request_target with
+# the scripts from main. The PR's code is only built and run in the record
+# job, which holds the planner's API key (environment ui-preview, no approval
+# asked: any PR's code can read it, so the key there is one with a low
+# limit) and nothing that can write to the repo. The publish job, which can
+# write, never runs the PR's code.
+#
+# The backend the recording runs against comes in two lanes: a diff that
+# only touches the frontend (the usual case) runs against the released
+# dbx-web static binary — no Rust is built; a diff that reaches crates/,
+# plugins/ or src-tauri/ builds dbx-web from the PR itself. Either way the
+# PR's own frontend build is what's on screen (DBX_STATIC_DIR).
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number
+        required: true
+
+concurrency:
+  group: ui-preview-${{ github.event.pull_request.number || inputs.pr }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  detect:
+    if: github.event.action != 'labeled' || github.event.label.name == 'ui-preview'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    outputs:
+      ui: ${{ steps.detect.outputs.ui }}
+      lane: ${{ steps.detect.outputs.lane }}
+      sha: ${{ steps.detect.outputs.sha }}
+      number: ${{ steps.detect.outputs.number }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: .github/ui-preview
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - id: detect
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number || inputs.pr }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node .github/ui-preview/publish.mjs detect
+      # what the recorder reads of the PR, handed over so its job needs no token
+      - if: steps.detect.outputs.ui == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.detect.outputs.number }}
+        run: |
+          mkdir pr-info
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" -H "Accept: application/vnd.github.diff" > pr-info/pr.diff
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .title > pr-info/title.txt
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '.body // ""' > pr-info/body.txt
+      - if: steps.detect.outputs.ui == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-info
+          path: pr-info
+          retention-days: 3
+
+  record:
+    needs: detect
+    if: needs.detect.outputs.ui == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ needs.detect.outputs.lane == 'rust' && 60 || 30 }}
+    environment: ui-preview
+    permissions:
+      contents: read
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.pw
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: ci
+          sparse-checkout: .github/ui-preview
+          persist-credentials: false
+      # the fork's code, on purpose: this job is the one meant to run it,
+      # with a read-only token and no credentials left in the checkout
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.detect.outputs.sha }}
+          path: pr
+          persist-credentials: false
+          allow-unsafe-pr-checkout: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: pr-info
+          path: pr-info
+
+      # the frontend, from the PR, for both lanes
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: pr/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pr/pnpm-lock.yaml
+      - name: Build the PR's frontend
+        working-directory: pr
+        run: |
+          pnpm install --frozen-lockfile || pnpm install
+          pnpm build
+
+      # the backend: released static binary, or built from the PR
+      - name: The released dbx-web (frontend-only diff)
+        if: needs.detect.outputs.lane != 'rust'
+        working-directory: ${{ github.workspace }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p backend
+          gh release download --repo "$GITHUB_REPOSITORY" --pattern '*x64-browser-static.tar.gz' --dir backend --clobber
+          tar xzf backend/*x64-browser-static.tar.gz -C backend
+          echo "DBX_WEB_BIN=$(echo backend/*/dbx-web)" >> "$GITHUB_ENV"
+      - name: dbx-web built from the PR (backend diff)
+        if: needs.detect.outputs.lane == 'rust'
+        working-directory: pr
+        run: |
+          cargo build --release -p dbx-web --no-default-features --features dbx-core/sqlite-bundled
+          echo "DBX_WEB_BIN=pr/target/release/dbx-web" >> "$GITHUB_ENV"
+
+      - name: Chromium, ffmpeg and fonts
+        working-directory: ci/.github/ui-preview
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-noto-cjk fonts-noto-color-emoji
+          npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+      - name: Record
+        env:
+          PLAN_API_URL: https://api.atlascloud.ai/v1/chat/completions
+          PLAN_API_KEY: ${{ secrets.PLAN_API_KEY }}
+          PLAN_MODEL: ${{ vars.UI_PREVIEW_PLAN_MODEL || 'openai/gpt-5.4-mini' }}
+          DIFF_FILE: ${{ github.workspace }}/pr-info/pr.diff
+          PR_BODY_FILE: ${{ github.workspace }}/pr-info/body.txt
+          DIST_DIR: ${{ github.workspace }}/pr/dist
+          SRC_DIR: ${{ github.workspace }}/pr
+        run: PR_TITLE="$(cat pr-info/title.txt)" ci/.github/ui-preview/run.sh out
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-preview
+          path: out
+          retention-days: 7
+          if-no-files-found: ignore
+
+  publish:
+    needs: [detect, record]
+    if: always() && needs.detect.outputs.ui == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: .github/ui-preview
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: ui-preview
+          path: out
+      - env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR: ${{ needs.detect.outputs.number }}
+          SHA: ${{ needs.detect.outputs.sha }}
+          OUT_DIR: out
+          RECORD_RESULT: ${{ needs.record.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node .github/ui-preview/publish.mjs publish

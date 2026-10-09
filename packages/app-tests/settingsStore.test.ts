@@ -141,6 +141,28 @@ test("table DDL wrapping defaults on and normalizes saved booleans independently
   assert.equal(settings.wordWrap, true);
 });
 
+test("data grid column width mode defaults to content and normalizes saved values", () => {
+  assert.equal(DEFAULT_EDITOR_SETTINGS.dataGridColumnWidthMode, "content");
+  assert.equal(normalizeEditorSettings({}).dataGridColumnWidthMode, "content");
+  assert.equal(normalizeEditorSettings({ dataGridColumnWidthMode: "content" }).dataGridColumnWidthMode, "content");
+  assert.equal(normalizeEditorSettings({ dataGridColumnWidthMode: "invalid" as any }).dataGridColumnWidthMode, "content");
+});
+
+test("updateEditorSettings persists the data grid column width mode", async () => {
+  await withMockLocalStorage({}, async () => {
+    setActivePinia(createPinia());
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+
+    store.updateEditorSettings({ dataGridColumnWidthMode: "content" });
+    assert.equal(store.editorSettings.dataGridColumnWidthMode, "content");
+    await vi.waitFor(() => {
+      const saved = saveEditorSettingsMock.mock.calls.at(-1)?.[0] as { dataGridColumnWidthMode?: string } | undefined;
+      assert.equal(saved?.dataGridColumnWidthMode, "content");
+    });
+  });
+});
+
 test("updateEditorSettings persists completion column sort toggles", async () => {
   await withMockLocalStorage({}, async () => {
     setActivePinia(createPinia());
@@ -483,6 +505,7 @@ test("defaults shortcut settings", () => {
   assert.equal(settings.shortcuts.copySidebarSelection, "Mod+C");
   assert.equal(settings.shortcuts.pasteSidebarSelection, "Mod+V");
   assert.equal(settings.shortcuts.editSidebarConnection, "Mod+E");
+  assert.equal(settings.shortcuts.disconnectSidebarConnection, "Shift+Mod+E");
 });
 
 test("keeps saved shortcut overrides", () => {
@@ -496,6 +519,7 @@ test("keeps saved shortcut overrides", () => {
       openSettings: "Shift+Mod+P",
       zoomInUi: "Alt+Mod+=",
       editSidebarConnection: "Alt+E",
+      disconnectSidebarConnection: "Alt+D",
     } as any,
   });
 
@@ -508,6 +532,7 @@ test("keeps saved shortcut overrides", () => {
   assert.equal(settings.shortcuts.openSettings, "Shift+Mod+P");
   assert.equal(settings.shortcuts.zoomInUi, "Alt+Mod+=");
   assert.equal(settings.shortcuts.editSidebarConnection, "Alt+E");
+  assert.equal(settings.shortcuts.disconnectSidebarConnection, "Alt+D");
   assert.equal(settings.shortcuts.saveSql, "Mod+S");
 });
 

@@ -40,7 +40,7 @@ import { translateBackendError } from "@/i18n/backend-errors";
 import { runAgentOfflineExportAction } from "@/lib/driverStore/agentOfflineExportFlow";
 import { DRIVER_CATEGORIES, getCategoryForAgentDriver, assertAgentDriverCategoriesComplete } from "@/lib/connection/driver-category-definitions";
 import { hasAnyUpdatableDriverMatching, countInstalledDrivers, countAvailableDrivers, partitionDriversByInstallStatus, upgradeAllDriverTypes, upgradeAllMatchesFullUpdateSet, type DriverInstallStatusFilter } from "@/lib/connection/driverListFilter";
-import { notifyComponentUpdatesChanged } from "@/lib/updates/componentUpdateEvents";
+import { COMPONENT_DRIVER_UPDATES_CHANGED_EVENT, notifyComponentUpdatesChanged } from "@/lib/updates/componentUpdateEvents";
 import { updateBlockerLabels } from "@/lib/updates/componentUpdateOrchestration";
 
 const { t } = useI18n();
@@ -429,6 +429,10 @@ async function forceRefresh() {
   } finally {
     refreshing.value = false;
   }
+}
+
+function handleComponentDriverUpdatesChanged() {
+  void Promise.allSettled([forceRefresh(), loadJdbcDrivers(), loadJdbcPluginStatus()]);
 }
 
 function setUpdateDownloadSource(value: unknown) {
@@ -1460,6 +1464,7 @@ async function deleteJdbcLocalBundle(bundleId: string) {
 // ──────────── Lifecycle ────────────
 
 onMounted(async () => {
+  window.addEventListener(COMPONENT_DRIVER_UPDATES_CHANGED_EVENT, handleComponentDriverUpdatesChanged);
   updateAgentDrivers(await api.listInstalledAgentsLocal());
   void loadJavaRuntimeConfig();
   void loadDriverStoreUsage();
@@ -1507,6 +1512,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  window.removeEventListener(COMPONENT_DRIVER_UPDATES_CHANGED_EVENT, handleComponentDriverUpdatesChanged);
   unlisten?.();
   stopDriverRuntimePolling();
 });
@@ -2231,14 +2237,22 @@ html.dark .driver-store-agent-row--installed::before {
   overflow-x: hidden;
 }
 
-/* Storage tab: cards scroll together inside the tab */
-.driver-store-storage-tab {
+/* Storage tab: cards scroll together inside the tab. The selector must out-specify
+   `.driver-store-tabs-root > [data-slot="tabs-content"]` above, otherwise the
+   `overflow: hidden` there wins and the cards get clipped with no way to scroll. */
+.driver-store-tabs-root > [data-slot="tabs-content"].driver-store-storage-tab {
   display: flex !important;
   flex-direction: column;
   flex: 1 1 0;
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
+}
+
+/* Cards must keep their natural height, otherwise `flex` squeezes the runtime
+   list inside the last card instead of letting the tab scroll. */
+.driver-store-tabs-root > [data-slot="tabs-content"].driver-store-storage-tab > * {
+  flex-shrink: 0;
 }
 
 .driver-store-agent-name,

@@ -1,7 +1,7 @@
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use reqwest::{Certificate, Client as HttpClient, Response};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::time::{Duration, Instant};
 
@@ -204,6 +204,13 @@ struct InfluxSeries {
     tags: BTreeMap<String, String>,
 }
 
+// Stable `ColumnInfo.extra` wire markers consumed by the desktop's guarded
+// InfluxDB delete path. Keep them distinct from ordinary display-only extras.
+const INFLUXDB_V1_TIME_COLUMN_EXTRA: &str = "influxdb:time";
+const INFLUXDB_V1_TAG_COLUMN_EXTRA: &str = "influxdb:tag";
+const INFLUXDB_V1_FIELD_COLUMN_EXTRA: &str = "influxdb:field";
+const INFLUXDB_V1_AMBIGUOUS_COLUMN_EXTRA: &str = "influxdb:ambiguous";
+
 #[derive(Deserialize)]
 struct InfluxBucketsResult {
     #[serde(default)]
@@ -237,6 +244,10 @@ fn build_query_url(client: &InfluxdbClient, database: Option<&str>, sql: &str) -
 
 fn encode_url_param(value: &str) -> String {
     utf8_percent_encode(value, NON_ALPHANUMERIC).to_string()
+}
+
+fn quote_influx_identifier(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('\r', "\\r").replace('\n', "\\n").replace('"', "\\\""))
 }
 
 fn build_v2_buckets_url(client: &InfluxdbClient, offset: usize) -> Result<String, String> {
@@ -436,64 +447,86 @@ pub async fn get_columns(client: &InfluxdbClient, database: &str, table: &str) -
     }
     let empty = vec![];
 
-    let tag_sql = format!("SHOW TAG KEYS FROM \"{}\"", table);
+    let measurement = quote_influx_identifier(table);
+    let tag_sql = format!("SHOW TAG KEYS FROM {measurement}");
     let tag_result = influx_query(client, &tag_sql, Some(database)).await?;
     let tag_series = tag_result.results.first().map(|r| &r.series).unwrap_or(&empty);
 
-    let field_sql = format!("SHOW FIELD KEYS FROM \"{}\"", table);
+    let field_sql = format!("SHOW FIELD KEYS FROM {measurement}");
     let field_result = influx_query(client, &field_sql, Some(database)).await?;
     let field_series = field_result.results.first().map(|r| &r.series).unwrap_or(&empty);
 
-    let time_col = ColumnInfo {
-        name: "time".to_string(),
-        data_type: "timestamp".to_string(),
-        is_nullable: false,
+    Ok(influx_v1_columns(tag_series, field_series))
+}
+
+fn influx_v1_column(name: String, data_type: String, is_primary_key: bool, role: &str) -> ColumnInfo {
+    ColumnInfo {
+        name,
+        data_type,
+        is_nullable: role != INFLUXDB_V1_TIME_COLUMN_EXTRA,
         column_default: None,
-        is_primary_key: true,
-        extra: None,
+        is_primary_key,
+        extra: Some(role.to_string()),
         comment: None,
         numeric_precision: None,
         numeric_scale: None,
         character_maximum_length: None,
         enum_values: None,
         ..Default::default()
-    };
+    }
+}
 
-    let cols: Vec<ColumnInfo> = std::iter::once(time_col)
-        .chain(tag_series.first().into_iter().flat_map(|s| s.values.iter()).map(|row| ColumnInfo {
-            name: row[0].as_str().unwrap_or("").to_string(),
-            data_type: "string".to_string(),
-            is_nullable: true,
-            column_default: None,
-            is_primary_key: true,
-            extra: None,
-            comment: None,
-            numeric_precision: None,
-            numeric_scale: None,
-            character_maximum_length: None,
-            enum_values: None,
-            ..Default::default()
-        }))
-        .chain(field_series.first().into_iter().flat_map(|s| s.values.iter()).map(|row| {
-            let data_type = row.get(1).and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
-            ColumnInfo {
-                name: row[0].as_str().unwrap_or("").to_string(),
-                data_type,
-                is_nullable: true,
-                column_default: None,
-                is_primary_key: false,
-                extra: None,
-                comment: None,
-                numeric_precision: None,
-                numeric_scale: None,
-                character_maximum_length: None,
-                enum_values: None,
-                ..Default::default()
-            }
-        }))
-        .collect();
+/// Preserve the database's tag/field distinction in the metadata sent to the
+/// desktop. InfluxQL DELETE predicates may use time and tags, but never fields.
+/// A key that exists in both namespaces is marked ambiguous so mutation callers
+/// can fail closed instead of guessing which value a result column represents.
+fn influx_v1_columns(tag_series: &[InfluxSeries], field_series: &[InfluxSeries]) -> Vec<ColumnInfo> {
+    let mut tag_names = Vec::new();
+    let mut seen_tags = BTreeSet::new();
+    for name in tag_series
+        .iter()
+        .flat_map(|series| &series.values)
+        .filter_map(|row| row.first().and_then(serde_json::Value::as_str))
+        .filter(|name| !name.is_empty())
+    {
+        if seen_tags.insert(name.to_string()) {
+            tag_names.push(name.to_string());
+        }
+    }
 
-    Ok(cols)
+    let mut fields = Vec::new();
+    let mut seen_fields = BTreeSet::new();
+    for row in field_series.iter().flat_map(|series| &series.values) {
+        let Some(name) = row.first().and_then(serde_json::Value::as_str).filter(|name| !name.is_empty()) else {
+            continue;
+        };
+        if seen_fields.insert(name.to_string()) {
+            fields.push((
+                name.to_string(),
+                row.get(1).and_then(serde_json::Value::as_str).unwrap_or("unknown").to_string(),
+            ));
+        }
+    }
+    let field_names = fields.iter().map(|(name, _)| name.as_str()).collect::<BTreeSet<_>>();
+
+    let mut columns =
+        vec![influx_v1_column("time".to_string(), "timestamp".to_string(), true, INFLUXDB_V1_TIME_COLUMN_EXTRA)];
+    for name in tag_names {
+        let ambiguous = field_names.contains(name.as_str());
+        columns.push(influx_v1_column(
+            name,
+            "string".to_string(),
+            !ambiguous,
+            if ambiguous { INFLUXDB_V1_AMBIGUOUS_COLUMN_EXTRA } else { INFLUXDB_V1_TAG_COLUMN_EXTRA },
+        ));
+    }
+    columns.extend(
+        fields
+            .into_iter()
+            .filter(|(name, _)| !seen_tags.contains(name))
+            .map(|(name, data_type)| influx_v1_column(name, data_type, false, INFLUXDB_V1_FIELD_COLUMN_EXTRA)),
+    );
+    columns
 }
 
 pub async fn execute_query(client: &InfluxdbClient, database: &str, sql: &str) -> Result<QueryResult, String> {
@@ -814,6 +847,11 @@ mod tests {
     }
 
     #[test]
+    fn quotes_influx_identifiers_with_influxql_escapes() {
+        assert_eq!(quote_influx_identifier("cpu\" west\\rack\n2"), "\"cpu\\\" west\\\\rack\\n2\"");
+    }
+
+    #[test]
     fn merges_v1_series_and_promotes_tags_to_columns() {
         let first = InfluxSeries {
             name: "dbx_smoke".to_string(),
@@ -837,6 +875,51 @@ mod tests {
                 vec![json!("2026-08-31T00:00:00Z"), json!(10), json!("a")],
                 vec![json!("2026-08-31T00:01:00Z"), json!(20), json!("b")],
             ]
+        );
+    }
+
+    #[test]
+    fn v1_column_metadata_distinguishes_time_tags_fields_and_ambiguity() {
+        let tags = vec![
+            InfluxSeries {
+                name: "cpu".to_string(),
+                columns: vec!["tagKey".to_string()],
+                values: vec![vec![json!("host")], vec![json!("shared")]],
+                tags: BTreeMap::new(),
+            },
+            InfluxSeries {
+                name: "cpu".to_string(),
+                columns: vec!["tagKey".to_string()],
+                values: vec![vec![json!("region")], vec![json!("host")]],
+                tags: BTreeMap::new(),
+            },
+        ];
+        let fields = vec![InfluxSeries {
+            name: "cpu".to_string(),
+            columns: vec!["fieldKey".to_string(), "fieldType".to_string()],
+            values: vec![vec![json!("usage"), json!("float")], vec![json!("shared"), json!("string")]],
+            tags: BTreeMap::new(),
+        }];
+
+        let columns = influx_v1_columns(&tags, &fields);
+
+        assert_eq!(
+            columns.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(),
+            vec!["time", "host", "shared", "region", "usage"]
+        );
+        assert_eq!(
+            columns.iter().map(|column| column.extra.as_deref()).collect::<Vec<_>>(),
+            vec![
+                Some(INFLUXDB_V1_TIME_COLUMN_EXTRA),
+                Some(INFLUXDB_V1_TAG_COLUMN_EXTRA),
+                Some(INFLUXDB_V1_AMBIGUOUS_COLUMN_EXTRA),
+                Some(INFLUXDB_V1_TAG_COLUMN_EXTRA),
+                Some(INFLUXDB_V1_FIELD_COLUMN_EXTRA),
+            ]
+        );
+        assert_eq!(
+            columns.iter().map(|column| column.is_primary_key).collect::<Vec<_>>(),
+            vec![true, true, false, true, false]
         );
     }
 

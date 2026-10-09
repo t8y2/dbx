@@ -84,7 +84,9 @@ describe("getMongoDocumentQueryCompletionContext", () => {
   it("completes sort keys without value or operator noise", () => {
     expect(contextAt("{ created", "sortKeys")).toMatchObject({ mode: "field", prefix: "created" });
     expect(labelsAt("{ created", "sortKeys")).toEqual(["createdAt"]);
-    expect(contextAt("{ createdAt: ", "sortKeys")).toMatchObject({ mode: "none" });
+    // A sort value is one of two directions; the filter bar's values and operators would be noise.
+    expect(contextAt("{ createdAt: ", "sortKeys")).toMatchObject({ mode: "keyMapValue", keyMap: "sort" });
+    expect(labelsAt("{ createdAt: ", "sortKeys")).toEqual(["-1", "1"]);
     expect(contextAt("{ createdAt: -1, ", "sortKeys")).toMatchObject({ mode: "field" });
   });
 });

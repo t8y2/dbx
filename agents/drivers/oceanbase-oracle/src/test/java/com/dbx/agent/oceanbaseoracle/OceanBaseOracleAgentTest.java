@@ -147,7 +147,8 @@ class OceanBaseOracleAgentTest {
         List<String> auditSql = new ArrayList<>();
         Connection auditConnection = auditTimingConnection(1, 2, false, auditSql, new ArrayList<>(), auditLimits);
         int[] row = {-1};
-        int[] queryLimit = {0}; // JDBC's default, independent of the client-side cap.
+        int[] queryLimit = {0};
+        int[] queryFetchSize = {0};
         boolean[] queryStarted = {false};
         boolean[] resultClosed = {false};
         boolean[] statementClosed = {false};
@@ -167,6 +168,7 @@ class OceanBaseOracleAgentTest {
         });
         Statement statement = proxy(Statement.class, (method, args) -> {
             if ("setMaxRows".equals(method.getName())) queryLimit[0] = (Integer) args[0];
+            if ("setFetchSize".equals(method.getName())) queryFetchSize[0] = (Integer) args[0];
             if ("execute".equals(method.getName())) {
                 queryStarted[0] = !String.valueOf(args[0]).startsWith("ALTER SESSION");
                 statementClosed[0] = false;
@@ -198,7 +200,8 @@ class OceanBaseOracleAgentTest {
         Assertions.assertFalse(result.getHas_more());
         Assertions.assertEquals(truncated, result.getTruncated());
         Assertions.assertEquals(truncated ? List.of(List.of(1)) : List.of(List.of(1), List.of(2)), rows);
-        Assertions.assertEquals(0, queryLimit[0], "the paging cap must not change the JDBC statement limit");
+        Assertions.assertEquals(maxRows + 1, queryLimit[0]);
+        Assertions.assertTrue(queryFetchSize[0] > 0);
         Assertions.assertTrue(auditSql.isEmpty(), "completed queries must not read trace or audit records");
         Assertions.assertTrue(auditLimits.isEmpty());
         Assertions.assertNull(result.getServer_execute_time_us());
@@ -621,7 +624,7 @@ class OceanBaseOracleAgentTest {
     }
 
     @Test
-    void fallsBackToAllSourceForOracleRoutineAndPackageTypes() {
+    void readsOracleRoutineAndPackageTypesFromAllSourceFirst() {
         for (String[] object : new String[][]{
             {"PROCEDURE", "PROCEDURE"},
             {"FUNCTION", "FUNCTION"},
@@ -631,7 +634,7 @@ class OceanBaseOracleAgentTest {
             List<String> sql = new ArrayList<>();
             List<String> params = new ArrayList<>();
             OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
-            TestSupport.setPrivateConnection(agent, objectSourceFallbackConnection(
+            TestSupport.setPrivateConnection(agent, objectSourceConnection(
                 sql,
                 params,
                 resultSet(
@@ -645,12 +648,35 @@ class OceanBaseOracleAgentTest {
             Assertions.assertEquals(object[0], source.getObject_type());
             Assertions.assertTrue(source.getSource().startsWith("CREATE OR REPLACE " + object[1]), source.getSource());
             Assertions.assertEquals(
-                List.of(object[0], "MixedRoutine", "MixedOwner", "MixedOwner", "MixedRoutine", object[1]),
+                List.of("MixedOwner", "MixedRoutine", object[1]),
                 params
             );
-            Assertions.assertTrue(sql.get(1).contains("ALL_SOURCE"), sql.get(1));
-            Assertions.assertTrue(sql.get(1).contains("ORDER BY LINE"), sql.get(1));
+            Assertions.assertEquals(1, sql.size());
+            Assertions.assertTrue(sql.get(0).contains("ALL_SOURCE"), sql.get(0));
+            Assertions.assertTrue(sql.get(0).contains("ORDER BY LINE"), sql.get(0));
         }
+    }
+
+    @Test
+    void fallsBackToDbmsMetadataWhenAllSourceIsUnavailable() {
+        List<String> sql = new ArrayList<>();
+        List<String> params = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, objectSourceFallbackConnection(
+            sql,
+            params,
+            resultSet(
+                new String[]{"DDL"},
+                new Object[][]{{"CREATE OR REPLACE PROCEDURE APP.P1 AS BEGIN NULL; END;"}}
+            )
+        ));
+
+        ObjectSource source = agent.getObjectSource("APP", "P1", "PROCEDURE");
+
+        Assertions.assertTrue(source.getSource().startsWith("CREATE OR REPLACE PROCEDURE"), source.getSource());
+        Assertions.assertTrue(sql.get(0).contains("ALL_SOURCE"), sql.get(0));
+        Assertions.assertTrue(sql.get(1).contains("DBMS_METADATA.GET_DDL"), sql.get(1));
+        Assertions.assertEquals(List.of("APP", "P1", "PROCEDURE", "PROCEDURE", "P1", "APP"), params);
     }
 
     @Test

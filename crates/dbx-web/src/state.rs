@@ -31,6 +31,10 @@ pub struct NacosImportContext {
 pub struct WebState {
     pub app: Arc<AppState>,
     pub data_dir: PathBuf,
+    /// Extra absolute roots allowed for connection-level `docsNotesPath`
+    /// beyond `data_dir/docs-notes` (`DBX_DOCS_NOTES_ROOTS`), resolved once at
+    /// startup; injectable so notes containment is testable (see `docs`).
+    pub notes_roots: Vec<PathBuf>,
     pub public_base_path: String,
     pub password_disabled: bool,
     /// `DBX_DEMO_MODE`：公网演示部署的封锁开关（见 `demo` 模块）。
@@ -48,6 +52,7 @@ pub struct WebState {
     pub export_files: RwLock<HashMap<String, WebExportFile>>,
     pub ssh_prompts: Arc<crate::ssh_prompt::SshPromptHub>,
     pub migration_ready: Arc<AtomicBool>,
+    pub web_mcp: Arc<crate::web_mcp::WebMcpRuntime>,
 }
 
 impl WebState {
@@ -61,6 +66,7 @@ impl WebState {
         Self {
             app,
             data_dir,
+            notes_roots: Vec::new(),
             public_base_path: "/".to_string(),
             password_disabled: false,
             demo_mode: false,
@@ -76,6 +82,7 @@ impl WebState {
             export_files: RwLock::new(HashMap::new()),
             ssh_prompts: Arc::new(crate::ssh_prompt::SshPromptHub::new()),
             migration_ready: Arc::new(AtomicBool::new(true)),
+            web_mcp: Arc::new(crate::web_mcp::WebMcpRuntime::disabled()),
         }
     }
 }

@@ -52,6 +52,21 @@ export function structureColumnCommentsForCopy(columns: readonly Pick<EditableSt
   return comments;
 }
 
+/**
+ * Column name handed to the DDL builder for a draft column.
+ *
+ * MySQL rejects identifiers that end with a space (ERROR 1166 "Incorrect column
+ * name"), so a pasted name carrying a stray trailing space produced an
+ * unexecutable `ALTER TABLE ... CHANGE COLUMN ...` statement that the editor
+ * still previewed as executable. Only the trailing whitespace is dropped:
+ * leading spaces are legal in a backtick-quoted identifier and are kept, both
+ * for a name the user typed (`#9654`) and for a metadata name, which is passed
+ * through byte-exact so that an unrelated edit never turns into a bogus rename.
+ */
+export function draftColumnNameForSql(name: string, originalName?: string | null): string {
+  return originalName === name ? name : name.trimEnd();
+}
+
 export function hasExistingColumnTypeChange(columns: readonly EditableStructureColumn[]): boolean {
   return columns.some((column) => !!column.original && !column.markedForDrop && column.dataType !== column.original.data_type);
 }
@@ -800,6 +815,32 @@ export function supportsTableStructureExtendedProperties(databaseType?: Database
   );
 }
 
+/**
+ * Extracts a MySQL generated-column definition from a raw `extra` string such
+ * as `GENERATED ALWAYS AS (`price` * `quantity`) STORED`. Returns undefined
+ * for plain columns and identity columns (`GENERATED ... AS IDENTITY`, no
+ * parenthesized expression). MariaDB `PERSISTENT` is normalized to `STORED`,
+ * matching the MySQL driver's introspection output.
+ */
+export function parseMysqlGeneratedColumnExtra(extra: string): { expression: string; storage: "VIRTUAL" | "STORED" } | undefined {
+  const marker = "generated always as";
+  const lower = extra.toLowerCase();
+  const index = lower.indexOf(marker);
+  if (index < 0) return undefined;
+  const rest = extra.slice(index + marker.length).trimStart();
+  if (!rest.startsWith("(")) return undefined;
+  const close = rest.lastIndexOf(")");
+  if (close <= 0) return undefined;
+  const expression = rest.slice(1, close).trim();
+  if (!expression) return undefined;
+  const tail = rest
+    .slice(close + 1)
+    .trim()
+    .toUpperCase();
+  const storage = tail.startsWith("STORED") || tail.startsWith("PERSISTENT") ? "STORED" : "VIRTUAL";
+  return { expression, storage };
+}
+
 export function parseExtraToColumnExtra(extra: string | null | undefined, databaseType?: DatabaseType): ColumnExtra {
   const result: ColumnExtra = {};
   if (!extra) return result;
@@ -812,6 +853,10 @@ export function parseExtraToColumnExtra(extra: string | null | undefined, databa
     }
     if (databaseType === "mysql" && lower.includes("on update current_timestamp")) {
       result.onUpdateCurrentTimestamp = true;
+    }
+    if (databaseType === "mysql") {
+      const generated = parseMysqlGeneratedColumnExtra(extra);
+      if (generated) result.generated = generated;
     }
   } else if (databaseType === "postgres" || databaseType === "gaussdb" || databaseType === "kwdb" || databaseType === "questdb" || databaseType === "highgo" || databaseType === "uxdb" || databaseType === "vastbase" || databaseType === "kingbase") {
     const identityMatch = lower.match(/generated\s+(by\s+default|always)\s+as\s+identity/i);
@@ -1242,6 +1287,35 @@ export function toColumnNames(columns: string[]): string {
 
 const AUTO_INDEX_NAME_MAX_LENGTH = 63;
 
+export type StructureIndexKind = "primary" | "unique" | "index" | "fulltext" | "spatial";
+type IndexNamingOptions = Partial<Pick<EditableStructureIndex, "isPrimary" | "isUnique" | "indexType">> & { maxLength?: number };
+
+export function structureIndexKind(index: IndexNamingOptions): StructureIndexKind {
+  if (index.isPrimary) return "primary";
+  if (index.indexType?.trim().toUpperCase() === "FULLTEXT") return "fulltext";
+  if (index.indexType?.trim().toUpperCase() === "SPATIAL") return "spatial";
+  return index.isUnique ? "unique" : "index";
+}
+
+export type SpecialIndexColumnIssue = "specialIndexUnique" | "fulltextIndexColumns" | "spatialIndexColumn" | "spatialIndexNullable";
+
+export function specialIndexColumnIssue(dialect: string, indexType: string, columns: readonly Pick<EditableStructureColumn, "dataType" | "isNullable">[], isUnique = false): SpecialIndexColumnIssue | null {
+  const type = indexType.trim().toUpperCase();
+  const fulltext = dialect === "mysql" && type === "FULLTEXT";
+  const spatial = (dialect === "mysql" || dialect === "sqlserver") && type === "SPATIAL";
+  if (!fulltext && !spatial) return null;
+  if (isUnique) return "specialIndexUnique";
+  if (!columns.length) return null;
+  const types = columns.map((column) => splitDataType(column.dataType).baseType.toLowerCase());
+  if (fulltext && types.some((value) => !/^(?:char|varchar|tinytext|text|mediumtext|longtext)$/.test(value))) return "fulltextIndexColumns";
+  if (spatial) {
+    const validType = dialect === "mysql" ? /^(?:geometry|point|linestring|polygon|multipoint|multilinestring|multipolygon|geometrycollection|geomcollection)$/ : /^(?:geometry|geography)$/;
+    if (columns.length !== 1 || !validType.test(types[0])) return "spatialIndexColumn";
+    if (dialect === "mysql" && columns[0].isNullable) return "spatialIndexNullable";
+  }
+  return null;
+}
+
 function normalizeIndexNamePart(value: string): string {
   const trimmed = value.trim();
   const unquoted = (trimmed.startsWith("[") && trimmed.endsWith("]")) || (trimmed.startsWith("`") && trimmed.endsWith("`")) || (trimmed.startsWith('"') && trimmed.endsWith('"')) ? trimmed.slice(1, -1) : trimmed;
@@ -1260,6 +1334,7 @@ function truncateIndexName(value: string, maxLength = AUTO_INDEX_NAME_MAX_LENGTH
   return `${value.slice(0, maxLength - suffix.length).replace(/_+$/g, "")}${suffix}`;
 }
 
+// Keep the original API and table-qualified naming for existing callers and dialects.
 export function generateIndexName(tableName: string, columns: string[], maxLength = AUTO_INDEX_NAME_MAX_LENGTH): string {
   const parts = [tableName, ...columns].map(normalizeIndexNamePart).filter(Boolean);
   if (parts.length === 0) return "";
@@ -1282,6 +1357,53 @@ export function generateUniqueIndexName(tableName: string, columns: string[], ex
   return base;
 }
 
+function indexNameHash(value: string): string {
+  // Keep long names deterministic and distinguish columns beyond the cutoff.
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i++) hash = Math.imul(hash ^ value.charCodeAt(i), 16777619);
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function truncateShortIndexName(value: string, maxLength = AUTO_INDEX_NAME_MAX_LENGTH): string {
+  if (value.length <= maxLength) return value;
+  const suffix = `_${indexNameHash(value)}`;
+  if (maxLength <= suffix.length) return value.slice(0, maxLength);
+  return `${value.slice(0, maxLength - suffix.length).replace(/_+$/g, "")}${suffix}`;
+}
+
+export function generateShortIndexName(columnName: string, options: IndexNamingOptions = {}): string {
+  if (options.isPrimary) return "PRIMARY";
+  if (!columnName.trim()) return "";
+  // MySQL permits BMP Unicode identifiers, but not supplementary characters.
+  const normalized = columnName
+    .trim()
+    .replace(/[^\p{L}\p{N}]+/gu, "_")
+    .replace(/[\uD800-\uDFFF]/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toLowerCase();
+  const name = normalized || `column_${indexNameHash(columnName)}`;
+  const prefix = { primary: "pk", unique: "uk", index: "idx", fulltext: "ft", spatial: "sp" }[structureIndexKind(options)];
+  return truncateShortIndexName(`${prefix}_${name}`, options.maxLength);
+}
+
+export function generateUniqueShortIndexName(columnName: string, existingNames: Iterable<string>, options: IndexNamingOptions = {}): string {
+  const maxLength = options.maxLength ?? AUTO_INDEX_NAME_MAX_LENGTH;
+  const base = generateShortIndexName(columnName, options);
+  if (!base) return "";
+  if (options.isPrimary) return base;
+
+  const taken = new Set([...existingNames].map((name) => name.trim().toLowerCase()).filter(Boolean));
+  if (!taken.has(base.toLowerCase())) return base;
+
+  for (let counter = 2; ; counter++) {
+    const suffix = `_${counter}`;
+    const stem = generateShortIndexName(columnName, { ...options, maxLength: Math.max(1, maxLength - suffix.length) });
+    const candidate = `${stem}${suffix}`;
+    if (!taken.has(candidate.toLowerCase())) return candidate;
+  }
+}
+
 export function splitDataType(raw: string): { baseType: string; params: string } {
   const trimmed = raw.trim();
   const parenIdx = trimmed.indexOf("(");
@@ -1297,9 +1419,30 @@ export function splitDataType(raw: string): { baseType: string; params: string }
   return { baseType, params };
 }
 
+function splitPostgresTemporalDataType(raw: string): { baseType: string; params: string } | null {
+  // format_type() places the precision before the time-zone qualifier. Keep
+  // that qualifier in the base selector so editing only the precision cannot
+  // silently turn timestamptz into timestamp. The anchored built-in names
+  // deliberately exclude domains and schema-qualified custom types.
+  const match = raw.trim().match(/^(TIME|TIMESTAMP|TIMETZ|TIMESTAMPTZ)\s*\(([^()]*)\)(?:\s+((?:WITH|WITHOUT)\s+TIME\s+ZONE))?((?:\s*\[\])*)$/i);
+  if (!match) return null;
+  const typeName = match[1]!;
+  const qualifier = match[3]?.replace(/\s+/g, " ");
+  if (qualifier && !/^(?:TIME|TIMESTAMP)$/i.test(typeName)) return null;
+  const arraySuffix = (match[4] ?? "").replace(/\s+/g, "");
+  return {
+    baseType: `${typeName}${qualifier ? ` ${qualifier}` : ""}${arraySuffix}`,
+    params: match[2]!.trim(),
+  };
+}
+
 function splitDataTypeForDatabase(dbType: DatabaseType | undefined, raw: string): { baseType: string; params: string } {
   if (dbType === "duckdb") {
     const parsed = splitDuckdbScalarDataType(raw);
+    if (parsed) return parsed;
+  }
+  if (dbType === "postgres") {
+    const parsed = splitPostgresTemporalDataType(raw);
     if (parsed) return parsed;
   }
   if (dbType === "xugu") {
@@ -1465,6 +1608,10 @@ function combineQualifiedTemporalType(baseType: string, params: string, dbType: 
   if (dbType === "duckdb") {
     const match = baseType.trim().match(/^(TIMESTAMP)\s+WITHOUT\s+TIME\s+ZONE$/i);
     return match ? (params ? `${match[1]}(${params}) WITHOUT TIME ZONE` : baseType.trim()) : null;
+  }
+  if (dbType === "postgres") {
+    const match = baseType.trim().match(/^(TIME|TIMESTAMP)\s+((?:WITH|WITHOUT)\s+TIME\s+ZONE)$/i);
+    return match ? (params ? `${match[1]}(${params}) ${match[2]!.replace(/\s+/g, " ")}` : baseType.trim()) : null;
   }
   if (dbType !== "xugu") return null;
   const match = baseType.trim().match(/^(TIME|TIMESTAMP)\s+WITH\s+TIME\s+ZONE$/i);

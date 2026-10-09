@@ -50,7 +50,12 @@ vi.mock("@/components/ui/tooltip", () => ({
   TooltipContent: { name: "TooltipContentStub", template: `<span><slot /></span>` },
 }));
 vi.mock("@/components/ui/LightDropdown.vue", () => ({
-  default: { name: "LightDropdownStub", template: `<div />` },
+  default: {
+    name: "LightDropdownStub",
+    props: ["items"],
+    emits: ["update:modelValue"],
+    template: `<div data-light-dropdown><button v-for="item in items" :key="item.value" :data-toolbar-menu-item="item.value" :disabled="item.disabled" @click="$emit('update:modelValue', item.value)">{{ item.label }}</button></div>`,
+  },
 }));
 vi.mock("@/components/layout/WindowControls.vue", () => ({
   default: { name: "WindowControlsStub", template: `<div />` },
@@ -137,6 +142,7 @@ const toolbarProps = {
   hasConnections: false,
   canNewQuery: false,
   hasSqlFileConnections: false,
+  immediateSyncing: false,
 };
 
 describe("always-on-top button visibility", () => {
@@ -147,6 +153,16 @@ describe("always-on-top button visibility", () => {
     windowState.alwaysOnTop = false;
     pinia = createPinia();
     setActivePinia(pinia);
+  });
+
+  it("keeps the actual title bar on Tauri's intentional native drag path", async () => {
+    const { host, unmount } = mount(AppToolbar, toolbarProps);
+    await settled();
+
+    expect(host.querySelector(".app-toolbar")?.getAttribute("data-tauri-drag-region")).toBe("");
+    expect(host.querySelector('.app-toolbar > [data-tauri-drag-region=""]')).not.toBeNull();
+
+    unmount();
   });
 
   it("hides the main toolbar pin control until the appearance setting opts in", async () => {
@@ -202,6 +218,74 @@ describe("always-on-top button visibility", () => {
     clickPin(host, PIN_OFF_LABEL);
     await vi.waitFor(() => expect(windowState.alwaysOnTop).toBe(false));
     await vi.waitFor(() => expect(pinButton(host, PIN_OFF_LABEL)).toBeNull());
+
+    unmount();
+  });
+
+  it("exposes backup and MCP shortcuts from the more menu", async () => {
+    const openBackups = vi.fn();
+    const openMcpSettings = vi.fn();
+    const { host, unmount } = mount(AppToolbar, {
+      ...toolbarProps,
+      onOpenBackups: openBackups,
+      onOpenMcpSettings: openMcpSettings,
+    });
+    await settled();
+    await nextTick();
+
+    const backupButton = host.querySelector<HTMLButtonElement>('[data-toolbar-menu-item="database-backups"]');
+    const mcpButton = host.querySelector<HTMLButtonElement>('[data-toolbar-menu-item="mcp-settings"]');
+
+    expect(backupButton).not.toBeNull();
+    expect(mcpButton).not.toBeNull();
+
+    backupButton?.click();
+    mcpButton?.click();
+
+    expect(openBackups).toHaveBeenCalledOnce();
+    expect(openMcpSettings).toHaveBeenCalledOnce();
+
+    unmount();
+  });
+
+  it("disables the immediate sync action while syncing", async () => {
+    const settingsStore = useSettingsStore();
+    settingsStore.editorSettings.toolbarItems.immediateSync = true;
+    const { host, unmount } = mount(AppToolbar, { ...toolbarProps, immediateSyncing: true });
+    await settled();
+
+    const button = host.querySelector('[aria-label="toolbar.immediateSync"]');
+    expect(button?.getAttribute("aria-busy")).toBe("true");
+    expect((button as HTMLButtonElement | null)?.disabled).toBe(true);
+
+    unmount();
+  });
+
+  it("renders shortcut hints in toolbar button tooltips", async () => {
+    const settingsStore = useSettingsStore();
+    settingsStore.updateEditorSettings({
+      shortcuts: {
+        ...settingsStore.editorSettings.shortcuts,
+        newQuery: "Mod+N",
+        toggleSidebar: "Mod+B",
+        openSettings: "Mod+,",
+        toggleAiPanel: "Mod+I",
+      },
+    });
+
+    const { host, unmount } = mount(AppToolbar, {
+      ...toolbarProps,
+      showSidebarExpand: true,
+      canNewQuery: true,
+    });
+    await settled();
+    await nextTick();
+
+    const tooltips = [...host.querySelectorAll(".app-toolbar span")].map((el) => el.textContent?.trim() ?? "");
+    expect(tooltips.some((text) => text.includes("toolbar.newQuery (") && text.includes("N)"))).toBe(true);
+    expect(tooltips.some((text) => text.includes("sidebar.expand (") && text.includes("B)"))).toBe(true);
+    expect(tooltips.some((text) => text.includes("settings.title (") && text.includes(","))).toBe(true);
+    expect(tooltips.some((text) => text.includes("AI (") && text.includes("I)"))).toBe(true);
 
     unmount();
   });

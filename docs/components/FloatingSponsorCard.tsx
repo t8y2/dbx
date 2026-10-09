@@ -4,20 +4,34 @@ import { X } from "lucide-react";
 import { useEffect, useState } from "react";
 
 const DISMISS_STORAGE_KEY = "dbx.docs.sponsorCard.dismissedAt";
-// 关闭 7 天后重新出现
-const RESURFACE_MS = 7 * 24 * 60 * 60 * 1000;
+// 关闭后第二天（24 小时）重新出现
+const RESURFACE_MS = 24 * 60 * 60 * 1000;
 
-const RAINYUN_URL = "https://www.rainyun.com/MTE5Mjc4Ng==_";
+// 悬浮赞助位：固定展示全部赞助商
+const SPONSORS = [
+  {
+    href: "https://www.jumpserver.org/",
+    logo: "/sponsors/jumpserver-card.png",
+    alt: "JumpServer",
+    cnTagline: "广受欢迎的开源堡垒机",
+    enTagline: "Widely popular open-source bastion host",
+  },
+  {
+    href: "https://www.rainyun.com/MTE5Mjc4Ng==_",
+    logo: "/sponsors/rainyun-card.png",
+    alt: "RainYun",
+    cnTagline: "云服务器 · 游戏云 · 物理服务器",
+    enTagline: "Cloud servers, game hosting & bare metal",
+  },
+] as const;
 
 const COPY = {
   cn: {
     badge: "赞助商",
-    tagline: "云服务器 · 游戏云 · 物理服务器",
     closeLabel: "关闭赞助卡片",
   },
   en: {
     badge: "Sponsor",
-    tagline: "Cloud servers, game hosting & bare metal",
     closeLabel: "Dismiss sponsor card",
   },
 } as const;
@@ -65,13 +79,24 @@ export function FloatingSponsorCard({ lang }: { lang: string }) {
           <X className="size-3.5" />
         </button>
       </div>
-      <a href={RAINYUN_URL} target="_blank" rel="nofollow sponsored noopener noreferrer" className="group mt-1.5 block">
-        {/* 品牌图为白底，暗色主题下需显式白底容器承载 */}
-        <span className="block overflow-hidden rounded-lg bg-white ring-1 ring-black/5 transition-shadow group-hover:ring-black/15">
-          <img src="/sponsors/rainyun-card.png" alt="RainYun" width={400} height={160} className="h-auto w-full" />
-        </span>
-        <span className="mt-1 block text-center text-xs text-fd-muted-foreground">{t.tagline}</span>
-      </a>
+      {SPONSORS.map((sponsor, index) => {
+        const tagline = lang === "cn" ? sponsor.cnTagline : sponsor.enTagline;
+        return (
+          <a
+            key={sponsor.alt}
+            href={sponsor.href}
+            target="_blank"
+            rel="nofollow sponsored noopener noreferrer"
+            className={`group block ${index > 0 ? "mt-2 border-t border-fd-border pt-2.5" : "mt-1.5"}`}
+          >
+            {/* 品牌图为白底，暗色主题下需显式白底容器承载 */}
+            <span className="block overflow-hidden rounded-lg bg-white ring-1 ring-black/5 transition-shadow group-hover:ring-black/15">
+              <img src={sponsor.logo} alt={sponsor.alt} width={400} height={160} className="h-auto w-full" />
+            </span>
+            <span className="mt-1 block text-center text-xs text-fd-muted-foreground">{tagline}</span>
+          </a>
+        );
+      })}
     </aside>
   );
 }

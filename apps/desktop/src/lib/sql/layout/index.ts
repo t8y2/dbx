@@ -19,6 +19,7 @@ export const DEFAULT_SQL_LAYOUT_OPTIONS: SqlLayoutOptions = {
   linesBetweenQueries: 1,
   useTabs: false,
   fromClauseSourceOnSameLine: true,
+  commaPosition: "after",
 };
 
 export interface SqlLayoutRequest {

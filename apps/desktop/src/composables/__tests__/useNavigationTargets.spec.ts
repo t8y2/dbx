@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
   setErrorResult: vi.fn(),
   setTableMeta: vi.fn(),
   updateSql: vi.fn(),
+  databaseInfo: undefined as { productName?: string; productVersion?: string } | undefined,
 }));
 
 vi.mock("@/lib/backend/api", () => ({
@@ -27,7 +28,7 @@ vi.mock("@/lib/backend/api", () => ({
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     activeConnectionId: "",
-    getConfig: () => ({ id: "connection-1", db_type: mocks.databaseType }),
+    getConfig: () => ({ id: "connection-1", db_type: mocks.databaseType, database_info: mocks.databaseInfo }),
     ensureConnected: mocks.ensureConnected,
     connectionIdentifierQuote: () => undefined,
     metadataGenerationFor: () => 0,
@@ -108,6 +109,7 @@ describe("useNavigationTargets openTableTarget", () => {
     mocks.tabs.length = 0;
     mocks.databaseType = "postgres";
     mocks.tableOpenSortMode = "none";
+    mocks.databaseInfo = undefined;
     mocks.ensureConnected.mockResolvedValue(undefined);
     mocks.buildTableSelectSql.mockImplementation(async ({ tableName }: { tableName: string }) => `SELECT * FROM ${tableName}`);
     mocks.executeTabSql.mockResolvedValue(undefined);
@@ -128,6 +130,30 @@ describe("useNavigationTargets openTableTarget", () => {
       expect(options.orderBy).toBeUndefined();
     }
     expect(mocks.tabs[0]?.orderByInput).toBeUndefined();
+  });
+
+  it("forwards the connected server version to the table SQL builder (#10503)", async () => {
+    mocks.databaseType = "neo4j";
+    mocks.databaseInfo = { productName: "Neo4j", productVersion: "Neo4j/4.4.44" };
+
+    await useNavigationTargets(dialogs).openTableTarget({ connectionId: "connection-1", database: "neo4j", tableName: "users", tableType: "TABLE" });
+
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ serverVersion: "Neo4j/4.4.44" }));
+  });
+
+  it("reads the server version when the SQL is built, not from the config captured before connect (#10503)", async () => {
+    mocks.databaseType = "neo4j";
+    mocks.databaseInfo = undefined;
+    // The store swaps the config object when the probe lands, so the reference captured before
+    // connect never sees the version.
+    mocks.getColumns.mockImplementation(async () => {
+      mocks.databaseInfo = { productName: "Neo4j", productVersion: "Neo4j/4.4.44" };
+      return [column("id")];
+    });
+
+    await useNavigationTargets(dialogs).openTableTarget({ connectionId: "connection-1", database: "neo4j", tableName: "users", tableType: "TABLE" });
+
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ serverVersion: "Neo4j/4.4.44" }));
   });
 
   it.each(["oracle", "oceanbase-oracle"])("uses the %s physical primary index for default ordering", async (databaseType) => {

@@ -20,7 +20,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function createHarness() {
+function createHarness(doc = "SELECT 1;\nSELECT 2;") {
   const view = shallowRef<EditorView | null>(null);
   const cache = { value: null as ExecutableStatementRangeCache | null };
   const runtime = createQueryEditorCodeMirrorRuntime();
@@ -34,7 +34,7 @@ function createHarness() {
   });
   const parent = document.createElement("div");
   document.body.append(parent);
-  const currentView = new EditorView({ parent, state: EditorState.create({ doc: "SELECT 1;\nSELECT 2;", extensions: [boundaries.createTrackingPlugin(ViewPlugin)] }) });
+  const currentView = new EditorView({ parent, state: EditorState.create({ doc, extensions: [boundaries.createTrackingPlugin(ViewPlugin)] }) });
   view.value = currentView;
   cleanups.push(() => {
     currentView.destroy();
@@ -87,6 +87,19 @@ describe("QueryEditor shared statement boundaries", () => {
     expect(boundaries.statementBoundariesForState(currentView.state).doc).toBe(currentView.state.doc);
   });
 
+  it("clears a pending refresh when the editor is paused", async () => {
+    const { currentView, cache, boundaries } = createHarness();
+    boundaries.statementBoundariesForState(currentView.state);
+    currentView.dispatch({ changes: { from: 0, insert: " " } });
+
+    boundaries.clear();
+    const dispatch = vi.spyOn(currentView, "dispatch");
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(cache.value).toBeNull();
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
   it.each(["destroyed", "replaced", "detached"])("does not refresh an editor that was %s", async (reason) => {
     const { currentView, view, parent, boundaries, cache } = createHarness();
     boundaries.statementBoundariesForState(currentView.state);
@@ -98,6 +111,33 @@ describe("QueryEditor shared statement boundaries", () => {
     const dispatch = vi.spyOn(currentView, "dispatch");
     await vi.advanceTimersByTimeAsync(200);
     expect(dispatch).not.toHaveBeenCalled();
-    expect(cache.value).toBe(previousCache);
+    expect(cache.value).toBe(reason === "destroyed" ? null : previousCache);
+  });
+
+  it("maps large-document folds while an exact background rebuild is pending", async () => {
+    const source = `BEGIN\n${"SELECT 1;\n".repeat(2_001)}END;`;
+    const { currentView, boundaries } = createHarness(source);
+    const initial = boundaries.statementBoundariesForState(currentView.state);
+    expect(initial.fresh).toBe(false);
+    await boundaries.ensureStatementCache(currentView.state);
+    const original = boundaries.foldRangeForState(currentView.state, 0);
+    expect(original).toEqual({ from: 5, to: source.indexOf("END;") });
+    currentView.dispatch({ changes: { from: 0, insert: "-- prefix\n" } });
+    expect(boundaries.statementBoundariesForState(currentView.state).fresh).toBe(false);
+    expect(boundaries.foldRangeForState(currentView.state, 10)).toEqual({ from: original!.from + 10, to: original!.to + 10 });
+    await vi.advanceTimersByTimeAsync(150);
+    expect(boundaries.statementBoundariesForState(currentView.state).fresh).toBe(true);
+  });
+
+  it("never installs a background result for an edited or paused document", async () => {
+    const { currentView, boundaries, cache } = createHarness("SELECT 1;\n".repeat(2_001));
+    const pending = boundaries.ensureStatementCache(currentView.state);
+    currentView.dispatch({ changes: { from: 0, insert: " " } });
+    await expect(pending).resolves.toBeNull();
+    expect(cache.value).toBeNull();
+    const paused = boundaries.ensureStatementCache(currentView.state);
+    boundaries.clear();
+    await expect(paused).resolves.toBeNull();
+    expect(cache.value).toBeNull();
   });
 });

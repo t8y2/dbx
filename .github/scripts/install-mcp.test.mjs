@@ -59,10 +59,25 @@ if (!routes[url]) process.exit(22);
 fs.copyFileSync(path.join(root, routes[url]), args[args.indexOf('-o') + 1]);
 `, { mode: 0o755 });
   writeFileSync(join(mocks, "uname"), `#!/bin/sh\ncase "$1" in -s) echo '${platform.startsWith("darwin") ? "Darwin" : "Linux"}';; -m) echo '${platform.includes("arm64") ? "aarch64" : "x86_64"}';; esac\n`, { mode: 0o755 });
+  writeFileSync(join(mocks, "codesign"), `#!${process.execPath}
+const args = process.argv.slice(2);
+const mode = process.env.SIGNATURE_MODE || 'valid';
+const requirement = 'identifier "com.dbx.app.mcp" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "TVDM965TDL"';
+if (process.env.FIXTURE_PLATFORM.startsWith('linux')) process.exit(99);
+if (args[0] === '--verify') {
+  if (!args.includes('--strict') || !args.includes('--all-architectures') || args[args.indexOf('-R') + 1] !== '=' + requirement) process.exit(98);
+  process.exit(['unsigned', 'adhoc', 'wrong-team', 'wrong-id', 'tampered'].includes(mode) ? 1 : 0);
+}
+if (args[0] !== '--display') process.exit(97);
+console.error('Identifier=com.dbx.app.mcp');
+console.error('TeamIdentifier=TVDM965TDL');
+console.error('Timestamp=' + (mode === 'no-timestamp' ? 'none' : 'Oct 3, 2026'));
+console.error('designated => ' + (mode === 'hash-bound' ? 'cdhash H"' + 'ab'.repeat(20) + '"' : requirement.replaceAll('exists', '/* exists */')));
+`, { mode: 0o755 });
   const installedBinary = join(home, ".dbx/bin/dbx-mcp");
   const marker = join(home, ".dbx/bin/.dbx-mcp-version");
   const run = (extra = {}) => spawnSync("sh", [installer], {
-    env: { ...process.env, HOME: home, SHELL: "/bin/zsh", ZDOTDIR: home, PATH: `${mocks}:${process.env.PATH}`, FIXTURE: root, ...extra },
+    env: { ...process.env, HOME: home, SHELL: "/bin/zsh", ZDOTDIR: home, PATH: `${mocks}:${process.env.PATH}`, FIXTURE: root, FIXTURE_PLATFORM: platform, ...extra },
     encoding: "utf8", timeout: 30_000,
   });
   return { root, home, mocks, binary: installedBinary, marker, run };
@@ -160,6 +175,25 @@ for (const source of ["npm", "github"]) {
     assert.equal(readFileSync(setup.marker, "utf8"), "0.4.95\n");
     assert.ok(!existsSync(join(setup.home, ".zshrc")));
   });
+}
+
+for (const platform of ["darwin-arm64", "darwin-x64"]) {
+  for (const mode of ["unsigned", "adhoc", "wrong-team", "wrong-id", "tampered", "hash-bound", "no-timestamp"]) {
+    test(`rejects ${mode} macOS signature before replacing an installation: ${platform}`, (context) => {
+      const setup = fixture(context, platform);
+      mkdirSync(join(setup.home, ".dbx/bin"), { recursive: true });
+      const original = "#!/bin/sh\nprintf 'dbx-mcp 0.4.95\\n'\n";
+      writeFileSync(setup.binary, original, { mode: 0o755 });
+      writeFileSync(setup.marker, "0.4.95\n");
+      const result = setup.run({ SIGNATURE_MODE: mode });
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /signature verification failed/i);
+      assert.equal(readFileSync(setup.binary, "utf8"), original);
+      assert.equal(readFileSync(setup.marker, "utf8"), "0.4.95\n");
+      assert.ok(!existsSync(join(setup.home, ".zshrc")));
+      assert.ok(!readdirSync(join(setup.home, ".dbx/bin")).some((name) => name.startsWith(".dbx-mcp-install.")));
+    });
+  }
 }
 
 test("stale marker without binary reinstalls, and bash users get migration guidance", (context) => {

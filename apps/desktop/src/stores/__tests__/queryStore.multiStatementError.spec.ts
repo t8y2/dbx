@@ -340,6 +340,37 @@ describe("queryStore multi-statement errors", () => {
     });
   });
 
+  it.each(["oracle", "postgres"])("skips the redundant health probe before a %s batch execution", async (dbType) => {
+    const sql = Array.from({ length: 20 }, (_, index) => `INSERT INTO users (id) VALUES (${index + 1});`).join("\n");
+    const blockedHealthProbe = deferred<void>();
+    mocks.ensureConnected.mockImplementation((_connectionId, options) => (options?.verifyHealth === false ? Promise.resolve() : blockedHealthProbe.promise));
+    const connectionId = `${dbType}-1`;
+    mocks.getConnectionConfig.mockReturnValue({
+      id: connectionId,
+      name: dbType,
+      db_type: dbType,
+      database: "app",
+      query_timeout_secs: 30,
+    });
+    mocks.executeMulti.mockResolvedValue(
+      Array.from({ length: 20 }, (_, statementIndex) => ({
+        columns: [],
+        rows: [],
+        affected_rows: 1,
+        execution_time_ms: 1,
+        statement_index: statementIndex,
+      })),
+    );
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab(connectionId, "app", "Query", "query", "public", sql);
+
+    await store.executeTabSql(tabId, sql, { sourceOffset: 0 });
+
+    expect(mocks.ensureConnected).toHaveBeenCalledWith(connectionId, { verifyHealth: false });
+    expect(mocks.executeMultiWithProgress).toHaveBeenCalledTimes(1);
+  });
+
   it("skips a failed statement and continues the original batch without replaying successful statements", async () => {
     const sqlError = structuredSqlError();
     const sql = "INSERT INTO t VALUES (1);\nINSERT INTO t VALUES (1);\nINSERT INTO t VALUES (2);\nINSERT INTO t VALUES (3)";
@@ -947,6 +978,10 @@ describe("queryStore multi-statement errors", () => {
     await store.executeTabSql(tabId, sql);
 
     expect(store.tabs.find((item) => item.id === tabId)?.results?.map((result) => result.sourceLabel)).toEqual(["Orders", "Users"]);
+    expect(store.tabs.find((item) => item.id === tabId)?.results).toMatchObject([
+      { sourceLabelKind: "comment", sourceQualifier: "app", sourceName: "orders" },
+      { sourceLabelKind: "comment", sourceQualifier: "app", sourceName: "users" },
+    ]);
   });
 
   it("does not repeatedly scan the full document when naming a selected large batch", async () => {

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -30,7 +31,22 @@ func (s *server) listTopics(params jsonObject) (any, error) {
 		return nil, err
 	}
 	allVhosts := allVhostsRequested(params)
-	queues, err := managementGetAll(connection, managementListPath(params, connection, "queues"))
+	pageRequest, err := managementPageRequestFromParams(params, "name", "messages_ready")
+	if err != nil {
+		return nil, err
+	}
+	var queues []any
+	var pageResult *managementPageResult
+	if pageRequest == nil {
+		queues, err = managementGetAll(connection, managementListPath(params, connection, "queues"))
+	} else {
+		page, pageErr := managementGetPage(connection, managementListPath(params, connection, "queues"), *pageRequest)
+		if pageErr != nil {
+			return nil, pageErr
+		}
+		queues = page.Items
+		pageResult = &page
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -46,10 +62,12 @@ func (s *server) listTopics(params jsonObject) (any, error) {
 		}
 		topics = append(topics, info)
 	}
-	sort.SliceStable(topics, func(left, right int) bool {
-		return stringOrEmpty(topics[left], "name") < stringOrEmpty(topics[right], "name")
-	})
-	return jsonObject{"topics": topics}, nil
+	if pageRequest == nil {
+		sort.SliceStable(topics, func(left, right int) bool {
+			return stringOrEmpty(topics[left], "name") < stringOrEmpty(topics[right], "name")
+		})
+	}
+	return managementListResult("topics", topics, pageResult), nil
 }
 
 func topicInfoFromJSON(queue jsonObject) jsonObject {
@@ -382,7 +400,29 @@ func (s *server) listExchanges(params jsonObject) (any, error) {
 		return nil, err
 	}
 	allVhosts := allVhostsRequested(params)
-	exchanges, err := managementGetAll(connection, managementListPath(params, connection, "exchanges"))
+	pageRequest, err := managementPageRequestFromParams(params, "name")
+	if err != nil {
+		return nil, err
+	}
+	if pageRequest != nil && pageRequest.Search != "" && strings.Contains(strings.ToLower("(AMQP default)"), strings.ToLower(pageRequest.Search)) {
+		// The UI displays the empty-name default exchange as "(AMQP default)".
+		// Include it in the broker-side name search whenever that display label
+		// matches, while retaining ordinary substring matches.
+		pageRequest.Search = "(" + regexp.QuoteMeta(pageRequest.Search) + "|^$)"
+		pageRequest.UseRegex = true
+	}
+	var exchanges []any
+	var pageResult *managementPageResult
+	if pageRequest == nil {
+		exchanges, err = managementGetAll(connection, managementListPath(params, connection, "exchanges"))
+	} else {
+		page, pageErr := managementGetPage(connection, managementListPath(params, connection, "exchanges"), *pageRequest)
+		if pageErr != nil {
+			return nil, pageErr
+		}
+		exchanges = page.Items
+		pageResult = &page
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -398,10 +438,24 @@ func (s *server) listExchanges(params jsonObject) (any, error) {
 		}
 		result = append(result, info)
 	}
-	sort.SliceStable(result, func(left, right int) bool {
-		return stringOrEmpty(result[left], "name") < stringOrEmpty(result[right], "name")
-	})
-	return jsonObject{"exchanges": result}, nil
+	if pageRequest == nil {
+		sort.SliceStable(result, func(left, right int) bool {
+			return stringOrEmpty(result[left], "name") < stringOrEmpty(result[right], "name")
+		})
+	}
+	return managementListResult("exchanges", result, pageResult), nil
+}
+
+func managementListResult(key string, items []jsonObject, page *managementPageResult) jsonObject {
+	result := jsonObject{key: items}
+	if page == nil {
+		return result
+	}
+	result["page"] = page.Page
+	result["pageSize"] = page.PageSize
+	result["totalCount"] = page.TotalCount
+	result["hasMore"] = page.HasMore
+	return result
 }
 
 func exchangeInfoFromJSON(exchange jsonObject) jsonObject {

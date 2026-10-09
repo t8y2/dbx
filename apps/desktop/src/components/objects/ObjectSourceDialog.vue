@@ -9,7 +9,7 @@ import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatSqlForDisplay, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { buildEditableObjectSource, buildExecutableObjectSourceStatements, executeObjectSourceSave, formatObjectSourceSaveError, resolveObjectSourceEditDraft } from "@/lib/table/objectSourceEditor";
 import { loadObjectSourceWithRoutineFallback } from "@/lib/table/objectSourceLoad";
-import { xuguRoutineMetadataFromDefinition, type XuguRoutineMetadata } from "@/lib/table/routineParameters";
+import { jdbcRoutineMetadata, xuguRoutineMetadataFromDefinition, type RoutineMetadata } from "@/lib/table/routineParameters";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import * as api from "@/lib/backend/api";
 import QueryEditor from "@/components/editor/QueryEditor.vue";
@@ -57,7 +57,7 @@ const editing = ref(false);
 const sourceEditable = ref(true);
 const error = ref("");
 const saveError = ref("");
-const routineMetadata = ref<XuguRoutineMetadata | null>(null);
+const routineMetadata = ref<RoutineMetadata | null>(null);
 /** May differ from props.objectType after PROCEDURE/FUNCTION/PACKAGE fallback resolution. */
 const resolvedObjectType = ref<ObjectSourceKind>(props.objectType);
 let loadSerial = 0;
@@ -111,7 +111,8 @@ async function loadSource(nextEditing = props.initialEditing && canEdit.value) {
     });
     if (serial !== loadSerial) return;
     resolvedObjectType.value = resolvedType;
-    routineMetadata.value = props.databaseType === "xugu" && (resolvedType === "PROCEDURE" || resolvedType === "FUNCTION") ? xuguRoutineMetadataFromDefinition(result.source) : null;
+    const isRoutine = resolvedType === "PROCEDURE" || resolvedType === "FUNCTION";
+    routineMetadata.value = !isRoutine ? null : result.routine_parameters !== undefined ? jdbcRoutineMetadata(result.routine_parameters) : target.databaseType === "xugu" ? xuguRoutineMetadataFromDefinition(result.source) : null;
     sourceEditable.value = editableAllowed;
     const displaySource = resolvedType === "SEQUENCE" ? result.source : editable;
     const formatted = await formatSqlForDisplay(displaySource, target.formatDialect ?? target.dialect, settingsStore.editorSettings.sqlFormatter);
@@ -259,6 +260,7 @@ function closeDialog() {
       <div v-else class="flex min-h-0 flex-col gap-3 overflow-hidden">
         <RoutineMetadataPanel v-if="hasRoutineMetadata && routineMetadata" :parameters="routineMetadata.parameters" :return-type="routineMetadata.returnType" />
         <QueryEditor
+          v-if="content || !hasRoutineMetadata"
           :key="`${props.connectionId}:${props.database}:${props.schema || ''}:${props.name}:${props.objectType}`"
           :model-value="content"
           class="object-source-dialog-editor min-h-0 flex-1 overflow-hidden rounded border"

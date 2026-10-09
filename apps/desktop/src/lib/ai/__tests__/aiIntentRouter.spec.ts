@@ -1,6 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import i18n from "@/i18n";
 import * as api from "@/lib/backend/api";
-import { AGENT_ACTIONS, ASK_ACTIONS, buildAgentRequest, isValidActionForMode, type AiAction, type AiContext } from "@/lib/ai/ai";
+import { AGENT_ACTIONS, ASK_ACTIONS, buildAgentRequest, buildSystemPrompt, isValidActionForMode, type AiAction, type AiContext } from "@/lib/ai/ai";
 import { INTENT_CLASSIFY_MAX_TEXT_CHARS, actionForIntent, classifyIntentByLlm, intentCandidatesForMode, parseClassifierAction, requestsExplicitExecution, routeIntent, routeIntentByRules, type AiIntent, type AiIntentRouteInput } from "@/lib/ai/aiIntentRouter";
 import type { AiConfig } from "@/stores/settingsStore";
 
@@ -25,6 +26,11 @@ function context(overrides: Partial<AiContext> = {}): AiContext {
 
 /** Gate-open sample: an unambiguous data request (查一下 anchors the execution gate). */
 const EXPLICIT_DATA_TEXT = "查一下这张表里的数据";
+
+// 提示词断言按英文文案书写；显式固定语言，避免跟随机器语言环境（例如中文系统）而误报。
+beforeEach(() => {
+  i18n.global.locale.value = "en";
+});
 
 describe("routeIntentByRules — Ask mode golden cases", () => {
   // Every non-general Ask action is reachable from an unambiguous zh/en sample.
@@ -428,6 +434,13 @@ describe("routeIntent (two-stage entry point)", () => {
 });
 
 describe("'auto' never reaches the transport layer", () => {
+  it("builds plugin Agent prompts that require live tools", () => {
+    const request = buildAgentRequest({ config, action: "general", mode: "agent", instruction: "检查当前集群", context: context({ databaseType: "plugin", connectionName: "orb", database: "" }) });
+    expect(request.messages[request.messages.length - 1]?.content).toBe("检查当前集群");
+    expect(buildSystemPrompt("general", context({ databaseType: "plugin", connectionName: "orb", database: "" }), "agent")).toContain("live data");
+    expect(buildSystemPrompt("general", context({ databaseType: "plugin", connectionName: "orb", database: "" }), "agent")).not.toContain("返回 SQL");
+  });
+
   it("keeps the concrete action tables free of 'auto'", () => {
     expect(ASK_ACTIONS).not.toContain("auto");
     expect(AGENT_ACTIONS).not.toContain("auto");

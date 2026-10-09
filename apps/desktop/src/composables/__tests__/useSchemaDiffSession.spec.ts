@@ -22,6 +22,77 @@ vi.mock("@/lib/schema/schemaDiffMetadataLoad", () => ({ loadSchemaDetails: vi.fn
 
 const { startSchemaDiffSession } = await import("../useSchemaDiffSession.ts");
 
+test("disconnecting either side stops the compare after its issued table-list requests settle", async () => {
+  const { cancelSchemaDiffTasksForConnection } = await import("@/lib/schema/schemaDiffCancellation");
+  const { loadSchemaDetails } = await import("@/lib/schema/schemaDiffMetadataLoad");
+  vi.clearAllMocks();
+  const finish: Array<(tables: never[]) => void> = [];
+  const session = startSchemaDiffSession(
+    {
+      sourceConnectionId: "cancel-source",
+      sourceDatabase: "app",
+      sourceSchema: "",
+      targetConnectionId: "cancel-target",
+      targetDatabase: "app",
+      targetSchema: "",
+      sourceDbType: "mysql",
+      targetDbType: "mysql",
+      options: {},
+      ignoreComments: false,
+      label: "cancel compare",
+    },
+    { tableListLoader: { load: vi.fn(() => new Promise<never[]>((resolve) => finish.push(resolve))) } },
+  );
+  const cancellation = cancelSchemaDiffTasksForConnection("cancel-target", new Error("connection disconnected"));
+  assert.ok(cancellation);
+  finish[0]([]);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(session.status, "running");
+  finish[1]([]);
+  await cancellation;
+  assert.equal(session.status, "failed");
+  assert.equal(session.error, "connection disconnected");
+  assert.equal(vi.mocked(loadSchemaDetails).mock.calls.length, 0);
+  assert.equal(apiMock.prepareSchemaDiff.mock.calls.length, 0);
+  assert.equal(trackerMock.updateCompareTask.mock.calls.at(-1)?.[1].status, "Error");
+  vi.clearAllMocks();
+});
+
+test("applies every exclude rule before loading source and target details", async () => {
+  const { loadSchemaDetails } = await import("@/lib/schema/schemaDiffMetadataLoad");
+  vi.mocked(loadSchemaDetails).mockClear();
+  apiMock.prepareSchemaDiff.mockResolvedValue({ diffs: [], renameCandidates: [], syncSql: "", rollbackSyncSql: "" });
+  const tableListLoader = {
+    load: vi.fn().mockResolvedValue(["im_users", "ib_orders", "audit_log", "users"].map((name) => ({ name, table_type: "BASE TABLE" }))),
+  };
+  const session = startSchemaDiffSession(
+    {
+      sourceConnectionId: "source",
+      sourceDatabase: "app",
+      sourceSchema: "public",
+      targetConnectionId: "target",
+      targetDatabase: "warehouse",
+      targetSchema: "public",
+      sourceDbType: "mysql",
+      targetDbType: "mysql",
+      options: { functions: false, tableExcludePattern: "^im_,^ib_,log$" },
+      ignoreComments: false,
+      label: "app → warehouse",
+    },
+    { tableListLoader },
+  );
+  await waitForSession(session);
+  assert.equal(session.status, "completed");
+  assert.equal(vi.mocked(loadSchemaDetails).mock.calls.length, 2);
+  for (const [tables] of vi.mocked(loadSchemaDetails).mock.calls) {
+    assert.deepEqual(
+      tables.map((table) => table.name),
+      ["users"],
+    );
+  }
+  vi.clearAllMocks();
+});
+
 async function waitForSession(session: { status: string }) {
   for (let attempt = 0; attempt < 40 && session.status === "running"; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -31,6 +102,7 @@ async function waitForSession(session: { status: string }) {
 test("defaults enable tables and functions compare for common targets", () => {
   assert.equal(DEFAULT_MYSQL_OPTIONS.tables, true);
   assert.equal(DEFAULT_MYSQL_OPTIONS.functions, true);
+  assert.equal(DEFAULT_MYSQL_OPTIONS.compareCharset, true);
   assert.equal(getDefaultOptionsForDbType("oracle").tables, true);
   assert.equal(getDefaultOptionsForDbType("oracle").functions, true);
   assert.equal(getDefaultOptionsForDbType("mysql").tables, true);
@@ -82,10 +154,47 @@ test("runs a schema diff session after the dialog is closed and retains the prep
   assert.equal(trackerMock.updateCompareTask.mock.calls.at(-1)?.[1].status, "Done");
   // MySQL defaults now enable functions compare for same-dialect pairs.
   assert.equal(apiMock.listFunctions.mock.calls.length, 2);
+  assert.equal(apiMock.prepareSchemaDiff.mock.calls[0]?.[0]?.compareCharset, true);
 
   const onOpen = trackerMock.addSchemaDiffTask.mock.calls[0]?.[2] as (() => void) | undefined;
   onOpen?.();
   assert.equal(openMock.mock.calls.at(-1)?.[0], session.id);
+});
+
+test("forwards a disabled charset comparison to the backend", async () => {
+  apiMock.prepareSchemaDiff.mockClear();
+  apiMock.prepareSchemaDiff.mockResolvedValue({
+    diffs: [],
+    functionDiffs: [],
+    sequenceDiffs: [],
+    ruleDiffs: [],
+    ownerDiffs: [],
+    renameCandidates: [],
+    syncSql: "",
+    rollbackSyncSql: "",
+  });
+
+  const session = startSchemaDiffSession(
+    {
+      sourceConnectionId: "source",
+      sourceDatabase: "app",
+      sourceSchema: "",
+      targetConnectionId: "target",
+      targetDatabase: "warehouse",
+      targetSchema: "",
+      sourceDbType: "mysql",
+      targetDbType: "mysql",
+      options: { compareCharset: false },
+      ignoreComments: false,
+      label: "charset disabled",
+    },
+    { tableListLoader: { load: vi.fn().mockResolvedValue([]) } },
+  );
+
+  await waitForSession(session);
+
+  assert.equal(session.status, "completed");
+  assert.equal(apiMock.prepareSchemaDiff.mock.calls[0]?.[0]?.compareCharset, false);
 });
 
 test("loads routines for mysql↔mysql when functions is enabled", async () => {

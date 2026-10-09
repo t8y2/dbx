@@ -366,6 +366,7 @@
           const data = await window.dbxPlugin.queryData({
             connectionId: resultContext.connectionId,
             database: resultContext.database || undefined,
+            schema: resultContext.schema || undefined,
             sql: resultContext.sql,
             maxRows: 1000,
           });

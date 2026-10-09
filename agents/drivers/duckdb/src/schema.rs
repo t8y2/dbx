@@ -319,7 +319,23 @@ pub fn duckdb_query_columns_in_database_with_attached(
     table: &str,
     attached_names: &[String],
 ) -> Result<Vec<db::ColumnInfo>, String> {
+    let use_primary_catalog = database.trim().is_empty() || database == "main";
     let database = duckdb_catalog_name(con, database, attached_names)?;
+    let columns = duckdb_query_columns_in_catalog(con, &database, schema, table)?;
+    if columns.is_empty() && use_primary_catalog {
+        if let Some(attached) = attached_names.iter().find(|name| name.eq_ignore_ascii_case(schema)) {
+            return duckdb_query_columns_in_catalog(con, attached, "main", table);
+        }
+    }
+    Ok(columns)
+}
+
+fn duckdb_query_columns_in_catalog(
+    con: &duckdb::Connection,
+    database: &str,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<db::ColumnInfo>, String> {
     let mut pk_stmt = con
         .prepare(
             "SELECT kcu.column_name
@@ -335,11 +351,10 @@ pub fn duckdb_query_columns_in_database_with_attached(
          ORDER BY kcu.ordinal_position",
         )
         .map_err(|e| e.to_string())?;
-    let pk_rows = pk_stmt
-        .query_map((database.as_str(), schema, table), |row| row.get::<_, String>(0))
-        .map_err(|e| e.to_string())?;
+    let pk_rows =
+        pk_stmt.query_map((database, schema, table), |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
     let primary_keys: std::collections::HashSet<String> = pk_rows.filter_map(|r| r.ok()).collect();
-    let column_comments = duckdb_column_comments(con, &database, schema, table);
+    let column_comments = duckdb_column_comments(con, database, schema, table);
 
     let mut stmt = con
         .prepare(
@@ -350,7 +365,7 @@ pub fn duckdb_query_columns_in_database_with_attached(
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map((database.as_str(), schema, table), |row| {
+        .query_map((database, schema, table), |row| {
             let name = row.get::<_, String>(0)?;
             let comment = column_comments.get(&name).cloned().flatten();
             Ok(db::ColumnInfo {
@@ -370,8 +385,8 @@ pub fn duckdb_query_columns_in_database_with_attached(
         })
         .map_err(|e| e.to_string())?;
     let columns: Vec<db::ColumnInfo> = rows.filter_map(|r| r.ok()).collect();
-    if columns.is_empty() && duckdb_is_quack_catalog(con, &database) {
-        if let Some(remote) = duckdb_quack_remote_columns(con, &database, schema, table) {
+    if columns.is_empty() && duckdb_is_quack_catalog(con, database) {
+        if let Some(remote) = duckdb_quack_remote_columns(con, database, schema, table) {
             return Ok(remote);
         }
     }
@@ -636,6 +651,111 @@ mod tests {
         let name = columns.iter().find(|column| column.name == "name").unwrap();
 
         assert_eq!(name.comment.as_deref(), Some("Display name"));
+    }
+
+    fn duckdb_attached_columns_fixture() -> (duckdb::Connection, Vec<String>) {
+        let con = duckdb::Connection::open_in_memory().unwrap();
+        duckdb_attach_database(&con, "cost_db", ":memory:").unwrap();
+        duckdb_attach_database(&con, "other_db", ":memory:").unwrap();
+        con.execute_batch(
+            "CREATE TABLE memory.main.md_bom(primary_id INTEGER); \
+             CREATE TABLE cost_db.main.md_bom(product_id INTEGER PRIMARY KEY, description VARCHAR DEFAULT 'part'); \
+             COMMENT ON COLUMN cost_db.main.md_bom.description IS 'Product description'; \
+             CREATE TABLE other_db.main.md_bom(other_id INTEGER); \
+             CREATE TABLE other_db.main.other_only(id INTEGER);",
+        )
+        .unwrap();
+        (con, vec!["cost_db".to_string(), "other_db".to_string()])
+    }
+
+    #[test]
+    fn duckdb_query_columns_resolves_attached_catalog_as_schema() {
+        let (con, attached_names) = duckdb_attached_columns_fixture();
+        con.execute_batch("SELECT product_id FROM cost_db.md_bom").unwrap();
+
+        for database in ["main", "", " "] {
+            for schema in ["cost_db", "COST_DB"] {
+                let columns =
+                    duckdb_query_columns_in_database_with_attached(&con, database, schema, "md_bom", &attached_names)
+                        .unwrap();
+                assert_eq!(
+                    columns.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(),
+                    ["product_id", "description"]
+                );
+                assert!(columns[0].is_primary_key);
+                assert!(!columns[0].is_nullable);
+                assert_eq!(columns[0].data_type, "INTEGER");
+                assert!(!columns[1].is_primary_key);
+                assert!(columns[1].is_nullable);
+                assert_eq!(columns[1].column_default.as_deref(), Some("'part'"));
+                assert_eq!(columns[1].comment.as_deref(), Some("Product description"));
+            }
+        }
+    }
+
+    #[test]
+    fn duckdb_query_columns_prefers_existing_schema_table_over_attached_catalog() {
+        let (con, attached_names) = duckdb_attached_columns_fixture();
+        con.execute_batch("CREATE SCHEMA memory.cost_db; CREATE TABLE memory.cost_db.md_bom(schema_id INTEGER);")
+            .unwrap();
+
+        let columns =
+            duckdb_query_columns_in_database_with_attached(&con, "main", "cost_db", "md_bom", &attached_names).unwrap();
+        assert_eq!(columns.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(), ["schema_id"]);
+
+        con.execute_batch("DROP TABLE memory.cost_db.md_bom").unwrap();
+        let columns =
+            duckdb_query_columns_in_database_with_attached(&con, "main", "cost_db", "md_bom", &attached_names).unwrap();
+        assert_eq!(
+            columns.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(),
+            ["product_id", "description"]
+        );
+    }
+
+    #[test]
+    fn duckdb_query_columns_keeps_explicit_catalog_and_default_schema() {
+        let (con, attached_names) = duckdb_attached_columns_fixture();
+        for (database, expected) in [("main", "primary_id"), ("memory", "primary_id"), ("other_db", "other_id")] {
+            let columns =
+                duckdb_query_columns_in_database_with_attached(&con, database, "main", "md_bom", &attached_names)
+                    .unwrap();
+            assert_eq!(columns.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(), [expected]);
+        }
+        let columns =
+            duckdb_query_columns_in_database_with_attached(&con, "cost_db", "main", "md_bom", &attached_names).unwrap();
+        assert_eq!(
+            columns.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(),
+            ["product_id", "description"]
+        );
+
+        for database in ["memory", "other_db", "cost_db", "unknown"] {
+            let columns =
+                duckdb_query_columns_in_database_with_attached(&con, database, "cost_db", "md_bom", &attached_names)
+                    .unwrap();
+            assert!(columns.is_empty(), "must not redirect explicit {database}.cost_db.md_bom");
+        }
+    }
+
+    #[test]
+    fn duckdb_query_columns_isolates_attached_catalog_fallback() {
+        let (con, attached_names) = duckdb_attached_columns_fixture();
+        let columns =
+            duckdb_query_columns_in_database_with_attached(&con, "main", "other_db", "md_bom", &attached_names)
+                .unwrap();
+        assert_eq!(columns.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(), ["other_id"]);
+
+        for (schema, table) in [("cost_db", "missing"), ("cost_db", "other_only"), ("unknown", "md_bom")] {
+            let columns =
+                duckdb_query_columns_in_database_with_attached(&con, "main", schema, table, &attached_names).unwrap();
+            assert!(columns.is_empty(), "unexpected columns for {schema}.{table}");
+        }
+        let columns = duckdb_query_columns_in_database_with_attached(&con, "main", "cost_db", "md_bom", &[]).unwrap();
+        assert!(columns.is_empty());
+
+        con.execute_batch("DETACH cost_db").unwrap();
+        let columns =
+            duckdb_query_columns_in_database_with_attached(&con, "main", "cost_db", "md_bom", &attached_names).unwrap();
+        assert!(columns.is_empty());
     }
 
     #[test]

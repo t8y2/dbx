@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
+import { summarizeSelection } from "../../apps/desktop/src/lib/dataGrid/gridSelection.ts";
 import {
   applyMongoGridChangesToDocument,
   applyMongoGridChangesToDocumentBaseline,
@@ -10,14 +11,17 @@ import {
   formatMongoShellLiteral,
   MONGO_DOCUMENT_GRID_NULL,
   mongoDocumentDisplayValue,
+  mongoDocumentDisplayText,
   mongoDocumentGridDisplayText,
   mongoDocumentGridClipboardText,
   mongoDocumentGridEditorText,
   mongoDocumentGridExternalValue,
   mongoDocumentGridInputValue,
   mongoDocumentGridValue,
+  mongoDocumentGridNumericValue,
   mongoDocumentGridColumnTypes,
   mongoDocumentIdForGrid,
+  mongoDocumentRelaxedExtendedJson,
   parseMongoDocumentInputValue,
   serializeMongoDocumentId,
 } from "../../apps/desktop/src/lib/mongo/mongoDocumentValues.ts";
@@ -60,6 +64,10 @@ test("parses Mongo shell ISODate literals as extended JSON dates", () => {
 });
 
 test("preserves date-shaped Mongo strings instead of guessing Date", () => {
+  // A shell date literal written the way a grid cell shows it is read as local time and sent as UTC.
+  assert.deepEqual(parseMongoDocumentInputValue('ISODate("2025-04-01 19:46:03")'), { $date: new Date(2025, 3, 1, 19, 46, 3).toISOString() });
+  assert.deepEqual(parseMongoDocumentInputValue('new Date("2025-04-01")'), { $date: new Date(2025, 3, 1).toISOString() });
+  // Bare text stays text: only the literal marks a date.
   assert.equal(parseMongoDocumentInputValue("2025-08-14 02:25:43.718"), "2025-08-14 02:25:43.718");
   assert.equal(parseMongoDocumentInputValue("2025-04-01 19:46:03"), "2025-04-01 19:46:03");
   assert.equal(parseMongoDocumentInputValue('"2025-08-14 02:25:43.718"'), "2025-08-14 02:25:43.718");
@@ -344,6 +352,28 @@ test("keeps normal Mongo values readable and unsafe Int64 editable", () => {
   assert.deepEqual(parseMongoDocumentInputValue('NumberLong("9007199254740993")'), { $numberLong: "9007199254740993" });
 });
 
+test("renders Mongo structures as shell-style literals like mongosh", () => {
+  assert.equal(mongoDocumentDisplayText({ $oid: "6743e4bfa3f6f84bc3fff6c8" }), 'ObjectId("6743e4bfa3f6f84bc3fff6c8")');
+  assert.equal(mongoDocumentDisplayText({ $numberLong: "2326645729978441729" }), 'NumberLong("2326645729978441729")');
+  assert.equal(mongoDocumentDisplayText({ $numberInt: "42" }), 'NumberInt("42")');
+  assert.equal(mongoDocumentDisplayText({ $date: "2026-06-10T13:59:31.287Z" }), 'ISODate("2026-06-10T13:59:31.287Z")');
+  assert.equal(mongoDocumentDisplayText({ $date: { $numberLong: "1781099971287" } }), 'ISODate("2026-06-10T13:59:31.287Z")');
+  assert.equal(mongoDocumentDisplayText({ $minKey: 1 }), "MinKey()");
+  assert.equal(mongoDocumentDisplayText(['ISODate("2026-06-10T13:59:31.287Z")', { $oid: "507f1f77bcf86cd799439011" }, 2]), '[ISODate("2026-06-10T13:59:31.287Z"), ObjectId("507f1f77bcf86cd799439011"), 2]');
+  assert.equal(mongoDocumentDisplayText({ note: "[1,2]", nested: [[1], []] }), '{"note": "[1,2]", "nested": [[1], []]}');
+  assert.equal(mongoDocumentDisplayText({ $binary: { base64: "AQI=", subType: "00" } }), '{"$binary": {"base64": "AQI=", "subType": "00"}}');
+});
+
+test("converts browser-form dates to relaxed Extended JSON for document previews", () => {
+  assert.deepEqual(mongoDocumentRelaxedExtendedJson({ at: 'ISODate("2026-06-10T13:59:31.287Z")', keep: "ISODate-ish text" }), {
+    at: { $date: "2026-06-10T13:59:31.287Z" },
+    keep: "ISODate-ish text",
+  });
+  assert.deepEqual(mongoDocumentRelaxedExtendedJson({ items: [{ by: { $oid: "507f1f77bcf86cd799439011" }, at: 'new Date("2026-06-10T13:59:31.287Z")' }] }), {
+    items: [{ by: { $oid: "507f1f77bcf86cd799439011" }, at: { $date: "2026-06-10T13:59:31.287Z" } }],
+  });
+});
+
 test("builds edits for Int32, Double, Date, and unsafe Int64", () => {
   const changes = new Map<number, string | number | boolean | null>([
     [1, 42],
@@ -414,4 +444,32 @@ test("keeps BSON null empty in editors while preserving a copy marker", () => {
 test("restores internal Mongo collection-grid values for external output", () => {
   assert.equal(mongoDocumentGridExternalValue(MONGO_DOCUMENT_GRID_NULL), null);
   assert.equal(mongoDocumentGridExternalValue("NULL"), "NULL");
+});
+
+test("counts typed BSON scalars as numbers so a column total keeps its negative values", () => {
+  const documents = [{ charactersUsed: 2528.125 }, { charactersUsed: { $numberDecimal: "-12.5" } }, { charactersUsed: -100.5 }, { charactersUsed: { $numberInt: "-5" } }, { charactersUsed: { $numberLong: "9" } }];
+  const rows = documents.map((document) => [mongoDocumentGridValue(document.charactersUsed)]);
+  const summary = summarizeSelection({ columns: ["charactersUsed"], rows }, { numericValue: mongoDocumentGridNumericValue });
+
+  assert.equal(summary.numericCount, 5);
+  assert.equal(summary.sum, 2528.125 - 12.5 - 100.5 - 5 + 9);
+  assert.equal(summary.average, (2528.125 - 12.5 - 100.5 - 5 + 9) / 5);
+});
+
+test("keeps non-numeric Mongo cells out of a column total", () => {
+  assert.equal(mongoDocumentGridNumericValue(mongoDocumentGridValue(null)), undefined);
+  assert.equal(mongoDocumentGridNumericValue(true), undefined);
+  assert.equal(mongoDocumentGridNumericValue(""), undefined);
+  assert.equal(mongoDocumentGridNumericValue("not a number"), undefined);
+  assert.equal(mongoDocumentGridNumericValue(Number.NaN), undefined);
+  assert.equal(mongoDocumentGridNumericValue(Number.POSITIVE_INFINITY), undefined);
+  assert.equal(mongoDocumentGridNumericValue(mongoDocumentGridValue({ $date: "2026-06-10T13:59:31.287Z" })), undefined);
+  assert.equal(mongoDocumentGridNumericValue(mongoDocumentGridValue({ $oid: "6743e4bfa3f6f84bc3fff6c8" })), undefined);
+  assert.equal(mongoDocumentGridNumericValue(mongoDocumentGridValue({ nested: { amount: -12.5 } })), undefined);
+  // A BSON string that spells a shell literal is read exactly as the grid renders it.
+  assert.equal(mongoDocumentGridNumericValue(mongoDocumentGridValue('NumberLong("-7")')), -7);
+  // Reserved-namespace text is never unwrapped as a literal.
+  assert.equal(mongoDocumentGridNumericValue(mongoDocumentGridValue(MONGO_DOCUMENT_GRID_NULL)), undefined);
+  // Numeric text stored as a BSON string still counts, as it does in every other grid.
+  assert.equal(mongoDocumentGridNumericValue(mongoDocumentGridValue("-12.5")), -12.5);
 });

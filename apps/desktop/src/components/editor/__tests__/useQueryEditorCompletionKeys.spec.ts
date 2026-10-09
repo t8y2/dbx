@@ -45,7 +45,7 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}) {
     codeMirrorSelectFirstCompletion: vi.fn(() => false),
     codeMirrorInsertNewlineKeepIndent: newline,
   });
-  const settings = reactive({ editorSettings: { sqlFormatter: { useTabs: false, tabWidth: 2 }, shortcuts: { acceptCompletion: "Tab" }, selectFirstCompletionOnOpen: false, sqlServerSpaceConfirmsCompletion: true } });
+  const settings = reactive({ editorSettings: { sqlFormatter: { useTabs: false, tabWidth: 2 }, shortcuts: { acceptCompletion: "Tab" }, selectFirstCompletionOnOpen: false, sqlServerSpaceConfirmsCompletion: true, snippetTriggerKey: "tab" as const } });
   const completion = { suppressAutoStartUntil: 0 };
   const keys = useQueryEditorCompletionKeys({ props, settingsStore: settings as Options["settingsStore"], runtime, completion, batchSelection: { applySelectedBatchColumnSelection: batch }, isEditorComposing: composing, retryDelayMs: 5, tabMaxWaitMs: 40, enterMaxWaitMs: 20 });
   cleanups.push(() => {
@@ -149,6 +149,31 @@ describe("QueryEditor completion-key ownership", () => {
     expect(completion.suppressAutoStartUntil).toBeGreaterThan(Date.now());
   });
 
+  it("accepts the first completion once a pending Enter retry becomes active", async () => {
+    const { keys, view, status, runtime, accept, newline, settings } = createHarness();
+    status.mockReturnValue("pending");
+    settings.editorSettings.selectFirstCompletionOnOpen = true;
+    expect(keys.handleEnter(view)).toBe(true);
+    expect(newline).not.toHaveBeenCalled();
+    status.mockReturnValue("active");
+    runtime.codeMirrorSelectedCompletionIndex = () => 0;
+    accept.mockReturnValue(true);
+    await vi.advanceTimersByTimeAsync(5);
+    expect(accept).toHaveBeenCalledOnce();
+    expect(view.state.doc.toString()).toBe("abc");
+  });
+
+  it("inserts one newline when a pending Enter retry expires", async () => {
+    const { keys, view, status, settings, newline, completion } = createHarness();
+    status.mockReturnValue("pending");
+    settings.editorSettings.selectFirstCompletionOnOpen = true;
+    expect(keys.handleEnter(view)).toBe(true);
+    await vi.advanceTimersByTimeAsync(25);
+    expect(newline).toHaveBeenCalledOnce();
+    expect(view.state.doc.toString()).toBe("abc\n");
+    expect(completion.suppressAutoStartUntil).toBeGreaterThan(Date.now());
+  });
+
   it("cancels Enter retries without cancelling another editor's pending Tab", async () => {
     const first = createHarness();
     const second = createHarness();
@@ -173,5 +198,70 @@ describe("QueryEditor completion-key ownership", () => {
     expect(keys.acceptSqlServerCompletionOnSpace(view)).toBe(true);
     expect(view.state.doc.toString()).toBe("users ");
     expect(view.state.selection.main.head).toBe(6);
+  });
+
+  it("accepts snippet completion on Tab when snippetTriggerKey is tab or both", () => {
+    const { keys, view, status, runtime, accept } = createHarness();
+    status.mockReturnValue("active");
+    runtime.codeMirrorSelectedCompletionIndex = () => 0;
+    runtime.codeMirrorSelectedCompletion = () => ({ label: "sel", type: "snippet" });
+    accept.mockReturnValue(true);
+
+    expect(keys.handleTab(view)).toBe(true);
+    expect(accept).toHaveBeenCalledOnce();
+  });
+
+  it("does not accept snippet completion on Tab when snippetTriggerKey is space", () => {
+    const { keys, view, status, runtime, accept, settings } = createHarness();
+    settings.editorSettings.snippetTriggerKey = "space";
+    status.mockReturnValue("active");
+    runtime.codeMirrorSelectedCompletionIndex = () => 0;
+    runtime.codeMirrorSelectedCompletion = () => ({ label: "sel", type: "snippet" });
+    accept.mockReturnValue(true);
+
+    expect(keys.handleTab(view)).toBe(true);
+    expect(accept).not.toHaveBeenCalled();
+    expect(view.state.doc.toString()).toBe("abc  ");
+  });
+
+  it("accepts snippet completion on Space when snippetTriggerKey is space or both", () => {
+    const { keys, view, status, runtime, accept, settings } = createHarness();
+    settings.editorSettings.snippetTriggerKey = "space";
+    status.mockReturnValue("active");
+    runtime.codeMirrorSelectedCompletionIndex = () => 0;
+    runtime.codeMirrorSelectedCompletion = () => ({ label: "sel", type: "snippet" });
+    accept.mockReturnValue(true);
+
+    expect(keys.handleSpace(view)).toBe(true);
+    expect(accept).toHaveBeenCalledOnce();
+
+    accept.mockClear();
+    settings.editorSettings.snippetTriggerKey = "both";
+    expect(keys.handleSpace(view)).toBe(true);
+    expect(accept).toHaveBeenCalledOnce();
+  });
+
+  it("does not accept snippet completion on Space when snippetTriggerKey is tab", () => {
+    const { keys, view, status, runtime, accept, settings } = createHarness();
+    settings.editorSettings.snippetTriggerKey = "tab";
+    status.mockReturnValue("active");
+    runtime.codeMirrorSelectedCompletionIndex = () => 0;
+    runtime.codeMirrorSelectedCompletion = () => ({ label: "sel", type: "snippet" });
+    accept.mockReturnValue(true);
+
+    expect(keys.handleSpace(view)).toBe(false);
+    expect(accept).not.toHaveBeenCalled();
+  });
+
+  it("ignores Space for snippet completion while an IME composition is active", () => {
+    const { keys, view, status, runtime, accept, composing, settings } = createHarness();
+    settings.editorSettings.snippetTriggerKey = "space";
+    status.mockReturnValue("active");
+    runtime.codeMirrorSelectedCompletionIndex = () => 0;
+    runtime.codeMirrorSelectedCompletion = () => ({ label: "sel", type: "snippet" });
+    composing.mockReturnValue(true);
+
+    expect(keys.handleSpace(view)).toBe(false);
+    expect(accept).not.toHaveBeenCalled();
   });
 });

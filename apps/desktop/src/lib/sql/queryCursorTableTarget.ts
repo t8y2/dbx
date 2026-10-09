@@ -6,6 +6,7 @@ import { sqlSemanticDialectFor } from "@/lib/sql/semantic/dialect";
 import type { DatabaseType, QueryTab, TreeNode } from "@/types/database";
 
 export interface QueryCursorTableCandidate {
+  catalog?: string;
   connectionId: string;
   database: string;
   schema?: string;
@@ -44,7 +45,7 @@ export function queryCursorTableCandidate(tab: QueryTab | undefined | null, data
   if (!tab || tab.mode !== "query" || !tab.connectionId || !tab.database) return null;
 
   const cursor = tab.editorSelection?.head ?? tab.editorSelection?.anchor ?? tab.sql.length;
-  return queryTableCandidateAtSqlPosition({
+  const candidate = queryTableCandidateAtSqlPosition({
     connectionId: tab.connectionId,
     database: tab.database,
     schema: tab.schema,
@@ -52,6 +53,7 @@ export function queryCursorTableCandidate(tab: QueryTab | undefined | null, data
     sql: tab.sql,
     position: cursor,
   });
+  return candidate && tab.catalog ? { ...candidate, catalog: tab.catalog } : candidate;
 }
 
 export function queryTableCandidateAtSqlPosition(input: QueryTableCandidateAtPositionInput): QueryCursorTableCandidate | null {
@@ -158,8 +160,9 @@ function sameIdentifier(left: string | undefined, right: string | undefined): bo
 function nodeMatchesCandidate(node: TreeNode, candidate: QueryCursorTableCandidate): boolean {
   if (node.type !== "table" && node.type !== "view" && node.type !== "materialized_view") return false;
   if (node.connectionId !== candidate.connectionId) return false;
+  if ((node.catalog || undefined) !== (candidate.catalog || undefined)) return false;
   if (!sameIdentifier(node.database, candidate.database)) return false;
-  if (candidate.schema && !sameIdentifier(node.schema, candidate.schema)) return false;
+  if (candidate.schema && !sameIdentifier(node.schema || node.database, candidate.schema)) return false;
   return sameIdentifier(node.label, candidate.tableName);
 }
 
@@ -170,6 +173,7 @@ export function findLoadedTableTargetForCandidate(nodes: readonly TreeNode[], ca
         type: "table",
         connectionId: candidate.connectionId,
         database: node.database || candidate.database,
+        ...(node.catalog ? { catalog: node.catalog } : {}),
         schema: node.schema || candidate.schema,
         tableName: node.label,
       };

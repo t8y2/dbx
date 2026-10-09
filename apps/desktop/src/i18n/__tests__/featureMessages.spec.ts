@@ -3,6 +3,7 @@ import { createI18n } from "vue-i18n";
 import az from "../locales/az";
 import en from "../locales/en";
 import es from "../locales/es";
+import id from "../locales/id";
 import itLocale from "../locales/it";
 import ja from "../locales/ja";
 import ko from "../locales/ko";
@@ -20,9 +21,9 @@ import zhTW from "../locales/zh-TW";
 vi.mock("../locales/fallback", () => ({ withEnglishFallback: (messages: Record<string, unknown>) => messages }));
 
 type Messages = Record<string, unknown>;
-type Locale = "az" | "en" | "es" | "it" | "ja" | "ko" | "pt-BR" | "ru" | "tr" | "zh-CN" | "zh-TW";
+type Locale = "az" | "en" | "es" | "id" | "it" | "ja" | "ko" | "pt-BR" | "ru" | "tr" | "zh-CN" | "zh-TW";
 
-const declared: Record<Locale, Messages> = { az, en, es, it: itLocale, ja, ko, "pt-BR": ptBR, ru, tr, "zh-CN": zhCN, "zh-TW": zhTW };
+const declared: Record<Locale, Messages> = { az, en, es, id, it: itLocale, ja, ko, "pt-BR": ptBR, ru, tr, "zh-CN": zhCN, "zh-TW": zhTW };
 const ALL_LOCALES = Object.keys(declared) as Locale[];
 const EXCEPT_AZ_TR = ALL_LOCALES.filter((locale) => locale !== "az" && locale !== "tr");
 
@@ -42,6 +43,7 @@ const under = (namespace: string, keys: string[]) => keys.map((key) => `${namesp
 // leaks the raw key path, and a key missing from a locale silently shows
 // English.
 const FEATURE_MESSAGES: FeatureMessages[] = [
+  { feature: "AstraFlow provider", keys: ["ai.astraflowDescription"], translated: true },
   { feature: "AI HTML preview (#6467)", keys: under("ai", ["htmlPreviewLabel", "htmlExpandPreview", "htmlExpandPreviewHint", "htmlSaveSafe", "htmlSaveFailed", "htmlCopySource", "htmlCopyRiskBody", "htmlCopyRiskAccept", "htmlCopyRiskRemember", "htmlCopyRiskToast"]) },
   { feature: "AI conversation export (#6467)", keys: under("ai", ["exportConversation", "conversationExportMarkdown", "conversationExportHtml", "conversationRoleUser", "conversationRoleAssistant", "conversationFailedMarker", "conversationExportEmpty"]) },
   { feature: "AI conversation management", keys: under("ai", ["renameConversation", "conversationRenameFailed", "clearDatabaseSelection", "searchDatabases", "noDatabasesFound"]) },
@@ -54,24 +56,53 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   },
   { feature: "offline Agent export", keys: ["driverStore.offlineExport*"] },
   { feature: "offline Agent import", keys: ["driverStore.offlineImport*", "driverStore.offlineJreImport*"] },
+  { feature: "driver runtime connection-owned message (#10412)", keys: ["driverStore.runtimeControlConnectionOwned"], translated: true },
   { feature: "multi-database execution and export progress", keys: ["multiDbExecute.*", "exportProgress.*"], locales: ["en", "zh-CN"] },
   { feature: "process list batch terminate", keys: under("processList", ["batchTerminate", "batchTerminateTitle", "batchTerminateConfirm", "batchTerminateRunning", "batchTerminateSummary"]) },
   { feature: "cached result fallback", keys: ["grid.cachedResultUnavailable", "grid.reexecuteQuery"] },
   { feature: "Nacos global replace", keys: ["nacos.contentReplace*", "nacos.replaceHistory.*"], locales: EXCEPT_AZ_TR, translated: true },
+  { feature: "Nacos instance health and availability (#10116)", keys: under("nacos", ["serviceInstancesAllHealthy", "serviceInstancesPartiallyHealthy", "serviceInstancesNoHealthyInstances", "serviceInstancesNoInstances", "online", "offline"]) },
   { feature: "SQLite table rebuild notice", keys: ["structureEditor.sqliteRebuildNotice"] },
   { feature: "custom types", keys: ["customType.kinds.composite", "customType.tabs.properties", "customType.members.empty", "customType.properties.empty", "customType.ddl.empty", "customType.ddl.incomplete", "contextMenu.viewDetails"], translated: true },
   { feature: "Dameng object compilation", keys: ["contextMenu.compileObjectFailedTitle", "contextMenu.compileObjectFailedMessage"], locales: EXCEPT_AZ_TR, translated: true },
+  { feature: "SunDB bundled JDBC driver (#10732)", keys: ["connection.sundbCustomDriverHint"], translated: true },
   { feature: "user administration Host change", keys: ["userAdmin.changeHost", "userAdmin.newHost"], translated: true },
   { feature: "plugin batch actions", keys: ["pluginPlatform.batchDuplicateSources", "pluginPlatform.batchRefreshFailed"], locales: EXCEPT_AZ_TR },
   { feature: "plugin marketplace sorting (#10078)", keys: under("pluginPlatform", ["sortBy", "sortByName", "sortByRecentlyUpdated", "sortByRecentlyListed", "sortByUpdatesFirst"]), locales: EXCEPT_AZ_TR, translated: true },
   { feature: "shared refresh action (#8768)", keys: ["common.refresh"] },
   { feature: "transfer bulk select", keys: under("transfer", ["bulkSelectObjects", "bulkSelectTitle", "bulkSelectHint", "bulkSelectPlaceholder", "bulkSelectConfirm", "bulkSelectMatched", "bulkSelectUnmatched", "noMatchingObjects"]), translated: true },
+  { feature: "transfer background acknowledgement (#8649)", keys: ["transfer.backgroundStarted"], translated: true },
   { feature: "table info pin", keys: ["grid.pinTableInfo", "grid.unpinTableInfo"], translated: true },
+  {
+    feature: "data grid structured sorting",
+    keys: under("grid", [
+      "sortBuilderTitle",
+      "sortBuilderAddRule",
+      "sortBuilderSelectColumn",
+      "sortBuilderReorderRule",
+      "sortBuilderApplyOnly",
+      "sortBuilderEnableRule",
+      "sortBuilderDisableRule",
+      "sortBuilderEmpty",
+      "sortBuilderApply",
+      "sortBuilderReset",
+      "sortBuilderCompleteRuleFirst",
+      "sortSqlPreview",
+      "sortSqlPreviewEmpty",
+      "copySortSql",
+      "sortSqlCopied",
+      "resizeSortPanel",
+      "sortTextView",
+    ]),
+    translated: true,
+  },
   { feature: "Consul workspace", keys: ["consul.ui.*", "consul.tools.*"] },
   { feature: "MQTT max packet size", keys: ["connection.mqttMaxPacketSize"] },
   { feature: "sidebar search skip hint", keys: ["sidebar.searchConnectionSkipped"] },
   { feature: "PostgreSQL legacy TLS", keys: ["connection.postgresLegacyTls", "connection.postgresLegacyTlsHint"] },
   { feature: "settings search sections", keys: ["settings.syncWebDavWebDescription", "settings.performanceSection"] },
+  { feature: "local backup selection", keys: ["settings.localBackupSecretsPassphraseRequiredHint", "settings.localBackupPathLabel", "settings.localBackupPathUnset", "settings.localBackupChoosePath", "settings.localBackupPathRequired"], translated: true },
+  { feature: "SQL table completion schema qualification (#9219)", keys: ["settings.tableCompletionSchemaQualification*"], translated: true },
   { feature: "Redis batch expiration", keys: under("redis", ["batchExpiry", "batchExpiryTitle", "batchExpirySelected", "batchExpiryApply", "batchExpirySuccess", "batchExpiryPartial"]) },
   {
     feature: "plugin AI tools and data access",

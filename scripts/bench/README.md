@@ -1,5 +1,17 @@
 # Startup dependency benchmark
 
+## SQL editor typing
+
+Run `node scripts/bench/editor-typing.mjs`, open the printed local URL, and click
+Run benchmark. It mounts the real QueryEditor with its feature extensions enabled
+and runs the actual completion and diagnostic Web Workers alongside typing.
+It covers 5,000 and 20,000 statements and edits inside a single 5,000-line INSERT.
+The JSON report distinguishes synchronous input-dispatch time from animation-frame
+gaps, including delayed analysis after typing. This is an offline browser benchmark:
+it does not measure database metadata latency or the native desktop WebView.
+
+## Startup dependencies
+
 Run `pnpm bench:startup` from the repository root. The benchmark uses the current
 production Vite configuration, checks generated connection descriptors, and builds
 in memory without replacing `dist` or writing generated source files.

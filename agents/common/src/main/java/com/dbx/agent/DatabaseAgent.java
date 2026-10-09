@@ -14,6 +14,14 @@ public interface DatabaseAgent {
     /** Opt in to request-boundary timing, including pooled connection lifecycle. */
     default boolean supportsQueryTiming() { return false; }
 
+    /** A dedicated manual transaction must never migrate to a replacement connection. */
+    default boolean permitsAutomaticReconnect() { return true; }
+
+    default List<QueryResult> executeQueryResults(String sql, String schema, ExecuteQueryOptions options) {
+        throw new UnsupportedOperationException("Complete manual transaction batches are not supported by this driver");
+    }
+
+
     void connect(ConnectParams params);
 
     boolean testConnection(ConnectParams params);
@@ -147,6 +155,10 @@ public interface DatabaseAgent {
     List<IndexInfo> listIndexes(String schema, String table);
 
     List<ForeignKeyInfo> listForeignKeys(String schema, String table);
+
+    default List<ConstraintInfo> listConstraints(String schema, String table) {
+        throw new UnsupportedOperationException("Constraint metadata is not supported by this driver");
+    }
 
     List<TriggerInfo> listTriggers(String schema, String table);
 

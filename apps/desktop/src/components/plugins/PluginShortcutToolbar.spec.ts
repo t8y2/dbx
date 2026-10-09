@@ -1,10 +1,11 @@
 // @vitest-environment happy-dom
 import { createApp, h, nextTick, reactive, ref } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { OPEN_PLUGIN_SETTINGS } from "@/lib/plugins/pluginCenterNavigation";
 import PluginShortcutToolbar from "./PluginShortcutToolbar.vue";
 import { normalizePluginShortcutSettings } from "@/lib/plugins/pluginShortcuts";
 
-const mocks = vi.hoisted(() => ({ open: vi.fn(), save: vi.fn(), toast: vi.fn(), state: null as any, entries: null as any }));
+const mocks = vi.hoisted(() => ({ openSettings: vi.fn(), open: vi.fn(), save: vi.fn(), toast: vi.fn(), state: null as any, entries: null as any }));
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => mocks.state }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
@@ -27,7 +28,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   width = undefined;
   dropdownOnly.value = false;
-  mocks.state = reactive({ isEditorSettingsLoaded: true, editorSettings: { pluginShortcuts: normalizePluginShortcutSettings({ position: "toolbar", toolbarCount: 2 }) }, updateEditorSettingsAndPersist: mocks.save });
+  mocks.state = reactive({ isEditorSettingsLoaded: true, editorSettings: { pluginShortcuts: normalizePluginShortcutSettings({ position: "toolbar", toolbarCount: 2, showSettingsEntry: false }) }, updateEditorSettingsAndPersist: mocks.save });
   mocks.entries = ref(["a", "b", "c", "d", "e"].map((id) => ({ id, pluginId: id, label: `Function ${id}`, pluginName: `Plugin ${id}`, kind: "workbench", targetId: id, disabled: false })));
   mocks.save.mockResolvedValue(undefined);
   vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockImplementation(function (this: HTMLElement) {
@@ -47,6 +48,7 @@ beforeEach(() => {
   host = document.createElement("div");
   document.body.append(host);
   app = createApp({ render: () => h(PluginShortcutToolbar, { dropdownOnly: dropdownOnly.value }) });
+  app.provide(OPEN_PLUGIN_SETTINGS, mocks.openSettings);
   app.mount(host);
 });
 afterEach(() => {
@@ -70,6 +72,76 @@ function pointer(target: EventTarget, type: string, x: number, y: number) {
 }
 
 describe("floating plugin shortcuts", () => {
+  it.each([false, true])("keeps drag previews in the viewport (dropdownOnly=%s)", async (menuOnly) => {
+    dropdownOnly.value = menuOnly;
+    if (menuOnly) await openMenu();
+    else await flush();
+    const original = HTMLElement.prototype.getBoundingClientRect;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      return this.hasAttribute("data-shortcut-drag-preview") ? rect(0, 0, 180, 32) : original.call(this);
+    });
+    const item = document.querySelector<HTMLElement>("[data-shortcut-id]")!;
+    pointer(item, "pointerdown", 16, 16);
+    pointer(window, "pointermove", window.innerWidth - 2, window.innerHeight - 2);
+    await flush();
+    const preview = document.querySelector<HTMLElement>("[data-shortcut-drag-preview]")!;
+    expect(preview.style.left).toBe(`${window.innerWidth - 194}px`);
+    expect(preview.style.top).toBe(`${window.innerHeight - 46}px`);
+    pointer(window, "pointermove", 2, 2);
+    await flush();
+    expect(preview.style.left).toBe("14px");
+    expect(preview.style.top).toBe("14px");
+  });
+
+  it.each([false, true])("keeps settings as the last non-sortable menu action (dropdownOnly=%s)", async (menuOnly) => {
+    dropdownOnly.value = menuOnly;
+    mocks.state.editorSettings.pluginShortcuts.showSettingsEntry = true;
+    await openMenu();
+    const menu = document.querySelector<HTMLElement>("[data-plugin-shortcut-overflow]")!;
+    const action = menu.querySelector<HTMLElement>("[data-plugin-shortcut-settings]")!;
+    expect(menu.lastElementChild).toBe(action);
+    expect(action.hasAttribute("data-shortcut-id")).toBe(false);
+    pointer(action, "pointerdown", 16, 80);
+    pointer(window, "pointermove", 1, 1);
+    pointer(window, "pointerup", 1, 1);
+    await flush();
+    expect(mocks.save).not.toHaveBeenCalled();
+    action.click();
+    expect(mocks.openSettings).toHaveBeenCalledOnce();
+    await flush();
+    expect(document.querySelector("[data-plugin-shortcut-overflow]")).toBeNull();
+  });
+  it("reserves room for inline settings and moves it to overflow when the toolbar shrinks", async () => {
+    mocks.state.editorSettings.pluginShortcuts.showSettingsEntry = true;
+    mocks.state.editorSettings.pluginShortcuts.toolbarCount = 10;
+    await flush();
+    const buttons = host.querySelectorAll("button");
+    expect(buttons[buttons.length - 1]?.hasAttribute("data-plugin-shortcut-settings")).toBe(true);
+    width = 34;
+    resize();
+    await flush();
+    expect(host.querySelector("[data-plugin-shortcut-settings]")).toBeNull();
+    await openMenu();
+    expect(document.querySelector("[data-plugin-shortcut-overflow]")?.lastElementChild?.hasAttribute("data-plugin-shortcut-settings")).toBe(true);
+    mocks.state.editorSettings.pluginShortcuts.showSettingsEntry = false;
+    await flush();
+    expect(document.querySelector("[data-plugin-shortcut-settings]")).toBeNull();
+  });
+  it.each([false, true])("hides the entire area without visible plugins even when settings is enabled (dropdownOnly=%s)", async (menuOnly) => {
+    dropdownOnly.value = menuOnly;
+    mocks.state.editorSettings.pluginShortcuts.showSettingsEntry = true;
+    await openMenu();
+    const originalEntries = mocks.entries.value;
+    mocks.entries.value = [];
+    await flush();
+    expect(host.querySelector("nav")).toBeNull();
+    expect(document.querySelector("[data-plugin-shortcut-settings]")).toBeNull();
+    expect(document.querySelector("[data-plugin-shortcut-overflow]")).toBeNull();
+    mocks.entries.value = originalEntries;
+    await flush();
+    expect(host.querySelector("nav")).not.toBeNull();
+    expect(document.querySelector("[data-plugin-shortcut-overflow]")).toBeNull();
+  });
   it("shows all shortcuts beside Plugin Center regardless of the floating icon count", async () => {
     dropdownOnly.value = true;
     mocks.state.editorSettings.pluginShortcuts.toolbarCount = 10;

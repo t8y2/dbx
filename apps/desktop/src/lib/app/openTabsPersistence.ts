@@ -1,4 +1,4 @@
-import type { QueryTab, TabOutputView } from "@/types/database";
+import type { QueryResultSourceLabelKind, QueryTab, TabOutputView } from "@/types/database";
 import { sanitizeTabUiState } from "@/lib/tabs/tabUiState";
 
 export const OPEN_TABS_STORAGE_KEY = "dbx-open-tabs";
@@ -19,6 +19,7 @@ export interface SavedQueryResultRun {
   /** 结果来源（库名.表名 / 表名），用于结果标签命名；与结果 payload 分离，回收 payload 后仍可显示 */
   sourceLabel?: string;
   sourceName?: string;
+  sourceLabelKind?: QueryResultSourceLabelKind;
 }
 
 export interface SavedOpenTab {
@@ -49,6 +50,7 @@ export interface SavedOpenTab {
   resultSortDirection?: QueryTab["resultSortDirection"];
   resultSortMode?: QueryTab["resultSortMode"];
   orderByInput?: string;
+  structuredOrderByInput?: string;
   resultPageLimit?: number;
   resultPageOffset?: number;
   whereInput?: string;
@@ -63,6 +65,7 @@ export interface SavedOpenTab {
   nacosNamespaceName?: string;
   structureTableName?: string;
   structureDraft?: QueryTab["structureDraft"];
+  databaseSearchState?: QueryTab["databaseSearchState"];
   objectBrowser?: QueryTab["objectBrowser"];
   objectSource?: QueryTab["objectSource"];
   sourceView?: boolean;
@@ -148,13 +151,15 @@ function restoredEditorViewport(tab: SavedOpenTab): QueryTab["editorViewport"] {
   };
 }
 
-const TAB_OUTPUT_VIEWS = new Set<TabOutputView>(["result", "summary", "explain", "chart", "messages", "profile"]);
+const TAB_OUTPUT_VIEWS = new Set<TabOutputView>(["result", "graph", "summary", "explain", "chart", "messages", "profile"]);
 
 function restoredTabUiState(tab: SavedOpenTab): QueryTab["uiState"] {
   const activeOutputView = tab.uiState?.activeOutputView;
+  const redisResultViewMode = tab.uiState?.redisResultViewMode;
   const resultPaneOpen = tab.uiState?.resultPaneOpen;
   const restored: NonNullable<QueryTab["uiState"]> = {};
   if (activeOutputView && TAB_OUTPUT_VIEWS.has(activeOutputView)) restored.activeOutputView = activeOutputView;
+  if (redisResultViewMode === "grid" || redisResultViewMode === "console") restored.redisResultViewMode = redisResultViewMode;
   if (typeof resultPaneOpen === "boolean") restored.resultPaneOpen = resultPaneOpen;
   if (tab.uiState?.page) {
     const sanitized = sanitizeTabUiState({ page: tab.uiState.page });
@@ -193,6 +198,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     ...(tab.resultSortDirection !== undefined ? { resultSortDirection: tab.resultSortDirection } : {}),
     ...(tab.resultSortMode !== undefined ? { resultSortMode: tab.resultSortMode } : {}),
     ...(tab.orderByInput !== undefined ? { orderByInput: tab.orderByInput } : {}),
+    ...(tab.structuredOrderByInput !== undefined ? { structuredOrderByInput: tab.structuredOrderByInput } : {}),
     ...(tab.resultPageLimit !== undefined ? { resultPageLimit: tab.resultPageLimit } : {}),
     ...(tab.resultPageOffset !== undefined ? { resultPageOffset: tab.resultPageOffset } : {}),
     ...(tab.whereInput !== undefined ? { whereInput: tab.whereInput } : {}),
@@ -207,6 +213,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     ...(tab.nacosNamespaceName !== undefined ? { nacosNamespaceName: tab.nacosNamespaceName } : {}),
     ...(tab.structureTableName !== undefined ? { structureTableName: tab.structureTableName } : {}),
     ...(tab.structureDraft ? { structureDraft: JSON.parse(JSON.stringify(tab.structureDraft)) } : {}),
+    ...(tab.databaseSearchState ? { databaseSearchState: tab.databaseSearchState } : {}),
     objectBrowser: tab.objectBrowser,
     objectSource: tab.objectSource,
     ...(tab.sourceView ? { sourceView: true } : {}),
@@ -226,6 +233,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
             createdAt: run.createdAt,
             ...(run.sourceLabel ? { sourceLabel: run.sourceLabel } : {}),
             ...(run.sourceName ? { sourceName: run.sourceName } : {}),
+            ...(run.sourceLabelKind ? { sourceLabelKind: run.sourceLabelKind } : {}),
             ...(run.customTitle ? { customTitle: true } : {}),
             ...(run.pinned ? { pinned: true } : {}),
             activeResultIndex: run.activeResultIndex,

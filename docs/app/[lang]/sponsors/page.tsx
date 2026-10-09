@@ -16,6 +16,8 @@ const i18n = {
     qiniuSponsorAction: "Visit",
     rainyunSponsorDesc: "RainYun is a cloud service provider offering cloud servers, physical servers, game hosting, and developer-friendly infrastructure services.",
     rainyunSponsorAction: "Visit",
+    jumpserverSponsorDesc: "JumpServer is a widely popular open-source bastion host.",
+    jumpserverSponsorAction: "Visit",
     easysearchSponsorDesc: "Easysearch is an enterprise-grade distributed search engine compatible with Elasticsearch APIs, combining full-text, vector, geospatial search, real-time analytics, and AI capabilities in one platform.",
     easysearchSponsorAction: "Visit",
     atlasCloudSponsorDesc: "Atlas Cloud gives developers one unified API for 400+ AI models across chat, image, video, and audio.",
@@ -44,6 +46,8 @@ const i18n = {
     qiniuSponsorAction: "访问",
     rainyunSponsorDesc: "雨云是面向开发者和站长的云服务提供商，提供云服务器、物理服务器、游戏云和配套基础设施服务。",
     rainyunSponsorAction: "访问",
+    jumpserverSponsorDesc: "广受欢迎的开源堡垒机",
+    jumpserverSponsorAction: "访问",
     easysearchSponsorDesc: "Easysearch 是一款企业级分布式搜索引擎，兼容 ES API、融合全文检索、向量检索、地理空间位置检索、实时分析与 AI 能力，为企业提供统一的数据检索与智能分析基础设施。",
     easysearchSponsorAction: "访问",
     atlasCloudSponsorDesc: "Atlas Cloud 为开发者提供统一的多模态 AI API，可通过一个接口访问聊天、图像、视频和音频等 400+ 模型。",
@@ -84,58 +88,66 @@ export default async function SponsorsPage({ params }: { params: Promise<{ lang:
   const t = i18n[locale];
   const sponsorItems = [
     {
+      name: "JumpServer",
+      href: "https://www.jumpserver.org/",
+      logo: "/sponsors/jumpserver-tight.png",
+      logoClass: "w-full object-contain",
+      description: t.jumpserverSponsorDesc,
+      action: t.jumpserverSponsorAction,
+    },
+    {
       name: "RainYun",
       href: "https://www.rainyun.com/MTE5Mjc4Ng==_",
-      logo: "https://www.rainyun.com/img/logo.d193755d.png",
-      logoClass: "h-12 w-auto max-w-[150px]",
+      logo: "/sponsors/rainyun-tight.png",
+      logoClass: "max-h-12 w-auto max-w-full object-contain",
       description: t.rainyunSponsorDesc,
       action: t.rainyunSponsorAction,
     },
     {
-      name: "TrustAsia",
-      href: "https://www.trustasia.com/ssl/trustasia/code-signing",
-      logo: "/sponsors/trustasia.png",
-      logoClass: "w-full max-w-[160px] object-contain",
-      description: t.trustasiaSponsorDesc,
-      action: t.trustasiaSponsorAction,
-    },
-    {
       name: "Jalapeño Cloud",
       href: "https://www.jalapeno-cloud.ai/DBX",
-      logo: "/sponsors/jalapeno-card.png",
-      logoClass: "w-full max-w-[136px] object-contain",
+      logo: "/sponsors/jalapeno-tight.png",
+      logoClass: "w-full object-contain",
       description: t.jalapenoSponsorDesc,
       action: t.jalapenoSponsorAction,
     },
     {
       name: "AICodeMirror",
       href: "https://www.aicodemirror.ai/register?invitecode=9A50BU",
-      logo: "/sponsors/aicodemirror-card.png",
-      logoClass: "w-full max-w-[160px] object-contain",
+      logo: "/sponsors/aicodemirror-tight.png",
+      logoClass: "w-full object-contain",
       description: t.aicodemirrorSponsorDesc,
       action: t.aicodemirrorSponsorAction,
     },
     {
       name: "HuaLongAI",
       href: "https://api.hualong.online/register?promo=DBX%26HUALONG",
-      logo: "/sponsors/hualong-card.png",
-      logoClass: "w-full max-w-[160px] object-contain",
+      logo: "/sponsors/hualong-tight.png",
+      logoClass: "w-full object-contain",
       description: t.hualongSponsorDesc,
       action: t.hualongSponsorAction,
     },
     {
       name: "AstraFlow",
       href: "https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx",
-      logo: "/sponsors/astraflow-card.png",
-      logoClass: "w-full max-w-[136px] object-contain",
+      logo: "/sponsors/astraflow-tight.png",
+      logoClass: "w-full object-contain",
       description: t.astraflowSponsorDesc,
       action: t.astraflowSponsorAction,
     },
     {
+      name: "TrustAsia",
+      href: "https://www.trustasia.com/ssl/trustasia/code-signing",
+      logo: "/sponsors/trustasia.png",
+      logoClass: "w-full object-contain",
+      description: t.trustasiaSponsorDesc,
+      action: t.trustasiaSponsorAction,
+    },
+    {
       name: "Atlas Cloud",
       href: "https://www.atlascloud.ai/?ref=6YYXWA",
-      logo: "https://www.atlascloud.ai/logo.svg",
-      logoClass: "w-full max-w-[136px] object-contain",
+      logo: "/sponsors/atlas-tight.png",
+      logoClass: "w-full object-contain",
       description: t.atlasCloudSponsorDesc,
       action: t.atlasCloudSponsorAction,
     },
@@ -143,7 +155,7 @@ export default async function SponsorsPage({ params }: { params: Promise<{ lang:
       name: locale === "cn" ? "七牛云" : "Qiniu Cloud",
       href: "https://www.qiniu.com/",
       logo: "https://www-static.qbox.me/_next/static/media/logo.0fc18feaa621d2068a7180631f742256.jpg",
-      logoClass: "h-16 w-16 object-contain",
+      logoClass: "max-h-14 w-auto max-w-full object-contain",
       description: t.qiniuSponsorDesc,
       action: t.qiniuSponsorAction,
     },
@@ -152,8 +164,8 @@ export default async function SponsorsPage({ params }: { params: Promise<{ lang:
     {
       name: "1Panel",
       href: "https://1panel.cn/",
-      logo: "/sponsors/1panel-card.png",
-      logoClass: "w-full max-w-[136px] object-contain",
+      logo: "/sponsors/1panel-tight.png",
+      logoClass: "w-full object-contain",
       description: t.onepanelSponsorDesc,
       action: t.onepanelSponsorAction,
     },
@@ -161,7 +173,7 @@ export default async function SponsorsPage({ params }: { params: Promise<{ lang:
       name: "Easysearch",
       href: "https://easysearch.cn",
       logo: "/sponsors/easysearch.png",
-      logoClass: "w-full max-w-[136px] object-contain",
+      logoClass: "w-full object-contain",
       description: t.easysearchSponsorDesc,
       action: t.easysearchSponsorAction,
     },
@@ -179,7 +191,7 @@ export default async function SponsorsPage({ params }: { params: Promise<{ lang:
         <h2 className="mt-10 text-2xl font-[760]">{t.sponsorsTitle}</h2>
         <div className="mt-5 grid grid-cols-2 gap-5 max-[900px]:grid-cols-1">
           {sponsorItems.map((sponsor) => (
-            <Link key={sponsor.name} href={sponsor.href} target="_blank" rel="noopener noreferrer" className="block rounded-xl border border-landing-line bg-landing-panel p-6 transition-colors hover:border-landing-blue">
+            <Link key={sponsor.name} href={sponsor.href} target="_blank" rel="noopener noreferrer" className="flex flex-col justify-center rounded-xl border border-landing-line bg-landing-panel p-6 transition-colors hover:border-landing-blue">
               <div className="flex items-center gap-6 max-[640px]:block">
                 <div className="flex h-24 w-44 shrink-0 items-center justify-center rounded-lg bg-white px-5 shadow-[0_10px_30px_rgba(15,23,42,0.08)] max-[640px]:w-max">
                   <img src={sponsor.logo} alt={sponsor.name} className={sponsor.logoClass} />
@@ -202,7 +214,7 @@ export default async function SponsorsPage({ params }: { params: Promise<{ lang:
         <h2 className="mt-12 text-2xl font-[760]">{t.partnersTitle}</h2>
         <div className="mt-5 grid grid-cols-2 gap-5 max-[900px]:grid-cols-1">
           {partnerItems.map((sponsor) => (
-            <Link key={sponsor.name} href={sponsor.href} target="_blank" rel="noopener noreferrer" className="block rounded-xl border border-landing-line bg-landing-panel p-6 transition-colors hover:border-landing-blue">
+            <Link key={sponsor.name} href={sponsor.href} target="_blank" rel="noopener noreferrer" className="flex flex-col justify-center rounded-xl border border-landing-line bg-landing-panel p-6 transition-colors hover:border-landing-blue">
               <div className="flex items-center gap-6 max-[640px]:block">
                 <div className="flex h-24 w-44 shrink-0 items-center justify-center rounded-lg bg-white px-5 shadow-[0_10px_30px_rgba(15,23,42,0.08)] max-[640px]:w-max">
                   <img src={sponsor.logo} alt={sponsor.name} className={sponsor.logoClass} />

@@ -144,11 +144,21 @@ export interface IndexDiff {
   changes?: string[];
 }
 
+export interface SchemaForeignKeyInfo extends ForeignKeyInfo {
+  /** Ordered local/reference pairs; scalar fields remain display labels. */
+  column_pairs?: [string, string][];
+}
+
+function foreignKeyColumns(foreignKey?: SchemaForeignKeyInfo): string[] {
+  if (!foreignKey) return [];
+  return foreignKey.column_pairs?.length ? foreignKey.column_pairs.map(([column]) => column) : [foreignKey.column];
+}
+
 export interface ForeignKeyDiff {
   type: "added" | "removed" | "modified";
   name: string;
-  source?: ForeignKeyInfo;
-  target?: ForeignKeyInfo;
+  source?: SchemaForeignKeyInfo;
+  target?: SchemaForeignKeyInfo;
   changes?: string[];
 }
 
@@ -242,6 +252,7 @@ export interface SchemaDiffPreparationOptions {
   ignoreComments?: boolean;
   cascadeDelete?: boolean;
   compareColumnOrder?: boolean;
+  compareCharset?: boolean;
   ignoreTableNameCase?: boolean;
   ignoreColumnNameCase?: boolean;
   detectRenames?: boolean;
@@ -1197,7 +1208,7 @@ export function setSchemaDiffObjectSelectedWithDependencies(objects: SchemaDiffO
           if (indexObject) apply(indexObject.id, true);
         }
         for (const [index, foreignKey] of (tableDiff.foreignKeys ?? []).entries()) {
-          if (!["removed", "modified"].includes(foreignKey.type) || foreignKey.target?.column !== columnDiff.name) continue;
+          if (!["removed", "modified"].includes(foreignKey.type) || !foreignKeyColumns(foreignKey.target).includes(columnDiff.name)) continue;
           const foreignKeyObject = child("foreignKey", tableDiff.foreignKeys, index);
           if (foreignKeyObject) apply(foreignKeyObject.id, true);
         }
@@ -1216,7 +1227,7 @@ export function setSchemaDiffObjectSelectedWithDependencies(objects: SchemaDiffO
           if (indexObject) apply(indexObject.id, false);
         }
         for (const [index, foreignKey] of (tableDiff.foreignKeys ?? []).entries()) {
-          if (!["added", "modified"].includes(foreignKey.type) || foreignKey.source?.column !== columnDiff.name) continue;
+          if (!["added", "modified"].includes(foreignKey.type) || !foreignKeyColumns(foreignKey.source).includes(columnDiff.name)) continue;
           const foreignKeyObject = child("foreignKey", tableDiff.foreignKeys, index);
           if (foreignKeyObject) apply(foreignKeyObject.id, false);
         }
@@ -1234,7 +1245,7 @@ export function setSchemaDiffObjectSelectedWithDependencies(objects: SchemaDiffO
     if (value && object.objectKind === "foreignKey") {
       const foreignKeyIndex = findDiffChildIndex("foreignKey", tableObject.name, tableDiff.foreignKeys, object.id);
       const foreignKey = foreignKeyIndex < 0 ? undefined : tableDiff.foreignKeys?.[foreignKeyIndex];
-      if (foreignKey?.source?.column) applyColumn(foreignKey.source.column, true);
+      for (const column of foreignKeyColumns(foreignKey?.source)) applyColumn(column, true);
     }
   };
 

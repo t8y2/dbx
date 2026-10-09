@@ -1,4 +1,4 @@
-import type { ChangeSet, Text } from "@codemirror/state";
+import { RangeSet, RangeValue, type ChangeSet, type Text } from "@codemirror/state";
 import type { DatabaseType } from "@/types/database";
 import { readSqlBracedParameterAt, type SqlParameterOptions } from "@/lib/sql/sqlParameters";
 import { executableStatementRanges, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
@@ -22,26 +22,42 @@ export interface ExecutableStatementRangeCache {
  * the whole document synchronously per keystroke.
  */
 export interface StatementGutterStartIndex {
-  starts: ReadonlySet<number>;
-  executableLineStarts: ReadonlySet<number>;
+  starts: RangeSet<StatementGutterStartMarker>;
+  executableLineStarts: RangeSet<StatementGutterStartMarker>;
+}
+
+class StatementGutterStartMarker extends RangeValue {
+  startSide = 1;
+  endSide = 1;
+}
+
+const statementGutterStartMarker = new StatementGutterStartMarker();
+
+function statementGutterStartRangeSet(positions: Iterable<number>): RangeSet<StatementGutterStartMarker> {
+  return RangeSet.of(
+    Array.from(new Set(positions), (position) => statementGutterStartMarker.range(position)),
+    true,
+  );
 }
 
 export function statementGutterStartIndexForCache(cache: ExecutableStatementRangeCache): StatementGutterStartIndex {
-  return { starts: new Set(cache.byStart.keys()), executableLineStarts: new Set(cache.byExecutableLineStart.keys()) };
+  return {
+    starts: statementGutterStartRangeSet(cache.byStart.keys()),
+    executableLineStarts: statementGutterStartRangeSet(cache.byExecutableLineStart.keys()),
+  };
 }
 
 export function mapStatementGutterStartIndex(index: StatementGutterStartIndex, changes: ChangeSet): StatementGutterStartIndex {
-  return { starts: mapStartPositions(index.starts, changes), executableLineStarts: mapStartPositions(index.executableLineStarts, changes) };
-}
-
-function mapStartPositions(positions: ReadonlySet<number>, changes: ChangeSet): Set<number> {
-  const mapped = new Set<number>();
-  for (const position of positions) mapped.add(changes.mapPos(position, 1));
-  return mapped;
+  return { starts: index.starts.map(changes), executableLineStarts: index.executableLineStarts.map(changes) };
 }
 
 export function statementGutterStartIndexHasStartAt(index: StatementGutterStartIndex, lineFrom: number): boolean {
-  return index.starts.has(lineFrom) || index.executableLineStarts.has(lineFrom);
+  return rangeSetHasPointAt(index.starts, lineFrom) || rangeSetHasPointAt(index.executableLineStarts, lineFrom);
+}
+
+function rangeSetHasPointAt(ranges: RangeSet<StatementGutterStartMarker>, position: number): boolean {
+  const cursor = ranges.iter(position);
+  return cursor.value !== null && cursor.from === position;
 }
 
 export type ExecutableStatementRangeParser = (sql: string, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions) => SqlTextRange[];

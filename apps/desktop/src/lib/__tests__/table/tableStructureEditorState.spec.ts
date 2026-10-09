@@ -13,8 +13,14 @@ import {
   dataTypeLengthUnitValue,
   DATA_TYPE_OPTIONS,
   defaultNewColumnDataType,
+  draftColumnNameForSql,
   getDataTypeLengthUnitOptions,
   getDefaultLengthForType,
+  generateIndexName,
+  generateUniqueIndexName,
+  generateShortIndexName,
+  generateUniqueShortIndexName,
+  specialIndexColumnIssue,
   hasExistingColumnTypeChange,
   isDataTypeLengthDisabled,
   isDamengIdentityCompatibleDataType,
@@ -24,6 +30,7 @@ import {
   matchesCopySourceColumnSearch,
   mysqlEnumDataType,
   parseExtraToColumnExtra,
+  parseMysqlGeneratedColumnExtra,
   rehydrateColumnDraftsFromMetadata,
   resolveInsertColumnIndex,
   restoreCharacterLengthUnitsAfterSave,
@@ -35,6 +42,74 @@ import {
 } from "@/lib/table/tableStructureEditorState";
 
 describe("tableStructureEditorState", () => {
+  describe("index naming", () => {
+    it("uses a lowercase type prefix and the initial field name", () => {
+      expect(generateShortIndexName("Prop_Code")).toBe("idx_prop_code");
+      expect(generateShortIndexName("email", { isUnique: true })).toBe("uk_email");
+      expect(generateShortIndexName("title", { indexType: "FULLTEXT" })).toBe("ft_title");
+      expect(generateShortIndexName("location", { indexType: "SPATIAL" })).toBe("sp_location");
+      expect(generateShortIndexName("id", { isPrimary: true })).toBe("PRIMARY");
+      expect(generateShortIndexName("")).toBe("");
+    });
+
+    it("keeps long names deterministic and distinguishes truncated column names", () => {
+      const name = generateShortIndexName("a".repeat(90));
+      expect(name).toHaveLength(63);
+      expect(name).toMatch(/^idx_.*_[0-9a-f]{8}$/);
+      expect(generateShortIndexName("a".repeat(90))).toBe(name);
+      expect(generateShortIndexName("a".repeat(89) + "b")).not.toBe(name);
+      expect(generateShortIndexName("a".repeat(90), { maxLength: 64 })).toHaveLength(64);
+    });
+
+    it("resolves case-insensitive collisions while retaining type prefixes and limits", () => {
+      expect(generateUniqueShortIndexName("email", ["IDX_EMAIL", "idx_email_2"])).toBe("idx_email_3");
+      expect(generateUniqueShortIndexName("email", ["UK_EMAIL"], { isUnique: true })).toBe("uk_email_2");
+      const base = generateShortIndexName("a".repeat(90));
+      const next = generateUniqueShortIndexName("a".repeat(90), [base]);
+      expect(next).toHaveLength(63);
+      expect(next).toMatch(/^idx_.*_[0-9a-f]{8}_2$/);
+    });
+
+    it("preserves legacy callers and table-qualified names for shared namespaces", () => {
+      expect(generateIndexName("users", ["email"])).toBe("USERS_EMAIL_IDX");
+      expect(generateIndexName("orders", ["email"])).toBe("ORDERS_EMAIL_IDX");
+      expect(generateIndexName("users", ["email", "region"])).toBe("USERS_EMAIL_REGION_IDX");
+      expect(generateUniqueIndexName("users", ["email"], ["USERS_EMAIL_IDX"])).toBe("USERS_EMAIL_IDX_2");
+    });
+
+    it("preserves Chinese field names and provides deterministic names for symbols", () => {
+      const field = "\u5c5e\u6027";
+      expect(generateShortIndexName(field)).toBe(`idx_${field}`);
+      expect(generateUniqueShortIndexName(field, [`uk_${field}`], { isUnique: true })).toBe(`uk_${field}_2`);
+      const longName = generateShortIndexName(field.repeat(40), { maxLength: 64 });
+      expect(longName).toHaveLength(64);
+      expect(longName).toMatch(/_[0-9a-f]{8}$/);
+      expect(generateShortIndexName("---")).toMatch(/^idx_column_[0-9a-f]{8}$/);
+      expect(generateShortIndexName("---")).not.toBe(generateShortIndexName("+++"));
+      expect(generateShortIndexName("\u{10400}")).toMatch(/^idx_column_[0-9a-f]{8}$/);
+    });
+  });
+
+  describe("special index columns", () => {
+    const field = (dataType: string, isNullable = false) => ({ dataType, isNullable });
+
+    it("allows composite text searches but rejects JSON, numbers, and unique fulltext", () => {
+      expect(specialIndexColumnIssue("mysql", "FULLTEXT", [field("varchar(255)"), field("longtext")])).toBeNull();
+      for (const type of ["json", "int", "blob"]) expect(specialIndexColumnIssue("mysql", "FULLTEXT", [field(type)])).toBe("fulltextIndexColumns");
+      expect(specialIndexColumnIssue("mysql", "FULLTEXT", [field("text")], true)).toBe("specialIndexUnique");
+    });
+
+    it("requires one non-null geometry for MySQL spatial indexes", () => {
+      expect(specialIndexColumnIssue("mysql", "SPATIAL", [field("point")])).toBeNull();
+      expect(specialIndexColumnIssue("mysql", "SPATIAL", [field("polygon", true)])).toBe("spatialIndexNullable");
+      expect(specialIndexColumnIssue("mysql", "SPATIAL", [field("point"), field("geometry")])).toBe("spatialIndexColumn");
+      expect(specialIndexColumnIssue("mysql", "SPATIAL", [field("varchar(64)")])).toBe("spatialIndexColumn");
+      expect(specialIndexColumnIssue("mysql", "SPATIAL", [field("geography")])).toBe("spatialIndexColumn");
+      expect(specialIndexColumnIssue("sqlserver", "SPATIAL", [field("geography", true)])).toBeNull();
+      expect(specialIndexColumnIssue("postgres", "GIST", [field("geometry", true)])).toBeNull();
+    });
+  });
+
   describe("DuckDB type parameters", () => {
     it.each([
       "TINYINT",
@@ -199,6 +274,49 @@ describe("tableStructureEditorState", () => {
       expect(combineDataTypeForDatabase("duckdb", "custom_type", "10")).toBe("custom_type(10)");
       expect(combineDataTypeForDatabase("duckdb", "DECIMAL", "39,0")).toBe("DECIMAL(39,0)");
       expect(combineDataTypeForDatabase("duckdb", "VARCHAR", "-1")).toBe("VARCHAR(-1)");
+    });
+  });
+
+  describe("PostgreSQL temporal precision", () => {
+    it("keeps the time-zone qualifier returned by PostgreSQL metadata", () => {
+      const drafts = createColumnDrafts(
+        [
+          { name: "with_tz", data_type: "timestamp(6) with time zone", is_nullable: true, column_default: null, is_primary_key: false },
+          { name: "without_tz", data_type: "timestamp(6) without time zone", is_nullable: true, column_default: null, is_primary_key: false },
+        ],
+        "postgres",
+      );
+
+      expect(drafts.map((column) => column.dataType)).toEqual(["timestamp(6) with time zone", "timestamp(6) without time zone"]);
+      expect(drafts.map((column) => column.original?.data_type)).toEqual(drafts.map((column) => column.dataType));
+      expect(hasExistingColumnTypeChange(drafts)).toBe(false);
+      expect(dataTypeBaseInputValue("postgres", drafts[0]!.dataType)).toBe("timestamp with time zone");
+      expect(dataTypeBaseInputValue("postgres", drafts[1]!.dataType)).toBe("timestamp without time zone");
+      expect(dataTypeLengthInputValue("postgres", drafts[0]!.dataType)).toBe("6");
+      expect(dataTypeLengthInputValue("postgres", drafts[1]!.dataType)).toBe("6");
+      expect(combineDataTypeForDatabase("postgres", dataTypeBaseInputValue("postgres", drafts[0]!.dataType), "3")).toBe("timestamp(3) with time zone");
+      expect(combineDataTypeForDatabase("postgres", dataTypeBaseInputValue("postgres", drafts[1]!.dataType), "3")).toBe("timestamp(3) without time zone");
+    });
+
+    it("rebuilds qualified timestamp precision without changing time-zone semantics", () => {
+      expect(combineDataTypeForDatabase("postgres", "timestamp with time zone", "3")).toBe("timestamp(3) with time zone");
+      expect(combineDataTypeForDatabase("postgres", "timestamp without time zone", "3")).toBe("timestamp(3) without time zone");
+      expect(combineDataTypeForDatabase("postgres", "timestamptz", "3")).toBe("timestamptz(3)");
+      expect(combineDataTypeForDatabase("postgres", "timestamp", "3")).toBe("timestamp(3)");
+    });
+
+    it("does not reinterpret temporal arrays, domains, or user-defined types as scalar timestamps", () => {
+      expect(dataTypeBaseInputValue("postgres", "timestamp(6) with time zone[]")).toBe("timestamp with time zone[]");
+      expect(dataTypeLengthInputValue("postgres", "timestamp(6) with time zone[]")).toBe("");
+      expect(dataTypeBaseInputValue("postgres", "timestamptz(6)[][]")).toBe("timestamptz[][]");
+      expect(dataTypeLengthInputValue("postgres", "timestamptz(6)[][]")).toBe("");
+
+      const metadataTypes = ["audit.timestamp_domain", 'audit."timestamp"', "custom_timestamp(6)"];
+      const drafts = createColumnDrafts(
+        metadataTypes.map((dataType, index) => ({ name: `custom_${index}`, data_type: dataType, is_nullable: true, column_default: null, is_primary_key: false })),
+        "postgres",
+      );
+      expect(drafts.map((column) => column.dataType)).toEqual(metadataTypes);
     });
   });
 
@@ -414,6 +532,33 @@ describe("tableStructureEditorState", () => {
       identity: { generation: "ALWAYS" },
     });
     expect(parseExtraToColumnExtra("identity(1,1)", "postgres")).toEqual({});
+  });
+
+  it("parses mysql generated-column metadata into the editable extra", () => {
+    expect(parseExtraToColumnExtra("GENERATED ALWAYS AS (`price` * `quantity`) STORED", "mysql")).toEqual({
+      generated: { expression: "`price` * `quantity`", storage: "STORED" },
+    });
+    expect(parseExtraToColumnExtra("GENERATED ALWAYS AS (lower(`name`)) VIRTUAL", "mysql")).toEqual({
+      generated: { expression: "lower(`name`)", storage: "VIRTUAL" },
+    });
+    // MariaDB PERSISTENT normalizes to STORED, matching the backend introspection.
+    expect(parseExtraToColumnExtra("GENERATED ALWAYS AS (`a` + 1) PERSISTENT", "mysql")).toEqual({
+      generated: { expression: "`a` + 1", storage: "STORED" },
+    });
+    // Storage omitted: MySQL defaults to VIRTUAL.
+    expect(parseExtraToColumnExtra("GENERATED ALWAYS AS (json_extract(`doc`, '$.x'))", "mysql")).toEqual({
+      generated: { expression: "json_extract(`doc`, '$.x')", storage: "VIRTUAL" },
+    });
+    // Plain columns and identity columns stay untouched.
+    expect(parseMysqlGeneratedColumnExtra("auto_increment")).toBeUndefined();
+    expect(parseMysqlGeneratedColumnExtra("GENERATED ALWAYS AS IDENTITY")).toBeUndefined();
+    expect(parseMysqlGeneratedColumnExtra("")).toBeUndefined();
+    // Identity extras for postgres must not leak into the mysql branch.
+    expect(parseExtraToColumnExtra("GENERATED ALWAYS AS IDENTITY", "postgres")).toEqual({
+      identity: { generation: "ALWAYS" },
+    });
+    // Other dialects never parse mysql generated columns.
+    expect(parseExtraToColumnExtra("GENERATED ALWAYS AS (1) STORED", "sqlite")).toEqual({});
   });
 
   it("keeps mysql unsigned attributes in the editable base type", () => {
@@ -994,5 +1139,27 @@ describe("structureColumnCommentsForCopy", () => {
       { name: "  ", comment: "没有字段名", markedForDrop: false },
     ]);
     expect(comments.size).toBe(0);
+  });
+});
+
+describe("draftColumnNameForSql", () => {
+  // MySQL rejects identifiers that end with a space (ERROR 1166), so a name the
+  // user pasted with a trailing space must not reach the DDL builder as typed.
+  it("drops the trailing whitespace of a name the user typed", () => {
+    expect(draftColumnNameForSql("device_app_face_status ", "app_auth_status")).toBe("device_app_face_status");
+    expect(draftColumnNameForSql("display_name\t", "name")).toBe("display_name");
+    expect(draftColumnNameForSql("new_column\n  ")).toBe("new_column");
+  });
+
+  // #9654: leading spaces are legal inside a backtick-quoted identifier, so the
+  // user's spelling is kept for a new column and for a metadata name alike.
+  it("keeps leading spaces of a name the user typed", () => {
+    expect(draftColumnNameForSql("  content1")).toBe("  content1");
+  });
+
+  it("keeps an untouched metadata name byte-exact so whitespace is never read as a rename", () => {
+    expect(draftColumnNameForSql("  content1", "  content1")).toBe("  content1");
+    expect(draftColumnNameForSql("content1 ", "content1 ")).toBe("content1 ");
+    expect(draftColumnNameForSql("plain", "plain")).toBe("plain");
   });
 });

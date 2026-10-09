@@ -4,7 +4,9 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
-use dbx_core::storage::{DesktopSettings, McpGlobalPolicy, McpGlobalPolicyState};
+use dbx_core::storage::{
+    AppAppearanceSettings, AppAppearanceSettingsPatch, DesktopSettings, McpGlobalPolicy, McpGlobalPolicyState,
+};
 use tauri::{AppHandle, Manager, State, Window};
 
 use super::connection::AppState;
@@ -84,9 +86,36 @@ pub async fn load_max_agent_turns(state: State<'_, Arc<AppState>>) -> Result<u32
 }
 
 #[tauri::command]
-pub fn set_app_locale(app: AppHandle, locale_state: State<'_, AppLocaleState>, locale: String) -> Result<(), String> {
+pub async fn load_app_appearance_settings(state: State<'_, Arc<AppState>>) -> Result<AppAppearanceSettings, String> {
+    state.storage.load_app_appearance_settings().await
+}
+
+#[tauri::command]
+pub async fn update_app_appearance_settings(
+    state: State<'_, Arc<AppState>>,
+    patch: AppAppearanceSettingsPatch,
+) -> Result<(), String> {
+    state.storage.update_app_appearance_settings(&patch).await
+}
+
+#[tauri::command]
+pub async fn set_app_locale(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    locale_state: State<'_, AppLocaleState>,
+    locale: String,
+) -> Result<(), String> {
     locale_state.set(locale);
-    refresh_native_menus(&app).map_err(|err| format!("failed to refresh native menus: {err}"))
+    let persistence = state
+        .storage
+        .update_app_appearance_settings(&AppAppearanceSettingsPatch {
+            locale: Some(locale_state.get()),
+            ..Default::default()
+        })
+        .await;
+    let refresh = refresh_native_menus(&app).map_err(|err| format!("failed to refresh native menus: {err}"));
+    persistence?;
+    refresh
 }
 
 #[tauri::command]

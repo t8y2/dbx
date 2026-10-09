@@ -33,6 +33,11 @@ describe("startup input guard", () => {
 
   it("installs before the application module and is released after mount", () => {
     expect(indexSource.indexOf("data-dbx-startup-input-guard")).toBeLessThan(indexSource.indexOf('src="/src/main.ts"'));
-    expect(mainSource.indexOf('app.mount("#root")')).toBeLessThan(mainSource.indexOf('window.dispatchEvent(new Event("dbx:startup-ready"))'));
+
+    // The engine-compatibility gate releases the guard earlier on the blocked path, so search
+    // for the release that belongs to mounting instead of the first one in the file.
+    const mountIndex = mainSource.indexOf('app.mount("#root")');
+    expect(mountIndex).toBeGreaterThan(-1);
+    expect(mainSource.indexOf('window.dispatchEvent(new Event("dbx:startup-ready"))', mountIndex)).toBeGreaterThan(mountIndex);
   });
 });

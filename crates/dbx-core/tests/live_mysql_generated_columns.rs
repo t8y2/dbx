@@ -48,7 +48,9 @@ fn change_options(table_name: &str, columns: Vec<EditableStructureColumn>) -> Ta
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     }

@@ -1,19 +1,22 @@
 use super::column_format::{
     column_data_type, column_extra_clause, has_dameng_identity, is_dameng_identity_compatible_type,
-    is_mysql_character_data_type, is_mysql_timestamp_type, mysql_on_update_current_timestamp_clause,
-    strip_inherited_mysql_column_charsets,
+    is_mysql_character_data_type, is_mysql_timestamp_type, mysql_generated_clause,
+    mysql_on_update_current_timestamp_clause, strip_inherited_mysql_column_charsets,
 };
 use super::comments::{build_sqlserver_column_comment_sql_for_profile, build_sqlserver_table_comment_sql_for_profile};
 use super::dialect::{capabilities_for, database_label, StructureDialect};
 use super::foreign_keys::build_foreign_key_sql_for_new_table;
 use super::indexes::build_create_index_statements;
 use super::mysql_engine::{append_mysql_table_option, validate_mysql_engine};
+use super::transwarp;
 use super::triggers::build_trigger_sql_for_new_table;
 use super::types::{TableStructureSqlOptions, TableStructureSqlResult};
 use super::util::{
     clean, format_default_for_sql, normalize_default, qualified_new_table, quote_ident, quote_new_ident, quote_string,
 };
-use super::validation::{validate_columns, validate_concurrent_index_scope, validate_dameng_identity};
+use super::validation::{
+    validate_columns, validate_concurrent_index_scope, validate_dameng_identity, validate_mysql_literal_defaults,
+};
 use crate::models::connection::DatabaseType;
 
 fn is_sqlite_integer_family_type(data_type: &str) -> bool {
@@ -63,6 +66,8 @@ pub(super) fn build_create_table_sql_with_partition_clause(
     }
     validate_columns(&active_columns, &mut warnings);
     validate_dameng_identity(&options, &active_columns, &mut warnings);
+    validate_mysql_literal_defaults(&options, &active_columns, &mut warnings);
+    transwarp::validate_create_options(&options, &active_columns, &mut warnings);
     if !warnings.is_empty() {
         return TableStructureSqlResult { statements: Vec::new(), warnings };
     }
@@ -105,6 +110,9 @@ pub(super) fn build_create_table_sql_with_partition_clause(
     let mut column_definitions = Vec::new();
 
     for column in &active_columns {
+        if transwarp::is_partition_column(&options, column) {
+            continue;
+        }
         let mut data_type = column_data_type(dialect, column);
         // SQLite accepts AUTOINCREMENT only on an exact INTEGER PRIMARY KEY,
         // so integer-family aliases are normalized when auto-increment is on.
@@ -123,14 +131,20 @@ pub(super) fn build_create_table_sql_with_partition_clause(
                 parts.push(format!("COLLATE {}", quote_ident(dialect, &column.collation)));
             }
         }
+        let generated_clause = (dialect == StructureDialect::Mysql).then(|| mysql_generated_clause(column)).flatten();
+        if let Some(clause) = generated_clause.as_ref() {
+            parts.push(clause.clone());
+        }
         // Oracle's column grammar is `col type [DEFAULT expr] [inline constraint ...]`, so the
         // DEFAULT clause has to precede NOT NULL. Emitting `NOT NULL DEFAULT ...` leaves the
         // parser looking for the closing parenthesis of the column list and fails with
         // ORA-00907 (t8y2/dbx#9477). Scoped to Oracle: every other engine keeps the historical
         // NOT NULL-then-DEFAULT order.
         let default_value = normalize_default(Some(&column.default_value));
-        let default_clause = (!default_value.is_empty() && dialect != StructureDialect::ManticoreSearch)
-            .then(|| format!("DEFAULT {}", format_default_for_sql(dialect, &column.data_type, &default_value)));
+        // Generated columns cannot carry a DEFAULT in MySQL.
+        let default_clause =
+            (!default_value.is_empty() && dialect != StructureDialect::ManticoreSearch && generated_clause.is_none())
+                .then(|| format!("DEFAULT {}", format_default_for_sql(dialect, &column.data_type, &default_value)));
         if dialect == StructureDialect::Oracle {
             if let Some(clause) = default_clause.clone() {
                 parts.push(clause);
@@ -153,17 +167,21 @@ pub(super) fn build_create_table_sql_with_partition_clause(
         {
             parts.push("NULL".to_string());
         }
-        if let Some(extra_clause) = column_extra_clause(dialect, column) {
-            parts.push(extra_clause);
+        if generated_clause.is_none() {
+            if let Some(extra_clause) = column_extra_clause(dialect, column) {
+                parts.push(extra_clause);
+            }
         }
         if dialect != StructureDialect::Oracle {
             if let Some(clause) = default_clause {
                 parts.push(clause);
             }
         }
-        if let Some(on_update) = column.extra.as_ref().and_then(|e| e.on_update_current_timestamp).filter(|v| *v) {
-            if on_update && dialect == StructureDialect::Mysql {
-                parts.push(mysql_on_update_current_timestamp_clause(&column.data_type));
+        if generated_clause.is_none() {
+            if let Some(on_update) = column.extra.as_ref().and_then(|e| e.on_update_current_timestamp).filter(|v| *v) {
+                if on_update && dialect == StructureDialect::Mysql {
+                    parts.push(mysql_on_update_current_timestamp_clause(&column.data_type));
+                }
             }
         }
         if dialect == StructureDialect::Mysql && capabilities.comment && !clean(&column.comment).is_empty() {
@@ -190,7 +208,8 @@ pub(super) fn build_create_table_sql_with_partition_clause(
         column_definitions.push(format!("PRIMARY KEY ({pk_list})"));
     }
 
-    let create_table = format!("CREATE TABLE {table} (\n  {}\n)", column_definitions.join(",\n  "));
+    let mut create_table = format!("CREATE TABLE {table} (\n  {}\n)", column_definitions.join(",\n  "));
+    create_table.push_str(&transwarp::create_table_suffix(&options, &active_columns, dialect));
     let create_table = match partition_clause {
         Some(clause) => format!("{create_table} {clause}"),
         None => create_table,
@@ -205,7 +224,7 @@ pub(super) fn build_create_table_sql_with_partition_clause(
 
     if capabilities.comment {
         let table_comment = clean(options.table_comment.as_deref().unwrap_or(""));
-        if !table_comment.is_empty() {
+        if !table_comment.is_empty() && options.database_type != Some(DatabaseType::Transwarp) {
             if matches!(dialect, StructureDialect::Mysql | StructureDialect::GaussdbM) {
                 if let Some(last) = statements.last_mut() {
                     append_mysql_table_option(last, &format!("COMMENT = {}", quote_string(&table_comment)));

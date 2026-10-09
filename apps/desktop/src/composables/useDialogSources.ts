@@ -38,6 +38,7 @@ const pendingImportContent = ref("");
 const showConfigConnectionSelectDialog = ref(false);
 const configConnectionSelectMode = ref<"export" | "import">("export");
 const configConnectionSelectList = ref<ConnectionConfig[]>([]);
+const configConnectionSelectLayout = ref<SidebarLayout | null>(null);
 const pendingExportConnectionIds = ref<string[]>([]);
 const pendingImportPreview = ref<ConnectionConfigBundle | null>(null);
 const pendingImportSource = ref<"dbx" | "navicat" | "dbeaver" | "datagrip">("dbx");
@@ -64,6 +65,7 @@ const dataComparePrefillTable = ref("");
 const dataCompareSessionId = ref<string | null>(null);
 const sqlFilePrefillConnectionId = ref("");
 const sqlFilePrefillDatabase = ref("");
+const sqlFilePrefillSchema = ref<string>();
 const sqlFilePrefillFilePath = ref("");
 const sqlFilePrefillPreview = ref<SqlFilePreview>();
 const diagramPrefillConnectionId = ref("");
@@ -221,6 +223,7 @@ export function useDialogSources() {
         if (v) {
           sqlFilePrefillConnectionId.value = v.connectionId;
           sqlFilePrefillDatabase.value = v.database;
+          sqlFilePrefillSchema.value = v.schema;
           sqlFilePrefillFilePath.value = v.filePath ?? "";
           sqlFilePrefillPreview.value = v.preview;
           showSqlFileDialog.value = true;
@@ -236,6 +239,7 @@ export function useDialogSources() {
       if (!open) {
         sqlFilePrefillConnectionId.value = "";
         sqlFilePrefillDatabase.value = "";
+        sqlFilePrefillSchema.value = undefined;
         sqlFilePrefillFilePath.value = "";
         sqlFilePrefillPreview.value = undefined;
       }
@@ -393,18 +397,21 @@ export function useDialogSources() {
     pendingImportPreview.value = null;
     pendingImportSource.value = "dbx";
     configConnectionSelectList.value = [];
+    configConnectionSelectLayout.value = null;
     configPassphraseError.value = "";
   }
 
   function clearPendingExportState() {
     pendingExportConnectionIds.value = [];
     configConnectionSelectList.value = [];
+    configConnectionSelectLayout.value = null;
     configPassphraseError.value = "";
   }
 
-  function openConnectionSelect(mode: "export" | "import", connections: ConnectionConfig[]) {
+  function openConnectionSelect(mode: "export" | "import", connections: ConnectionConfig[], layout?: SidebarLayout | null) {
     configConnectionSelectMode.value = mode;
     configConnectionSelectList.value = connections;
+    configConnectionSelectLayout.value = layout ?? null;
     showConfigConnectionSelectDialog.value = true;
   }
 
@@ -432,7 +439,7 @@ export function useDialogSources() {
   // Config export/import helpers
   function onExportClick() {
     clearPendingExportState();
-    openConnectionSelect("export", connectionStore.connections);
+    openConnectionSelect("export", connectionStore.connections, connectionStore.sidebarLayout);
   }
 
   function onExportConnectionsSelected(connectionIds: string[]) {
@@ -513,7 +520,7 @@ export function useDialogSources() {
       const preview = await connectionStore.parseConnectionsImport(result.content, null);
       pendingImportPreview.value = preview;
       if (source === "dbx") {
-        openConnectionSelect("import", preview.connections);
+        openConnectionSelect("import", preview.connections, preview.layout);
         return;
       }
       const { count, layout } = await connectionStore.applyConnectionsImport(preview);
@@ -530,7 +537,7 @@ export function useDialogSources() {
       pendingImportPreview.value = preview;
       showConfigPassphraseDialog.value = false;
       configPassphraseError.value = "";
-      openConnectionSelect("import", preview.connections);
+      openConnectionSelect("import", preview.connections, preview.layout);
     } catch (e: any) {
       configPassphraseError.value = e?.message === "wrong_passphrase" ? t("configExport.wrongPassphrase") : e?.message === "crypto_unavailable" ? t("configExport.cryptoUnavailable") : e?.message || String(e);
     }
@@ -608,6 +615,7 @@ export function useDialogSources() {
     applyingImportSelection,
     configConnectionSelectMode,
     configConnectionSelectList,
+    configConnectionSelectLayout,
     transferPrefillConnectionId,
     transferPrefillDatabase,
     transferPrefillCatalog,
@@ -629,6 +637,7 @@ export function useDialogSources() {
     dataCompareSessionId,
     sqlFilePrefillConnectionId,
     sqlFilePrefillDatabase,
+    sqlFilePrefillSchema,
     sqlFilePrefillFilePath,
     sqlFilePrefillPreview,
     diagramPrefillConnectionId,

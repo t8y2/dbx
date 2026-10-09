@@ -21,6 +21,7 @@ export const goAgents = [
   { driver: "hive-go", binary: "hive", race: false },
   { driver: "vastbase-go", binary: "vastbase", race: false },
   { driver: "neo4j-go", binary: "neo4j", race: false },
+  { driver: "nebula-go", binary: "nebula", race: false },
   { driver: "iotdb", binary: "iotdb", race: false },
 ];
 

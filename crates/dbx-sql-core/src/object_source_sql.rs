@@ -232,6 +232,9 @@ pub fn build_editable_object_source(input: EditableObjectSourceSqlInput) -> Stri
 
 pub fn build_view_ddl_sql(input: BuildViewDdlInput) -> String {
     let source = input.source.trim();
+    if input.database_type.is_some_and(is_mysql_like) {
+        return display_mysql_view_ddl(source, &quote_mysql_identifier(&input.name));
+    }
     let terminated_source = if matches!(
         input.database_type,
         Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng)
@@ -602,6 +605,34 @@ fn executable_oracle_routine_ddl(source: &str) -> String {
         return ensure_semicolon(&format!("CREATE OR REPLACE {trimmed}"));
     }
     ensure_semicolon(trimmed)
+}
+
+/// View DDL shown in Edit Structure. MySQL returns `CREATE VIEW`, which the
+/// structure editor used to present like a table script. Rewrite that to
+/// `CREATE OR REPLACE VIEW` and keep the view name unqualified.
+fn display_mysql_view_ddl(source: &str, view_name: &str) -> String {
+    let trimmed = source.trim();
+    if let Some(statement) = rewrite_mysql_view_statement(trimmed) {
+        return statement;
+    }
+    if Regex::new(r"(?i)^(?:CREATE|ALTER)\s+").unwrap().is_match(trimmed) {
+        return ensure_semicolon(trimmed);
+    }
+    format!("CREATE OR REPLACE VIEW {view_name} AS\n{}", ensure_semicolon(trimmed))
+}
+
+fn rewrite_mysql_view_statement(source: &str) -> Option<String> {
+    let start = leading_sql_statement_start(source);
+    let executable = source[start..].trim_end();
+    let create_view = Regex::new(
+        r"(?is)^(?:CREATE|ALTER)\s+(?:OR\s+REPLACE\s+)?(?P<options>(?:ALGORITHM\s*=\s*(?:UNDEFINED|MERGE|TEMPTABLE)\s+)?(?:DEFINER\s*=\s*(?:(?:`(?:``|[^`])+`|'(?:''|[^'])+'|[^\s]+)\s*@\s*(?:`(?:``|[^`])+`|'(?:''|[^'])+'|[^\s]+)|CURRENT_USER(?:\(\))?)\s+)?(?:SQL\s+SECURITY\s+(?:DEFINER|INVOKER)\s+)?)VIEW\s+(?:(?:`(?:``|[^`])+`|[A-Za-z0-9_$]+)\s*\.\s*)?(?P<rest>.*)$",
+    )
+    .unwrap();
+    let captures = create_view.captures(executable)?;
+    let options = captures.name("options").map(|value| value.as_str()).unwrap_or("");
+    let rest = captures.name("rest")?.as_str();
+    let statement = format!("CREATE OR REPLACE {options}VIEW {rest}");
+    Some(ensure_semicolon(&format!("{}{}", &source[..start], statement.trim_start())))
 }
 
 fn executable_mysql_view_ddl(source: &str) -> String {
@@ -1905,20 +1936,50 @@ mod tests {
             identifier_quote: None,
         });
 
-        assert_eq!(sql, "CREATE ALGORITHM=UNDEFINED VIEW `active_users` AS SELECT `id` FROM `users`;");
+        assert_eq!(sql, "CREATE OR REPLACE ALGORITHM=UNDEFINED VIEW `active_users` AS SELECT `id` FROM `users`;");
     }
 
     #[test]
-    fn view_ddl_uses_create_view_for_non_postgres_like_databases() {
+    fn mysql_view_ddl_uses_create_or_replace_without_database_name() {
         let sql = build_view_ddl_sql(BuildViewDdlInput {
             database_type: Some(DatabaseType::Mysql),
-            schema: Some("reporting".to_string()),
+            schema: Some("app".to_string()),
             name: "active_users".to_string(),
             source: "SELECT id FROM users".to_string(),
             identifier_quote: None,
         });
 
-        assert_eq!(sql, "CREATE VIEW `reporting`.`active_users` AS\nSELECT id FROM users;");
+        assert_eq!(sql, "CREATE OR REPLACE VIEW `active_users` AS\nSELECT id FROM users;");
+    }
+
+    #[test]
+    fn mysql_show_create_view_drops_database_qualifier() {
+        let sql = build_view_ddl_sql(BuildViewDdlInput {
+            database_type: Some(DatabaseType::Mysql),
+            schema: Some("app".to_string()),
+            name: "active_users".to_string(),
+            source: "CREATE ALGORITHM=UNDEFINED DEFINER=`hr`@`%` SQL SECURITY DEFINER VIEW `app`.`active_users` AS select `id` from `users`"
+                .to_string(),
+            identifier_quote: None,
+        });
+
+        assert_eq!(
+            sql,
+            "CREATE OR REPLACE ALGORITHM=UNDEFINED DEFINER=`hr`@`%` SQL SECURITY DEFINER VIEW `active_users` AS select `id` from `users`;"
+        );
+    }
+
+    #[test]
+    fn view_ddl_uses_create_view_for_non_postgres_like_databases() {
+        let sql = build_view_ddl_sql(BuildViewDdlInput {
+            database_type: Some(DatabaseType::Sqlite),
+            schema: Some("main".to_string()),
+            name: "active_users".to_string(),
+            source: "SELECT id FROM users".to_string(),
+            identifier_quote: None,
+        });
+
+        assert_eq!(sql, "CREATE VIEW \"main\".\"active_users\" AS\nSELECT id FROM users;");
     }
 
     #[test]

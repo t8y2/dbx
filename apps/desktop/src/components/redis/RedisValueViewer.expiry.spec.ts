@@ -130,7 +130,7 @@ function missingValue() {
     key_raw: "key",
     ttl: -2,
     redis_type: "none",
-    data: { kind: "unknown" as const },
+    data: { kind: "unknown" as const, redis_type: "none" },
   };
 }
 

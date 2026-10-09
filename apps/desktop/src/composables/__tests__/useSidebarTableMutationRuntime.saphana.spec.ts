@@ -49,7 +49,7 @@ function tableNode(database: string | null | undefined): TreeNode {
   } as TreeNode;
 }
 
-function runtime(database: string | null | undefined, config: Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "driver_profile">> = { db_type: "saphana" }, databaseType: DatabaseType = "saphana") {
+function runtime(database: string | null | undefined, config: Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "driver_profile">> = { db_type: "saphana" }, databaseType: DatabaseType = "saphana", historyStore?: any) {
   const node = tableNode(database);
   const activeNode = shallowRef(node);
   const connectionStore = {
@@ -66,6 +66,7 @@ function runtime(database: string | null | undefined, config: Pick<ConnectionCon
     executeWithProductionGuard: mocks.executeWithProductionGuard,
     closeDroppedTableObjectTabsForNode: mocks.closeDroppedTableObjectTabsForNode,
     refreshMutatedTableDataTabsForNode: mocks.refreshMutatedTableDataTabsForNode,
+    historyStore,
   });
   return { feature, node };
 }
@@ -455,5 +456,56 @@ describe("useSidebarTableMutationRuntime SAP HANA schema-scoped actions", () => 
     expect(mocks.refreshMutatedTableDataTabsForNode).not.toHaveBeenCalled();
     expect(sidebarDangerRunningExecutionId.value).toBe("");
     expect(sidebarDangerRunningCancel.value).toBeNull();
+  });
+
+  it.each(actions)("records executed SQL into historyStore on $action success", async ({ action, sql }) => {
+    const addMock = vi.fn().mockResolvedValue(undefined);
+    const historyStore = { add: addMock };
+    const { feature } = runtime("", { db_type: "saphana" }, "saphana", historyStore);
+
+    await feature[action]();
+
+    expect(addMock).toHaveBeenCalledOnce();
+    expect(addMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connection_id: "hana-1",
+        database: "",
+        sql,
+        success: true,
+        target: "ORDERS",
+      }),
+    );
+  });
+
+  it("records failed mutation into historyStore when execution fails", async () => {
+    const addMock = vi.fn().mockResolvedValue(undefined);
+    const historyStore = { add: addMock };
+    const { feature } = runtime("", { db_type: "saphana" }, "saphana", historyStore);
+    mocks.executeWithProductionGuard.mockRejectedValueOnce(new Error("Database write error"));
+
+    await feature.confirmDropTable();
+
+    expect(addMock).toHaveBeenCalledOnce();
+    expect(addMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connection_id: "hana-1",
+        database: "",
+        sql: 'DROP TABLE "APP"."ORDERS";',
+        success: false,
+        error: "Database write error",
+        target: "ORDERS",
+      }),
+    );
+  });
+
+  it("does not record into historyStore when production confirmation is declined", async () => {
+    const addMock = vi.fn().mockResolvedValue(undefined);
+    const historyStore = { add: addMock };
+    const { feature } = runtime("", { db_type: "saphana" }, "saphana", historyStore);
+    mocks.executeWithProductionGuard.mockResolvedValueOnce(undefined);
+
+    await feature.confirmDropTable();
+
+    expect(addMock).not.toHaveBeenCalled();
   });
 });

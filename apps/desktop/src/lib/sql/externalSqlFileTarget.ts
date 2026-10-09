@@ -15,15 +15,16 @@ export interface ExternalSqlFileTarget {
 type ExternalSqlFileTargetTab = Pick<QueryTab, "id" | "connectionId" | "database" | "catalog" | "schema" | "mode">;
 type ExternalSqlFileTargetConnection = Pick<ConnectionConfig, "db_type">;
 type ExternalSqlFileConnectionLookup = (connectionId: string) => ExternalSqlFileTargetConnection | undefined;
+type ExternalSqlFileTargetOptions = { allowMongoScripts?: boolean };
 
 export function unassociatedExternalSqlFileTarget(): ExternalSqlFileTarget {
   return { connectionId: "", database: "", catalog: undefined, schema: undefined };
 }
 
-export function activeTabExternalSqlFileTarget(tabs: readonly ExternalSqlFileTargetTab[], activeTabId: string | null | undefined, getConnection: ExternalSqlFileConnectionLookup): ExternalSqlFileTarget {
+export function activeTabExternalSqlFileTarget(tabs: readonly ExternalSqlFileTargetTab[], activeTabId: string | null | undefined, getConnection: ExternalSqlFileConnectionLookup, options: ExternalSqlFileTargetOptions = {}): ExternalSqlFileTarget {
   const activeTab = activeTabId ? tabs.find((tab) => tab.id === activeTabId) : undefined;
   const connection = activeTab?.connectionId ? getConnection(activeTab.connectionId) : undefined;
-  if (!activeTab || activeTab.mode === "plugin-workbench" || activeTab.mode === "plugin-filesystem" || !connection || !supportsSqlFileExecution(connection.db_type)) return unassociatedExternalSqlFileTarget();
+  if (!activeTab || activeTab.mode === "plugin-workbench" || activeTab.mode === "plugin-filesystem" || !connection || !(supportsSqlFileExecution(connection.db_type) || (options.allowMongoScripts === true && connection.db_type === "mongodb"))) return unassociatedExternalSqlFileTarget();
   return {
     connectionId: activeTab.connectionId,
     database: activeTab.database,
@@ -103,6 +104,6 @@ export function resolveExternalSqlFileTarget(path: string, connectionExists: (co
   return { connectionId: saved.connectionId, database: saved.database, catalog: saved.catalog, schema: saved.schema };
 }
 
-export function resolveExternalSqlFileTargetForActiveTab(path: string, tabs: readonly ExternalSqlFileTargetTab[], activeTabId: string | null | undefined, getConnection: ExternalSqlFileConnectionLookup): ExternalSqlFileTarget {
-  return resolveExternalSqlFileTarget(path, (connectionId) => !!getConnection(connectionId), activeTabExternalSqlFileTarget(tabs, activeTabId, getConnection));
+export function resolveExternalSqlFileTargetForActiveTab(path: string, tabs: readonly ExternalSqlFileTargetTab[], activeTabId: string | null | undefined, getConnection: ExternalSqlFileConnectionLookup, options: ExternalSqlFileTargetOptions = {}): ExternalSqlFileTarget {
+  return resolveExternalSqlFileTarget(path, (connectionId) => !!getConnection(connectionId), activeTabExternalSqlFileTarget(tabs, activeTabId, getConnection, options));
 }

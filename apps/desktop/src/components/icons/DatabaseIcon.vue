@@ -32,6 +32,7 @@ const assetIcons: Record<string, string> = {
   easysearch: "easysearch",
   meilisearch: "meilisearch",
   solr: "solr",
+  couchdb: "couchdb",
   oracle: "oracle",
   "oracle-10g": "oracle",
   "oracle-legacy": "oracle",
@@ -60,6 +61,8 @@ const assetIcons: Record<string, string> = {
   prestosql: "presto",
   hive: "hive",
   argo: "hive",
+  transwarp: "transwarp-inceptor.png",
+  transwarp_inceptor: "transwarp-inceptor.png",
   kyuubi: "kyuubi.png",
   impala: "impala",
   hbase: "hbase",
@@ -85,6 +88,7 @@ const assetIcons: Record<string, string> = {
   starrocks: "starrocks",
   redshift: "redshift",
   neo4j: "neo4j",
+  nebula: "nebula.png",
   informix: "informix",
   databricks: "databricks",
   saphana: "saphana",
@@ -129,6 +133,7 @@ const assetIcons: Record<string, string> = {
 const normalizedType = computed(() => (props.dbType || "").toLowerCase().replace(/[\s-]+/g, "_"));
 const assetName = computed(() => assetIcons[normalizedType.value]);
 const useLightIconInDarkMode = computed(() => normalizedType.value === "easysearch" && isDark.value);
+const brightenInceptorInDarkMode = computed(() => isDark.value && (normalizedType.value === "transwarp" || normalizedType.value === "transwarp_inceptor"));
 const assetSrc = computed(() => {
   if (!assetName.value) return "";
   if (normalizedType.value === "uxdb" && isDark.value) return webPath("/icons/database/uxdb-dark.svg");
@@ -137,7 +142,14 @@ const assetSrc = computed(() => {
 </script>
 
 <template>
-  <img v-if="assetName" :src="assetSrc" alt="" class="database-logo object-contain" :class="{ 'database-logo-light': useLightIconInDarkMode, 'database-logo-impala': normalizedType === 'impala', 'database-logo-solr': normalizedType === 'solr' }" aria-hidden="true" />
+  <img
+    v-if="assetName"
+    :src="assetSrc"
+    alt=""
+    class="database-logo object-contain"
+    :class="{ 'database-logo-light': useLightIconInDarkMode, 'database-logo-inceptor-dark': brightenInceptorInDarkMode, 'database-logo-impala': normalizedType === 'impala', 'database-logo-solr': normalizedType === 'solr' }"
+    aria-hidden="true"
+  />
   <Database v-else class="text-blue-400" />
 </template>
 
@@ -149,6 +161,10 @@ const assetSrc = computed(() => {
 
 .database-logo-light {
   filter: brightness(0) invert(82%);
+}
+
+.database-logo-inceptor-dark {
+  filter: brightness(1.6);
 }
 
 .database-logo-impala {

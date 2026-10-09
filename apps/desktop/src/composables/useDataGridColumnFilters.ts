@@ -1,11 +1,10 @@
-import { computed, onUnmounted, ref, watch, type ComputedRef, type Ref } from "vue";
-import * as api from "@/lib/backend/api";
+import { computed, ref, watch, type ComputedRef, type Ref } from "vue";
 import { buildColumnValueFilterCondition, buildColumnValuesFilterCondition, parseFilterValue, removeColumnValueFilterCondition, replaceColumnValueFilterCondition, appendColumnValueFilterCondition } from "@/lib/dataGrid/dataGridColumnFilter";
-import { buildDataGridColumnDistinctValuesSql } from "@/lib/dataGrid/dataGridSql";
 import { buildDataGridLocalFilterOptions, sortDataGridLocalFilterOptions, type DataGridLocalFilterSort, dataGridLocalFilterKey, dataGridLocalFilterLabel, rowMatchesDataGridLocalColumnFilters, type DataGridLocalFilterOption } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
 import type { DataGridCachedServerColumnFilter } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
-import type { ColumnInfo, DatabaseType, QueryResult } from "@/types/database";
+import { DATA_GRID_DISTINCT_VALUE_DEFAULT_LIMIT, useDataGridDistinctValueLoader } from "@/composables/useDataGridDistinctValueLoader";
+import type { ColumnInfo, ConnectionConfig, DatabaseType, QueryResult } from "@/types/database";
 
 export type DataGridLocalFilterMode = "local" | "server";
 
@@ -21,11 +20,6 @@ export interface DataGridColumnFilterState {
   localFilterOpenColumn: Ref<number | null>;
   localFilterSearch: Ref<string>;
   localFilterDraft: Ref<DataGridLocalFilterDraft | null>;
-  serverFilterLoading: Ref<boolean>;
-  serverFilterError: Ref<string>;
-  serverFilterOptions: Ref<DataGridLocalFilterOption[]>;
-  serverFilterLimited: Ref<boolean>;
-  serverFilterValueByKey: Ref<Map<string, CellValue>>;
   serverColumnFilters: Ref<Record<number, DataGridCachedServerColumnFilter>>;
 }
 
@@ -37,10 +31,6 @@ interface TableMetadata {
   columns: ColumnInfo[];
 }
 
-interface ConnectionConfig {
-  driver_profile?: string;
-}
-
 export interface UseDataGridColumnFiltersOptions {
   state: DataGridColumnFilterState;
   getResult: () => QueryResult;
@@ -48,14 +38,16 @@ export interface UseDataGridColumnFiltersOptions {
   getConnectionId: () => string | undefined;
   getSchema: () => string | undefined;
   getExecutionDatabase: () => string;
+  scopeIdentity: ComputedRef<string>;
   resolvedDatabaseType: ComputedRef<DatabaseType | undefined>;
   canUseWhereSearch: ComputedRef<boolean>;
   canUseServerColumnFilter: ComputedRef<boolean>;
   structuredFilterCount: ComputedRef<number>;
   hasStructuredFilters: ComputedRef<boolean>;
   whereFilterInput: Ref<string>;
-  getConnectionConfig: () => ConnectionConfig | undefined;
+  getConnectionConfig: () => Pick<ConnectionConfig, "driver_profile" | "query_timeout_secs" | "query_timeout_inherit"> | undefined;
   getIdentifierQuote: () => string | undefined;
+  getGlobalQueryTimeoutSecs: () => number | undefined;
   getNewRows: () => readonly (readonly CellValue[])[];
   getRowData: (row: CellValue[], sourceIndex: number) => readonly CellValue[];
   formatValue: (value: CellValue, columnIndex: number) => string;
@@ -67,12 +59,28 @@ export interface UseDataGridColumnFiltersOptions {
   emitLocalFiltersChange: (filters: Record<string, string[]>) => void;
 }
 
-export const DATA_GRID_SERVER_COLUMN_FILTER_LIMIT = 1000;
-const SERVER_COLUMN_FILTER_DEBOUNCE_MS = 300;
+export const DATA_GRID_SERVER_COLUMN_FILTER_LIMIT = DATA_GRID_DISTINCT_VALUE_DEFAULT_LIMIT;
 
 export function useDataGridColumnFilters(options: UseDataGridColumnFiltersOptions) {
   const { state } = options;
   const localFilterSort = ref<DataGridLocalFilterSort>({ field: "value", direction: "asc" });
+  const distinctValueLoader = useDataGridDistinctValueLoader({
+    scopeIdentity: options.scopeIdentity,
+    getConnectionId: options.getConnectionId,
+    getExecutionDatabase: options.getExecutionDatabase,
+    getSchema: options.getSchema,
+    getDatabaseType: () => options.resolvedDatabaseType.value,
+    getConnectionConfig: options.getConnectionConfig,
+    getIdentifierQuote: options.getIdentifierQuote,
+    getGlobalQueryTimeoutSecs: options.getGlobalQueryTimeoutSecs,
+    waitForTableMeta: options.waitForTableMeta,
+    formatValue: options.formatValue,
+  });
+  const serverFilterLoading = distinctValueLoader.loading;
+  const serverFilterError = distinctValueLoader.error;
+  const serverFilterOptions = distinctValueLoader.options;
+  const serverFilterLimited = distinctValueLoader.limited;
+  const serverFilterValueByKey = distinctValueLoader.valueByKey;
 
   function toggleLocalFilterSort(field: DataGridLocalFilterSort["field"]) {
     if (state.localFilterDraft.value?.mode !== "local") return;
@@ -82,9 +90,6 @@ export function useDataGridColumnFilters(options: UseDataGridColumnFiltersOption
       direction: current.field === field ? (current.direction === "asc" ? "desc" : "asc") : field === "count" ? "desc" : "asc",
     };
   }
-
-  let serverFilterRequestId = 0;
-  let serverFilterSearchTimer: ReturnType<typeof window.setTimeout> | undefined;
 
   watch(
     state.localColumnFilters,
@@ -142,12 +147,12 @@ export function useDataGridColumnFilters(options: UseDataGridColumnFiltersOption
   const rowMatchesLocalColumnFilters = (data: CellValue[]) => rowMatchesDataGridLocalColumnFilters(data, state.localColumnFilters.value);
 
   const localFilterAllOptions = computed(() => {
-    if (state.localFilterDraft.value?.mode === "server") return state.serverFilterOptions.value;
+    if (state.localFilterDraft.value?.mode === "server") return serverFilterOptions.value;
     const columnIndex = state.localFilterDraft.value?.columnIndex;
     return columnIndex === undefined ? [] : buildLocalFilterOptions(columnIndex);
   });
   const localFilterOptions = computed(() => {
-    if (state.localFilterDraft.value?.mode === "server") return state.serverFilterOptions.value;
+    if (state.localFilterDraft.value?.mode === "server") return serverFilterOptions.value;
     const query = state.localFilterSearch.value.trim().toLowerCase();
     const matchingOptions = localFilterAllOptions.value.filter((option) => !query || option.label.toLowerCase().includes(query));
     // Sort before limiting so frequent values outside the default first 500 remain discoverable.
@@ -174,19 +179,6 @@ export function useDataGridColumnFilters(options: UseDataGridColumnFiltersOption
     return !localFilterAllOptions.value.some((option) => option.label.toLowerCase() === normalized);
   });
 
-  function resetServerFilterState() {
-    serverFilterRequestId++;
-    if (serverFilterSearchTimer !== undefined) {
-      window.clearTimeout(serverFilterSearchTimer);
-      serverFilterSearchTimer = undefined;
-    }
-    state.serverFilterLoading.value = false;
-    state.serverFilterError.value = "";
-    state.serverFilterOptions.value = [];
-    state.serverFilterLimited.value = false;
-    state.serverFilterValueByKey.value = new Map();
-  }
-
   function openLocalFilter(columnIndex: number, requestedMode: DataGridLocalFilterMode = "local") {
     options.onOpen?.();
     localFilterSort.value = { field: "value", direction: "asc" };
@@ -200,7 +192,7 @@ export function useDataGridColumnFilters(options: UseDataGridColumnFiltersOption
       touched: false,
     };
     state.localFilterOpenColumn.value = columnIndex;
-    resetServerFilterState();
+    distinctValueLoader.reset();
     if (mode === "server") void loadServerFilterValues(columnIndex, "");
   }
 
@@ -209,24 +201,7 @@ export function useDataGridColumnFilters(options: UseDataGridColumnFiltersOption
     state.localFilterOpenColumn.value = null;
     state.localFilterDraft.value = null;
     state.localFilterSearch.value = "";
-    resetServerFilterState();
-  }
-
-  function serverFilterOptionFromRow(row: QueryResult["rows"][number], columnIndex: number): DataGridLocalFilterOption {
-    const value = (row[0] ?? null) as CellValue;
-    const countValue = Number(row[1]);
-    return { key: dataGridLocalFilterKey(value), label: localFilterLabel(value, columnIndex), count: Number.isFinite(countValue) ? countValue : null, value };
-  }
-
-  function serverFilterOptionsFromResult(result: QueryResult, columnIndex: number): DataGridLocalFilterOption[] {
-    const byKey = new Map<string, DataGridLocalFilterOption>();
-    for (const row of result.rows) {
-      const option = serverFilterOptionFromRow(row, columnIndex);
-      const current = byKey.get(option.key);
-      if (current) current.count = (current.count ?? 0) + (option.count ?? 0);
-      else byKey.set(option.key, option);
-    }
-    return [...byKey.values()];
+    distinctValueLoader.reset();
   }
 
   function syncServerFilterDraft(columnIndex: number, filterOptions: DataGridLocalFilterOption[]) {
@@ -236,63 +211,38 @@ export function useDataGridColumnFilters(options: UseDataGridColumnFiltersOption
     state.localFilterDraft.value = { ...draft, values: new Set(activeFilter?.keys ?? filterOptions.map((option) => option.key)) };
   }
 
+  watch(serverFilterOptions, (filterOptions) => {
+    const draft = state.localFilterDraft.value;
+    if (draft?.mode === "server" && state.localFilterOpenColumn.value === draft.columnIndex) syncServerFilterDraft(draft.columnIndex, filterOptions);
+  });
+
   async function loadServerFilterValues(columnIndex: number, searchValue: string) {
-    const connectionId = options.getConnectionId();
-    if (!options.canUseServerColumnFilter.value || !connectionId) return;
+    if (!options.canUseServerColumnFilter.value || !options.getConnectionId()) return;
     const columnName = options.getResult().columns[columnIndex];
     if (!columnName) return;
-    const requestId = ++serverFilterRequestId;
-    state.serverFilterLoading.value = true;
-    state.serverFilterError.value = "";
-    state.serverFilterLimited.value = false;
-    try {
-      const tableMeta = await options.waitForTableMeta();
-      if (!tableMeta) return;
-      const columnInfo = tableMeta.columns.find((column) => column.name === columnName);
-      const sql = await buildDataGridColumnDistinctValuesSql({
-        databaseType: options.resolvedDatabaseType.value,
-        driverProfile: options.getConnectionConfig()?.driver_profile,
-        identifierQuote: options.getIdentifierQuote(),
-        catalog: tableMeta.catalog,
-        database: tableMeta.database,
-        schema: tableMeta.schema,
-        tableName: tableMeta.tableName,
-        columnName,
-        columnInfo,
-        searchValue: searchValue.trim() || undefined,
-        limit: DATA_GRID_SERVER_COLUMN_FILTER_LIMIT,
-        includeCounts: true,
-      });
-      const result = await api.executeQuery(connectionId, options.getExecutionDatabase(), sql, tableMeta.schema ?? options.getSchema(), undefined, {
-        maxRows: DATA_GRID_SERVER_COLUMN_FILTER_LIMIT,
-        fetchSize: DATA_GRID_SERVER_COLUMN_FILTER_LIMIT,
-        pageSize: DATA_GRID_SERVER_COLUMN_FILTER_LIMIT,
-      });
-      if (requestId !== serverFilterRequestId || state.localFilterOpenColumn.value !== columnIndex) return;
-      const filterOptions = serverFilterOptionsFromResult(result, columnIndex);
-      const nextValueByKey = new Map(state.serverFilterValueByKey.value);
-      for (const option of filterOptions) nextValueByKey.set(option.key, option.value);
-      state.serverFilterValueByKey.value = nextValueByKey;
-      state.serverFilterOptions.value = filterOptions;
-      state.serverFilterLimited.value = result.truncated === true || result.rows.length >= DATA_GRID_SERVER_COLUMN_FILTER_LIMIT;
-      syncServerFilterDraft(columnIndex, filterOptions);
-    } catch (error: any) {
-      if (requestId !== serverFilterRequestId) return;
-      state.serverFilterOptions.value = [];
-      state.serverFilterError.value = String(error?.message || error);
-    } finally {
-      if (requestId === serverFilterRequestId) state.serverFilterLoading.value = false;
-    }
+    await distinctValueLoader.load({
+      columnIndex,
+      columnName,
+      searchValue,
+      limit: DATA_GRID_SERVER_COLUMN_FILTER_LIMIT,
+      includeCounts: true,
+    });
+    if (state.localFilterOpenColumn.value === columnIndex) syncServerFilterDraft(columnIndex, serverFilterOptions.value);
   }
 
   watch(state.localFilterSearch, (value) => {
     const draft = state.localFilterDraft.value;
     if (!draft || draft.mode !== "server" || state.localFilterOpenColumn.value !== draft.columnIndex) return;
-    if (serverFilterSearchTimer !== undefined) window.clearTimeout(serverFilterSearchTimer);
-    serverFilterSearchTimer = window.setTimeout(() => void loadServerFilterValues(draft.columnIndex, value), SERVER_COLUMN_FILTER_DEBOUNCE_MS);
+    const columnName = options.getResult().columns[draft.columnIndex];
+    if (!columnName) return;
+    distinctValueLoader.schedule({
+      columnIndex: draft.columnIndex,
+      columnName,
+      searchValue: value,
+      limit: DATA_GRID_SERVER_COLUMN_FILTER_LIMIT,
+      includeCounts: true,
+    });
   });
-
-  onUnmounted(resetServerFilterState);
 
   function toggleLocalFilterValue(key: string) {
     const draft = state.localFilterDraft.value;
@@ -339,13 +289,13 @@ export function useDataGridColumnFilters(options: UseDataGridColumnFiltersOption
       closeLocalFilter();
       return;
     }
-    if (canApplyTypedLocalFilterValue.value && state.serverFilterOptions.value.length === 0) {
+    if (canApplyTypedLocalFilterValue.value && serverFilterOptions.value.length === 0) {
       await applyTypedLocalFilterValue();
       return;
     }
     const columnName = options.getResult().columns[draft.columnIndex];
     if (!columnName) return;
-    const values = [...draft.values].flatMap((key) => (state.serverFilterValueByKey.value.has(key) ? [state.serverFilterValueByKey.value.get(key)!] : []));
+    const values = [...draft.values].flatMap((key) => (serverFilterValueByKey.value.has(key) ? [serverFilterValueByKey.value.get(key)!] : []));
     if (values.length === 0) {
       closeLocalFilter();
       return;
@@ -431,6 +381,10 @@ export function useDataGridColumnFilters(options: UseDataGridColumnFiltersOption
     if (removedServerFilter && applyServerWhereFilter && options.canUseWhereSearch.value) void options.applyWhereFilter();
   }
 
+  function resetDistinctValueCache() {
+    distinctValueLoader.reset({ clearCache: true });
+  }
+
   return {
     localFilterActive,
     localFilterCount,
@@ -448,6 +402,11 @@ export function useDataGridColumnFilters(options: UseDataGridColumnFiltersOption
     toggleLocalFilterSort,
     localFilterTypedValue,
     canApplyTypedLocalFilterValue,
+    serverFilterLoading,
+    serverFilterError,
+    serverFilterOptions,
+    serverFilterLimited,
+    resetDistinctValueCache,
     openLocalFilter,
     closeLocalFilter,
     toggleLocalFilterValue,

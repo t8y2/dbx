@@ -262,6 +262,11 @@ pub(super) fn capabilities_for(
             index_include: true,
             index_filter: true,
             index_comment: true,
+            // T-SQL: `ALTER TABLE ... DROP CONSTRAINT <name>` for the persisted primary key and
+            // `ADD [CONSTRAINT name] PRIMARY KEY (...)` are supported; constraint names are read
+            // from the index metadata (issue #10758).
+            add_primary_key: true,
+            alter_primary_key: true,
             ..base
         },
         Some(DatabaseType::Dameng) => TableStructureCapabilities {
@@ -377,6 +382,15 @@ pub(super) fn capabilities_for(
             create_index: true,
             drop_index: true,
             rebuild_index: true,
+            ..base
+        },
+        // Inceptor accepts ADD COLUMNS and CHANGE, but not DROP COLUMN.
+        Some(DatabaseType::Transwarp) => TableStructureCapabilities {
+            dialect: StructureDialect::Mysql,
+            add_column: true,
+            rename_column: true,
+            alter_existing_column: true,
+            comment: true,
             ..base
         },
         _ => base,

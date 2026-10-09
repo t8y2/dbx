@@ -18,6 +18,8 @@ vi.mock("splitpanes", () => ({
 const editorPreviewCalls = vi.hoisted(() => [] as Array<{ tabId: string; range: unknown }>);
 const editorFocusCalls = vi.hoisted(() => [] as Array<{ tabId: string; range: unknown }>);
 const groupHandleModRCalls = vi.hoisted(() => [] as Element[]);
+const groupFocusWhereCalls = vi.hoisted(() => [] as string[]);
+const groupOpenTableStructureEditorCalls = vi.hoisted(() => [] as string[]);
 const groupFocusSearchCalls = vi.hoisted(() => [] as Array<Element | null>);
 const resultHandleModRCalls = vi.hoisted(() => [] as Element[]);
 const resultFocusSearchCalls = vi.hoisted(() => [] as boolean[]);
@@ -39,6 +41,14 @@ vi.mock("@/components/layout/EditorGroup.vue", () => ({
       },
       handleModRTarget(target: Element) {
         groupHandleModRCalls.push(target);
+        return true;
+      },
+      focusWhere(this: { groupId: string }) {
+        groupFocusWhereCalls.push(this.groupId);
+        return true;
+      },
+      openTableStructureEditor(this: { groupId: string }) {
+        groupOpenTableStructureEditorCalls.push(this.groupId);
         return true;
       },
       focusSearch(target?: Element | null) {
@@ -157,6 +167,8 @@ describe("SqlEditorWorkspace mount contract", () => {
     editorFocusCalls.length = 0;
     groupHandleModRCalls.length = 0;
     groupFocusSearchCalls.length = 0;
+    groupFocusWhereCalls.length = 0;
+    groupOpenTableStructureEditorCalls.length = 0;
     resultHandleModRCalls.length = 0;
     resultFocusSearchCalls.length = 0;
     groupExecutionCalls.capture.length = 0;
@@ -713,5 +725,48 @@ describe("SqlEditorWorkspace mount contract", () => {
     portalEl.remove();
     app.unmount();
     host.remove();
+  });
+  it("routes WHERE focus only to the active editor group after switching groups", async () => {
+    const store = useQueryStore();
+    store.tabs = [dataTab("data-a"), dataTab("data-b")];
+    store.activeTabId = "data-a";
+    store.groups = [
+      { id: "g1", tabIds: ["data-a"], activeTabId: "data-a" },
+      { id: "g2", tabIds: ["data-b"], activeTabId: "data-b" },
+    ];
+    store.focusedGroupId = "g1";
+    store.orientation = "vertical";
+    store.sizes = [50, 50];
+    const host = createHost();
+    const app = createApp(SqlEditorWorkspace, {
+      activeTab: store.tabs[0],
+      activeOutputView: "result",
+      executableSql: "",
+      formatSqlRequest: null,
+      compressSqlRequest: null,
+      selectedSql: "",
+      cursorPos: 0,
+      blockDangerousRedisCommands: false,
+    });
+    app.use(pinia);
+    app.use(i18n);
+    const vm = app.mount(host) as unknown as { focusWhere: () => boolean; openTableStructureEditor: () => boolean };
+    try {
+      await nextTick();
+      expect(vm.focusWhere()).toBe(true);
+      expect(groupFocusWhereCalls).toEqual(["g1"]);
+      expect(vm.openTableStructureEditor()).toBe(true);
+      expect(groupOpenTableStructureEditorCalls).toEqual(["g1"]);
+      store.focusedGroupId = "g2";
+      store.activeTabId = "data-b";
+      await nextTick();
+      expect(vm.focusWhere()).toBe(true);
+      expect(groupFocusWhereCalls).toEqual(["g1", "g2"]);
+      expect(vm.openTableStructureEditor()).toBe(true);
+      expect(groupOpenTableStructureEditorCalls).toEqual(["g1", "g2"]);
+    } finally {
+      app.unmount();
+      host.remove();
+    }
   });
 });

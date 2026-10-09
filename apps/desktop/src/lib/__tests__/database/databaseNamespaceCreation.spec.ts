@@ -33,4 +33,11 @@ describe("database namespace creation targets", () => {
     expect(connectionNamespaceCreationTarget(postgres)).toBe("database");
     expect(databaseNodeNamespaceCreationTarget(postgres, databaseNode)).toBe("schema");
   });
+
+  it("offers top-level database creation for Inceptor without nested schemas", () => {
+    const transwarp = { db_type: "transwarp", driver_profile: "transwarp-inceptor" } as Conn;
+
+    expect(connectionNamespaceCreationTarget(transwarp)).toBe("database");
+    expect(databaseNodeNamespaceCreationTarget(transwarp, databaseNode)).toBeNull();
+  });
 });

@@ -72,6 +72,35 @@ describe("connectionStore one_time runtime cleanup", () => {
     vi.restoreAllMocks();
   });
 
+  it("cancels source and target schema compares and drains metadata before disconnecting pools", async () => {
+    installApiMocks();
+    const { registerSchemaDiffTask } = await import("@/lib/schema/schemaDiffCancellation");
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { disconnectDb } = await import("@/lib/backend/api");
+    const store = useConnectionStore();
+    store.connections = [previewConnection({ id: "saved-1", one_time: false })];
+    const controllers = [new AbortController(), new AbortController(), new AbortController()];
+    const finish: Array<() => void> = [];
+    for (const [i, ids] of [
+      ["saved-1", "target"],
+      ["source", "saved-1"],
+      ["other", "target"],
+    ].entries()) {
+      registerSchemaDiffTask(ids, controllers[i], new Promise<void>((resolve) => finish.push(resolve)));
+    }
+    const disconnecting = store.disconnect("saved-1");
+    expect(controllers.map((controller) => controller.signal.aborted)).toEqual([true, true, false]);
+    expect(disconnectDb).not.toHaveBeenCalled();
+    finish[0]();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(disconnectDb).not.toHaveBeenCalled();
+    finish[1]();
+    await disconnecting;
+    expect(disconnectDb).toHaveBeenCalledOnce();
+    expect(disconnectDb).toHaveBeenCalledWith("saved-1", undefined);
+    finish[2]();
+  });
+
   // One-time connections are never persisted, so the backend's save_connections
   // sync never reclaims them; disconnect_db is the only reclaim point, which makes
   // an explicit disconnect on removal mandatory.
@@ -115,6 +144,49 @@ describe("connectionStore one_time runtime cleanup", () => {
 
     expect(store.getConfig("removed-1")).toBeUndefined();
     expect(store.connections).toEqual([]);
+  });
+
+  it("reloads externally added, copied and deleted connections while preserving existing tree state", async () => {
+    installApiMocks();
+    const { loadConnections } = await import("@/lib/backend/api");
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const kept = previewConnection({ id: "kept", one_time: false });
+    const temporary = previewConnection({ id: "temporary" });
+    store.connections = [kept, previewConnection({ id: "removed", one_time: false }), temporary];
+    store.connectedIds.add("kept");
+    store.treeNodes = [{ id: "kept", label: kept.name, type: "connection", connectionId: "kept", isExpanded: true, children: [{ id: "kept:app", label: "app", type: "database", connectionId: "kept", database: "app", isExpanded: true }] }];
+    vi.mocked(loadConnections).mockResolvedValue([kept, previewConnection({ id: "added", one_time: false }), previewConnection({ id: "copied", one_time: false })]);
+
+    await store.reloadFromDisk();
+
+    expect(store.connections.map((connection) => connection.id)).toEqual(["kept", "added", "copied", "temporary"]);
+    expect(store.treeNodes.map((node) => node.id)).toEqual(["kept", "added", "copied", "temporary"]);
+    expect(store.treeNodes[0]).toMatchObject({ isExpanded: true, children: expect.arrayContaining([expect.objectContaining({ id: "kept:app", isExpanded: true })]) });
+    expect(store.connectedIds.has("kept")).toBe(true);
+  });
+
+  it("reads a fresh snapshot when an external change arrives during an in-flight reload", async () => {
+    installApiMocks();
+    const { loadConnections } = await import("@/lib/backend/api");
+    let finishFirstRead!: (connections: ConnectionConfig[]) => void;
+    vi.mocked(loadConnections)
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          finishFirstRead = resolve;
+        }),
+      )
+      .mockResolvedValueOnce([previewConnection({ id: "new", one_time: false })]);
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const initialLoad = store.initFromDisk();
+    await vi.waitFor(() => expect(loadConnections).toHaveBeenCalledOnce());
+    const externalReload = store.reloadFromDisk();
+    finishFirstRead([]);
+    await Promise.all([initialLoad, externalReload]);
+
+    expect(loadConnections).toHaveBeenCalledTimes(2);
+    expect(store.getConfig("new")).toBeDefined();
   });
 
   it("removeConnection leaves saved connections to the save_connections sync", async () => {

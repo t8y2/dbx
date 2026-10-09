@@ -230,6 +230,10 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     const presentBinaryText = descriptor.category !== "sql";
     const rawRows = sourceRows.map((row) => requiredSourceIndexes.map((sourceIndex) => row[sourceIndex]));
     const rows = rawRows.map((row) => row.map((value, index) => extractorCellValue(value, columnTypes[index], normalizeValues, keepUnsafeJsonText, presentBinaryText, index)));
+    // 「包含数据库名称」：复制/导出 SQL 时，提取器自身的勾选框与编辑器全局设置
+    // （`generateSqlIncludeDatabaseName`）任一开启都保留库名/模式名；后者还会影响
+    // 保存 SQL、侧栏导出等其它路径，因此这里取“或”，不覆盖全局偏好。
+    const extractorOptionValues = normalizeDataGridExtractorOptions(extractorOptions);
     const tableMeta =
       descriptor.category === "sql"
         ? tableMetaWithoutOptionalDatabaseQualifier(
@@ -238,7 +242,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
               columns.map((column) => column.sourceName ?? column.displayName),
             ),
             options.databaseType.value,
-            options.includeDatabaseName?.value,
+            options.includeDatabaseName?.value === true || extractorOptionValues.sql.includeDatabaseName === true,
           )
         : undefined;
     const request: DataGridExtractRequest = {
@@ -251,7 +255,12 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       selectedColumnIndexes,
       rows,
       selectionKind,
-      options: normalizeDataGridExtractorOptions(extractorOptions),
+      // For dialects whose tableMeta keeps the schema qualifier regardless of
+      // the flag (DATABASE_SCHEMA_QUALIFIED_TYPES), the backend strips every
+      // namespace prefix when include_database_name=false, which would regress
+      // the default output to a bare table name; keep the flag aligned with
+      // the qualified tableMeta we intentionally preserved.
+      options: tableMeta && (tableMeta.schema !== undefined || tableMeta.database !== undefined) ? { ...extractorOptionValues, sql: { ...extractorOptionValues.sql, includeDatabaseName: true } } : extractorOptionValues,
     };
     requestSources.set(request, {
       rowIds: sourceRowIds,

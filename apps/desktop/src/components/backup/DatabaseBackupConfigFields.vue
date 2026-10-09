@@ -12,11 +12,13 @@ import { Check, ChevronDown, FolderOpen, Loader2, Search } from "@lucide/vue";
 import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
 import { databaseBackupFileNamePatternIsValid, type DatabaseBackupExecutionConfig } from "@/lib/backup/scheduledDatabaseBackup";
 import type { ConnectionConfig } from "@/types/database";
+import BackupTableSelector from "./BackupTableSelector.vue";
+import type { DatabaseBackupTableSelectionState } from "@/lib/backup/scheduledDatabaseBackup";
 
 const props = withDefaults(
   defineProps<{
     draft: DatabaseBackupExecutionConfig;
-    connections: Array<Pick<ConnectionConfig, "id" | "name">>;
+    connections: Array<Pick<ConnectionConfig, "id" | "name"> & Partial<Pick<ConnectionConfig, "db_type">>>;
     allDatabases: boolean;
     selectedDatabases: string[];
     databaseOptions: string[];
@@ -34,6 +36,7 @@ const emit = defineEmits<{
   changeConnection: [connectionId: string];
   chooseDestination: [];
   toggleDatabase: [database: string];
+  tableSelectionState: [state: DatabaseBackupTableSelectionState];
   "update:allDatabases": [value: boolean];
   "update:tablePatternsInput": [value: string];
   "update:runDirectoryPattern": [value: string];
@@ -47,6 +50,7 @@ const connectionPickerTrigger = ref<ComponentPublicInstance | null>(null);
 const connectionPickerWidth = ref<number>();
 
 const selectedConnectionName = computed(() => props.connections.find((connection) => connection.id === props.draft.connectionId)?.name || props.draft.connectionId);
+const selectedConnectionType = computed(() => props.connections.find((connection) => connection.id === props.draft.connectionId)?.db_type);
 const filteredConnections = computed(() => {
   const query = connectionSearch.value.trim().toLocaleLowerCase();
   if (!query) return props.connections;
@@ -234,15 +238,25 @@ watch(
               <SelectItem value="all">{{ t("databaseBackup.allTables") }}</SelectItem>
               <SelectItem value="include">{{ t("databaseBackup.includeTables") }}</SelectItem>
               <SelectItem value="exclude">{{ t("databaseBackup.excludeTables") }}</SelectItem>
+              <SelectItem value="selected">{{ t("databaseBackup.exactTables") }}</SelectItem>
             </SelectContent>
           </Select>
         </div>
-        <div v-if="draft.tableFilterMode !== 'all'" class="space-y-2">
+        <div v-if="draft.tableFilterMode === 'include' || draft.tableFilterMode === 'exclude'" class="space-y-2">
           <Label>{{ t("databaseBackup.tablePatterns") }}</Label>
           <Input :model-value="tablePatternsInput" :placeholder="t('databaseBackup.tablePatternsPlaceholder')" @update:model-value="(value: any) => emit('update:tablePatternsInput', String(value))" />
         </div>
       </div>
-      <p v-if="draft.tableFilterMode !== 'all'" class="text-xs text-muted-foreground">{{ t("databaseBackup.tablePatternsHint") }}</p>
+      <p v-if="draft.tableFilterMode === 'include' || draft.tableFilterMode === 'exclude'" class="text-xs text-muted-foreground">{{ t("databaseBackup.tablePatternsHint") }}</p>
+      <BackupTableSelector
+        v-if="draft.tableFilterMode === 'selected'"
+        :connection-id="draft.connectionId"
+        :database-type="selectedConnectionType"
+        :databases="allDatabases ? [] : selectedDatabases"
+        :model-value="draft.selectedTables ?? []"
+        @update:model-value="(value) => (draft.selectedTables = value)"
+        @state-change="(state) => emit('tableSelectionState', state)"
+      />
     </div>
 
     <div class="space-y-3">

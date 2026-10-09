@@ -1,6 +1,6 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { nacosNamespaceIdentity } from "@/lib/nacos/nacosNamespaceVisibility";
-import { classifySqlRisk, isSqlRiskMutation } from "@/lib/sql/sqlRisk";
+import { classifySqlRisk, isSqlRiskMutation, usesMysqlLexerRules } from "@/lib/sql/sqlRisk";
 
 export type ProductionContextReason = "connection" | "database" | "sql_target";
 
@@ -124,7 +124,7 @@ export function isProductionMutation(sql: string): boolean {
  */
 export function assessProductionSql(sql: string, connection: ConnectionConfig | undefined, activeDatabase: string | undefined | null): ProductionSqlAssessment {
   const activeContext = productionContextForDatabase(connection, activeDatabase);
-  const targetText = sqlTargetSafetyText(sql);
+  const targetText = sqlTargetSafetyText(sql, connection?.db_type);
   const statements = splitTargetStatements(targetText.text);
   const risk = classifySqlRisk(sql, { dialect: connection?.db_type });
   const isMutation = isSqlRiskMutation(risk.risk);
@@ -258,7 +258,20 @@ function splitTargetStatements(sql: string): string[] {
     .filter(Boolean);
 }
 
-function sqlTargetSafetyText(sql: string, quotedIdentifiers = new Map<string, string>()): SqlTargetSafetyText {
+/**
+ * Removes the text no database target can be found in. Everything removed here
+ * is text this gate cannot inspect, so reading MySQL lexer rules for a
+ * connection that has none hides writes: on SQL Server `#tmp` is a temporary
+ * table and T-SQL escapes a quote by doubling it, so both
+ * `SELECT * FROM #tmp; DELETE FROM prod_app.dbo.users;` and
+ * `SELECT 'dir\'; DELETE FROM prod_app.dbo.users;` would lose the `DELETE` and
+ * the write would no longer require confirmation.
+ *
+ * Mirrors `SqlScanLexerRules` in
+ * `crates/dbx-core/src/safety/production_safety.rs`.
+ */
+function sqlTargetSafetyText(sql: string, dialect?: DatabaseType | string, quotedIdentifiers = new Map<string, string>()): SqlTargetSafetyText {
+  const mysqlLexer = usesMysqlLexerRules(dialect);
   let output = "";
   let index = 0;
 
@@ -273,7 +286,7 @@ function sqlTargetSafetyText(sql: string, quotedIdentifiers = new Map<string, st
       continue;
     }
 
-    if (char === "#") {
+    if (char === "#" && mysqlLexer) {
       index += 1;
       while (index < sql.length && sql[index] !== "\n" && sql[index] !== "\r") index += 1;
       output += " ";
@@ -286,7 +299,7 @@ function sqlTargetSafetyText(sql: string, quotedIdentifiers = new Map<string, st
       const executablePrefixLength = mysqlExecutableCommentPrefixLength(sql, index);
       if (executablePrefixLength > 0) {
         const bodyStart = skipExecutableCommentVersion(sql, index + executablePrefixLength);
-        output += ` ${sqlTargetSafetyText(sql.slice(bodyStart, close), quotedIdentifiers).text} `;
+        output += ` ${sqlTargetSafetyText(sql.slice(bodyStart, close), dialect, quotedIdentifiers).text} `;
       } else {
         output += " ";
       }
@@ -303,14 +316,14 @@ function sqlTargetSafetyText(sql: string, quotedIdentifiers = new Map<string, st
     }
 
     if (char === "'") {
-      index = readQuotedEnd(sql, index, "'", "'");
+      index = readQuotedEnd(sql, index, "'", "'", mysqlLexer);
       output += " ";
       continue;
     }
 
     if (char === '"' || char === "`" || char === "[") {
       const close = char === "[" ? "]" : char;
-      const end = readQuotedEnd(sql, index, char, close);
+      const end = readQuotedEnd(sql, index, char, close, mysqlLexer);
       const identifier = unquoteIdentifier(sql.slice(index, end), char, close).replace(/[;]/g, " ");
       const token = `__dbxq${quotedIdentifiers.size}__`;
       quotedIdentifiers.set(token.toLowerCase(), identifier);
@@ -343,10 +356,10 @@ function dollarQuoteTagAt(sql: string, index: number): string | undefined {
   return sql.slice(index).match(/^\$[A-Za-z_][A-Za-z0-9_]*\$|^\$\$/)?.[0];
 }
 
-function readQuotedEnd(sql: string, start: number, open: string, close: string): number {
+function readQuotedEnd(sql: string, start: number, open: string, close: string, backslashEscapes: boolean): number {
   let index = start + open.length;
   while (index < sql.length) {
-    if (sql[index] === "\\" && (open === "'" || open === '"')) {
+    if (backslashEscapes && sql[index] === "\\" && (open === "'" || open === '"')) {
       index += 2;
       continue;
     }

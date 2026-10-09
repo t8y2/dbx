@@ -1035,7 +1035,7 @@ jobs:
     # Keep the release as a draft until every release-blocking platform job passes.
     # Nix packaging and the Windows 7 static-browser build are advisory and
     # upload their release assets independently of publication.
-    needs: [cleanup-release-signatures, docker-manifest, jdbc-plugin, static-browser]
+    needs: [cleanup-release-signatures, docker-manifest, fnos-package, jdbc-plugin, static-browser]
     runs-on: ubuntu-latest
     steps:
       - name: Publish draft release
@@ -1088,25 +1088,6 @@ jobs:
             --tag-pattern '^v[0-9]+[.][0-9]+[.][0-9]+([.-][0-9A-Za-z.-]+)?$' \
             --retain 5 \
             --apply
-
-  notify-feishu:
-    name: Notify Feishu group
-    needs: [publish, sync-release-to-cnb]
-    # Card sends once the release is public even if the CNB mirror sync failed.
-    if: always() && needs.publish.result == 'success'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
-
-      - name: Send release card to Feishu
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
-          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
-          FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
-        run: python3 scripts/notify_feishu.py "${{ github.ref_name }}"
 
   docker:
     runs-on: ubuntu-latest
@@ -1233,3 +1214,24 @@ jobs:
             -t ${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}:${{ steps.version.outputs.version }} \
             -t ${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}:latest \
             $(cd /tmp/digests/cnb && printf '${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}@sha256:%s ' *)
+
+  fnos-package:
+    name: Build fnOS package
+    needs: [release-ready, docker-manifest]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build versioned fnOS package
+        env:
+          DBX_FNOS_VERSION: ${{ github.ref_name }}
+        run: |
+          DBX_FNOS_VERSION="${DBX_FNOS_VERSION#v}" ./deploy/fnos/build.sh
+
+      - name: Upload fnOS release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" dist/fnos/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber

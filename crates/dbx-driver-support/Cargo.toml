@@ -13,6 +13,7 @@ test-support = ["dbx-platform/test-support"]
 dbx-platform = { path = "../dbx-platform" }
 dbx-types = { path = "../dbx-types", default-features = false }
 bytes = "1"
+glob = "0.3"
 portpicker = "0.1.1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 russh = "0.60"
@@ -24,4 +25,5 @@ tokio-util = { version = "0.7", features = ["rt"] }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }

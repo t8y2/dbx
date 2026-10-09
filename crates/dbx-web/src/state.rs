@@ -52,6 +52,10 @@ pub struct NacosImportContext {
 pub struct WebState {
     pub app: Arc<AppState>,
     pub data_dir: PathBuf,
+    /// Extra absolute roots allowed for connection-level `docsNotesPath`
+    /// beyond `data_dir/docs-notes` (`DBX_DOCS_NOTES_ROOTS`), resolved once at
+    /// startup; injectable so notes containment is testable (see `docs`).
+    pub notes_roots: Vec<PathBuf>,
     pub public_base_path: String,
     /// 仅 `DBX_DISABLE_PASSWORD=1` 时为 true：所有请求放行（无认证）。
     pub password_disabled: bool,
@@ -146,6 +150,7 @@ impl WebState {
         Self {
             app,
             data_dir,
+            notes_roots: Vec::new(),
             public_base_path: "/".to_string(),
             password_disabled: false,
             demo_mode: false,

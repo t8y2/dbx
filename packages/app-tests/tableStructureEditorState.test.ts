@@ -119,7 +119,7 @@ test("creates editable column drafts from column metadata", () => {
   );
 });
 
-test("preserves MySQL generated expressions in original column metadata", () => {
+test("preserves MySQL generated expressions in editable and original column metadata", () => {
   const expression = "GENERATED ALWAYS AS (`price` * `quantity`) STORED";
   const [draft] = createColumnDrafts(
     [
@@ -136,7 +136,9 @@ test("preserves MySQL generated expressions in original column metadata", () => 
     "mysql",
   );
 
-  assert.deepEqual(draft.extra, {});
+  assert.deepEqual(draft.extra, {
+    generated: { expression: "`price` * `quantity`", storage: "STORED" },
+  });
   assert.equal(draft.original?.extra, expression);
 });
 

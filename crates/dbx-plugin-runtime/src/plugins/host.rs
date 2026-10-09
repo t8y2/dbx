@@ -339,16 +339,25 @@ impl PluginHost {
         active
     }
 
-    pub async fn stop(&self, plugin_id: &str) {
+    pub async fn stop(&self, plugin_id: &str) -> Result<(), String> {
         if let Some(session) = self.inner.sessions.write().await.remove(plugin_id) {
-            session.shutdown().await;
+            session.shutdown().await?;
         }
+        Ok(())
     }
 
-    pub async fn stop_all(&self) {
+    pub async fn stop_all(&self) -> Result<(), String> {
         let sessions = std::mem::take(&mut *self.inner.sessions.write().await);
-        for (_, session) in sessions {
-            session.shutdown().await;
+        let mut errors = Vec::new();
+        for (plugin_id, session) in sessions {
+            if let Err(error) = session.shutdown().await {
+                errors.push(format!("{plugin_id}: {error}"));
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("Failed to stop plugin sessions: {}", errors.join("; ")))
         }
     }
 
@@ -362,7 +371,7 @@ impl PluginHost {
     /// refused while the plugin still has an active connection or operation.
     pub async fn uninstall_plugin(&self, plugin_id: &str) -> Result<(), String> {
         let _update = self.inner.registry.lifecycle.begin_update(plugin_id)?;
-        self.stop(plugin_id).await;
+        self.stop(plugin_id).await?;
         let root_dir = self.inner.registry.root_dir().to_path_buf();
         let app_version = self.inner.registry.app_version().to_string();
         // Uninstall never validates a package signature, so it must not load the user trust store.

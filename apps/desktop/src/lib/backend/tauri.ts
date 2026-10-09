@@ -36,7 +36,7 @@ function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> 
 
 import type { MigrationPreflight, MigrationReport } from "./migration";
 export type { MigrationPreflight, MigrationReport } from "./migration";
-export const migrationStatus = (): Promise<MigrationPreflight> => invoke("migration_status");
+export const migrationStatus = (retry = false): Promise<MigrationPreflight> => invoke("migration_status", { retry });
 export const migrationStart = (): Promise<MigrationReport> => invoke("migration_start");
 export const migrationRetry = (): Promise<MigrationReport> => invoke("migration_retry");
 export const migrationCleanupBackups = (): Promise<void> => invoke("migration_cleanup_backups");
@@ -122,6 +122,7 @@ import type { QueryEditability } from "@/lib/sql/sqlAnalysis";
 import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
 import type {
   ActivePluginSession,
+  ConnectionLivenessMessage,
   PluginBinaryEvent,
   PluginConnectionActionResult,
   PluginEvent,
@@ -324,6 +325,7 @@ export interface DesktopSettings {
   agent_store_dir?: string | null;
   custom_ai_skill_root_enabled?: boolean | null;
   custom_ai_skill_root?: string | null;
+  custom_ai_skill_auto_enabled?: boolean | null;
   sidebar_table_page_size?: number | null;
 }
 
@@ -380,6 +382,7 @@ export interface WebDavConfig {
   username?: string;
   password?: string;
   remotePath?: string;
+  userAgent?: string;
 }
 
 export interface WebDavSyncSummary {
@@ -387,6 +390,55 @@ export interface WebDavSyncSummary {
   bytes: number;
   exportedAt?: string;
   appVersion?: string;
+}
+
+export interface SyncCatalogItem {
+  id: string;
+  label: string;
+}
+
+export interface PluginUiStorageItemRef {
+  pluginId: string;
+  key: string;
+  pluginName?: string;
+}
+
+export interface SyncSelection {
+  connections?: string[];
+  connectionSecrets?: string[];
+  tunnelProfiles?: string[];
+  tunnelSecrets?: string[];
+  savedSqlFolders?: string[];
+  savedSqlFiles?: string[];
+  desktopSettings?: string[];
+  editorSettings?: string[];
+  aiConfigs?: string[];
+  pluginUiStorage?: PluginUiStorageItemRef[];
+  sidebarLayout?: boolean;
+  pinnedTreeNodeIds?: boolean;
+  includeSecrets: boolean;
+  syncCredentials: boolean;
+}
+
+export interface SyncSnapshotCatalog {
+  exportedAt: string;
+  appVersion: string;
+  hasEncryptedSecrets: boolean;
+  connections: SyncCatalogItem[];
+  connectionSecrets: string[];
+  tunnelProfiles: SyncCatalogItem[];
+  tunnelSecrets: string[];
+  savedSqlFolders: SyncCatalogItem[];
+  savedSqlFiles: SyncCatalogItem[];
+  desktopSettings: SyncCatalogItem[];
+  editorSettings: SyncCatalogItem[];
+  aiConfigs: SyncCatalogItem[];
+  aiConfigsLocked: boolean;
+  pluginUiStorage: PluginUiStorageItemRef[];
+  pluginUiStorageLocked: boolean;
+  hasSidebarLayout: boolean;
+  hasPinnedTreeNodeIds: boolean;
+  selection?: SyncSelection;
 }
 
 export interface WebDavDownloadResult {
@@ -397,6 +449,16 @@ export interface WebDavDownloadResult {
     encryptedSecretsPresent: boolean;
     secretsApplied: boolean;
   };
+}
+
+export interface LocalBackupImportResult {
+  editorSettings?: unknown;
+  desktopSettings: DesktopSettings;
+  applySummary: WebDavDownloadResult["applySummary"];
+}
+
+export interface LocalBackupExportSummary {
+  bytes: number;
 }
 
 export interface WebDavPasswordStatus {
@@ -479,6 +541,7 @@ export interface QueryPaginationExecutionPlan {
   exactQueryRowBound?: number;
   useAgentResultSession: boolean;
   paginationRowNumberColumn?: string;
+  paginationError?: string;
 }
 
 export type QuerySortDirection = "asc" | "desc";
@@ -531,13 +594,29 @@ export interface DriverInstallProgress {
 }
 
 export interface AiMessage {
-  role: "user" | "assistant" | "system";
+  role: "user" | "assistant" | "system" | "tool";
   content: string;
   /** Transient images for this message. Persisted conversation history intentionally omits them. */
   images?: Array<{
     mediaType: string;
     data: string;
   }>;
+  /** For `role: "tool"`: the call this message answers. */
+  toolCallId?: string;
+  /** For `role: "assistant"`: the calls this turn made. The panel builds one of
+   *  these per request to replay a loaded skill as a real tool round; it is never
+   *  written to a conversation record. */
+  toolCalls?: AiToolCallRef[];
+}
+
+/** Mirrors `ToolCallRef` in `crates/dbx-ai-provider/src/ai.rs`. `providerPayload`
+ *  is provider-private replay data (Gemini thought signatures) that only a real
+ *  provider round can produce; a panel-built call leaves it unset. */
+export interface AiToolCallRef {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+  providerPayload?: unknown;
 }
 
 export interface AiTaskContract {
@@ -571,6 +650,7 @@ export interface AiStreamChunk {
   session_id: string;
   delta: string;
   reasoning_delta?: string;
+  finish_reason?: string;
   done: boolean;
   /** Web-only explicit terminal error; Tauri reports invoke failures directly. */
   error?: string;
@@ -637,6 +717,7 @@ export type AgentEvent =
        */
       type: "response_complete";
     }
+  | { type: "output_truncated"; finish_reason: string }
   | { type: "agent_end"; input_tokens?: number; output_tokens?: number }
   | {
       type: "context_compacted";
@@ -668,6 +749,7 @@ export async function aiAgentStream(
   confirmedSchema?: string,
   _signal?: AbortSignal,
   selectedDatabases?: string[],
+  allowSkills = false,
 ): Promise<string> {
   const unlisten: UnlistenFn = await listen<TauriAgentEvent>("ai-agent-event", (event) => {
     const payload = event.payload;
@@ -692,6 +774,7 @@ export async function aiAgentStream(
       confirmedDatabase,
       confirmedSchema,
       selectedDatabases,
+      allowSkills,
     });
   } catch (e) {
     unlisten();
@@ -1061,17 +1144,38 @@ export async function forgetWebdavSyncSecretsPassphrase(): Promise<void> {
   return invoke("forget_webdav_sync_secrets_passphrase");
 }
 
-export async function webdavSyncUpload(config: WebDavConfig, editorSettings?: unknown, secretsPassphrase?: string, includeSecrets = false): Promise<WebDavSyncSummary> {
+export async function cloudSyncLocalCatalog(editorSettings?: unknown): Promise<SyncSnapshotCatalog> {
+  return invoke("cloud_sync_local_catalog", { editorSettings });
+}
+
+export async function localBackupExport(path: string, editorSettings: unknown, secretsPassphrase: string | undefined, selection: SyncSelection): Promise<LocalBackupExportSummary> {
+  return invoke("local_backup_export", { path, editorSettings, secretsPassphrase, selection });
+}
+
+export async function localBackupInspect(path: string, secretsPassphrase?: string): Promise<SyncSnapshotCatalog> {
+  return invoke("local_backup_inspect", { path, secretsPassphrase });
+}
+
+export async function localBackupImport(path: string, secretsPassphrase: string | undefined, restoreSecrets: boolean, selection: SyncSelection): Promise<LocalBackupImportResult> {
+  return invoke("local_backup_import", { path, secretsPassphrase, restoreSecrets, selection });
+}
+
+export async function webdavSyncInspect(config: WebDavConfig, secretsPassphrase?: string): Promise<SyncSnapshotCatalog> {
+  return invoke("webdav_sync_inspect", { config, secretsPassphrase });
+}
+
+export async function webdavSyncUpload(config: WebDavConfig, editorSettings?: unknown, secretsPassphrase?: string, includeSecrets = false, selection?: SyncSelection): Promise<WebDavSyncSummary> {
   return invoke("webdav_sync_upload", {
     config,
     editorSettings,
     secretsPassphrase,
     includeSecrets,
+    selection,
   });
 }
 
-export async function webdavSyncDownload(config: WebDavConfig, secretsPassphrase?: string, restoreSecrets = true): Promise<WebDavDownloadResult> {
-  return invoke("webdav_sync_download", { config, secretsPassphrase, restoreSecrets });
+export async function webdavSyncDownload(config: WebDavConfig, secretsPassphrase?: string, restoreSecrets = true, selection?: SyncSelection): Promise<WebDavDownloadResult> {
+  return invoke("webdav_sync_download", { config, secretsPassphrase, restoreSecrets, selection });
 }
 
 export async function snippetSyncTest(config: SnippetSyncConfig): Promise<void> {
@@ -1102,18 +1206,23 @@ export async function retrySnippetLegacyCleanup(config: SnippetSyncConfig): Prom
   return invoke("retry_snippet_legacy_cleanup", { config });
 }
 
-export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string): Promise<SnippetSyncSummary> {
+export async function snippetSyncInspect(config: SnippetSyncConfig, snippetPassphrase?: string, secretsPassphrase?: string): Promise<SyncSnapshotCatalog> {
+  return invoke("snippet_sync_inspect", { config, snippetPassphrase, secretsPassphrase });
+}
+
+export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string, selection?: SyncSelection): Promise<SnippetSyncSummary> {
   return invoke("snippet_sync_upload", {
     config,
     editorSettings,
     snippetPassphrase,
     includeSecrets,
     secretsPassphrase,
+    selection,
   });
 }
 
-export async function snippetSyncDownload(config: SnippetSyncConfig, snippetPassphrase?: string, restoreSecrets = false, secretsPassphrase?: string): Promise<SnippetDownloadResult> {
-  return invoke("snippet_sync_download", { config, snippetPassphrase, restoreSecrets, secretsPassphrase });
+export async function snippetSyncDownload(config: SnippetSyncConfig, snippetPassphrase?: string, restoreSecrets = false, secretsPassphrase?: string, selection?: SyncSelection): Promise<SnippetDownloadResult> {
+  return invoke("snippet_sync_download", { config, snippetPassphrase, restoreSecrets, secretsPassphrase, selection });
 }
 
 export async function loadPinnedTreeNodeIds(): Promise<string[]> {
@@ -1159,39 +1268,41 @@ export async function pendingOpenPluginInstallLinks(): Promise<string[]> {
 export interface ExternalSqlFileSnapshot {
   content: string;
   version: ExternalSqlFileVersion;
+  encoding?: import("@/types/database").QueryTab["externalSqlEncoding"];
 }
 
 export type ExternalSqlFileStatus = { kind: "present"; sizeBytes: number; modifiedNs: string } | { kind: "missing" };
 
 export type ExternalSqlFileWriteResult = { kind: "written"; version: ExternalSqlFileVersion } | { kind: "conflict"; currentVersion: ExternalSqlFileVersion } | { kind: "missing" };
 
-export async function readExternalSqlFileSnapshot(path: string, maxSizeBytes?: number): Promise<ExternalSqlFileSnapshot> {
-  const result = await invoke<{ kind: "content"; content: string; version: ExternalSqlFileVersion } | { kind: "tooLarge"; sizeBytes: number; maxSizeBytes: number }>("read_external_sql_file", { path, maxSizeBytes });
+export async function readExternalSqlFileSnapshot(path: string, maxSizeBytes?: number, encoding?: string): Promise<ExternalSqlFileSnapshot> {
+  const result = await invoke<{ kind: "content"; content: string; version: ExternalSqlFileVersion; encoding?: ExternalSqlFileSnapshot["encoding"] } | { kind: "tooLarge"; sizeBytes: number; maxSizeBytes: number }>("read_external_sql_file", { path, maxSizeBytes, encoding: encoding ?? null });
   if (result.kind === "tooLarge") {
     throw new ExternalSqlFileTooLargeError(result.sizeBytes, result.maxSizeBytes);
   }
-  return { content: result.content, version: result.version };
+  return { content: result.content, version: result.version, ...(result.encoding ? { encoding: result.encoding } : {}) };
 }
 
-export async function readExternalSqlFile(path: string, maxSizeBytes?: number): Promise<string> {
-  return (await readExternalSqlFileSnapshot(path, maxSizeBytes)).content;
+export async function readExternalSqlFile(path: string, maxSizeBytes?: number, encoding?: string): Promise<string> {
+  return (await readExternalSqlFileSnapshot(path, maxSizeBytes, encoding)).content;
 }
 
 export async function inspectExternalSqlFile(path: string): Promise<ExternalSqlFileStatus> {
   return invoke("inspect_external_sql_file", { path });
 }
 
-export async function writeExternalSqlFile(path: string, content: string, options: { expectedContentHash?: string; expectedMissing?: boolean } = {}): Promise<ExternalSqlFileWriteResult> {
+export async function writeExternalSqlFile(path: string, content: string, options: { expectedContentHash?: string; expectedMissing?: boolean; encoding?: string } = {}): Promise<ExternalSqlFileWriteResult> {
   return invoke("write_external_sql_file", {
     path,
     content,
     expectedContentHash: options.expectedContentHash ?? null,
     expectedMissing: options.expectedMissing ?? false,
+    encoding: options.encoding ?? "utf8",
   });
 }
 
-export async function saveExternalSqlFile(defaultFileName: string, content: string, filterExtension?: string): Promise<{ path: string; version: ExternalSqlFileVersion } | null> {
-  return invoke("save_external_sql_file", { defaultFileName, content, filterExtension });
+export async function saveExternalSqlFile(defaultFileName: string, content: string, filterExtension?: string, encoding?: string): Promise<{ path: string; version: ExternalSqlFileVersion } | null> {
+  return invoke("save_external_sql_file", { defaultFileName, content, filterExtension, encoding: encoding ?? "utf8" });
 }
 
 export interface SqlFileEntry {
@@ -1254,6 +1365,24 @@ export interface AiChatMessage {
   failed?: boolean;
   /** Target frozen when this assistant turn started, retained for confirmation. */
   sourceBinding?: import("@/lib/ai/aiConversationBinding").AiConversationBinding;
+  /**
+   * Footprint of a turn that carried a context selection (#10058). The selection
+   * text is never persisted (it can be 12 000 chars and records are
+   * cloud-synced), so this boolean is all a reloaded transcript has left to say
+   * the turn was not empty. Absent on records written before the field existed.
+   */
+  selectionsOmitted?: boolean;
+  /**
+   * Skills this conversation has had loaded (prd 09-30 Req 13), carried on the
+   * newest assistant turn of each snapshot.
+   *
+   * Only the fact, never the body: a body can reach 1 MiB per skill, the stored
+   * message array is an unbounded column with no per-message cap, and it is
+   * re-serialized in full on every save. Bodies stay in memory and are re-read
+   * from disk when a request needs them — the same shape as the #10058 selection
+   * footprint above, which keeps a flag instead of its payload.
+   */
+  loadedSkillIds?: string[];
 }
 
 export interface AiConversation {
@@ -1471,6 +1600,17 @@ export async function checkConnectionHealth(connectionId: string): Promise<void>
   return invokeBackend("check_connection_health", { connectionId });
 }
 
+/**
+ * Read-only counterpart of `checkConnectionHealth`: reports whether the connection still has a
+ * pool, without probing or mutating anything (#4339).
+ *
+ * Liveness events must be confirmed through this, never through `checkConnectionHealth`: the
+ * latter removes unhealthy pools and is the path `ensureConnected` uses to trigger a reconnect.
+ */
+export async function connectionIsOpen(connectionId: string): Promise<boolean> {
+  return invokeBackend("connection_is_open", { connectionId });
+}
+
 export async function prewarmConnection(connectionId: string, database?: string, catalog?: string, clientSessionId?: string): Promise<void> {
   return invokeBackend("prewarm_connection", { connectionId, database, catalog, clientSessionId });
 }
@@ -1586,7 +1726,18 @@ export async function getMysqlTableAutoIncrement(connectionId: string, database:
   return invoke("get_mysql_table_auto_increment", { connectionId, database, table });
 }
 
-export async function listObjects(connectionId: string, database: string, schema: string, objectTypes?: (SidebarObjectKind | "EVENT")[], filter?: string, limit?: number, offset?: number, catalog?: string, tableNameFilter?: import("@/types/database").TableNameFilter): Promise<ObjectInfo[]> {
+export async function listObjects(
+  connectionId: string,
+  database: string,
+  schema: string,
+  objectTypes?: (SidebarObjectKind | "EVENT")[],
+  filter?: string,
+  limit?: number,
+  offset?: number,
+  catalog?: string,
+  tableNameFilter?: import("@/types/database").TableNameFilter,
+  executionId?: string,
+): Promise<ObjectInfo[]> {
   return invoke("list_objects", {
     connectionId,
     database,
@@ -1597,6 +1748,7 @@ export async function listObjects(connectionId: string, database: string, schema
     offset,
     catalog,
     tableNameFilter,
+    executionId,
   });
 }
 
@@ -1854,6 +2006,10 @@ export async function refreshConnections(): Promise<void> {
   return invoke("refresh_connections");
 }
 
+export async function cancelQueryAndWait(executionId: string): Promise<{ requested: boolean; terminal: boolean }> {
+  return invokeBackend("cancel_conditional_update", { executionId });
+}
+
 export async function cancelQuery(executionId: string): Promise<boolean> {
   return invoke("cancel_query", { executionId });
 }
@@ -1922,11 +2078,23 @@ export async function executeInTransaction(connectionId: string, database: strin
 }
 
 export async function beginManualTransaction(connectionId: string, database: string, schema?: string, catalog?: string): Promise<string> {
-  return invoke("begin_manual_transaction", { connectionId, database, schema, catalog });
+  return invokeBackend("begin_manual_transaction", { connectionId, database, schema, catalog });
 }
 
-export async function executeInManualTransaction(txnSessionId: string, sql: string, database: string, schema?: string, maxRows?: number, tableDataPreview?: boolean, pageSize?: number, resultSessionId?: string, classificationSql?: string): Promise<QueryResult[]> {
-  return invoke("execute_in_manual_transaction", {
+export async function executeInManualTransaction(
+  txnSessionId: string,
+  sql: string,
+  database: string,
+  schema?: string,
+  maxRows?: number,
+  tableDataPreview?: boolean,
+  pageSize?: number,
+  resultSessionId?: string,
+  classificationSql?: string,
+  executionId?: string,
+  timeoutSecs?: number,
+): Promise<QueryResult[]> {
+  return invokeBackend("execute_in_manual_transaction", {
     txnSessionId,
     sql,
     database,
@@ -1936,15 +2104,17 @@ export async function executeInManualTransaction(txnSessionId: string, sql: stri
     pageSize,
     resultSessionId,
     classificationSql,
+    executionId,
+    timeoutSecs,
   });
 }
 
 export async function commitManualTransaction(txnSessionId: string): Promise<QueryResult> {
-  return invoke("commit_manual_transaction", { txnSessionId });
+  return invokeBackend("commit_manual_transaction", { txnSessionId });
 }
 
 export async function rollbackManualTransaction(txnSessionId: string): Promise<QueryResult> {
-  return invoke("rollback_manual_transaction", { txnSessionId });
+  return invokeBackend("rollback_manual_transaction", { txnSessionId });
 }
 
 export async function analyzeSqlReferences(sql: string, dialect?: string): Promise<SqlReferenceAnalysis> {
@@ -2323,6 +2493,10 @@ export async function listForeignKeys(connectionId: string, database: string, sc
   });
 }
 
+export async function listForeignKeysForDatabase(connectionId: string, database: string, schema: string, catalog?: string, executionId?: string): Promise<Record<string, ForeignKeyInfo[]>> {
+  return invoke("list_foreign_keys_for_database", { connectionId, database, schema, catalog, executionId });
+}
+
 export async function listTriggers(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<TriggerInfo[]> {
   return invoke("list_triggers", {
     connectionId,
@@ -2356,6 +2530,7 @@ export async function listPartitions(connectionId: string, database: string, sch
 export interface TablePartitionStatus {
   isPartitionedParent: boolean;
   isPartition: boolean;
+  isForeign: boolean;
 }
 
 export async function getTablePartitionStatus(connectionId: string, database: string, schema: string, table: string): Promise<TablePartitionStatus> {
@@ -2644,6 +2819,8 @@ export interface PluginLocalFileHandle {
   size: number;
   contentType: string;
   write: boolean;
+  /** Only for files expanded out of a dropped folder: '/'-separated path relative to the dropped folder root. */
+  relativePath?: string;
 }
 
 export interface PluginLocalFileChunk {
@@ -2657,8 +2834,29 @@ export interface PluginLocalFileWriteResult {
   nextOffset: number;
 }
 
-export async function openPluginLocalFile(pluginId: string, path: string, write: boolean): Promise<PluginLocalFileHandle> {
-  return invoke("plugin_file_open", { pluginId, path, write });
+// The native open/save dialogs run on the Rust side: the host never passes
+// paths into the plugin-file registry, it only receives handles for what the
+// user picked. Only the OS drop flow goes through openDroppedPluginLocalFiles:
+// the Rust command accepts exactly the paths its own drop pipeline granted to
+// this webview (one open attempt per granted path); a granted folder expands
+// to its contained files on the Rust side, and `truncated` flags any cap
+// cutoff so partial delivery is visible to the plugin.
+export interface PluginDroppedFilesResult {
+  dropId: string;
+  files: PluginLocalFileHandle[];
+  truncated: boolean;
+}
+
+export async function openDroppedPluginLocalFiles(pluginId: string, paths: string[]): Promise<PluginDroppedFilesResult> {
+  return invoke("plugin_file_open_dropped", { pluginId, paths });
+}
+
+export async function pickPluginLocalFiles(pluginId: string, multiple: boolean): Promise<PluginLocalFileHandle[]> {
+  return invoke("plugin_file_pick_files", { pluginId, multiple });
+}
+
+export async function savePluginLocalFileAs(pluginId: string, defaultFileName: string): Promise<PluginLocalFileHandle | null> {
+  return invoke("plugin_file_save_as", { pluginId, defaultFileName });
 }
 
 export async function readPluginLocalFileChunk(pluginId: string, handleId: string, offset: number, length?: number): Promise<PluginLocalFileChunk> {
@@ -2736,6 +2934,16 @@ export async function subscribePluginEvents(onEvent: (event: PluginEvent) => voi
     unlistenEvent();
     unlistenBinary();
   };
+}
+
+/**
+ * Subscribe to backend connection-liveness messages (#4339).
+ *
+ * The listener receives the message unwrapped; the web transport's SSE handler parses the same
+ * shape, so the store can stay transport-agnostic.
+ */
+export async function subscribeConnectionLiveness(onEvent: (event: ConnectionLivenessMessage) => void): Promise<UnlistenFn> {
+  return listen<ConnectionLivenessMessage>("dbx-connection-liveness", (event) => onEvent(event.payload));
 }
 
 export async function listJdbcDrivers(): Promise<JdbcDriverInfo[]> {
@@ -3106,7 +3314,8 @@ export interface RedisKeyInfo {
 
 export interface RedisDatabaseInfo {
   db: number;
-  keys: number;
+  /** 该库的键数量；服务端无法给出可信数量时（如 kvrocks 未执行过 DBSIZE SCAN）缺省。 */
+  keys?: number;
 }
 
 export type RedisBlobEncoding = "utf8" | "binary";
@@ -3210,7 +3419,11 @@ export type RedisValueData =
       scan_cursor?: number;
     }
   | { kind: "stream"; entries: RedisStreamEntry[]; total?: number; next_cursor?: string }
-  | { kind: "unknown" };
+  // kvrocks 把位图/HLL 实现为独立类型（TYPE 返回 bitmap / hyperloglog），
+  // 这里单独建模，避免落到 unknown 后界面显示不出值。
+  | { kind: "bitmap"; content: RedisBlob; total_bytes?: number; truncated?: boolean; set_bits?: number }
+  | { kind: "hyperloglog"; count?: number }
+  | { kind: "unknown"; redis_type: string };
 
 export interface RedisValue {
   key_display: string;
@@ -3290,6 +3503,10 @@ export async function redisScanValues(connectionId: string, db: number, cursor: 
 
 export async function redisGetValue(connectionId: string, db: number, keyRaw: string): Promise<RedisValue> {
   return invoke("redis_get_value", { connectionId, db, keyRaw });
+}
+
+export async function redisGetRawValue(connectionId: string, db: number, keyRaw: string): Promise<RedisBlob> {
+  return invoke("redis_get_raw_value", { connectionId, db, keyRaw });
 }
 
 export async function redisGetTtl(connectionId: string, db: number, keyRaw: string): Promise<number> {
@@ -5147,6 +5364,115 @@ export interface HistoryConnectionOption extends HistoryConnectionFilter {
   databases: string[];
 }
 
+export type TaskType = "transfer";
+export type TaskLifecycleOwner = "tauri" | "web";
+export type TaskRunStatus = "running" | "succeeded" | "partial_failed" | "failed" | "cancelled";
+export type TaskItemKind = "table" | "view" | "materialized_view" | "procedure" | "function" | "trigger" | "sequence" | "event" | "object";
+export type TaskItemStatus = "pending" | "running" | "succeeded" | "skipped" | "failed" | "cancelled" | "not_started" | "incomplete";
+export type TaskRowCountState = "not_applicable" | "known" | "unknown" | "incomplete";
+export type TransferRunContent = "structure_and_data" | "structure_only" | "data_only";
+export type TransferRunMode = "append" | "overwrite" | "upsert";
+export type TransferRunObjectSelectionMode = "unspecified" | "explicit";
+
+export interface TaskEndpointSnapshot {
+  connectionId: string;
+  databaseType: string;
+  database: string;
+  schema: string;
+  catalog?: string | null;
+}
+
+export interface TaskRun {
+  runId: string;
+  taskType: TaskType;
+  lifecycleOwner: TaskLifecycleOwner;
+  status: TaskRunStatus;
+  createdAt: string;
+  startedAt: string;
+  finishedAt?: string | null;
+  ownerInstanceId: string;
+  errorCode?: string | null;
+  safeErrorSummary?: string | null;
+  historyComplete: boolean;
+  source: TaskEndpointSnapshot;
+  target: TaskEndpointSnapshot;
+}
+
+export interface TransferRunDetails {
+  runId: string;
+  content: TransferRunContent;
+  mode: TransferRunMode;
+  batchSize: number;
+  createTable: boolean;
+  dropTargetBeforeCreate: boolean;
+  targetTableNameCase: "preserve" | "lower" | "upper";
+  quoteTargetColumnNames: boolean;
+  ownershipPolicy: "preserve" | "skip" | "reassign_missing";
+  filteredTableCount: number;
+  tableTotal: number;
+  objectSelectionMode: TransferRunObjectSelectionMode;
+  selectedObjectCount?: number | null;
+}
+
+export interface TaskRunDetail {
+  run: TaskRun;
+  transfer?: TransferRunDetails | null;
+}
+
+export interface TaskRunCursor {
+  createdAt: string;
+  runId: string;
+}
+
+export interface TaskRunListQuery {
+  limit?: number;
+  cursor?: TaskRunCursor | null;
+  taskType?: TaskType;
+  status?: TaskRunStatus;
+}
+
+export interface TaskRunPage {
+  items: TaskRun[];
+  nextCursor?: TaskRunCursor | null;
+}
+
+export interface TaskRunItem {
+  runId: string;
+  itemIndex: number;
+  itemKind: TaskItemKind;
+  sourceObject: string;
+  targetObject: string;
+  status: TaskItemStatus;
+  sourceRowCount?: number | null;
+  movedRowCount?: number | null;
+  targetRowCount?: number | null;
+  rowCountState: TaskRowCountState;
+  hasTableFilter: boolean;
+  safeErrorSummary?: string | null;
+}
+
+export interface TaskRunItemsQuery {
+  limit?: number;
+  afterItemIndex?: number;
+}
+
+export interface TaskRunItemsPage {
+  items: TaskRunItem[];
+  nextAfterItemIndex?: number | null;
+}
+
+export async function loadTaskRuns(query: TaskRunListQuery = {}): Promise<TaskRunPage> {
+  return invoke("load_task_runs", { query });
+}
+
+export async function loadTaskRun(runId: string): Promise<TaskRunDetail | null> {
+  return invoke("load_task_run", { runId });
+}
+
+export async function loadTaskRunItems(runId: string, query: TaskRunItemsQuery = {}): Promise<TaskRunItemsPage> {
+  return invoke("load_task_run_items", { runId, query });
+}
+
 export async function saveHistory(entry: HistoryEntry): Promise<void> {
   return invoke("save_history", { entry });
 }
@@ -5199,6 +5525,7 @@ export interface SqlFileRequest {
   executionId: string;
   connectionId: string;
   database: string;
+  schema?: string;
   filePath: string;
   continueOnError: boolean;
   txnSessionId?: string;
@@ -5298,8 +5625,38 @@ export interface TransferRequest {
   quoteTargetColumnNames: boolean;
   ownershipPolicy?: TransferOwnershipPolicy;
   batchSize: number;
+  /**
+   * Optional per-source-table transfer filter.
+   * Key = source table name; value = a bare `WHERE` predicate
+   * (`id <= 90000`) or a complete `SELECT`
+   * (`select * from t_order where id <= 90000`). Missing/empty = full table.
+   */
+  tableFilters?: Record<string, string>;
   dropTargetBeforeCreate: boolean;
   dropTargetConfirmed: boolean;
+}
+
+export interface TransferStructurePreviewTable {
+  sourceTable: string;
+  targetTable: string;
+  /** The target table already exists, so this transfer plans no structure DDL for it. */
+  preexisting: boolean;
+  sql: string;
+}
+
+export type TransferStructureOperationKind = "createSchema" | "createTable" | "skipExistingTable" | "rebuildTable" | "createIndex" | "addForeignKey" | "createSequence" | "bindSequence" | "addComment";
+
+export interface TransferStructureOperation {
+  kind: TransferStructureOperationKind;
+  objectName?: string;
+  sourceTable?: string;
+  targetTable?: string;
+}
+
+export interface TransferStructurePreview {
+  sql: string;
+  tables: TransferStructurePreviewTable[];
+  operations: TransferStructureOperation[];
 }
 
 export interface TransferOwnershipPreview {
@@ -5308,7 +5665,13 @@ export interface TransferOwnershipPreview {
   rebuild?: {
     sql: string;
     tables: Array<{ sourceTable: string; targetTable: string; backupTable?: string }>;
+    /** The rename phase on its own, so the structure plan can sit between rename and cleanup. */
+    backupSql?: string;
+    /** The drop-backups phase on its own. */
+    cleanupSql?: string;
   };
+  /** Structure-plan preview: present for structure-only transfers. */
+  structure?: TransferStructurePreview;
 }
 
 export interface TransferProgress {
@@ -5379,7 +5742,7 @@ export type TableImportMode = "append" | "truncate";
 export type TableImportConflictPolicy = "error" | "skip" | "updateExisting";
 export type TableImportStatus = "running" | "done" | "error" | "cancelled";
 export type TableImportPhase = "preparing" | "detectingEncoding" | "reading" | "writing" | "finalizing" | "done";
-export type TableImportSourceFormat = "csv" | "tsv" | "delimited" | "json" | "excel" | "sql";
+export type TableImportSourceFormat = "csv" | "tsv" | "delimited" | "json" | "excel" | "sql" | "parquet";
 export type TableImportJsonShape = "auto" | "objects" | "arrays";
 export type TableImportTextEncoding = "auto" | "utf8" | "gbk" | "utf16Le" | "utf16Be";
 
@@ -5391,6 +5754,7 @@ export interface TableImportColumnMapping {
 
 export interface TableImportParseOptions {
   delimiter?: string | null;
+  decimalSeparator?: string | null;
   encoding?: TableImportTextEncoding | null;
   hasHeader?: boolean | null;
   titleRow?: number | null;
@@ -5398,6 +5762,8 @@ export interface TableImportParseOptions {
   lastDataRow?: number | null;
   trimValues?: boolean | null;
   emptyStringAsNull?: boolean | null;
+  /** 分隔文本里代表 NULL 的字面量。缺省表示用后端默认值 `\N`；空串表示关闭字面量，退回「空字段即 NULL」。 */
+  nullLiteral?: string | null;
   sheetName?: string | null;
   sheetIndex?: number | null;
   jsonShape?: TableImportJsonShape | null;
@@ -5406,6 +5772,8 @@ export interface TableImportParseOptions {
 
 export interface TableImportPreviewRequest {
   filePath: string;
+  connectionId?: string | null;
+  database?: string | null;
   sourceRef?: string | null;
   sourceFormat?: TableImportSourceFormat | null;
   parseOptions?: TableImportParseOptions | null;
@@ -5745,10 +6113,12 @@ export interface DatabaseExportRequest {
   includeCreateDatabase?: boolean;
   dropTableIfExists?: boolean;
   omitAutoIncrement?: boolean;
+  preserveOriginalLanguage?: boolean;
   failOnError?: boolean;
   preventOverwrite?: boolean;
   outputCompression?: "none" | "gzip";
   insertDialect?: SqlInsertDialect;
+  insertMode?: "batch" | "single";
   snapshotSessionId?: string;
   batchSize: number;
   splitMaxMb?: number;
@@ -5791,6 +6161,8 @@ export interface TableExportRequest {
   insertMode?: SqlInsertMode;
   insertDialect?: SqlInsertDialect;
   csvQuoteMode?: CsvQuoteMode;
+  /** CSV 里 NULL 写成什么。缺省表示用后端默认值 `\N`；空串表示关闭字面量。 */
+  nullLiteral?: string;
   columns?: string[];
   selectedColumns?: SqlExportColumnSelection[];
   columnTypes?: Array<string | null | undefined>;
@@ -5809,6 +6181,11 @@ export interface TableExportRequest {
   numericColumnRightAlign?: boolean;
   autoFilter?: boolean;
   splitMaxMb?: number;
+  /**
+   * SQL 导出时省略 INSERT 目标的库/模式限定（前端按「生成 SQL 时包含数据库名」设置 +
+   * `dropsSchemaQualifier` 引擎规则解析；仅影响 INSERT 目标，读取 SQL 不变）。
+   */
+  omitDatabaseQualifier?: boolean;
 }
 
 export interface TableCsvExportOptions {
@@ -5821,6 +6198,8 @@ export interface TableCsvExportOptions {
   pageSize?: number;
   timeoutSecs?: number;
   csvQuoteMode?: CsvQuoteMode;
+  /** CSV 里 NULL 写成什么。缺省表示用后端默认值 `\N`；空串表示关闭字面量。 */
+  nullLiteral?: string;
 }
 
 export interface TableExportProgress {
@@ -5847,6 +6226,8 @@ export interface QueryResultExportRequest {
   format: "csv" | "xlsx" | "json" | "txt" | "sql";
   insertMode?: SqlInsertMode;
   csvQuoteMode?: CsvQuoteMode;
+  /** CSV 里 NULL 写成什么。缺省表示用后端默认值 `\N`；空串表示关闭字面量。 */
+  nullLiteral?: string;
   includeSqlSheet?: boolean;
   pageSize: number;
   rowLimit?: number | null;
@@ -5857,6 +6238,8 @@ export interface QueryResultExportRequest {
   executionId?: string;
   dateTimeFormat?: string;
   exportTableName?: string;
+  /** Explicit INSERT target schema; separate from `schema`, which scopes query execution. */
+  exportSchema?: string;
   exportColumnTypes?: Array<string | null | undefined>;
   selectedColumns?: SqlExportColumnSelection[];
   /**
@@ -5967,6 +6350,10 @@ export async function cancelQueryResultExport(exportId: string, executionId?: st
   });
 }
 
+export async function createQueryResultTempFile(extension = "xlsx"): Promise<string> {
+  return invoke("create_query_result_temp_file", { extension });
+}
+
 export async function beginDatabaseBackupSnapshot(connectionId: string, database: string, exportId?: string): Promise<DatabaseBackupSnapshot> {
   return invoke("begin_database_backup_snapshot", { connectionId, database, exportId: exportId || null });
 }
@@ -6004,13 +6391,14 @@ export async function recordDatabaseExportDestination(directory: string): Promis
   await invoke("record_database_export_destination", { directory });
 }
 
-export async function exportQueryResultCsv(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[], csvQuoteMode: CsvQuoteMode = "all"): Promise<void> {
+export async function exportQueryResultCsv(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[], csvQuoteMode: CsvQuoteMode = "all", nullLiteral?: string): Promise<void> {
   return invoke("export_query_result_csv", {
     request: {
       filePath,
       columns,
       rows,
       csvQuoteMode,
+      ...(nullLiteral === undefined ? {} : { nullLiteral }),
     },
   });
 }
@@ -6103,3 +6491,7 @@ export async function exportQueryResultHtml(filePath: string, title: string | un
 export * from "@/lib/backend/mq-tauri";
 export * from "@/lib/backend/mqtt-tauri";
 export * from "@/lib/backend/nacos-tauri";
+
+export async function openQueryResultTempFile(path: string): Promise<void> {
+  return invoke("open_query_result_temp_file", { path });
+}

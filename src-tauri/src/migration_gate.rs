@@ -44,6 +44,8 @@ pub fn allowed_command(command: &str) -> bool {
             | "complete_app_close"
             | "reveal_path_in_file_manager"
             | "get_platform"
+            | "load_app_appearance_settings"
+            | "update_app_appearance_settings"
             | "set_app_locale"
     )
 }

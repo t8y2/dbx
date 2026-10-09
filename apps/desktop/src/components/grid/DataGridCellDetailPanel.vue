@@ -54,12 +54,23 @@ const emit = defineEmits<{
   copyValue: [];
   commit: [];
   cancel: [];
+  save: [];
   setNull: [];
   copyColumnName: [];
   copySqlCondition: [];
 }>();
 
-const { geometryPreviewOpen, geometryCanvas, detailsEditorContainer, sideJsonPreviewContainer, openSearch } = useDataGridCellDetail({ detail: toRef(props, "detail"), editValue: detailEditValue, onCancel: () => emit("cancel") });
+const { geometryPreviewOpen, geometryCanvas, detailsEditorContainer, sideJsonPreviewContainer, openSearch } = useDataGridCellDetail({
+  detail: toRef(props, "detail"),
+  editValue: detailEditValue,
+  onCancel: () => emit("cancel"),
+  // 详情编辑器里按 Ctrl/Cmd+S 与 temporal 编辑器的 ctrl+s 路径保持一致：
+  // 先 emit commit（把草稿落成待保存变更），再 emit save（触发网格保存）。
+  onSave: () => {
+    emit("commit");
+    emit("save");
+  },
+});
 void geometryCanvas;
 void detailsEditorContainer;
 void sideJsonPreviewContainer;
@@ -183,7 +194,7 @@ defineExpose({ openSearch });
         </div>
         <template v-if="editing"
           ><div class="dbx-data-grid-value-font min-h-0 min-w-0 flex-1" :style="editorStyle">
-            <TemporalCellEditor v-if="temporalEditorConfig" v-model="detailEditValue" :kind="temporalEditorConfig.kind" :fraction-precision="temporalEditorConfig.fractionPrecision" variant="inline" :commit-on-close="false" @cancel="emit('cancel')" @commit="emit('commit')" />
+            <TemporalCellEditor v-if="temporalEditorConfig" v-model="detailEditValue" :kind="temporalEditorConfig.kind" :fraction-precision="temporalEditorConfig.fractionPrecision" variant="inline" :commit-on-close="false" @cancel="emit('cancel')" @commit="emit('commit')" @save="emit('save')" />
             <div v-else ref="detailsEditorContainer" data-cell-detail-editor-root class="min-h-0 h-full w-full rounded border overflow-hidden" />
           </div>
           <div v-if="!panelIsBottom" class="flex shrink-0 gap-1 py-0.5">

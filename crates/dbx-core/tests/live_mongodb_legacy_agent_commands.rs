@@ -372,3 +372,26 @@ async fn dump_and_export_resolve_the_per_database_pool() {
     command(&state, id, &restored, doc! { "dropDatabase": 1 }).await;
     command(&state, id, &database, doc! { "dropDatabase": 1 }).await;
 }
+
+#[tokio::test]
+#[ignore = "opt-in: DBX_MONGO_LEGACY_DUMP_TEST_HOST (host:port, MongoDB 3.6+ without auth) and an installed MongoDB Legacy Agent; creates a temporary database"]
+async fn missing_collection_returns_error() {
+    let endpoint = std::env::var("DBX_MONGO_LEGACY_DUMP_TEST_HOST").expect("DBX_MONGO_LEGACY_DUMP_TEST_HOST");
+    let (host, port) = endpoint.split_once(':').expect("host:port");
+    let files = tempfile::tempdir().unwrap();
+    let database = format!("dbx_legacy_missing_{}", uuid::Uuid::new_v4().simple());
+    let state =
+        AppState::new(dbx_core::persistence::test_storage::open(&files.path().join("storage.db")).await.unwrap());
+    let id = "legacy-missing-collection-test";
+    let config: ConnectionConfig = serde_json::from_value(serde_json::json!({ "id": id, "name": "Legacy missing test", "db_type": "mongodb", "host": host, "port": port.parse::<u16>().unwrap(), "username": "", "password": "", "database": database, "driver_profile": "mongodb-legacy" })).unwrap();
+    state.configs.write().await.insert(id.into(), config);
+    let key = state.get_or_create_pool(id, Some(&database)).await.unwrap();
+    assert!(matches!(state.pool_handle(&key).await, Some(PoolKind::Agent(_))), "test must run over the legacy agent");
+
+    mongo_create_database_core(&state, id, &database).await.unwrap();
+
+    let err = shell(&state, id, &database, "db.getCollection('does_not_exist').find()").await.unwrap_err();
+    assert!(err.contains("does not exist"), "Expected error about missing collection, got: {err}");
+
+    command(&state, id, &database, doc! { "dropDatabase": 1 }).await;
+}

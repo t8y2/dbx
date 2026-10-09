@@ -21,16 +21,16 @@ capabilities:
   queryExecution: true
   metadataBrowse: true
   objectBrowser: true
-  objectSource: false
+  objectSource: true
   schemaSearch: true
   diagram: true
-  tableDataEdit: false
+  tableDataEdit: true
   tableStructureEdit: true
   tableImport: true
   dataTransfer: false
   sqlFileExecution: true
   databaseCreate: false
   fieldLineage: false
-  sqlExplain: false
-  userAdmin: false
+  sqlExplain: true
+  userAdmin: true
   driverManagement: true

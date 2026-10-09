@@ -461,6 +461,40 @@ export function preferredRedisValueFormat(value: unknown, preferred?: RedisValue
   return detail.defaultFormat;
 }
 
+/**
+ * Issue #10922: a string payload that parses into a JSON object or array opens
+ * pretty-printed instead of raw, matching RedisInsight. `stored` is the
+ * persisted format preference; null means the user never pinned a format, so
+ * detection wins. Scalar JSON ("123", "\"text\"") renders identically in both
+ * views, so it never triggers the switch.
+ */
+export function autoRedisValueFormat(detail: RedisMemberDetail, stored: RedisValueFormat | null): RedisValueFormat {
+  if (stored != null && shouldReuseRedisValueFormatPreference(detail, stored)) return stored;
+  if (stored == null && isRedisJsonContainerValue(detail.json?.value)) return "json";
+  return detail.defaultFormat;
+}
+
+export function isRedisJsonContainerValue(value: unknown): boolean {
+  return typeof value === "object" && value !== null;
+}
+
+/**
+ * Codec that `formatRedisMemberDetail` already decoded for this payload, or
+ * null. Java serialization, Pickle, and PHP serialization have deterministic
+ * magic prefixes; Protobuf is deliberately excluded because without a schema
+ * its wire format matches too many byte strings. Msgpack has no magic prefix
+ * -- any single byte is a valid msgpack scalar -- so its detection
+ * additionally requires the decoded value to be a container, matching the
+ * JSON auto-format guard above.
+ */
+export function detectedRedisStructuredCodec(detail: RedisMemberDetail): RedisValueCodec | null {
+  if (detail.javaSerialized) return "javaserialize";
+  if (detail.pickle) return "pickle";
+  if (detail.msgpack && isRedisJsonContainerValue(detail.msgpack.value)) return "msgpack";
+  if (detail.phpSerialized) return "phpserialize";
+  return null;
+}
+
 export function canRenderRedisValueFormat(detail: RedisMemberDetail, format: RedisValueFormat): boolean {
   return !isJsonDerivedView(format) || Boolean(detail.json);
 }
@@ -562,6 +596,8 @@ export function redisValueCollectionScanCursor(value: RedisValue): number | unde
 export function redisValueSize(value: RedisValue): number {
   switch (value.data.kind) {
     case "string":
+    // kvrocks 位图与字符串一样按字节计长度
+    case "bitmap":
       return value.data.total_bytes ?? decodeRedisBlob(value.data.content).byteLength;
     case "json":
       return new TextEncoder().encode(redisJsonValueText(value.data)).byteLength;
@@ -580,6 +616,9 @@ export function redisValueSize(value: RedisValue): number {
 export function redisValuePreview(value: RedisValue): string {
   switch (value.data.kind) {
     case "string":
+      return previewText(redisBlobRawText(value.data.content));
+    case "bitmap":
+      // kvrocks 位图的 GET 结果就是字节内容，预览方式与字符串一致
       return previewText(redisBlobRawText(value.data.content));
     case "json":
       return previewText(redisJsonValueText(value.data));

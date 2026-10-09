@@ -8,6 +8,7 @@ import com.google.gson.JsonParser;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -39,7 +40,7 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
     private final ExecutorService cleanup;
     private final JdbcConnectionPoolRegistry poolRegistry;
     private final Gson gson = new Gson();
-    private final PrintStream protocolOutput = System.out;
+    private final PrintStream protocolOutput = new PrintStream(System.out, true, StandardCharsets.UTF_8);
     private final Object outputLock = new Object();
     private final Object maintenanceLock = new Object();
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -95,7 +96,7 @@ public final class MultiSessionJsonRpcServer implements AutoCloseable {
             protocolOutput.println("{\"ready\":true}");
             protocolOutput.flush();
         }
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(System.in))) {
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8))) {
             String line;
             while ((line = reader.readLine()) != null) {
                 JsonObject request = JsonParser.parseString(line).getAsJsonObject();

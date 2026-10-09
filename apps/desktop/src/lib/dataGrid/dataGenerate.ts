@@ -944,8 +944,39 @@ function transformText(text: string, mode: string): string {
 function generateEmail(): string {
   return `${pick(firstNames).toLowerCase()}.${pick(lastNames).toLowerCase()}@${pick(domains)}`;
 }
-function generatePhone(): string {
-  return `+1${randInt(200, 999)}${randInt(100, 999)}${randInt(1000, 9999)}`;
+function generatePhone(params?: GeneratorParams): string {
+  const regions = params?.phoneRegions?.length ? params.phoneRegions : ["us"];
+  const region = pick(regions);
+  const separator = params?.phoneSeparator === true;
+  const format = params?.phoneFormat ?? "domestic";
+  let phone: string;
+
+  if (region === "uk") {
+    const first = randInt(1000, 9999);
+    const second = randInt(100000, 999999);
+    phone = separator ? `${first} ${second}` : `+44${first}${second}`;
+  } else if (region === "jp") {
+    const first = randInt(10, 99);
+    const second = randInt(1000, 9999);
+    const third = randInt(1000, 9999);
+    phone = separator ? `0${first}-${second}-${third}` : `+810${first}${second}${third}`;
+  } else if (region === "cn" || region === "other") {
+    const first = randInt(130, 199);
+    const second = randInt(1000, 9999);
+    const third = randInt(1000, 9999);
+    const domestic = separator ? `${first}-${second}-${third}` : `${first}${second}${third}`;
+    phone = format === "international" ? `+86${domestic.replace(/[^0-9]/g, "")}` : domestic;
+  } else {
+    const first = randInt(200, 999);
+    const second = randInt(100, 999);
+    const third = randInt(1000, 9999);
+    phone = separator ? `(${first}) ${second}-${third}` : `+1${first}${second}${third}`;
+  }
+
+  const maxLength = params?.maxLength;
+  if (maxLength === undefined || !Number.isFinite(maxLength) || maxLength < 1 || phone.length <= maxLength) return phone;
+  const digits = phone.replace(/\D/g, "");
+  return digits.length <= maxLength ? digits : digits.slice(-Math.floor(maxLength));
 }
 function generateIP(): string {
   return `${randInt(1, 255)}.${randInt(0, 255)}.${randInt(0, 255)}.${randInt(1, 255)}`;
@@ -1455,6 +1486,7 @@ function buildDefaultGeneratorParams(_columnName: string, attrs: ColumnAttrs, ge
     params.phoneFormat = "domestic";
     params.phoneSeparator = true;
     params.phoneRegions = ["us"];
+    if (charLen !== null && charLen > 0) params.maxLength = Math.min(charLen, 2000);
     return params;
   }
   if (generatorKey === "email") {

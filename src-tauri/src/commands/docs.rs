@@ -121,7 +121,10 @@ pub async fn docs_save_annotations(
     annotations: AnnotationFile,
 ) -> Result<(), String> {
     let path = notes_path_of(&state, &connection_id).await?;
-    save_annotations(&path, &annotations)
+    // 注释文件写入是同步磁盘 IO：放到阻塞线程池，避免占用 tokio worker
+    tauri::async_runtime::spawn_blocking(move || save_annotations(&path, &annotations))
+        .await
+        .map_err(|error| format!("annotation save task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -131,6 +134,13 @@ pub async fn docs_export_html(
     annotations: AnnotationFile,
     lang: String,
 ) -> Result<(), String> {
-    let html = to_standalone_html(&snapshot, &annotations, &lang)?;
-    std::fs::write(&file_path, html).map_err(|error| format!("Failed to write {file_path}: {error}"))
+    // standalone HTML 可能达数 MB，序列化加写盘都是阻塞工作：与
+    // csv_export/xlsx_export 一致走 spawn_blocking，避免占用共享 runtime
+    // 的 tokio worker。
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let html = to_standalone_html(&snapshot, &annotations, &lang)?;
+        std::fs::write(&file_path, html).map_err(|error| format!("Failed to write {file_path}: {error}"))
+    })
+    .await
+    .map_err(|error| format!("docs export task failed: {error}"))?
 }

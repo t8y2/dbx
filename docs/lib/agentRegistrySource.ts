@@ -16,10 +16,16 @@ async function fetchRegistry(url: string): Promise<AgentRegistry> {
 }
 
 export async function fetchAgentDownloadCatalog(): Promise<AgentDownloadCatalog | null> {
+  const result = await fetchAgentDownloadCatalogWithRegistry();
+  return result?.catalog ?? null;
+}
+
+export async function fetchAgentDownloadCatalogWithRegistry(): Promise<{ catalog: AgentDownloadCatalog; registry: AgentRegistry } | null> {
   for (const url of AGENT_REGISTRY_URLS) {
     try {
-      const catalog = buildAgentDownloadCatalogFromRegistry(await fetchRegistry(url));
-      if (hasDownloadAssets(catalog)) return catalog;
+      const registry = await fetchRegistry(url);
+      const catalog = buildAgentDownloadCatalogFromRegistry(registry);
+      if (hasDownloadAssets(catalog)) return { catalog, registry };
     } catch {
       // Both sources contain the same generated registry; try the synchronized mirror next.
     }

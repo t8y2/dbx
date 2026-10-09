@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { buildEditorFontThemeRules, buildSqlCompletionThemeRules, editorDiagnosticColors, editorThemeAppearanceFor, resolveCustomThemeBackgrounds, resolveEditorTheme, SQL_BUILTIN_HIGHLIGHT_TAG } from "@/lib/editor/editorThemes";
+import { buildEditorFontThemeRules, buildSqlCompletionThemeRules, EDITOR_FONT_FAMILY_CSS_VAR, editorDiagnosticColors, editorThemeAppearanceFor, IDE_EDITOR_THEMES, loadEditorTheme, resolveCustomThemeBackgrounds, resolveEditorTheme, SQL_BUILTIN_HIGHLIGHT_TAG } from "@/lib/editor/editorThemes";
 import { DEFAULT_APP_CUSTOM_UI_COLORS, wcagContrastRatio, type AppThemePalette } from "@/lib/app/appTheme";
-import type { EditorTheme } from "@/stores/settingsStore";
+import { DEFAULT_CUSTOM_THEME_COLORS, type CustomThemeColors, type EditorTheme } from "@/stores/settingsStore";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
 import * as langSql from "@codemirror/lang-sql";
 
@@ -59,6 +59,31 @@ describe("custom editor theme backgrounds", () => {
       background: "#f5f3ee",
       gutterBackground: "#f5f3ee",
     });
+  });
+
+  it("uses an explicit gutter background when provided", () => {
+    expect(resolveCustomThemeBackgrounds({ background: "#10131a", gutterBackground: "#0b0c10" }, true)).toEqual({
+      background: "#10131a",
+      gutterBackground: "#0b0c10",
+    });
+    expect(resolveCustomThemeBackgrounds({ gutterBackground: "#0b0c10" }, false)).toEqual({
+      background: "#fafafa",
+      gutterBackground: "#0b0c10",
+    });
+  });
+
+  it("loads custom editor theme with custom UI colors", async () => {
+    const customColors: CustomThemeColors = {
+      ...DEFAULT_CUSTOM_THEME_COLORS,
+      activeLine: "#2a2a3a",
+      selection: "#3a3a4a",
+      cursor: "#ff00ff",
+      gutterBackground: "#111122",
+      lineNumber: "#777788",
+      matchingBracket: "#444455",
+    };
+    const extension = await loadEditorTheme("custom", "dark", customColors);
+    expect(extension).toBeDefined();
   });
 
   it("keeps the existing custom defaults when background is omitted", () => {
@@ -150,12 +175,56 @@ describe("custom editor theme backgrounds", () => {
   });
 });
 
+describe("Cursor editor theme selection", () => {
+  // The Cursor palettes track Cursor/VS Code's own `editor.selectionBackground`
+  // (#264F78 dark, #ADD6FF light). They previously used translucent neutrals
+  // (#40404099 over #181818, #1414141e over #fcfcfc) which composited to #303030 /
+  // #e1e1e1 — visually almost identical to the editor background, so a mouse
+  // selection was hard to spot.
+  it("paints the selection opaque and clearly visible on the editor background", () => {
+    const dark = IDE_EDITOR_THEMES.cursorDark;
+    const light = IDE_EDITOR_THEMES.cursorLight;
+
+    expect(dark.selection).toBe("#264f78");
+    expect(light.selection).toBe("#add6ff");
+    // Opaque, so the highlight cannot wash out against the editor background.
+    expect(dark.selection).toMatch(/^#[0-9a-f]{6}$/);
+    expect(light.selection).toMatch(/^#[0-9a-f]{6}$/);
+    // Selected text must stay legible inside the highlight.
+    expect(wcagContrastRatio(dark.foreground, dark.selection), `cursor-dark text on selection`).toBeGreaterThanOrEqual(3.0);
+    expect(wcagContrastRatio(light.foreground, light.selection), `cursor-light text on selection`).toBeGreaterThanOrEqual(3.0);
+  });
+
+  it("does not paint an opaque background on .cm-scroller so background images can show through", async () => {
+    const ideThemes = ["idea-dark", "idea-light", "jetbrains-dark", "jetbrains-light", "cursor-dark", "cursor-light", "claude-dark", "claude-light"] as const;
+
+    for (const theme of ideThemes) {
+      const extension = (await loadEditorTheme(theme, "dark")) as any;
+      const themeFacet = extension[0]?.find((ext: any) => ext?.value?.rules);
+      expect(themeFacet).toBeDefined();
+      const scrollerRule = themeFacet.value.rules.find((r: string) => r.includes(".cm-scroller {") && r.includes("background"));
+      expect(scrollerRule, `${theme} should not set an opaque background on .cm-scroller`).toBeUndefined();
+    }
+  });
+});
+
 describe("SQL completion theme", () => {
   it("uses the configurable medium radius for the popup container", () => {
     const rules = buildSqlCompletionThemeRules();
 
     expect(rules[".cm-tooltip.cm-tooltip-autocomplete"]).toMatchObject({ borderRadius: "var(--dbx-radius-md)" });
     expect(rules[".cm-tooltip.cm-tooltip-autocomplete > ul > li"]).toMatchObject({ borderRadius: "var(--dbx-radius-sm)" });
+  });
+
+  it("renders the info popup in the configured editor font", () => {
+    // The info popup is a sibling tooltip rather than a child of the
+    // autocomplete tooltip, so it inherits nothing from it and needs the
+    // variable set on its own rule.
+    const rules = buildSqlCompletionThemeRules();
+    const editorFont = `var(${EDITOR_FONT_FAMILY_CSS_VAR}, var(--font-mono, monospace))`;
+
+    expect(rules[".cm-tooltip.cm-completionInfo"]).toMatchObject({ fontFamily: editorFont });
+    expect(rules[".cm-completionLabel"]).toMatchObject({ fontFamily: editorFont });
   });
 
   it("keeps completion labels ahead of long detail text", () => {

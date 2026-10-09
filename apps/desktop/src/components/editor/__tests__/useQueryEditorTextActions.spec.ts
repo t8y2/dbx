@@ -133,6 +133,22 @@ describe("QueryEditor extracted text actions", () => {
     expect(clipboard.readTextFromClipboard).toHaveBeenCalledTimes(1);
   });
 
+  it("restores source-code SQL through the explicit paste action", async () => {
+    clipboard.readTextFromClipboard.mockResolvedValue('"SELECT * " +\n"FROM users \\n " +\n"WHERE id = 1"');
+    const { actions, editorView } = mountActions("");
+    await actions.pasteClipboardSqlRestoringSource();
+    expect(editorView.state.doc.toString()).toBe("SELECT * FROM users \n WHERE id = 1");
+    expect(undo(editorView)).toBe(true);
+    expect(editorView.state.doc.toString()).toBe("");
+  });
+
+  it("pastes the original text when the clipboard is not a source-code SQL concatenation", async () => {
+    clipboard.readTextFromClipboard.mockResolvedValue("SELECT * FROM users");
+    const { actions, editorView } = mountActions("");
+    await actions.pasteClipboardSqlRestoringSource();
+    expect(editorView.state.doc.toString()).toBe("SELECT * FROM users");
+  });
+
   it("preserves multi-range case conversion and selects each replacement", () => {
     const { actions, editorView } = mountActions("select id, name from users");
     editorView.dispatch({ selection: EditorSelection.create([EditorSelection.range(0, 6), EditorSelection.range(16, 20)]) });

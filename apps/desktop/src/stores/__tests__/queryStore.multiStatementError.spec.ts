@@ -978,6 +978,10 @@ describe("queryStore multi-statement errors", () => {
     await store.executeTabSql(tabId, sql);
 
     expect(store.tabs.find((item) => item.id === tabId)?.results?.map((result) => result.sourceLabel)).toEqual(["Orders", "Users"]);
+    expect(store.tabs.find((item) => item.id === tabId)?.results).toMatchObject([
+      { sourceLabelKind: "comment", sourceQualifier: "app", sourceName: "orders" },
+      { sourceLabelKind: "comment", sourceQualifier: "app", sourceName: "users" },
+    ]);
   });
 
   it("does not repeatedly scan the full document when naming a selected large batch", async () => {

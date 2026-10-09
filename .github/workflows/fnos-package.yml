@@ -1,0 +1,31 @@
+name: fnOS Package
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "deploy/fnos/**"
+      - "crates/dbx-web/Cargo.toml"
+      - "docs/logo.png"
+      - "docs/public/logo-64.png"
+      - ".github/workflows/fnos-package.yml"
+      - ".github/workflows/release.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build fnOS package
+        run: ./deploy/fnos/build.sh
+
+      - name: Upload fnOS package
+        uses: actions/upload-artifact@v7
+        with:
+          name: dbx-fnos
+          path: dist/fnos/*
+          if-no-files-found: error

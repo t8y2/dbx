@@ -40,11 +40,12 @@ enum SqlServerQueryTransport {
 pub struct SqlServerClient {
     inner: SqlServerTdsClient,
     query_transport: SqlServerQueryTransport,
+    server_major_version: Option<u32>,
 }
 
 impl SqlServerClient {
     fn new(inner: SqlServerTdsClient) -> Self {
-        Self { inner, query_transport: SqlServerQueryTransport::Unknown }
+        Self { inner, query_transport: SqlServerQueryTransport::Unknown, server_major_version: None }
     }
 
     async fn ensure_query_transport(&mut self) -> SqlServerQueryTransport {
@@ -89,6 +90,24 @@ impl SqlServerClient {
         } else {
             self.inner.query(query, params).await
         }
+    }
+
+    /// Best-effort TDS ATTENTION to interrupt the in-flight batch. SQL Server
+    /// 2000 keeps executing a batch after TCP FIN, so desktop builds (feature
+    /// `native-attention`, vendored tiberius) signal the server over the wire
+    /// before the connection is discarded. ATTENTION is never proof of
+    /// rollback: every caller discards the connection right after.
+    #[cfg(feature = "native-attention")]
+    pub async fn send_attention(&mut self) -> tiberius::Result<()> {
+        self.inner.send_attention().await
+    }
+
+    /// No-op fallback for builds whose tiberius comes from crates.io
+    /// (standalone agent driver workspaces), where the wire call above does
+    /// not exist. Connection discard still aborts the session.
+    #[cfg(not(feature = "native-attention"))]
+    pub async fn send_attention(&mut self) -> tiberius::Result<()> {
+        Ok(())
     }
 }
 
@@ -203,6 +222,19 @@ pub struct SqlServerColumnMetadata {
     /// `CREATE TABLE` has to use this definition instead of the type.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub computed_clause: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SqlServerTemporalTableMetadata {
+    pub temporal_type: i32,
+    pub start_column: Option<String>,
+    pub end_column: Option<String>,
+    pub history_schema: Option<String>,
+    pub history_table: Option<String>,
+    pub parent_schema: Option<String>,
+    pub parent_table: Option<String>,
+    pub retention_period: Option<i32>,
+    pub retention_unit: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -1617,14 +1649,19 @@ fn top_level_sqlserver_tokens(sql: &str) -> Vec<SqlServerToken> {
         }
         if ch == '/' && next == Some('*') {
             i += 2;
-            while i < sql.len() {
+            let mut comment_depth = 1usize;
+            while i < sql.len() && comment_depth > 0 {
                 let current = next_char(sql, i);
                 let following = next_char_at(sql, i + current.len_utf8());
-                if current == '*' && following == Some('/') {
+                if current == '/' && following == Some('*') {
+                    comment_depth += 1;
                     i += 2;
-                    break;
+                } else if current == '*' && following == Some('/') {
+                    comment_depth -= 1;
+                    i += 2;
+                } else {
+                    i += current.len_utf8();
                 }
-                i += current.len_utf8();
             }
             continue;
         }
@@ -2928,6 +2965,75 @@ pub async fn get_column_metadata(
     Ok(rows.iter().map(sqlserver_column_metadata_from_row).collect())
 }
 
+pub async fn get_temporal_table_metadata(
+    client: &mut SqlServerClient,
+    schema: &str,
+    table: &str,
+) -> Result<Option<SqlServerTemporalTableMetadata>, String> {
+    // Dynamic SQL keeps pre-2016 servers from binding the newer catalog columns.
+    // Retention metadata was added later, so it has its own feature check.
+    let sql = r#"IF OBJECT_ID(N'sys.periods') IS NOT NULL
+BEGIN
+    DECLARE @retention nvarchar(max) = N'CAST(NULL AS int), CAST(NULL AS nvarchar(30))';
+    IF COL_LENGTH(N'sys.tables', N'history_retention_period') IS NOT NULL
+        SET @retention = N'CAST(t.history_retention_period AS int), t.history_retention_period_unit_desc';
+    DECLARE @sql nvarchar(max) = N'
+        SELECT CAST(t.temporal_type AS int), cs.name, ce.name,
+               hs.name, h.name, ps.name, parent.name, ' + @retention + N'
+        FROM sys.tables t
+        JOIN sys.schemas s ON s.schema_id = t.schema_id
+        LEFT JOIN sys.periods p ON p.object_id = t.object_id
+        LEFT JOIN sys.columns cs ON cs.object_id = p.object_id AND cs.column_id = p.start_column_id
+        LEFT JOIN sys.columns ce ON ce.object_id = p.object_id AND ce.column_id = p.end_column_id
+        LEFT JOIN sys.tables h ON h.object_id = t.history_table_id
+        LEFT JOIN sys.schemas hs ON hs.schema_id = h.schema_id
+        LEFT JOIN sys.tables parent ON parent.history_table_id = t.object_id
+        LEFT JOIN sys.schemas ps ON ps.schema_id = parent.schema_id
+        WHERE s.name = COALESCE(NULLIF(@schema, N''''), SCHEMA_NAME()) AND t.name = @table';
+    EXEC sys.sp_executesql @sql, N'@schema nvarchar(128), @table nvarchar(128)', @schema=@P1, @table=@P2;
+END"#;
+    let rows = client
+        .query(sql, &[&schema, &table])
+        .await
+        .map_err(|error| error.to_string())?
+        .into_first_result()
+        .await
+        .map_err(|error| error.to_string())?;
+    let Some(row) = rows.first() else { return Ok(None) };
+    let metadata = SqlServerTemporalTableMetadata {
+        temporal_type: row.get::<i32, _>(0).unwrap_or(0),
+        start_column: row.get::<&str, _>(1).map(str::to_string),
+        end_column: row.get::<&str, _>(2).map(str::to_string),
+        history_schema: row.get::<&str, _>(3).map(str::to_string),
+        history_table: row.get::<&str, _>(4).map(str::to_string),
+        parent_schema: row.get::<&str, _>(5).map(str::to_string),
+        parent_table: row.get::<&str, _>(6).map(str::to_string),
+        retention_period: row.get::<i32, _>(7),
+        retention_unit: row.get::<&str, _>(8).map(str::to_string),
+    };
+    if metadata.temporal_type == 0 && metadata.start_column.is_none() && metadata.end_column.is_none() {
+        return Ok(None);
+    }
+    if metadata.temporal_type == 2
+        && (metadata.start_column.is_none()
+            || metadata.end_column.is_none()
+            || metadata.history_schema.is_none()
+            || metadata.history_table.is_none())
+    {
+        return Err("SQL Server temporal table metadata is incomplete".to_string());
+    }
+    if metadata.temporal_type == 1 && (metadata.parent_schema.is_none() || metadata.parent_table.is_none()) {
+        return Err("SQL Server history table relationship metadata is incomplete".to_string());
+    }
+    if metadata.temporal_type == 2
+        && metadata.retention_period.is_some_and(|period| period >= 0)
+        && !metadata.retention_unit.as_deref().is_some_and(|unit| matches!(unit, "DAY" | "WEEK" | "MONTH" | "YEAR"))
+    {
+        return Err("SQL Server temporal history retention metadata is unavailable or unsupported".to_string());
+    }
+    Ok(Some(metadata))
+}
+
 fn sqlserver_column_metadata_from_row(row: &Row) -> SqlServerColumnMetadata {
     let base = row.get::<&str, _>(1).unwrap_or("").to_string();
     let max_len = row
@@ -3876,6 +3982,98 @@ fn sqlserver_dml_output_returns_rows(sql: &str) -> bool {
     })
 }
 
+/// Transaction controls cannot be mixed with DBX-owned interactive transactions.
+/// The existing lexer skips comments, literals and delimited identifiers.
+pub fn manual_transaction_control_conflict(sql: &str) -> bool {
+    let tokens = top_level_sqlserver_tokens(sql);
+    tokens.iter().enumerate().any(|(index, token)| {
+        matches!(token.text.as_str(), "COMMIT" | "ROLLBACK" | "USE" | "SAVE")
+            || (token.text == "BEGIN"
+                && tokens
+                    .get(index + 1)
+                    .is_some_and(|next| matches!(next.text.as_str(), "TRAN" | "TRANSACTION" | "DISTRIBUTED")))
+            || (token.text == "SET" && tokens.get(index + 1).is_some_and(|next| next.text == "IMPLICIT_TRANSACTIONS"))
+    })
+}
+
+fn manual_transaction_status_error(error: String) -> String {
+    // Inspect the capability probe's server error, not a version allowlist or
+    // a failed login/transport. Preserve unrelated errors for their caller.
+    if sqlserver_error_number(&error) == Some(195) && error.to_ascii_uppercase().contains("XACT_STATE") {
+        format!(
+            "DBX_MANUAL_TRANSACTION_UNSUPPORTED: The native SQL Server driver requires XACT_STATE() \
+             to verify transaction safety. Use the SQL Server legacy compatibility driver \
+             (jTDS for SQL Server 2000). Server error: {error}"
+        )
+    } else {
+        error
+    }
+}
+
+/// SQL Server 2000 has no XACT_STATE(). Keep that absence explicit rather
+/// than infer committability from transaction count. Any execution error ends
+/// the owning session; COMMIT/ROLLBACK acknowledgement remains authoritative.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ManualTransactionStatus {
+    pub count: i64,
+    pub xact_state: Option<i64>,
+}
+impl ManualTransactionStatus {
+    pub fn is_active(self) -> bool {
+        self.count == 1 && self.xact_state.is_none_or(|state| state == 1)
+    }
+}
+/// SQL Server 2000 (product major 8) never offers XACT_STATE() and this driver
+/// negotiates TDS 7.1 with it, so the product major identifies the legacy
+/// count-only status check without reaching into a patched-only tiberius API.
+fn uses_legacy_transaction_status(server_major: Option<u32>) -> bool {
+    server_major == Some(8)
+}
+
+/// Consume the full response, including transaction descriptor ENVCHANGE tokens.
+pub async fn manual_transaction_status(client: &mut SqlServerClient) -> Result<ManualTransactionStatus, String> {
+    if client.server_major_version.is_none() {
+        let version = execute_simple_batch_with_max_rows_metadata(
+            client,
+            "SELECT CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(128))",
+            Some(1),
+        )
+        .await?;
+        client.server_major_version = version
+            .iter()
+            .find_map(|result| result.result.rows.first())
+            .and_then(|row| row.first())
+            .and_then(serde_json::Value::as_str)
+            .and_then(|version| version.split('.').next())
+            .and_then(|major| major.parse().ok());
+        if client.server_major_version.is_none() {
+            return Err("SQL Server did not return its product version for transaction capability detection".to_owned());
+        }
+    }
+    let legacy = uses_legacy_transaction_status(client.server_major_version);
+    let results = execute_simple_batch_with_max_rows_metadata(
+        client,
+        if legacy {
+            "SELECT @@TRANCOUNT AS dbx_transaction_count"
+        } else {
+            "SELECT @@TRANCOUNT AS dbx_transaction_count, XACT_STATE() AS dbx_transaction_state"
+        },
+        Some(1),
+    )
+    .await
+    .map_err(manual_transaction_status_error)?;
+    results
+        .iter()
+        .find_map(|result| result.result.rows.first())
+        .and_then(|row| {
+            Some(ManualTransactionStatus {
+                count: row.first()?.as_i64()?,
+                xact_state: if legacy { None } else { Some(row.get(1)?.as_i64()?) },
+            })
+        })
+        .ok_or_else(|| "SQL Server did not return transaction status".to_owned())
+}
+
 fn contains_transaction_control(sql: &str) -> bool {
     let tokens = top_level_sqlserver_tokens(sql);
     tokens.iter().enumerate().any(|(index, token)| {
@@ -3993,6 +4191,75 @@ fn first_sql_tokens(sql: &str, limit: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn manual_transaction_status_keeps_legacy_and_modern_safety_explicit() {
+        use super::{uses_legacy_transaction_status as legacy, ManualTransactionStatus as Status};
+        assert!(legacy(Some(8)));
+        for major in [None, Some(9), Some(13), Some(16)] {
+            assert!(!legacy(major));
+        }
+        assert!(Status { count: 1, xact_state: None }.is_active());
+        assert!(Status { count: 1, xact_state: Some(1) }.is_active());
+        for count in [0, 2, -1] {
+            assert!(!Status { count, xact_state: None }.is_active());
+            assert!(!Status { count, xact_state: Some(1) }.is_active());
+        }
+        for state in [-1, 0, 2] {
+            assert!(!Status { count: 1, xact_state: Some(state) }.is_active());
+        }
+    }
+
+    #[test]
+    fn manual_transaction_status_missing_xact_state_is_unsupported() {
+        for message in [
+            "'XACT_STATE' is not a recognized built-in function name. (code: 195, state: 10, class: 15)",
+            "无法识别函数 'xact_state'。 (code: 195, state: 10, class: 15)",
+        ] {
+            let error = super::manual_transaction_status_error(message.to_owned());
+            assert!(error.starts_with("DBX_MANUAL_TRANSACTION_UNSUPPORTED:"), "{error}");
+            assert!(error.contains("legacy"));
+            assert!(error.contains(message));
+        }
+    }
+
+    #[test]
+    fn manual_transaction_status_other_errors_keep_their_original_category() {
+        for message in [
+            "Permission denied for XACT_STATE. (code: 229, state: 1, class: 14)",
+            "'OTHER_FUNCTION' is not a recognized function name. (code: 195, state: 10, class: 15)",
+            "Connection reset while querying XACT_STATE",
+            "XACT_STATE query timed out",
+        ] {
+            assert_eq!(super::manual_transaction_status_error(message.to_owned()), message);
+        }
+    }
+    #[test]
+    fn manual_transaction_controls_are_detected_without_false_positive_literals_or_try_blocks() {
+        for sql in [
+            "BEGIN TRAN",
+            "BEGIN DISTRIBUTED TRANSACTION",
+            "COMMIT",
+            "ROLLBACK TRANSACTION",
+            "SAVE TRANSACTION x",
+            "SET IMPLICIT_TRANSACTIONS OFF",
+            "USE [other_db]",
+            "IF 1=1 BEGIN COMMIT; END",
+        ] {
+            assert!(super::manual_transaction_control_conflict(sql), "{sql}");
+        }
+        for sql in [
+            "-- COMMIT\nSELECT 1",
+            "/* BEGIN TRANSACTION */ SELECT 1",
+            "/* outer /* inner */ COMMIT; USE other */ SELECT 1",
+            "SELECT 'ROLLBACK; USE db'",
+            "SELECT [COMMIT], [USE] FROM t",
+            "BEGIN TRY SELECT 1; END TRY BEGIN CATCH SELECT ERROR_MESSAGE(); END CATCH",
+            "DECLARE @message nvarchar(50) = N'SET IMPLICIT_TRANSACTIONS ON'",
+        ] {
+            assert!(!super::manual_transaction_control_conflict(sql), "{sql}");
+        }
+    }
+
     use super::{
         build_sqlserver_unsafe_type_query, capture_sqlserver_messages, completion_context_from_query_result,
         decode_sqlserver_spatial_values, format_sqlserver_numeric, is_blocking_sqlserver_unsafe_probe_error,

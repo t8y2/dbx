@@ -4,7 +4,11 @@ pub fn format_pg_array_sql_literal(arr: &[serde_json::Value]) -> String {
     }
     let elements: Vec<String> = arr.iter().map(format_pg_array_element).collect();
     let inner = format!("{{{}}}", elements.join(","));
-    format!("'{}'", inner.replace('\\', "\\\\").replace('\'', "''"))
+    // The array text already carries its own backslash escapes, so doubling
+    // them is only valid inside an escape string constant (E'...'); a plain
+    // '...' literal keeps backslashes verbatim under the default
+    // standard_conforming_strings = on.
+    quote_postgres_string_literal(&inner)
 }
 
 pub fn format_pg_array_element(val: &serde_json::Value) -> String {
@@ -147,4 +151,36 @@ pub fn format_postgres_vector_element(value: &serde_json::Value) -> String {
 
 pub fn quote_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn string_literal_quotes_normal_unicode_empty_and_apostrophe_values() {
+        assert_eq!(quote_string_literal("hello"), "'hello'");
+        assert_eq!(quote_string_literal("O'Reilly"), "'O''Reilly'");
+        assert_eq!(quote_string_literal(""), "''");
+        assert_eq!(quote_string_literal("中文注释"), "'中文注释'");
+    }
+
+    #[test]
+    fn pg_array_literal_without_backslashes_stays_a_plain_string() {
+        assert_eq!(format_pg_array_sql_literal(&[]), "'{}'");
+        assert_eq!(format_pg_array_sql_literal(&[json!("a"), json!(null), json!(1)]), r#"'{"a",NULL,1}'"#);
+        assert_eq!(format_pg_array_sql_literal(&[json!("it's")]), r#"'{"it''s"}'"#);
+    }
+
+    #[test]
+    fn pg_array_literal_escapes_backslashes_inside_an_escape_string() {
+        // PostgreSQL reads E'{"C:\\\\tmp"}' as the array text {"C:\\tmp"},
+        // whose single element is C:\tmp.
+        assert_eq!(format_pg_array_sql_literal(&[json!(r"C:\tmp")]), r#"E'{"C:\\\\tmp"}'"#);
+        // A double quote is escaped as \" in the array text; without the E
+        // prefix PostgreSQL keeps both backslashes, the first escapes the
+        // second, and the quote then ends the element early.
+        assert_eq!(format_pg_array_sql_literal(&[json!(r#"say "hi""#)]), r#"E'{"say \\"hi\\""}'"#);
+    }
 }

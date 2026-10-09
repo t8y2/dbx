@@ -159,13 +159,13 @@ describe("SshHostKeyPromptDialog web bridge", () => {
     connectionPositioner.textContent = "New connection";
     document.body.append(connectionPositioner);
 
-    const promptPositioner = document.body.querySelector<HTMLElement>(".dialog-positioner.z-\\[200\\]");
-    const promptOverlay = document.body.querySelector<HTMLElement>(".dialog-overlay.z-\\[200\\]");
+    const promptPositioner = document.body.querySelector<HTMLElement>(".dialog-positioner.\\!z-\\[200\\]");
+    const promptOverlay = document.body.querySelector<HTMLElement>(".dialog-overlay.\\!z-\\[200\\]");
     expect(promptPositioner).not.toBeNull();
     expect(promptOverlay).not.toBeNull();
     expect(connectionPositioner.classList.contains("z-50")).toBe(true);
-    expect(promptPositioner?.classList.contains("z-[200]")).toBe(true);
-    expect(promptOverlay?.classList.contains("z-[200]")).toBe(true);
+    expect(promptPositioner?.classList.contains("!z-[200]")).toBe(true);
+    expect(promptOverlay?.classList.contains("!z-[200]")).toBe(true);
     expect(document.body.textContent).toContain("layered.example.test:22");
 
     const buttons = document.body.querySelectorAll<HTMLButtonElement>("button");
@@ -472,6 +472,35 @@ describe("SshHostKeyPromptDialog web bridge", () => {
         secret: "654321",
       });
     });
+  });
+
+  it("pads the prompt scroll container so the input focus ring is not clipped", async () => {
+    // Regression: the container had no horizontal padding, so the 2px focus
+    // ring of the `w-full` input was clipped on the left/right edges even
+    // though `overflow-y-auto` also clips the horizontal axis.
+    await mountDialog();
+
+    const eventSource = MockEventSource.instances[0];
+    eventSource?.emit({
+      type: "prompt",
+      request: {
+        id: "ring-clip-1",
+        kind: "UserInput",
+        host: "",
+        port: 0,
+        prompt: "Please enter 6 digits.",
+        title: "Dynamic token",
+        source: "Terminal",
+        echo: false,
+      },
+    });
+    await nextTick();
+
+    const input = document.body.querySelector<HTMLInputElement>("input");
+    if (!input) throw new Error("plugin prompt input was not rendered");
+    const scroller = input.closest(".overflow-y-auto");
+    expect(scroller).not.toBeNull();
+    expect(scroller?.classList.contains("px-1")).toBe(true);
   });
 
   it("answers a fixed-choice plugin question by picking an option", async () => {

@@ -68,3 +68,13 @@ export async function checkStartupAuthentication(signal?: AbortSignal): Promise<
   if (!normalized) throw new Error("AUTH_CHECK_FAILED");
   return normalized;
 }
+
+export async function logoutWeb(): Promise<void> {
+  const response = await fetch(apiUrl("/api/auth/logout"), {
+    method: "POST",
+    credentials: "same-origin",
+  });
+  if (!response.ok) {
+    throw new Error("AUTH_LOGOUT_FAILED");
+  }
+}

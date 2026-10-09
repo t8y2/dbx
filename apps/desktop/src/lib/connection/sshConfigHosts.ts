@@ -20,4 +20,5 @@ export function applySshConfigHostAliasPrefill(target: SshTunnelConfig, hosts: r
       target.auth_method = "key";
     }
   }
+  if (!target.proxy_command && entry.proxy_command) target.proxy_command = entry.proxy_command;
 }

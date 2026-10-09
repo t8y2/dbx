@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { joinedRowChanges, type JoinedWriteSource } from "../../dataGrid/joinedRowChanges";
+import { joinedRowChanges, joinedSaveOptions, type JoinedWriteSource } from "../../dataGrid/joinedRowChanges";
 
 const sources: JoinedWriteSource[] = [
   { tableKey: "users", primaryKeys: ["id"], sourceColumns: ["id", "name", undefined, undefined] },
@@ -77,5 +77,24 @@ describe("joined row updates", () => {
         ]),
       ),
     ).toHaveLength(2);
+  });
+});
+
+describe("joined save options", () => {
+  it("keeps the connected server version so saved rows are addressed like the rows that were read", () => {
+    const options = joinedSaveOptions([{ tableMeta: { tableName: "events", primaryKeys: ["id"] }, sourceColumns: ["id", "name"] }], {
+      databaseType: "neo4j",
+      serverVersion: "Neo4j/4.4.44",
+      identifierQuote: "`",
+      includeDatabaseName: false,
+      columns: ["id", "name"],
+      rows: [[1, "user"]],
+      dirtyRows: new Map([[0, new Map([[1, "renamed"]])]]),
+      newRows: [],
+      deletedRows: new Set(),
+    });
+    expect(options).toHaveLength(1);
+    expect(options[0]!.serverVersion).toBe("Neo4j/4.4.44");
+    expect(options[0]!.databaseType).toBe("neo4j");
   });
 });

@@ -6,7 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect.vue";
-import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
+import CompareConnectionSelect from "@/components/diff/CompareConnectionSelect.vue";
+import { supportsDatabaseCompare } from "@/lib/database/databaseCompareCapabilities";
 import TableMultiSelect from "@/components/diff/TableMultiSelect.vue";
 import { buildSchemaDiffTableMatches, availableSchemaDiffTargetTables, areSchemaDiffTableMappingsEqual, pruneSchemaDiffTableMappings, reconcileSchemaDiffTableMappings, updateSchemaDiffTableMapping, type SchemaDiffTableMatch } from "@/lib/schema/schemaDiffTableMapping";
 import {
@@ -84,7 +85,34 @@ const targetSchemas = ref<string[]>([]);
 const sourceDbVersion = ref<string | null>(null);
 const targetDbVersion = ref<string | null>(null);
 
-const sqlConnections = computed(() => store.connections.filter((c: any) => !["mongodb", "redis", "elasticsearch", "easysearch", "meilisearch", "solr", "etcd", "zookeeper", "consul", "mq", "nacos", "salesforce"].includes(c.db_type)));
+const compareConnections = computed(() => store.connections.filter((connection) => supportsDatabaseCompare(connection, "schema")));
+
+type MetadataScope = "connection" | "database" | "schema";
+const metadataGenerations = {
+  source: { connection: 0, database: 0, schema: 0 },
+  target: { connection: 0, database: 0, schema: 0 },
+};
+for (const side of ["source", "target"] as const) {
+  watch(
+    () => (side === "source" ? [props.sourceConnectionId, props.sourceDatabase, props.sourceSchema] : [props.targetConnectionId, props.targetDatabase, props.targetSchema]),
+    (current, previous) => {
+      const connectionChanged = current[0] !== previous[0];
+      const databaseChanged = connectionChanged || current[1] !== previous[1];
+      if (connectionChanged) metadataGenerations[side].connection += 1;
+      if (databaseChanged) metadataGenerations[side].database += 1;
+      if (databaseChanged || current[2] !== previous[2]) metadataGenerations[side].schema += 1;
+    },
+    { flush: "sync" },
+  );
+}
+
+// Only invalidate a request when its own inputs change. Selecting a schema
+// must not discard an in-flight database or schema list for the same endpoint.
+function metadataRequestIsCurrent(side: "source" | "target", scope: MetadataScope = "schema"): () => boolean {
+  const generation = metadataGenerations[side][scope];
+  const connectionId = side === "source" ? props.sourceConnectionId : props.targetConnectionId;
+  return () => generation === metadataGenerations[side][scope] && supportsDatabaseCompare(store.getConfig(connectionId), "schema");
+}
 
 const sourceConfig = computed(() => store.getConfig(props.sourceConnectionId));
 const targetConfig = computed(() => store.getConfig(props.targetConnectionId));
@@ -197,7 +225,7 @@ function getTableIdentity(side: SchemaDiffTableSide): SchemaDiffTableIdentity {
 function isTableIdentityReady(side: SchemaDiffTableSide): boolean {
   const identity = getTableIdentity(side);
   const config = side === "source" ? sourceConfig.value : targetConfig.value;
-  return !!identity.connectionId && !!identity.database && (!isSchemaAware(config?.db_type) || !!identity.schema);
+  return supportsDatabaseCompare(config, "schema") && !!identity.connectionId && !!identity.database && (!isSchemaAware(config?.db_type) || !!identity.schema);
 }
 
 function setTableList(side: SchemaDiffTableSide, tables: Array<{ name?: string }>) {
@@ -340,7 +368,7 @@ async function loadRoutineList(side: "source" | "target") {
   const database = side === "source" ? props.sourceDatabase : props.targetDatabase;
   const schema = side === "source" ? props.sourceSchema : props.targetSchema;
   const dbType = side === "source" ? sourceDbType.value : targetDbType.value;
-  if (!connectionId || !database || !supportsSchemaDiffRoutines(dbType as DatabaseType)) {
+  if (!isTableIdentityReady(side) || !supportsSchemaDiffRoutines(dbType as DatabaseType)) {
     if (side === "source") sourceRoutineList.value = [];
     else {
       targetRoutineList.value = [];
@@ -348,12 +376,15 @@ async function loadRoutineList(side: "source" | "target") {
     }
     return;
   }
+  const isCurrent = metadataRequestIsCurrent(side);
   try {
     loadingRoutines.value = true;
     await store.ensureConnected(connectionId);
+    if (!isCurrent()) return;
     // Names/signatures only — avoid listFunctions N+1 source fetch on the config step.
     const kinds = schemaDiffRoutineObjectTypes(dbType as DatabaseType);
     const objects = kinds.length === 0 ? [] : await api.listObjects(connectionId, database, schema, kinds);
+    if (!isCurrent()) return;
     const keys = objects.map((object) => schemaDiffRoutineKey(object.name, object.signature ?? ""));
     if (side === "source") {
       sourceRoutineList.value = keys;
@@ -370,6 +401,7 @@ async function loadRoutineList(side: "source" | "target") {
       if (restrictRoutines.value) reconcileRoutineMappings(localSelectedRoutines.value, keys);
     }
   } catch {
+    if (!isCurrent()) return;
     if (side === "source") sourceRoutineList.value = [];
     else {
       targetRoutineList.value = [];
@@ -454,6 +486,8 @@ const canCompare = computed(() => {
   const hasValidTableMappings = !tablesEnabled || !restrictTables.value || localSelectedTables.value.length === 0 || isTableIdentityReady("target");
   const hasValidRoutineMappings = !routinesEnabled || !restrictRoutines.value || localSelectedRoutines.value.length === 0 || isTableIdentityReady("target");
   return (
+    supportsDatabaseCompare(sourceConfig.value, "schema") &&
+    supportsDatabaseCompare(targetConfig.value, "schema") &&
     props.sourceConnectionId &&
     props.targetConnectionId &&
     props.sourceDatabase &&
@@ -468,11 +502,14 @@ const canCompare = computed(() => {
 });
 
 async function loadDatabases(connectionId: string, side: "source" | "target") {
-  if (!connectionId) return;
+  if (!connectionId || !supportsDatabaseCompare(store.getConfig(connectionId), "schema")) return;
+  const isCurrent = metadataRequestIsCurrent(side, "connection");
   try {
     await store.ensureConnected(connectionId);
+    if (!isCurrent()) return;
     const config = store.getConfig(connectionId);
     const dbNames = config ? await fetchNamespaceOptionsForConnection(connectionId, config) : (await api.listDatabases(connectionId)).map((db) => db.name);
+    if (!isCurrent()) return;
     if (side === "source") {
       sourceDatabases.value = dbNames;
       if (props.sourceDatabase) {
@@ -493,6 +530,7 @@ async function loadDatabases(connectionId: string, side: "source" | "target") {
       }
     }
   } catch {
+    if (!isCurrent()) return;
     if (side === "source") {
       sourceDatabases.value = [];
       sourceDbVersion.value = null;
@@ -507,11 +545,14 @@ async function loadSchemas(side: "source" | "target") {
   const connectionId = side === "source" ? props.sourceConnectionId : props.targetConnectionId;
   const database = side === "source" ? props.sourceDatabase : props.targetDatabase;
   const schema = side === "source" ? props.sourceSchema : props.targetSchema;
-  if (!connectionId || !database) return;
+  if (!connectionId || !database || !supportsDatabaseCompare(store.getConfig(connectionId), "schema")) return;
+  const isCurrent = metadataRequestIsCurrent(side, "database");
 
   try {
     await store.ensureConnected(connectionId);
+    if (!isCurrent()) return;
     const schemas = await api.listSchemas(connectionId, database);
+    if (!isCurrent()) return;
     if (side === "source") {
       sourceSchemas.value = schemas;
     } else {
@@ -519,6 +560,7 @@ async function loadSchemas(side: "source" | "target") {
     }
     await fetchDbVersion(connectionId, database, schema, side);
   } catch {
+    if (!isCurrent()) return;
     if (side === "source") {
       sourceSchemas.value = [];
     } else {
@@ -530,6 +572,9 @@ async function loadSchemas(side: "source" | "target") {
 watch(
   () => props.sourceConnectionId,
   async (id) => {
+    sourceDatabases.value = [];
+    sourceSchemas.value = [];
+    sourceDbVersion.value = null;
     if (id) {
       await loadDatabases(id, "source");
     } else {
@@ -554,6 +599,9 @@ watch(
 watch(
   () => props.targetConnectionId,
   async (id) => {
+    targetDatabases.value = [];
+    targetSchemas.value = [];
+    targetDbVersion.value = null;
     if (id) {
       await loadDatabases(id, "target");
     } else {
@@ -615,6 +663,8 @@ function getConnectionInfo(connectionId: string) {
 }
 
 async function fetchDbVersion(connectionId: string, database: string, schema: string, side: "source" | "target") {
+  if (!supportsDatabaseCompare(store.getConfig(connectionId), "schema")) return;
+  const isCurrent = metadataRequestIsCurrent(side);
   try {
     await store.ensureConnected(connectionId);
     const config = store.getConfig(connectionId);
@@ -634,7 +684,9 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
       default:
         return;
     }
+    if (!isCurrent()) return;
     const result = await api.executeQuery(connectionId, database, sql, schema || undefined);
+    if (!isCurrent()) return;
     if (result.rows && result.rows.length > 0) {
       const version = String(result.rows[0][0]);
       if (side === "source") {
@@ -644,6 +696,7 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
       }
     }
   } catch (e) {
+    if (!isCurrent()) return;
     console.error(`[fetchDbVersion] Failed to fetch version for ${side}:`, e);
     if (side === "source") {
       sourceDbVersion.value = null;
@@ -681,17 +734,7 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
 
         <div class="space-y-1.5">
           <Label class="text-xs">{{ t("diff.connection") }}</Label>
-          <ConnectionTreeSelect
-            :model-value="sourceConnectionId"
-            @update:model-value="(v: string) => $emit('update:sourceConnectionId', v)"
-            :connections="sqlConnections"
-            :layout="store.sidebarLayout"
-            :placeholder="t('diff.selectConnection')"
-            :search-placeholder="t('diff.searchConnection')"
-            :empty-text="t('common.noResults')"
-            trigger-class="dbx-diff-connection-trigger h-8 w-full max-w-none justify-between gap-1.5 rounded-md border border-input bg-transparent px-2.5 text-xs shadow-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 dark:hover:bg-input/50"
-            list-class="w-[var(--reka-popover-trigger-width)]"
-          />
+          <CompareConnectionSelect :model-value="sourceConnectionId" @update:model-value="(v: string) => $emit('update:sourceConnectionId', v)" :connections="compareConnections" :layout="store.sidebarLayout" :disabled="loading" />
         </div>
 
         <div class="space-y-1.5">
@@ -757,17 +800,7 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
 
         <div class="space-y-1.5">
           <Label class="text-xs">{{ t("diff.connection") }}</Label>
-          <ConnectionTreeSelect
-            :model-value="targetConnectionId"
-            @update:model-value="(v: string) => $emit('update:targetConnectionId', v)"
-            :connections="sqlConnections"
-            :layout="store.sidebarLayout"
-            :placeholder="t('diff.selectConnection')"
-            :search-placeholder="t('diff.searchConnection')"
-            :empty-text="t('common.noResults')"
-            trigger-class="dbx-diff-connection-trigger h-8 w-full max-w-none justify-between gap-1.5 rounded-md border border-input bg-transparent px-2.5 text-xs shadow-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 dark:hover:bg-input/50"
-            list-class="w-[var(--reka-popover-trigger-width)]"
-          />
+          <CompareConnectionSelect :model-value="targetConnectionId" @update:model-value="(v: string) => $emit('update:targetConnectionId', v)" :connections="compareConnections" :layout="store.sidebarLayout" :disabled="loading" />
         </div>
 
         <div class="space-y-1.5">

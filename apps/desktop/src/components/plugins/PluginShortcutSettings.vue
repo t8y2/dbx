@@ -48,6 +48,10 @@ async function togglePlugin(pluginId: string, visible: boolean) {
       <Switch id="plugin-shortcuts-enabled" :model-value="settings.editorSettings.pluginShortcuts.enabled" :disabled="saving || !settings.isEditorSettingsLoaded" @update:model-value="update({ enabled: $event })" />
     </div>
     <div v-if="settings.editorSettings.pluginShortcuts.enabled" class="flex items-center justify-between gap-4">
+      <Label for="plugin-shortcuts-settings-entry" class="text-xs">{{ t("pluginPlatform.shortcutsShowSettings") }}</Label>
+      <Switch id="plugin-shortcuts-settings-entry" :model-value="settings.editorSettings.pluginShortcuts.showSettingsEntry" :disabled="saving || !settings.isEditorSettingsLoaded" @update:model-value="update({ showSettingsEntry: $event })" />
+    </div>
+    <div v-if="settings.editorSettings.pluginShortcuts.enabled" class="flex items-center justify-between gap-4">
       <Label for="plugin-shortcuts-position" class="text-xs">{{ t("pluginPlatform.shortcutsPosition") }}</Label>
       <Select :model-value="settings.editorSettings.pluginShortcuts.position" :disabled="saving || !settings.isEditorSettingsLoaded" @update:model-value="update({ position: String($event) as PluginShortcutSettings['position'] })">
         <SelectTrigger id="plugin-shortcuts-position" class="h-8 w-52 text-xs"><SelectValue /></SelectTrigger>

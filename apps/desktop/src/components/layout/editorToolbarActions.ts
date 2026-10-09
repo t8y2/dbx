@@ -21,6 +21,8 @@ export interface SpecialPageTabsState {
 }
 
 export interface EditorToolbarActions {
+  canNewQuery: Ref<boolean>;
+  newQuery(groupId: string): void;
   explainMode: Ref<"explain" | "autotrace">;
   blockDangerousRedisCommands: Ref<boolean>;
   /** Highlights the database selector of the tab that needs a database choice. */
@@ -79,6 +81,8 @@ export function createNoopEditorToolbarActions(): EditorToolbarActions {
     },
   } as Ref<SpecialPageTabsState>;
   return {
+    canNewQuery: { value: false } as Ref<boolean>,
+    newQuery: noop,
     explainMode: mode,
     blockDangerousRedisCommands: flag,
     databaseRequiredSignalFor: () => 0,

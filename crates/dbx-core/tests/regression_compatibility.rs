@@ -239,6 +239,7 @@ fn data_compare_from_tables_preparation_optional_fields_default() {
         target_row_count: 0,
         source_truncated: false,
         target_truncated: false,
+        row_budget: 100_000,
         degradation_level: None,
         sampling_rate: None,
         confidence_score: None,
@@ -252,6 +253,8 @@ fn data_compare_from_tables_preparation_optional_fields_default() {
     // Core fields must be present
     assert!(json.get("result").is_some(), "result must be present");
     assert!(json.get("syncSql").is_some(), "syncSql must be present");
+    // The row budget travels with the preparation so the UI can flag a partial compare.
+    assert_eq!(json.get("rowBudget").and_then(|value| value.as_u64()), Some(100_000));
 
     // New optional fields should be absent when None
     assert!(json.get("degradationLevel").is_none(), "degradationLevel should be absent");

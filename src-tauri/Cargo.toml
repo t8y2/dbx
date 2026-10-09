@@ -1,6 +1,6 @@
 [package]
 name = "dbx"
-version = "0.6.26"
+version = "0.6.37"
 description = "Open-source database management tool"
 authors = ["skyler"]
 license = "Apache-2.0"
@@ -13,10 +13,11 @@ name = "dbx_lib"
 crate-type = ["rlib"]
 
 [features]
-default = ["duckdb-sidecar", "dynamodb", "mq-admin", "sqlite-multiple-ciphers", "system-fonts", "os-keyring"]
+default = ["duckdb-sidecar", "dynamodb", "mq-admin", "sqlite-multiple-ciphers", "system-fonts", "os-keyring", "sqlserver-native-attention"]
 custom-protocol = ["tauri/custom-protocol"]
 duckdb-sidecar = ["dbx-core/duckdb-sidecar"]
 os-keyring = ["dbx-core/os-keyring"]
+sqlserver-native-attention = ["dbx-core/sqlserver-native-attention"]
 dynamodb = ["dbx-core/dynamodb"]
 mq-admin = ["dbx-core/mq-admin"]
 sqlite-sqlcipher = ["dbx-core/sqlite-sqlcipher"]
@@ -73,6 +74,7 @@ zip = "4.6.1"
 dbx-core = { path = "../crates/dbx-core", default-features = false }
 dbx-mcp = { path = "../crates/dbx-mcp", default-features = false, features = ["duckdb-sidecar", "mq-admin"] }
 dbx-tauri-consul = { path = "../crates/dbx-tauri-consul" }
+dbx-tauri-schema = { path = "../crates/dbx-tauri-schema" }
 wry = { path = "../vendor/wry" }
 axum = { version = "0.8", features = ["ws"] }
 font-kit = "0.14.3"
@@ -94,4 +96,4 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["N
 libloading = "0.8"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }

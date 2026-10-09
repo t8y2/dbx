@@ -111,7 +111,9 @@ attributes(
 
 - Confirm release registry generation emits `external_driver_required: true`.
 
-Current external-driver agents include BigQuery and SunDB.
+Current external-driver agents include BigQuery. SunDB used to carry the flag;
+its vendor JAR is now vendored under `drivers/sundb/libs/` and bundled into
+the Agent, so it is a normal bundled driver again.
 
 ## 6. JRE Selection
 

@@ -27,11 +27,34 @@ fn agent_jdbc_driver_class(config: &ConnectionConfig) -> &str {
     let driver_class = config.jdbc_driver_class.as_deref().unwrap_or("");
     if (config.db_type == DatabaseType::H2 && !h2_uses_custom_driver(config))
         || (config.db_type == DatabaseType::SapHana && matches!(driver_class, "sap_hana" | "saphana"))
+        || (config.db_type == DatabaseType::Db2 && !looks_like_jdbc_driver_class_name(driver_class))
     {
         ""
     } else {
         driver_class
     }
+}
+
+/// DBeaver and other importers store their own driver-registry id (for example
+/// `db2` or `mysql8`) in `jdbc_driver_class`. DB2 bundles its driver in the
+/// agent, so such an id can only fail as `Class.forName("db2")`; forward the
+/// value only when it is a package-qualified class name.
+fn looks_like_jdbc_driver_class_name(value: &str) -> bool {
+    let mut segments = 0;
+    for segment in value.trim().split('.') {
+        let mut chars = segment.chars();
+        let Some(first) = chars.next() else {
+            return false;
+        };
+        if !(first.is_ascii_alphabetic() || first == '_' || first == '$') {
+            return false;
+        }
+        if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') {
+            return false;
+        }
+        segments += 1;
+    }
+    segments >= 2
 }
 
 fn agent_jdbc_driver_paths(config: &ConnectionConfig) -> &[String] {
@@ -105,6 +128,14 @@ pub fn agent_connect_params_with_role(
         sap_hana_jdbc_connection_string(config, host, port, database)
     } else if matches!(config.db_type, DatabaseType::Trino | DatabaseType::PrestoSql) {
         trino_like_jdbc_connection_string(config, host, port, database)?
+    } else if config.db_type == DatabaseType::Transwarp {
+        match config.connection_string.as_deref().filter(|value| !value.trim().is_empty()) {
+            Some(url) if host != config.host || port != config.port => {
+                crate::models::connection::rewrite_jdbc_url_host(url, host, port)?
+            }
+            Some(url) => url.to_string(),
+            None => String::new(),
+        }
     } else if config.db_type == DatabaseType::H2 {
         h2_agent_jdbc_connection_string(config)
     } else {
@@ -384,6 +415,9 @@ pub fn oracle_alternate_connect_configs(config: &ConnectionConfig, err: &str) ->
             _ => vec![sid_url, legacy_service_url, descriptor_service_url, descriptor_sid_url],
         }
     };
+    // The retries travel through `oracle_jdbc_connection_string` as a stored
+    // connection string, so they must already carry the profile's protocol.
+    let candidates: Vec<String> = candidates.into_iter().map(|url| oracle_url_for_profile(config, url)).collect();
 
     let mut urls = Vec::new();
     for url in candidates {
@@ -403,6 +437,20 @@ pub fn oracle_alternate_connect_configs(config: &ConnectionConfig, err: &str) ->
         .collect()
 }
 
+/// Applies the OCI (thick) protocol to an Oracle JDBC URL when the connection
+/// selects the OCI driver profile. Thin connections keep the URL unchanged.
+///
+/// OCI reaches the same targets as thin; the TNS form additionally moves its
+/// `TNS_ADMIN` query into the agent-process environment
+/// (`crate::oracle_oci::oracle_oci_launch_env`).
+fn oracle_url_for_profile(config: &ConnectionConfig, url: String) -> String {
+    if !crate::oracle_oci::uses_oracle_oci_profile(config) {
+        return url;
+    }
+    let rewritten = crate::oracle_oci::rewrite_oracle_url_protocol(&url, true);
+    crate::oracle_oci::strip_oracle_tns_admin_query(&rewritten)
+}
+
 fn oracle_jdbc_connection_string(
     config: &ConnectionConfig,
     host: &str,
@@ -412,9 +460,12 @@ fn oracle_jdbc_connection_string(
     if let Some(connection_string) = config.connection_string.as_deref().filter(|value| !value.trim().is_empty()) {
         let connection_string = connection_string.trim();
         if host == config.host && port == config.port {
-            return Ok(connection_string.to_string());
+            return Ok(oracle_url_for_profile(config, connection_string.to_string()));
         }
-        return crate::models::connection::rewrite_jdbc_url_host(connection_string, host, port);
+        return Ok(oracle_url_for_profile(
+            config,
+            crate::models::connection::rewrite_jdbc_url_host(connection_string, host, port)?,
+        ));
     }
 
     let database = database.trim();
@@ -422,11 +473,12 @@ fn oracle_jdbc_connection_string(
         return Ok(String::new());
     }
 
-    Ok(if config.oracle_connection_type.as_deref() == Some("sid") {
+    let url = if config.oracle_connection_type.as_deref() == Some("sid") {
         oracle_sid_jdbc_url(host, port, database)
     } else {
         oracle_service_jdbc_url(host, port, database)
-    })
+    };
+    Ok(oracle_url_for_profile(config, url))
 }
 
 fn oracle_listener_error_can_retry(err: &str) -> bool {
@@ -733,6 +785,8 @@ mod tests {
 
     fn config(db_type: DatabaseType, database: Option<&str>) -> ConnectionConfig {
         ConnectionConfig {
+            oracle_oci_nls_lang: None,
+            oracle_oci_tns_admin: None,
             docs_notes_path: None,
             id: "conn".to_string(),
             name: "Connection".to_string(),
@@ -779,6 +833,7 @@ mod tests {
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_filter: None,
             redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
@@ -854,6 +909,60 @@ mod tests {
 
             assert_eq!(params["database"], "ORCL");
             assert_eq!(params["connection_string"], expected_url);
+        }
+    }
+
+    #[test]
+    fn oracle_oci_profile_builds_oci8_urls_for_service_and_sid() {
+        for (mode, expected_url) in [
+            ("service_name", "jdbc:oracle:oci8:@//oracle.example.com:1521/ORCLPDB1"),
+            ("sid", "jdbc:oracle:oci8:@oracle.example.com:1521:ORCLPDB1"),
+        ] {
+            let mut cfg = config(DatabaseType::Oracle, Some("ORCLPDB1"));
+            cfg.driver_profile = Some(crate::oracle_oci::ORACLE_OCI_DRIVER_PROFILE.to_string());
+            cfg.oracle_connection_type = Some(mode.to_string());
+
+            let params = agent_connect_params(&cfg, "oracle.example.com", 1521, "ORCLPDB1").unwrap();
+
+            assert_eq!(params["connection_string"], expected_url);
+        }
+    }
+
+    #[test]
+    fn oracle_oci_profile_rewrites_tns_urls_and_strips_the_admin_query() {
+        let mut cfg = config(DatabaseType::Oracle, None);
+        cfg.driver_profile = Some(crate::oracle_oci::ORACLE_OCI_DRIVER_PROFILE.to_string());
+        cfg.connection_string = Some("jdbc:oracle:oci8:@ORCLPDB1?TNS_ADMIN=C%3A%5Coracle%5Cwallets".to_string());
+
+        // 主机与端口沿用连接自身：TNS 别名 URL 不参与主机改写（别名没有 host）。
+        let params = agent_connect_params(&cfg, &cfg.host.clone(), cfg.port, "").unwrap();
+
+        assert_eq!(params["connection_string"], "jdbc:oracle:oci8:@ORCLPDB1");
+    }
+
+    #[test]
+    fn oracle_thin_profile_keeps_the_thin_protocol() {
+        let mut cfg = config(DatabaseType::Oracle, Some("ORCLPDB1"));
+        cfg.oracle_connection_type = Some("service_name".to_string());
+
+        let params = agent_connect_params(&cfg, "oracle.example.com", 1521, "ORCLPDB1").unwrap();
+
+        assert_eq!(params["connection_string"], "jdbc:oracle:thin:@//oracle.example.com:1521/ORCLPDB1");
+    }
+
+    #[test]
+    fn oracle_oci_alternate_connect_configs_stay_on_the_oci_protocol() {
+        let mut cfg = config(DatabaseType::Oracle, Some("ORCLPDB1"));
+        cfg.driver_profile = Some(crate::oracle_oci::ORACLE_OCI_DRIVER_PROFILE.to_string());
+        cfg.oracle_connection_type = Some("service_name".to_string());
+
+        let alternates =
+            oracle_alternate_connect_configs(&cfg, "ORA-12514: listener does not currently know of service");
+
+        assert!(!alternates.is_empty());
+        for alternate in &alternates {
+            let url = alternate.connection_string.as_deref().expect("alternate url");
+            assert!(url.starts_with("jdbc:oracle:oci8:@"), "alternate url must keep the oci8 protocol: {url}");
         }
     }
 
@@ -1384,6 +1493,56 @@ mod tests {
         let params = agent_connect_params(&cfg, "jdbc.example.com", 1234, "test").unwrap();
 
         assert_eq!(params["jdbc_driver_class"], "com.example.CustomDriver");
+    }
+
+    #[test]
+    fn transwarp_jdbc_url_follows_resolved_tunnel_endpoint() {
+        let mut cfg = config(DatabaseType::Transwarp, Some("analytics"));
+        cfg.host = "quark.example.com".to_string();
+        cfg.port = 10000;
+        cfg.connection_string = Some("jdbc:inceptor2://quark.example.com:10000/analytics;fetchSize=500".to_string());
+        cfg.jdbc_driver_class = Some("org.apache.hive.jdbc.HiveDriver".to_string());
+        cfg.jdbc_driver_paths = vec!["C:/drivers/inceptor-sdk.jar".to_string()];
+
+        let params = agent_connect_params(&cfg, "127.0.0.1", 18431, "analytics").unwrap();
+
+        assert_eq!(params["connection_string"], "jdbc:inceptor2://127.0.0.1:18431/analytics;fetchSize=500");
+        assert_eq!(params["jdbc_driver_class"], "org.apache.hive.jdbc.HiveDriver");
+        assert_eq!(params["jdbc_driver_paths"], serde_json::json!(["C:/drivers/inceptor-sdk.jar"]));
+    }
+
+    #[test]
+    fn db2_agent_connect_params_ignore_driver_registry_ids() {
+        for registry_id in ["db2", "DB2", " db2 ", "db2_zos", "db2i"] {
+            let mut cfg = config(DatabaseType::Db2, Some("geofuy"));
+            cfg.jdbc_driver_class = Some(registry_id.to_string());
+
+            let params = agent_connect_params(&cfg, "db2.example.com", 50000, "geofuy").unwrap();
+
+            assert_eq!(params["jdbc_driver_class"], "", "registry id {registry_id:?} must be dropped");
+        }
+    }
+
+    #[test]
+    fn db2_agent_connect_params_preserve_custom_driver_class() {
+        let mut cfg = config(DatabaseType::Db2, Some("geofuy"));
+        cfg.jdbc_driver_class = Some("com.ibm.db2.jcc.DB2Driver".to_string());
+
+        let params = agent_connect_params(&cfg, "db2.example.com", 50000, "geofuy").unwrap();
+
+        assert_eq!(params["jdbc_driver_class"], "com.ibm.db2.jcc.DB2Driver");
+    }
+
+    #[test]
+    fn other_agent_connect_params_preserve_db2_driver_alias() {
+        let mut cfg = config(DatabaseType::Mysql, Some("test"));
+        cfg.jdbc_driver_class = Some("db2".to_string());
+        cfg.jdbc_driver_paths = vec!["/tmp/custom-driver.jar".to_string()];
+
+        let params = agent_connect_params(&cfg, "mysql.example.com", 3306, "test").unwrap();
+
+        assert_eq!(params["jdbc_driver_class"], "db2");
+        assert_eq!(params["jdbc_driver_paths"], serde_json::json!(["/tmp/custom-driver.jar"]));
     }
 
     #[test]

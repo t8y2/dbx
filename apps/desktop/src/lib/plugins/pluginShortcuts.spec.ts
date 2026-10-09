@@ -45,8 +45,10 @@ describe("plugin shortcuts", () => {
     expect(clampPluginShortcutHeight(40, 130)).toBe(10);
   });
   it("normalizes old and malformed preferences with independent default arrays", () => {
-    expect(normalizePluginShortcutSettings(null)).toEqual({ enabled: true, position: "right-top", order: [], hiddenPluginIds: [], sidebarHeight: null, toolbarCount: 3 });
-    expect(normalizePluginShortcutSettings({ enabled: "false", position: "top", order: [null, "a", "", "a", "b"] })).toEqual({ enabled: true, position: "right-top", order: ["a", "b"], hiddenPluginIds: [], sidebarHeight: null, toolbarCount: 3 });
+    expect(normalizePluginShortcutSettings({ showSettingsEntry: "false" }).showSettingsEntry).toBe(true);
+    expect(normalizePluginShortcutSettings({ showSettingsEntry: false }).showSettingsEntry).toBe(false);
+    expect(normalizePluginShortcutSettings(null)).toEqual({ enabled: true, position: "right-top", order: [], hiddenPluginIds: [], sidebarHeight: null, toolbarCount: 3, showSettingsEntry: true });
+    expect(normalizePluginShortcutSettings({ enabled: "false", position: "top", order: [null, "a", "", "a", "b"] })).toEqual({ enabled: true, position: "right-top", order: ["a", "b"], hiddenPluginIds: [], sidebarHeight: null, toolbarCount: 3, showSettingsEntry: true });
     expect(normalizePluginShortcutSettings({ enabled: false, position: "sidebar-bottom" }).enabled).toBe(false);
   });
   it("includes legacy standalone workbenches and filesystems but not connection-bound surfaces", () => {

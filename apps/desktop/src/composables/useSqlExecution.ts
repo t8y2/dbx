@@ -20,6 +20,7 @@ import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { classifyRedisCommandSafety } from "@/lib/redis/redisCommandSafety";
 import { isRedisCommentLine } from "@/lib/redis/redisCommandTokenizer";
 import { isDangerousSolrRequest } from "@/lib/solr/solrRequestRisk";
+import { isDangerousCouchDbRequest } from "@/lib/couchdb/couchdbRequestRisk";
 import { isSqlExecutionSnapshot, resolveExecutableSql, type SqlExecutionOverride, type SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
 import { isElasticsearchRestRequestText, parseElasticsearchRestRequestTarget, splitSqlStatementRanges, sqlStatementParameterOptionsForCompatibility } from "@/lib/sql/sqlStatementRanges";
 import { extractSqlParameterDescriptors, type SqlParameterDescriptor, type SqlParameterSyntax } from "@/lib/sql/sqlParameters";
@@ -129,12 +130,20 @@ export function isPotentialWriteSql(sql: string): boolean {
 }
 
 export function isDangerousSql(sql: string, databaseType?: DatabaseType): boolean {
-  if (databaseType === "elasticsearch" || databaseType === "easysearch" || databaseType === "meilisearch" || databaseType === "solr") {
+  if (databaseType === "elasticsearch" || databaseType === "easysearch" || databaseType === "meilisearch" || databaseType === "solr" || databaseType === "couchdb") {
     const requests = splitSqlStatementRanges(sql, databaseType)
       .map((statement) => parseElasticsearchRestRequestTarget(statement.sql))
       .filter((request): request is NonNullable<typeof request> => request !== null);
     if (requests.length > 0) {
-      return requests.some((request) => (databaseType === "meilisearch" ? isDangerousMeilisearchRequest(request.method, request.path) : databaseType === "solr" ? isDangerousSolrRequest(request.method, request.path) : isDangerousElasticsearchRequest(request.method, request.path)));
+      return requests.some((request) =>
+        databaseType === "meilisearch"
+          ? isDangerousMeilisearchRequest(request.method, request.path)
+          : databaseType === "solr"
+            ? isDangerousSolrRequest(request.method, request.path)
+            : databaseType === "couchdb"
+              ? isDangerousCouchDbRequest(request.method, request.path)
+              : isDangerousElasticsearchRequest(request.method, request.path),
+      );
     }
   }
   const cleaned = stripSqlComments(sql);
@@ -163,7 +172,7 @@ export function useSqlExecution(deps: {
   activeConnection: ComputedRef<ConnectionConfig | undefined>;
   executableSql: ComputedRef<string>;
   resolveExecutableSql?: (snapshot?: SqlExecutionSnapshot, tab?: QueryTab) => Promise<string>;
-  activeOutputView: Ref<"result" | "summary" | "explain" | "chart" | "messages" | "profile">;
+  activeOutputView: Ref<"result" | "graph" | "summary" | "explain" | "chart" | "messages" | "profile">;
   blockDangerousRedisCommands?: Ref<boolean>;
   onMissingDatabase?: (tabId?: string) => void;
   requestDangerConfirmation?: (request: SqlExecutionDangerRequest) => Promise<boolean>;
@@ -1001,7 +1010,7 @@ export function useSqlExecution(deps: {
 
 export function supportsSqlTemplateParameters(connection: Pick<ConnectionConfig, "db_type"> | undefined, sql = ""): boolean {
   if (!connection) return false;
-  if (connection.db_type === "meilisearch" || connection.db_type === "solr") return false;
+  if (connection.db_type === "meilisearch" || connection.db_type === "solr" || connection.db_type === "couchdb") return false;
   if (connection.db_type === "elasticsearch" || connection.db_type === "easysearch") return !isElasticsearchRestRequestText(sql);
   return connection.db_type !== "redis" && connection.db_type !== "mongodb" && connection.db_type !== "victoriametrics" && connection.db_type !== "salesforce";
 }

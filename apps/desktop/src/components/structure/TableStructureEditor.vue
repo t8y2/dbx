@@ -1,6 +1,9 @@
 <script setup lang="ts">
+import { Compartment } from "@codemirror/state";
+import { keymap as codeMirrorKeymap } from "@codemirror/view";
 import { applyDdlStoragePreference } from "@/lib/sql/ddlStorage";
 import DdlStorageToggle from "@/components/objects/DdlStorageToggle.vue";
+import StructureIndexColumnPicker from "./StructureIndexColumnPicker.vue";
 
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, shallowRef, watch } from "vue";
 import { uuid } from "@/lib/common/utils";
@@ -11,11 +14,40 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { AlertTriangle, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ClipboardList, Copy, Database, Info, KeyRound, ListChevronsUpDown, Loader2, Maximize2, Pencil, Plus, RefreshCw, RotateCcw, Rows3, Save, Search, Settings, SlidersHorizontal, Trash2, UserRound, X } from "@lucide/vue";
-import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import {
+  AlertTriangle,
+  Check,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
+  ClipboardList,
+  Copy,
+  Database,
+  Info,
+  KeyRound,
+  ListChevronsUpDown,
+  Loader2,
+  Maximize2,
+  Pencil,
+  Plus,
+  RefreshCw,
+  RotateCcw,
+  Rows3,
+  Save,
+  Search,
+  Settings,
+  SlidersHorizontal,
+  SquareFunction,
+  Trash2,
+  UserRound,
+  X,
+} from "@lucide/vue";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import TablePhysicalOptionsEditor from "@/components/structure/TablePhysicalOptionsEditor.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -24,6 +56,9 @@ import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { useQueryStore } from "@/stores/queryStore";
 import { useHistoryStore } from "@/stores/historyStore";
+import { matchesShortcut } from "@/lib/editor/keyboardShortcuts";
+import { selectLineEndsDefaultShortcut, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
+import { selectLineEnds } from "@/lib/editor/selectLineEnds";
 import { useSettingsStore, type StructureEditorDensity } from "@/stores/settingsStore";
 import { useTheme } from "@/composables/useTheme";
 import { editorFontTheme, loadEditorTheme } from "@/lib/editor/editorThemes";
@@ -34,7 +69,8 @@ import { type SqlHighlighter, createShikiSqlHighlighter } from "@/lib/sql/sqlHig
 import { joinSqlStatementsForScript } from "@/lib/sql/sqlBatchScript";
 import { applyDdlDatabaseQualifier, formatDdlForDisplay, formatGeneratedDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
-import { copyToClipboard } from "@/lib/common/clipboard";
+import { copyToClipboard, eventTargetUsesNativeClipboard, isPlainClipboardShortcut } from "@/lib/common/clipboard";
+import { formatTsv } from "@/lib/export/exportFormats";
 import DataGridCopyColumnNamesDialog from "@/components/grid/DataGridCopyColumnNamesDialog.vue";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { queryTimeoutSecsForConcurrentIndex, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
@@ -58,6 +94,7 @@ import {
 import { buildMysqlAutoIncrementCounterStatement, canEditMysqlAutoIncrementCounter, refreshMysqlAutoIncrementCounterDraft } from "@/lib/table/mysqlAutoIncrementCounter";
 import { mysqlTableCollationSql, parseMysqlTableCollation } from "@/lib/table/mysqlTableCollation";
 import { MYSQL_STORAGE_ENGINES_SQL, mysqlTableEngineSql, mysqlTableEngineSqlOption, parseMysqlTableEngineMetadata, refreshMysqlTableEngineDraft, supportsMysqlTableEngine } from "@/lib/table/mysqlTableEngine";
+import { INCEPTOR_PHYSICAL_OPTIONS, buildInceptorCreateOptions, emptyTablePhysicalOptions, hasTablePhysicalOptions, pruneTablePhysicalOptions, restoreTablePhysicalOptions } from "@/lib/table/tablePhysicalOptions";
 import { PRESET_FIELDS_TEMPLATE_ID, createTableColumnTemplateDrafts } from "@/lib/table/tableColumnTemplates";
 import { getMysqlDataTypeHelp } from "@/lib/table/mysqlDataTypeHelp";
 import { getPostgresDataTypeHelp, gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
@@ -92,8 +129,11 @@ import {
   dataTypeLengthUnitValue,
   defaultNewColumnDataType,
   filterStructureIndexColumnOptions,
-  generateIndexName,
   generateUniqueIndexName,
+  generateUniqueShortIndexName,
+  structureIndexKind,
+  specialIndexColumnIssue,
+  type StructureIndexKind,
   getColumnEditorControls,
   getDataTypeOptions,
   POSTGRES_GEOMETRY_TYPES,
@@ -112,6 +152,7 @@ import {
   isSqlServerIdentityCompatibleDataType,
   mysqlEnumDataType,
   parseExtraToColumnExtra,
+  parseMysqlGeneratedColumnExtra,
   rehydrateColumnDraftsFromMetadata,
   resolveInsertColumnIndex,
   restoreCharacterLengthUnitsAfterSave,
@@ -127,11 +168,12 @@ import {
   copySourceColumnDetails,
   matchesCopySourceColumnSearch,
   foldCreatedTableName,
+  draftColumnNameForSql,
 } from "@/lib/table/tableStructureEditorState";
 import { CREATE_DATABASE_CHARSET_OPTIONS, createDatabaseCollationOptionsForCharset, fallbackCreateDatabaseCharsetMetadata, normalizeCreateDatabaseCharsetKey, parseCreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
 import type { CreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
 import * as api from "@/lib/backend/api";
-import type { EditorView } from "@codemirror/view";
+import { EditorView } from "@codemirror/view";
 
 const { t } = useI18n();
 const { isDark, themePalette } = useTheme();
@@ -187,6 +229,8 @@ const props = defineProps<{
   catalog?: string;
   schema?: string;
   tableName: string;
+  /** `view` loads `CREATE OR REPLACE VIEW` instead of table DDL. */
+  tableType?: "table" | "view";
   initialTab?: TableInfoTab;
   initialTabRequestId?: number;
   initialTarget?: TableStructureEditorTarget;
@@ -238,6 +282,8 @@ const ddlEditorContainer = ref<HTMLDivElement>();
 const ddlSearchPanelRef = ref<InstanceType<typeof EditorSearchPanel>>();
 const ddlSearchOpen = ref(false);
 const ddlEditorView = shallowRef<EditorView | null>(null);
+const ddlEditorShortcut = new Compartment();
+const selectLineEndsShortcut = () => settingsStore.editorSettings?.shortcuts?.selectLineEnds ?? selectLineEndsDefaultShortcut();
 let ddlEditorInitRequestId = 0;
 let ddlEditorScrollCleanup: (() => void) | null = null;
 const loadedMetadataFacets = new Set<ObjectMetadataFacet>();
@@ -334,6 +380,10 @@ function observeDdlEditorScroll(view: EditorView) {
   ddlEditorScrollCleanup = () => scrollDOM.removeEventListener("scroll", onScroll);
 }
 
+watch(selectLineEndsShortcut, (shortcut) => {
+  ddlEditorView.value?.dispatch({ effects: ddlEditorShortcut.reconfigure(codeMirrorKeymap.of([{ key: shortcutToCodeMirrorKey(shortcut), preventDefault: true, run: selectLineEnds }])) });
+});
+
 async function initDdlEditor(content: string) {
   const container = ddlEditorContainer.value;
   if (!container) return;
@@ -377,6 +427,14 @@ async function initDdlEditor(content: string) {
       langSql.sql({ dialect }),
       themeExt,
       fontExt,
+      ddlEditorShortcut.of(keymap.of([{ key: shortcutToCodeMirrorKey(selectLineEndsShortcut()), preventDefault: true, run: selectLineEnds }])),
+      EditorView.domEventHandlers({
+        keydown(event, eventView) {
+          if (!matchesShortcut(event, selectLineEndsShortcut())) return false;
+          event.preventDefault();
+          return selectLineEnds(eventView);
+        },
+      }),
       Prec.highest(keymap.of([{ key: "Mod-f", run: () => ddlSearchPanelRef.value?.openSearch() ?? false, preventDefault: true }])),
       EditorView.theme({
         "&.cm-focused": { outline: "none" },
@@ -428,13 +486,23 @@ function applyDdlGenerationPreferences(sql: string, dialect: SqlFormatDialect): 
   return formatGeneratedDdlIdentifierQuotes(unqualified, dialect, false, { preserveCaseSensitiveIdentifiers: tableStoresCaseSensitiveIdentifiers.value });
 }
 
-function ddlRequest() {
+type StructureDdlRequest = {
+  connectionId: string;
+  database: string;
+  schema: string;
+  tableName: string;
+  catalog?: string;
+  objectType?: "VIEW";
+};
+
+function ddlRequest(): StructureDdlRequest {
   return {
     connectionId: props.connectionId,
     database: props.database,
     schema: metadataSchema.value,
     tableName: props.tableName,
     catalog: props.catalog,
+    objectType: props.tableType === "view" ? "VIEW" : undefined,
   };
 }
 
@@ -481,6 +549,10 @@ const indexes = ref<EditableStructureIndex[]>([]);
 const isPartitionedParent = ref(false);
 // True when the edited table is itself a member partition of another table.
 const isTablePartition = ref(false);
+// True when the edited table is a PostgreSQL foreign table (relkind = 'f').
+// PostgreSQL requires `COMMENT ON FOREIGN TABLE` for these, so the SQL
+// preview must know which form to generate.
+const isForeignTable = ref(false);
 // The partition-status probe has settled (success or failure), so the tab can
 // be hidden without hiding it merely because the probe is still in flight.
 const partitionStatusResolved = ref(false);
@@ -496,6 +568,7 @@ async function probePartitionsTabVisibility() {
   if (!tableMetadataCapabilities.value.partitions || isCreateMode.value) {
     isPartitionedParent.value = false;
     isTablePartition.value = false;
+    isForeignTable.value = false;
     partitionStatusResolved.value = true;
     return;
   }
@@ -512,11 +585,13 @@ async function probePartitionsTabVisibility() {
     if (requestId !== partitionTabProbeRequestId) return;
     isPartitionedParent.value = status.isPartitionedParent;
     isTablePartition.value = status.isPartition;
+    isForeignTable.value = status.isForeign;
     partitionStatusResolved.value = true;
   } catch {
     if (requestId !== partitionTabProbeRequestId) return;
     isPartitionedParent.value = false;
     isTablePartition.value = false;
+    isForeignTable.value = false;
     // A failed probe leaves the concurrent-index availability unknown, so keep
     // the documented fail-closed behavior (disable Concurrent) instead of
     // assuming the table is a plain, non-partitioned one.
@@ -960,7 +1035,7 @@ const structureDensityMetrics: Record<
 > = {
   compact: {
     columns: [28, 168, 136, 82, 60, 52, 108, 220, 80, 120, 144, 108],
-    indexes: [120, 180, 60, 88, 124, 144, 120, 84, 70],
+    indexes: [280, 180, 60, 88, 124, 144, 120, 84, 70],
     minColumnWidth: 24,
     minLengthColumnWidth: 140,
     minIndexColumnWidth: 48,
@@ -978,7 +1053,7 @@ const structureDensityMetrics: Record<
   },
   standard: {
     columns: [32, 200, 160, 104, 72, 64, 128, 260, 90, 140, 160, 136],
-    indexes: [148, 224, 72, 108, 148, 180, 148, 100, 84],
+    indexes: [320, 224, 72, 108, 148, 180, 148, 100, 84],
     minColumnWidth: 28,
     minLengthColumnWidth: 156,
     minIndexColumnWidth: 60,
@@ -996,7 +1071,7 @@ const structureDensityMetrics: Record<
   },
   comfortable: {
     columns: [36, 232, 188, 116, 84, 76, 152, 300, 100, 160, 188, 148],
-    indexes: [176, 260, 84, 124, 176, 216, 176, 116, 104],
+    indexes: [360, 260, 84, 124, 176, 216, 176, 116, 104],
     minColumnWidth: 32,
     minLengthColumnWidth: 176,
     minIndexColumnWidth: 64,
@@ -1134,7 +1209,7 @@ const structureCheckboxClass = "h-[var(--structure-checkbox-size)] w-[var(--stru
 const structureHeaderCellClass = "relative min-w-0 overflow-hidden border-b border-r px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-left last:border-r-0";
 const structureCellClass = "min-w-0 overflow-hidden border-b border-r px-[var(--structure-cell-px)] py-[var(--structure-cell-py)] last:border-r-0";
 const structureLastCellClass = "min-w-0 overflow-hidden border-b px-[var(--structure-cell-px)] py-[var(--structure-cell-py)]";
-const structurePropertyListClass = "flex min-w-0 items-center gap-0 overflow-hidden";
+const structurePropertyListClass = "flex w-max min-w-0 items-center gap-0 overflow-hidden";
 const structurePropertyLabelClass = "flex min-w-0 items-center gap-1 whitespace-nowrap";
 const structureActionButtonClass = `${structureIconButtonClass} shrink-0`;
 const structureDensityMenuOpen = ref(false);
@@ -1219,6 +1294,11 @@ const selectedColumnId = ref<string | null>(null);
 // new rows are inserted and which row copy/add operations anchor to.
 const selectedColumnIds = ref<Set<string>>(new Set());
 const columnSelectionAnchorId = ref<string | null>(null);
+// The editable field rows have their own selection state for batch structure
+// operations. Header selection is a separate mode so clipboard actions do not
+// accidentally apply row copy/drop operations to the field rows.
+const selectedStructureColumnKeys = ref<Set<string>>(new Set());
+const structureColumnSelectionAnchorKey = ref<string | null>(null);
 const highlightedColumnId = ref<string | null>(null);
 const indexSearchInputRef = ref<InstanceType<typeof Input>>();
 const indexSearchText = ref("");
@@ -1284,6 +1364,10 @@ function onIndexColResize(e: MouseEvent, col: number) {
 
 const connection = computed(() => (props.connectionId ? store.getConfig(props.connectionId) : undefined));
 const databaseType = computed(() => tableStructureDatabaseTypeForConnection(connection.value));
+const usesNativeMysqlIndexNames = computed(() => {
+  const profile = connection.value?.driver_profile?.trim().toLowerCase();
+  return databaseType.value === "mysql" && connection.value?.db_type === "mysql" && (!profile || profile === "mysql");
+});
 const supportsCharacterLengthUnits = computed(() => databaseType.value === "dameng" || databaseType.value === "oracle");
 const usesMysql8SafeDefaults = computed(() => databaseType.value === "mysql" && connection.value?.db_type === "mysql" && connection.value.driver_profile === "mysql");
 const structureCapabilities = computed(() => getTableStructureCapabilities(databaseType.value, connection.value?.db_type, connection.value?.database_info?.productVersion));
@@ -1313,59 +1397,60 @@ const indexTypeOptions = computed(() => {
 interface DefaultValuePreset {
   label: string;
   value: string;
+  dataType: string | null;
 }
 
 const defaultValuePresets = computed((): DefaultValuePreset[] => {
   const universal: DefaultValuePreset[] = [
-    { label: "''", value: "''" },
-    { label: "NULL", value: "NULL" },
-    { label: "0", value: "0" },
-    { label: "1", value: "1" },
+    { label: "''", value: "''", dataType: "text" },
+    { label: "NULL", value: "NULL", dataType: null },
+    { label: "0", value: "0", dataType: "int" },
+    { label: "1", value: "1", dataType: "int" },
   ];
 
   const dialectPresets: Record<string, DefaultValuePreset[]> = {
     mysql: [
-      { label: "CURRENT_TIMESTAMP", value: "CURRENT_TIMESTAMP" },
-      { label: "CURRENT_DATE", value: "CURRENT_DATE" },
-      { label: "CURRENT_TIME", value: "CURRENT_TIME" },
+      { label: "CURRENT_TIMESTAMP", value: "CURRENT_TIMESTAMP", dataType: "timestamp" },
+      { label: "CURRENT_DATE", value: "CURRENT_DATE", dataType: "date" },
+      { label: "CURRENT_TIME", value: "CURRENT_TIME", dataType: "time" },
     ],
     postgres: [
-      { label: "CURRENT_TIMESTAMP", value: "CURRENT_TIMESTAMP" },
-      { label: "CURRENT_DATE", value: "CURRENT_DATE" },
-      { label: "now()", value: "now()" },
-      { label: "gen_random_uuid()", value: "gen_random_uuid()" },
+      { label: "CURRENT_TIMESTAMP", value: "CURRENT_TIMESTAMP", dataType: "timestamp" },
+      { label: "CURRENT_DATE", value: "CURRENT_DATE", dataType: "date" },
+      { label: "now()", value: "now()", dataType: "timestamp" },
+      { label: "gen_random_uuid()", value: "gen_random_uuid()", dataType: "uuid" },
     ],
     sqlite: [
-      { label: "CURRENT_TIMESTAMP", value: "CURRENT_TIMESTAMP" },
-      { label: "CURRENT_DATE", value: "CURRENT_DATE" },
-      { label: "CURRENT_TIME", value: "CURRENT_TIME" },
+      { label: "CURRENT_TIMESTAMP", value: "CURRENT_TIMESTAMP", dataType: "timestamp" },
+      { label: "CURRENT_DATE", value: "CURRENT_DATE", dataType: "date" },
+      { label: "CURRENT_TIME", value: "CURRENT_TIME", dataType: "time" },
     ],
     duckdb: [
-      { label: "CURRENT_TIMESTAMP", value: "CURRENT_TIMESTAMP" },
-      { label: "CURRENT_DATE", value: "CURRENT_DATE" },
+      { label: "CURRENT_TIMESTAMP", value: "CURRENT_TIMESTAMP", dataType: "timestamp" },
+      { label: "CURRENT_DATE", value: "CURRENT_DATE", dataType: "date" },
     ],
     sqlserver: [
-      { label: "GETDATE()", value: "GETDATE()" },
-      { label: "GETUTCDATE()", value: "GETUTCDATE()" },
-      { label: "CURRENT_TIMESTAMP", value: "CURRENT_TIMESTAMP" },
-      { label: "NEWID()", value: "NEWID()" },
+      { label: "GETDATE()", value: "GETDATE()", dataType: "datetime" },
+      { label: "GETUTCDATE()", value: "GETUTCDATE()", dataType: "datetime" },
+      { label: "CURRENT_TIMESTAMP", value: "CURRENT_TIMESTAMP", dataType: "timestamp" },
+      { label: "NEWID()", value: "NEWID()", dataType: "uuid" },
     ],
     oracle: [
-      { label: "SYSDATE", value: "SYSDATE" },
-      { label: "SYSTIMESTAMP", value: "SYSTIMESTAMP" },
-      { label: "CURRENT_TIMESTAMP", value: "CURRENT_TIMESTAMP" },
+      { label: "SYSDATE", value: "SYSDATE", dataType: "date" },
+      { label: "SYSTIMESTAMP", value: "SYSTIMESTAMP", dataType: "timestamp" },
+      { label: "CURRENT_TIMESTAMP", value: "CURRENT_TIMESTAMP", dataType: "timestamp" },
     ],
     h2: [
-      { label: "CURRENT_TIMESTAMP", value: "CURRENT_TIMESTAMP" },
-      { label: "CURRENT_DATE", value: "CURRENT_DATE" },
+      { label: "CURRENT_TIMESTAMP", value: "CURRENT_TIMESTAMP", dataType: "timestamp" },
+      { label: "CURRENT_DATE", value: "CURRENT_DATE", dataType: "date" },
     ],
     clickhouse: [
-      { label: "now()", value: "now()" },
-      { label: "today()", value: "today()" },
+      { label: "now()", value: "now()", dataType: "timestamp" },
+      { label: "today()", value: "today()", dataType: "date" },
     ],
     informix: [
-      { label: "CURRENT", value: "CURRENT" },
-      { label: "TODAY", value: "TODAY" },
+      { label: "CURRENT", value: "CURRENT", dataType: "timestamp" },
+      { label: "TODAY", value: "TODAY", dataType: "date" },
     ],
   };
 
@@ -1442,6 +1527,9 @@ function columnCollation(column: EditableStructureColumn): string {
 }
 
 const extendedPropertiesColumnIndex = 10;
+// Widest extended-properties content seen so far. The column is last (no resize
+// handle) and its controls differ per dialect/locale, so a fixed width clips them.
+const extendedPropertiesContentWidth = ref(0);
 const actionButtonGap = 2;
 const columnOrdinalIndicatorGap = 4;
 const columnOrdinalIndicatorTrailingChrome = 3;
@@ -1452,7 +1540,8 @@ const columnOrdinalIndicatorWidth = computed(() => {
   // Reserve a full em per digit plus the primary-key icon, its gap, padding,
   // and divider. The indicator is shared by every row, so it must fit the
   // largest ordinal even when that row is a primary-key column.
-  const requiredWidth = metric.fontSize * digitCount + metric.iconSize + columnOrdinalIndicatorGap + columnOrdinalIndicatorTrailingChrome;
+  const iconCount = Math.max(1, ...columns.value.map((column) => columnIndexIndicators(column).length));
+  const requiredWidth = metric.fontSize * digitCount + (metric.iconSize + columnOrdinalIndicatorGap) * iconCount + columnOrdinalIndicatorTrailingChrome;
   return Math.max(metric.columns[0], requiredWidth);
 });
 const columnActionsWidth = computed(() => {
@@ -1465,6 +1554,7 @@ const visibleColWidths = computed(() =>
   colLabels.value.map((column) => {
     if (column.key === "actions") return columnActionsWidth.value;
     const width = colWidths.value[column.widthIndex] ?? structureDensityMetric.value.minColumnWidth;
+    if (column.key === "extendedProperties") return Math.max(width, extendedPropertiesContentWidth.value);
     return column.key === "length" && supportsCharacterLengthUnits.value ? Math.max(width, structureDensityMetric.value.minLengthColumnWidth) : width;
   }),
 );
@@ -1491,6 +1581,212 @@ const colLabels = computed(() => {
   }
   return labels;
 });
+
+const copyableStructureColumnLabels = computed(() => colLabels.value.filter((label) => label.key !== "actions"));
+
+function structureColumnSelectionClass(key: string): string {
+  return key !== "actions" && selectedStructureColumnKeys.value.has(key) ? "structure-grid-column-selected" : "";
+}
+
+function normalizedStructureDataType(dataType: string): string {
+  return dataTypeBaseInputValue(databaseType.value, dataType)
+    .replace(/["'`\[\]]/g, "")
+    .trim()
+    .toLowerCase();
+}
+
+function structureDataTypeToneClass(dataType: string): string {
+  const type = normalizedStructureDataType(dataType);
+  if (!type) return "structure-data-type-other";
+
+  if (/^(?:bool|boolean)$/.test(type)) return "structure-data-type-boolean";
+  if (/^(?:enum|set)(?:\b|$)/.test(type)) return "structure-data-type-enum";
+  if (/^(?:json|jsonb|xml)\b/.test(type)) return "structure-data-type-json";
+  if (/^(?:date|time|timestamp|timestamptz|datetime|smalldatetime|interval|year)\b/.test(type)) return "structure-data-type-temporal";
+  if (/^(?:tinyblob|mediumblob|longblob|blob|binary|varbinary|bytea|image|raw|long raw)\b/.test(type)) return "structure-data-type-binary";
+  if (/^(?:geometry|geometrycollection|geography|point|line|linestring|lseg|box|path|polygon|circle|multipoint|multilinestring|multipolygon)\b/.test(type)) return "structure-data-type-spatial";
+  if (/^(?:number|numeric|decimal|dec|float|double|real|money|smallmoney)\b/.test(type)) return "structure-data-type-real";
+  if (/^(?:tinyint|smallint|mediumint|int|integer|bigint|serial|bigserial|bit)\b/.test(type)) return "structure-data-type-numeric";
+  if (/^(?:char|varchar|varchar2|nvarchar|nchar|text|tinytext|mediumtext|longtext|clob|nclob|string|uuid|uniqueidentifier)\b/.test(type)) return "structure-data-type-text";
+
+  return "structure-data-type-other";
+}
+
+function structureDefaultValueToneClass(value: string | null | undefined, dataType: string | null): string {
+  const text = value?.trim() ?? "";
+  if (dataType === null || !text || /^null$/i.test(text)) return "structure-data-type-null";
+  return structureDataTypeToneClass(dataType);
+}
+
+function structureColumnComparisonKey(name: string): string {
+  return tableStructureIdentifierComparisonKey(name, databaseType.value, connection.value?.database_info);
+}
+
+function indexContainsColumn(index: EditableStructureIndex, column: EditableStructureColumn): boolean {
+  const names = [column.name, column.original?.name].filter((name): name is string => !!name).map(structureColumnComparisonKey);
+  return index.columns.some((name) => names.includes(structureColumnComparisonKey(name)));
+}
+
+function columnIndexes(column: EditableStructureColumn): EditableStructureIndex[] {
+  if (!column.name.trim() || column.markedForDrop) return [];
+  return indexes.value.filter((index) => !index.markedForDrop && !index.isPrimary && indexContainsColumn(index, column));
+}
+
+const indexKindOrder: StructureIndexKind[] = ["primary", "unique", "index", "fulltext", "spatial"];
+
+function indexIconClass(kind: StructureIndexKind): string {
+  return {
+    primary: "text-amber-600 dark:text-amber-400",
+    unique: "text-red-600 dark:text-red-400",
+    index: "text-green-700 dark:text-green-300",
+    fulltext: "text-purple-600 dark:text-purple-300",
+    spatial: "text-cyan-700 dark:text-cyan-300",
+  }[kind];
+}
+
+function columnIndexKind(column: EditableStructureColumn): StructureIndexKind | "none" {
+  if (column.markedForDrop) return "none";
+  if (column.isPrimaryKey) return "primary";
+  const memberships = columnIndexes(column);
+  return indexKindOrder.find((kind) => memberships.some((index) => structureIndexKind(index) === kind)) ?? "none";
+}
+
+function columnIndexIndicators(column: EditableStructureColumn): { kind: StructureIndexKind; title: string }[] {
+  if (column.markedForDrop) return [];
+  const memberships = columnIndexes(column);
+  return indexKindOrder.flatMap((kind) => {
+    const titles = memberships.filter((index) => structureIndexKind(index) === kind).map(indexTitle);
+    if (kind === "primary" && column.isPrimaryKey)
+      titles.unshift(
+        `PRIMARY (${columns.value
+          .filter((item) => item.isPrimaryKey && !item.markedForDrop)
+          .map((item) => item.name)
+          .join(", ")})`,
+      );
+    return titles.length ? [{ kind, title: titles.join("\n") }] : [];
+  });
+}
+
+function indexTitle(index: EditableStructureIndex): string {
+  return `${index.isPrimary ? "PRIMARY" : index.isUnique ? "UNIQUE" : index.indexType || "INDEX"} ${index.name} (${index.columns.join(", ")})`;
+}
+
+function columnIndexTitle(column: EditableStructureColumn): string {
+  return columnIndexIndicators(column)
+    .map((indicator) => indicator.title)
+    .join("\n");
+}
+
+function structureColumnClipboardValue(column: EditableStructureColumn, key: string): string {
+  switch (key) {
+    case "name":
+      return column.name;
+    case "type":
+      return gaussdbMDataTypeDisplayName(dataTypeBaseInputValue(databaseType.value, column.dataType));
+    case "length": {
+      if (isMysqlEnumDataType(databaseType.value, column.dataType)) return (column.enumValues ?? []).join(", ");
+      if (isPostgresGeometryDataType(databaseType.value, column.dataType)) {
+        return [postgresGeometryTypeValue(column.dataType), postgresGeometrySridValue(column.dataType)].filter(Boolean).join(", ");
+      }
+      return [dataTypeLengthInputValue(databaseType.value, column.dataType), dataTypeLengthUnitValue(databaseType.value, column.dataType)].filter(Boolean).join(" ");
+    }
+    case "nullable":
+      return column.isNullable ? t("structureEditor.yes") : t("structureEditor.no");
+    case "primaryKey":
+      return column.isPrimaryKey ? t("structureEditor.yes") : t("structureEditor.no");
+    case "defaultValue":
+      return column.defaultValue;
+    case "comment":
+      return column.comment;
+    case "characterSet":
+      return columnCharset(column);
+    case "collation":
+      return columnCollation(column);
+    case "extendedProperties":
+      return Object.entries(column.extra)
+        .filter(([, value]) => value !== undefined && value !== false && value !== "")
+        .map(([name, value]) => `${name}: ${typeof value === "object" ? JSON.stringify(value) : String(value)}`)
+        .join("; ");
+    default:
+      return "";
+  }
+}
+
+function structureColumnClipboardText(): string {
+  const labels = copyableStructureColumnLabels.value.filter((label) => selectedStructureColumnKeys.value.has(label.key));
+  if (labels.length === 0) return "";
+  const rows = columns.value.filter((column) => !column.markedForDrop).map((column) => labels.map((label) => structureColumnClipboardValue(column, label.key)));
+  return formatTsv(
+    labels.map((label) => label.label),
+    rows,
+    "",
+  );
+}
+
+function setStructureColumnSelection(keys: Iterable<string>, anchorKey: string | null) {
+  // Clears first: setColumnSelection also resets the header-column keys.
+  clearColumnSelection();
+  selectedStructureColumnKeys.value = new Set(keys);
+  structureColumnSelectionAnchorKey.value = anchorKey;
+}
+
+function selectStructureColumnKey(key: string, event: MouseEvent) {
+  if (key === "actions") return;
+  const labels = copyableStructureColumnLabels.value;
+  const index = labels.findIndex((label) => label.key === key);
+  if (index < 0) return;
+
+  if (event.shiftKey && structureColumnSelectionAnchorKey.value) {
+    const anchorIndex = labels.findIndex((label) => label.key === structureColumnSelectionAnchorKey.value);
+    if (anchorIndex >= 0) {
+      const start = Math.min(anchorIndex, index);
+      const end = Math.max(anchorIndex, index);
+      setStructureColumnSelection(
+        labels.slice(start, end + 1).map((label) => label.key),
+        structureColumnSelectionAnchorKey.value,
+      );
+      return;
+    }
+  }
+
+  if (event.metaKey || event.ctrlKey) {
+    const next = new Set(selectedStructureColumnKeys.value);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    setStructureColumnSelection(next, key);
+    return;
+  }
+
+  setStructureColumnSelection([key], key);
+}
+
+function selectAllStructureColumns() {
+  const keys = copyableStructureColumnLabels.value.map((label) => label.key);
+  if (keys.length > 0) setStructureColumnSelection(keys, keys[0] ?? null);
+}
+
+async function copySelectedStructureColumns() {
+  const text = structureColumnClipboardText();
+  if (!text) return;
+  try {
+    await copyToClipboard(text);
+    toast(t("grid.copied"));
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
+watch(
+  copyableStructureColumnLabels,
+  (labels) => {
+    const allowed = new Set(labels.map((label) => label.key));
+    const next = [...selectedStructureColumnKeys.value].filter((key) => allowed.has(key));
+    if (next.length !== selectedStructureColumnKeys.value.size) selectedStructureColumnKeys.value = new Set(next);
+    if (structureColumnSelectionAnchorKey.value && !allowed.has(structureColumnSelectionAnchorKey.value)) structureColumnSelectionAnchorKey.value = next[0] ?? null;
+  },
+  { flush: "sync" },
+);
+
 const structureColumnRowHeight = computed(() => structureDensityMetric.value.controlHeight + structureDensityMetric.value.cellPaddingY * 2 + 1);
 const columnTableWidth = computed(() => visibleColWidths.value.reduce((total, width) => total + width, 0));
 function columnNeedsVariableGeometryHeight(column: EditableStructureColumn): boolean {
@@ -1581,6 +1877,14 @@ const mysqlAutoIncrementLoading = ref(false);
 const mysqlAutoIncrementLoadError = ref("");
 const mysqlTableEngine = ref("");
 const originalMysqlTableEngine = ref("");
+const physicalOptions = ref(emptyTablePhysicalOptions());
+watch(
+  () => columns.value.filter((column) => !column.markedForDrop).map((column) => column.id),
+  (ids) => {
+    if (!isCreateMode.value) return;
+    physicalOptions.value = pruneTablePhysicalOptions(physicalOptions.value, new Set(ids));
+  },
+);
 const mysqlTableEngineOptions = ref<string[]>([]);
 const mysqlTableEngineLoading = ref(false);
 const mysqlTableEngineLoadError = ref("");
@@ -1603,6 +1907,50 @@ function setMysqlAutoIncrement(column: EditableStructureColumn, checked: boolean
   column.extra.autoIncrement = checked;
   if (checked && originalMysqlAutoIncrementValue.value === undefined && !mysqlAutoIncrementLoading.value) {
     void loadMysqlAutoIncrementCounter(true);
+  }
+}
+
+// MySQL generated columns (issue #11208). Tri-state mirrors the backend contract:
+// `undefined` inherits the original definition, an empty expression removes the
+// attribute, otherwise the clause renders from the edited values.
+function hasOriginalMysqlGeneratedColumn(column: EditableStructureColumn): boolean {
+  return structureDialect.value === "mysql" && !!column.original?.extra && !!parseMysqlGeneratedColumnExtra(column.original.extra);
+}
+
+function isMysqlGeneratedChecked(column: EditableStructureColumn): boolean {
+  return structureDialect.value === "mysql" && column.extra.generated !== undefined;
+}
+
+function isMysqlGeneratedActive(column: EditableStructureColumn): boolean {
+  return isMysqlGeneratedChecked(column) && (column.extra.generated?.expression.trim() ?? "") !== "";
+}
+
+function setMysqlGenerated(column: EditableStructureColumn, checked: boolean) {
+  // Only manage the generated flag here. Conflicting attributes (DEFAULT,
+  // AUTO_INCREMENT, ON UPDATE) stay in the draft: they are disabled in the UI
+  // while generated, and stripped from the SQL payload only while the
+  // generated attribute is active, so unchecking restores them untouched.
+  if (checked) {
+    // Re-checking after an accidental uncheck restores the original expression
+    // and storage instead of starting from a blank VIRTUAL draft.
+    const original = column.original?.extra ? parseMysqlGeneratedColumnExtra(column.original.extra) : undefined;
+    column.extra.generated = original ? { ...original } : { expression: "", storage: "STORED" };
+    return;
+  }
+  // Dropping the attribute must be explicit for a column that was generated,
+  // otherwise `undefined` would inherit the original definition back.
+  column.extra.generated = hasOriginalMysqlGeneratedColumn(column) ? { expression: "" } : undefined;
+}
+
+function updateMysqlGeneratedExpression(column: EditableStructureColumn, expression: string) {
+  if (column.extra.generated) {
+    column.extra.generated.expression = expression;
+  }
+}
+
+function updateMysqlGeneratedStorage(column: EditableStructureColumn, storage: string) {
+  if (column.extra.generated) {
+    column.extra.generated.storage = storage === "STORED" ? "STORED" : "VIRTUAL";
   }
 }
 function isSqliteAutoIncrement(column: EditableStructureColumn): boolean {
@@ -1843,9 +2191,21 @@ function updateColumnVirtualRowsDuringScroll(scroller: HTMLElement) {
   virtualScroller.updateVisibleItems?.(false, true);
 }
 
+function updateExtendedPropertiesContentWidth() {
+  const scroller = structureScrollerElement(columnsScrollerRef.value);
+  if (!scroller) return;
+  const chromeWidth = structureDensityMetric.value.cellPaddingX * 2 + 1;
+  let width = extendedPropertiesContentWidth.value;
+  for (const content of scroller.querySelectorAll<HTMLElement>("[data-structure-extended-properties]")) {
+    width = Math.max(width, content.offsetWidth + chromeWidth);
+  }
+  extendedPropertiesContentWidth.value = width;
+}
+
 function onColumnVirtualRowsUpdated() {
   const scroller = structureScrollerElement(columnsScrollerRef.value);
   if (scroller) lastColumnVirtualRenderScrollTop = scroller.scrollTop;
+  void nextTick(updateExtendedPropertiesContentWidth);
 }
 
 function columnVirtualRowsNeedSynchronousUpdate(scroller: HTMLElement): boolean {
@@ -1900,6 +2260,7 @@ function createCurrentDraft(initialized = true): TableStructureEditorDraft {
     originalMysqlAutoIncrementValue: originalMysqlAutoIncrementValue.value,
     mysqlTableEngine: mysqlTableEngine.value,
     originalMysqlTableEngine: originalMysqlTableEngine.value,
+    physicalOptions: cloneDraftValue(physicalOptions.value),
     tableOwner: tableOwner.value,
     originalTableOwner: originalTableOwner.value,
     columns: cloneDraftValue(columns.value),
@@ -1977,10 +2338,19 @@ function restoreDraft(draft: TableStructureEditorDraft) {
   tableOwner.value = draft.tableOwner || "";
   originalTableOwner.value = draft.originalTableOwner || "";
   columns.value = cloneDraftValue(draft.columns || []);
+  physicalOptions.value = restoreTablePhysicalOptions(draft);
   // Existing-index edits never support Concurrent (the checkbox is disabled and
   // the core builder rejects the request), so a stale `concurrently: true`
   // saved in a restored draft must not be submitted or deadlock the save.
-  indexes.value = cloneDraftValue(draft.indexes || []).map((index) => (index.original ? { ...index, concurrently: false } : index));
+  indexes.value = cloneDraftValue(draft.indexes || []).map((index) => {
+    if (index.original) index.concurrently = false;
+    // Older drafts have no naming seed. Preserve their saved names until regeneration.
+    if (index.autoNameColumn === undefined) {
+      if (index.name) index.nameEdited = true;
+      else index.nameEdited ??= false;
+    }
+    return index;
+  });
   // Re-run the availability normalization against the current inputs (e.g. a
   // re-activated editor may already carry an unknown/unsupported partition
   // status): restored new-index Concurrent choices that became illegal are
@@ -2004,12 +2374,15 @@ function restoreDraft(draft: TableStructureEditorDraft) {
   } else {
     const activeScope = visibleTableStructureRefreshScope(draft.activeTab || "columns");
     if (activeScope.columns) loadedMetadataFacets.add("columns");
-    if (activeScope.indexes || draft.indexes?.length) loadedMetadataFacets.add("indexes");
+    // Older field-tab drafts did not load indexes alongside columns.
+    if (draft.activeTab === "indexes" || draft.indexes?.length) loadedMetadataFacets.add("indexes");
     if (activeScope.foreignKeys || draft.foreignKeys?.length) loadedMetadataFacets.add("foreign-keys");
     if (activeScope.constraints || constraintsLoaded.value) loadedMetadataFacets.add("constraints");
     if (activeScope.triggers || triggersLoaded.value) loadedMetadataFacets.add("triggers");
     if (activeScope.tableComment) loadedMetadataFacets.add("comment");
   }
+  // Some older snapshots have incomplete facet flags but already contain index edits.
+  if (indexes.value.length) loadedMetadataFacets.add("indexes");
   structureScrollPositions = cloneDraftValue(draft.scrollPositions || {});
   restoringDraft = false;
   draftHydrated = !needsColumnDraftMetadataHydration();
@@ -2066,6 +2439,7 @@ function hasPendingStructureChanges(): boolean {
       !!newTableName.value.trim() ||
       !!tableComment.value.trim() ||
       mysqlTableEngine.value !== originalMysqlTableEngine.value ||
+      hasTablePhysicalOptions(physicalOptions.value) ||
       columns.value.length > 0 ||
       indexes.value.length > 0 ||
       foreignKeys.value.length > 0 ||
@@ -2227,17 +2601,38 @@ function structureChangeOptions(): BuildTableStructureChangeSqlOptions {
     driverProfile: connection.value?.driver_profile,
     schema: props.schema,
     tableName: isCreateMode.value ? newTableName.value.trim() : props.tableName || "",
-    // Do not let a draft created by an older build submit properties that the
-    // current database cannot represent (notably PostgreSQL-style identity on openGauss).
-    columns: showExtendedProperties.value ? columns.value : columns.value.map((column) => ({ ...column, extra: {} })),
+    // User-entered names are normalized here so the preview and the executed
+    // batch agree: MySQL rejects identifiers that end with a space (ERROR 1166),
+    // while a metadata name the user never touched keeps its exact spelling.
+    columns: columns.value.map((column) => {
+      const normalized = {
+        ...column,
+        name: draftColumnNameForSql(column.name, column.original?.name),
+        // Do not let a draft created by an older build submit properties that the
+        // current database cannot represent (notably PostgreSQL-style identity on openGauss).
+        ...(showExtendedProperties.value ? {} : { extra: {} }),
+      };
+      // MySQL generated columns cannot carry DEFAULT / AUTO_INCREMENT /
+      // ON UPDATE CURRENT_TIMESTAMP; drop them from the payload only while the
+      // generated attribute is active, so unchecking "virtual" leaves the
+      // draft (and the diff) exactly as the user last saw it.
+      if (isMysqlGeneratedActive(column) && normalized.extra) {
+        const { autoIncrement: _autoIncrement, onUpdateCurrentTimestamp: _onUpdate, ...restExtra } = normalized.extra;
+        normalized.extra = restExtra;
+        normalized.defaultValue = "";
+      }
+      return normalized;
+    }),
     indexes: sanitizeStructureIndexesForCapabilities(indexes.value, structureCapabilities.value),
     foreignKeys: foreignKeys.value,
     triggers: triggers.value,
     tableComment: tableComment.value,
     originalTableComment: isCreateMode.value ? undefined : originalTableComment.value,
     mysqlEngine: mysqlTableEngineSqlOption({ value: mysqlTableEngine.value, originalValue: originalMysqlTableEngine.value }, isCreateMode.value, supportsMysqlEngine.value && !mysqlTableEngineLoading.value && !mysqlTableEngineLoadError.value),
+    transwarpCreate: isCreateMode.value && databaseType.value === "transwarp" ? buildInceptorCreateOptions(physicalOptions.value, columns.value) : undefined,
     tableCollation: mysqlTableDefaultCollation.value || undefined,
     partitioned: isPartitionedParent.value,
+    foreignTable: isForeignTable.value,
     isGaussdbMMode: connection.value?.driver_profile?.toLowerCase() === "gaussdb-m",
   };
 }
@@ -2284,6 +2679,20 @@ async function refreshSqlPreview() {
   if (!hasPendingStructureChanges()) {
     pendingStatements.value = [];
     warnings.value = [];
+    sqliteSchemaRevision.value = undefined;
+    sqlPreviewLoading.value = false;
+    sqlPreviewPending.value = false;
+    return;
+  }
+  const indexWarnings = indexes.value
+    .filter((index) => !index.markedForDrop && needsIndexColumnValidation(index))
+    .flatMap((index) => {
+      const issue = indexColumnsIssue(index);
+      return issue ? [`${index.name || t("structureEditor.addIndex")}: ${t(`structureEditor.${issue}`)}`] : [];
+    });
+  if (indexWarnings.length) {
+    pendingStatements.value = [];
+    warnings.value = indexWarnings;
     sqliteSchemaRevision.value = undefined;
     sqlPreviewLoading.value = false;
     sqlPreviewPending.value = false;
@@ -2391,6 +2800,7 @@ function resetState() {
   secondaryMetadataErrors.value = {};
   isPartitionedParent.value = false;
   isTablePartition.value = false;
+  isForeignTable.value = false;
   partitionStatusResolved.value = false;
   partitionStatusKnown.value = true;
   concurrentAvailabilityInvalidated.value = false;
@@ -2425,6 +2835,7 @@ function resetState() {
   mysqlAutoIncrementLoadError.value = "";
   mysqlTableEngine.value = "";
   originalMysqlTableEngine.value = "";
+  physicalOptions.value = emptyTablePhysicalOptions();
   mysqlTableEngineOptions.value = [];
   mysqlTableEngineLoadRequestId += 1;
   mysqlTableEngineLoading.value = false;
@@ -2510,7 +2921,7 @@ async function fetchTableCommentValue(connectionId: string, database: string, sc
   }
 }
 
-function loadCachedTableComment(request: ReturnType<typeof ddlRequest>, force = false): Promise<{ value: string | undefined; cacheStatus: "memory" | "disk" | "remote" }> {
+function loadCachedTableComment(request: StructureDdlRequest, force = false): Promise<{ value: string | undefined; cacheStatus: "memory" | "disk" | "remote" }> {
   return loadObjectMetadataFacet(request, "comment", () => fetchTableCommentValue(request.connectionId, request.database, request.schema, request.tableName, request.catalog), { force });
 }
 
@@ -2704,8 +3115,8 @@ async function loadStructure(
             // status we cannot rule out a partitioned parent, so Concurrent is
             // treated as unavailable until a later reload re-runs the probe.
             .then((status) => ({ known: true, status }))
-            .catch(() => ({ known: false, status: { isPartitionedParent: false, isPartition: false } }))
-        : Promise.resolve({ known: true, status: { isPartitionedParent: false, isPartition: false } });
+            .catch(() => ({ known: false, status: { isPartitionedParent: false, isPartition: false, isForeign: false } }))
+        : Promise.resolve({ known: true, status: { isPartitionedParent: false, isPartition: false, isForeign: false } });
     const columnsLoad = effectiveScope.columns ? loadObjectMetadataFacet(metadataRequest, "columns", () => api.getColumns(connectionId, database, schema, tableName, catalog), { force: forceMetadata }) : undefined;
     const columnsPromise = columnsLoad
       ? columnsLoad.then((result) => {
@@ -2770,7 +3181,8 @@ async function loadStructure(
       if (!options.preserveDraft) clearColumnSelection();
     }
 
-    await loadMysqlAutoIncrementCounter(options.preserveDraft === true);
+    // Loading missing index metadata must not rebase a restored column counter again.
+    if (!options.preserveDraft || effectiveScope.columns) await loadMysqlAutoIncrementCounter(options.preserveDraft === true);
 
     const nextTableComment = await tableCommentPromise;
     if (nextTableComment !== undefined) {
@@ -2783,6 +3195,7 @@ async function loadStructure(
       partitionStatusKnown.value = partitionStatus.known;
       isPartitionedParent.value = partitionStatus.status.isPartitionedParent;
       isTablePartition.value = partitionStatus.status.isPartition;
+      isForeignTable.value = partitionStatus.status.isForeign;
       partitionStatusResolved.value = true;
       // Availability inputs changed: fail closed while the status is unknown,
       // but preserve the user's Concurrent intent so a later successful probe
@@ -2820,7 +3233,8 @@ async function loadStructure(
       const nextConstraints = constraintsResult.status === "fulfilled" ? constraintsResult.value : undefined;
       const nextTriggers = triggersResult.status === "fulfilled" ? triggersResult.value : undefined;
       if (nextIndexes) {
-        indexes.value = createIndexDrafts(nextIndexes);
+        // An empty lazy load changes no draft data and should not trigger another save.
+        if (nextIndexes.length || indexes.value.length) indexes.value = createIndexDrafts(nextIndexes);
         loadedMetadataFacets.add("indexes");
       }
       if (nextForeignKeys) {
@@ -2978,11 +3392,18 @@ function columnIsSelectable(column: EditableStructureColumn): boolean {
   return !column.markedForDrop && columns.value.some((item) => item.id === column.id);
 }
 
-/** Replace the whole selection state (set + active + shift anchor) atomically. */
+/**
+ * Replace the whole selection state (set + active + shift anchor) atomically.
+ * Header-column selection and row selection are exclusive modes, so any row
+ * selection also clears the header-column keys, mirroring how
+ * `setStructureColumnSelection` clears the row selection.
+ */
 function setColumnSelection(ids: Iterable<string>, activeId: string | null, anchorId: string | null) {
   selectedColumnIds.value = new Set(ids);
   selectedColumnId.value = activeId;
   columnSelectionAnchorId.value = anchorId;
+  selectedStructureColumnKeys.value = new Set();
+  structureColumnSelectionAnchorKey.value = null;
 }
 
 function clearColumnSelection() {
@@ -3658,6 +4079,11 @@ function columnRowClass(column: EditableStructureColumn, index: number) {
   const isSelected = selectedColumnIds.value.has(column.id) && !column.markedForDrop;
   return {
     "bg-destructive/5 opacity-60": column.markedForDrop,
+    "structure-column-primary-key": columnIndexKind(column) === "primary",
+    "structure-column-unique-key": columnIndexKind(column) === "unique",
+    "structure-column-index-key": columnIndexKind(column) === "index",
+    "structure-column-fulltext-key": columnIndexKind(column) === "fulltext",
+    "structure-column-spatial-key": columnIndexKind(column) === "spatial",
     "structure-column-search-match": isSearchMatch,
     // Reuse the existing search-current highlight for the active/selected row.
     "structure-column-search-current": highlightedColumnId.value === column.id || isSelected,
@@ -3750,8 +4176,14 @@ function indexFieldMatchesSearch(value: string | null | undefined): boolean {
 
 function indexRowClass(index: EditableStructureIndex) {
   const isSearchMatch = filteredIndexRowIds.value.has(index.id);
+  const kind = structureIndexKind(index);
   return {
     "bg-destructive/5 opacity-60": index.markedForDrop,
+    "structure-index-primary-key": kind === "primary",
+    "structure-index-unique-key": kind === "unique",
+    "structure-index-normal-key": kind === "index",
+    "structure-index-fulltext-key": kind === "fulltext",
+    "structure-index-spatial-key": kind === "spatial",
     "structure-column-search-match": isSearchMatch,
     "structure-column-search-current": highlightedIndexId.value === index.id,
   };
@@ -3894,6 +4326,7 @@ function columnContextMenuItems(column: EditableStructureColumn): ContextMenuIte
   const count = targets.length;
   const allDroppable = targets.every((item) => !item.original || canDropColumn(item));
   return [
+    ...columnIndexContextMenuItems(targets),
     {
       label: isBatchContext ? t("structureEditor.copySelectedColumns", { count }) : t("structureEditor.copyColumn"),
       icon: Copy,
@@ -3936,8 +4369,129 @@ function clearColumnContextMenuTarget() {
   columnContextMenuTarget.value = null;
 }
 
+function canUseColumnIndexActions(targets: EditableStructureColumn[]): boolean {
+  return !loading.value && !saving.value && !indexesLoading.value && !secondaryMetadataErrors.value.indexes && (isCreateMode.value || loadedMetadataFacets.has("indexes")) && targets.length > 0 && targets.every((column) => columnIsSelectable(column) && !!column.name.trim());
+}
+
+function setColumnsPrimaryKey(targets: EditableStructureColumn[]) {
+  if (!canUseColumnIndexActions(targets) || targets.some(isPrimaryKeyDisabled)) return;
+  for (const column of targets) {
+    column.isPrimaryKey = true;
+    column.isNullable = false;
+  }
+  sqlPreviewCollapsed.value = false;
+}
+
+function createIndexFromColumns(targets: EditableStructureColumn[], isUnique: boolean, indexType = "") {
+  if (!canUseColumnIndexActions(targets) || !structureCapabilities.value.createIndex || specialIndexColumnIssue(structureDialect.value, indexType, targets, isUnique)) return;
+  const index = newIndexDraft();
+  index.columns = targets.map((column) => column.name.trim());
+  index.isUnique = isUnique;
+  index.indexType = indexType;
+  refreshAutoIndexName(index);
+  indexes.value.push(index);
+  sqlPreviewCollapsed.value = false;
+}
+
+function addColumnsToIndex(index: EditableStructureIndex, targets: EditableStructureColumn[]) {
+  if (!canUseColumnIndexActions(targets) || !canEditIndexDraft(index) || !canAddColumnsToIndex(index, targets)) return;
+  for (const column of targets) {
+    if (indexContainsColumn(index, column)) continue;
+    // Operator classes are positional; preserve existing entries when extending a key.
+    index.columnOpclasses = index.columns.map((_, position) => index.columnOpclasses?.[position] ?? null);
+    index.columns.push(column.name.trim());
+    index.columnOpclasses.push(null);
+    index.includedColumns = index.includedColumns.filter((name) => structureColumnComparisonKey(name) !== structureColumnComparisonKey(column.name));
+  }
+  refreshAutoIndexName(index);
+  sqlPreviewCollapsed.value = false;
+}
+
+function columnIndexContextMenuItems(targets: EditableStructureColumn[]): ContextMenuItem[] {
+  if (!tableMetadataCapabilities.value.indexes) return [];
+  const disabled = () => !canUseColumnIndexActions(targets);
+  const primaryColumns = columns.value.filter((column) => column.isPrimaryKey && !column.markedForDrop);
+  const createItems: ContextMenuItem[] = [
+    {
+      label: t("structureEditor.createPrimaryIndex"),
+      icon: KeyRound,
+      iconClass: "text-amber-600 dark:text-amber-400",
+      disabled: () => disabled() || primaryColumns.length > 0 || targets.some(isPrimaryKeyDisabled),
+      action: () => setColumnsPrimaryKey(targets),
+    },
+    ...([false, true] as const).map(
+      (unique): ContextMenuItem => ({
+        label: t(unique ? "structureEditor.createUniqueIndex" : "structureEditor.createNormalIndex"),
+        icon: KeyRound,
+        iconClass: indexIconClass(unique ? "unique" : "index"),
+        disabled: () =>
+          disabled() ||
+          !structureCapabilities.value.createIndex ||
+          indexes.value.some(
+            (index) =>
+              !index.markedForDrop &&
+              !index.isPrimary &&
+              index.isUnique === unique &&
+              !index.filter &&
+              (!index.indexType || index.indexType.toUpperCase() === "BTREE") &&
+              index.columns.length === targets.length &&
+              index.columns.every((name, position) => structureColumnComparisonKey(name) === structureColumnComparisonKey(targets[position].name)),
+          ),
+        action: () => createIndexFromColumns(targets, unique),
+      }),
+    ),
+    ...["FULLTEXT", "SPATIAL"]
+      .filter((type) => indexTypeOptions.value.includes(type))
+      .map(
+        (type): ContextMenuItem => ({
+          label: t(type === "FULLTEXT" ? "structureEditor.createFulltextIndex" : "structureEditor.createSpatialIndex"),
+          icon: KeyRound,
+          iconClass: indexIconClass(type === "FULLTEXT" ? "fulltext" : "spatial"),
+          disabled: () => disabled() || !structureCapabilities.value.createIndex || !!specialIndexColumnIssue(structureDialect.value, type, targets),
+          action: () => createIndexFromColumns(targets, false, type),
+        }),
+      ),
+  ];
+  const addItems: ContextMenuItem[] = indexes.value
+    .filter((index) => !index.markedForDrop && !index.isPrimary)
+    .map((index) => ({
+      label: `${index.name || t("structureEditor.addIndex")} (${index.columns.join(", ")})`,
+      icon: KeyRound,
+      iconClass: indexIconClass(structureIndexKind(index)),
+      disabled: () => disabled() || !canEditIndexDraft(index) || !canAddColumnsToIndex(index, targets) || targets.every((column) => indexContainsColumn(index, column)),
+      action: () => addColumnsToIndex(index, targets),
+    }));
+  if (primaryColumns.length)
+    addItems.unshift({
+      label: `PRIMARY (${primaryColumns.map((column) => column.name).join(", ")})`,
+      icon: KeyRound,
+      iconClass: "text-amber-600 dark:text-amber-400",
+      disabled: () => disabled() || targets.every((column) => column.isPrimaryKey) || targets.some(isPrimaryKeyDisabled),
+      action: () => setColumnsPrimaryKey(targets),
+    });
+  return [
+    { label: targets.length > 1 ? t("structureEditor.createCompositeIndex", { count: targets.length }) : t("structureEditor.createColumnIndex"), icon: Plus, disabled, children: createItems },
+    { label: t("structureEditor.addColumnsToIndex"), icon: KeyRound, disabled: () => disabled() || !addItems.length, children: addItems },
+    {
+      label: t("structureEditor.manageIndexes"),
+      icon: Settings,
+      action: () => {
+        activeTab.value = "indexes";
+      },
+    },
+    { label: "", separator: true },
+  ];
+}
+
 function isColumnNameDisabled(column: EditableStructureColumn): boolean {
   return column.markedForDrop || (!!column.original && !structureCapabilities.value.renameColumn);
+}
+
+/** Mirror in the input what the DDL builder does with the name, so the field the
+ * user sees matches the statement that will run. */
+function commitColumnNameInput(column: EditableStructureColumn) {
+  const normalized = draftColumnNameForSql(column.name, column.original?.name);
+  if (normalized !== column.name) column.name = normalized;
 }
 
 function isColumnTypeDisabled(column: EditableStructureColumn): boolean {
@@ -3965,7 +4519,7 @@ function isColumnNullableDisabled(column: EditableStructureColumn): boolean {
 }
 
 function isColumnDefaultDisabled(column: EditableStructureColumn): boolean {
-  return column.markedForDrop || (!!column.original && !structureCapabilities.value.alterDefault);
+  return column.markedForDrop || (!!column.original && !structureCapabilities.value.alterDefault) || isMysqlGeneratedActive(column);
 }
 
 function isColumnCommentDisabled(column: EditableStructureColumn): boolean {
@@ -3993,10 +4547,8 @@ function isManticoreColumnPropertyDisabled(column: EditableStructureColumn): boo
   return !canEditManticoreColumnProperties(databaseType.value, !!column.original) || column.markedForDrop;
 }
 
-function addIndex() {
-  if (!structureCapabilities.value.createIndex || indexesLoading.value) return;
-  activeTab.value = "indexes";
-  indexes.value.push({
+function newIndexDraft(): EditableStructureIndex {
+  return {
     id: `new:${uuid()}`,
     name: "",
     columns: [],
@@ -4010,7 +4562,13 @@ function addIndex() {
     concurrently: false,
     columnOpclasses: [],
     markedForDrop: false,
-  });
+  };
+}
+
+function addIndex() {
+  if (!structureCapabilities.value.createIndex || indexesLoading.value) return;
+  activeTab.value = "indexes";
+  indexes.value.push(newIndexDraft());
   void nextTick(() => {
     const indexRows = rootRef.value?.querySelectorAll<HTMLElement>('[data-new-index-row="true"]');
     const row = indexRows?.[indexRows.length - 1];
@@ -4029,26 +4587,27 @@ function existingIndexNamesForDraft(index: EditableStructureIndex): string[] {
   return indexes.value.filter((item) => item.id !== index.id && !item.markedForDrop).map((item) => item.name);
 }
 
-function generatedIndexNameForDraft(index: EditableStructureIndex, columnsForName = index.columns): string {
-  const name = generateUniqueIndexName(structureIndexTableName(), columnsForName, existingIndexNamesForDraft(index));
-  // GaussDB M-mode expects lowercase index names (MySQL-compatible).
+function generatedIndexNameForDraft(index: EditableStructureIndex): string {
+  const firstColumn = index.autoNameColumn ?? index.columns[0] ?? "";
+  const existingNames = existingIndexNamesForDraft(index);
+  if (usesNativeMysqlIndexNames.value) return generateUniqueShortIndexName(firstColumn, existingNames, { ...index, maxLength: 64 });
+  // Index names can be schema-wide outside MySQL. Retain the original table-qualified rule.
+  const name = generateUniqueIndexName(structureIndexTableName(), firstColumn ? [firstColumn] : [], existingNames);
   return connection.value?.driver_profile?.toLowerCase() === "gaussdb-m" ? name.toLowerCase() : name;
 }
 
-function refreshAutoIndexName(index: EditableStructureIndex, previousColumns = index.columns) {
-  if (index.original || index.nameEdited) return;
-  const isGaussdbM = connection.value?.driver_profile?.toLowerCase() === "gaussdb-m";
-  const previousName = generateIndexName(structureIndexTableName(), previousColumns);
-  const previousUniqueName = generateUniqueIndexName(structureIndexTableName(), previousColumns, existingIndexNamesForDraft(index));
-  const currentName = index.name.trim();
-  if (currentName) {
-    if (isGaussdbM) {
-      if (currentName.toLowerCase() !== previousName.toLowerCase() && currentName.toLowerCase() !== previousUniqueName.toLowerCase()) return;
-    } else if (currentName !== previousName && currentName !== previousUniqueName) {
-      return;
-    }
-  }
+function refreshAutoIndexName(index: EditableStructureIndex, typeChanged = false) {
+  if (index.original || index.nameEdited !== false) return;
+  index.autoNameColumn ??= index.columns[0];
+  if (index.name && !typeChanged) return;
   index.name = generatedIndexNameForDraft(index);
+}
+
+function regenerateIndexName(index: EditableStructureIndex) {
+  if (!canEditIndexDraft(index) || !index.columns.length) return;
+  index.autoNameColumn = index.columns[0];
+  index.name = generatedIndexNameForDraft(index);
+  index.nameEdited = !!index.original;
 }
 
 function onIndexNameInput(index: EditableStructureIndex, value: string | number) {
@@ -4063,18 +4622,63 @@ const availableColumnNames = computed(() =>
     .filter(Boolean),
 );
 
-const colSearch = ref("");
-
-function filteredIndexColumnNames(selectedColumns: readonly string[]): string[] {
-  return filterStructureIndexColumnOptions(availableColumnNames.value, selectedColumns, colSearch.value);
+function indexColumnPickerOptions(index: EditableStructureIndex, included = false) {
+  const selected = included ? index.includedColumns : index.columns;
+  return filterStructureIndexColumnOptions(availableColumnNames.value, selected).map((name) => {
+    const column = columns.value.find((item) => item.name === name && !item.markedForDrop);
+    return { name, dataType: column?.dataType ?? "", disabled: !included && !canToggleIndexColumn(index, name) };
+  });
 }
 
 function toggleIndexColumn(index: EditableStructureIndex, col: string) {
-  const previousColumns = [...index.columns];
+  if (!canEditIndexDraft(index) || !canToggleIndexColumn(index, col)) return;
   const i = index.columns.indexOf(col);
-  if (i >= 0) index.columns.splice(i, 1);
-  else index.columns.push(col);
-  refreshAutoIndexName(index, previousColumns);
+  index.columnOpclasses = index.columns.map((_, position) => index.columnOpclasses?.[position] ?? null);
+  if (i >= 0) {
+    index.columns.splice(i, 1);
+    index.columnOpclasses.splice(i, 1);
+  } else {
+    index.columns.push(col);
+    index.columnOpclasses.push(null);
+  }
+  refreshAutoIndexName(index);
+}
+
+function indexColumnsIssue(index: EditableStructureIndex, names = index.columns, indexType = index.indexType, isUnique = index.isUnique) {
+  const fields = names.flatMap((name) => {
+    const column = columns.value.find((item) => !item.markedForDrop && [item.name, item.original?.name].some((value) => value && structureColumnComparisonKey(value) === structureColumnComparisonKey(name)));
+    return column ? [column] : [];
+  });
+  return specialIndexColumnIssue(structureDialect.value, indexType, fields, isUnique);
+}
+
+function needsIndexColumnValidation(index: EditableStructureIndex): boolean {
+  if (indexChanged(index)) return true;
+  // Untouched server metadata must not block unrelated edits under newer UI rules.
+  return columns.value.some((column) => indexContainsColumn(index, column) && (!column.original || column.markedForDrop || column.dataType !== column.original.data_type || column.isNullable !== column.original.is_nullable));
+}
+
+function canToggleIndexColumn(index: EditableStructureIndex, name: string): boolean {
+  return index.columns.includes(name) || !indexColumnsIssue(index, [...index.columns, name]);
+}
+
+function canAddColumnsToIndex(index: EditableStructureIndex, targets: EditableStructureColumn[]): boolean {
+  const names = [...index.columns, ...targets.filter((column) => !indexContainsColumn(index, column)).map((column) => column.name.trim())];
+  return !indexColumnsIssue(index, names);
+}
+
+function onIndexUniqueChange(index: EditableStructureIndex, unique: boolean) {
+  if (!canEditIndexDraft(index) || indexColumnsIssue(index, index.columns, index.indexType, unique)) return;
+  index.isUnique = unique;
+  refreshAutoIndexName(index, true);
+}
+
+function onIndexTypeChange(index: EditableStructureIndex, value: unknown) {
+  const type = String(value ?? "");
+  if (!canEditIndexDraft(index) || indexColumnsIssue(index, index.columns, type, false)) return;
+  index.indexType = type;
+  if (structureIndexKind({ indexType: type }) === "fulltext" || structureIndexKind({ indexType: type }) === "spatial") index.isUnique = false;
+  refreshAutoIndexName(index, true);
 }
 
 function toggleIncludedColumn(index: EditableStructureIndex, col: string) {
@@ -4518,6 +5122,20 @@ function isPlainModDeleteShortcut(event: KeyboardEvent): boolean {
 
 function onStructureEditorKeydown(event: KeyboardEvent) {
   if (event.defaultPrevented) return;
+  if (activeTab.value === "columns" && !eventTargetUsesNativeClipboard(event)) {
+    if (isPlainClipboardShortcut(event, "a")) {
+      event.preventDefault();
+      event.stopPropagation();
+      selectAllStructureColumns();
+      return;
+    }
+    if (isPlainClipboardShortcut(event, "c") && selectedStructureColumnKeys.value.size > 0) {
+      event.preventDefault();
+      event.stopPropagation();
+      void copySelectedStructureColumns();
+      return;
+    }
+  }
   const focusedColumn = activeTab.value === "columns" ? focusedEditableColumn(event.target) : undefined;
   if (focusedColumn && isShiftEnterShortcut(event) && canAddColumn.value) {
     event.preventDefault();
@@ -4786,6 +5404,7 @@ watch(
     mysqlAutoIncrementLoadError,
     mysqlTableEngine,
     originalMysqlTableEngine,
+    physicalOptions,
     mysqlTableEngineLoading,
     mysqlTableEngineLoadError,
     mysqlTableDefaultCollation,
@@ -4820,6 +5439,12 @@ watch(activeTab, () => {
 
 watch([activeTab, loading, indexesLoading, visibleColWidths, indexColWidths], observeStructureHorizontalScroller, { deep: true, flush: "post", immediate: true });
 
+// Font sizes change with density, so start measuring again instead of keeping a stale maximum.
+watch(localStructureDensity, () => {
+  extendedPropertiesContentWidth.value = 0;
+});
+watch([columns, localStructureDensity], updateExtendedPropertiesContentWidth, { deep: true, flush: "post" });
+
 watch(
   columns,
   (items) => {
@@ -4841,12 +5466,6 @@ watch(
 watch(secondaryMetadataLoading, (value) => {
   if (value || !deferredSqlPreviewRefresh) return;
   scheduleSqlPreviewRefresh();
-});
-
-watch([() => props.tableName, newTableName], () => {
-  for (const index of indexes.value) {
-    refreshAutoIndexName(index);
-  }
 });
 
 watch(refreshVersion, (version, previous) => {
@@ -4964,6 +5583,8 @@ watch(
         <TooltipContent>{{ t("structureEditor.mysqlTableEngineLoadFailed", { message: mysqlTableEngineLoadError }) }}</TooltipContent>
       </Tooltip>
     </div>
+
+    <TablePhysicalOptionsEditor v-if="isCreateMode && databaseType === 'transwarp'" v-model="physicalOptions" :config="INCEPTOR_PHYSICAL_OPTIONS" :columns="columns.filter((column) => !column.markedForDrop && !!column.name.trim())" :disabled="saving" />
 
     <div v-if="supportsTableOwner" class="flex shrink-0 items-center gap-2">
       <label class="flex shrink-0 items-center gap-1 font-medium text-muted-foreground">
@@ -5165,11 +5786,13 @@ watch(
                         <th
                           v-for="(columnLabel, i) in colLabels"
                           :key="columnLabel.key"
-                          :class="[structureHeaderCellClass, { 'text-center': columnLabel.key === 'primaryKey' }]"
+                          :class="[structureHeaderCellClass, 'bg-background select-none', { 'text-center': columnLabel.key === 'primaryKey' || columnLabel.key === 'nullable' }]"
+                          :data-column-selected="columnLabel.key === 'actions' ? undefined : selectedStructureColumnKeys.has(columnLabel.key)"
                           :style="{
                             width: visibleColWidths[i] + 'px',
                             minWidth: visibleColWidths[i] + 'px',
                           }"
+                          @click="selectStructureColumnKey(columnLabel.key, $event)"
                         >
                           <template v-if="columnLabel.key === 'actions'">
                             <div class="flex min-w-0 items-center">
@@ -5178,7 +5801,13 @@ watch(
                             </div>
                           </template>
                           <template v-else>{{ columnLabel.label }}</template>
-                          <div v-if="columnLabel.key !== 'actions' && i < colLabels.length - 1" class="absolute right-0 top-0 z-20 h-full w-1 cursor-col-resize hover:bg-primary/30" :class="colResizing?.col === columnWidthIndex(i) ? 'bg-primary/30' : ''" @mousedown="onColResize($event, i)" />
+                          <div
+                            v-if="columnLabel.key !== 'actions' && i < colLabels.length - 1"
+                            class="absolute right-0 top-0 z-20 h-full w-1 cursor-col-resize hover:bg-primary/30"
+                            :class="colResizing?.col === columnWidthIndex(i) ? 'bg-primary/30' : ''"
+                            @mousedown="onColResize($event, i)"
+                            @click.stop
+                          />
                         </th>
                       </tr>
                     </thead>
@@ -5203,11 +5832,11 @@ watch(
                         @dragover="onColumnDragOver(index, $event)"
                         @drop="onColumnDrop(index, $event)"
                       >
-                        <td :class="structureCellClass">
+                        <td :class="[structureCellClass, structureColumnSelectionClass('actions')]">
                           <div class="flex min-w-0 items-center">
                             <div class="flex shrink-0 items-center justify-center gap-1 border-r pr-0.5 text-muted-foreground" :style="{ width: columnOrdinalIndicatorWidth + 'px' }">
                               <span class="tabular-nums">{{ index + 1 }}</span>
-                              <KeyRound v-if="column.isPrimaryKey" :class="[structureIconClass, 'shrink-0 text-amber-500']" />
+                              <KeyRound v-for="indicator in columnIndexIndicators(column)" :key="indicator.kind" :class="[structureIconClass, indexIconClass(indicator.kind), 'shrink-0']" :title="indicator.title" :aria-label="indicator.title" :data-index-kind="indicator.kind" />
                             </div>
                             <div class="flex min-w-0 items-center gap-0.5 pl-0.5">
                               <Button
@@ -5270,10 +5899,10 @@ watch(
                             </div>
                           </div>
                         </td>
-                        <td :class="structureCellClass">
-                          <Input v-model="column.name" :class="[structureControlClass, columnSearchFieldClass(column, column.name)]" :disabled="isColumnNameDisabled(column)" data-column-name-input />
+                        <td :class="[structureCellClass, structureColumnSelectionClass('name')]">
+                          <Input v-model="column.name" :class="[structureControlClass, columnSearchFieldClass(column, column.name)]" :title="columnIndexTitle(column) || undefined" :disabled="isColumnNameDisabled(column)" data-column-name-input @blur="commitColumnNameInput(column)" />
                         </td>
-                        <td :class="structureCellClass">
+                        <td :class="[structureCellClass, 'structure-column-data-type', structureDataTypeToneClass(column.dataType), structureColumnSelectionClass('type')]">
                           <SearchableSelect
                             v-if="!isColumnTypeDisabled(column)"
                             :model-value="dataTypeBaseInputValue(databaseType, column.dataType)"
@@ -5287,10 +5916,17 @@ watch(
                             :display-name="gaussdbMDataTypeDisplayName"
                             :trigger-class="[structureMonoControlClass, 'w-full']"
                             @update:model-value="(v: string) => updateColumnDataType(column, v)"
-                          />
+                          >
+                            <template #option-label="{ option, label }">
+                              <span :class="['structure-data-type-option block truncate font-mono', structureDataTypeToneClass(option)]">{{ label }}</span>
+                            </template>
+                            <template #custom-option-label="{ value }">
+                              <span :class="['structure-data-type-option block truncate font-mono', structureDataTypeToneClass(value)]">{{ value }}</span>
+                            </template>
+                          </SearchableSelect>
                           <Input v-else :model-value="gaussdbMDataTypeDisplayName(dataTypeBaseInputValue(databaseType, column.dataType))" :class="[structureMonoControlClass, 'w-full']" disabled />
                         </td>
-                        <td v-if="columnEditorControls.length" :class="structureCellClass">
+                        <td v-if="columnEditorControls.length" :class="[structureCellClass, structureColumnSelectionClass('length')]">
                           <Popover v-if="isMysqlEnumDataType(databaseType, column.dataType)">
                             <PopoverTrigger as-child>
                               <Button variant="outline" size="sm" :class="[structureMonoControlClass, 'w-full justify-between px-2']" :disabled="isColumnTypeDisabled(column)">
@@ -5362,18 +5998,16 @@ watch(
                             </Select>
                           </div>
                         </td>
-                        <td v-if="columnEditorControls.nullable" :class="structureCellClass">
-                          <label class="flex items-center gap-1.5">
-                            <input v-model="column.isNullable" type="checkbox" :class="structureCheckboxClass" :disabled="isColumnNullableDisabled(column)" />
-                            <span>{{ column.isNullable ? t("structureEditor.yes") : t("structureEditor.no") }}</span>
-                          </label>
+                        <td v-if="columnEditorControls.nullable" :class="[structureCellClass, 'text-center', structureColumnSelectionClass('nullable')]">
+                          <input v-model="column.isNullable" type="checkbox" :class="structureCheckboxClass" :disabled="isColumnNullableDisabled(column)" :aria-label="t('structureEditor.nullable')" />
                         </td>
-                        <td v-if="columnEditorControls.primaryKey" :class="[structureCellClass, 'text-center']">
+                        <td v-if="columnEditorControls.primaryKey" :class="[structureCellClass, 'text-center', structureColumnSelectionClass('primaryKey')]">
                           <input
                             v-model="column.isPrimaryKey"
                             type="checkbox"
                             :class="structureCheckboxClass"
                             :disabled="isPrimaryKeyDisabled(column)"
+                            :aria-label="t('structureEditor.primaryKey')"
                             @change="
                               () => {
                                 if (column.isPrimaryKey) column.isNullable = false;
@@ -5381,7 +6015,7 @@ watch(
                             "
                           />
                         </td>
-                        <td v-if="columnEditorControls.defaultValue" :class="structureCellClass">
+                        <td v-if="columnEditorControls.defaultValue" :class="[structureCellClass, 'structure-column-default-value', structureDefaultValueToneClass(column.defaultValue, column.dataType), structureColumnSelectionClass('defaultValue')]">
                           <div class="flex min-w-0 items-center gap-1">
                             <Input v-model="column.defaultValue" :class="[structureMonoControlClass, 'flex-1']" :disabled="isColumnDefaultDisabled(column)" />
                             <DropdownMenu>
@@ -5390,15 +6024,15 @@ watch(
                                   <ChevronDown :class="structureIconClass" />
                                 </Button>
                               </DropdownMenuTrigger>
-                              <DropdownMenuContent align="end" class="max-h-56 min-w-36 overflow-y-auto">
+                              <DropdownMenuContent align="end" class="max-h-56 w-max min-w-36 max-w-[calc(100vw-1rem)] overflow-y-auto">
                                 <DropdownMenuItem v-for="preset in defaultValuePresets" :key="preset.value" @click="column.defaultValue = preset.value">
-                                  <code class="font-mono text-[length:var(--structure-font-size)]">{{ preset.label }}</code>
+                                  <code :class="['structure-data-type-option block truncate font-mono text-[length:var(--structure-font-size)]', structureDefaultValueToneClass(preset.value, preset.dataType)]">{{ preset.label }}</code>
                                 </DropdownMenuItem>
                               </DropdownMenuContent>
                             </DropdownMenu>
                           </div>
                         </td>
-                        <td v-if="columnEditorControls.comment" :class="structureCellClass">
+                        <td v-if="columnEditorControls.comment" :class="[structureCellClass, structureColumnSelectionClass('comment')]">
                           <div class="flex min-w-0 items-center gap-1">
                             <Input v-model="column.comment" :class="[structureControlClass, 'flex-1', columnSearchFieldClass(column, column.comment)]" :disabled="isColumnCommentDisabled(column)" />
                             <Popover>
@@ -5426,7 +6060,7 @@ watch(
                             </Popover>
                           </div>
                         </td>
-                        <td v-if="showCharacterSet" :class="structureCellClass">
+                        <td v-if="showCharacterSet" :class="[structureCellClass, structureColumnSelectionClass('characterSet')]">
                           <SearchableSelect
                             :model-value="columnCharset(column)"
                             :options="mysqlCharsetOptions"
@@ -5439,7 +6073,7 @@ watch(
                             @update:model-value="(v: string) => onCharsetChange(column, v)"
                           />
                         </td>
-                        <td v-if="showCharacterSet" :class="structureCellClass">
+                        <td v-if="showCharacterSet" :class="[structureCellClass, structureColumnSelectionClass('collation')]">
                           <SearchableSelect
                             :model-value="columnCollation(column)"
                             :options="collationOptionsForCharset(columnCharset(column))"
@@ -5452,8 +6086,8 @@ watch(
                             @update:model-value="(v: string) => (column.collation = v)"
                           />
                         </td>
-                        <td v-if="showExtendedProperties" :class="structureCellClass">
-                          <div :class="structurePropertyListClass">
+                        <td v-if="showExtendedProperties" :class="[structureCellClass, structureColumnSelectionClass('extendedProperties')]">
+                          <div :class="structurePropertyListClass" data-structure-extended-properties>
                             <!-- Manticore Search: character data type properties -->
                             <template v-if="databaseType === 'manticoresearch'">
                               <template v-if="isManticoreTextColumn(column)">
@@ -5491,8 +6125,44 @@ watch(
                               </label>
                             </template>
                             <template v-else-if="structureDialect === 'mysql'">
+                              <label :class="[structurePropertyLabelClass, 'shrink-0 pr-1']" :title="t('structureEditor.virtual')">
+                                <input :checked="isMysqlGeneratedChecked(column)" type="checkbox" :class="[structureCheckboxClass, 'shrink-0']" @change="setMysqlGenerated(column, ($event.target as HTMLInputElement).checked)" />
+                                <span>{{ t("structureEditor.virtual") }}</span>
+                              </label>
+                              <Popover v-if="isMysqlGeneratedChecked(column)">
+                                <PopoverTrigger as-child>
+                                  <Button variant="ghost" size="icon" :class="[structureIconButtonClass, 'mr-1 shrink-0']" :title="t('structureEditor.generatedExpression')" :aria-label="t('structureEditor.generatedExpression')" data-mysql-generated-expression-trigger>
+                                    <SquareFunction :class="structureIconClass" />
+                                  </Button>
+                                </PopoverTrigger>
+                                <PopoverContent align="start" class="w-96 space-y-2 p-3">
+                                  <label class="block text-xs font-medium text-foreground">{{ t("structureEditor.generatedExpression") }}</label>
+                                  <Input
+                                    :model-value="column.extra.generated?.expression ?? ''"
+                                    class="w-full font-mono"
+                                    :placeholder="t('structureEditor.generatedExpressionPlaceholder')"
+                                    data-mysql-generated-expression
+                                    :aria-label="t('structureEditor.generatedExpression')"
+                                    @update:model-value="(v) => updateMysqlGeneratedExpression(column, String(v ?? ''))"
+                                  />
+                                  <p v-if="!isMysqlGeneratedActive(column)" class="text-xs text-destructive">{{ t("structureEditor.generatedExpressionEmptyHint") }}</p>
+                                  <div class="flex items-center gap-2">
+                                    <label class="text-xs text-muted-foreground">{{ t("structureEditor.generatedStorage") }}</label>
+                                    <Select :model-value="column.extra.generated?.storage ?? 'VIRTUAL'" @update:model-value="(v) => updateMysqlGeneratedStorage(column, String(v ?? 'VIRTUAL'))">
+                                      <SelectTrigger class="h-[var(--structure-control-height)] w-28 rounded-[6px] px-[var(--structure-control-px)] text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25">
+                                        <SelectValue />
+                                      </SelectTrigger>
+                                      <SelectContent>
+                                        <SelectItem value="VIRTUAL">{{ t("structureEditor.generatedStorageVirtual") }}</SelectItem>
+                                        <SelectItem value="STORED">{{ t("structureEditor.generatedStorageStored") }}</SelectItem>
+                                      </SelectContent>
+                                    </Select>
+                                  </div>
+                                  <p class="text-xs leading-5 text-muted-foreground">{{ t("structureEditor.generatedExpressionHint") }}</p>
+                                </PopoverContent>
+                              </Popover>
                               <label :class="[structurePropertyLabelClass, 'shrink-0 pr-1']" :title="t('structureEditor.autoIncrement')">
-                                <input :checked="column.extra.autoIncrement" type="checkbox" :class="[structureCheckboxClass, 'shrink-0']" @change="setMysqlAutoIncrement(column, ($event.target as HTMLInputElement).checked)" />
+                                <input :checked="column.extra.autoIncrement" type="checkbox" :class="[structureCheckboxClass, 'shrink-0']" :disabled="isMysqlGeneratedActive(column)" @change="setMysqlAutoIncrement(column, ($event.target as HTMLInputElement).checked)" />
                                 <span>{{ t("structureEditor.autoIncrement") }}</span>
                               </label>
                               <Popover v-if="isMysqlAutoIncrementCounterColumn(column)">
@@ -5529,9 +6199,9 @@ watch(
                                   <p class="text-xs leading-5 text-muted-foreground">{{ t("contextMenu.mysqlAutoIncrementNonemptyHint") }}</p>
                                 </PopoverContent>
                               </Popover>
-                              <label :class="[structurePropertyLabelClass, 'flex-1 basis-0']" :title="t('structureEditor.onUpdateCurrentTimestamp')">
-                                <input v-model="column.extra.onUpdateCurrentTimestamp" type="checkbox" :class="[structureCheckboxClass, 'shrink-0']" />
-                                <span class="min-w-0 truncate">{{ t("structureEditor.onUpdateCurrentTimestamp") }}</span>
+                              <label :class="[structurePropertyLabelClass, 'shrink-0']" :title="t('structureEditor.onUpdateCurrentTimestamp')">
+                                <input v-model="column.extra.onUpdateCurrentTimestamp" type="checkbox" :class="[structureCheckboxClass, 'shrink-0']" :disabled="isMysqlGeneratedActive(column)" />
+                                <span>{{ t("structureEditor.onUpdateCurrentTimestamp") }}</span>
                               </label>
                             </template>
                             <!-- Dameng: IDENTITY -->
@@ -5664,7 +6334,7 @@ watch(
                   <th
                     v-for="(label, i) in indexColLabels"
                     :key="i"
-                    :class="structureHeaderCellClass"
+                    :class="[structureHeaderCellClass, { 'text-center': i === 2 || i === 7 }]"
                     :style="{
                       width: indexColWidths[i] + 'px',
                       minWidth: indexColWidths[i] + 'px',
@@ -5677,62 +6347,76 @@ watch(
               </thead>
               <tbody>
                 <tr v-for="(index, rowIndex) in indexes" :key="index.id" :class="indexRowClass(index)" :data-new-index-row="!index.original ? 'true' : undefined" :data-index-row-index="rowIndex">
-                  <td :class="structureCellClass">
-                    <Input :model-value="index.name" :class="[structureControlClass, indexSearchFieldClass(index, index.name)]" :disabled="!canEditIndexDraft(index)" data-index-name-input @update:model-value="(value: string | number) => onIndexNameInput(index, value)" />
+                  <td :class="[structureCellClass, 'structure-index-name']">
+                    <div class="flex min-w-0 items-center gap-1">
+                      <KeyRound :class="[structureIconClass, 'structure-column-key-icon shrink-0']" :title="index.isPrimary ? 'PRIMARY' : index.isUnique ? 'UNIQUE' : index.indexType || 'INDEX'" />
+                      <Input
+                        :model-value="index.name"
+                        :class="[structureControlClass, 'flex-1', { 'disabled:opacity-100': index.isPrimary }, indexSearchFieldClass(index, index.name)]"
+                        :title="index.name"
+                        :disabled="!canEditIndexDraft(index)"
+                        data-index-name-input
+                        @update:model-value="(value: string | number) => onIndexNameInput(index, value)"
+                      />
+                      <LightTooltip v-if="!index.isPrimary" :text="t('structureEditor.regenerateIndexName')" side="top" nowrap>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          :class="[structureActionButtonClass, 'shrink-0']"
+                          :disabled="!canEditIndexDraft(index) || !index.columns.length"
+                          :aria-label="t('structureEditor.regenerateIndexName')"
+                          data-regenerate-index-name
+                          @click="regenerateIndexName(index)"
+                        >
+                          <RefreshCw :class="structureIconClass" />
+                        </Button>
+                      </LightTooltip>
+                    </div>
                   </td>
                   <td :class="[structureCellClass, 'overflow-hidden']">
-                    <DropdownMenu v-if="canEditIndexDraft(index)">
-                      <DropdownMenuTrigger as-child>
-                        <Button variant="outline" :class="[structureMonoControlClass, 'w-full justify-between']">
-                          <span class="truncate">{{ toColumnNames(index.columns) || t("structureEditor.indexColumnsPlaceholder") }}</span>
-                          <ChevronDown :class="[structureIconClass, 'ml-1 shrink-0 opacity-50']" />
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent class="max-h-56 min-w-44 overflow-y-auto" side="bottom" :side-offset="2" :avoid-collisions="false" @interactOutside="colSearch = ''">
-                        <div class="px-[var(--structure-cell-px)] pb-1 pt-0.5">
-                          <Input v-model="colSearch" :class="structureControlClass" :placeholder="t('grid.search')" @click.stop />
-                        </div>
-                        <DropdownMenuCheckboxItem v-for="col in filteredIndexColumnNames(index.columns)" :key="col" :checked="index.columns.includes(col)" :class="index.columns.includes(col) ? 'bg-primary/10' : ''" @select.prevent @click="toggleIndexColumn(index, col)">
-                          {{ col }}
-                        </DropdownMenuCheckboxItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
+                    <StructureIndexColumnPicker v-if="canEditIndexDraft(index)" :selected="index.columns" :options="indexColumnPickerOptions(index)" :placeholder="t('structureEditor.indexColumnsPlaceholder')" :trigger-class="structureMonoControlClass" @toggle="toggleIndexColumn(index, $event)">
+                      <template #type="{ column }">
+                        <span :class="[structureDataTypeToneClass(column.dataType), 'structure-data-type-option']">{{ column.dataType }}</span>
+                      </template>
+                    </StructureIndexColumnPicker>
                     <span v-else class="font-mono text-[length:var(--structure-font-size)] text-muted-foreground">{{ toColumnNames(index.columns) }}</span>
                   </td>
-                  <td :class="structureCellClass">
-                    <label class="flex items-center gap-1.5">
-                      <input v-model="index.isUnique" type="checkbox" :class="structureCheckboxClass" :disabled="!canEditIndexDraft(index)" />
-                      <span>{{ index.isUnique ? t("structureEditor.yes") : t("structureEditor.no") }}</span>
-                    </label>
+                  <td :class="[structureCellClass, 'text-center']">
+                    <input
+                      :checked="index.isUnique"
+                      type="checkbox"
+                      :class="structureCheckboxClass"
+                      :disabled="!canEditIndexDraft(index) || !!indexColumnsIssue(index, index.columns, index.indexType, true)"
+                      data-index-unique
+                      :aria-label="t('structureEditor.unique')"
+                      @change="onIndexUniqueChange(index, ($event.target as HTMLInputElement).checked)"
+                    />
                   </td>
                   <td :class="structureCellClass">
-                    <Select v-if="indexTypeOptions.length > 0" :model-value="index.indexType || 'BTREE'" :disabled="!canEditIndexDraft(index)" @update:model-value="(v: any) => (index.indexType = String(v ?? ''))">
+                    <Select v-if="indexTypeOptions.length > 0" :model-value="index.indexType || 'BTREE'" :disabled="!canEditIndexDraft(index)" data-index-type @update:model-value="(value: unknown) => onIndexTypeChange(index, value)">
                       <SelectTrigger class="structure-grid-control h-[var(--structure-control-height)] w-full rounded-[6px] px-[var(--structure-control-px)] font-mono text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem v-for="opt in indexTypeOptions" :key="opt" :value="opt">{{ opt }}</SelectItem>
+                        <SelectItem v-for="opt in indexTypeOptions" :key="opt" :value="opt" :disabled="!!indexColumnsIssue(index, index.columns, opt, false)">{{ opt }}</SelectItem>
                       </SelectContent>
                     </Select>
-                    <Input v-else v-model="index.indexType" :class="structureMonoControlClass" placeholder="BTREE" :disabled="!canEditIndexDraft(index) || !structureCapabilities.indexType" />
+                    <Input v-else :model-value="index.indexType" :class="structureMonoControlClass" placeholder="BTREE" :disabled="!canEditIndexDraft(index) || !structureCapabilities.indexType" @update:model-value="(value: unknown) => onIndexTypeChange(index, value)" />
                   </td>
                   <td :class="[structureCellClass, 'overflow-hidden']">
-                    <DropdownMenu v-if="canEditIndexDraft(index) && structureCapabilities.indexInclude">
-                      <DropdownMenuTrigger as-child>
-                        <Button variant="outline" :class="[structureMonoControlClass, 'w-full justify-between']">
-                          <span class="truncate">{{ index.includedColumns.join(", ") || t("structureEditor.includedColumnsPlaceholder") }}</span>
-                          <ChevronDown :class="[structureIconClass, 'ml-1 shrink-0 opacity-50']" />
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent class="max-h-56 min-w-44 overflow-y-auto" side="bottom" :side-offset="2" :avoid-collisions="false" @interactOutside="colSearch = ''">
-                        <div class="px-[var(--structure-cell-px)] pb-1 pt-0.5">
-                          <Input v-model="colSearch" :class="structureControlClass" :placeholder="t('grid.search')" @click.stop />
-                        </div>
-                        <DropdownMenuCheckboxItem v-for="col in filteredIndexColumnNames(index.includedColumns)" :key="col" :checked="index.includedColumns.includes(col)" :class="index.includedColumns.includes(col) ? 'bg-primary/10' : ''" @select.prevent @click="toggleIncludedColumn(index, col)">
-                          {{ col }}
-                        </DropdownMenuCheckboxItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
+                    <StructureIndexColumnPicker
+                      v-if="canEditIndexDraft(index) && structureCapabilities.indexInclude"
+                      :selected="index.includedColumns"
+                      :options="indexColumnPickerOptions(index, true)"
+                      :placeholder="t('structureEditor.includedColumnsPlaceholder')"
+                      :trigger-class="structureMonoControlClass"
+                      @toggle="toggleIncludedColumn(index, $event)"
+                    >
+                      <template #type="{ column }">
+                        <span :class="[structureDataTypeToneClass(column.dataType), 'structure-data-type-option']">{{ column.dataType }}</span>
+                      </template>
+                    </StructureIndexColumnPicker>
                     <span v-else class="text-[length:var(--structure-font-size)] text-muted-foreground">{{ index.includedColumns.join(", ") }}</span>
                   </td>
                   <td :class="structureCellClass">
@@ -5741,10 +6425,9 @@ watch(
                   <td :class="structureCellClass">
                     <Input v-model="index.comment" :class="[structureControlClass, indexSearchFieldClass(index, index.comment)]" :disabled="!canEditIndexComment(index)" />
                   </td>
-                  <td :class="structureCellClass">
-                    <label v-if="structureCapabilities.indexConcurrent" class="flex items-center gap-1.5" :title="concurrentIndexCellTitle(index)">
-                      <input v-model="index.concurrently" type="checkbox" :class="structureCheckboxClass" :disabled="!canEditIndexConcurrent(index)" />
-                      <span>{{ index.concurrently ? t("structureEditor.yes") : t("structureEditor.no") }}</span>
+                  <td :class="[structureCellClass, 'text-center']">
+                    <label v-if="structureCapabilities.indexConcurrent" class="inline-flex items-center justify-center" :title="concurrentIndexCellTitle(index)">
+                      <input v-model="index.concurrently" type="checkbox" :class="structureCheckboxClass" :disabled="!canEditIndexConcurrent(index)" :aria-label="t('structureEditor.concurrent')" />
                     </label>
                     <span v-else class="text-[length:var(--structure-font-size)] text-muted-foreground">—</span>
                   </td>
@@ -6377,6 +7060,15 @@ watch(
 </template>
 
 <style scoped>
+.structure-grid-column-selected {
+  background-color: color-mix(in oklab, var(--primary) 14%, transparent) !important;
+}
+
+.structure-grid-column-selected :deep(input),
+.structure-grid-column-selected :deep(button) {
+  background-color: color-mix(in oklab, var(--primary) 10%, var(--background)) !important;
+}
+
 .structure-ddl-editor :deep(.cm-editor) {
   min-height: 100%;
   background: transparent;
@@ -6617,6 +7309,161 @@ watch(
   border-color: transparent;
   background-color: transparent;
   box-shadow: none;
+}
+
+.structure-column-primary-key,
+.structure-index-primary-key {
+  --structure-key-color: #d97706;
+}
+
+.structure-column-unique-key,
+.structure-index-unique-key {
+  --structure-key-color: #dc2626;
+}
+
+.structure-column-index-key,
+.structure-index-normal-key {
+  --structure-key-color: #15803d;
+}
+
+.structure-column-fulltext-key,
+.structure-index-fulltext-key {
+  --structure-key-color: #9333ea;
+}
+
+.structure-column-spatial-key,
+.structure-index-spatial-key {
+  --structure-key-color: #0e7490;
+}
+
+.structure-column-key-icon {
+  color: var(--structure-key-color);
+}
+
+.structure-column-primary-key > td:first-child,
+.structure-column-unique-key > td:first-child,
+.structure-column-index-key > td:first-child,
+.structure-column-fulltext-key > td:first-child,
+.structure-column-spatial-key > td:first-child {
+  box-shadow: inset 3px 0 0 var(--structure-key-color);
+}
+
+.structure-column-primary-key > td:nth-child(2) :deep(.structure-grid-control),
+.structure-column-unique-key > td:nth-child(2) :deep(.structure-grid-control),
+.structure-column-index-key > td:nth-child(2) :deep(.structure-grid-control),
+.structure-column-fulltext-key > td:nth-child(2) :deep(.structure-grid-control),
+.structure-column-spatial-key > td:nth-child(2) :deep(.structure-grid-control),
+.structure-index-name :deep(.structure-grid-control) {
+  color: var(--structure-key-color);
+  font-weight: 600;
+}
+
+.structure-column-data-type,
+.structure-column-default-value,
+.structure-data-type-option {
+  --structure-type-color: var(--muted-foreground);
+}
+
+.structure-data-type-option {
+  color: var(--structure-type-color);
+  font-weight: 500;
+}
+
+.structure-data-type-numeric,
+.structure-data-type-boolean {
+  --structure-type-color: #2563eb;
+}
+
+.structure-data-type-real {
+  --structure-type-color: #6366d1;
+}
+
+.structure-data-type-text,
+.structure-data-type-json {
+  --structure-type-color: #15803d;
+}
+
+.structure-data-type-temporal {
+  --structure-type-color: #b45309;
+}
+
+.structure-data-type-binary {
+  --structure-type-color: #9333b8;
+}
+
+.structure-data-type-enum,
+.structure-data-type-other {
+  --structure-type-color: #737323;
+}
+
+.structure-data-type-spatial {
+  --structure-type-color: #0e7490;
+}
+
+.structure-data-type-null {
+  --structure-type-color: var(--muted-foreground);
+}
+
+.dark .structure-column-primary-key,
+.dark .structure-index-primary-key {
+  --structure-key-color: #fbbf24;
+}
+
+.dark .structure-column-unique-key,
+.dark .structure-index-unique-key {
+  --structure-key-color: #f87171;
+}
+
+.dark .structure-column-index-key,
+.dark .structure-index-normal-key {
+  --structure-key-color: #86efac;
+}
+
+.dark .structure-column-fulltext-key,
+.dark .structure-index-fulltext-key {
+  --structure-key-color: #d8b4fe;
+}
+
+.dark .structure-column-spatial-key,
+.dark .structure-index-spatial-key {
+  --structure-key-color: #67e8f9;
+}
+
+.dark .structure-data-type-numeric,
+.dark .structure-data-type-boolean {
+  --structure-type-color: #93c5fd;
+}
+
+.dark .structure-data-type-real {
+  --structure-type-color: #a5b4fc;
+}
+
+.dark .structure-data-type-text,
+.dark .structure-data-type-json {
+  --structure-type-color: #86efac;
+}
+
+.dark .structure-data-type-temporal {
+  --structure-type-color: #fcd34d;
+}
+
+.dark .structure-data-type-binary {
+  --structure-type-color: #d8b4fe;
+}
+
+.dark .structure-data-type-enum,
+.dark .structure-data-type-other {
+  --structure-type-color: #d4d486;
+}
+
+.dark .structure-data-type-spatial {
+  --structure-type-color: #67e8f9;
+}
+
+.structure-column-data-type :deep(.structure-grid-control),
+.structure-column-default-value :deep(.structure-grid-control) {
+  color: var(--structure-type-color);
+  font-weight: 500;
 }
 
 /* --primary is rgb/oklch; use color-mix like DataGrid, not channel-based hsl wrappers. */

@@ -43,12 +43,13 @@ pub use identifiers::{
     transfer_column_identifier,
 };
 pub use table_select::{
-    build_count_table_sql, build_table_data_select_sql, build_table_data_select_sql_with_database,
-    build_table_select_sql, DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX,
+    build_count_table_sql, build_iris_table_select_sql, build_table_data_select_sql,
+    build_table_data_select_sql_with_database, build_table_select_sql, DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX,
 };
 pub use table_select::{
-    database_qualified_table_name, quote_table_data_identifier, table_data_qualified_table_name, table_data_schema,
-    uses_connection_identifier_quote,
+    database_qualified_table_name, neo4j_element_id_function, quote_table_data_identifier,
+    table_data_qualified_table_name, table_data_schema, uses_connection_identifier_quote,
+    NEO4J_LEGACY_ELEMENT_ID_FUNCTION,
 };
 pub use type_rewrite::{
     apply_auto_inc_to_column_def, column_is_auto_increment, normalize_len_params, rewrite_column_type,

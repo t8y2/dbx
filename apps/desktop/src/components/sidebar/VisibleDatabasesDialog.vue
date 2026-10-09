@@ -7,6 +7,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Input } from "@/components/ui/input";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, databaseNameMatchesVisiblePatterns, filterDatabaseNamesForVisiblePicker, filterSchemaNamesForVisiblePicker, normalizeVisibleDatabaseSelection, parseVisibleDatabasePatternsInput } from "@/lib/database/visibleDatabases";
+import { resolveVisibleDatabaseSaveAction } from "./visibleDatabasesDialogState";
 import * as api from "@/lib/backend/api";
 
 const props = defineProps<{
@@ -159,8 +160,27 @@ async function saveSelection() {
   if (!canSaveSelection.value) return;
   if (isSchemaFilterMode.value) {
     await connectionStore.setVisibleSchemas(props.connectionId, databaseKey.value, normalizeVisibleDatabaseSelection([...selectedNames.value], objectNames.value));
+    emit("update:open", false);
+    return;
+  }
+  // 勾选等于"默认可见库"且没有通配符时等价于不筛选：不能存成当时的库名快照，
+  // 否则之后新建的库永远不会出现在侧边栏（用户视角就是"库丢了"）。
+  const action = resolveVisibleDatabaseSaveAction({
+    selection: selectedNames.value,
+    allNames: objectNames.value,
+    defaultVisibleNames: defaultObjectNames.value,
+    configured: connection.value?.visible_databases,
+    configuredPatterns: connection.value?.visible_database_patterns,
+    patterns: parsedPatterns.value,
+  });
+  if (action.type === "none") {
+    emit("update:open", false);
+    return;
+  }
+  if (action.type === "clear") {
+    await connectionStore.clearVisibleDatabases(props.connectionId);
   } else {
-    await connectionStore.setVisibleDatabaseFilter(props.connectionId, [...selectedNames.value], parsedPatterns.value);
+    await connectionStore.setVisibleDatabaseFilter(props.connectionId, action.databaseNames, action.patterns);
   }
   emit("update:open", false);
 }

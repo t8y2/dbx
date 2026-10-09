@@ -27,6 +27,7 @@ import {
 } from "@/lib/app/appTheme";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { persistAppAppearancePatch } from "@/lib/app/appAppearance";
 
 function isLinuxTauriRuntime() {
   return isTauriRuntime() && typeof navigator !== "undefined" && /linux/i.test(navigator.userAgent);
@@ -169,6 +170,7 @@ function applyTheme() {
 function setThemeMode(mode: AppThemeMode) {
   themeMode.value = mode;
   safeLocalStorageSet(APP_THEME_STORAGE_KEY, mode);
+  persistAppAppearancePatch({ themeMode: mode });
   applyTheme();
 }
 
@@ -176,6 +178,7 @@ function setThemePalette(palette: AppThemePalette) {
   savedThemePaletteValue.value = palette;
   previewedThemePalette.value = null;
   safeLocalStorageSet(APP_THEME_PALETTE_STORAGE_KEY, palette);
+  persistAppAppearancePatch({ themePalette: palette });
   applyTheme();
 }
 
@@ -225,6 +228,7 @@ function setCustomUiColors(colors: AppCustomUiColors) {
     customUiColors.value = next;
     safeLocalStorageSet(APP_CUSTOM_UI_STORAGE_KEY, JSON.stringify(next));
   }
+  persistAppAppearancePatch({ [isDark.value ? "customUiColorsDark" : "customUiColors"]: next });
   applyCustomUiColors();
 }
 
@@ -235,6 +239,7 @@ function resetCustomUiColors() {
 function setCornerStyle(style: AppCornerStyle) {
   cornerStyle.value = normalizeAppCornerStyle(style);
   safeLocalStorageSet(APP_CORNER_STYLE_STORAGE_KEY, cornerStyle.value);
+  persistAppAppearancePatch({ cornerStyle: cornerStyle.value });
   applyTheme();
 }
 

@@ -102,12 +102,31 @@ describe("tableStructureCapabilities", () => {
       addPrimaryKey: true,
       alterPrimaryKey: false,
     });
+    expect(getTableStructureCapabilities("sqlserver", "sqlserver")).toMatchObject({
+      addPrimaryKey: true,
+      alterPrimaryKey: true,
+    });
     for (const databaseType of ["oceanbase-oracle", "iris"] as const) {
       expect(getTableStructureCapabilities(databaseType, databaseType)).toMatchObject({
         addPrimaryKey: false,
         alterPrimaryKey: false,
       });
     }
+  });
+
+  it("enables only the verified Inceptor column structure operations", () => {
+    expect(getTableStructureCapabilities("transwarp", "transwarp")).toMatchObject({
+      dialect: "mysql",
+      alterStrategy: "direct",
+      createTable: true,
+      addColumn: true,
+      dropColumn: false,
+      renameColumn: true,
+      alterExistingColumn: true,
+      comment: true,
+      createIndex: false,
+      foreignKey: false,
+    });
   });
 
   it("uses local-only column reordering for editable databases without physical reorder support", () => {

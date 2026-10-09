@@ -279,6 +279,12 @@ fn build_create_database_statement(options: &CreateDatabaseSqlOptions) -> Result
     if !supports_create_database_target(options.database_type, options.driver_profile.as_deref()) {
         return Err(format!("Creating databases is not supported for {}.", database_label(options.database_type)));
     }
+    if options.database_type == Some(DatabaseType::Transwarp) {
+        return Ok(format!(
+            "CREATE DATABASE IF NOT EXISTS {};",
+            quote_table_identifier(options.database_type, &options.name)
+        ));
+    }
     if is_informix_family(options.database_type, options.driver_profile.as_deref()) {
         // Informix / GBase 8s accept only a bare `CREATE DATABASE <name>`. The new database
         // inherits the instance default locale, and the MySQL `CHARACTER SET`/`COLLATE`
@@ -347,6 +353,7 @@ pub fn supports_create_database_target(database_type: Option<DatabaseType>, driv
                 | DatabaseType::Highgo
                 | DatabaseType::Kingbase
                 | DatabaseType::Yashandb
+                | DatabaseType::Transwarp
         )
     )
 }
@@ -691,7 +698,11 @@ fn supports_truncate_table_cascade(database_type: Option<DatabaseType>) -> bool 
 }
 
 pub fn build_drop_database_sql(options: DatabaseNameSqlOptions) -> String {
-    format!("DROP DATABASE {};", quote_table_identifier(options.database_type, &options.name))
+    let name = quote_table_identifier(options.database_type, &options.name);
+    if options.database_type == Some(DatabaseType::Transwarp) {
+        return format!("DROP DATABASE IF EXISTS {name};");
+    }
+    format!("DROP DATABASE {name};")
 }
 
 pub fn build_update_database_properties_sql(options: DatabasePropertyEditSqlOptions) -> Result<String, String> {
@@ -830,6 +841,30 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
         }));
     }
 
+    // SELECT INTO does not copy MS_Description extended properties. The
+    // target is newly created, so add each supplied comment without updating
+    // or deleting any pre-existing object's properties.
+    if options.database_type == Some(DatabaseType::SqlServer) {
+        if let Some(comment) = options.table_comment.as_deref().filter(|comment| !comment.trim().is_empty()) {
+            comment_sql.push(sqlserver_clone_comment_sql(
+                options.schema.as_deref(),
+                &options.target_name,
+                None,
+                comment,
+            ));
+        }
+        for column in &options.column_comments {
+            if !column.comment.trim().is_empty() {
+                comment_sql.push(sqlserver_clone_comment_sql(
+                    options.schema.as_deref(),
+                    &options.target_name,
+                    Some(&column.name),
+                    &column.comment,
+                ));
+            }
+        }
+    }
+
     // `SELECT ... INTO` copies the IDENTITY property but not constraints, so the cloned table
     // would silently lose its primary key (t8y2/dbx#8931). Recreate it from the source metadata.
     let mut constraint_sql = Vec::new();
@@ -855,6 +890,19 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
         return structure_sql;
     }
     format!("{};\n{};", structure_sql.trim_end_matches(';'), trailing_sql.join(";\n"))
+}
+
+fn sqlserver_clone_comment_sql(schema: Option<&str>, table: &str, column: Option<&str>, comment: &str) -> String {
+    let schema = schema.filter(|value| !value.trim().is_empty()).unwrap_or("dbo").replace('\'', "''");
+    let table = table.replace('\'', "''");
+    let comment = comment.replace('\'', "''");
+    let mut sql = format!(
+        "EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'{comment}', @level0type=N'SCHEMA', @level0name=N'{schema}', @level1type=N'TABLE', @level1name=N'{table}'"
+    );
+    if let Some(column) = column {
+        sql.push_str(&format!(", @level2type=N'COLUMN', @level2name=N'{}'", column.replace('\'', "''")));
+    }
+    sql
 }
 
 pub fn build_copy_table_data_sql(options: CopyTableDataSqlOptions) -> String {
@@ -921,6 +969,9 @@ pub fn supports_object_rename(database_type: Option<DatabaseType>, object_type: 
     if database_type == DatabaseType::SqlServer {
         return true;
     }
+    if matches!(database_type, DatabaseType::Transwarp | DatabaseType::StarRocks) {
+        return object_type == DatabaseObjectType::Table;
+    }
     if matches!(object_type, DatabaseObjectType::Procedure | DatabaseObjectType::Function) {
         return false;
     }
@@ -961,6 +1012,22 @@ pub fn build_rename_object_sql(options: RenameObjectSqlOptions) -> Result<String
             "EXEC sp_rename {}, {}, N'OBJECT';",
             sqlserver_string(&sqlserver_object_name(options.schema.as_deref(), &options.old_name)),
             sqlserver_string(&options.new_name)
+        ));
+    }
+
+    if database_type == Some(DatabaseType::StarRocks) {
+        return Ok(format!(
+            "ALTER TABLE {} RENAME {};",
+            qualified_name(database_type, options.schema.as_deref(), &options.old_name),
+            quote_rename_identifier(database_type, &options.new_name)
+        ));
+    }
+
+    if database_type == Some(DatabaseType::Transwarp) {
+        return Ok(format!(
+            "ALTER TABLE {} RENAME TO {};",
+            qualified_name(database_type, options.schema.as_deref(), &options.old_name),
+            qualified_name(database_type, options.schema.as_deref(), &options.new_name)
         ));
     }
 
@@ -1539,6 +1606,50 @@ mod tests {
         assert!(!supports_create_database_target(Some(DatabaseType::Gbase), Some("gbase8a")));
         assert!(!supports_create_database_target(Some(DatabaseType::Gbase), None));
         assert!(supports_create_database_target(Some(DatabaseType::Informix), None));
+        assert!(supports_create_database_target(Some(DatabaseType::Transwarp), Some("transwarp-inceptor")));
+    }
+
+    #[test]
+    fn transwarp_database_actions_match_waterdrop_ddl() {
+        assert!(!supports_create_schema_target(Some(DatabaseType::Transwarp)));
+        assert_eq!(
+            build_create_database_sql(CreateDatabaseSqlOptions {
+                database_type: Some(DatabaseType::Transwarp),
+                driver_profile: Some("transwarp-inceptor".to_string()),
+                target: None,
+                parent: None,
+                name: "analytics db".to_string(),
+                charset: None,
+                collation: None,
+            })
+            .unwrap(),
+            "CREATE DATABASE IF NOT EXISTS `analytics db`;"
+        );
+        assert_eq!(
+            build_drop_database_sql(DatabaseNameSqlOptions {
+                database_type: Some(DatabaseType::Transwarp),
+                name: "analytics db".to_string(),
+            }),
+            "DROP DATABASE IF EXISTS `analytics db`;"
+        );
+    }
+
+    #[test]
+    fn transwarp_table_rename_matches_waterdrop_ddl() {
+        assert!(supports_object_rename(Some(DatabaseType::Transwarp), DatabaseObjectType::Table));
+        assert!(!supports_object_rename(Some(DatabaseType::Transwarp), DatabaseObjectType::View));
+        assert!(!supports_database_rename(Some(DatabaseType::Transwarp)));
+        assert_eq!(
+            build_rename_object_sql(RenameObjectSqlOptions {
+                database_type: Some(DatabaseType::Transwarp),
+                object_type: DatabaseObjectType::Table,
+                schema: Some("analytics".to_string()),
+                old_name: "old table".to_string(),
+                new_name: "new table".to_string(),
+            })
+            .unwrap(),
+            "ALTER TABLE `analytics`.`old table` RENAME TO `analytics`.`new table`;"
+        );
     }
 
     #[test]
@@ -2279,6 +2390,57 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_clone_preserves_unicode_comments_with_quoted_object_names() {
+        let sql = build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            schema: Some("业务]".to_string()),
+            source_name: "source".to_string(),
+            target_name: "副本]".to_string(),
+            table_comment: Some("  表 O'Brien;\n注释  ".to_string()),
+            column_comments: vec![
+                DuplicateTableColumnComment {
+                    name: "value' field]".to_string(),
+                    comment: "  字段 O'Brien  ".to_string(),
+                },
+                DuplicateTableColumnComment { name: "empty".to_string(), comment: " \t\n ".to_string() },
+            ],
+            primary_key_columns: vec!["id".to_string()],
+            primary_key_constraint_name: Some("PK_copy".to_string()),
+            identifier_quote: None,
+        });
+        let statements = crate::sql::split_sql_statements_for_database(&sql, DatabaseType::SqlServer);
+        assert_eq!(statements.len(), 4);
+        assert_eq!(statements[0], "SELECT TOP 0 * INTO [业务]]].[副本]]] FROM [业务]]].[source]");
+        assert!(statements[1].contains("PRIMARY KEY ([id])"));
+        assert!(statements[2].contains("@value=N'  表 O''Brien;\n注释  '"));
+        assert!(statements[2].contains("@level0name=N'业务]'"));
+        assert!(statements[2].contains("@level1name=N'副本]'"));
+        assert!(statements[3].contains("@level2name=N'value'' field]'"));
+        assert!(statements[3].contains("@value=N'  字段 O''Brien  '"));
+        assert!(statements[2..].iter().all(|statement| statement.starts_with("EXEC sys.sp_addextendedproperty")));
+    }
+
+    #[test]
+    fn sqlserver_clone_column_only_comments_use_default_schema() {
+        let sql = build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            schema: None,
+            source_name: "source".to_string(),
+            target_name: "copy".to_string(),
+            table_comment: None,
+            column_comments: vec![DuplicateTableColumnComment {
+                name: "id".to_string(), comment: "编号".to_string()
+            }],
+            primary_key_columns: vec![],
+            primary_key_constraint_name: None,
+            identifier_quote: None,
+        });
+        assert_eq!(crate::sql::split_sql_statements_for_database(&sql, DatabaseType::SqlServer).len(), 2);
+        assert!(sql.contains("@level0name=N'dbo'"));
+        assert!(sql.contains("@level2name=N'id'"));
+    }
+
+    #[test]
     fn duplicate_table_structure_vastbase_preserves_table_and_column_comments() {
         let sql = build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
             database_type: Some(DatabaseType::Vastbase),
@@ -2938,7 +3100,9 @@ mod tests {
                 table_comment: None,
                 original_table_comment: None,
                 mysql_engine: None,
+                transwarp_create: None,
                 partitioned: false,
+                foreign_table: false,
                 is_gaussdb_m_mode: false,
                 table_collation: None,
             });
@@ -2964,6 +3128,45 @@ mod tests {
             copy,
             "INSERT INTO \"APP\".orders_copy (user_id, userName) SELECT \"user_id\", \"userName\" FROM \"APP\".\"orders\";"
         );
+    }
+
+    #[test]
+    fn builds_starrocks_table_rename_sql() {
+        let database_type = Some(DatabaseType::StarRocks);
+        assert!(supports_object_rename(database_type, DatabaseObjectType::Table));
+        for (old_name, new_name, expected) in [
+            ("users", "app_users", "ALTER TABLE `users` RENAME `app_users`;"),
+            ("user`name", "new`name", "ALTER TABLE `user``name` RENAME `new``name`;"),
+        ] {
+            assert_eq!(
+                build_rename_object_sql(RenameObjectSqlOptions {
+                    database_type,
+                    object_type: DatabaseObjectType::Table,
+                    schema: None,
+                    old_name: old_name.to_string(),
+                    new_name: new_name.to_string(),
+                })
+                .unwrap(),
+                expected
+            );
+        }
+        for object_type in [
+            DatabaseObjectType::View,
+            DatabaseObjectType::MaterializedView,
+            DatabaseObjectType::Procedure,
+            DatabaseObjectType::Function,
+            DatabaseObjectType::Event,
+        ] {
+            assert!(!supports_object_rename(database_type, object_type));
+            assert!(build_rename_object_sql(RenameObjectSqlOptions {
+                database_type,
+                object_type,
+                schema: None,
+                old_name: "old_name".to_string(),
+                new_name: "new_name".to_string(),
+            })
+            .is_err());
+        }
     }
 
     #[test]

@@ -4,6 +4,7 @@ import type { HTMLAttributes } from "vue";
 import { reactiveOmit } from "@vueuse/core";
 import { PopoverContent, PopoverPortal, useForwardPropsEmits } from "reka-ui";
 import { cn } from "@/lib/common/utils";
+import { useFloatingLayerOrder } from "@/components/ui/dialog/useDialogLayerOrder";
 
 defineOptions({
   inheritAttrs: false,
@@ -18,16 +19,18 @@ const emits = defineEmits<PopoverContentEmits>();
 const delegatedProps = reactiveOmit(props, "class");
 
 const forwarded = useForwardPropsEmits(delegatedProps, emits);
+const { forwardRef } = useFloatingLayerOrder();
 </script>
 
 <template>
   <PopoverPortal>
     <PopoverContent
+      :ref="forwardRef"
       data-slot="popover-content"
       v-bind="{ ...$attrs, ...forwarded }"
       :class="
         cn(
-          'bg-popover text-popover-foreground data-open:animate-in data-closed:animate-out data-closed:fade-out-0 data-open:fade-in-0 data-closed:zoom-out-95 data-open:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 ring-foreground/10 flex flex-col gap-2.5 rounded-md p-2.5 text-sm shadow-md ring-1 duration-100 z-50 w-72 origin-(--reka-popover-content-transform-origin) outline-hidden',
+          'bg-popover text-popover-foreground data-open:animate-in data-closed:animate-out data-closed:fade-out-0 data-open:fade-in-0 data-closed:zoom-out-95 data-open:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 ring-foreground/10 flex flex-col gap-2.5 rounded-md p-2.5 text-sm shadow-md ring-1 duration-100 z-(--dbx-floating-layer-z-index) w-72 origin-(--reka-popover-content-transform-origin) outline-hidden',
           props.class,
         )
       "

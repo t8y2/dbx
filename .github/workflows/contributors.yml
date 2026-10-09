@@ -49,4 +49,14 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add docs/data/contributors.json
           git commit -m "chore(docs): refresh contributor activity"
-          git push
+          # 抓取快照要跑十几分钟，期间 main 被其它合并推进时直推会被拒（fetch first）。
+          # 先 rebase 到最新 main 再重试，避免每天定时任务留下一个红 run。
+          for attempt in 1 2 3 4 5; do
+            if git push; then
+              exit 0
+            fi
+            echo "::warning::push attempt ${attempt} was rejected; rebasing onto origin/main"
+            git pull --rebase origin main
+          done
+          echo "::error::Unable to push the refreshed contributor snapshot after 5 attempts."
+          exit 1

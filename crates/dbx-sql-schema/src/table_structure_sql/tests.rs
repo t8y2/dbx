@@ -62,7 +62,9 @@ fn structure_change_options(
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     }
@@ -77,6 +79,132 @@ fn mysql_table_engine_change_generates_alter_table() {
 
     assert!(result.warnings.is_empty());
     assert_eq!(result.statements, vec!["ALTER TABLE `remote_orders` ENGINE = FEDERATED;"]);
+}
+
+#[test]
+fn transwarp_table_comments_use_inceptor_syntax() {
+    let mut options =
+        structure_change_options(DatabaseType::Transwarp, Some("analytics"), "users", vec![column("name")]);
+    options.table_comment = Some("Owner's table".to_string());
+    let created = build_create_table_sql(options.clone());
+    assert!(created.warnings.is_empty(), "{:?}", created.warnings);
+    assert!(created.statements[0].ends_with("COMMENT 'Owner''s table';"));
+    options.columns.clear();
+    options.original_table_comment = Some("old".to_string());
+    let changed = build_table_structure_change_sql(options);
+    assert!(changed.warnings.is_empty(), "{:?}", changed.warnings);
+    assert_eq!(changed.statements, vec!["ALTER TABLE `users` SET TBLPROPERTIES ('comment' = 'Owner''s table');"]);
+}
+
+#[test]
+fn transwarp_create_table_supports_partition_bucket_storage_and_transactions() {
+    let mut options = structure_change_options(
+        DatabaseType::Transwarp,
+        Some("analytics"),
+        "events",
+        vec![column("id"), column("day")],
+    );
+    options.table_comment = Some("Daily events".to_string());
+    options.transwarp_create = Some(super::types::TranswarpCreateTableOptions {
+        partition_columns: vec!["day".to_string()],
+        bucket_columns: vec!["id".to_string()],
+        bucket_count: Some(2),
+        storage_format: Some("ORC".to_string()),
+        transactional: true,
+    });
+    let result = build_create_table_sql(options);
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    let sql = &result.statements[0];
+    assert!(sql.contains("COMMENT 'Daily events' PARTITIONED BY (`day`"), "{sql}");
+    assert!(
+        sql.contains("CLUSTERED BY (`id`) INTO 2 BUCKETS STORED AS ORC TBLPROPERTIES ('transactional'='true');"),
+        "{sql}"
+    );
+}
+
+#[test]
+fn transwarp_create_table_rejects_invalid_transaction_options() {
+    let mut options =
+        structure_change_options(DatabaseType::Transwarp, Some("analytics"), "events", vec![column("id")]);
+    options.transwarp_create = Some(super::types::TranswarpCreateTableOptions {
+        transactional: true,
+        storage_format: Some("PARQUET".to_string()),
+        ..Default::default()
+    });
+    let result = build_create_table_sql(options);
+    assert!(result.statements.is_empty());
+    assert!(result.warnings.iter().any(|warning| warning.contains("ORC")));
+}
+
+#[test]
+fn transwarp_uses_verified_mysql_style_column_ddl_without_constraints() {
+    let mut original = column("name");
+    original.data_type = "varchar(64)".to_string();
+    original.is_nullable = true;
+    original.original = Some(ColumnInfo {
+        name: "name".to_string(),
+        data_type: "varchar(64)".to_string(),
+        is_nullable: true,
+        ..Default::default()
+    });
+    let mut renamed = original.clone();
+    renamed.name = "display_name".to_string();
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Transwarp,
+        Some("analytics"),
+        "users",
+        vec![renamed],
+    ));
+
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    assert_eq!(result.statements, vec!["ALTER TABLE `users` CHANGE `name` `display_name` varchar(64);"]);
+}
+
+#[test]
+fn transwarp_adds_and_modifies_columns_with_live_verified_syntax() {
+    let added = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Transwarp,
+        Some("analytics"),
+        "users",
+        vec![column("note")],
+    ));
+    assert!(added.warnings.is_empty(), "{:?}", added.warnings);
+    assert_eq!(added.statements, vec!["ALTER TABLE `users` ADD COLUMNS (`note` varchar(255));"]);
+
+    let mut changed = column("note");
+    changed.data_type = "varchar(40)".to_string();
+    changed.original = Some(ColumnInfo {
+        name: "note".to_string(),
+        data_type: "varchar(255)".to_string(),
+        is_nullable: true,
+        ..Default::default()
+    });
+    let modified = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Transwarp,
+        Some("analytics"),
+        "users",
+        vec![changed],
+    ));
+    assert!(modified.warnings.is_empty(), "{:?}", modified.warnings);
+    assert_eq!(modified.statements, vec!["ALTER TABLE `users` CHANGE `note` `note` varchar(40);"]);
+
+    let mut dropped = column("note");
+    dropped.original = Some(ColumnInfo {
+        name: "note".to_string(),
+        data_type: "varchar(40)".to_string(),
+        is_nullable: true,
+        ..Default::default()
+    });
+    dropped.marked_for_drop = true;
+    let unsupported = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Transwarp,
+        Some("analytics"),
+        "users",
+        vec![dropped],
+    ));
+    assert!(unsupported.statements.is_empty());
+    assert!(unsupported.warnings.iter().any(|warning| warning.contains("Dropping columns is not supported")));
 }
 
 #[test]
@@ -224,7 +352,9 @@ fn index_change_options(
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     }
@@ -306,7 +436,9 @@ fn builds_mysql_column_and_index_changes() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -668,7 +800,9 @@ fn builds_xugu_type_change_with_native_syntax() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -785,6 +919,53 @@ fn builds_postgres_type_change_that_drops_default() {
 }
 
 #[test]
+fn builds_postgres_timestamp_precision_changes_without_losing_timezone_semantics() {
+    let mut with_timezone = column("with_timezone");
+    with_timezone.data_type = "timestamp(3) with time zone".to_string();
+    with_timezone.original = Some(ColumnInfo {
+        name: "with_timezone".to_string(),
+        data_type: "timestamp(6) with time zone".to_string(),
+        is_nullable: true,
+        ..Default::default()
+    });
+    let with_timezone_result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        driver_profile: None,
+        schema: Some("public".to_string()),
+        table_name: "events".to_string(),
+        column: with_timezone,
+    });
+    assert_eq!(
+        with_timezone_result.statements,
+        vec![
+            r#"ALTER TABLE "public"."events" ALTER COLUMN "with_timezone" TYPE timestamp(3) with time zone USING "with_timezone"::timestamp(3) with time zone;"#
+        ]
+    );
+
+    let mut without_timezone = column("without_timezone");
+    without_timezone.data_type = "timestamp(3) without time zone".to_string();
+    without_timezone.original = Some(ColumnInfo {
+        name: "without_timezone".to_string(),
+        data_type: "timestamp(6) without time zone".to_string(),
+        is_nullable: true,
+        ..Default::default()
+    });
+    let without_timezone_result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        driver_profile: None,
+        schema: Some("public".to_string()),
+        table_name: "events".to_string(),
+        column: without_timezone,
+    });
+    assert_eq!(
+        without_timezone_result.statements,
+        vec![
+            r#"ALTER TABLE "public"."events" ALTER COLUMN "without_timezone" TYPE timestamp(3) without time zone USING "without_timezone"::timestamp(3) without time zone;"#
+        ]
+    );
+}
+
+#[test]
 fn builds_xugu_timezone_temporal_precision_in_final_ddl() {
     let mut local_time = column("local_time");
     local_time.data_type = "TIME(3) WITH TIME ZONE".to_string();
@@ -887,7 +1068,9 @@ fn builds_mysql_unsigned_integer_column_with_length_before_attribute() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -924,7 +1107,9 @@ fn doris_table_editor_renames_column_without_mysql_change_syntax() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -986,7 +1171,9 @@ fn dameng_integer_column_omits_mysql_display_width() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1030,7 +1217,9 @@ fn builds_highgo_foreign_key_changes_with_postgres_syntax() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1105,7 +1294,9 @@ fn builds_informix_column_and_index_changes() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1163,7 +1354,9 @@ fn oracle_does_not_generate_drop_sql_for_all_columns() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1237,7 +1430,9 @@ fn oracle_create_table_places_default_before_not_null() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1250,6 +1445,40 @@ fn oracle_create_table_places_default_before_not_null() {
     );
     assert!(result.statements[0].contains("CREATED_AT DATE DEFAULT SYSDATE NOT NULL"), "ddl: {}", result.statements[0]);
     assert!(!result.statements[0].contains("NOT NULL DEFAULT"), "ddl: {}", result.statements[0]);
+}
+
+#[test]
+fn oracle_add_column_keeps_not_null_after_default() {
+    // `ADD (...)` used to drop NOT NULL entirely for Oracle, so a column the user marked
+    // not nullable was created nullable without any error (t8y2/dbx#11234).
+    let cases = [
+        (
+            "QTY",
+            "NUMBER(18,2)",
+            false,
+            "0",
+            "ALTER TABLE \"HR\".\"orders\" ADD (\"QTY\" NUMBER(18,2) DEFAULT 0 NOT NULL);",
+        ),
+        ("CODE", "VARCHAR2(20)", false, "", "ALTER TABLE \"HR\".\"orders\" ADD (\"CODE\" VARCHAR2(20) NOT NULL);"),
+        ("NOTE", "VARCHAR2(20)", true, "", "ALTER TABLE \"HR\".\"orders\" ADD (\"NOTE\" VARCHAR2(20));"),
+    ];
+
+    for (name, data_type, is_nullable, default_value, expected) in cases {
+        let mut col = column(name);
+        col.data_type = data_type.to_string();
+        col.is_nullable = is_nullable;
+        col.default_value = default_value.to_string();
+
+        let result = build_table_structure_change_sql(structure_change_options(
+            DatabaseType::Oracle,
+            Some("HR"),
+            "orders",
+            vec![col],
+        ));
+
+        assert_eq!(result.warnings, Vec::<String>::new(), "{name}");
+        assert_eq!(result.statements, vec![expected], "{name}");
+    }
 }
 
 #[test]
@@ -1271,7 +1500,9 @@ fn oracle_create_table_preserves_character_length_units() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1308,7 +1539,9 @@ fn oracle_create_table_uses_unquoted_identifiers_for_new_objects() {
         table_comment: Some("user table".to_string()),
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1346,7 +1579,9 @@ fn oracle_create_table_leaves_uppercase_regular_identifier_unquoted() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1383,7 +1618,9 @@ fn oracle_create_table_quotes_special_and_reserved_identifiers() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1423,7 +1660,9 @@ fn oracle_create_table_distinguishes_new_and_referenced_foreign_key_identifiers(
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1464,7 +1703,9 @@ fn oracle_create_table_extracts_single_line_trigger_source_into_the_body() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1497,7 +1738,9 @@ fn oracle_create_table_warns_instead_of_emitting_an_unparsed_trigger_declaration
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1534,7 +1777,9 @@ fn oracle_existing_quoted_identifiers_keep_exact_spelling() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1568,7 +1813,9 @@ fn oracle_new_identifier_formatting_does_not_change_other_dialects() {
             table_comment: None,
             original_table_comment: None,
             mysql_engine: None,
+            transwarp_create: None,
             partitioned: false,
+            foreign_table: false,
             is_gaussdb_m_mode: false,
             table_collation: None,
         });
@@ -1664,7 +1911,9 @@ fn iris_drop_index_includes_table_name() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1707,7 +1956,9 @@ fn iris_ignores_comment_changes_but_keeps_supported_column_alters() {
         table_comment: Some("new table description".to_string()),
         original_table_comment: Some("old table description".to_string()),
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1791,7 +2042,9 @@ fn oracle_compatible_databases_keep_comment_on_sql() {
             table_comment: Some("new table description".to_string()),
             original_table_comment: Some("old table description".to_string()),
             mysql_engine: None,
+            transwarp_create: None,
             partitioned: false,
+            foreign_table: false,
             is_gaussdb_m_mode: false,
             table_collation: None,
         });
@@ -1827,7 +2080,9 @@ fn mysql_create_index_with_comment() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1862,7 +2117,9 @@ fn manticoresearch_builds_create_table_sql_only() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1907,7 +2164,9 @@ fn manticoresearch_builds_add_and_drop_column_sql() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -1977,7 +2236,9 @@ fn gbase8a_uses_limited_mysql_ddl() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2049,7 +2310,9 @@ fn gbase8a_allows_mysql_style_column_reorder() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2092,7 +2355,9 @@ fn gbase8s_uses_informix_ddl_not_mysql() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2127,7 +2392,9 @@ fn gbase_without_driver_profile_still_uses_mysql_ddl() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2164,7 +2431,9 @@ fn manticoresearch_does_not_drop_id_column() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2234,7 +2503,9 @@ fn manticoresearch_warns_when_existing_column_properties_change() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2271,7 +2542,9 @@ fn manticoresearch_ignores_mysql_column_options() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2311,7 +2584,9 @@ fn manticoresearch_builds_text_column_properties() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2343,7 +2618,9 @@ fn manticoresearch_builds_json_secondary_index_property() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2371,7 +2648,9 @@ fn mysql_create_unique_index_with_comment_and_btree() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2401,7 +2680,9 @@ fn mysql_create_functional_index_preserves_key_part_syntax() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2431,7 +2712,9 @@ fn mysql_add_timestamp_column_drops_invalid_precision() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2461,7 +2744,9 @@ fn mysql_add_timestamp_column_preserves_valid_precision() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2498,7 +2783,9 @@ fn builds_postgres_create_table_with_comments_and_index() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2532,7 +2819,9 @@ fn quotes_expression_like_new_index_columns_without_provenance() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2606,7 +2895,9 @@ fn create_table_trims_table_name_whitespace_for_all_statements() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2645,7 +2936,9 @@ fn warns_for_sqlite_unsafe_column_changes() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2690,7 +2983,9 @@ fn qualifies_attached_sqlite_table_and_index_changes() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2761,7 +3056,9 @@ fn builds_rqlite_changes_with_sqlite_dialect() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2793,7 +3090,9 @@ fn builds_kingbase_add_column_without_column_keyword() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2860,7 +3159,9 @@ fn builds_mysql_column_reorder_statements() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2918,7 +3219,9 @@ fn mysql_add_column_before_existing_column_does_not_reorder_shifted_column() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -2983,7 +3286,9 @@ fn mysql_existing_column_reorder_does_not_reorder_columns_shifted_by_prior_move(
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3060,7 +3365,9 @@ fn mysql_moving_first_column_to_end_uses_single_reorder_statement() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3087,7 +3394,9 @@ fn builds_sql_server_quoted_column_and_index_statements() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3120,7 +3429,9 @@ fn sqlserver_strips_mysql_display_width_from_fixed_integer_types() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3147,7 +3458,9 @@ fn sqlserver_strips_scale_from_float() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3174,7 +3487,9 @@ fn sqlserver_preserves_float_mantissa_bits() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3226,7 +3541,9 @@ fn sqlserver_default_changes_drop_old_constraints_with_isolated_batches() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3445,7 +3762,9 @@ fn sqlserver_unchanged_foreign_key_does_not_warn_when_saving_other_changes() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3477,7 +3796,9 @@ fn sqlserver_add_column_with_identity() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3510,7 +3831,9 @@ fn sqlserver_legacy_column_comment_change_uses_legacy_extended_properties() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3545,7 +3868,9 @@ fn dameng_add_column_with_identity() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3571,7 +3896,9 @@ fn dameng_uppercases_lowercase_column_type() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3604,7 +3931,9 @@ fn dameng_rejects_identity_on_incompatible_type() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3639,7 +3968,9 @@ fn sqlserver_rejects_identity_on_incompatible_type() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3677,7 +4008,9 @@ fn sqlserver_changed_foreign_key_still_warns_as_unsupported() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3720,7 +4053,9 @@ fn sqlserver_unchanged_identity_extra_does_not_mark_existing_column_changed() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -3763,7 +4098,9 @@ fn dameng_unchanged_identity_extra_does_not_mark_existing_column_changed() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -4019,7 +4356,9 @@ fn dameng_rejects_adding_second_identity_column() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -4074,7 +4413,9 @@ fn sqlserver_existing_column_identity_change_warns_without_unchanged_foreign_key
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -4108,7 +4449,9 @@ fn builds_duckdb_create_table_statements() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -4231,7 +4574,9 @@ fn builds_clickhouse_nullable_comment_and_reorder_statements() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -4280,7 +4625,9 @@ fn builds_h2_schema_qualified_existing_column_statements() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -4509,6 +4856,57 @@ fn builds_dameng_alter_table_change_primary_key() {
 }
 
 #[test]
+fn builds_sqlserver_alter_table_add_primary_key() {
+    // T-SQL accepts an anonymous `ADD PRIMARY KEY`; the server names the constraint.
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::SqlServer,
+        Some("dbo"),
+        "users",
+        vec![existing_pk_column("id", "INT", false, true)],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE [dbo].[users] ADD PRIMARY KEY ([id]);"]);
+}
+
+#[test]
+fn sqlserver_replaces_primary_key_by_persisted_constraint_name() {
+    let mut old_pk = existing_pk_column("id", "INT", true, false);
+    old_pk.id = "old_id".to_string();
+    let mut new_pk = existing_pk_column("code", "VARCHAR(50)", false, true);
+    new_pk.id = "new_code".to_string();
+    let mut options = structure_change_options(DatabaseType::SqlServer, Some("dbo"), "users", vec![old_pk, new_pk]);
+    options.indexes = vec![existing_primary_index("PK_users", &["id"])];
+
+    let result = build_table_structure_change_sql(options);
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE [dbo].[users] DROP CONSTRAINT [PK_users];",
+            "ALTER TABLE [dbo].[users] ADD CONSTRAINT [PK_users] PRIMARY KEY ([code]);",
+        ]
+    );
+}
+
+#[test]
+fn builds_sqlserver_alter_table_drop_primary_key() {
+    let mut options = structure_change_options(
+        DatabaseType::SqlServer,
+        Some("dbo"),
+        "users",
+        vec![existing_pk_column("id", "INT", true, false)],
+    );
+    options.indexes = vec![existing_primary_index("PK_users", &["id"])];
+
+    let result = build_table_structure_change_sql(options);
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE [dbo].[users] DROP CONSTRAINT [PK_users];"]);
+}
+
+#[test]
 fn dameng_validates_new_primary_key_column_before_replacing_existing_key() {
     let mut old_pk = existing_pk_column("id", "INT", true, false);
     old_pk.id = "old_id".to_string();
@@ -4710,6 +5108,57 @@ fn sqlserver_uncheck_primary_key_and_drop_column_does_not_emit_drop_column() {
         result.statements
     );
     assert!(result.warnings.iter().any(|w| w.contains("primary key") || w.contains("Primary key")));
+}
+
+#[test]
+fn sqlserver_drop_column_removes_default_constraint_first() {
+    let cases = [
+        (Some("dbo"), Some("((0))"), "[dbo].[orders]", true),
+        (None, Some("((0))"), "[orders]", true),
+        (Some("dbo"), Some("NULL"), "[dbo].[orders]", false),
+        (Some("dbo"), None, "[dbo].[orders]", false),
+    ];
+
+    for (schema, column_default, table, drops_default) in cases {
+        let mut big = column("big");
+        big.data_type = "bigint".to_string();
+        big.is_nullable = false;
+        big.marked_for_drop = true;
+        big.original = Some(ColumnInfo {
+            name: "big".to_string(),
+            data_type: "bigint".to_string(),
+            is_nullable: false,
+            column_default: column_default.map(str::to_string),
+            ..Default::default()
+        });
+
+        let mut expected = Vec::new();
+        if drops_default {
+            let drop_default = build_sqlserver_drop_default_constraint_sql(table, "big");
+            assert!(drop_default.contains(&format!("OBJECT_ID(N'{table}')")), "{drop_default}");
+            expected.push(drop_default);
+        }
+        expected.push(format!("ALTER TABLE {table} DROP COLUMN [big];"));
+
+        let batch = build_table_structure_change_sql(structure_change_options(
+            DatabaseType::SqlServer,
+            schema,
+            "orders",
+            vec![big.clone()],
+        ));
+        assert_eq!(batch.warnings, Vec::<String>::new());
+        assert_eq!(batch.statements, expected, "schema {schema:?}, default {column_default:?}");
+
+        let single = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            driver_profile: None,
+            schema: schema.map(str::to_string),
+            table_name: "orders".to_string(),
+            column: big,
+        });
+        assert_eq!(single.warnings, Vec::<String>::new());
+        assert_eq!(single.statements, expected, "schema {schema:?}, default {column_default:?}");
+    }
 }
 
 #[test]
@@ -5188,8 +5637,10 @@ fn warns_sqlite_cannot_alter_primary_key() {
 }
 
 #[test]
-fn warns_sqlserver_cannot_alter_primary_key_without_drop_strategy() {
-    // alter_primary_key is false for SQL Server; fail closed (no partial ADD-only SQL).
+fn sqlserver_requires_persisted_constraint_name_and_fails_closed_without_it() {
+    // Dropping the persisted primary key needs its constraint name from the index metadata
+    // (server-generated names have no rule); without it, emit no partial SQL (no ADD-only) and
+    // ask the user to refresh the structure (issue #10758).
     let result = build_table_structure_change_sql(structure_change_options(
         DatabaseType::SqlServer,
         Some("dbo"),
@@ -5199,7 +5650,8 @@ fn warns_sqlserver_cannot_alter_primary_key_without_drop_strategy() {
 
     assert_eq!(result.statements, Vec::<String>::new());
     assert_eq!(result.warnings.len(), 1);
-    assert!(result.warnings[0].contains("primary key"));
+    assert!(result.warnings[0].contains("SQL Server primary key constraint name"));
+    assert!(result.warnings[0].contains("Refresh"));
 }
 
 #[test]
@@ -5222,7 +5674,9 @@ fn mysql_create_table_with_auto_increment() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -5252,7 +5706,9 @@ fn mysql_create_table_keeps_column_charset_collation_and_comment() {
         table_comment: Some("User accounts".to_string()),
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -5286,7 +5742,9 @@ fn mysql_compatible_databases_do_not_emit_mysql_column_charset_clauses() {
             table_comment: None,
             original_table_comment: None,
             mysql_engine: None,
+            transwarp_create: None,
             partitioned: false,
+            foreign_table: false,
             is_gaussdb_m_mode: false,
             table_collation: None,
         });
@@ -5317,7 +5775,9 @@ fn mysql_create_table_with_on_update_current_timestamp() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -5480,7 +5940,9 @@ fn postgres_create_table_with_identity() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -5513,7 +5975,9 @@ fn dameng_create_table_with_identity() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -5542,7 +6006,9 @@ fn dameng_create_table_preserves_character_length_units() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -5579,7 +6045,9 @@ fn dameng_alter_column_preserves_character_length_unit() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -5617,7 +6085,9 @@ fn dameng_rejects_multiple_identity_columns() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -5648,7 +6118,9 @@ fn dameng_rejects_zero_identity_increment() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -5680,7 +6152,9 @@ fn sqlserver_create_table_with_identity() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -5707,7 +6181,9 @@ fn mysql_quotes_datetime_literal_default() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -5734,7 +6210,9 @@ fn mysql_does_not_quote_current_timestamp() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -5762,7 +6240,9 @@ fn mysql_does_not_quote_temporal_function_with_parens() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -5789,7 +6269,9 @@ fn mysql_date_literal_default_is_quoted() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -5816,7 +6298,9 @@ fn mysql_time_literal_default_is_quoted() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -5843,7 +6327,9 @@ fn non_temporal_types_are_not_quoted() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -5974,7 +6460,9 @@ fn builds_mysql_foreign_key_changes() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6006,7 +6494,9 @@ fn builds_mysql_composite_foreign_key() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6041,7 +6531,9 @@ fn builds_oracle_foreign_key_with_supported_actions() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6080,7 +6572,9 @@ fn builds_oracle_foreign_key_replacement() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6118,7 +6612,9 @@ fn builds_mysql_trigger_changes() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6147,7 +6643,9 @@ fn builds_sqlserver_trigger_with_multiple_events() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6192,7 +6690,9 @@ fn rebuilds_changed_sqlserver_trigger_from_complete_metadata_source() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6231,7 +6731,9 @@ fn sqlserver_trigger_edit_restores_disabled_state() {
         table_comment: None,
         original_table_comment: None,
         partitioned: false,
+        foreign_table: false,
         mysql_engine: None,
+        transwarp_create: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6276,7 +6778,9 @@ fn unchanged_postgres_trigger_does_not_block_column_rename() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6308,7 +6812,9 @@ fn changed_postgres_trigger_remains_unsupported() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6345,7 +6851,9 @@ fn rejects_editing_existing_oracle_trigger_without_complete_source() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6371,7 +6879,9 @@ fn builds_oracle_statement_trigger_without_row_clause() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6409,7 +6919,9 @@ fn drops_existing_oracle_trigger_without_reconstructing_it() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6432,7 +6944,9 @@ fn rejects_unsupported_oracle_compound_trigger_shape() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6459,7 +6973,9 @@ fn mysql_varchar_default_is_quoted() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6487,7 +7003,9 @@ fn mysql_char_default_is_quoted() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6502,9 +7020,11 @@ fn mysql_text_default_is_quoted() {
     col.data_type = "text".to_string();
     col.default_value = "default value".to_string();
 
+    // MariaDB accepts a literal default on TEXT; MySQL refuses it (see
+    // `mysql_literal_default_on_blob_text_json_geometry_is_refused`).
     let result = build_create_table_sql(TableStructureSqlOptions {
         database_type: Some(DatabaseType::Mysql),
-        driver_profile: None,
+        driver_profile: Some("mariadb".to_string()),
         schema: None,
         table_name: "products".to_string(),
         columns: vec![col],
@@ -6514,7 +7034,9 @@ fn mysql_text_default_is_quoted() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6541,7 +7063,9 @@ fn mysql_enum_default_is_quoted() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6568,7 +7092,9 @@ fn mysql_int_default_is_not_quoted() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6705,7 +7231,9 @@ fn mysql_character_column_add_with_charset_collation() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6717,6 +7245,88 @@ fn mysql_character_column_add_with_charset_collation() {
             "ALTER TABLE `users` ADD COLUMN `name` varchar(255) CHARACTER SET `utf8mb4` COLLATE `utf8mb4_unicode_ci`;"
         ]
     );
+}
+
+#[test]
+fn single_column_alter_builder_generates_add_for_new_mysql_column() {
+    let mut col = column("category");
+    col.id = "ddl-preview:new:category".to_string();
+    col.data_type = "varchar(50)".to_string();
+    col.character_set = "utf8mb4".to_string();
+    col.collation = "utf8mb4_general_ci".to_string();
+    col.comment = "所属类别".to_string();
+
+    let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        driver_profile: None,
+        schema: None,
+        table_name: "apis".to_string(),
+        column: col,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `apis` ADD COLUMN `category` varchar(50) CHARACTER SET `utf8mb4` COLLATE `utf8mb4_general_ci` COMMENT '所属类别';"
+        ]
+    );
+}
+
+#[test]
+fn single_column_alter_builder_preserves_mysql_generated_expression_for_add_preview() {
+    let mut col = column("total");
+    col.id = "ddl-preview:existing:total".to_string();
+    col.data_type = "int".to_string();
+    col.original = Some(ColumnInfo {
+        name: "total".to_string(),
+        data_type: "int".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: Some("GENERATED ALWAYS AS (`quantity` * `price`) STORED".to_string()),
+        comment: None,
+        character_set: None,
+        collation: None,
+    });
+    col.original_position = None;
+
+    let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        driver_profile: None,
+        schema: None,
+        table_name: "orders".to_string(),
+        column: col,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["ALTER TABLE `orders` ADD COLUMN `total` int GENERATED ALWAYS AS (`quantity` * `price`) STORED;"]
+    );
+}
+
+#[test]
+fn single_column_alter_builder_keeps_existing_column_without_position_as_edit() {
+    let mut col = column("id");
+    col.data_type = "INTEGER".to_string();
+    col.original = Some(ColumnInfo {
+        name: "id".to_string(),
+        data_type: "SMALLINT".to_string(),
+        is_nullable: true,
+        ..Default::default()
+    });
+
+    let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::DuckDb),
+        driver_profile: None,
+        schema: None,
+        table_name: "issue_9980".to_string(),
+        column: col,
+    });
+
+    assert!(result.statements.is_empty());
+    assert_eq!(result.warnings, vec!["Editing existing columns is not supported for duckdb yet."]);
 }
 
 #[test]
@@ -6740,7 +7350,9 @@ fn mysql_numeric_column_omits_charset_collation_in_column_definition() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6785,7 +7397,9 @@ fn mysql_numeric_column_ignores_charset_collation_in_change_detection() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6825,7 +7439,9 @@ fn mysql_character_column_detects_charset_collation_change() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6870,7 +7486,9 @@ fn mysql_character_column_preserves_charset_collation_on_other_change() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -6948,7 +7566,9 @@ fn mysql_inherited_column_charset_is_omitted_from_generated_ddl() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: Some("utf8mb4_0900_ai_ci".to_string()),
     });
@@ -6994,7 +7614,9 @@ fn mysql_explicit_column_charset_survives_the_table_default_comparison() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: Some("utf8mb4_0900_ai_ci".to_string()),
     });
@@ -7041,7 +7663,9 @@ fn mysql_inherited_column_charset_does_not_register_as_a_change() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: Some("utf8mb4_0900_ai_ci".to_string()),
     });
@@ -7081,7 +7705,9 @@ fn mysql_collation_switched_away_from_the_table_default_is_emitted() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: Some("utf8mb4_0900_ai_ci".to_string()),
     });
@@ -7126,7 +7752,9 @@ fn mysql_column_charset_switched_to_the_table_default_drops_the_clause() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: Some("utf8mb4_0900_ai_ci".to_string()),
     });
@@ -7168,7 +7796,9 @@ fn mysql_column_charset_is_kept_when_the_table_default_is_unknown() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -7205,7 +7835,9 @@ fn mysql_create_table_omits_inherited_column_charset() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: Some("utf8mb4_0900_ai_ci".to_string()),
     });
@@ -7329,6 +7961,605 @@ fn mysql_generated_column_change_is_blocked_without_expression_metadata() {
     assert!(result.warnings[0].contains("generation expression could not be loaded"));
 }
 
+#[test]
+fn postgres_generated_column_extra_shape_is_not_an_mysql_extra_change() {
+    // PostgreSQL-family introspection reports generated columns in the same
+    // `generated always as (...) stored` shape, but the structure editor of
+    // those dialects never parses it into `extra.generated`. The MySQL-only
+    // generated-column diff must not flag these columns as changed.
+    let mut total = column("total");
+    total.data_type = "numeric(12,2)".to_string();
+    total.extra = Some(ColumnExtra::default());
+    total.original = Some(ColumnInfo {
+        name: "total".to_string(),
+        data_type: "numeric(12,2)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: Some("generated always as (price * quantity) stored".to_string()),
+        comment: None,
+        ..Default::default()
+    });
+    total.original_position = Some(0);
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Postgres,
+        None,
+        "products",
+        vec![total],
+    ));
+
+    assert_eq!(result.statements, Vec::<String>::new());
+    assert_eq!(result.warnings, Vec::<String>::new());
+}
+
+#[test]
+fn mysql_add_column_with_generated_expression_stored() {
+    let mut total = column("total");
+    total.data_type = "decimal(14,2)".to_string();
+    total.extra = Some(ColumnExtra {
+        generated: Some(ColumnGenerated {
+            expression: "`price` * `quantity`".to_string(),
+            storage: Some("STORED".to_string()),
+        }),
+        ..Default::default()
+    });
+
+    let result =
+        build_table_structure_change_sql(structure_change_options(DatabaseType::Mysql, None, "products", vec![total]));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `products` ADD COLUMN `total` decimal(14,2) GENERATED ALWAYS AS (`price` * `quantity`) STORED;"
+        ]
+    );
+}
+
+#[test]
+fn mysql_add_column_with_generated_expression_defaults_to_virtual() {
+    let mut total = column("total");
+    total.data_type = "decimal(14,2)".to_string();
+    total.extra = Some(ColumnExtra {
+        generated: Some(ColumnGenerated { expression: "`price` * `quantity`".to_string(), storage: None }),
+        ..Default::default()
+    });
+
+    let result =
+        build_table_structure_change_sql(structure_change_options(DatabaseType::Mysql, None, "products", vec![total]));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `products` ADD COLUMN `total` decimal(14,2) GENERATED ALWAYS AS (`price` * `quantity`) VIRTUAL;"
+        ]
+    );
+}
+
+#[test]
+fn mysql_modify_generated_column_expression_change() {
+    let mut total = column("total");
+    total.data_type = "decimal(12,2)".to_string();
+    total.extra = Some(ColumnExtra {
+        generated: Some(ColumnGenerated {
+            expression: "`price` * `quantity` * 2".to_string(),
+            storage: Some("STORED".to_string()),
+        }),
+        ..Default::default()
+    });
+    total.original = Some(ColumnInfo {
+        name: "total".to_string(),
+        data_type: "decimal(12,2)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: Some("GENERATED ALWAYS AS (`price` * `quantity`) STORED".to_string()),
+        comment: None,
+        ..Default::default()
+    });
+    total.original_position = Some(0);
+
+    let result =
+        build_table_structure_change_sql(structure_change_options(DatabaseType::Mysql, None, "products", vec![total]));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `products` MODIFY COLUMN `total` decimal(12,2) GENERATED ALWAYS AS (`price` * `quantity` * 2) STORED;"
+        ]
+    );
+}
+
+#[test]
+fn mysql_modify_generated_column_storage_change() {
+    let mut total = column("total");
+    total.data_type = "decimal(12,2)".to_string();
+    total.extra = Some(ColumnExtra {
+        generated: Some(ColumnGenerated {
+            expression: "`price` * `quantity`".to_string(),
+            storage: Some("STORED".to_string()),
+        }),
+        ..Default::default()
+    });
+    total.original = Some(ColumnInfo {
+        name: "total".to_string(),
+        data_type: "decimal(12,2)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: Some("GENERATED ALWAYS AS (`price` * `quantity`) VIRTUAL".to_string()),
+        comment: None,
+        ..Default::default()
+    });
+    total.original_position = Some(0);
+
+    let result =
+        build_table_structure_change_sql(structure_change_options(DatabaseType::Mysql, None, "products", vec![total]));
+
+    // MySQL rejects switching a generated column between VIRTUAL and STORED
+    // in place; the DDL is still emitted but a warning explains the rejection.
+    assert_eq!(result.warnings.len(), 1);
+    assert!(result.warnings[0].contains("cannot switch a generated column between VIRTUAL and STORED"));
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `products` MODIFY COLUMN `total` decimal(12,2) GENERATED ALWAYS AS (`price` * `quantity`) STORED;"
+        ]
+    );
+}
+
+#[test]
+fn mysql_generated_column_removed_becomes_plain_column() {
+    let mut total = column("total");
+    total.data_type = "decimal(12,2)".to_string();
+    // An explicit empty expression removes the generated-column attribute.
+    total.extra = Some(ColumnExtra {
+        generated: Some(ColumnGenerated { expression: String::new(), storage: None }),
+        ..Default::default()
+    });
+    total.original = Some(ColumnInfo {
+        name: "total".to_string(),
+        data_type: "decimal(12,2)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: Some("GENERATED ALWAYS AS (`price` * `quantity`) STORED".to_string()),
+        comment: None,
+        ..Default::default()
+    });
+    total.original_position = Some(0);
+
+    let result =
+        build_table_structure_change_sql(structure_change_options(DatabaseType::Mysql, None, "products", vec![total]));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE `products` MODIFY COLUMN `total` decimal(12,2);"]);
+}
+
+#[test]
+fn mysql_plain_column_becomes_generated() {
+    let mut total = column("total");
+    total.data_type = "decimal(12,2)".to_string();
+    total.extra = Some(ColumnExtra {
+        generated: Some(ColumnGenerated {
+            expression: "`price` * `quantity`".to_string(),
+            storage: Some("STORED".to_string()),
+        }),
+        ..Default::default()
+    });
+    total.original = Some(ColumnInfo {
+        name: "total".to_string(),
+        data_type: "decimal(12,2)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        ..Default::default()
+    });
+    total.original_position = Some(0);
+
+    let result =
+        build_table_structure_change_sql(structure_change_options(DatabaseType::Mysql, None, "products", vec![total]));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `products` MODIFY COLUMN `total` decimal(12,2) GENERATED ALWAYS AS (`price` * `quantity`) STORED;"
+        ]
+    );
+}
+
+#[test]
+fn mysql_unchanged_generated_column_with_explicit_values_is_not_modified() {
+    let mut total = column("total");
+    total.data_type = "decimal(12,2)".to_string();
+    // Explicitly echoing the introspected definition must not register a change.
+    total.extra = Some(ColumnExtra {
+        generated: Some(ColumnGenerated {
+            expression: "`price` * `quantity`".to_string(),
+            storage: Some("STORED".to_string()),
+        }),
+        ..Default::default()
+    });
+    total.original = Some(ColumnInfo {
+        name: "total".to_string(),
+        data_type: "decimal(12,2)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: Some("GENERATED ALWAYS AS (`price` * `quantity`) STORED".to_string()),
+        comment: None,
+        ..Default::default()
+    });
+    total.original_position = Some(0);
+
+    let result =
+        build_table_structure_change_sql(structure_change_options(DatabaseType::Mysql, None, "products", vec![total]));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, Vec::<String>::new());
+}
+
+#[test]
+fn mysql_generated_column_comparison_ignores_case_and_whitespace() {
+    let mut total = column("total");
+    total.data_type = "decimal(12,2)".to_string();
+    total.extra = Some(ColumnExtra {
+        generated: Some(ColumnGenerated {
+            expression: "  `PRICE`  *   `quantity`  ".to_string(),
+            storage: Some("stored".to_string()),
+        }),
+        ..Default::default()
+    });
+    total.original = Some(ColumnInfo {
+        name: "total".to_string(),
+        data_type: "decimal(12,2)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: Some("GENERATED ALWAYS AS (`price` * `quantity`) STORED".to_string()),
+        comment: None,
+        ..Default::default()
+    });
+    total.original_position = Some(0);
+
+    let result =
+        build_table_structure_change_sql(structure_change_options(DatabaseType::Mysql, None, "products", vec![total]));
+
+    assert_eq!(result.statements, Vec::<String>::new());
+}
+
+#[test]
+fn mysql_generated_expression_with_wrapping_parentheses_is_normalized() {
+    let mut total = column("total");
+    total.data_type = "decimal(14,2)".to_string();
+    total.extra = Some(ColumnExtra {
+        generated: Some(ColumnGenerated {
+            expression: "(`price` * `quantity`)".to_string(),
+            storage: Some("STORED".to_string()),
+        }),
+        ..Default::default()
+    });
+
+    let result =
+        build_table_structure_change_sql(structure_change_options(DatabaseType::Mysql, None, "products", vec![total]));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `products` ADD COLUMN `total` decimal(14,2) GENERATED ALWAYS AS (`price` * `quantity`) STORED;"
+        ]
+    );
+}
+
+#[test]
+fn mysql_generated_literal_case_change_is_detected() {
+    // MySQL stores string literals verbatim, so editing only the case of a
+    // literal is a real change and must not be swallowed by the
+    // case-insensitive comparison of keywords and identifiers.
+    let mut flag = column("flag");
+    flag.data_type = "varchar(3)".to_string();
+    flag.extra = Some(ColumnExtra {
+        generated: Some(ColumnGenerated {
+            expression: "if(`status`, 'yes', 'No')".to_string(),
+            storage: Some("STORED".to_string()),
+        }),
+        ..Default::default()
+    });
+    flag.original = Some(ColumnInfo {
+        name: "flag".to_string(),
+        data_type: "varchar(3)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: Some("GENERATED ALWAYS AS (IF(`status`, 'Yes', 'No')) STORED".to_string()),
+        comment: None,
+        ..Default::default()
+    });
+    flag.original_position = Some(0);
+
+    let result =
+        build_table_structure_change_sql(structure_change_options(DatabaseType::Mysql, None, "products", vec![flag]));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `products` MODIFY COLUMN `flag` varchar(3) GENERATED ALWAYS AS (if(`status`, 'yes', 'No')) STORED;"
+        ]
+    );
+}
+
+#[test]
+fn mysql_generated_keyword_case_change_is_ignored_but_literal_is_not() {
+    // Keyword/identifier case differences must stay invisible (drivers may
+    // rewrite them), while the literal keeps its exact spelling.
+    let mut flag = column("flag");
+    flag.data_type = "varchar(3)".to_string();
+    flag.extra = Some(ColumnExtra {
+        generated: Some(ColumnGenerated {
+            expression: "  IF(`status`,   'Yes', 'No')".to_string(),
+            storage: Some("STORED".to_string()),
+        }),
+        ..Default::default()
+    });
+    flag.original = Some(ColumnInfo {
+        name: "flag".to_string(),
+        data_type: "varchar(3)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: Some("GENERATED ALWAYS AS (if(`status`, 'Yes', 'No')) STORED".to_string()),
+        comment: None,
+        ..Default::default()
+    });
+    flag.original_position = Some(0);
+
+    let result =
+        build_table_structure_change_sql(structure_change_options(DatabaseType::Mysql, None, "products", vec![flag]));
+
+    // Only whitespace and keyword case differ → no statement.
+    assert_eq!(result.statements, Vec::<String>::new());
+}
+
+#[test]
+fn mysql_generated_wrapping_parentheses_typed_by_hand_do_not_modify() {
+    // The renderer strips one layer of wrapping parentheses; edit detection
+    // compares with the same contract, so re-typing them is not a change and
+    // must not emit a no-op MODIFY (a STORED rebuild is not free).
+    let mut total = column("total");
+    total.data_type = "decimal(12,2)".to_string();
+    total.extra = Some(ColumnExtra {
+        generated: Some(ColumnGenerated {
+            expression: "(price * qty)".to_string(),
+            storage: Some("STORED".to_string()),
+        }),
+        ..Default::default()
+    });
+    total.original = Some(ColumnInfo {
+        name: "total".to_string(),
+        data_type: "decimal(12,2)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: Some("GENERATED ALWAYS AS (price * qty) STORED".to_string()),
+        comment: None,
+        ..Default::default()
+    });
+    total.original_position = Some(0);
+
+    let result =
+        build_table_structure_change_sql(structure_change_options(DatabaseType::Mysql, None, "products", vec![total]));
+
+    assert_eq!(result.statements, Vec::<String>::new());
+    assert_eq!(result.warnings, Vec::<String>::new());
+}
+
+#[test]
+fn mysql_generated_double_quoted_literal_case_change_is_detected() {
+    // MySQL treats double quotes as string quotes unless ANSI_QUOTES is on;
+    // either way the quoted text must keep its exact spelling in comparisons.
+    let mut flag = column("flag");
+    flag.data_type = "varchar(3)".to_string();
+    flag.extra = Some(ColumnExtra {
+        generated: Some(ColumnGenerated {
+            expression: "IF(`status`, \"yes\", 'No')".to_string(),
+            storage: Some("STORED".to_string()),
+        }),
+        ..Default::default()
+    });
+    flag.original = Some(ColumnInfo {
+        name: "flag".to_string(),
+        data_type: "varchar(3)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: Some("GENERATED ALWAYS AS (IF(`status`, \"Yes\", 'No')) STORED".to_string()),
+        comment: None,
+        ..Default::default()
+    });
+    flag.original_position = Some(0);
+
+    let result =
+        build_table_structure_change_sql(structure_change_options(DatabaseType::Mysql, None, "products", vec![flag]));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements.len(), 1);
+    assert!(result.statements[0].contains("\"yes\""));
+}
+
+#[test]
+fn mysql_plain_to_virtual_generated_warns() {
+    let mut total = column("total");
+    total.data_type = "decimal(14,2)".to_string();
+    total.original = Some(ColumnInfo {
+        name: "total".to_string(),
+        data_type: "decimal(14,2)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        ..Default::default()
+    });
+    total.original_position = Some(0);
+    total.extra = Some(ColumnExtra {
+        generated: Some(ColumnGenerated {
+            expression: "`price` * 2".to_string(),
+            storage: Some("VIRTUAL".to_string()),
+        }),
+        ..Default::default()
+    });
+
+    let result =
+        build_table_structure_change_sql(structure_change_options(DatabaseType::Mysql, None, "products", vec![total]));
+
+    assert_eq!(result.warnings.len(), 1);
+    assert!(result.warnings[0].contains("only allows converting a plain column into a STORED generated column"));
+}
+
+#[test]
+fn mysql_generated_storage_switch_warns() {
+    let mut total = column("total");
+    total.data_type = "decimal(14,2)".to_string();
+    total.original = Some(ColumnInfo {
+        name: "total".to_string(),
+        data_type: "decimal(14,2)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: Some("GENERATED ALWAYS AS (`price` * 2) VIRTUAL".to_string()),
+        comment: None,
+        ..Default::default()
+    });
+    total.original_position = Some(0);
+    total.extra = Some(ColumnExtra {
+        generated: Some(ColumnGenerated { expression: "`price` * 2".to_string(), storage: Some("STORED".to_string()) }),
+        ..Default::default()
+    });
+
+    let result =
+        build_table_structure_change_sql(structure_change_options(DatabaseType::Mysql, None, "products", vec![total]));
+
+    assert_eq!(result.warnings.len(), 1);
+    assert!(result.warnings[0].contains("cannot switch a generated column between VIRTUAL and STORED"));
+}
+
+#[test]
+fn mysql_virtual_to_plain_warns() {
+    let mut total = column("total");
+    total.data_type = "decimal(14,2)".to_string();
+    total.original = Some(ColumnInfo {
+        name: "total".to_string(),
+        data_type: "decimal(14,2)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: Some("GENERATED ALWAYS AS (`price` * 2) VIRTUAL".to_string()),
+        comment: None,
+        ..Default::default()
+    });
+    total.original_position = Some(0);
+    total.extra = Some(ColumnExtra { ..Default::default() });
+
+    let result =
+        build_table_structure_change_sql(structure_change_options(DatabaseType::Mysql, None, "products", vec![total]));
+
+    assert!(result.warnings.iter().any(|warning| warning.contains("removing a VIRTUAL generated attribute")));
+}
+
+#[test]
+fn mysql_plain_to_stored_generated_and_back_do_not_warn() {
+    let mut total = column("total");
+    total.data_type = "decimal(14,2)".to_string();
+    total.original = Some(ColumnInfo {
+        name: "total".to_string(),
+        data_type: "decimal(14,2)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        ..Default::default()
+    });
+    total.original_position = Some(0);
+    total.extra = Some(ColumnExtra {
+        generated: Some(ColumnGenerated { expression: "`price` * 2".to_string(), storage: Some("STORED".to_string()) }),
+        ..Default::default()
+    });
+
+    let result =
+        build_table_structure_change_sql(structure_change_options(DatabaseType::Mysql, None, "products", vec![total]));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert!(result.statements.iter().any(|statement| statement.contains("GENERATED ALWAYS AS (`price` * 2) STORED")));
+}
+
+#[test]
+fn mysql_empty_generated_expression_warns_and_omits_clause() {
+    let mut total = column("total");
+    total.data_type = "decimal(14,2)".to_string();
+    total.extra = Some(ColumnExtra {
+        generated: Some(ColumnGenerated { expression: "   ".to_string(), storage: Some("STORED".to_string()) }),
+        ..Default::default()
+    });
+
+    let result =
+        build_table_structure_change_sql(structure_change_options(DatabaseType::Mysql, None, "products", vec![total]));
+
+    assert_eq!(result.warnings.len(), 1);
+    assert!(result.warnings[0].contains("expression is empty"));
+    assert_eq!(result.statements, vec!["ALTER TABLE `products` ADD COLUMN `total` decimal(14,2);"]);
+}
+
+#[test]
+fn mysql_create_table_with_generated_column() {
+    let mut price = column("price");
+    price.data_type = "decimal(10,2)".to_string();
+    let mut total = column("total");
+    total.data_type = "decimal(12,2)".to_string();
+    total.extra = Some(ColumnExtra {
+        generated: Some(ColumnGenerated {
+            expression: "`price` * 2".to_string(),
+            storage: Some("VIRTUAL".to_string()),
+        }),
+        ..Default::default()
+    });
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        driver_profile: None,
+        schema: None,
+        table_name: "products".to_string(),
+        columns: vec![price, total],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        transwarp_create: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+        table_collation: None,
+        foreign_table: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "CREATE TABLE `products` (\n  `price` decimal(10,2),\n  `total` decimal(12,2) GENERATED ALWAYS AS (`price` * 2) VIRTUAL\n);"
+        ]
+    );
+}
+
 // ---- Oscar (神通) ----
 // 神通 v7 是 Oracle 兼容方言，且实测支持 ALTER TABLE DROP/ADD PRIMARY KEY（与 Dameng 一致，
 // 不同于 Oracle）。DDL 生成走 StructureDialect::Oscar，与 Dameng 共享 Oracle-like 分支。
@@ -7357,7 +8588,9 @@ fn oscar_create_table_with_primary_key_and_comments() {
         table_comment: Some("user table".to_string()),
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -7554,7 +8787,9 @@ fn oscar_drop_index_with_schema_qualifier() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -7577,7 +8812,9 @@ fn oscar_table_comment_uses_comment_on_table() {
         table_comment: Some("new comment".to_string()),
         original_table_comment: Some("old comment".to_string()),
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -7662,7 +8899,9 @@ fn postgres_partitioned_parent_concurrent_request_rejected() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: true,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -7695,7 +8934,9 @@ fn postgres_partitioned_parent_plain_index_unchanged() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: true,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -7740,7 +8981,9 @@ fn postgres_create_table_partitioned_concurrent_request_rejected() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: true,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -7869,7 +9112,9 @@ fn postgres_create_table_concurrent_index() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -7987,7 +9232,9 @@ fn gaussdb_m_options(columns: Vec<EditableStructureColumn>) -> TableStructureSql
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: true,
         table_collation: None,
     }
@@ -8223,7 +9470,9 @@ fn gaussdb_m_rebuild_index_unchanged_type_does_not_rebuild() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: true,
         table_collation: None,
     };
@@ -8272,7 +9521,9 @@ fn mysql_create_table_nullable_timestamp_without_default_gets_explicit_null() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -8303,7 +9554,9 @@ fn mysql_create_table_nullable_timestamp_with_default_still_gets_explicit_null()
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -8332,7 +9585,9 @@ fn mysql_create_table_nullable_datetime_does_not_gain_null_keyword() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -8361,7 +9616,9 @@ fn mysql_add_column_nullable_timestamp_without_default_gets_explicit_null() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
         table_collation: None,
     });
@@ -9000,4 +10257,89 @@ fn create_partitioned_table_is_supported_for_kingbase() {
 
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     assert!(result.statements[0].ends_with(") PARTITION BY LIST (\"region\");"), "{}", result.statements[0]);
+}
+
+#[test]
+fn mysql_literal_default_on_blob_text_json_geometry_is_refused() {
+    // (data type, default, driver profile, expected DEFAULT clause; None means refused)
+    let cases: &[(&str, &str, Option<&str>, Option<&str>)] = &[
+        ("text", "''", None, None),
+        ("TEXT", "x", None, None),
+        ("mediumtext", "''", None, None),
+        ("longtext", "a(b)", None, None),
+        ("blob", "abc", None, None),
+        ("json", "{}", None, None),
+        ("geometry", "x", None, None),
+        ("text", "('')", None, Some("DEFAULT ('')")),
+        ("json", "(json_object())", None, Some("DEFAULT (json_object())")),
+        ("text", "''", Some("mariadb"), Some("DEFAULT ''")),
+        ("text", "", None, Some("`note` text NOT NULL")),
+        ("text", "NULL", None, Some("`note` text NOT NULL")),
+        ("varchar(255)", "''", None, Some("DEFAULT ''")),
+        ("char(10)", "abc", None, Some("DEFAULT 'abc'")),
+    ];
+    for (data_type, default_value, driver_profile, expected) in cases {
+        let mut note = column("note");
+        note.data_type = data_type.to_string();
+        note.is_nullable = false;
+        note.default_value = default_value.to_string();
+        let mut options = structure_change_options(DatabaseType::Mysql, None, "t", vec![note.clone()]);
+        options.driver_profile = driver_profile.map(str::to_string);
+        let added = build_table_structure_change_sql(options.clone());
+        let created = build_create_table_sql(options);
+        note.id = "ddl-preview:new:note".to_string();
+        let single = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+            database_type: Some(DatabaseType::Mysql),
+            driver_profile: driver_profile.map(str::to_string),
+            schema: None,
+            table_name: "t".to_string(),
+            column: note,
+        });
+        let case = format!("{data_type} DEFAULT {default_value:?} ({driver_profile:?})");
+        match expected {
+            None => {
+                let warning = format!(
+                    "MySQL does not allow a literal default on {} column \"note\". Remove the default, or on MySQL 8.0.13 or later use an expression default such as ('').",
+                    data_type.to_ascii_lowercase()
+                );
+                assert_eq!(added.warnings, vec![warning.clone()], "{case}");
+                assert_eq!(created.warnings, vec![warning.clone()], "{case}");
+                assert!(created.statements.is_empty(), "{case}: {:?}", created.statements);
+                assert_eq!(single.warnings, vec![warning], "{case}");
+                assert!(single.statements.is_empty(), "{case}: {:?}", single.statements);
+            }
+            Some(clause) => {
+                for result in [&added, &created, &single] {
+                    assert!(result.warnings.is_empty(), "{case}: {:?}", result.warnings);
+                    assert_eq!(result.statements.len(), 1, "{case}: {:?}", result.statements);
+                    assert!(result.statements[0].contains(clause), "{case}: {}", result.statements[0]);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn mysql_literal_default_check_only_covers_defaults_the_draft_emits() {
+    // MySQL 8.0.13+ reports an expression default on TEXT this way. Leaving it
+    // unchanged must not block an unrelated edit to the column.
+    let mut kept = existing_pk_column("note", "text", false, false);
+    kept.original.as_mut().unwrap().column_default = Some("_utf8mb4\\'\\'".to_string());
+    kept.default_value = "_utf8mb4\\'\\'".to_string();
+    kept.is_nullable = true;
+    let result = build_table_structure_change_sql(structure_change_options(DatabaseType::Mysql, None, "t", vec![kept]));
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+
+    // Turning a VARCHAR with a literal default into TEXT would carry the
+    // literal into the MODIFY statement.
+    let mut retyped = existing_pk_column("note", "varchar(255)", false, false);
+    retyped.original.as_mut().unwrap().column_default = Some("".to_string());
+    retyped.data_type = "text".to_string();
+    retyped.default_value = "''".to_string();
+    let result =
+        build_table_structure_change_sql(structure_change_options(DatabaseType::Mysql, None, "t", vec![retyped]));
+    assert_eq!(
+        result.warnings,
+        vec!["MySQL does not allow a literal default on text column \"note\". Remove the default, or on MySQL 8.0.13 or later use an expression default such as ('').".to_string()]
+    );
 }

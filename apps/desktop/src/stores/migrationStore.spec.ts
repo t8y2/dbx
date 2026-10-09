@@ -74,9 +74,11 @@ describe("migration store", () => {
     expect(store.state.error).toBe("statusFailed");
     expect(store.state.errorCode).toBeNull();
     expect(store.state.errorMessage).toBeNull();
-    await store.initialize();
+    await store.retryStatus();
     expect(store.state.error).toBeNull();
     expect(store.completed.value).toBe(true);
+    expect(status).toHaveBeenNthCalledWith(1, false);
+    expect(status).toHaveBeenNthCalledWith(2, true);
   });
   it("discards arbitrary transport exception values in state and diagnostics", async () => {
     const secret = "password=DO_NOT_EXPOSE";
@@ -194,7 +196,7 @@ describe("migration store", () => {
     await store.initialize();
     await store.start();
     expect(store.state.error).toBe("statusFailed");
-    await store.initialize();
+    await store.retryStatus();
     expect(store.completed.value).toBe(true);
     expect(store.state.report).toBeNull();
     expect(store.blocking.value).toBe(true);

@@ -106,3 +106,13 @@ export function resolveSidebarSearchDispatchMode(transition: SidebarSearchTransi
   if (transition.wasRegexMode && !transition.query) return "none";
   return "ordinary";
 }
+
+/**
+ * Keep an ordinary-search projection available while a non-empty regex is
+ * filtering it. Restoring those tracked nodes on the mode switch can remove
+ * the only currently loaded matches before a local table index exists. The
+ * projection is restored once the regex query is cleared.
+ */
+export function shouldRestoreTrackedSidebarSearchTargetsInRegexMode(query: string): boolean {
+  return query.length === 0;
+}

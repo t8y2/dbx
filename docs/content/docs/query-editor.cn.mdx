@@ -5,6 +5,19 @@ description: 使用 DBX 编写、理解、参数化、执行、分析和复用 S
 
 查询编辑器是 DBX 的 SQL 工作区。它把方言感知的高亮与补全、语义诊断、参数输入、执行进度、多结果、执行计划、查询历史、SQL 库和 AI 助手放在同一个标签页中。
 
+## Vim 配置
+
+在桌面版的**编辑器设置**中启用 Vim 模式后，DBX 会读取 `~/.dbx/vimrc`。如文件不存在，请先创建；修改后重启 DBX 才会生效。空行及以 `"` 开头的注释行会被忽略。CodeMirror Vim 支持的命令会应用到每个 SQL 编辑器标签页，例如：
+
+```vim
+" DBX Vim 映射
+imap jj <Esc>
+nmap Y y$
+set clipboard=unnamedplus
+```
+
+配置 `set clipboard=unnamedplus` 后，Vim 的复制和删除会写入系统剪贴板，普通模式下的 `p` 和 `P` 会从系统剪贴板读取。不支持的命令不会阻止编辑器启动。
+
 ## 基本工作流
 
 <Steps>

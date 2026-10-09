@@ -84,6 +84,18 @@ fn session_cookie_path(state: &WebState) -> &str {
     state.public_base_path.as_str()
 }
 
+/// `Secure` is opt-in: LAN/HTTP deployments would otherwise never receive the
+/// session cookie back. Reverse-proxy TLS deployments set DBX_WEB_COOKIE_SECURE=1.
+fn cookie_secure_enabled() -> bool {
+    static SECURE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SECURE.get_or_init(|| matches!(std::env::var("DBX_WEB_COOKIE_SECURE").ok().as_deref(), Some("1") | Some("true")))
+}
+
+fn session_cookie(state: &WebState, token: &str) -> String {
+    let secure = if cookie_secure_enabled() { "; Secure" } else { "" };
+    format!("dbx_session={token}; Path={}; HttpOnly; SameSite=Lax{secure}", session_cookie_path(state))
+}
+
 fn api_path_suffix<'a>(path: &'a str, public_base_path: &str) -> Option<&'a str> {
     if let Some(suffix) = path.strip_prefix("/api/") {
         return Some(suffix);
@@ -114,6 +126,33 @@ pub(crate) fn middleware_api_path_suffix<'a>(path: &'a str, public_base_path: &s
 pub(crate) fn migration_gate_exempt_path(suffix: &str) -> bool {
     matches!(suffix, "migration/status" | "migration/start" | "migration/retry" | "migration/cleanup-backups" | "ping")
 }
+pub async fn login(State(state): State<Arc<WebState>>, Json(body): Json<LoginRequest>) -> Result<Response, StatusCode> {
+    let hash_guard = state.password_hash.read().await;
+    let hash_str = match hash_guard.as_deref() {
+        // No password configured: nothing to authenticate against. Answer
+        // explicitly instead of an ok:true that reads as "authenticated" —
+        // the API remains locked by the middleware until setup completes.
+        Some(h) => h.to_string(),
+        None => {
+            return Ok((StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "setup_required"}))).into_response());
+        }
+    };
+    drop(hash_guard);
+
+    // Check rate limit
+    {
+        let rl = state.login_rate_limit.lock().await;
+        if let Some(locked_until) = rl.locked_until {
+            if locked_until > std::time::Instant::now() {
+                let remaining = (locked_until - std::time::Instant::now()).as_secs();
+                return Ok((
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(serde_json::json!({"error": format!("Please try again in {remaining}s")})),
+                )
+                    .into_response());
+            }
+        }
+    }
 
 fn error_response(status: StatusCode, code: &str) -> Response {
     (status, Json(serde_json::json!({"error": code}))).into_response()
@@ -262,6 +301,8 @@ fn permission_keys(user: &UserRecord, effective: &EffectivePermissions) -> Vec<S
     keys.sort();
     keys.dedup();
     keys
+    let cookie = session_cookie(&state, &token);
+    Ok((StatusCode::OK, [("set-cookie", cookie.as_str())], Json(serde_json::json!({"ok": true}))).into_response())
 }
 
 /// setup_required 判定：用户表为空。
@@ -386,6 +427,8 @@ pub async fn setup(State(state): State<Arc<WebState>>, Json(body): Json<SetupReq
 
 pub async fn check(State(state): State<Arc<WebState>>, headers: HeaderMap) -> Json<AuthCheckResponse> {
     Json(auth_check_shape(&state, &headers).await)
+    let cookie = session_cookie(&state, &token);
+    Ok((StatusCode::OK, [("set-cookie", cookie.as_str())], Json(serde_json::json!({"ok": true}))).into_response())
 }
 
 /// check 端点的核心逻辑：会话 token -> 用户 -> 完整状态；任一环节失败均回退
@@ -417,6 +460,24 @@ pub async fn change_password(
         let guard = state.sessions.read().await;
         let session = guard.get(&token).cloned();
         session
+    headers: axum::http::HeaderMap,
+    Json(body): Json<ChangePasswordRequest>,
+) -> Result<Response, StatusCode> {
+    // Session-bound: this endpoint used to sit outside the auth middleware,
+    // giving unauthenticated callers an unlimited online guess at the admin
+    // password with none of login's lockout. It now requires a live session
+    // (defense in depth — the middleware gates it too) and, after a successful
+    // change, revokes every OTHER session so a stolen old cookie cannot survive
+    // a credential rotation.
+    let current_token = session_token_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    if !state.sessions.read().await.contains(&current_token) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    let hash_guard = state.password_hash.read().await;
+    let hash_str = match hash_guard.as_deref() {
+        Some(h) => h.to_string(),
+        None => return Err(StatusCode::BAD_REQUEST),
     };
     let Some(session) = session else {
         return Err(StatusCode::UNAUTHORIZED);
@@ -444,6 +505,9 @@ pub async fn change_password(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     // 同步内存哈希（admin 场景下与旧共享口令判定路径保持一致）。
     *state.password_hash.write().await = Some(new_hash);
+
+    // Rotation revokes sibling sessions; only the caller stays logged in.
+    state.sessions.write().await.retain(|token| *token == current_token);
 
     Ok((StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response())
 }
@@ -486,9 +550,11 @@ pub async fn auth_middleware(
     req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    // Auth endpoints are always accessible.
+    // Only the bootstrap auth endpoints are reachable without a session —
+    // login/setup/check. change-password and logout require one: change-password
+    // must not be an unauthenticated password oracle.
     let api_suffix = middleware_api_path_suffix(req.uri().path(), &state.public_base_path);
-    if api_suffix.is_some_and(|suffix| suffix.starts_with("auth/")) {
+    if api_suffix.is_some_and(|suffix| matches!(suffix, "auth/login" | "auth/setup" | "auth/check")) {
         return next.run(req).await;
     }
 

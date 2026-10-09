@@ -19,16 +19,16 @@ describe("DataGridBusyOverlay", () => {
   it("shows the elapsed seconds without a stop action by default", () => {
     const mounted = mountComponent(DataGridBusyOverlay, { elapsedMs: 12_340 });
 
-    expect(hostText(mounted.root)).toContain("12.34s");
+    expect(hostText(mounted.root)).toContain("12.3s");
     expect(findCancelButton(mounted.root)).toHaveLength(0);
   });
 
   it("formats long waits and guards non-finite elapsed values", async () => {
     const mounted = mountComponent(DataGridBusyOverlay, { elapsedMs: 312_450 });
-    expect(hostText(mounted.root)).toContain("312.45s");
+    expect(hostText(mounted.root)).toContain("312.4s");
 
     await mounted.setProps({ elapsedMs: Number.NaN });
-    expect(hostText(mounted.root)).toContain("0.00s");
+    expect(hostText(mounted.root)).toContain("0.0s");
   });
 
   it("stops the running load from the elapsed pill", () => {
@@ -70,7 +70,7 @@ describe("DataGridBusyOverlay", () => {
 
     expect(hostText(mounted.root)).toContain("grid.pageJumpLoading");
     expect(hostText(mounted.root)).toContain("grid.pageJumpProgress");
-    expect(hostText(mounted.root)).toContain("45.00s");
+    expect(hostText(mounted.root)).toContain("45.0s");
     const progressbar = findOne(mounted.root, (node) => node.props.role === "progressbar");
     expect(progressbar.props["aria-valuenow"]).toBe(3);
     expect(progressbar.props["aria-valuemax"]).toBe(12);

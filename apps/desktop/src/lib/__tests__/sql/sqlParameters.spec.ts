@@ -34,6 +34,25 @@ describe("extractSqlParameters", () => {
       { key: "params", name: "params", syntax: "named", token: ":params" },
       { key: "context", name: "context", syntax: "sqlserver", token: "@context" },
     ]);
+    expect(extractSqlParameters("select :customer_id", { databaseType: "mysql" })).toEqual(["customer_id"]);
+  });
+
+  it("preserves Neo4j pattern labels and relationship types", () => {
+    const cypher = 'MATCH (p:Person)-[:WORK_IN]->(c:Company{name:"星云科技"})\nRETURN p.name, p.job, c.name';
+    const options = { databaseType: "neo4j" as const };
+    expect(extractSqlParameterDescriptors(cypher, options)).toEqual([]);
+    expect(substituteSqlParameters(cypher, {}, options)).toBe(cypher);
+    expect(extractSqlParameterDescriptors(cypher, { ...options, enabledSyntaxes: ["named"] as const })).toEqual([]);
+    expect(extractSqlParameters("MATCH (p:Person {name:${name}}) RETURN p", options)).toEqual(["name"]);
+  });
+
+  it("keeps NebulaGraph tags and edge types intact in nGQL", () => {
+    const ngql = 'MATCH (p:Person)-[:WORK_IN]->(c:Company{name:"星云科技"}) RETURN p.Person.name LIMIT 10';
+    const options = { databaseType: "nebula" as const };
+    expect(extractSqlParameterDescriptors(ngql, options)).toEqual([]);
+    expect(substituteSqlParameters(ngql, {}, options)).toBe(ngql);
+    expect(extractSqlParameters("MATCH (p:Person {name:${name}}) RETURN p LIMIT 10", options)).toEqual(["name"]);
+    expect(extractSqlParameters("select :customer_id", { databaseType: "mysql" })).toEqual(["customer_id"]);
   });
 
   it("extracts unique template parameters in order", () => {

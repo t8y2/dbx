@@ -186,6 +186,9 @@ const sqlserverCapabilities = capabilities({
   indexInclude: true,
   indexFilter: true,
   indexComment: true,
+  // T-SQL: ALTER TABLE ... DROP CONSTRAINT <name> / ADD [CONSTRAINT name] PRIMARY KEY (...);
+  // the backend drops the persisted constraint by its index-metadata name (issue #10758).
+  alterPrimaryKey: true,
 });
 
 const oracleCompatibleCapabilities = capabilities({
@@ -266,6 +269,20 @@ const informixCapabilities = capabilities({
   createIndex: true,
   dropIndex: true,
   rebuildIndex: true,
+});
+
+// Inceptor accepts ADD COLUMNS and CHANGE. DROP COLUMN and index/constraint DDL
+// remain disabled until a safe server-supported form is verified.
+const transwarpCapabilities = capabilities({
+  dialect: "mysql",
+  createTable: true,
+  addColumn: true,
+  renameColumn: true,
+  alterExistingColumn: true,
+  alterType: true,
+  alterNullability: true,
+  alterDefault: true,
+  comment: true,
 });
 
 const accessCapabilities = capabilities({
@@ -359,6 +376,7 @@ const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>
   access: accessCapabilities,
   clickhouse: clickhouseCapabilities,
   informix: informixCapabilities,
+  transwarp: transwarpCapabilities,
   influxdb: influxdbCapabilities,
   manticoresearch: manticoreSearchCapabilities,
 };

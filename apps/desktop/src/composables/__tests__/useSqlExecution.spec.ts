@@ -193,6 +193,16 @@ describe("useSqlExecution", () => {
     const authStore = useAuthStore();
     authStore.isAdmin = false;
     authStore.permissions = ["query.read"];
+  it("executes Neo4j graph patterns without a SQL parameter dialog", async () => {
+    const sql = 'MATCH (p:Person)-[:WORK_IN]->(c:Company{name:"星云科技"})\nRETURN p.name, p.job, c.name';
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("neo4j"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("neo4j"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: ["p.name"], rows: [["Ada"]], affected_rows: 0, execution_time_ms: 1 };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
 
     const execution = useSqlExecution({
       activeTab: computed(() => activeTab.value),
@@ -205,6 +215,8 @@ describe("useSqlExecution", () => {
 
     expect(executeCurrentSql).toHaveBeenCalledWith(sql, { tabId: "tab-1" });
     expect(toast).not.toHaveBeenCalled();
+    expect(execution.showSqlParameterDialog.value).toBe(false);
+    expect(executeCurrentSql).toHaveBeenCalledWith(sql, { tabId: "tab-1" });
   });
 
   it("invalidates object metadata after successful connection-level DDL", async () => {
@@ -385,6 +397,30 @@ describe("useSqlExecution", () => {
 
     expect(execution.showSqlParameterDialog.value).toBe(false);
     expect(executeCurrentSql).toHaveBeenCalledWith("SELECT * FROM patrol WHERE post_id = '224';", { tabId: "tab-1" });
+  });
+
+  it("executes an unsemicoloned @set followed by a query without producing empty SQL or silently cancelling", async () => {
+    const sql = ["@set user_id = 42", "select * from users where id = @user_id"].join("\n");
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("postgres"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: ["id"], rows: [["42"]], affected_rows: 0, execution_time_ms: 1 };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      resolveExecutableSql: async () => sql,
+      activeOutputView,
+    });
+
+    await execution.tryExecute(sql);
+
+    expect(executeCurrentSql).toHaveBeenCalledWith("select * from users where id = 42", { tabId: "tab-1" });
   });
 
   it("opens the result table for a multi-statement batch by default", async () => {

@@ -447,6 +447,13 @@
           "agentKey": "oracle",
           "label": "Oracle",
           "storeVisible": false
+        },
+        {
+          "profile": "oci",
+          "agentKey": "oracle-oci",
+          "label": "Oracle (OCI)",
+          "storeVisible": true,
+          "storeOrder": 54
         }
       ],
       "singleConnectionPool": true,
@@ -576,6 +583,35 @@
       "metadataConnectionScoped": false,
       "skipTcpProbe": false,
       "defaultPort": 8983,
+      "supportLevel": "browse",
+      "capabilities": {
+        "queryExecution": true,
+        "metadataBrowse": true,
+        "objectBrowser": false,
+        "objectSource": false,
+        "schemaSearch": false,
+        "diagram": false,
+        "tableDataEdit": false,
+        "tableStructureEdit": false,
+        "tableImport": false,
+        "dataTransfer": false,
+        "sqlFileExecution": false,
+        "databaseCreate": false,
+        "fieldLineage": false,
+        "sqlExplain": false,
+        "userAdmin": false,
+        "driverManagement": false
+      }
+    },
+    {
+      "dbType": "couchdb",
+      "label": "Apache CouchDB",
+      "runtimeMode": "native",
+      "mcpMode": "bridge",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": false,
+      "defaultPort": 5984,
       "supportLevel": "browse",
       "capabilities": {
         "queryExecution": true,
@@ -1743,7 +1779,9 @@
       "skipTcpProbe": true,
       "defaultPort": 443,
       "traits": {
-        "schemaAware": true
+        "schemaAware": true,
+        "databaseSchemaQualified": true,
+        "treeSchema": true
       },
       "supportLevel": "operate",
       "capabilities": {
@@ -1907,6 +1945,50 @@
       }
     },
     {
+      "dbType": "transwarp",
+      "label": "星环Inceptor",
+      "dialect": "Transwarp",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "transwarp",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 52,
+      "driverProfiles": [
+        {
+          "profile": "transwarp-inceptor",
+          "agentKey": "transwarp",
+          "label": "星环Inceptor",
+          "storeVisible": false
+        }
+      ],
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 10000,
+      "traits": {
+        "schemaAware": true
+      },
+      "supportLevel": "operate",
+      "capabilities": {
+        "queryExecution": true,
+        "metadataBrowse": true,
+        "objectBrowser": true,
+        "objectSource": true,
+        "schemaSearch": true,
+        "diagram": false,
+        "tableDataEdit": true,
+        "tableStructureEdit": true,
+        "tableImport": true,
+        "dataTransfer": true,
+        "sqlFileExecution": true,
+        "databaseCreate": true,
+        "fieldLineage": false,
+        "sqlExplain": false,
+        "userAdmin": false,
+        "driverManagement": true
+      }
+    },
+    {
       "dbType": "kyuubi",
       "label": "Apache Kyuubi",
       "runtimeMode": "agent",
@@ -2000,11 +2082,11 @@
         "diagram": true,
         "tableDataEdit": true,
         "tableStructureEdit": false,
-        "tableImport": false,
-        "dataTransfer": false,
+        "tableImport": true,
+        "dataTransfer": true,
         "sqlFileExecution": true,
         "databaseCreate": false,
-        "fieldLineage": false,
+        "fieldLineage": true,
         "sqlExplain": false,
         "userAdmin": false,
         "driverManagement": true
@@ -2072,6 +2154,46 @@
         "tableImport": false,
         "dataTransfer": false,
         "sqlFileExecution": true,
+        "databaseCreate": false,
+        "fieldLineage": false,
+        "sqlExplain": false,
+        "userAdmin": false,
+        "driverManagement": true
+      }
+    },
+    {
+      "dbType": "nebula",
+      "label": "NebulaGraph",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "nebula",
+      "driverProfiles": [
+        {
+          "profile": "nebula-v3",
+          "agentKey": "nebula",
+          "label": "NebulaGraph 3.x",
+          "storeVisible": false
+        }
+      ],
+      "driverStoreVisible": true,
+      "driverStoreOrder": 53,
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 9669,
+      "supportLevel": "browse",
+      "capabilities": {
+        "queryExecution": true,
+        "metadataBrowse": true,
+        "objectBrowser": true,
+        "objectSource": true,
+        "schemaSearch": false,
+        "diagram": false,
+        "tableDataEdit": false,
+        "tableStructureEdit": false,
+        "tableImport": false,
+        "dataTransfer": false,
+        "sqlFileExecution": false,
         "databaseCreate": false,
         "fieldLineage": false,
         "sqlExplain": false,
@@ -2295,6 +2417,10 @@
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "defaultPort": 22581,
+      "traits": {
+        "schemaAware": true,
+        "treeSchema": true
+      },
       "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
@@ -2405,18 +2531,18 @@
         "queryExecution": true,
         "metadataBrowse": true,
         "objectBrowser": true,
-        "objectSource": false,
+        "objectSource": true,
         "schemaSearch": true,
         "diagram": true,
-        "tableDataEdit": false,
+        "tableDataEdit": true,
         "tableStructureEdit": true,
         "tableImport": true,
         "dataTransfer": false,
         "sqlFileExecution": true,
         "databaseCreate": false,
         "fieldLineage": false,
-        "sqlExplain": false,
-        "userAdmin": false,
+        "sqlExplain": true,
+        "userAdmin": true,
         "driverManagement": true
       }
     },
@@ -2710,7 +2836,7 @@
         "tableDataEdit": false,
         "tableStructureEdit": true,
         "tableImport": false,
-        "dataTransfer": false,
+        "dataTransfer": true,
         "sqlFileExecution": true,
         "databaseCreate": false,
         "fieldLineage": false,

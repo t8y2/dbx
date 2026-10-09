@@ -24,17 +24,24 @@ export type ShortcutActionId =
   | "undo"
   | "redo"
   | "selectAll"
+  | "selectCurrentStatement"
   | "extendSelection"
   | "addNextSelectionOccurrence"
   | "selectAllSelectionOccurrences"
+  | "selectLineEnds"
   | "uppercaseSelection"
   | "lowercaseSelection"
+  | "toggleCaseSelection"
   | "convertNamingStyle"
   | "exPasteSqlInCondition"
   | "toggleFold"
+  | "foldAll"
+  | "unfoldAll"
+  | "editCell"
   | "editTableStructure"
   | "copyCurrentRow"
   | "deleteCurrentRow"
+  | "focusWhere"
   | "goToColumn"
   | "goToFirstPage"
   | "goToPreviousPage"
@@ -44,6 +51,7 @@ export type ShortcutActionId =
   | "openSettings"
   | "closeTab"
   | "closeOtherTabs"
+  | "closeWindow"
   | "focusSearch"
   | "quickOpen"
   | "globalSearch"
@@ -77,6 +85,8 @@ export type ShortcutActionId =
   | "copySidebarSelection"
   | "pasteSidebarSelection"
   | "editSidebarConnection"
+  | "disconnectSidebarConnection"
+  | "disconnectAllActiveConnections"
   | "openDataInNewTab"
   | "viewTableDdl"
   | "sendSelectionToAi"
@@ -116,6 +126,12 @@ export function selectionOccurrenceDefaultShortcut(actionId: "addNextSelectionOc
   return actionId === "addNextSelectionOccurrence" ? "Alt+J" : "Ctrl+Alt+Shift+J";
 }
 
+export function selectLineEndsDefaultShortcut(_platform = globalThis.navigator?.platform || ""): string {
+  // VS Code uses Option+Shift+I on macOS; CodeMirror's physical shortcut
+  // representation is Alt+Shift+I on every platform.
+  return "Alt+Shift+I";
+}
+
 export function tabNavigationHistoryDefaultShortcut(direction: "back" | "forward", platform = globalThis.navigator?.platform || ""): string {
   const modifier = isMacShortcutPlatform(platform) ? "Ctrl" : "Mod";
   const key = direction === "back" ? "ArrowLeft" : "ArrowRight";
@@ -136,14 +152,22 @@ export function gotoLineDefaultShortcut(platform = globalThis.navigator?.platfor
   return isMacShortcutPlatform(platform) ? "Mod+Alt+G" : "Mod+G";
 }
 
+export function foldAllDefaultShortcut(actionId: "foldAll" | "unfoldAll", platform = globalThis.navigator?.platform || ""): string {
+  const key = actionId === "foldAll" ? "[" : "]";
+  return `${isMacShortcutPlatform(platform) ? "Ctrl+Alt" : "Shift+Alt"}+${key}`;
+}
+
 const PLATFORM_DEFAULT_SHORTCUTS: Partial<Record<ShortcutActionId, ReadonlySet<string>>> = {
   closeOtherTabs: new Set(["Alt+Mod+W", "Shift+Alt+W"]),
   navigateTabHistoryBack: new Set(["Ctrl+Alt+ArrowLeft", "Mod+Alt+ArrowLeft"]),
   navigateTabHistoryForward: new Set(["Ctrl+Alt+ArrowRight", "Mod+Alt+ArrowRight"]),
   addNextSelectionOccurrence: new Set(["Ctrl+G", "Alt+J"]),
   selectAllSelectionOccurrences: new Set(["Ctrl+Mod+G", "Ctrl+Alt+Shift+J"]),
+  selectLineEnds: new Set(["Alt+Shift+I"]),
   toggleAiPanel: new Set(["Ctrl+Mod+I", "Ctrl+Alt+I"]),
   gotoLine: new Set(["Mod+G", "Mod+Alt+G"]),
+  foldAll: new Set(["Mod+Alt+[", "Ctrl+Alt+[", "Shift+Alt+["]),
+  unfoldAll: new Set(["Mod+Alt+]", "Ctrl+Alt+]", "Shift+Alt+]"]),
 };
 const LEGACY_CLOSE_TAB_DEFAULT = "Meta+W";
 const LEGACY_COPY_CURRENT_ROW_DEFAULT = "Mod+D";
@@ -290,6 +314,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     defaultShortcut: "Mod+A",
   },
   {
+    id: "selectCurrentStatement",
+    labelKey: "settings.shortcutSelectCurrentStatement",
+    scope: "editor",
+    defaultShortcut: "Mod+Shift+E",
+  },
+  {
     id: "extendSelection",
     labelKey: "settings.shortcutExtendSelection",
     scope: "editor",
@@ -308,6 +338,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     defaultShortcut: "Ctrl+Mod+G",
   },
   {
+    id: "selectLineEnds",
+    labelKey: "settings.shortcutSelectLineEnds",
+    scope: "editor",
+    defaultShortcut: "Alt+Shift+I",
+  },
+  {
     id: "uppercaseSelection",
     labelKey: "settings.shortcutUppercaseSelection",
     scope: "editor",
@@ -318,6 +354,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutLowercaseSelection",
     scope: "editor",
     defaultShortcut: "Shift+Alt+L",
+  },
+  {
+    id: "toggleCaseSelection",
+    labelKey: "settings.shortcutToggleCaseSelection",
+    scope: "editor",
+    defaultShortcut: "Mod+Shift+U",
   },
   {
     id: "convertNamingStyle",
@@ -338,6 +380,24 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     defaultShortcut: "Mod+.",
   },
   {
+    id: "foldAll",
+    labelKey: "settings.shortcutFoldAll",
+    scope: "editor",
+    defaultShortcut: foldAllDefaultShortcut("foldAll"),
+  },
+  {
+    id: "unfoldAll",
+    labelKey: "settings.shortcutUnfoldAll",
+    scope: "editor",
+    defaultShortcut: foldAllDefaultShortcut("unfoldAll"),
+  },
+  {
+    id: "editCell",
+    labelKey: "settings.shortcutEditCell",
+    scope: "grid",
+    defaultShortcut: "F2",
+  },
+  {
     id: "editTableStructure",
     labelKey: "settings.shortcutEditTableStructure",
     scope: "grid",
@@ -354,6 +414,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutDeleteCurrentRow",
     scope: "grid",
     defaultShortcut: "Delete",
+  },
+  {
+    id: "focusWhere",
+    labelKey: "settings.shortcutFocusWhere",
+    scope: "grid",
+    defaultShortcut: "",
   },
   {
     id: "goToColumn",
@@ -408,6 +474,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "contextMenu.closeOtherTabs",
     scope: "global",
     defaultShortcut: closeOtherTabsDefaultShortcut(),
+  },
+  {
+    id: "closeWindow",
+    labelKey: "settings.shortcutCloseWindow",
+    scope: "global",
+    defaultShortcut: "Shift+Mod+W",
   },
   {
     id: "focusSearch",
@@ -590,6 +662,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     defaultShortcut: "Shift+Mod+F12",
   },
   {
+    id: "disconnectAllActiveConnections",
+    labelKey: "sidebar.disconnectAllActiveConnections",
+    scope: "global",
+    defaultShortcut: "",
+  },
+  {
     id: "copySidebarSelection",
     labelKey: "settings.shortcutCopySidebarSelection",
     scope: "sidebar",
@@ -606,6 +684,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutEditSidebarConnection",
     scope: "sidebar",
     defaultShortcut: "Mod+E",
+  },
+  {
+    id: "disconnectSidebarConnection",
+    labelKey: "settings.shortcutDisconnectSidebarConnection",
+    scope: "sidebar",
+    defaultShortcut: "Shift+Mod+E",
   },
   {
     id: "openDataInNewTab",
@@ -667,11 +751,13 @@ function shortcutsUseSameKeys(first: string, second: string, platform = globalTh
 function shortcutDefaultForPlatform(definition: ShortcutDefinition, platform: string): string {
   if (definition.id === "addNextSelectionOccurrence") return selectionOccurrenceDefaultShortcut("addNextSelectionOccurrence", platform);
   if (definition.id === "selectAllSelectionOccurrences") return selectionOccurrenceDefaultShortcut("selectAllSelectionOccurrences", platform);
+  if (definition.id === "selectLineEnds") return selectLineEndsDefaultShortcut(platform);
   if (definition.id === "closeOtherTabs") return closeOtherTabsDefaultShortcut(platform);
   if (definition.id === "gotoLine") return gotoLineDefaultShortcut(platform);
   if (definition.id === "navigateTabHistoryBack") return tabNavigationHistoryDefaultShortcut("back", platform);
   if (definition.id === "navigateTabHistoryForward") return tabNavigationHistoryDefaultShortcut("forward", platform);
   if (definition.id === "toggleAiPanel") return toggleAiPanelDefaultShortcut(platform);
+  if (definition.id === "foldAll" || definition.id === "unfoldAll") return foldAllDefaultShortcut(definition.id, platform);
   return definition.defaultShortcut;
 }
 

@@ -1,7 +1,9 @@
 export type RedisKeyBrowserSearchMode = "key" | "value" | "all";
 
 export interface RedisKeyBrowserStateSnapshot {
-  /** Key / value / all search input text. */
+  /** Implicit key scope captured when this tab opened, independent of search input and later connection edits. */
+  defaultKeyFilter?: string;
+  /** User-entered Key / value / all search text; never prefilled from the connection scope. */
   searchPattern: string;
   /** Which Redis search mode the toolbar is in. */
   searchMode: RedisKeyBrowserSearchMode;

@@ -1,6 +1,25 @@
-import type { AstNode, ClauseNode, LimitClauseNode, ParenthesisNode, StatementNode } from "sql-formatter/dist/esm/parser/ast.js";
+import type { AstNode, ClauseNode, LimitClauseNode, ParenthesisNode, SetOperationNode, StatementNode } from "sql-formatter/dist/esm/parser/ast.js";
 import { createTableLayout, isCreateTable } from "./ddl";
-import { clauseChildContext, collapsedContext, emitText, endsWithLineComment, isBodyNode, isCallParen, isJoinKeyword, isLineComment, isLogicalOperator, isParenthesis, keywordText, limitChildren, renderInline, splitByComma, splitLogicalOperands, Writer, type SqlLayoutContext } from "./primitives";
+import {
+  clauseChildContext,
+  collapsedContext,
+  emitText,
+  endsWithLineComment,
+  isBodyNode,
+  isCallParen,
+  isJoinKeyword,
+  isLineComment,
+  isLogicalOperator,
+  isParenthesis,
+  isProjectionClauseName,
+  keywordText,
+  limitChildren,
+  renderInline,
+  splitByComma,
+  splitLogicalOperands,
+  Writer,
+  type SqlLayoutContext,
+} from "./primitives";
 
 export type { SqlLayoutContext, SqlLayoutOptions } from "./primitives";
 
@@ -13,9 +32,10 @@ export type { SqlLayoutContext, SqlLayoutOptions } from "./primitives";
  *   them.
  * - A clause's first item stays on the keyword's line, and its remaining items
  *   align under the first item's column.
- * - Short element lists stay collapsed.
- * - A statement whose clauses all fit the line width is emitted as a single
- *   line.
+ * - SELECT fields each get their own line; other short element lists stay
+ *   collapsed.
+ * - A statement with a single SELECT field whose clauses all fit the line
+ *   width is emitted as a single line.
  * - Join keywords are indented relative to their FROM clause.
  *
  * Alignment is *column-relative*, not indent-level-relative: a subquery's
@@ -30,19 +50,26 @@ export type { SqlLayoutContext, SqlLayoutOptions } from "./primitives";
 
 /**
  * Emits one clause: its keyword, then its items — the first kept on the keyword's
- * line and the rest aligned under it — unless the whole list is short enough to
- * stay on one line.
+ * line and the rest aligned under it. SELECT fields always split; other lists
+ * stay on one line when they are short enough.
  */
 function printClause(writer: Writer, clause: ClauseNode, baseColumn: number, ctx: SqlLayoutContext): void {
   const keyword = keywordText(clause.nameKw.text, ctx);
   const items = splitByComma(clause.children);
   const itemColumn = baseColumn + keyword.length + 1;
+  const projection = isProjectionClauseName(clause.nameKw.text);
   // `FROM` is the one clause DBX lets users push its first source off of, so it
   // skips both the collapse and the "element on the keyword's line" rule.
   const sourceOnOwnLine = clause.nameKw.text.toUpperCase() === "FROM" && !ctx.options.fromClauseSourceOnSameLine;
   const childCtx = clauseChildContext(ctx, clause);
 
-  if (!sourceOnOwnLine && items.length <= ctx.options.keepElementsOnOneLine) {
+  // Align explicit SELECT aliases to the same column, matching the tabular
+  // layout used by DBX for CREATE TABLE definitions. Only use this path when
+  // every aliased item can be rendered as a single line; otherwise the normal
+  // element printer preserves the formatter's existing wrapping behavior.
+  const alignedAliases = projection && items.length > 1 ? alignedProjectionItems(items, childCtx, ctx.options.lineWidth - itemColumn) : null;
+
+  if (!sourceOnOwnLine && !(projection && items.length > 1) && items.length <= ctx.options.keepElementsOnOneLine) {
     const flat = renderInline(childCtx, clause.children, ctx.options.lineWidth - writer.column - keyword.length - 1);
     if (flat) {
       writer.write(`${keyword} ${flat}`);
@@ -56,11 +83,54 @@ function printClause(writer: Writer, clause: ClauseNode, baseColumn: number, ctx
       if (sourceOnOwnLine) writer.newline(baseColumn + ctx.options.indentWidth);
       else writer.space();
     } else {
-      writer.newline(itemColumn);
+      if (ctx.options.commaPosition === "before") {
+        const leadingIndent = sourceOnOwnLine ? baseColumn + ctx.options.indentWidth : Math.max(baseColumn, itemColumn - 2);
+        writer.newline(leadingIndent);
+        writer.write(", ");
+      } else {
+        writer.newline(itemColumn);
+      }
     }
-    printElement(writer, item, baseColumn, childCtx);
-    if (index < items.length - 1) writer.write(",");
+    if (alignedAliases) {
+      const aligned = alignedAliases[index];
+      if (aligned) {
+        writer.write(aligned.expression);
+        writer.write(" ".repeat(aligned.aliasColumn - aligned.expression.length));
+        writer.write(`${aligned.asKeyword} ${aligned.alias}`);
+      } else {
+        printElement(writer, item, baseColumn, childCtx);
+      }
+    } else {
+      printElement(writer, item, baseColumn, childCtx);
+    }
+    if (ctx.options.commaPosition !== "before" && index < items.length - 1) writer.write(",");
   });
+}
+
+interface AlignedProjectionItem {
+  expression: string;
+  alias: string;
+  asKeyword: string;
+  aliasColumn: number;
+}
+
+function alignedProjectionItems(items: AstNode[][], ctx: SqlLayoutContext, lineWidth: number): Array<AlignedProjectionItem | null> | null {
+  const parsed = items.map((item) => {
+    const asIndex = item.findIndex((node) => node.type === "keyword" && node.text.toUpperCase() === "AS");
+    if (asIndex <= 0 || asIndex >= item.length - 1) return null;
+    const asNode = item[asIndex];
+    if (asNode?.type !== "keyword") return null;
+    const expression = renderInline(ctx, item.slice(0, asIndex), lineWidth);
+    const alias = renderInline(ctx, item.slice(asIndex + 1), lineWidth);
+    if (!expression || !alias) return null;
+    return { expression, alias, asKeyword: keywordText(asNode.text, ctx), aliasColumn: 0 };
+  });
+
+  if (!parsed.some(Boolean)) return null;
+  const expressionWidth = Math.max(...parsed.filter((item): item is AlignedProjectionItem => item !== null).map((item) => item.expression.length));
+  const aliasColumn = expressionWidth + 1;
+  if (parsed.some((item) => item && item.expression.length + (aliasColumn - item.expression.length) + item.asKeyword.length + 1 + item.alias.length > lineWidth)) return null;
+  return parsed.map((item) => (item ? { ...item, aliasColumn } : null));
 }
 
 /** Emits a `LIMIT` clause, which sql-formatter renders as keyword + expressions. */
@@ -106,6 +176,52 @@ function measureParen(writer: Writer, nodes: AstNode[], index: number, ctx: SqlL
 
   const remaining = width - afterOpen - inner.length - node.closeParen.length;
   return renderInline(collapseCtx, nodes.slice(index + 1, end), remaining) ? inner : null;
+}
+
+/**
+ * Emits a parenthesis group: inline while it fits — together with the rest of
+ * the join element it opens — and expanded, re-based on the `(`'s own column,
+ * when it does not.
+ */
+function writeParenthesis(writer: Writer, nodes: AstNode[], index: number, ctx: SqlLayoutContext): void {
+  const node = nodes[index] as ParenthesisNode;
+  const inner = measureParen(writer, nodes, index, ctx);
+  if (inner) {
+    writer.write(`${node.openParen}${inner}${node.closeParen}`);
+    return;
+  }
+  writer.write(node.openParen);
+  printBlock(writer, node.children, writer.column, ctx);
+  writer.write(node.closeParen);
+}
+
+/**
+ * Emits one set operation (`UNION ALL`, `INTERSECT`, ...).
+ *
+ * The parser only promotes a *bare* `SELECT` after the operator to a sibling
+ * clause of its own; every other branch — a parenthesized subquery, a `VALUES`
+ * list — stays in this node's `children`. Printing the keyword alone would
+ * therefore delete every branch after the first one (#10472), so the operand is
+ * written on the next line at the operator's column, which is where the
+ * sibling-clause form (`SELECT ... UNION ALL SELECT ...`) puts it as well.
+ */
+function printSetOperation(writer: Writer, node: SetOperationNode, baseColumn: number, ctx: SqlLayoutContext): void {
+  writer.write(keywordText(node.nameKw.text, ctx));
+  if (node.children.length === 0) return;
+  writer.newline(baseColumn);
+  printSetOperationOperand(writer, node.children, ctx);
+}
+
+/** Emits the operand a set operation carries inside its own node. */
+function printSetOperationOperand(writer: Writer, nodes: AstNode[], ctx: SqlLayoutContext): void {
+  if (nodes.length === 1 && isParenthesis(nodes[0])) {
+    writeParenthesis(writer, nodes, 0, ctx);
+    return;
+  }
+  // Anything the grammar did not turn into a clause of its own (a `VALUES`
+  // list, a dialect-specific operand): let sql-formatter lay it out, re-based
+  // on this column.
+  emitText(writer, ctx.renderers.block(nodes).trim(), writer.column, endsWithLineComment(nodes));
 }
 
 /**
@@ -166,14 +282,7 @@ function printElement(writer: Writer, nodes: AstNode[], baseColumn: number, ctx:
 
     if (isParenthesis(node)) {
       if (!isCallParen(nodes, index, ctx)) writer.space();
-      const inner = measureParen(writer, nodes, index, ctx);
-      if (inner) {
-        writer.write(`${node.openParen}${inner}${node.closeParen}`);
-      } else {
-        writer.write(node.openParen);
-        printBlock(writer, node.children, writer.column, ctx);
-        writer.write(node.closeParen);
-      }
+      writeParenthesis(writer, nodes, index, ctx);
       index += 1;
       continue;
     }
@@ -232,14 +341,19 @@ function printBlock(writer: Writer, nodes: AstNode[], baseColumn: number, ctx: S
 /** Emits one clause / set operation / limit clause of a statement body. */
 function writeBodyNode(writer: Writer, node: AstNode, baseColumn: number, ctx: SqlLayoutContext): void {
   if (node.type === "clause") printClause(writer, node, baseColumn, ctx);
-  else if (node.type === "set_operation") writer.write(keywordText(node.nameKw.text, ctx));
+  else if (node.type === "set_operation") printSetOperation(writer, node, baseColumn, ctx);
   else if (node.type === "limit_clause") printLimitClause(writer, node, ctx);
+  // A parenthesized group that is not a clause (a set operation's branch, a
+  // statement wrapped in parentheses) is laid out like any other parenthesis so
+  // its contents stay in this style instead of dropping to the generic renderer.
+  else if (isParenthesis(node)) writeParenthesis(writer, [node], 0, ctx);
   else emitText(writer, ctx.renderers.block([node]).trim(), writer.column, isLineComment(node));
 }
 
 /** Emits a whole statement, one clause per line unless the statement collapses. */
 function printStatement(statement: StatementNode, ctx: SqlLayoutContext): string | null {
-  const collapsed = renderInline(collapsedContext(ctx), statement.children, ctx.options.lineWidth);
+  const hasMultiItemProjection = statement.children.some((node) => node.type === "clause" && isProjectionClauseName(node.nameKw.text) && splitByComma(node.children).length > 1);
+  const collapsed = hasMultiItemProjection ? null : renderInline(collapsedContext(ctx), statement.children, ctx.options.lineWidth);
   if (collapsed) return statement.hasSemicolon ? `${collapsed};` : collapsed;
 
   if (isCreateTable(statement)) return createTableLayout(statement, ctx);

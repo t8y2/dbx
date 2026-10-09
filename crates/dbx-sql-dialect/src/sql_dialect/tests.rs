@@ -1,3 +1,4 @@
+use super::identifiers::quote_gaussdb_jdbc_identifier;
 use super::*;
 use crate::models::connection::DatabaseType;
 
@@ -16,6 +17,7 @@ fn transfer_identifier_policy_preserves_legacy_output() {
 
 #[test]
 fn quotes_identifiers_by_database_type() {
+    assert_eq!(quote_table_identifier(Some(DatabaseType::Nebula), "tag`name"), "`tag\\`name`");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Mysql), "user`name"), "`user``name`");
     assert_eq!(quote_table_identifier(Some(DatabaseType::ClickHouse), "user`name"), "`user``name`");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Doris), "user`name"), "`user``name`");
@@ -47,6 +49,29 @@ fn quotes_identifiers_by_database_type() {
     assert_eq!(quote_table_identifier(Some(DatabaseType::Argo), "user`name"), "`user``name`");
     assert_eq!(quote_transfer_identifier("user`name", &DatabaseType::Argo), "`user``name`");
     assert!(is_schema_aware(DatabaseType::Argo));
+}
+
+#[test]
+fn builds_nebula_tag_and_edge_queries() {
+    let tag = build_table_data_select_sql(TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Nebula),
+        table_name: "player".into(),
+        table_type: Some("TABLE".into()),
+        columns: vec!["name".into()],
+        limit: Some(20),
+        ..Default::default()
+    });
+    assert_eq!(tag, "MATCH (v:`player`) RETURN id(v) AS `_vid`, v.`player`.`name` AS `name` LIMIT 20;");
+
+    let edge = build_table_data_select_sql(TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Nebula),
+        table_name: "serve".into(),
+        table_type: Some("VIEW".into()),
+        columns: vec!["start_year".into()],
+        limit: Some(10),
+        ..Default::default()
+    });
+    assert_eq!(edge, "MATCH ()-[e:`serve`]->() RETURN src(e) AS `_src`, dst(e) AS `_dst`, rank(e) AS `_rank`, e.`start_year` AS `start_year` LIMIT 10;");
 }
 
 /// Spanner databases are created in one of two immutable dialects. The connected
@@ -199,6 +224,15 @@ fn maps_table_pagination_strategy_by_database_type() {
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Questdb)), TablePaginationStrategy::QuestDbLimit);
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Oracle)), TablePaginationStrategy::Rownum);
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Oscar)), TablePaginationStrategy::Rownum);
+    assert_eq!(table_pagination_strategy(Some(DatabaseType::Cassandra)), TablePaginationStrategy::AgentMaxRows);
+    assert_eq!(
+        pagination_strategy(Some(DatabaseType::Cassandra), PaginationContext::BoundedRead),
+        TablePaginationStrategy::LimitOffset
+    );
+    assert_eq!(
+        pagination_strategy(Some(DatabaseType::Cassandra), PaginationContext::UserQuery),
+        TablePaginationStrategy::AgentMaxRows
+    );
     assert_eq!(
         pagination_strategy(Some(DatabaseType::Oracle), PaginationContext::BoundedRead),
         TablePaginationStrategy::Rownum
@@ -219,6 +253,22 @@ fn maps_table_pagination_strategy_by_database_type() {
     // Both Spanner dialects support `LIMIT n OFFSET m`; pin the fallback.
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Spanner)), TablePaginationStrategy::LimitOffset);
     assert_eq!(table_pagination_strategy(None), TablePaginationStrategy::LimitOffset);
+}
+
+#[test]
+fn cassandra_table_data_pagination_uses_the_agent_cursor() {
+    for offset in [0, 100, 200] {
+        assert_eq!(
+            build_table_data_select_sql(TableDataSelectSqlOptions {
+                database_type: Some(DatabaseType::Cassandra),
+                table_name: "paged_rows".to_string(),
+                limit: Some(100),
+                offset: Some(offset),
+                ..Default::default()
+            }),
+            "SELECT * FROM \"paged_rows\";"
+        );
+    }
 }
 
 #[test]
@@ -971,8 +1021,8 @@ fn builds_postgres_table_data_large_value_previews() {
         schema: Some("public".to_string()),
         table_name: "large_rows".to_string(),
         primary_keys: vec!["id".to_string()],
-        columns: vec!["id".to_string(), "payload".to_string(), "metadata".to_string()],
-        column_types: vec!["integer".to_string(), "text".to_string(), "jsonb".to_string()],
+        columns: vec!["id".to_string(), "payload".to_string(), "metadata".to_string(), "content".to_string()],
+        column_types: vec!["integer".to_string(), "text".to_string(), "jsonb".to_string(), "bytea".to_string()],
         large_value_preview_size: Some(8192),
         limit: Some(100),
         ..Default::default()
@@ -982,6 +1032,41 @@ fn builds_postgres_table_data_large_value_previews() {
     assert!(sql.contains("'T:8192' AS \"__DBX_LARGE_VALUE_BYTES_T_1\""));
     assert!(sql.contains("left(\"metadata\"::text, 8193) AS \"metadata\""));
     assert!(sql.contains("'T:8192' AS \"__DBX_LARGE_VALUE_BYTES_K_2\""));
+    assert!(sql.contains("substring(\"content\" from 1 for 8193) AS \"content\""));
+    assert!(sql.contains("'B:8192:' || octet_length(\"content\")::text AS \"__DBX_LARGE_VALUE_BYTES_B_3\""));
+}
+
+#[test]
+fn builds_db2_table_data_large_value_previews_with_bounded_substr() {
+    let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Db2),
+        schema: Some("DB2INST1".to_string()),
+        table_name: "large_rows".to_string(),
+        primary_keys: vec!["id".to_string()],
+        columns: vec!["id".to_string(), "doc".to_string(), "raw_value".to_string()],
+        column_types: vec!["integer".to_string(), "clob".to_string(), "blob".to_string()],
+        large_value_preview_size: Some(4096),
+        limit: Some(100),
+        ..Default::default()
+    });
+
+    // DB2 的 SUBSTR 第三参数越界会报 SQL0138N，故用 CASE WHEN LENGTH(..) 把预览长度
+    // 夹在实际长度内：CLOB → 文本预览、BLOB → 二进制预览，都不对短值报错。
+    assert!(
+        sql.contains(
+            "SUBSTR(\"doc\", 1, CASE WHEN LENGTH(\"doc\") >= 4097 THEN 4097 ELSE LENGTH(\"doc\") END) AS \"doc\""
+        ),
+        "clob preview sql: {sql}"
+    );
+    assert!(sql.contains("'T:4096' AS "), "clob marker sql: {sql}");
+    assert!(
+        sql.contains("SUBSTR(\"raw_value\", 1, CASE WHEN LENGTH(\"raw_value\") >= 4097 THEN 4097 ELSE LENGTH(\"raw_value\") END) AS \"raw_value\""),
+        "blob preview sql: {sql}"
+    );
+    assert!(sql.contains("'B:4096' AS "), "blob marker sql: {sql}");
+    // 主键列不做预览，且不得生成裸 SUBSTR(col,1,n)（会越界报错）
+    assert!(!sql.contains("SUBSTR(\"id\""), "pk should not be previewed: {sql}");
+    assert!(!sql.contains("SUBSTR(\"doc\", 1, 4097)"), "must not emit unbounded substr: {sql}");
 }
 
 #[test]
@@ -1055,7 +1140,7 @@ fn preserves_postgres_array_types_in_large_value_previews() {
     assert!(sql.contains("'T:8' AS \"__DBX_LARGE_VALUE_BYTES_K_11\""));
     assert!(sql.contains("'T:8' AS \"__DBX_LARGE_VALUE_BYTES_S_12\""));
     assert!(sql.contains("'V:8' AS \"__DBX_LARGE_VALUE_BYTES_V_13\""));
-    assert!(sql.contains("'B:8' AS \"__DBX_LARGE_VALUE_BYTES_B_14\""));
+    assert!(sql.contains("'B:8:' || octet_length(\"bytea_value\")::text AS \"__DBX_LARGE_VALUE_BYTES_B_14\""));
 }
 
 #[test]
@@ -1551,6 +1636,37 @@ fn builds_oracle_and_neo4j_table_data_queries() {
 }
 
 #[test]
+fn neo4j_element_id_function_follows_the_connected_server_version() {
+    // Neo4j 4.x and older only know `id()`; `elementId()` arrived in 5.0.
+    assert_eq!(neo4j_element_id_function(Some("4.4.44")), "id");
+    assert_eq!(neo4j_element_id_function(Some("Neo4j/4.4.44")), "id");
+    assert_eq!(neo4j_element_id_function(Some("Neo4j 4.4.44 (community)")), "id");
+    assert_eq!(neo4j_element_id_function(Some("3.5.35")), "id");
+    assert_eq!(neo4j_element_id_function(Some("Neo4j/5.26.0")), "elementId");
+    assert_eq!(neo4j_element_id_function(Some("Neo4j/2025.01.0")), "elementId");
+    // Unknown or unparsable versions keep the current spelling.
+    assert_eq!(neo4j_element_id_function(None), "elementId");
+    assert_eq!(neo4j_element_id_function(Some("")), "elementId");
+    assert_eq!(neo4j_element_id_function(Some("Neo4j Community")), "elementId");
+}
+
+#[test]
+fn builds_neo4j_table_select_with_the_legacy_element_id_on_neo4j_4() {
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Neo4j),
+            table_name: "Employee".to_string(),
+            primary_keys: vec!["id".to_string()],
+            columns: vec!["id".to_string(), "role".to_string()],
+            server_version: Some("Neo4j/4.4.44".to_string()),
+            limit: Some(100),
+            ..Default::default()
+        }),
+        "MATCH (n:`Employee`) RETURN id(n) AS `__DBX_ELEMENT_ID`, n.`id` AS `id`, n.`role` AS `role` LIMIT 100;"
+    );
+}
+
+#[test]
 fn oracle_unknown_table_type_does_not_assume_rowid_support() {
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {
@@ -1637,4 +1753,58 @@ fn oracle_view_later_pages_keep_rownum_pagination() {
 fn normalizes_where_input_with_multibyte_identifier_prefix() {
     assert_eq!(normalize_where_input(Some("`客户名称` = '示例客户'")), "`客户名称` = '示例客户'");
     assert_eq!(normalize_where_input(Some("WHERE `客户名称` = '示例客户';")), "`客户名称` = '示例客户'");
+}
+
+// Grid saves re-quote the table identity carried by the query result. For
+// PostgreSQL-family engines reached through an agent-reported identifier quote,
+// `quote_gaussdb_jdbc_identifier` only leaves all-lower-case identifiers
+// unquoted, so a folded (`mss_check_sales_item`) write resolves while the
+// query's original casing (`term."MSS_CHECK_SALES_ITEM"`) fails with
+// `relation ... does not exist` on a lower-case-stored table (issue #10567).
+// The frontend folds unquoted SQL-text identifiers before they reach this
+// layer; these assertions lock the quoting contract that makes that fix work.
+#[test]
+fn postgres_family_table_data_quoting_resolves_folded_identifiers() {
+    let quote = Some("\"".to_string());
+    assert_eq!(quote_gaussdb_jdbc_identifier("mss_check_sales_item", "\""), "mss_check_sales_item");
+    assert_eq!(quote_gaussdb_jdbc_identifier("MSS_CHECK_SALES_ITEM", "\""), "\"MSS_CHECK_SALES_ITEM\"");
+    assert_eq!(quote_gaussdb_jdbc_identifier("term", "\""), "term");
+
+    assert_eq!(
+        table_data_qualified_table_name(
+            Some(DatabaseType::Postgres),
+            Some("term"),
+            "mss_check_sales_item",
+            quote.as_deref()
+        ),
+        "term.mss_check_sales_item"
+    );
+    assert_eq!(
+        table_data_qualified_table_name(
+            Some(DatabaseType::Postgres),
+            Some("term"),
+            "MSS_CHECK_SALES_ITEM",
+            quote.as_deref()
+        ),
+        "term.\"MSS_CHECK_SALES_ITEM\""
+    );
+    assert_eq!(
+        table_data_qualified_table_name(
+            Some(DatabaseType::Gaussdb),
+            Some("term"),
+            "mss_check_sales_item",
+            quote.as_deref()
+        ),
+        "term.mss_check_sales_item"
+    );
+    // Engines outside the GaussDB/PG identifier-quote path quote both parts.
+    assert_eq!(
+        table_data_qualified_table_name(
+            Some(DatabaseType::Jdbc),
+            Some("term"),
+            "mss_check_sales_item",
+            quote.as_deref()
+        ),
+        "\"term\".\"mss_check_sales_item\""
+    );
 }

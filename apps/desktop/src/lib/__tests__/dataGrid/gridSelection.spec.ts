@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createPendingSelectionSummary, dedupeColumnIndexes, formatSelectionAggregate, formatSelectionAverage, summarizeSelection } from "@/lib/dataGrid/gridSelection";
+import { createPendingSelectionSummary, dedupeColumnIndexes, formatSelectionAggregate, formatSelectionAverage, plainSelectionNumericValue, summarizeSelection } from "@/lib/dataGrid/gridSelection";
 
 describe("gridSelection", () => {
   it("summarizes empty selections", () => {
@@ -89,6 +89,20 @@ describe("gridSelection", () => {
     });
   });
 
+  it("summarizes with a grid-specific numeric resolver", () => {
+    // A grid can hand cells over in a shape plain coercion rejects; the resolver
+    // decides what takes part, so a column total never silently drops values.
+    const numericValue = (value: string | number | boolean | null): number | undefined => {
+      const prefixed = typeof value === "string" ? /^#(-?[\d.]+)$/.exec(value) : null;
+      if (prefixed) return Number(prefixed[1]);
+      return plainSelectionNumericValue(value);
+    };
+    const selection = { columns: ["value"], rows: [[10], ["-4"], ["#6"], ["#-0.5"], ["x"]] };
+
+    expect(summarizeSelection(selection)).toMatchObject({ numericCount: 2, sum: 6, average: 3 });
+    expect(summarizeSelection(selection, { numericValue })).toMatchObject({ numericCount: 4, sum: 11.5, average: 2.875 });
+  });
+
   it("keeps pending summaries count-only and formats sum and average identically", () => {
     expect(createPendingSelectionSummary(1_000_000, 100_000)).toEqual({
       cellCount: 1_000_000,
@@ -103,6 +117,17 @@ describe("gridSelection", () => {
     expect(formatSelectionAverage(1 / 3, "en-US")).toBe("0.333333333333");
     expect(formatSelectionAverage(null, "en-US")).toBe("—");
     expect(formatSelectionAverage(Number.POSITIVE_INFINITY, "en-US")).toBe("—");
+  });
+
+  it("ignores non-finite and non-numeric cells in the default resolver", () => {
+    expect(plainSelectionNumericValue(2.5)).toBe(2.5);
+    expect(plainSelectionNumericValue(" -4 ")).toBe(-4);
+    expect(plainSelectionNumericValue(Number.NaN)).toBeUndefined();
+    expect(plainSelectionNumericValue(Number.POSITIVE_INFINITY)).toBeUndefined();
+    expect(plainSelectionNumericValue("   ")).toBeUndefined();
+    expect(plainSelectionNumericValue('NumberLong("-6")')).toBeUndefined();
+    expect(plainSelectionNumericValue(true)).toBeUndefined();
+    expect(plainSelectionNumericValue(null)).toBeUndefined();
   });
 
   it("dedupeColumnIndexes preserves the first visible occurrence instead of sorting", () => {

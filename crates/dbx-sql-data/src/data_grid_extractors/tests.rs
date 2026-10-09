@@ -22,6 +22,231 @@ fn request(extractor: DataGridExtractorId) -> DataGridExtractRequest {
     }
 }
 
+fn temporal_insert_request() -> DataGridExtractRequest {
+    let mut native = request(DataGridExtractorId::SqlInserts);
+    native.database_type = Some(DatabaseType::Oracle);
+    native.columns = vec![column("CREATED_AT", 0), column("NOTE", 1), column("AMOUNT", 2)];
+    native.selected_column_indexes = vec![0, 1, 2];
+    native.rows = vec![vec![json!("2022-08-25T09:58:43Z"), json!("it's text"), json!(42)]];
+    native.table_meta = Some(DataGridTableMeta {
+        catalog: None,
+        database: None,
+        schema: Some("APP".into()),
+        table_name: "EVENTS".into(),
+        primary_keys: vec![],
+        columns: Some(
+            [("CREATED_AT", "DATE"), ("NOTE", "VARCHAR2"), ("AMOUNT", "NUMBER")]
+                .into_iter()
+                .map(|(name, data_type)| DataGridColumnInfo {
+                    name: name.into(),
+                    data_type: data_type.into(),
+                    is_nullable: true,
+                    is_primary_key: false,
+                    column_default: None,
+                    extra: None,
+                })
+                .collect(),
+        ),
+    });
+    native
+}
+
+#[test]
+fn sql_insert_temporal_format_contract_and_output() {
+    let native = temporal_insert_request();
+    assert_eq!(extract_data_grid_selection(native.clone()).unwrap().text,
+        "INSERT INTO \"APP\".\"EVENTS\" (\"CREATED_AT\", \"NOTE\", \"AMOUNT\") VALUES (TO_DATE('2022-08-25 09:58:43', 'YYYY-MM-DD HH24:MI:SS'), 'it''s text', 42);");
+    let mut payload = serde_json::to_value(&native).unwrap();
+    payload["options"]["sql"]["quoteIdentifiers"] = json!(false);
+    payload["options"]["sql"]["temporalFormat"] = json!("string");
+    let portable: DataGridExtractRequest = serde_json::from_value(payload).unwrap();
+    assert_eq!(
+        extract_data_grid_selection(portable).unwrap().text,
+        "INSERT INTO APP.EVENTS (CREATED_AT, NOTE, AMOUNT) VALUES ('2022-08-25 09:58:43', 'it''s text', 42);"
+    );
+}
+
+#[test]
+fn sql_insert_portable_temporals_preserve_wall_time_and_escape_fallback_text() {
+    for (data_type, value, native_literal, portable_literal) in [
+        ("DATE", "2022-08-25", "DATE '2022-08-25'", "'2022-08-25 00:00:00'"),
+        (
+            "TIMESTAMP(6)",
+            "2022-08-25 09:58:43.123456",
+            "TO_TIMESTAMP('2022-08-25 09:58:43.123456', 'YYYY-MM-DD HH24:MI:SS.FF')",
+            "'2022-08-25 09:58:43'",
+        ),
+        (
+            "TIMESTAMP WITH TIME ZONE",
+            "2022-08-25T09:58:43.123456+08:00",
+            "TO_TIMESTAMP_TZ('2022-08-25 09:58:43.123456 +08:00', 'YYYY-MM-DD HH24:MI:SS.FF TZH:TZM')",
+            "'2022-08-25 09:58:43'",
+        ),
+        (
+            "TIMESTAMP WITH LOCAL TIME ZONE",
+            "2022-08-25T09:58:43Z",
+            "TO_TIMESTAMP_TZ('2022-08-25 09:58:43 +00:00', 'YYYY-MM-DD HH24:MI:SS TZH:TZM')",
+            "'2022-08-25 09:58:43'",
+        ),
+        ("DATE", "not a date's value", "'not a date''s value'", "'not a date''s value'"),
+        ("VARCHAR2", "2022-08-25T09:58:43Z", "'2022-08-25T09:58:43Z'", "'2022-08-25T09:58:43Z'"),
+    ] {
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            let mut request = temporal_insert_request();
+            request.database_type = Some(database_type);
+            request.rows[0][0] = json!(value);
+            request.table_meta.as_mut().unwrap().columns.as_mut().unwrap()[0].data_type = data_type.into();
+            let native = extract_data_grid_selection(request.clone()).unwrap().text;
+            request.options.sql.temporal_format = DataGridTemporalFormat::String;
+            let portable = extract_data_grid_selection(request).unwrap().text;
+            assert!(native.contains(&format!("VALUES ({native_literal}, 'it''s text', 42)")), "{native}");
+            assert!(portable.contains(&format!("VALUES ({portable_literal}, 'it''s text', 42)")), "{portable}");
+        }
+    }
+    for value in [Value::Null, json!(42), json!(true), json!("")] {
+        let mut request = temporal_insert_request();
+        request.rows[0][0] = value;
+        let native = extract_data_grid_selection(request.clone()).unwrap().text;
+        request.options.sql.temporal_format = DataGridTemporalFormat::String;
+        assert_eq!(extract_data_grid_selection(request).unwrap().text, native);
+    }
+}
+
+#[test]
+fn sql_insert_quote_opt_out_keeps_required_delimiters_and_namespaces() {
+    for (database_type, quote, name, expected) in [
+        (DatabaseType::Oracle, None, "EVENTS", "EVENTS"),
+        (DatabaseType::Oracle, None, "Events", "\"Events\""),
+        (DatabaseType::Oracle, None, "ORDER", "\"ORDER\""),
+        (DatabaseType::Oracle, None, "A\"B", "\"A\"\"B\""),
+        (DatabaseType::Oracle, None, "EVENT LOG", "\"EVENT LOG\""),
+        (DatabaseType::Mysql, None, "events", "events"),
+        (DatabaseType::Mysql, None, "order", "`order`"),
+        (DatabaseType::Mysql, None, "a`b", "`a``b`"),
+        (DatabaseType::Postgres, None, "events", "events"),
+        (DatabaseType::Postgres, None, "Events", "\"Events\""),
+        (DatabaseType::SqlServer, None, "events", "events"),
+        (DatabaseType::SqlServer, None, "a]b", "[a]]b]"),
+        (DatabaseType::Dameng, None, "EVENTS", "EVENTS"),
+        (DatabaseType::Dameng, None, "ABSOLUTE", "\"ABSOLUTE\""),
+        (DatabaseType::Kingbase, Some("`"), "events", "events"),
+        (DatabaseType::Kingbase, Some("`"), "order", "`order`"),
+        (DatabaseType::Jdbc, Some("\""), "events", "events"),
+        (DatabaseType::Jdbc, Some("\""), "Events", "\"Events\""),
+        (DatabaseType::Spanner, Some("\""), "order", "\"order\""),
+    ] {
+        for include_database_name in [true, false] {
+            let mut request = request(DataGridExtractorId::SqlInserts);
+            request.database_type = Some(database_type);
+            request.identifier_quote = quote.map(str::to_string);
+            request.columns = vec![column(name, 0)];
+            request.selected_column_indexes = vec![0];
+            request.rows = vec![vec![json!(1)]];
+            request.table_meta = Some(DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("APP".into()),
+                table_name: name.into(),
+                primary_keys: vec![],
+                columns: None,
+            });
+            request.options.sql.quote_identifiers = false;
+            request.options.sql.include_database_name = include_database_name;
+            let text = extract_data_grid_selection(request).unwrap().text;
+            assert!(text.contains(&format!("{expected} ({expected}) VALUES (1);")), "{database_type:?}: {text}");
+            if !include_database_name {
+                assert_eq!(text, format!("INSERT INTO {expected} ({expected}) VALUES (1);"));
+            }
+        }
+    }
+}
+
+#[test]
+fn sql_insert_portable_options_keep_insert_modes_and_type_fallbacks() {
+    for insert_mode in
+        [crate::data_grid_sql::DataGridCopyInsertMode::Merged, crate::data_grid_sql::DataGridCopyInsertMode::RowByRow]
+    {
+        let mut request = temporal_insert_request();
+        request.database_type = Some(DatabaseType::Mysql);
+        request.rows.push(vec![Value::Null, json!("O'Reilly"), json!(0)]);
+        request.options.sql.quote_identifiers = false;
+        request.options.sql.temporal_format = DataGridTemporalFormat::String;
+        request.options.sql.insert_mode = insert_mode;
+        request.options.sql.include_database_name = false;
+        let result = extract_data_grid_selection(request).unwrap();
+        assert!(result.text.contains("('2022-08-25 09:58:43', 'it''s text', 42)"));
+        assert!(result.text.contains("(NULL, 'O''Reilly', 0)"));
+        assert_eq!(
+            result.text.matches("INSERT INTO EVENTS").count(),
+            if insert_mode == crate::data_grid_sql::DataGridCopyInsertMode::Merged { 1 } else { 2 }
+        );
+    }
+    let mut request = temporal_insert_request();
+    request.options.sql.temporal_format = DataGridTemporalFormat::String;
+    request.table_meta = None;
+    let text = extract_data_grid_selection(request).unwrap().text;
+    assert!(text.contains("'2022-08-25T09:58:43Z'"));
+}
+
+#[test]
+fn sql_insert_string_format_preserves_binary_timestamps_and_numeric_epochs() {
+    for (database_type, data_type, value) in [
+        (DatabaseType::SqlServer, "timestamp", "0x00000000000007D3"),
+        (DatabaseType::Iotdb, "TIMESTAMP", "1747308643123456789"),
+    ] {
+        let mut request = temporal_insert_request();
+        request.database_type = Some(database_type);
+        request.table_meta.as_mut().unwrap().columns.as_mut().unwrap()[0].data_type = data_type.into();
+        request.rows[0][0] = json!(value);
+        let native = extract_data_grid_selection(request.clone()).unwrap().text;
+        request.options.sql.temporal_format = DataGridTemporalFormat::String;
+        assert_eq!(extract_data_grid_selection(request).unwrap().text, native);
+    }
+}
+
+#[test]
+fn sql_insert_policy_contract_rejects_unknown_modes_and_invalid_boolean_types() {
+    for invalid in [json!({"sql": {"temporalFormat": "custom"}}), json!({"sql": {"quoteIdentifiers": "false"}})] {
+        assert!(serde_json::from_value::<DataGridExtractorOptions>(invalid).is_err());
+    }
+    let options: DataGridExtractorOptions =
+        serde_json::from_value(json!({"sql": {"temporalFormat": "string", "quoteIdentifiers": false}})).unwrap();
+    let roundtrip: DataGridExtractorOptions = serde_json::from_value(serde_json::to_value(options).unwrap()).unwrap();
+    assert_eq!(roundtrip.sql.temporal_format, DataGridTemporalFormat::String);
+    assert!(!roundtrip.sql.quote_identifiers);
+}
+
+#[test]
+fn insert_policies_do_not_change_other_extractors_or_column_errors() {
+    for extractor in [
+        DataGridExtractorId::Csv,
+        DataGridExtractorId::Tsv,
+        DataGridExtractorId::Json,
+        DataGridExtractorId::JsonLines,
+        DataGridExtractorId::Markdown,
+        DataGridExtractorId::Html,
+        DataGridExtractorId::Xml,
+        DataGridExtractorId::SqlUpdates,
+        DataGridExtractorId::SqlInList,
+        DataGridExtractorId::WhereClause,
+    ] {
+        let mut request = temporal_insert_request();
+        request.extractor = extractor;
+        request.table_meta.as_mut().unwrap().primary_keys = vec!["AMOUNT".into()];
+        let native = extract_data_grid_selection(request.clone()).unwrap().text;
+        request.options.sql.quote_identifiers = false;
+        request.options.sql.temporal_format = DataGridTemporalFormat::String;
+        assert_eq!(extract_data_grid_selection(request).unwrap().text, native, "{extractor:?}");
+    }
+    let mut request = temporal_insert_request();
+    request.options.sql.quote_identifiers = false;
+    request.options.sql.temporal_format = DataGridTemporalFormat::String;
+    for info in request.table_meta.as_mut().unwrap().columns.as_mut().unwrap() {
+        info.extra = Some("VIRTUAL GENERATED".into());
+    }
+    assert_eq!(extract_data_grid_selection(request).unwrap_err().code, DataGridExtractErrorCode::NoWritableColumns);
+}
+
 #[test]
 fn partially_deserialized_options_use_the_canonical_defaults() {
     let options = serde_json::from_value::<DataGridExtractorOptions>(json!({
@@ -43,6 +268,8 @@ fn partially_deserialized_options_use_the_canonical_defaults() {
     assert_eq!(options.sql.insert_mode, crate::data_grid_sql::DataGridCopyInsertMode::Merged);
     assert!(!options.sql.exclude_primary_keys_from_insert);
     assert!(options.sql.include_database_name);
+    assert!(options.sql.quote_identifiers);
+    assert_eq!(options.sql.temporal_format, DataGridTemporalFormat::Native);
     assert!(options.json.pretty);
     assert!(!options.json.camel_case_field_names);
 }

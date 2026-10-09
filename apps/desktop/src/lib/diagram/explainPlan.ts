@@ -2,14 +2,19 @@ import type { DatabaseType, QueryResult } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import { supportsDatabaseFeature } from "@/lib/database/databaseDriverManifest";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
+import { parseXuguExplainResult } from "./xuguExplainPlan";
 
 export interface ExplainPlanNode {
   id: string;
   title: string;
   nodeType: string;
+  /** Optional dialect hint for engine-specific operator presentation. */
+  dialect?: ExplainPlanDatabaseType;
   relation?: string;
   index?: string;
   cost?: string;
+  /** Suppress derived cost shares when the engine's cost accumulation is undocumented. */
+  costModel?: "unknown";
   rows?: string;
   width?: string;
   estimatedTimeUs?: string;
@@ -17,7 +22,7 @@ export interface ExplainPlanNode {
   children: ExplainPlanNode[];
 }
 
-export type ExplainPlanDatabaseType = "mysql" | "postgres" | "dameng" | "questdb" | "doris" | "oracle" | "oceanbase-oracle" | "sqlserver";
+export type ExplainPlanDatabaseType = "mysql" | "postgres" | "dameng" | "questdb" | "doris" | "oracle" | "oceanbase-oracle" | "sqlserver" | "xugu";
 
 export interface ParsedExplainPlan {
   databaseType: ExplainPlanDatabaseType;
@@ -32,7 +37,7 @@ export function formatExplainPlanDetails(node: ExplainPlanNode | undefined, esti
   return node.estimatedTimeUs === undefined ? node.details : [`${estimatedTimeLabel}: ${node.estimatedTimeUs} µs`, ...node.details];
 }
 
-const SUPPORTED_EXPLAIN_TYPES = new Set<DatabaseType>(["mysql", "postgres", "dameng", "questdb", "doris", "oracle", "oceanbase-oracle", "sqlserver"]);
+const SUPPORTED_EXPLAIN_TYPES = new Set<DatabaseType>(["mysql", "postgres", "dameng", "questdb", "doris", "oracle", "oceanbase-oracle", "sqlserver", "xugu"]);
 export function supportsExplainPlan(databaseType?: DatabaseType): databaseType is ExplainPlanDatabaseType {
   return !!databaseType && supportsDatabaseFeature(databaseType, "sqlExplain") && SUPPORTED_EXPLAIN_TYPES.has(databaseType);
 }
@@ -43,7 +48,9 @@ export function buildExplainSql(databaseType: DatabaseType | undefined, sql: str
 }
 
 export function parseExplainResult(databaseType: ExplainPlanDatabaseType, result: QueryResult): ParsedExplainPlan {
-  if (databaseType === "dameng") {
+  if (databaseType === "xugu") {
+    return parseXuguExplainResult(result);
+  } else if (databaseType === "dameng") {
     return parseDamengExplain(result);
   } else if (databaseType === "questdb") {
     return parseQuestdbExplain(result);

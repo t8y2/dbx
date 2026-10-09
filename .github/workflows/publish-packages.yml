@@ -502,3 +502,22 @@ jobs:
             -H 'Authorization: Bearer ${ASTRBOT_API_KEY}' \
             -H 'Content-Type: application/json' \
             --data-binary @-"
+
+  notify-feishu:
+    name: Notify Feishu group
+    needs: [promote-release]
+    if: ${{ inputs.notify }}
+    # Card sends after promotion so the title reflects the formal release.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Send release card to Feishu
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
+        run: python3 scripts/notify_feishu.py "${{ github.event.inputs.tag }}"

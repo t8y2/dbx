@@ -2,6 +2,7 @@ package com.dbx.agent.gbase8s;
 
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.ColumnInfo;
+import com.dbx.agent.DdlBuilder;
 import com.dbx.agent.IndexInfo;
 import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.ObjectSource;
@@ -393,6 +394,42 @@ class Gbase8sAgentTest {
         Assertions.assertEquals("Product identifier", columns.get(0).getComment());
         Assertions.assertEquals("Unit price", columns.get(2).getComment());
         Assertions.assertTrue(sql.get(2).contains("LEFT JOIN syscolcomms"), sql.get(2));
+    }
+
+    @Test
+    void extendedCharacterColumnsPreserveTypeLengthAndNullabilityInDdl() {
+        Gbase8sAgent agent = new Gbase8sAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(
+            new ArrayList<>(),
+            resultSet(new String[]{"part1"}, new Object[][]{}),
+            resultSet(new String[]{"colname", "column_default"}, new Object[][]{}),
+            resultSet(
+                new String[]{"colname", "coltype", "colno", "collength", "comments"},
+                new Object[][]{
+                    {"channel_list", 63, 1, 1024, null},
+                    {"name", 63 + 256, 2, 4096, null},
+                    {"national_text", 64, 3, 64, null},
+                    {"required_text", 64 + 256, 4, 128, null}
+                }
+            )
+        ));
+
+        List<ColumnInfo> columns = agent.getColumns("root", "activity");
+        Assertions.assertEquals(List.of("VARCHAR2", "VARCHAR2", "NVARCHAR2", "NVARCHAR2"),
+            columns.stream().map(ColumnInfo::getData_type).toList());
+        Assertions.assertEquals(List.of(1024, 4096, 64, 128),
+            columns.stream().map(ColumnInfo::getCharacter_maximum_length).toList());
+        Assertions.assertEquals(List.of(true, false, true, false),
+            columns.stream().map(ColumnInfo::getIs_nullable).toList());
+        String ddl = DdlBuilder.buildTableDdl("root", "activity", columns, List.of(), List.of());
+        Assertions.assertEquals("""
+            CREATE TABLE "root"."activity" (
+              "channel_list" VARCHAR2(1024),
+              "name" VARCHAR2(4096) NOT NULL,
+              "national_text" NVARCHAR2(64),
+              "required_text" NVARCHAR2(128) NOT NULL
+            );
+            """, ddl);
     }
 
     @Test

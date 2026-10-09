@@ -98,7 +98,7 @@ export interface ResolveNewQueryInitialSqlInput extends ResolveNewQueryTableInpu
 
 // Database types whose "table" view does not use standard SQL `SELECT * FROM <table>`
 // (e.g. Neo4j uses Cypher). The new-query prefill is skipped for these.
-const NEW_QUERY_PREFILL_DISABLED_TYPES: ReadonlySet<DatabaseType | undefined> = new Set<DatabaseType | undefined>(["neo4j"]);
+const NEW_QUERY_PREFILL_DISABLED_TYPES: ReadonlySet<DatabaseType | undefined> = new Set<DatabaseType | undefined>(["neo4j", "nebula"]);
 
 export function isNewQueryPrefillSupported(databaseType: DatabaseType | undefined): boolean {
   return !NEW_QUERY_PREFILL_DISABLED_TYPES.has(databaseType);

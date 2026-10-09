@@ -9,7 +9,7 @@ import { createFrontendPluginRegistry, type PluginContributionEntry } from "@/li
 import { useAuthStore } from "@/stores/authStore";
 import type { InstalledPlugin, PluginResultViewContribution } from "@/types/database";
 
-type OutputView = "result" | "summary" | "explain" | "chart" | "messages" | "profile";
+type OutputView = "result" | "graph" | "summary" | "explain" | "chart" | "messages" | "profile";
 
 const props = withDefaults(
   defineProps<{

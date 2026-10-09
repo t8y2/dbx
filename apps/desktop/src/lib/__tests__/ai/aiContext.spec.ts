@@ -132,7 +132,7 @@ describe("Dameng AI context routing", () => {
       vi.fn(),
       "session-1",
     );
-    expect(apiMock.aiAgentStream).toHaveBeenCalledWith("session-1", expect.any(Object), "dameng-1", "APPDB", "REPORTING", "dameng", expect.any(Function), "agent", false, undefined, undefined, undefined, undefined);
+    expect(apiMock.aiAgentStream).toHaveBeenCalledWith("session-1", expect.any(Object), "dameng-1", "APPDB", "REPORTING", "dameng", expect.any(Function), "agent", false, undefined, undefined, undefined, undefined, undefined, undefined, false);
   });
 
   it("models the AI selector as a schema and chooses the connected user by default", () => {
@@ -189,7 +189,7 @@ describe("PostgreSQL AI schema routing", () => {
       vi.fn(),
       "session-postgres",
     );
-    expect(apiMock.aiAgentStream).toHaveBeenCalledWith("session-postgres", expect.any(Object), "postgres-1", "app", "main_chatdr", "postgres", expect.any(Function), "agent", false, undefined, undefined, undefined, undefined);
+    expect(apiMock.aiAgentStream).toHaveBeenCalledWith("session-postgres", expect.any(Object), "postgres-1", "app", "main_chatdr", "postgres", expect.any(Function), "agent", false, undefined, undefined, undefined, undefined, undefined, undefined, false);
   });
 });
 
@@ -234,5 +234,34 @@ describe("Plugin AI context", () => {
     expect(apiMock.getColumns).not.toHaveBeenCalled();
     expect(apiMock.listIndexes).not.toHaveBeenCalled();
     expect(apiMock.listForeignKeys).not.toHaveBeenCalled();
+  });
+});
+
+// #10058 R8: the selection has to reach the request through the context object
+// the prompt builders already treat as untrusted data — not as an instruction.
+describe("AI selection context", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    apiMock.listTables.mockResolvedValue([]);
+    apiMock.getColumns.mockResolvedValue([]);
+    apiMock.listIndexes.mockResolvedValue([]);
+    apiMock.listForeignKeys.mockResolvedValue([]);
+  });
+
+  it("passes attached selections through to the context", async () => {
+    const selections = [{ id: "s1", source: "editor" as const, label: "query-1", content: "select 1" }];
+
+    const context = await buildAiContext(queryTab("analytics"), sqliteConnection(), { selections });
+
+    expect(context.selections).toEqual(selections);
+  });
+
+  it("omits the field entirely when nothing was attached", async () => {
+    // Older callers and fixtures compare whole context objects; an always-present
+    // empty array would show up as a diff in every one of them.
+    const context = await buildAiContext(queryTab("analytics"), sqliteConnection());
+
+    expect(context.selections).toBeUndefined();
+    expect("selections" in context).toBe(false);
   });
 });

@@ -1,6 +1,19 @@
 import { describe, expect, it } from "vitest";
 import type { AiConversation } from "@/lib/backend/tauri";
-import { activeAiRunBinding, aiContextTargetFor, bindingForSnapshot, isAiRedisConsoleTarget, isBindingUnresolved, resolveConversationBinding, sameConversationBinding, type AiConversationBinding } from "@/lib/ai/aiConversationBinding";
+import {
+  AI_UNBOUND_BINDING,
+  activeAiRunBinding,
+  aiContextTargetFor,
+  aiTargetFromTab,
+  bindingForSnapshot,
+  editorTabBinding,
+  isAiRedisConsoleTarget,
+  isBindingUnresolved,
+  resolveConversationBinding,
+  resolveExternalSendTarget,
+  sameConversationBinding,
+  type AiConversationBinding,
+} from "@/lib/ai/aiConversationBinding";
 
 function conversation(overrides: Partial<AiConversation> & { id: string }): AiConversation {
   return {
@@ -192,5 +205,86 @@ describe("isAiRedisConsoleTarget", () => {
     expect(isAiRedisConsoleTarget({ mode: "redis", connectionId: "redis-a", database: "0" }, target)).toBe(false);
     expect(isAiRedisConsoleTarget({ mode: "redis", connectionId: "redis-b", database: "1" }, target)).toBe(false);
     expect(isAiRedisConsoleTarget({ mode: "query", connectionId: "redis-a", database: "1" }, target)).toBe(false);
+  });
+});
+
+// #10058 R1/R6: the target of an externally triggered request comes from the tab
+// the gesture happened in, not from whichever tab is active — and a tab whose
+// connection was deleted must resolve to *no* target rather than a stale one.
+describe("aiTargetFromTab", () => {
+  const hasConnection = (id: string) => id === "conn-a";
+
+  it("names the tab's own namespace", () => {
+    expect(aiTargetFromTab({ connectionId: "conn-a", database: "db_a", schema: "public" }, hasConnection)).toEqual({ connectionId: "conn-a", database: "db_a", schema: "public" });
+  });
+
+  it("normalizes an absent database so it compares equal to a stored empty one", () => {
+    expect(editorTabBinding({ connectionId: "conn-a", database: undefined as unknown as string, schema: undefined })).toEqual({ connectionId: "conn-a", database: "", schema: undefined });
+  });
+
+  it("refuses a tab whose connection is gone instead of half-binding it", () => {
+    // DBX keeps the SQL tab open after its connection is deleted; sending the
+    // request anyway would answer from whatever the chat was previously bound to.
+    expect(aiTargetFromTab({ connectionId: "conn-deleted", database: "db_a" }, hasConnection)).toBeNull();
+    expect(aiTargetFromTab({ connectionId: "", database: "db_a" }, hasConnection)).toBeNull();
+    expect(aiTargetFromTab(undefined, hasConnection)).toBeNull();
+  });
+});
+
+describe("resolveExternalSendTarget", () => {
+  const target: AiConversationBinding = { connectionId: "conn-b", database: "db_b", schema: "public" };
+
+  it("retargets a chat that has never been persisted instead of opening a duplicate", () => {
+    // A blank chat owns no record to preserve, so "cross-namespace → new chat"
+    // would leave the user with two empty conversations.
+    expect(resolveExternalSendTarget(undefined, null, AMBIENT, target)).toEqual({ action: "reuse", binding: target });
+    expect(resolveExternalSendTarget(undefined, { connectionId: "conn-draft", database: "draft_db" }, AMBIENT, target)).toEqual({ action: "reuse", binding: target });
+  });
+
+  it("reuses the shown conversation when the namespace already matches", () => {
+    const conversation = { id: "c1", ...target };
+
+    expect(resolveExternalSendTarget(conversation, null, AMBIENT, target)).toEqual({ action: "reuse", binding: target });
+    // The draft must not override a persisted conversation's own binding.
+    expect(resolveExternalSendTarget(conversation, { connectionId: "conn-other", database: "x" }, AMBIENT, target).binding).toEqual(target);
+  });
+
+  it("opens a new chat on another namespace rather than rewriting the record", () => {
+    const conversation = { id: "c1", connectionId: "conn-a", database: "db_a", schema: undefined };
+
+    const plan = resolveExternalSendTarget(conversation, null, AMBIENT, target);
+
+    expect(plan).toEqual({ action: "new", binding: target });
+    expect(conversation.connectionId).toBe("conn-a");
+    expect(conversation.database).toBe("db_a");
+  });
+
+  it("treats another database or schema on the same server as another namespace", () => {
+    for (const other of [
+      { ...target, database: "db_c" },
+      { ...target, schema: "private" },
+      { ...target, schema: undefined },
+    ]) {
+      expect(resolveExternalSendTarget({ id: "c1", ...target }, null, AMBIENT, other).action).toBe("new");
+    }
+  });
+
+  it("degrades an unresolvable trigger to an explicitly unbound chat", () => {
+    // Keeping a bound conversation would send a selection from a deleted
+    // connection to the old namespace; the chat must ask for a connection
+    // instead of falling back to the active tab (R6).
+    expect(resolveExternalSendTarget({ id: "c1", connectionId: "conn-a", database: "db_a" }, null, AMBIENT, null)).toEqual({ action: "new", binding: AI_UNBOUND_BINDING });
+    // A chat that is already unbound is equally unbound: reuse it rather than
+    // leaving the user with a second empty conversation.
+    expect(resolveExternalSendTarget({ id: "c1", connectionId: "", database: "" }, null, AMBIENT, null)).toEqual({ action: "reuse", binding: AI_UNBOUND_BINDING });
+    // A blank chat takes it directly.
+    expect(resolveExternalSendTarget(undefined, null, AMBIENT, null)).toEqual({ action: "reuse", binding: AI_UNBOUND_BINDING });
+  });
+
+  it("never resolves an unbound plan through the ambient tab", () => {
+    // The empty binding is what the caller writes into `draftBinding`; a null
+    // there would fall back to whatever tab is visible.
+    expect(AI_UNBOUND_BINDING.connectionId).toBe("");
+    expect(resolveConversationBinding(undefined, AI_UNBOUND_BINDING, AMBIENT).connectionId).toBe("");
   });
 });

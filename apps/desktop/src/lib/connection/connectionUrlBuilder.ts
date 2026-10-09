@@ -76,7 +76,7 @@ const STANDARD_URL_SCHEMES: Partial<Record<DatabaseType, string>> = {
 };
 
 /** Schemes that are plain HTTP(S) endpoints. */
-const HTTP_URL_DB_TYPES = new Set<DatabaseType>(["elasticsearch", "easysearch", "meilisearch", "solr", "qdrant", "milvus", "weaviate", "chromadb", "rqlite", "consul", "victoriametrics", "influxdb", "influxdb3", "dynamodb", "salesforce"]);
+const HTTP_URL_DB_TYPES = new Set<DatabaseType>(["elasticsearch", "easysearch", "meilisearch", "solr", "couchdb", "qdrant", "milvus", "weaviate", "chromadb", "rqlite", "consul", "victoriametrics", "influxdb", "influxdb3", "dynamodb", "salesforce"]);
 
 /**
  * Generic `prefix://host:port/db` JDBC dialects. Dialects with a different URL
@@ -100,6 +100,7 @@ const JDBC_URL_PREFIXES: Partial<Record<DatabaseType, string>> = {
   hive: "jdbc:hive2",
   kyuubi: "jdbc:hive2",
   argo: "jdbc:hive2",
+  transwarp: "jdbc:inceptor2",
   impala: "jdbc:impala",
   trino: "jdbc:trino",
   prestosql: "jdbc:presto",
@@ -352,6 +353,12 @@ function buildSpecialJdbcUrl(config: ConnectionUrlCopyConfig, database: string, 
       if (!host) return null;
       const query = joinNonEmpty("&", [database && `db=${database}`, ...credentials, rawParams.replace(/^[?&]+/, "")]);
       return `jdbc:snowflake://${formatHostForUrl(host)}/${query ? `?${query}` : ""}`;
+    }
+    case "transwarp": {
+      const portPart = shouldAppendPort(config) ? `:${config.port}` : "";
+      const props = rawParams.replace(/^[?&;]+/, "").replace(/&/g, ";");
+      const ssl = config.ssl && !queryHasParam(props, ["ssl"]) ? ";ssl=true" : "";
+      return `jdbc:inceptor2://${formatHostForUrl(host)}${portPart}/${database || "default"}${props ? `;${props}` : ""}${ssl}`;
     }
     case "informix":
     case "gbase": {

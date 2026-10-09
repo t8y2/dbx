@@ -7160,6 +7160,7 @@ fn oceanbase_oracle_keeps_existing_trigger_source_guard_and_new_drop_paths() {
         timing: draft.timing.clone(),
         statement: Some(draft.statement.clone()),
         enabled: None,
+        owner: Some("APP".into()),
     });
     draft.statement = "BEGIN\n  :NEW.ID := 1;\nEND;".to_string();
     options.triggers = vec![draft.clone()];

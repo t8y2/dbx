@@ -418,16 +418,19 @@ class OceanBaseOracleObjectListTest {
     @Test
     void userTypesPreserveOwnerPairAndActualValidity() {
         JdbcFixture jdbc = new JdbcFixture();
-        JdbcCall call = jdbc.rows(row("Mixed.Type", "TYPE", "VALID"), row("Mixed.Type", "TYPE BODY", "INVALID"), row("Unknown", "TYPE", null));
+        JdbcCall call = jdbc.rows(row("Mixed.Type", "TYPE", "spec comment", "VALID"),
+            row("Mixed.Type", "TYPE BODY", "body comment", "INVALID"), row("Unknown", "TYPE", null, null));
         List<ObjectInfo> objects = jdbc.agent.listObjects(" Mixed.Owner ", constraints(null, null, null, "TYPE", "TYPE_BODY"));
         assertEquals(List.of(" Mixed.Owner ", "TYPE", "TYPE BODY"), call.args);
         assertEquals(" Mixed.Owner ", objects.get(0).getSchema());
         assertEquals("TYPE_BODY", objects.get(1).getObject_type());
+        assertEquals("spec comment", objects.get(0).getComment());
+        assertEquals("body comment", objects.get(1).getComment());
         assertEquals(Boolean.TRUE, objects.get(0).getValid());
         assertEquals(Boolean.FALSE, objects.get(1).getValid());
         assertNull(objects.get(2).getValid());
         assertTrue(call.sql.contains("t.PREDEFINED = 'NO'"));
-        assertTrue(call.sql.contains("NVL(GENERATED, 'N') = 'N'"));
+        assertTrue(call.sql.contains("NVL(o.GENERATED, 'N') = 'N'"));
     }
 
     @Test

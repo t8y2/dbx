@@ -13489,8 +13489,12 @@ mod tests {
         ddl: Option<&str>,
     ) -> String {
         let Some(db) = kind_to_db(target_kind) else { return String::new() };
-        let _src_db = kind_to_db(source_kind).unwrap_or(DatabaseType::Mysql);
+        let src_db = kind_to_db(source_kind).unwrap_or(DatabaseType::Mysql);
         let options = SchemaDiffPreparationOptions {
+            source_database_type: Some(src_db),
+            source_schema: None,
+            routine_endpoints: None,
+            routine_context: None,
             source_tables: vec![TableInfo {
                 name: "t".into(),
                 table_type: "BASE TABLE".into(),

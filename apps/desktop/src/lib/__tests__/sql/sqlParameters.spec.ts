@@ -264,6 +264,70 @@ describe("extractSqlParameters", () => {
     ).toBe(`SELECT '@literal' FROM "Hr"."Audit Log"@ARCHIVE_DB /* @comment */ WHERE "Id" = 3 AND tenant_id = 7 -- @tail`);
   });
 
+  it.each(["oracle", "oceanbase-oracle"] as const)("extracts only real %s parameters around separated database links", (databaseType) => {
+    const sql = `SELECT @projection FROM SYS.ALL_TABLES @LINK
+      JOIN "Hr"."Audit Log"/* comment */@ARCHIVE_DB ON 1 = 1
+      JOIN employees -- comment with /* and @ignored
+        @REMOTE_DB ON 1 = 1
+      WHERE owner = :owner AND tenant_id = @tenant_id`;
+    expect(extractSqlParameters(sql, { databaseType })).toEqual(["projection", "owner", "tenant_id"]);
+  });
+
+  describe.each(["oracle", "oceanbase-oracle"] as const)("%s database link separators", (databaseType) => {
+    it.each(["", " ", "\t\r\n", "/* comment with -- and @ignored */", " /* first */ \n /* second */ ", "-- comment with /* and @ignored\n"])("preserves database links separated by %j during replacement", (separator) => {
+      const sql = `SELECT '@literal', @projection FROM "Hr"."Audit Log"${separator}@LINK WHERE id = :id -- @tail`;
+      expect(
+        substituteSqlParameters(
+          sql,
+          {
+            LINK: { kind: "string", value: "WRONG" },
+            projection: { kind: "number", value: "3" },
+            id: { kind: "number", value: "7" },
+          },
+          { databaseType },
+        ),
+      ).toBe(`SELECT '@literal', 3 FROM "Hr"."Audit Log"${separator}@LINK WHERE id = 7 -- @tail`);
+    });
+
+    it("keeps parameters following SQL and PL/SQL keywords", () => {
+      const sql = `SELECT CASE WHEN/* table_name */@condition THEN @yes ELSE @no END FROM DUAL;
+        BEGIN IF @condition THEN NULL; END IF; RETURN @result; END;`;
+      expect(extractSqlParameters(sql, { databaseType })).toEqual(["condition", "yes", "no", "result"]);
+      expect(
+        substituteSqlParameters(
+          sql,
+          {
+            condition: { kind: "raw", value: "1 = 1" },
+            yes: { kind: "number", value: "1" },
+            no: { kind: "number", value: "0" },
+            result: { kind: "number", value: "7" },
+          },
+          { databaseType },
+        ),
+      ).toBe(`SELECT CASE WHEN/* table_name */1 = 1 THEN 1 ELSE 0 END FROM DUAL;
+        BEGIN IF 1 = 1 THEN NULL; END IF; RETURN 7; END;`);
+    });
+
+    it("preserves quoted keywords and Unicode object names before links", () => {
+      const sql = `SELECT @value FROM "SELECT" /* separator */ @LINK, 订单 @中文链接 WHERE id = :id`;
+      expect(extractSqlParameters(sql, { databaseType })).toEqual(["value", "id"]);
+      expect(substituteSqlParameters(sql, { value: { kind: "number", value: "1" }, id: { kind: "number", value: "7" } }, { databaseType })).toBe(`SELECT 1 FROM "SELECT" /* separator */ @LINK, 订单 @中文链接 WHERE id = 7`);
+    });
+
+    it("keeps standalone parameters in joins, pagination and dynamic SQL", () => {
+      const sql = `SELECT @value FROM @source JOIN @target USING (@column)
+        OFFSET @offset ROWS FETCH NEXT @count ROWS ONLY;
+        BEGIN EXECUTE IMMEDIATE @sql USING @input; END;`;
+      expect(extractSqlParameters(sql, { databaseType })).toEqual(["value", "source", "target", "column", "offset", "count", "sql", "input"]);
+    });
+  });
+
+  it.each(["postgres", "sqlserver", "dameng"] as const)("keeps separated at-sign parameters unchanged for %s", (databaseType) => {
+    const sql = "SELECT * FROM employees /* comment */ @LINK WHERE id = :id";
+    expect(extractSqlParameters(sql, { databaseType })).toEqual(["LINK", "id"]);
+    expect(substituteSqlParameters(sql, { LINK: { kind: "number", value: "9" }, id: { kind: "number", value: "7" } }, { databaseType })).toBe("SELECT * FROM employees /* comment */ 9 WHERE id = 7");
+  });
+
   it("describes each placeholder syntax for the parameter dialog", () => {
     const sql = "select ? as a, :named as b, ${shell_name} as c, #{mybatis_name} as d, @sql_server_name as e";
     expect(extractSqlParameterDescriptors(sql)).toEqual([

@@ -1,5 +1,6 @@
 import type { DatabaseType } from "@/types/database";
 import { supportsOracleDatabaseLinks } from "@/lib/database/oracleDatabaseLinks";
+import { isOracleReservedKeyword } from "@/lib/sql/sqlIdentifier";
 
 export type SqlParameterValueKind = "string" | "number" | "boolean" | "null" | "raw";
 
@@ -65,6 +66,7 @@ export interface SqlParameterOptions {
 const PARAMETER_NAME_RE = /^[\p{L}_][\p{L}\p{N}_]*(?:\.[\p{L}_][\p{L}\p{N}_]*)*$/u;
 const PARAMETER_NAME_START_RE = /[\p{L}_]/u;
 const PARAMETER_NAME_CHAR_RE = /[\p{L}\p{N}_]/u;
+const ORACLE_PARAMETER_PREFIX_KEYWORDS = new Set(["begin", "case", "elsif", "fetch", "first", "if", "join", "limit", "loop", "next", "offset", "return", "returning", "using", "when", "while"]);
 const SQL_SERVER_TEMP_TABLE_CONTEXT_KEYWORDS = new Set(["table", "from", "join", "into", "update", "truncate"]);
 const MYSQL_ROUTINE_LABEL_STATEMENTS = new Set(["begin", "loop", "while", "repeat"]);
 const MYSQL_ROUTINE_LABEL_CONTEXTS = new Set(["begin", "then", "else", "do", "loop", "repeat"]);
@@ -389,6 +391,7 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
   let dollarQuoteEnd = "";
   let positionalIndex = 0;
   let parenthesisDepth = 0;
+  let lastSignificantIndex = -1;
   const postgresBracketStack: Array<{ constructor: boolean; parenthesisDepth: number }> = [];
 
   while (i < sql.length) {
@@ -402,6 +405,9 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
 
     const ch = sql[i];
     const next = sql[i + 1];
+
+    const previousSignificantIndex = lastSignificantIndex;
+    if (!/\s/.test(ch) && !(ch === "-" && next === "-") && !(ch === "/" && next === "*")) lastSignificantIndex = i;
 
     if (ch === "<" && isSyntaxEnabled("mybatis")) {
       const foreach = readMyBatisForeachAt(sql, i, databaseType);
@@ -445,6 +451,7 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
         continue;
       }
       const quotedEnd = skipQuoted(sql, i, ch);
+      if (ch === '"') lastSignificantIndex = quotedEnd - 1;
       // Double quotes can delimit identifiers, so only ordinary single-quoted
       // values opt into embedded interpolation.
       if (ch === "'" && !hasSqlStringLiteralPrefix(sql, i)) {
@@ -542,7 +549,15 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
     }
     if (ch === "@" && isSyntaxEnabled("sqlserver")) {
       const name = readParameterName(sql, i + 1);
-      if (name && next !== "@" && sql[i - 1] !== "@" && !isOracleDatabaseLinkMarker(sql, i, options?.databaseType) && !isJdbcxMcpScopedPackage(sql, i, i + 1 + name.length) && !nativeSqlServerParameters.declared.has(name.toLowerCase()) && !nativeSqlServerParameters.ignoredStarts.has(i)) {
+      if (
+        name &&
+        next !== "@" &&
+        sql[i - 1] !== "@" &&
+        !isOracleDatabaseLinkMarker(sql, i, previousSignificantIndex, databaseType) &&
+        !isJdbcxMcpScopedPackage(sql, i, i + 1 + name.length) &&
+        !nativeSqlServerParameters.declared.has(name.toLowerCase()) &&
+        !nativeSqlServerParameters.ignoredStarts.has(i)
+      ) {
         occurrences.push({
           key: name,
           name,
@@ -725,10 +740,19 @@ function isDuckDbCompactPrefixAliasSeparator(sql: string, index: number, databas
   return PARAMETER_NAME_CHAR_RE.test(previous) || previous === '"';
 }
 
-function isOracleDatabaseLinkMarker(sql: string, index: number, databaseType: DatabaseType | undefined): boolean {
-  if (!supportsOracleDatabaseLinks(databaseType) || index === 0) return false;
-  const previous = sql[index - 1];
-  return PARAMETER_NAME_CHAR_RE.test(previous) || previous === "$" || previous === "#" || previous === '"';
+function isOracleDatabaseLinkMarker(sql: string, index: number, previousIndex: number, databaseType: DatabaseType | undefined): boolean {
+  if (!supportsOracleDatabaseLinks(databaseType) || previousIndex < 0) return false;
+  const previous = sql[previousIndex];
+  if (previous === '"') return true;
+  if (!/[\p{L}\p{N}_$#]/u.test(previous)) return false;
+  if (previousIndex === index - 1) return true;
+
+  // Trivia can separate an object from its link, but a keyword such as SELECT
+  // before @value still introduces a parameter rather than a remote object.
+  let start = previousIndex;
+  while (start > 0 && /[\p{L}\p{N}_$#]/u.test(sql[start - 1])) start -= 1;
+  const identifier = sql.slice(start, previousIndex + 1);
+  return PARAMETER_NAME_START_RE.test(identifier[0]) && !isOracleReservedKeyword(identifier) && !ORACLE_PARAMETER_PREFIX_KEYWORDS.has(identifier.toLowerCase());
 }
 
 function isPostgresQuestionMarkOperator(sql: string, index: number, databaseType: DatabaseType | undefined): boolean {

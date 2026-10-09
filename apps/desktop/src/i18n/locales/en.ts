@@ -8619,6 +8619,7 @@ export default {
     syncSelectionRestoreNote: "Unchecked local content will be kept.",
     syncSelectionConnections: "Connections and SSH",
     syncSelectionConnectionSecrets: "Passwords, SSH passwords/key passphrases, and connection credentials",
+    syncSelectionConnectionCredentials: "Connection credentials",
     syncSelectionNoConnections: "No connections",
     syncSelectionTunnels: "Shared tunnel profiles",
     syncSelectionTunnelSecrets: "Tunnel credentials",

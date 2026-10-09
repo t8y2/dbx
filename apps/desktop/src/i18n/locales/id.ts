@@ -8348,6 +8348,7 @@ export default withEnglishFallback({
     syncSelectionRestoreNote: "Konten lokal yang tidak dicentang akan tetap dipertahankan.",
     syncSelectionConnections: "Koneksi dan SSH",
     syncSelectionConnectionSecrets: "Kata sandi, kata sandi SSH/passphrase kunci, dan kredensial koneksi",
+    syncSelectionConnectionCredentials: "Kredensial koneksi",
     syncSelectionNoConnections: "Tidak ada koneksi",
     syncSelectionTunnels: "Profil tunnel bersama",
     syncSelectionTunnelSecrets: "Kredensial tunnel",

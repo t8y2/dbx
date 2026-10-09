@@ -7660,6 +7660,7 @@ export default withEnglishFallback({
     syncSelectionRestoreNote: "選択されていないローカルデータは保持されます。",
     syncSelectionConnections: "接続情報とSSH",
     syncSelectionConnectionSecrets: "パスワード、SSHパスワード/鍵のパスフレーズ、接続認証情報",
+    syncSelectionConnectionCredentials: "接続認証情報",
     syncSelectionNoConnections: "接続情報はありません",
     syncSelectionTunnels: "共有トンネルプロファイル",
     syncSelectionTunnelSecrets: "トンネル認証情報",

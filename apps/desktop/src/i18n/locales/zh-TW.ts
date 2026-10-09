@@ -6995,6 +6995,7 @@ export default withEnglishFallback({
     syncSelectionRestoreNote: "未勾選的本機內容會保留。",
     syncSelectionConnections: "連線資訊與 SSH",
     syncSelectionConnectionSecrets: "密碼、SSH 密碼/金鑰密語及連線憑證",
+    syncSelectionConnectionCredentials: "連線憑證",
     syncSelectionNoConnections: "沒有連線項目",
     syncSelectionTunnels: "共用通道設定",
     syncSelectionTunnelSecrets: "通道憑證",

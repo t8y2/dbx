@@ -8899,6 +8899,7 @@ export default withEnglishFallback({
     syncSelectionRestoreNote: "Невыбранные локальные данные останутся без изменений.",
     syncSelectionConnections: "Подключения и SSH",
     syncSelectionConnectionSecrets: "Пароли, пароли SSH/парольные фразы ключей и учетные данные подключений",
+    syncSelectionConnectionCredentials: "Учетные данные подключений",
     syncSelectionNoConnections: "Нет подключений",
     syncSelectionTunnels: "Общие профили туннелей",
     syncSelectionTunnelSecrets: "Учетные данные туннеля",

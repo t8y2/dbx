@@ -7484,6 +7484,7 @@ export default withEnglishFallback({
     syncSelectionRestoreNote: "선택하지 않은 로컬 콘텐츠는 유지됩니다.",
     syncSelectionConnections: "연결 정보 및 SSH",
     syncSelectionConnectionSecrets: "비밀번호, SSH 비밀번호/키 암호 및 연결 자격 증명",
+    syncSelectionConnectionCredentials: "연결 자격 증명",
     syncSelectionNoConnections: "연결 정보가 없습니다",
     syncSelectionTunnels: "공유 터널 프로필",
     syncSelectionTunnelSecrets: "터널 자격 증명",

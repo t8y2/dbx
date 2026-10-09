@@ -8604,6 +8604,7 @@ export default withEnglishFallback({
     syncSelectionRestoreNote: "未勾选的本地内容会保留。",
     syncSelectionConnections: "连接信息与 SSH",
     syncSelectionConnectionSecrets: "密码、SSH 密码/密钥口令及连接凭据",
+    syncSelectionConnectionCredentials: "连接凭据",
     syncSelectionNoConnections: "无连接项目",
     syncSelectionTunnels: "共享隧道配置",
     syncSelectionTunnelSecrets: "隧道凭据",

@@ -7868,6 +7868,7 @@ export default withEnglishFallback({
     syncSelectionRestoreNote: "El contenido local sin seleccionar se conservará.",
     syncSelectionConnections: "Conexiones y SSH",
     syncSelectionConnectionSecrets: "Contraseñas, contraseñas de SSH/frases de contraseña de claves y credenciales de conexión",
+    syncSelectionConnectionCredentials: "Credenciales de conexión",
     syncSelectionNoConnections: "No hay conexiones",
     syncSelectionTunnels: "Perfiles de túnel compartidos",
     syncSelectionTunnelSecrets: "Credenciales del túnel",

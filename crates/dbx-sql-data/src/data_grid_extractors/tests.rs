@@ -459,9 +459,34 @@ fn raw_exports_null_as_an_empty_value() {
 }
 
 #[test]
-fn raw_rejects_multiple_selected_cells() {
+fn raw_preserves_multiline_view_definition_with_tabs_and_quotes() {
+    let lines = [
+        "CREATE view v_Copy_Tab",
+        "as",
+        "outer apply (select string_agg(z.CurrencyName+'：'+convert(varchar,round(z.Balance,2)), '/') YuE",
+        "\tfrom currency_detail z where z.customer_id=a.id) e",
+        "-- keep \"quoted\" identifiers and embedded\r\nnewlines",
+        "",
+    ];
+    let mut request = request(DataGridExtractorId::Raw);
+    request.columns = vec![column("Text", 0)];
+    request.selected_column_indexes = vec![0];
+    request.rows = lines.iter().map(|line| vec![json!(line)]).collect();
+    // Original text ignores the tabular format's quoting and header settings.
+    request.options.dsv.quote_policy = DataGridQuotePolicy::Always;
+    request.options.dsv.include_row_header = true;
+    request.options.dsv.include_column_header = true;
+
+    let result = extract_data_grid_selection(request).expect("raw view definition extraction");
+    assert_eq!(result.text, lines.join("\n"));
+    assert_eq!(result.row_count, lines.len());
+    assert_eq!(result.column_count, 1);
+}
+
+#[test]
+fn raw_rejects_multiple_selected_columns() {
     let error =
-        extract_data_grid_selection(request(DataGridExtractorId::Raw)).expect_err("raw must reject multiple cells");
+        extract_data_grid_selection(request(DataGridExtractorId::Raw)).expect_err("raw must reject multiple columns");
 
     assert_eq!(error.code, DataGridExtractErrorCode::InvalidRawSelection);
 }

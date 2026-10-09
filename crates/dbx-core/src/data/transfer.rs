@@ -6528,6 +6528,12 @@ async fn transfer_table_via_copy(
     let source_client = db::postgres::checkout_postgres_client(&source_pool, None, db::connection_timeout()).await?;
     let target_client = db::postgres::checkout_postgres_client(&target_pool, None, db::connection_timeout()).await?;
 
+    if db::postgres::postgres_client_has_text_encoding(&source_client)
+        || db::postgres::postgres_client_has_text_encoding(&target_client)
+    {
+        return Err("COPY byte piping requires matching native encodings; using INSERT fallback".into());
+    }
+
     // Open the read side first so an invalid source SELECT fails before the
     // target COPY is started.
     let source_stream =

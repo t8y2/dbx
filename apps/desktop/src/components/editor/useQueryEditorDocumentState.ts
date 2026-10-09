@@ -78,7 +78,11 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
   // transaction excluded from history, and the history extension is dropped and
   // re-added in two separate transactions (a compartment reconfigure alone keeps
   // the old field value) so the previous tab's edits cannot leak in.
-  const tabStateCache = new Map<string, import("@codemirror/state").EditorState>();
+  interface CachedTabState {
+    state: import("@codemirror/state").EditorState;
+    viewport: { scrollTop: number; scrollLeft: number };
+  }
+  const tabStateCache = new Map<string, CachedTabState>();
   const MAX_CACHED_TAB_STATES = 16;
 
   function swapEditorDocument(doc: string) {
@@ -102,13 +106,18 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
     // become the new tab's state. The event carries its original owner. A
     // before-tab-switch capture already flushed this editor while it was still
     // visible, so avoid reading the reset scroll position during the transition.
-    if (!tabSwitchStateCaptured) flushEditorViewport();
+    if (!tabSwitchStateCaptured) {
+      flushEditorViewport();
+      flushEditorSelection();
+    }
     viewportOwnerTabId = tabId;
-    latestViewport = props.initialViewport ?? { scrollTop: 0, scrollLeft: 0 };
     lastEmittedViewport = undefined;
     clearScheduledPreviewContextRefresh();
     if (prevTabId !== undefined) {
-      tabStateCache.set(prevTabId, currentView.state);
+      tabStateCache.set(prevTabId, {
+        state: currentView.state,
+        viewport: readEditorViewport(currentView),
+      });
       if (tabStateCache.size > MAX_CACHED_TAB_STATES) {
         const oldest = tabStateCache.keys().next();
         if (!oldest.done) tabStateCache.delete(oldest.value);
@@ -123,8 +132,12 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
       // document keeps whatever scroll offset the dispatch left behind (#8374).
       // A brand-new tab has no saved state, so reset it instead of falling back
       // to the previous tab's latest position (#8378).
-      restoreEditorSelection(props.initialSelection ?? { anchor: 0, head: 0 }, !props.initialViewport);
-      restoreEditorViewport(props.initialViewport ?? { scrollTop: 0, scrollLeft: 0 });
+      const initialSel = props.initialSelection ?? { anchor: 0, head: 0 };
+      const initialVp = props.initialViewport ?? { scrollTop: 0, scrollLeft: 0 };
+      latestSelection = initialSel;
+      latestViewport = initialVp;
+      restoreEditorSelection(initialSel, !props.initialViewport);
+      restoreEditorViewport(initialVp);
       clearScheduledPreviewContextRefresh();
       syncContextMenuState(currentView);
       emit("previewChangesAvailable", !!previewContextSql.value);
@@ -132,7 +145,7 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
     }
     // setState swaps doc, selection, undo history and all fields at once, but it
     // is not a transaction, so update-listener side effects are re-run manually.
-    currentView.setState(cached);
+    currentView.setState(cached.state);
     // Compartments in the restored state may lag behind settings that changed
     // while another tab was active; re-sync them from current values.
     void applyEditorAppearance();
@@ -148,8 +161,13 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
     }
     scheduleDocumentSearchUpdate();
     invalidateSemanticDiagnosticsForDocumentChange();
-    restoreEditorSelection(undefined, !props.initialViewport);
-    restoreEditorViewport();
+    if (props.initialSelection !== undefined) {
+      restoreEditorSelection(props.initialSelection, !props.initialViewport);
+    }
+    latestSelection = readEditorSelection(currentView);
+    const targetViewport = props.initialViewport ?? cached.viewport;
+    latestViewport = targetViewport;
+    restoreEditorViewport(targetViewport);
     clearScheduledPreviewContextRefresh();
     syncContextMenuState(currentView);
     emit("previewChangesAvailable", !!previewContextSql.value);

@@ -2225,6 +2225,7 @@ async fn list_postgres_export_enums(
         }
     };
     let client = pool.get().await.map_err(|e| e.to_string())?;
+    let client = crate::db::postgres::PostgresTextClient::new(&client);
     let rows = client.query(POSTGRES_EXPORT_ENUMS_SQL, &[&schema]).await.map_err(|e| e.to_string())?;
     rows.into_iter()
         .map(|row| {
@@ -2318,7 +2319,8 @@ async fn postgres_export_sequence_parameters_legacy(
     client: &deadpool_postgres::Client,
     schema: &str,
     sequence: &str,
-) -> Result<Option<PostgresExportSequenceParameters>, tokio_postgres::Error> {
+) -> Result<Option<PostgresExportSequenceParameters>, crate::db::postgres::PostgresQueryError> {
+    let client = crate::db::postgres::PostgresTextClient::new(client);
     let qualified = format!(
         "{}.{}",
         quote_identifier(schema, &DatabaseType::Postgres),
@@ -2360,6 +2362,7 @@ async fn list_postgres_export_sequences(
         }
     };
     let client = pool.get().await.map_err(|e| e.to_string())?;
+    let client = crate::db::postgres::PostgresTextClient::new(&client);
     // PostgreSQL 10+ keeps sequence parameters in `pg_sequence`; older servers
     // have neither that catalog nor `pg_sequence_last_value()`, so the compat
     // tier lists sequences (and owners) without it and reads each sequence

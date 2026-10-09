@@ -189,6 +189,15 @@ mod tests {
     }
 
     #[test]
+    fn raw_multiline_sql_keeps_tabs_and_apostrophes_without_formula_guards() {
+        let lines = ["CREATE view v_Test as", "\tselect 'quoted' as value", "-- \"keep quotes\""];
+        let request = request(DataGridExtractorId::Raw, lines.iter().map(|line| vec![json!(line)]).collect());
+        let guarded = neutralize_spreadsheet_formulas(request);
+        let result = dbx_sql::data_grid_extractors::extract_data_grid_selection(guarded).expect("raw SQL extraction");
+        assert_eq!(result.text, lines.join("\n"));
+    }
+
+    #[test]
     fn text_without_a_trigger_character_is_untouched() {
         // Only the trigger set is neutralized; a value that merely contains an
         // apostrophe (but does not start with one) is already plain text to Excel.

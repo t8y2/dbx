@@ -650,6 +650,10 @@ public final class StandardJdbcMetadata {
         if ("BASE TABLE".equals(normalized) || "COLUMN TABLE".equals(normalized) || "ROW TABLE".equals(normalized)) {
             return "TABLE";
         }
+        if ("CALC VIEW".equals(normalized) || "JOIN VIEW".equals(normalized)
+            || "OLAP VIEW".equals(normalized) || "HIERARCHY VIEW".equals(normalized)) {
+            return "VIEW";
+        }
         return type;
     }
 

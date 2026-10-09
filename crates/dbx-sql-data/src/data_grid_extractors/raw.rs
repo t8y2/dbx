@@ -1,9 +1,9 @@
 use super::{value_text, write_bytes, DataGridExtractError, ExtractContext};
 use std::io::Write;
 
-/// Writes selected cell values without DSV escaping. Tabs and newlines retain
-/// the selection shape, while NULL cells remain empty for spreadsheet-friendly
-/// clipboard output.
+/// Writes one selected column without escaping or spreadsheet formula guards.
+/// Rows are joined with a newline; tabs, quotes and embedded line breaks inside
+/// each value are preserved, and NULL cells remain empty.
 pub(super) fn write_raw(context: &ExtractContext<'_>, output: &mut dyn Write) -> Result<(), DataGridExtractError> {
     for (row_index, row) in context.request.rows.iter().enumerate() {
         if row_index > 0 {

@@ -2400,6 +2400,7 @@ dependencies = [
  "dbx-sql-core",
  "dbx-types",
  "deadpool-postgres",
+ "encoding_rs",
  "futures",
  "log",
  "openssl",

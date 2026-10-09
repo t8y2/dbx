@@ -2701,7 +2701,9 @@ function resumeQueryEditorBackgroundWork() {
   // the first Run does not pay pool creation or external-driver startup.
   warmActiveTabConnection();
   if (view.value) schedulePreviewContextRefresh(view.value);
-  restoreEditorSelection(undefined, !props.initialViewport);
+  if (props.initialSelection !== undefined) {
+    restoreEditorSelection(props.initialSelection, !props.initialViewport);
+  }
   restoreEditorFocus();
   restoreEditorViewport();
 }

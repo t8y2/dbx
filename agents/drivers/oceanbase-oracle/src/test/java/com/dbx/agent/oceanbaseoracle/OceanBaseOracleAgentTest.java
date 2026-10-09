@@ -786,6 +786,28 @@ class OceanBaseOracleAgentTest {
     }
 
     @Test
+    void getColumnsPreservesCharacterUnitsAndNegativeScale() {
+        List<String> sql = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, columnResultSet(new Object[][]{
+            {"VB", "VARCHAR2", "Y", null, null, 8, 8, null, null, 0, "B"},
+            {"VC", "VARCHAR2", "Y", null, null, 32, 8, null, null, 0, "C"},
+            {"NC", "NVARCHAR2", "Y", null, null, 32, 8, null, null, 0, "C"},
+            {"CB", "CHAR", "Y", null, null, 12, 4, null, null, 0, "B"},
+            {"CC", "CHAR", "Y", null, null, 32, 8, null, null, 0, "C"},
+            {"NR", "NUMBER", "Y", 10, -2, 22, 0, null, null, 0, null},
+            {"NZ", "NUMBER", "Y", 10, 0, 22, 0, null, null, 0, null},
+            {"NP", "NUMBER", "Y", 10, 2, 22, 0, null, null, 0, null},
+            {"NU", "NUMBER", "Y", null, null, 22, 0, null, null, 0, null},
+            {"VU", "VARCHAR2", "Y", null, null, 32, 8, null, null, 0, null}
+        })));
+        List<ColumnInfo> columns = agent.getColumns("APP", "USERS");
+        Assertions.assertEquals(List.of("VARCHAR2(8 BYTE)", "VARCHAR2(8 CHAR)", "NVARCHAR2(8)", "CHAR(12 BYTE)", "CHAR(8 CHAR)", "NUMBER(10,-2)", "NUMBER(10)", "NUMBER(10,2)", "NUMBER", "VARCHAR2(8)"),
+            columns.stream().map(ColumnInfo::getData_type).toList());
+        Assertions.assertTrue(sql.get(0).contains("c.CHAR_USED"));
+    }
+
+    @Test
     void getColumnsResolvesTheCurrentSchemaWhenSchemaIsEmpty() {
         List<String> sql = new ArrayList<>();
         List<String> params = new ArrayList<>();
@@ -1054,9 +1076,10 @@ class OceanBaseOracleAgentTest {
                 "CHAR_LENGTH",
                 "DATA_DEFAULT",
                 "COMMENTS",
-                "IS_PK"
+                "IS_PK",
+                "CHAR_USED"
             },
-            rows
+            java.util.Arrays.stream(rows).map(row -> java.util.Arrays.copyOf(row, 11)).toArray(Object[][]::new)
         );
     }
 

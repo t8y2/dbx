@@ -520,8 +520,8 @@ describe("TableStructureEditor primary key editing", () => {
     );
   });
 
-  it("enables a primary key on an existing keyless Oracle column and makes it not null", async () => {
-    const root = await mountEditor("oracle");
+  it.each(["oracle", "oceanbase-oracle"] as const)("enables a primary key on an existing keyless %s column and makes it not null", async (databaseType) => {
+    const root = await mountEditor(databaseType);
     const primaryKey = columnCheckbox(root, "structureEditor.primaryKey");
     const nullable = columnCheckbox(root, "structureEditor.nullable");
 
@@ -542,8 +542,8 @@ describe("TableStructureEditor primary key editing", () => {
     );
   });
 
-  it("keeps all primary-key checkboxes enabled while composing a new Oracle key", async () => {
-    const root = await mountEditor("oracle");
+  it.each(["oracle", "oceanbase-oracle"] as const)("keeps all primary-key checkboxes enabled while composing a new %s key", async (databaseType) => {
+    const root = await mountEditor(databaseType);
     buttonWithText(root, "structureEditor.addColumn").click();
     await nextTick();
 
@@ -570,8 +570,8 @@ describe("TableStructureEditor primary key editing", () => {
     );
   });
 
-  it("keeps an existing Oracle primary key and all replacement choices disabled", async () => {
-    const root = await mountEditor("oracle", true);
+  it.each(["oracle", "oceanbase-oracle"] as const)("keeps an existing %s primary key and all replacement choices disabled", async (databaseType) => {
+    const root = await mountEditor(databaseType, true);
     buttonWithText(root, "structureEditor.addColumn").click();
     await nextTick();
 
@@ -579,8 +579,8 @@ describe("TableStructureEditor primary key editing", () => {
     expect(columnCheckbox(root, "structureEditor.primaryKey", 1).disabled).toBe(true);
   });
 
-  it.each(["oceanbase-oracle", "iris"] as const)("keeps primary-key creation disabled for existing %s tables", async (databaseType) => {
-    const root = await mountEditor(databaseType);
+  it("keeps primary-key creation disabled for existing iris tables", async () => {
+    const root = await mountEditor("iris");
 
     expect(columnCheckbox(root, "structureEditor.primaryKey").disabled).toBe(true);
   });

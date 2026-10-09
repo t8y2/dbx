@@ -373,6 +373,8 @@ describe("tableStructureEditorState", () => {
     if (!existing) throw new Error("expected an existing trigger draft");
 
     expect(canEditStructuredTriggerDraft("oracle", existing)).toBe(false);
+    expect(canEditStructuredTriggerDraft("oceanbase-oracle", existing)).toBe(false);
+    expect(canEditStructuredTriggerDraft("oceanbase-oracle", { ...existing, original: undefined })).toBe(true);
     expect(canEditStructuredTriggerDraft(undefined, existing)).toBe(false);
     expect(canEditStructuredTriggerDraft("mysql", existing)).toBe(true);
     expect(canEditStructuredTriggerDraft("sqlserver", existing)).toBe(true);
@@ -670,10 +672,11 @@ describe("tableStructureEditorState", () => {
     expect(combineDataTypeForDatabaseWithLengthUnit("dameng", "varchar2", "255", "")).toBe("varchar2(255)");
   });
 
-  it("separates and reconstructs Oracle character length units", () => {
-    expect(dataTypeLengthInputValue("oracle", "VARCHAR2(255 CHAR)")).toBe("255");
-    expect(dataTypeLengthUnitValue("oracle", "VARCHAR2(255 CHAR)")).toBe("CHAR");
-    expect(combineDataTypeForDatabaseWithLengthUnit("oracle", "VARCHAR2", "64", "BYTE")).toBe("VARCHAR2(64 BYTE)");
+  it.each(["oracle", "oceanbase-oracle"] as const)("separates and reconstructs %s character length units", (databaseType) => {
+    expect(dataTypeLengthInputValue(databaseType, "VARCHAR2(255 CHAR)")).toBe("255");
+    expect(dataTypeLengthUnitValue(databaseType, "VARCHAR2(255 CHAR)")).toBe("CHAR");
+    expect(combineDataTypeForDatabaseWithLengthUnit(databaseType, "VARCHAR2", "64", "BYTE")).toBe("VARCHAR2(64 BYTE)");
+    expect(getDataTypeLengthUnitOptions(databaseType, "NVARCHAR2(10)")).toEqual([]);
   });
 
   it("does not reinterpret unsupported length parameters or dialects", () => {
@@ -725,10 +728,10 @@ describe("tableStructureEditorState", () => {
     expect(restored?.original?.data_type).toBe("VARCHAR2(255 BYTE)");
   });
 
-  it("keeps a saved Oracle length unit when refreshed metadata omits it", () => {
-    const [legacyAgentDraft] = createColumnDrafts([{ name: "DISPLAY_NAME", data_type: "VARCHAR2(255)", is_nullable: true, column_default: null, is_primary_key: false, extra: null }], "oracle");
+  it.each(["oracle", "oceanbase-oracle"] as const)("keeps a saved %s length unit when refreshed metadata omits it", (databaseType) => {
+    const [legacyAgentDraft] = createColumnDrafts([{ name: "DISPLAY_NAME", data_type: "VARCHAR2(255)", is_nullable: true, column_default: null, is_primary_key: false, extra: null }], databaseType);
 
-    const [restored] = restoreCharacterLengthUnitsAfterSave("oracle", [legacyAgentDraft!], new Map([["display_name", "VARCHAR2(255 CHAR)"]]));
+    const [restored] = restoreCharacterLengthUnitsAfterSave(databaseType, [legacyAgentDraft!], new Map([["display_name", "VARCHAR2(255 CHAR)"]]));
 
     expect(restored?.dataType).toBe("VARCHAR2(255 CHAR)");
     expect(restored?.original?.data_type).toBe("VARCHAR2(255 CHAR)");

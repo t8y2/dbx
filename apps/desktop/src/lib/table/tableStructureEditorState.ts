@@ -1278,7 +1278,7 @@ export function createTriggerDrafts(triggers: TriggerInfo[]): EditableStructureT
 }
 
 export function canEditStructuredTriggerDraft(databaseType: DatabaseType | undefined, trigger: EditableStructureTrigger): boolean {
-  return !trigger.original || (databaseType !== undefined && databaseType !== "oracle");
+  return !trigger.original || (databaseType !== undefined && databaseType !== "oracle" && databaseType !== "oceanbase-oracle");
 }
 
 export function toColumnNames(columns: string[]): string {
@@ -1471,7 +1471,7 @@ function normalizedDataTypeName(rawDataType: string): string {
 }
 
 export function getDataTypeLengthUnitOptions(dbType: DatabaseType | undefined, rawDataType: string): readonly DataTypeLengthUnit[] {
-  if (dbType !== "dameng" && dbType !== "oracle") return [];
+  if (dbType !== "dameng" && dbType !== "oracle" && dbType !== "oceanbase-oracle") return [];
   return CHARACTER_LENGTH_UNIT_TYPES.has(normalizedDataTypeName(rawDataType)) ? CHARACTER_LENGTH_UNITS : [];
 }
 

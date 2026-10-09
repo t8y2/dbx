@@ -8002,6 +8002,10 @@ export default withEnglishFallback({
     fileFilterHint: "Используйте шаблон, например *.sql или *.sh, либо регулярное выражение, например {regex}.",
   },
   diff: {
+    routinePlanBlocked: "Развертывание заблокировано: {reason}",
+    routineDependencies: "Зависимости: {dependencies}",
+    routineValidationTitle: "Компиляция и повторное чтение исходного кода",
+    routineValidationFailed: "DDL выполнен, но проверка компиляции или исходного кода завершилась ошибкой либо не завершена. Примененные изменения не были отменены.",
     progress: {
       loadingObjects: "Чтение объектов исходной и целевой баз данных...",
       loadingSourceDetails: "Чтение структур таблиц исходной базы данных",

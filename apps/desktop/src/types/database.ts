@@ -1266,6 +1266,9 @@ export interface FunctionInfo {
   data_type: string;
   definition: string;
   arguments: string;
+  schema?: string;
+  status?: string;
+  dependencies?: string[];
 }
 
 export interface SequenceInfo {

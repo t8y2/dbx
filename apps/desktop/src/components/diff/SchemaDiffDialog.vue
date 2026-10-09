@@ -23,7 +23,7 @@ import SideBySideTextDiff, { type TextDiffSide } from "@/components/common/SideB
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 import { getSchemaDiffOptionsForDbType } from "@/lib/schema/schemaDiffOptions";
-import { buildDeployTxResult } from "@/lib/schema/deployTxResult";
+import { finishSchemaDiffDeployment, type DeployTxResult } from "@/lib/schema/deployTxResult";
 import { getSchemaDiffNextProgressStep, isSchemaDiffPostgresLike, shouldLoadSchemaDiffExtraObjectPhase, type SchemaDiffProgressPhase } from "@/lib/schema/schemaDiffProgress";
 import { createSchemaDiffTableListLoader } from "@/lib/schema/schemaDiffTableList";
 import { countSchemaDiffActionableObjects, partitionSchemaDiffObjectsByResultTab, swapSchemaDiffRoutineMappings } from "@/lib/schema/schemaDiffRoutine";
@@ -61,6 +61,8 @@ import {
   type CompatibilityWarning,
   type PermissionDiff,
   type DependencyGraph,
+  type FunctionDiff,
+  type SchemaDiffRoutineStep,
   normalizeSchemaDiffDependencyGraph,
 } from "@/lib/schema/schemaDiff";
 
@@ -160,11 +162,13 @@ const focusedForwardDeploySql = ref("");
 const focusedRollbackSql = ref("");
 const selectedDeploySql = ref("");
 const selectedForwardDeploySql = ref("");
+const selectedRoutineDiffs = ref<FunctionDiff[]>([]);
+const blockedRoutineSteps = ref<SchemaDiffRoutineStep[]>([]);
 const executing = ref(false);
 const lastDiffResult = ref<SchemaDiffPreparation | null>(null);
 const targetDbVersion = ref<string | null>(null);
 const showResultDialog = ref(false);
-const deployResult = ref<{ success: boolean; status?: string; message: string; affectedRows?: number; error?: string } | null>(null);
+const deployResult = ref<DeployTxResult | null>(null);
 
 const partitionedDiffObjects = computed(() => partitionSchemaDiffObjectsByResultTab(diffObjects.value));
 const tableDiffObjects = computed(() => partitionedDiffObjects.value.tableObjects);
@@ -346,7 +350,8 @@ const selectedTreeObject = computed(() => {
   return findSchemaDiffObject(diffObjects.value, selectedObjectId.value);
 });
 
-const canDeployRoutines = computed(() => isSchemaDiffPostgresLike(targetDbType.value));
+const isOracleRoutineTarget = computed(() => targetDbType.value === "oracle" || targetDbType.value === "oceanbase-oracle");
+const canDeployRoutines = computed(() => isSchemaDiffPostgresLike(targetDbType.value) || (isOracleRoutineTarget.value && lastDiffResult.value?.routineSteps !== undefined));
 
 const canDeploy = computed(() => {
   // MySQL/SQL Server routine sync is deferred (copy DDL only). Postgres-family
@@ -822,6 +827,8 @@ function buildSchemaSyncPlanOptions(options: SchemaDiffCompareOptions) {
   const engineDbType = targetEngineDbType.value ?? getDbType();
   return {
     databaseType: engineDbType,
+    sourceDatabaseType: sourceEngineDbType.value ?? (sourceDbType.value as DatabaseType),
+    sourceSchema: sourceSchema.value,
     targetSchema: schemaDiffDeployTargetSchema(getDbType(), targetDatabase.value, targetSchema.value),
     cascadeDelete: options.cascadeDelete,
     sourceDialect: options.sourceDialect ? normalizeDialectKind(options.sourceDialect) : sourceEngineDbType.value ? databaseTypeToDialectKind(sourceEngineDbType.value) : undefined,
@@ -841,6 +848,8 @@ function formatSchemaSyncPlan(plan: Awaited<ReturnType<typeof api.generateSchema
 }
 
 function clearSelectedDeploySql() {
+  selectedRoutineDiffs.value = [];
+  blockedRoutineSteps.value = [];
   selectedForwardDeploySql.value = "";
   selectedDeploySql.value = "";
   rollbackSql.value = "";
@@ -868,6 +877,8 @@ async function regenerateSelectedDeploySql() {
   if (componentUnmounted || generation !== selectedDeploySqlGeneration) return;
 
   const formatted = formatSchemaSyncPlan(plan, input, options);
+  selectedRoutineDiffs.value = input.functionDiffs;
+  blockedRoutineSteps.value = plan.routineSteps?.filter((step) => step.blockedReason) ?? [];
   rollbackCompleteness.value = plan.rollbackCompleteness ?? "complete";
   missingRollbackObjects.value = plan.missingRollbackObjects ?? [];
   selectedForwardDeploySql.value = formatted.forwardSql;
@@ -916,6 +927,7 @@ function switchDeploySqlMode(mode: "forward" | "rollback") {
 }
 
 const canExecuteDeploy = computed(() => {
+  if (blockedRoutineSteps.value.length > 0 || (resultTab.value === "routines" && !canDeployRoutines.value)) return false;
   if (deploySqlMode.value === "rollback" && rollbackCompleteness.value === "incomplete") {
     return false;
   }
@@ -975,6 +987,7 @@ function ignoreRename(index: number) {
 }
 
 async function handleExecuteScript() {
+  if (blockedRoutineSteps.value.length > 0) return;
   if (!selectedDeploySql.value.trim() || selectedDeploySql.value.trim() === "-- No objects selected") {
     toast(t("diff.noObjectsSelected"), 3000);
     return;
@@ -988,21 +1001,27 @@ async function handleExecuteScript() {
 }
 
 async function executeDeploySql() {
+  if (!canExecuteDeploy.value) return;
+  const connectionId = targetConnectionId.value;
+  const database = targetDatabase.value;
+  const schema = targetSchema.value;
+  const sql = selectedDeploySql.value;
+  const destructive = destructiveStatements.value.length > 0;
+  const rollback = deploySqlMode.value === "rollback";
+  const expected = isOracleRoutineTarget.value ? selectedRoutineDiffs.value.map((diff) => ({ ...diff, source: diff.source ? { ...diff.source } : undefined, target: diff.target ? { ...diff.target } : undefined })) : [];
   executing.value = true;
   try {
-    const targetConnection = store.getConfig(targetConnectionId.value);
-    const failed = await executeWithProductionSqlGuard({
+    const targetConnection = store.getConfig(connectionId);
+    const txLog = await executeWithProductionSqlGuard({
       connection: targetConnection,
-      database: targetDatabase.value,
-      sql: selectedDeploySql.value,
+      database,
+      sql,
       source: t("production.sourceSchemaDiff"),
-      execute: async () => {
-        const txLog = await api.executeScriptWith2pc(targetConnectionId.value, targetDatabase.value, [selectedDeploySql.value], targetSchema.value, destructiveStatements.value.length > 0);
-        return txLog;
-      },
+      execute: () => api.executeScriptWith2pc(connectionId, database, [sql], schema, destructive),
     });
-    if (failed === undefined) return;
-    showDeployTxResult(failed);
+    if (txLog === undefined) return;
+    deployResult.value = await finishSchemaDiffDeployment(txLog, expected, (input) => api.validateSchemaDiffRoutines(connectionId, database, schema, input), t, rollback);
+    showResultDialog.value = true;
   } catch (e: any) {
     deployResult.value = {
       success: false,
@@ -1014,10 +1033,6 @@ async function executeDeploySql() {
   }
 }
 
-function showDeployTxResult(txLog: any) {
-  deployResult.value = buildDeployTxResult(txLog, t);
-  showResultDialog.value = true;
-}
 async function handleSelectObject(reviewObject: SchemaDiffObject) {
   selectedObjectId.value = reviewObject.id;
   void regenerateFocusedDeploySql(reviewObject.id);
@@ -1472,7 +1487,7 @@ const targetConnectionInfo = computed(() => {
               <Splitpanes horizontal class="min-h-0 flex-1" @resized="handleSplitpanesResized">
                 <Pane :size="splitpanesSize" min-size="20">
                   <div class="h-full overflow-auto">
-                    <SchemaDiffRoutineList :objects="routineDiffObjects" :viewing-object-id="selectedRoutineObjectId" :selectable="canDeployRoutines" :empty-text="t('diff.noDifferences')" @toggle-selection="handleToggleObjectSelection" @view-diff="handleViewRoutineDiff" />
+                    <SchemaDiffRoutineList :objects="routineDiffObjects" :source-schema="sourceSchema" :target-schema="targetSchema" :viewing-object-id="selectedRoutineObjectId" :selectable="canDeployRoutines" :empty-text="t('diff.noDifferences')" @toggle-selection="handleToggleObjectSelection" @view-diff="handleViewRoutineDiff" />
                   </div>
                 </Pane>
                 <Pane :size="100 - splitpanesSize" min-size="20">
@@ -1505,6 +1520,9 @@ const targetConnectionInfo = computed(() => {
 
         <!-- Deploy Review Step -->
         <template v-else-if="step === 'deploy-review'">
+          <div v-if="blockedRoutineSteps.length" class="m-3 rounded border border-destructive/40 p-3 text-xs text-destructive" role="alert">
+            <p v-for="item in blockedRoutineSteps" :key="`${item.routineType}-${item.name}`">{{ item.name }}: {{ t("diff.routinePlanBlocked", { reason: item.blockedReason }) }}</p>
+          </div>
           <SchemaDiffDeployStep
             v-model:deploy-sql="selectedDeploySql"
             :selected-objects="currentTabDiffObjects"
@@ -1629,6 +1647,10 @@ const targetConnectionInfo = computed(() => {
             <div v-else-if="deployResult?.status === 'rolled_back'" class="space-y-2">
               <p class="text-sm text-destructive-foreground">{{ deployResult.message }}</p>
             </div>
+            <div v-else-if="deployResult?.status === 'validation_failed'" class="space-y-2">
+              <p class="text-sm text-destructive">{{ deployResult.message }}</p>
+              <pre v-if="deployResult.error" class="max-h-40 overflow-auto whitespace-pre-wrap text-xs">{{ deployResult.error }}</pre>
+            </div>
             <div v-else-if="deployResult?.success" class="space-y-2">
               <p class="text-sm text-muted-foreground">{{ t("diff.deploySuccessMessage") }}</p>
               <div class="bg-muted p-3 rounded text-xs font-mono">
@@ -1639,6 +1661,15 @@ const targetConnectionInfo = computed(() => {
             <div v-else class="space-y-2">
               <p class="text-sm text-muted-foreground">{{ t("diff.deployFailedMessage") }}</p>
               <pre class="text-xs bg-destructive/10 text-destructive p-3 rounded overflow-auto max-h-40 font-mono whitespace-pre-wrap">{{ deployResult?.message }}</pre>
+            </div>
+            <div v-if="deployResult?.routineValidations?.length" class="mt-3 space-y-2 text-xs">
+              <p class="font-medium">{{ t("diff.routineValidationTitle") }}</p>
+              <ul class="max-h-48 space-y-2 overflow-auto">
+                <li v-for="item in deployResult.routineValidations" :key="`${item.routineType}-${item.name}`" :class="item.success ? 'text-green-600 dark:text-green-400' : 'text-destructive'">
+                  <span class="font-mono">{{ item.routineType }} {{ item.name }}</span>
+                  <pre class="whitespace-pre-wrap">{{ item.message }}</pre>
+                </li>
+              </ul>
             </div>
           </div>
 

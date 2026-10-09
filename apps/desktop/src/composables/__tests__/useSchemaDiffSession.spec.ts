@@ -475,3 +475,37 @@ test("resolves the JDBC engine dialect from the connection's product type", asyn
   // 部署脚本按目标产品类型（而不是 jdbc）生成。
   assert.equal(payload?.databaseType, "oracle");
 });
+
+test.each([
+  ["oracle", "oracle"],
+  ["oceanbase-oracle", "oceanbase-oracle"],
+  ["oracle", "oceanbase-oracle"],
+  ["oceanbase-oracle", "oracle"],
+] as const)("compares %s to %s routines with both schemas and actual engines", async (sourceDbType, targetDbType) => {
+  vi.clearAllMocks();
+  const source = { name: "P_SYNC", function_type: "PROCEDURE", data_type: "", arguments: "", definition: "CREATE PROCEDURE P_SYNC AS BEGIN NULL; END;", schema: "SRC", status: "VALID", dependencies: ["SRC.T_INPUT"] };
+  apiMock.listFunctions.mockResolvedValueOnce([source]).mockResolvedValueOnce([]);
+  apiMock.prepareSchemaDiff.mockResolvedValue({ diffs: [], functionDiffs: [{ name: "P_SYNC", type: "added", source }], syncSql: "" });
+  const tableListLoader = { load: vi.fn() };
+  const session = startSchemaDiffSession({ sourceConnectionId: "routine-source", sourceDatabase: "db", sourceSchema: "SRC", targetConnectionId: "routine-target", targetDatabase: "db", targetSchema: "DST", sourceDbType, targetDbType, options: { tables: false, functions: true }, ignoreComments: false, label: "routines" }, { tableListLoader });
+  await waitForSession(session);
+  assert.equal(session.status, "completed");
+  assert.equal(tableListLoader.load.mock.calls.length, 0);
+  assert.deepEqual(apiMock.listFunctions.mock.calls, [["routine-source", "db", "SRC"], ["routine-target", "db", "DST"]]);
+  const options = apiMock.prepareSchemaDiff.mock.calls[0]?.[0];
+  assert.equal(options.sourceDatabaseType, sourceDbType);
+  assert.equal(options.databaseType, targetDbType);
+  assert.equal(options.sourceSchema, "SRC");
+  assert.equal(options.targetSchema, "DST");
+  assert.deepEqual(options.sourceFunctions, [source]);
+});
+
+test("fails a routine compare on source read errors before generating a removal plan", async () => {
+  vi.clearAllMocks();
+  apiMock.listFunctions.mockRejectedValueOnce(new Error("SRC.P_SYNC: ORA-01031")).mockResolvedValueOnce([]);
+  const session = startSchemaDiffSession({ sourceConnectionId: "read-source", sourceDatabase: "db", sourceSchema: "SRC", targetConnectionId: "read-target", targetDatabase: "db", targetSchema: "DST", sourceDbType: "oracle", targetDbType: "oceanbase-oracle", options: { tables: false, functions: true }, ignoreComments: false, label: "read failure" }, { tableListLoader: { load: vi.fn() } });
+  await waitForSession(session);
+  assert.equal(session.status, "failed");
+  assert.match(session.error ?? "", /ORA-01031/);
+  assert.equal(apiMock.prepareSchemaDiff.mock.calls.length, 0);
+});

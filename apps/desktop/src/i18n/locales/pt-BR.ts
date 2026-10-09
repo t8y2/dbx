@@ -6761,6 +6761,10 @@ export default withEnglishFallback({
     totalFiles: "{count} arquivos",
   },
   diff: {
+    routinePlanBlocked: "Implantação bloqueada: {reason}",
+    routineDependencies: "Dependências: {dependencies}",
+    routineValidationTitle: "Compilação e releitura do código-fonte",
+    routineValidationFailed: "O DDL foi executado, mas a verificação de compilação ou do código-fonte falhou ou ficou incompleta. As alterações aplicadas não foram revertidas.",
     progress: {
       loadingObjects: "Lendo os objetos dos bancos de dados de origem e destino...",
       loadingSourceDetails: "Lendo a estrutura das tabelas do banco de dados de origem",

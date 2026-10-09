@@ -254,6 +254,7 @@ export const listEventTriggers = forward("listEventTriggers");
 export const prepareSchemaDiff = forward("prepareSchemaDiff");
 export const generateSchemaSyncSql = forward("generateSchemaSyncSql");
 export const generateSchemaSyncPlan = forward("generateSchemaSyncPlan");
+export const validateSchemaDiffRoutines = forward("validateSchemaDiffRoutines");
 export const listDialectDataTypes = forward("listDialectDataTypes");
 
 // Docs

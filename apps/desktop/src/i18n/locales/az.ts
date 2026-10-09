@@ -6671,6 +6671,10 @@ export default withEnglishFallback({
     fileFilterHint: "*.sql və ya *.sh kimi fayl şablonundan, yaxud {regex} kimi müntəzəm ifadədən istifadə edin.",
   },
   diff: {
+    routinePlanBlocked: "Yerləşdirmə bloklanıb: {reason}",
+    routineDependencies: "Asılılıqlar: {dependencies}",
+    routineValidationTitle: "Kompilyasiya və mənbə kodunun yoxlanması",
+    routineValidationFailed: "DDL icra edildi, lakin kompilyasiya və ya mənbə kodunun yoxlanması uğursuz oldu və ya tamamlanmadı. Tətbiq edilmiş dəyişikliklər geri qaytarılmayıb.",
     progress: {
       loadingObjects: "Mənbə və hədəf verilənlər bazası obyektləri oxunur...",
       loadingSourceDetails: "Mənbə verilənlər bazasının cədvəl strukturları oxunur",

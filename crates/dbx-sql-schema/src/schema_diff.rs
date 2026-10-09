@@ -1,4 +1,6 @@
 use dbx_sql_core::value_literals::quote_string_literal;
+mod oracle_routines;
+pub use oracle_routines::{add_oracle_routines_to_plan, comparable_oracle_routine, is_oracle_routine_database, oracle_routine_steps, RoutineStep};
 use dbx_sql_dialect::postgres_index_key::decorate_postgres_index_key;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
@@ -487,6 +489,10 @@ pub struct SchemaDiffTableMapping {
 #[serde(rename_all = "camelCase")]
 pub struct SchemaDiffPreparationOptions {
     #[serde(default)]
+    pub source_database_type: Option<DatabaseType>,
+    #[serde(default)]
+    pub source_schema: Option<String>,
+    #[serde(default)]
     pub source_tables: Vec<TableInfo>,
     #[serde(default)]
     pub target_tables: Vec<TableInfo>,
@@ -589,6 +595,8 @@ impl RollbackCompleteness {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaDiffPreparation {
+    #[serde(default)]
+    pub routine_steps: Vec<RoutineStep>,
     pub diffs: Vec<TableDiff>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub function_diffs: Vec<FunctionDiff>,
@@ -624,6 +632,8 @@ pub struct SchemaDiffPreparation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaSyncSqlPlan {
+    #[serde(default)]
+    pub routine_steps: Vec<RoutineStep>,
     pub sync_sql: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rollback_sync_sql: Option<String>,
@@ -1983,6 +1993,8 @@ impl AdaptiveScheduler {
 impl Default for SchemaDiffPreparationOptions {
     fn default() -> Self {
         Self {
+            source_database_type: None,
+            source_schema: None,
             source_tables: Vec::new(),
             target_tables: Vec::new(),
             source_details: Vec::new(),
@@ -2245,6 +2257,9 @@ pub fn prepare_schema_diff(options: SchemaDiffPreparationOptions) -> SchemaDiffP
         RollbackCompleteness::Incomplete
     };
 
+    let mut routine_plan = SchemaSyncSqlPlan { sync_sql, rollback_sync_sql, rollback_completeness, missing_rollback_objects, routine_steps: Vec::new() };
+    add_oracle_routines_to_plan(&mut routine_plan, &function_diffs, options.database_type, options.target_schema.as_deref(), options.source_database_type, options.source_schema.as_deref());
+
     let permission_diffs = if !options.source_permissions.is_empty() || !options.target_permissions.is_empty() {
         diff_permissions(&options.source_permissions, &options.target_permissions)
     } else {
@@ -2258,15 +2273,16 @@ pub fn prepare_schema_diff(options: SchemaDiffPreparationOptions) -> SchemaDiffP
     };
 
     SchemaDiffPreparation {
+        routine_steps: routine_plan.routine_steps,
         diffs,
         function_diffs,
         sequence_diffs,
         rule_diffs,
         owner_diffs,
-        sync_sql,
-        rollback_sync_sql,
-        rollback_completeness,
-        missing_rollback_objects,
+        sync_sql: routine_plan.sync_sql,
+        rollback_sync_sql: routine_plan.rollback_sync_sql,
+        rollback_completeness: routine_plan.rollback_completeness,
+        missing_rollback_objects: routine_plan.missing_rollback_objects,
         rename_candidates,
         rollback_graph,
         compatibility_warnings,
@@ -4002,16 +4018,18 @@ pub fn normalize_definition(def: &str) -> String {
         .join("\n")
 }
 
+fn routine_identity(info: &FunctionInfo) -> (&str, &str, &str) {
+    (&info.name, &info.arguments, if info.schema.is_some() { &info.function_type } else { "" })
+}
+
 pub fn diff_functions(source: &[FunctionInfo], target: &[FunctionInfo]) -> Vec<FunctionDiff> {
     let mut diffs = Vec::new();
     // Use (name, arguments) as key to support PostgreSQL function overloading
-    let target_map: HashMap<(&str, &str), &FunctionInfo> =
-        target.iter().map(|f| ((f.name.as_str(), f.arguments.as_str()), f)).collect();
-    let source_map: HashMap<(&str, &str), &FunctionInfo> =
-        source.iter().map(|f| ((f.name.as_str(), f.arguments.as_str()), f)).collect();
+    let target_map: HashMap<_, _> = target.iter().map(|f| (routine_identity(f), f)).collect();
+    let source_map: HashMap<_, _> = source.iter().map(|f| (routine_identity(f), f)).collect();
 
     for source_fn in source {
-        let key = (source_fn.name.as_str(), source_fn.arguments.as_str());
+        let key = routine_identity(source_fn);
         let Some(target_fn) = target_map.get(&key) else {
             diffs.push(FunctionDiff {
                 diff_type: "added".to_string(),
@@ -4030,7 +4048,12 @@ pub fn diff_functions(source: &[FunctionInfo], target: &[FunctionInfo]) -> Vec<F
         if source_fn.data_type != target_fn.data_type {
             changes.push(format!("return type: {} → {}", target_fn.data_type, source_fn.data_type));
         }
-        if normalize_definition(&source_fn.definition) != normalize_definition(&target_fn.definition) {
+        let definitions_differ = if source_fn.schema.is_some() || target_fn.schema.is_some() {
+            comparable_oracle_routine(&source_fn.definition) != comparable_oracle_routine(&target_fn.definition)
+        } else {
+            normalize_definition(&source_fn.definition) != normalize_definition(&target_fn.definition)
+        };
+        if definitions_differ {
             changes.push("definition changed".to_string());
         }
         if !changes.is_empty() {
@@ -4045,7 +4068,7 @@ pub fn diff_functions(source: &[FunctionInfo], target: &[FunctionInfo]) -> Vec<F
     }
 
     for target_fn in target {
-        let key = (target_fn.name.as_str(), target_fn.arguments.as_str());
+        let key = routine_identity(target_fn);
         if !source_map.contains_key(&key) {
             diffs.push(FunctionDiff {
                 diff_type: "removed".to_string(),
@@ -6050,7 +6073,7 @@ pub fn generate_schema_sync_sql_plan(
         RollbackCompleteness::Incomplete
     };
 
-    SchemaSyncSqlPlan { sync_sql, rollback_sync_sql, rollback_completeness, missing_rollback_objects }
+    SchemaSyncSqlPlan { sync_sql, rollback_sync_sql, rollback_completeness, missing_rollback_objects, routine_steps: Vec::new() }
 }
 
 /// Names of the objects a diff's own statements reference.
@@ -6702,7 +6725,7 @@ fn generate_schema_sync_sql_inner(
     }
 
     // Function diffs — only emit executable SQL when profile has templates
-    if !function_diffs.is_empty() {
+    if !function_diffs.is_empty() && !is_oracle_routine_database(db_type) {
         lines.push(String::new());
         lines.push("-- Functions".to_string());
         for diff in function_diffs {
@@ -8131,6 +8154,9 @@ mod tests {
             diff_type: "modified".into(),
             name: "next_value".into(),
             source: Some(FunctionInfo {
+                schema: None,
+                status: None,
+                dependencies: Vec::new(),
                 name: "next_value".into(),
                 function_type: "scalar".into(),
                 data_type: "int".into(),
@@ -8466,6 +8492,9 @@ mod tests {
             diff_type: "modified".into(),
             name: "next_value".into(),
             source: Some(FunctionInfo {
+                schema: None,
+                status: None,
+                dependencies: Vec::new(),
                 name: "next_value".into(),
                 function_type: "scalar".into(),
                 data_type: "int".into(),
@@ -8513,6 +8542,9 @@ mod tests {
             diff_type: "added".into(),
             name: "pg_only".into(),
             source: Some(FunctionInfo {
+                schema: None,
+                status: None,
+                dependencies: Vec::new(),
                 name: "pg_only".into(),
                 function_type: "FUNCTION".into(),
                 data_type: "integer".into(),
@@ -14807,6 +14839,9 @@ mod tests {
             diff_type: "added".into(),
             name: "f1".into(),
             source: Some(FunctionInfo {
+                schema: None,
+                status: None,
+                dependencies: Vec::new(),
                 name: "f1".into(),
                 function_type: "FUNCTION".into(),
                 data_type: "int".into(),
@@ -14877,6 +14912,9 @@ mod tests {
             diff_type: "added".into(),
             name: "armor".into(),
             source: Some(FunctionInfo {
+                schema: None,
+                status: None,
+                dependencies: Vec::new(),
                 name: "armor".into(),
                 function_type: "FUNCTION".into(),
                 data_type: "text".into(),
@@ -14922,6 +14960,9 @@ mod tests {
             diff_type: "added".into(),
             name: "f1".into(),
             source: Some(FunctionInfo {
+                schema: None,
+                status: None,
+                dependencies: Vec::new(),
                 name: "f1".into(),
                 function_type: "FUNCTION".into(),
                 data_type: "int".into(),

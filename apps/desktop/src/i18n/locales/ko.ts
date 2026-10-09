@@ -6601,6 +6601,10 @@ export default withEnglishFallback({
     fileFilterHint: "*.sql 또는 *.sh 같은 와일드카드나 {regex} 같은 정규식을 사용할 수 있습니다.",
   },
   diff: {
+    routinePlanBlocked: "배포 차단: {reason}",
+    routineDependencies: "종속 객체: {dependencies}",
+    routineValidationTitle: "컴파일 상태 및 소스 재조회",
+    routineValidationFailed: "DDL은 실행되었지만 컴파일 상태 또는 소스 재조회 검증에 실패했거나 검증이 완료되지 않았습니다. 적용된 변경 사항은 롤백되지 않았습니다.",
     progress: {
       loadingObjects: "원본 및 대상 데이터베이스 객체를 읽는 중...",
       loadingSourceDetails: "원본 데이터베이스 테이블 구조를 읽는 중",

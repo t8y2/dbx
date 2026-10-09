@@ -7352,6 +7352,10 @@ export default withEnglishFallback({
     fileFilterHint: "Gunakan pola glob seperti *.sql atau *.sh, atau ekspresi reguler seperti {regex}.",
   },
   diff: {
+    routinePlanBlocked: "Penerapan diblokir: {reason}",
+    routineDependencies: "Dependensi: {dependencies}",
+    routineValidationTitle: "Kompilasi dan pembacaan ulang sumber",
+    routineValidationFailed: "DDL telah dijalankan, tetapi verifikasi kompilasi atau sumber gagal atau belum lengkap. Perubahan yang diterapkan belum dibatalkan.",
     progress: {
       loadingObjects: "Membaca objek database sumber dan target...",
       loadingSourceDetails: "Membaca struktur tabel database sumber",

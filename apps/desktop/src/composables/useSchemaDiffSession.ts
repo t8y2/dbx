@@ -237,6 +237,8 @@ async function runSchemaDiffSession(session: SchemaDiffSession, dependencies: Sc
       targetOwners,
       tableMappings: sessionOptions.selectedTables === undefined ? undefined : sessionOptions.tableMappings,
       databaseType: input.targetEngineDbType ?? input.targetDbType,
+      sourceDatabaseType: (input.sourceEngineDbType ?? input.sourceDbType) as DatabaseType,
+      sourceSchema: input.sourceSchema,
       targetSchema: schemaDiffDeployTargetSchema(input.targetDbType, input.targetDatabase, input.targetSchema),
       ignoreComments: input.ignoreComments,
       cascadeDelete: sessionOptions.cascadeDelete ?? false,
@@ -340,5 +342,5 @@ export function schemaDiffSessionNextProgressStep(session: SchemaDiffSession): s
 
 export function schemaDiffSessionObjects(result: SchemaDiffPreparation | null): SchemaDiffObject[] {
   if (!result) return [];
-  return convertToSchemaDiffObjects(result.diffs, result.functionDiffs, result.sequenceDiffs, result.ruleDiffs, result.ownerDiffs, result.renameCandidates);
+  return convertToSchemaDiffObjects(result.diffs, result.functionDiffs, result.sequenceDiffs, result.ruleDiffs, result.ownerDiffs, result.renameCandidates, result.routineSteps);
 }

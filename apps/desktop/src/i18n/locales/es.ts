@@ -6978,6 +6978,10 @@ export default withEnglishFallback({
     totalFiles: "{count} archivos",
   },
   diff: {
+    routinePlanBlocked: "Despliegue bloqueado: {reason}",
+    routineDependencies: "Dependencias: {dependencies}",
+    routineValidationTitle: "Compilación y lectura del código fuente",
+    routineValidationFailed: "El DDL se ejecutó, pero la verificación de compilación o del código fuente falló o quedó incompleta. Los cambios aplicados no se han revertido.",
     progress: {
       loadingObjects: "Leyendo los objetos de las bases de datos de origen y destino...",
       loadingSourceDetails: "Leyendo la estructura de tablas de la base de datos de origen",

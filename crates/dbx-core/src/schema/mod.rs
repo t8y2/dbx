@@ -1,5 +1,7 @@
 pub mod table_structure_sql;
 pub mod oracle_constraint_change;
+mod oracle_routines;
+pub use oracle_routines::{validate_schema_diff_routines, RoutineValidation};
 
 pub use dbx_drivers::metadata::sqlite_ddl;
 
@@ -8940,6 +8942,11 @@ pub async fn list_functions_core(
     database: &str,
     schema: &str,
 ) -> Result<Vec<db::FunctionInfo>, String> {
+    if connection_config(state, connection_id).await.is_some_and(|config| {
+        crate::schema_diff::is_oracle_routine_database(config.db_type)
+    }) {
+        return oracle_routines::list_routines(state, connection_id, database, schema).await;
+    }
     let postgres_functions = retry_metadata_connection(state, connection_id, Some(database), || async {
         let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
         let pool = clone_metadata_pool(state, &pool_key).await.ok_or("Pool not found")?;
@@ -9047,6 +9054,9 @@ async fn load_function_info_via_object(
     };
 
     Some(db::FunctionInfo {
+        schema: None,
+        status: None,
+        dependencies: Vec::new(),
         name: object.name,
         function_type: function_type.to_string(),
         data_type: String::new(),

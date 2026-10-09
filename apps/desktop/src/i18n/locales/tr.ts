@@ -6552,6 +6552,10 @@ export default withEnglishFallback({
     fileFilterHint: "*.sql ya da *.sh gibi bir glob veya {regex} gibi bir düzenli ifade kullanın.",
   },
   diff: {
+    routinePlanBlocked: "Dağıtım engellendi: {reason}",
+    routineDependencies: "Bağımlılıklar: {dependencies}",
+    routineValidationTitle: "Derleme ve kaynak kodu doğrulaması",
+    routineValidationFailed: "DDL çalıştırıldı, ancak derleme veya kaynak kodu doğrulaması başarısız ya da eksik. Uygulanan değişiklikler geri alınmadı.",
     progress: {
       loadingObjects: "Kaynak ve hedef veritabanı nesneleri okunuyor...",
       loadingSourceDetails: "Kaynak veritabanı tablo yapıları okunuyor",

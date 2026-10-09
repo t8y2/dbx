@@ -7699,6 +7699,10 @@ export default withEnglishFallback({
     warnings: "警告",
   },
   diff: {
+    routinePlanBlocked: "无法部署：{reason}",
+    routineDependencies: "依赖对象：{dependencies}",
+    routineValidationTitle: "编译状态与源码读回",
+    routineValidationFailed: "DDL 已执行，但编译状态或源码读回验证失败或不完整。已应用的变更未回滚。",
     progress: {
       loadingObjects: "正在读取源库和目标库对象…",
       loadingSourceDetails: "正在读取源数据库表结构",

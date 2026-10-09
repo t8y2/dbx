@@ -10150,6 +10150,9 @@ pub async fn list_functions(pool: &Pool, schema: &str) -> Result<Vec<FunctionInf
                 .replace(&format!("CREATE OR REPLACE FUNCTION \"{}\".", schema), "CREATE OR REPLACE FUNCTION ")
                 .replace(&format!("CREATE OR REPLACE FUNCTION {}.", schema), "CREATE OR REPLACE FUNCTION ");
             FunctionInfo {
+                schema: None,
+                status: None,
+                dependencies: Vec::new(),
                 name: pg_row_try_string(row, 0),
                 function_type: pg_row_try_string(row, 1),
                 data_type: pg_row_try_string(row, 2),

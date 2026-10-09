@@ -8,6 +8,8 @@ const props = defineProps<{
   objects: SchemaDiffObject[];
   viewingObjectId?: string | null;
   emptyText?: string;
+  sourceSchema?: string;
+  targetSchema?: string;
   /** When false, hide deploy checkboxes (compare/copy-only dialects). */
   selectable?: boolean;
 }>();
@@ -38,7 +40,9 @@ const rows = computed(() =>
 
 function displayName(object: SchemaDiffObject, side: "source" | "target"): string {
   const name = side === "source" ? (object.sourceName ?? object.name) : (object.targetName ?? object.name);
-  return schemaDiffRoutineKey(name, object.arguments ?? "");
+  const schema = side === "source" ? (object.sourceSchema ?? props.sourceSchema) : (object.targetSchema ?? props.targetSchema);
+  const qualifiedName = schema ? `${schema}.${name}` : name;
+  return `${object.routineType ?? "FUNCTION"} ${schemaDiffRoutineKey(qualifiedName, object.arguments ?? "")}`;
 }
 
 function hasStats(stats: SchemaDiffRoutineTextDiffStats): boolean {
@@ -46,6 +50,7 @@ function hasStats(stats: SchemaDiffRoutineTextDiffStats): boolean {
 }
 
 function onCheckboxChange(object: SchemaDiffObject, event: Event) {
+  if (object.blockedReason) return;
   emit("toggle-selection", object, (event.target as HTMLInputElement).checked);
 }
 
@@ -79,7 +84,7 @@ function onRowActivate(object: SchemaDiffObject) {
         @keydown.enter.prevent="onRowActivate(row.object)"
         @keydown.space.prevent="onRowActivate(row.object)"
       >
-        <input v-if="showSelection" type="checkbox" class="accent-primary justify-self-center" :checked="row.selection.checked" :indeterminate="row.selection.indeterminate" @click.stop @change="onCheckboxChange(row.object, $event)" />
+        <input v-if="showSelection" type="checkbox" class="accent-primary justify-self-center" :checked="row.selection.checked" :indeterminate="row.selection.indeterminate" :disabled="!!row.object.blockedReason" :aria-label="row.sourceLabel || row.targetLabel" @click.stop @change="onCheckboxChange(row.object, $event)" />
         <div class="min-w-0 truncate font-mono" :title="row.sourceLabel || undefined">
           <span v-if="row.sourceLabel" :class="row.object.operationType === 'create' ? 'text-green-600 dark:text-green-400' : ''">{{ row.sourceLabel }}</span>
           <span v-else class="text-muted-foreground">—</span>
@@ -97,6 +102,10 @@ function onRowActivate(object: SchemaDiffObject) {
             <span class="text-amber-600 dark:text-amber-400">~{{ row.stats.modified }}</span>
           </template>
           <span v-else class="text-muted-foreground">—</span>
+        </div>
+        <div v-if="row.object.blockedReason || row.object.dependencies?.length" class="col-span-full space-y-1 break-words text-xs">
+          <p v-if="row.object.blockedReason" class="text-amber-700 dark:text-amber-400">{{ t("diff.routinePlanBlocked", { reason: row.object.blockedReason }) }}</p>
+          <p v-if="row.object.dependencies?.length" class="text-muted-foreground">{{ t("diff.routineDependencies", { dependencies: row.object.dependencies.join(", ") }) }}</p>
         </div>
       </div>
     </div>

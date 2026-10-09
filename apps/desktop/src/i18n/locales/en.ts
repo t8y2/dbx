@@ -7713,6 +7713,10 @@ export default {
     warnings: "Warnings",
   },
   diff: {
+    routinePlanBlocked: "Deployment blocked: {reason}",
+    routineDependencies: "Dependencies: {dependencies}",
+    routineValidationTitle: "Compilation and source readback",
+    routineValidationFailed: "DDL executed, but compilation or source readback was unsuccessful or incomplete. Applied changes have not been rolled back.",
     progress: {
       loadingObjects: "Reading source and target database objects...",
       loadingSourceDetails: "Reading source database table structures",

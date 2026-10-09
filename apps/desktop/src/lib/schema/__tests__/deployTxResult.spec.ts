@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
-import { buildDeployTxResult } from "@/lib/schema/deployTxResult";
+import { describe, expect, it, vi } from "vitest";
+import { buildDeployTxResult, finishSchemaDiffDeployment } from "@/lib/schema/deployTxResult";
+import type { FunctionDiff } from "@/lib/schema/schemaDiff";
 
 const t = (key: string, params?: Record<string, any>) => {
   const fallback: Record<string, string> = {
@@ -85,5 +86,54 @@ describe("buildDeployTxResult", () => {
     expect(result.statementCount).toBe(2);
     expect(result.message).toContain("1/2");
     expect(result.message).toMatch(/may already be applied|may not be transactional/i);
+  });
+});
+
+describe("routine deployment readback", () => {
+  const routine = { name: "P_SYNC", function_type: "PROCEDURE", data_type: "", arguments: "", definition: "CREATE PROCEDURE P_SYNC AS BEGIN NULL; END;", schema: "SRC" };
+  const expected: FunctionDiff[] = [{ name: routine.name, type: "added", source: routine }];
+
+  it("reports success only after every selected routine passes compilation and source readback", async () => {
+    const validate = vi.fn().mockResolvedValue([{ name: routine.name, routineType: "PROCEDURE", success: true, message: "VALID; source matches" }]);
+    const result = await finishSchemaDiffDeployment({ status: "committed" }, expected, validate, t);
+    expect(validate).toHaveBeenCalledWith(expected);
+    expect(result.success).toBe(true);
+    expect(result.routineValidations?.[0]?.message).toBe("VALID; source matches");
+  });
+
+  it.each([
+    { label: "INVALID", rows: [{ name: routine.name, routineType: "PROCEDURE", success: false, message: "PLS-00201: identifier missing" }] },
+    { label: "missing readback", rows: [] },
+    { label: "wrong routine", rows: [{ name: "OTHER", routineType: "PROCEDURE", success: true, message: "VALID" }] },
+  ])("does not report success for committed DDL with $label", async ({ rows }) => {
+    const result = await finishSchemaDiffDeployment({ status: "committed", executedCount: 1 }, expected, vi.fn().mockResolvedValue(rows), t);
+    expect(result.success).toBe(false);
+    expect(result.status).toBe("validation_failed");
+    expect(result.executedCount).toBe(1);
+  });
+
+  it("retains a metadata permission error without claiming rollback", async () => {
+    const result = await finishSchemaDiffDeployment({ status: "committed" }, expected, vi.fn().mockRejectedValue(new Error("ORA-01031")), t);
+    expect(result.success).toBe(false);
+    expect(result.status).toBe("validation_failed");
+    expect(result.error).toBe("ORA-01031");
+  });
+
+  it("does not validate an uncommitted or cancelled deployment", async () => {
+    const validate = vi.fn();
+    expect((await finishSchemaDiffDeployment({ status: "mixed" }, expected, validate, t)).success).toBe(false);
+    expect(validate).not.toHaveBeenCalled();
+  });
+
+  it("validates rollback against the previous target and verifies rolled-back additions are absent", async () => {
+    const target = { ...routine, schema: "DST", definition: "previous definition" };
+    const diffs: FunctionDiff[] = [...expected, { name: "P_OLD", type: "removed", target }, { name: "P_CHANGED", type: "modified", source: routine, target }];
+    const validate = vi.fn().mockResolvedValue([]);
+    await finishSchemaDiffDeployment({ status: "committed" }, diffs, validate, t, true);
+    expect(validate).toHaveBeenCalledWith([
+      { ...expected[0], type: "removed", source: undefined, target: routine },
+      { ...diffs[1], type: "added", source: target, target: undefined },
+      { ...diffs[2], source: target, target: routine },
+    ]);
   });
 });

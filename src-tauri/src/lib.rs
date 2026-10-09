@@ -2060,6 +2060,7 @@ pub fn run() {
             commands::schema_diff::prepare_schema_diff,
             commands::schema_diff::generate_schema_sync_sql,
             commands::schema_diff::generate_schema_sync_plan,
+            commands::schema_diff::validate_schema_diff_routines,
             commands::dialect_cmd::list_dialect_data_types,
             commands::schema_cache::save_schema_cache,
             commands::schema_cache::load_schema_cache,

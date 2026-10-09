@@ -155,10 +155,10 @@ describe("databaseObjectCapabilities", () => {
   });
 
   it("opens schema diff routines only for same-dialect allowlisted databases", () => {
-    for (const dbType of ["postgres", "opengauss", "mysql", "sqlserver", "gaussdb", "kingbase"] as const) {
+    for (const dbType of ["postgres", "opengauss", "mysql", "sqlserver", "gaussdb", "kingbase", "oracle", "oceanbase-oracle"] as const) {
       expect(supportsSchemaDiffRoutines(dbType), dbType).toBe(true);
     }
-    for (const dbType of ["oracle", "dameng", "hive", "sqlite", "doris", "databend", "manticoresearch"] as const) {
+    for (const dbType of ["dameng", "hive", "sqlite", "doris", "databend", "manticoresearch"] as const) {
       expect(supportsSchemaDiffRoutines(dbType), dbType).toBe(false);
     }
     // Fallback ROUTINE_OBJECTS must not open schema-diff routine compare.
@@ -166,7 +166,8 @@ describe("databaseObjectCapabilities", () => {
     expect(supportsSchemaDiffRoutines(undefined)).toBe(false);
     expect(schemaDiffRoutineObjectTypes("mysql")).toEqual(["PROCEDURE", "FUNCTION"]);
     expect(schemaDiffRoutineObjectTypes("sqlserver")).toEqual(["PROCEDURE", "FUNCTION"]);
-    expect(schemaDiffRoutineObjectTypes("oracle")).toEqual([]);
+    expect(schemaDiffRoutineObjectTypes("oracle")).toEqual(["PROCEDURE", "FUNCTION"]);
+    expect(schemaDiffRoutineObjectTypesIntersection("oracle", "oceanbase-oracle")).toEqual(["PROCEDURE", "FUNCTION"]);
     expect(schemaDiffRoutineObjectTypesIntersection("mysql", "mysql")).toEqual(["PROCEDURE", "FUNCTION"]);
     expect(schemaDiffRoutineObjectTypesIntersection("mysql", "oracle")).toEqual([]);
     expect(schemaDiffRoutineObjectTypesIntersection("mysql", "sqlserver")).toEqual([]);

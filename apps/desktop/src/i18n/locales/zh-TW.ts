@@ -6132,6 +6132,10 @@ export default withEnglishFallback({
     runInBackground: "背景執行",
   },
   diff: {
+    routinePlanBlocked: "無法部署：{reason}",
+    routineDependencies: "相依物件：{dependencies}",
+    routineValidationTitle: "編譯狀態與原始碼讀回",
+    routineValidationFailed: "DDL 已執行，但編譯狀態或原始碼讀回驗證失敗或不完整。已套用的變更未回復。",
     progress: {
       loadingObjects: "正在讀取來源與目標資料庫物件……",
       loadingSourceDetails: "正在讀取來源資料庫資料表結構",

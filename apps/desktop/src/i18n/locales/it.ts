@@ -6761,6 +6761,10 @@ export default withEnglishFallback({
     totalFiles: "{count} file",
   },
   diff: {
+    routinePlanBlocked: "Distribuzione bloccata: {reason}",
+    routineDependencies: "Dipendenze: {dependencies}",
+    routineValidationTitle: "Compilazione e rilettura del codice sorgente",
+    routineValidationFailed: "Il DDL è stato eseguito, ma la verifica della compilazione o del codice sorgente è fallita o è incompleta. Le modifiche applicate non sono state annullate.",
     progress: {
       loadingObjects: "Lettura degli oggetti dei database sorgente e di destinazione...",
       loadingSourceDetails: "Lettura della struttura delle tabelle del database sorgente",

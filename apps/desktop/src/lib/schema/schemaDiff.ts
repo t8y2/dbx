@@ -248,6 +248,8 @@ export interface SchemaDiffPreparationOptions {
   sourceOwners?: OwnerInfo[];
   targetOwners?: OwnerInfo[];
   databaseType: DatabaseType;
+  sourceDatabaseType?: DatabaseType;
+  sourceSchema?: string;
   targetSchema?: string;
   ignoreComments?: boolean;
   cascadeDelete?: boolean;
@@ -344,9 +346,26 @@ export interface MissingRollbackObject {
 
 export type RollbackCompleteness = "complete" | "incomplete";
 
+export interface SchemaDiffRoutineStep {
+  name: string;
+  routineType: "PROCEDURE" | "FUNCTION";
+  operation: "added" | "modified" | "removed";
+  sql?: string;
+  blockedReason?: string;
+  dependencies: string[];
+}
+
+export interface SchemaDiffRoutineValidation {
+  name: string;
+  routineType: "PROCEDURE" | "FUNCTION";
+  success: boolean;
+  message: string;
+}
+
 export interface SchemaDiffPreparation {
   diffs: TableDiff[];
   functionDiffs?: FunctionDiff[];
+  routineSteps?: SchemaDiffRoutineStep[];
   sequenceDiffs?: SequenceDiff[];
   ruleDiffs?: RuleDiff[];
   ownerDiffs?: OwnerDiff[];
@@ -363,6 +382,7 @@ export interface SchemaDiffPreparation {
 }
 
 export interface SchemaSyncSqlPlan {
+  routineSteps?: SchemaDiffRoutineStep[];
   syncSql: string;
   rollbackSyncSql?: string;
   rollbackCompleteness: RollbackCompleteness;
@@ -371,6 +391,8 @@ export interface SchemaSyncSqlPlan {
 
 export interface GenerateSchemaSyncPlanOptions {
   databaseType: DatabaseType;
+  sourceDatabaseType?: DatabaseType;
+  sourceSchema?: string;
   targetSchema?: string;
   cascadeDelete?: boolean;
   sourceDialect?: string;
@@ -416,6 +438,10 @@ export interface SchemaDiffObject {
   arguments?: string;
   /** PROCEDURE vs FUNCTION when objectKind is function (for getObjectSource). */
   routineType?: "PROCEDURE" | "FUNCTION";
+  sourceSchema?: string;
+  targetSchema?: string;
+  blockedReason?: string;
+  dependencies?: string[];
   renameMetadata?: {
     confirmed: boolean;
     sourceName?: string;
@@ -648,7 +674,7 @@ function buildSequenceDdl(seq: SequenceInfo): string {
   return parts.join("\n");
 }
 
-export function convertToSchemaDiffObjects(tableDiffs: TableDiff[], functionDiffs: FunctionDiff[] = [], sequenceDiffs: SequenceDiff[] = [], ruleDiffs: RuleDiff[] = [], ownerDiffs: OwnerDiff[] = [], renameCandidates?: RenameCandidate[]): SchemaDiffObject[] {
+export function convertToSchemaDiffObjects(tableDiffs: TableDiff[], functionDiffs: FunctionDiff[] = [], sequenceDiffs: SequenceDiff[] = [], ruleDiffs: RuleDiff[] = [], ownerDiffs: OwnerDiff[] = [], renameCandidates?: RenameCandidate[], routineSteps: SchemaDiffRoutineStep[] = []): SchemaDiffObject[] {
   const objects: SchemaDiffObject[] = [];
 
   for (const diff of tableDiffs) {
@@ -752,6 +778,7 @@ export function convertToSchemaDiffObjects(tableDiffs: TableDiff[], functionDiff
     const args = diff.source?.arguments || diff.target?.arguments || "";
     const functionType = (diff.source?.function_type || diff.target?.function_type || "").toUpperCase();
     const routineType: "PROCEDURE" | "FUNCTION" = functionType.includes("PROC") ? "PROCEDURE" : "FUNCTION";
+    const routineStep = routineSteps.find((step) => step.name === diff.name && step.routineType === routineType);
     objects.push({
       id: `func-${diff.name}-${args}`,
       operationType: getOperationType(diff.type),
@@ -759,9 +786,13 @@ export function convertToSchemaDiffObjects(tableDiffs: TableDiff[], functionDiff
       name: diff.name,
       arguments: args,
       routineType,
+      sourceSchema: diff.source?.schema,
+      targetSchema: diff.target?.schema,
+      blockedReason: routineStep?.blockedReason,
+      dependencies: routineStep?.dependencies,
       sourceName: diff.type === "added" ? undefined : diff.name,
       targetName: diff.type === "removed" ? undefined : diff.name,
-      selected: true,
+      selected: !routineStep?.blockedReason,
       sourceDdl: diff.source?.definition,
       targetDdl: diff.target?.definition,
       changes: diff.changes,
@@ -842,7 +873,7 @@ export interface SelectedSchemaDiffInput {
 export function selectSchemaDiffInput(result: SchemaDiffPreparation, objects: SchemaDiffObject[]): SelectedSchemaDiffInput {
   const selectedIds = new Set(
     flattenSchemaDiffObjects(objects)
-      .filter((object) => object.selected && object.operationType !== "none")
+      .filter((object) => object.selected && !object.blockedReason && object.operationType !== "none")
       .map((object) => object.id),
   );
 
@@ -1140,10 +1171,10 @@ export function findSchemaDiffObject(objects: SchemaDiffObject[], objectId: stri
 
 export function setSchemaDiffObjectSelected(objects: SchemaDiffObject[], objectId: string, selected: boolean): boolean {
   const object = findSchemaDiffObject(objects, objectId);
-  if (!object) return false;
+  if (!object || (selected && object.blockedReason)) return false;
 
   const applySelection = (target: SchemaDiffObject) => {
-    target.selected = selected;
+    target.selected = selected && !target.blockedReason;
     for (const child of target.children ?? []) applySelection(child);
   };
   applySelection(object);
@@ -1257,8 +1288,8 @@ export function setSchemaDiffObjectSelectedWithDependencies(objects: SchemaDiffO
 export function selectedSchemaDiffObjects(objects: SchemaDiffObject[]): SchemaDiffObject[] {
   return objects.flatMap((object) => {
     const children = object.children?.filter((child) => child.operationType !== "none") ?? [];
-    if (children.length > 0) return children.filter((child) => child.selected);
-    return object.selected && object.operationType !== "none" ? [object] : [];
+    if (children.length > 0) return children.filter((child) => child.selected && !child.blockedReason);
+    return object.selected && !object.blockedReason && object.operationType !== "none" ? [object] : [];
   });
 }
 

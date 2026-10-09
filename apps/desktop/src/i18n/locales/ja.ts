@@ -6790,6 +6790,10 @@ export default withEnglishFallback({
     totalFiles: "{count} ファイル",
   },
   diff: {
+    routinePlanBlocked: "デプロイできません: {reason}",
+    routineDependencies: "依存オブジェクト: {dependencies}",
+    routineValidationTitle: "コンパイル状態とソースの再取得",
+    routineValidationFailed: "DDL は実行されましたが、コンパイル状態またはソースの再取得の検証に失敗したか、検証が不完全です。適用済みの変更はロールバックされていません。",
     progress: {
       loadingObjects: "ソースとターゲットのデータベースオブジェクトを読み込み中...",
       loadingSourceDetails: "ソースデータベースのテーブル構造を読み込み中",

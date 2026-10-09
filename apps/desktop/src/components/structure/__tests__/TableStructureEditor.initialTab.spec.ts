@@ -401,4 +401,41 @@ describe("TableStructureEditor initial tab", () => {
 
     expect(root.textContent).toContain("structureEditor.addForeignKey");
   });
+
+  it("restores the fields horizontal scrollbar after visiting triggers", async () => {
+    const scrollWidthDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollWidth");
+    const clientWidthDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientWidth");
+    try {
+      Object.defineProperty(HTMLElement.prototype, "scrollWidth", {
+        configurable: true,
+        get() {
+          if (this.classList?.contains("structure-column-virtual-scroller")) return 1200;
+          return scrollWidthDescriptor?.get?.call(this) ?? 0;
+        },
+      });
+      Object.defineProperty(HTMLElement.prototype, "clientWidth", {
+        configurable: true,
+        get() {
+          if (this.classList?.contains("structure-column-virtual-scroller")) return 400;
+          return clientWidthDescriptor?.get?.call(this) ?? 0;
+        },
+      });
+
+      const root = await mountStructureEditor();
+      await vi.waitFor(() => expect(root.querySelector(".structure-horizontal-scrollbar")).not.toBeNull());
+
+      root.querySelector<HTMLButtonElement>('[data-tab-trigger="triggers"]')?.click();
+      await settle();
+      expect(root.querySelector(".structure-horizontal-scrollbar")).toBeNull();
+
+      root.querySelector<HTMLButtonElement>('[data-tab-trigger="columns"]')?.click();
+      await settle();
+      expect(root.querySelector(".structure-horizontal-scrollbar")).not.toBeNull();
+    } finally {
+      if (scrollWidthDescriptor) Object.defineProperty(HTMLElement.prototype, "scrollWidth", scrollWidthDescriptor);
+      else delete (HTMLElement.prototype as { scrollWidth?: number }).scrollWidth;
+      if (clientWidthDescriptor) Object.defineProperty(HTMLElement.prototype, "clientWidth", clientWidthDescriptor);
+      else delete (HTMLElement.prototype as { clientWidth?: number }).clientWidth;
+    }
+  });
 });

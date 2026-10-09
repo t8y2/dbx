@@ -1,6 +1,10 @@
 use super::*;
 use crate::schema_diff::{comparable_oracle_routine, FunctionDiff};
 
+#[cfg(all(test, unix))]
+#[path = "oracle_routine_context_tests.rs"]
+mod context_tests;
+
 fn literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
@@ -49,8 +53,7 @@ pub async fn schema_diff_routine_context(
     removed_objects: &[db::FunctionInfo],
     target_objects: &[db::FunctionInfo],
 ) -> Result<Option<dbx_sql::oracle_program_compatibility::OracleProgramContext>, String> {
-    let has_types = source_objects.iter().chain(removed_objects).any(|info| matches!(info.function_type.as_str(), "TYPE" | "TYPE BODY"));
-    if (source_type == Some(target_type) && !has_types) || (source_objects.is_empty() && !has_types) || !crate::schema_diff::is_oracle_routine_database(target_type) || !source_type.is_some_and(crate::schema_diff::is_oracle_routine_database) { return Ok(None); }
+    if (source_objects.is_empty() && removed_objects.is_empty() && target_objects.is_empty()) || !crate::schema_diff::is_oracle_routine_database(target_type) || !source_type.is_some_and(crate::schema_diff::is_oracle_routine_database) { return Ok(None); }
     let Some(endpoints) = endpoints else { return Ok(None) };
     let source_schema = source_schema.filter(|s| !s.is_empty()).ok_or("Explicit source schema is required")?;
     let target_schema = target_schema.filter(|s| !s.is_empty()).ok_or("Explicit target schema is required")?;

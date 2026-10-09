@@ -1229,6 +1229,8 @@ pub enum AgentMethod {
     ExecuteQueryPage,
     FetchQueryPage,
     CloseQuerySession,
+    ReadLargeValueChunk,
+    ReleaseLargeValue,
     StartTableRead,
     FetchTableReadPage,
     CloseTableReadSession,
@@ -1243,7 +1245,7 @@ pub enum AgentMethod {
 }
 
 impl AgentMethod {
-    pub const ALL: [Self; 41] = [
+    pub const ALL: [Self; 43] = [
         Self::Handshake,
         Self::Connect,
         Self::OpenSession,
@@ -1274,6 +1276,8 @@ impl AgentMethod {
         Self::ExecuteQueryPage,
         Self::FetchQueryPage,
         Self::CloseQuerySession,
+        Self::ReadLargeValueChunk,
+        Self::ReleaseLargeValue,
         Self::StartTableRead,
         Self::FetchTableReadPage,
         Self::CloseTableReadSession,
@@ -1321,6 +1325,8 @@ impl AgentMethod {
             Self::ExecuteQueryPage => "execute_query_page",
             Self::FetchQueryPage => "fetch_query_page",
             Self::CloseQuerySession => "close_query_session",
+            Self::ReadLargeValueChunk => "read_large_value_chunk",
+            Self::ReleaseLargeValue => "release_large_value",
             Self::StartTableRead => "start_table_read",
             Self::FetchTableReadPage => "fetch_table_read_page",
             Self::CloseTableReadSession => "close_table_read_session",

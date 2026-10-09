@@ -17,6 +17,7 @@ pub fn build_package_cleanup_steps(input: &RoutineRenameObjectSourceInput) -> Re
     let body_count = usize::from(input.package_body_source.is_some());
     let object_count = 1 + body_count;
     let drop = literal(&format!("DROP PACKAGE {}.{}", quoted(owner), quoted(&input.name)));
+    let direct_actor = if input.database_type == DatabaseType::OceanbaseOracle { "USERNAME=SYS_CONTEXT('USERENV','SESSION_USER') AND " } else { "" };
     let cleanup = format!("-- Explicit cleanup after external and dynamic callers have been migrated.
 DECLARE n PLS_INTEGER;
 BEGIN
@@ -26,7 +27,7 @@ BEGIN
   SELECT COUNT(*) INTO n FROM SYS.DBA_OBJECTS WHERE OWNER={schema} AND OBJECT_NAME={old} AND OBJECT_TYPE='PACKAGE BODY';
   IF n<>{body_count} THEN RAISE_APPLICATION_ERROR(-20041,'Original package body changed; reload both definitions.'); END IF;
   IF SYS_CONTEXT('USERENV','SESSION_USER') NOT IN ({schema},'SYS') THEN
-    SELECT COUNT(*) INTO n FROM SYS.USER_SYS_PRIVS WHERE PRIVILEGE='DROP ANY PROCEDURE';
+    SELECT COUNT(*) INTO n FROM SYS.USER_SYS_PRIVS WHERE {direct_actor}PRIVILEGE='DROP ANY PROCEDURE';
     IF n=0 THEN RAISE_APPLICATION_ERROR(-20042,'Cross-owner cleanup requires direct DROP ANY PROCEDURE.'); END IF;
   END IF;
   {validation}
@@ -72,6 +73,13 @@ pub fn build_package_rename_steps(input: &RoutineRenameObjectSourceInput) -> Res
     let new = literal(&input.new_name);
     let body_count = usize::from(sources.create_body.is_some());
     let object_count = 1 + body_count;
+    // OB 4.2.5 does not provide SESSION_PRIVS; enabled-role privileges are unknown.
+    // Require an actor's direct grant there rather than infer session role activation.
+    let creation_privileges = match input.database_type {
+        DatabaseType::Oracle => "SYS.SESSION_PRIVS WHERE PRIVILEGE IN ('CREATE PROCEDURE','CREATE ANY PROCEDURE')",
+        _ => "SYS.USER_SYS_PRIVS WHERE USERNAME=SYS_CONTEXT('USERENV','SESSION_USER') AND PRIVILEGE IN ('CREATE PROCEDURE','CREATE ANY PROCEDURE')",
+    };
+    let direct_actor = if input.database_type == DatabaseType::OceanbaseOracle { "USERNAME=SYS_CONTEXT('USERENV','SESSION_USER') AND " } else { "" };
     let preflight = format!("-- Preflight: no DDL. Complete dependency/grant visibility is required.
 DECLARE n PLS_INTEGER;
 BEGIN
@@ -85,11 +93,11 @@ BEGIN
   SELECT COUNT(*) INTO n FROM SYS.DBA_OBJECTS WHERE OWNER={schema} AND OBJECT_NAME={new};
   IF n<>0 THEN RAISE_APPLICATION_ERROR(-20034, 'Replacement name already exists; nothing changed.'); END IF;
   IF SYS_CONTEXT('USERENV', 'SESSION_USER')={schema} AND SYS_CONTEXT('USERENV', 'SESSION_USER')<>'SYS' THEN
-    SELECT COUNT(*) INTO n FROM SYS.SESSION_PRIVS WHERE PRIVILEGE IN ('CREATE PROCEDURE','CREATE ANY PROCEDURE');
+    SELECT COUNT(*) INTO n FROM {creation_privileges};
     IF n=0 THEN RAISE_APPLICATION_ERROR(-20035, 'Package creation privilege is unavailable.'); END IF;
   END IF;
   IF SYS_CONTEXT('USERENV', 'SESSION_USER') NOT IN ({schema}, 'SYS') THEN
-    SELECT COUNT(*) INTO n FROM SYS.USER_SYS_PRIVS WHERE PRIVILEGE='CREATE ANY PROCEDURE';
+    SELECT COUNT(*) INTO n FROM SYS.USER_SYS_PRIVS WHERE {direct_actor}PRIVILEGE='CREATE ANY PROCEDURE';
     IF n=0 THEN RAISE_APPLICATION_ERROR(-20035, 'Cross-owner package creation requires direct CREATE ANY PROCEDURE.'); END IF;
   END IF;
   SELECT COUNT(*) INTO n FROM SYS.DBA_DEPENDENCIES WHERE REFERENCED_OWNER={schema} AND REFERENCED_NAME={old};
@@ -99,7 +107,7 @@ BEGIN
   IF SYS_CONTEXT('USERENV', 'SESSION_USER') NOT IN ({schema}, 'SYS') THEN
     SELECT COUNT(*) INTO n FROM SYS.DBA_TAB_PRIVS WHERE OWNER={schema} AND TABLE_NAME={old};
     IF n>0 THEN
-      SELECT COUNT(*) INTO n FROM SYS.USER_SYS_PRIVS WHERE PRIVILEGE='GRANT ANY OBJECT PRIVILEGE';
+      SELECT COUNT(*) INTO n FROM SYS.USER_SYS_PRIVS WHERE {direct_actor}PRIVILEGE='GRANT ANY OBJECT PRIVILEGE';
       IF n=0 THEN RAISE_APPLICATION_ERROR(-20036, 'Cross-owner grant migration requires direct GRANT ANY OBJECT PRIVILEGE.'); END IF;
     END IF;
   END IF;
@@ -398,6 +406,46 @@ mod tests {
     use super::*;
     use crate::object_source_sql::build_routine_rename_object_source_statements;
     use crate::types::ObjectSourceKind;
+
+    #[test]
+    fn package_privilege_preflight_uses_engine_dictionary_and_fails_closed() {
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            let input = RoutineRenameObjectSourceInput {
+                package_cleanup: false,
+                database_type,
+                object_type: ObjectSourceKind::Package,
+                schema: Some("APP".into()),
+                name: "PKG".into(),
+                new_name: "NEW_PKG".into(),
+                source: "CREATE PACKAGE PKG AS PROCEDURE RUN; END PKG;".into(),
+                package_body_source: Some("CREATE PACKAGE BODY PKG AS PROCEDURE RUN IS BEGIN NULL; END RUN; END PKG;".into()),
+            };
+            let migration = build_package_rename_steps(&input).unwrap();
+            let preflight = &migration[0];
+            let cleanup = build_package_cleanup_steps(&input).unwrap();
+            if database_type == DatabaseType::Oracle {
+                assert!(preflight.contains("FROM SYS.SESSION_PRIVS WHERE PRIVILEGE IN ('CREATE PROCEDURE','CREATE ANY PROCEDURE')"));
+                assert!(preflight.contains("FROM SYS.USER_SYS_PRIVS WHERE PRIVILEGE='CREATE ANY PROCEDURE'"));
+                assert!(cleanup[0].contains("FROM SYS.USER_SYS_PRIVS WHERE PRIVILEGE='DROP ANY PROCEDURE'"));
+                assert!(!preflight.contains("WHERE USERNAME="));
+            } else {
+                assert!(preflight.contains("FROM SYS.USER_SYS_PRIVS WHERE USERNAME=SYS_CONTEXT('USERENV','SESSION_USER') AND PRIVILEGE IN ('CREATE PROCEDURE','CREATE ANY PROCEDURE')"));
+                for privilege in ["CREATE ANY PROCEDURE", "GRANT ANY OBJECT PRIVILEGE"] {
+                    assert!(preflight.contains(&format!("FROM SYS.USER_SYS_PRIVS WHERE USERNAME=SYS_CONTEXT('USERENV','SESSION_USER') AND PRIVILEGE='{privilege}'")));
+                }
+                assert!(cleanup[0].contains("FROM SYS.USER_SYS_PRIVS WHERE USERNAME=SYS_CONTEXT('USERENV','SESSION_USER') AND PRIVILEGE='DROP ANY PROCEDURE'"));
+                assert!(migration.iter().chain(cleanup.iter()).all(|sql| !sql.contains("SESSION_PRIVS") && !sql.contains("ROLE_SYS_PRIVS")));
+            }
+            // A zero direct grant count cannot silently authorize creation, grant or cleanup.
+            for (code, message) in [(-20035, "Package creation privilege is unavailable."), (-20035, "Cross-owner package creation requires direct CREATE ANY PROCEDURE."), (-20036, "Cross-owner grant migration requires direct GRANT ANY OBJECT PRIVILEGE.")] {
+                assert!(preflight.contains(&format!("IF n=0 THEN RAISE_APPLICATION_ERROR({code}, '{message}')")));
+            }
+            assert!(cleanup[0].contains("IF n=0 THEN RAISE_APPLICATION_ERROR(-20042,'Cross-owner cleanup requires direct DROP ANY PROCEDURE.')"));
+            assert!(preflight.contains("IF SYS_CONTEXT('USERENV', 'SESSION_USER')='APP'"));
+            assert!(migration[1].contains("PACKAGE \"APP\".\"NEW_PKG\""));
+            assert!(migration[2].contains("PACKAGE BODY \"APP\".\"NEW_PKG\""));
+        }
+    }
 
     #[test]
     fn public_package_plan_validates_both_sources_grants_and_members_without_dropping_original() {

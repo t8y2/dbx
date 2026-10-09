@@ -41,6 +41,7 @@ import TruncatedTextTooltip from "@/components/ui/TruncatedTextTooltip.vue";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
+import RuntimeDiagnostics from "@/components/editor/RuntimeDiagnostics.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -593,6 +594,7 @@ async function changeCatalog(selectedCatalog: string) {
         </TooltipTrigger>
         <TooltipContent>{{ t("editor.previewChanges") }}</TooltipContent>
       </Tooltip>
+      <RuntimeDiagnostics v-if="activeConnection && ['oracle', 'oceanbase-oracle'].includes(activeConnection.db_type)" :connection="activeConnection" :database="activeTab.database" />
       <Tooltip v-if="supportsExplain">
         <TooltipTrigger as-child>
           <Button

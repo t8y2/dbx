@@ -341,6 +341,22 @@ describe("extractSqlParameters", () => {
       ["BEGIN CLOSE @value; END;", "c", "BEGIN CLOSE c; END;"],
       ["SELECT * FROM employees WHERE name LIKE 'x' ESCAPE @value", "'!'", "SELECT * FROM employees WHERE name LIKE 'x' ESCAPE '!'"],
       ["SELECT CURRENT_TIMESTAMP AT TIME ZONE @value FROM DUAL", "'UTC'", "SELECT CURRENT_TIMESTAMP AT TIME ZONE 'UTC' FROM DUAL"],
+      ["SELECT INTERVAL @value DAY FROM DUAL", "'1'", "SELECT INTERVAL '1' DAY FROM DUAL"],
+      ["SELECT JSON_OBJECT(KEY @value VALUE 'x') FROM DUAL", "'k'", "SELECT JSON_OBJECT(KEY 'k' VALUE 'x') FROM DUAL"],
+      ["SELECT JSON_OBJECT(KEY 'k' VALUE @value) FROM DUAL", "'x'", "SELECT JSON_OBJECT(KEY 'k' VALUE 'x') FROM DUAL"],
+      ["SELECT XMLQUERY('/a' PASSING @value RETURNING CONTENT) FROM DUAL", "XMLTYPE('<a/>')", "SELECT XMLQUERY('/a' PASSING XMLTYPE('<a/>') RETURNING CONTENT) FROM DUAL"],
+      ["SELECT SUM(salary) OVER (ORDER BY salary RANGE @value PRECEDING) FROM employees", "100", "SELECT SUM(salary) OVER (ORDER BY salary RANGE 100 PRECEDING) FROM employees"],
+      ["SELECT id FROM employees CONNECT BY NOCYCLE @value", "PRIOR id = manager_id", "SELECT id FROM employees CONNECT BY NOCYCLE PRIOR id = manager_id"],
+      ["SELECT LISTAGG(name, ',' ON OVERFLOW TRUNCATE @value) WITHIN GROUP (ORDER BY name) FROM employees", "'...'", "SELECT LISTAGG(name, ',' ON OVERFLOW TRUNCATE '...') WITHIN GROUP (ORDER BY name) FROM employees"],
+      ["SELECT name COLLATE @value FROM employees", "BINARY_CI", "SELECT name COLLATE BINARY_CI FROM employees"],
+      ["SET TRANSACTION NAME @value", "'test'", "SET TRANSACTION NAME 'test'"],
+      ["DECLARE v NUMBER; BEGIN EXECUTE IMMEDIATE 'BEGIN :x := 1; END;' USING OUT @value; END;", "v", "DECLARE v NUMBER; BEGIN EXECUTE IMMEDIATE 'BEGIN :x := 1; END;' USING OUT v; END;"],
+      ["BEGIN FOR i IN REVERSE @value .. 10 LOOP NULL; END LOOP; END;", "1", "BEGIN FOR i IN REVERSE 1 .. 10 LOOP NULL; END LOOP; END;"],
+      ["SAVEPOINT @value", "sp1", "SAVEPOINT sp1"],
+      ["DECLARE e EXCEPTION; BEGIN RAISE @value; END;", "e", "DECLARE e EXCEPTION; BEGIN RAISE e; END;"],
+      ["BEGIN GOTO @value; <<finish>> NULL; END;", "finish", "BEGIN GOTO finish; <<finish>> NULL; END;"],
+      ["BEGIN <<outer_loop>> LOOP EXIT @value; END LOOP; END;", "outer_loop", "BEGIN <<outer_loop>> LOOP EXIT outer_loop; END LOOP; END;"],
+      ["BEGIN <<outer_loop>> FOR i IN 1..2 LOOP CONTINUE @value WHEN i = 1; END LOOP; END;", "outer_loop", "BEGIN <<outer_loop>> FOR i IN 1..2 LOOP CONTINUE outer_loop WHEN i = 1; END LOOP; END;"],
     ])("keeps expression parameters in %s", (sql, value, expected) => {
       expect(extractSqlParameters(sql, { databaseType })).toEqual(["value"]);
       expect(substituteSqlParameters(sql, { value: { kind: "raw", value } }, { databaseType })).toBe(expected);

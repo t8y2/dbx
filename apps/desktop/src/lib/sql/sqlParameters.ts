@@ -67,7 +67,48 @@ export interface SqlParameterOptions {
 const PARAMETER_NAME_RE = /^[\p{L}_][\p{L}\p{N}_]*(?:\.[\p{L}_][\p{L}\p{N}_]*)*$/u;
 const PARAMETER_NAME_START_RE = /[\p{L}_]/u;
 const PARAMETER_NAME_CHAR_RE = /[\p{L}\p{N}_]/u;
-const ORACLE_PARAMETER_PREFIX_KEYWORDS = new Set(["begin", "case", "close", "elsif", "escape", "fetch", "first", "if", "join", "limit", "loop", "next", "nulls", "offset", "open", "return", "returning", "scn", "timestamp", "using", "wait", "when", "while", "zone"]);
+const ORACLE_PARAMETER_PREFIX_KEYWORDS = new Set([
+  "begin",
+  "case",
+  "close",
+  "collate",
+  "continue",
+  "elsif",
+  "escape",
+  "exit",
+  "fetch",
+  "first",
+  "goto",
+  "if",
+  "interval",
+  "join",
+  "key",
+  "limit",
+  "loop",
+  "name",
+  "next",
+  "nocycle",
+  "nulls",
+  "offset",
+  "open",
+  "out",
+  "passing",
+  "raise",
+  "range",
+  "return",
+  "returning",
+  "reverse",
+  "savepoint",
+  "scn",
+  "timestamp",
+  "truncate",
+  "using",
+  "value",
+  "wait",
+  "when",
+  "while",
+  "zone",
+]);
 const ORACLE_OBJECT_PREFIX_KEYWORDS = new Set(["from", "join", "update", "into", "table", "delete"]);
 const SQL_SERVER_TEMP_TABLE_CONTEXT_KEYWORDS = new Set(["table", "from", "join", "into", "update", "truncate"]);
 const MYSQL_ROUTINE_LABEL_STATEMENTS = new Set(["begin", "loop", "while", "repeat"]);

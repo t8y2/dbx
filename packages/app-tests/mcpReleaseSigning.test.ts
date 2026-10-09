@@ -10,6 +10,11 @@ import { mcpIdentifier, mcpRequirement, signMcp, verifyMcp } from "../../.github
 
 const workflow = parse(readFileSync(".github/workflows/mcp-release.yml", "utf8"));
 
+// These fixtures execute POSIX shebang tools and Bash workflow steps. Windows
+// cannot spawn them; skips are missing coverage, not signing validation. Run all
+// cases with POSIX Node/Bash in Linux or macOS CI; real signing requires macOS.
+const posixTest = test.skipIf(process.platform === "win32");
+
 test("every macOS MCP build signs before staging and validates npm reruns", () => {
   const job = workflow.jobs["publish-mcp-platforms"];
   assert.deepEqual(job.strategy.matrix.include.filter((leg) => leg.target.endsWith("apple-darwin")).map((leg) => leg.target).sort(), [
@@ -116,7 +121,7 @@ if (security) {
   };
 }
 
-test("imports only into an isolated keychain, signs and verifies in order, then restores all keychains", async () => {
+posixTest("imports only into an isolated keychain, signs and verifies in order, then restores all keychains", async () => {
   const scenario = fixture();
   await signMcp(scenario.binary, scenario.options);
   scenario.cleaned();
@@ -141,7 +146,7 @@ test("imports only into an isolated keychain, signs and verifies in order, then 
   assert.match(commands.at(-1).args[1], /dbx-mcp-signing-.*\/signing.keychain-db$/);
 });
 
-test("distinct builds and renewed certificates keep the same signer-constrained requirement", async () => {
+posixTest("distinct builds and renewed certificates keep the same signer-constrained requirement", async () => {
   const scenario = fixture();
   await signMcp(scenario.binary, scenario.options);
   const first = readFileSync(scenario.binary, "utf8");
@@ -171,14 +176,14 @@ test("rejects unsupported hosts, missing credentials and malformed teams before 
   assert.deepEqual(scenario.commands(), []);
 });
 
-test.each(["create-keychain", "set-keychain-settings", "unlock-keychain", "import", "set-key-partition-list", "find-identity", "sign", "--verify", "--display"])("propagates %s failure and cleans up", async (fail) => {
+posixTest.each(["create-keychain", "set-keychain-settings", "unlock-keychain", "import", "set-key-partition-list", "find-identity", "sign", "--verify", "--display"])("propagates %s failure and cleans up", async (fail) => {
   const scenario = fixture({ fail });
   await assert.rejects(signMcp(scenario.binary, scenario.options), /failed/);
   scenario.cleaned();
   assert.equal(scenario.commands().at(-1).args[0], "delete-keychain");
 });
 
-test.each([
+posixTest.each([
   { identities: '  1) AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA "Developer ID Application: DBX (OTHER12345)"' },
   { identities: '  1) AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA "Apple Development: DBX (ABCDE12345)"' },
   { identities: "0 valid identities found" },
@@ -190,14 +195,14 @@ test.each([
   scenario.cleaned();
 });
 
-test.each(["restore", "delete-keychain"])("cleanup failure at %s fails the release and still removes temporary material", async (fail) => {
+posixTest.each(["restore", "delete-keychain"])("cleanup failure at %s fails the release and still removes temporary material", async (fail) => {
   const scenario = fixture({ fail });
   await assert.rejects(signMcp(scenario.binary, scenario.options), /cleanup failed/);
   assert.ok(!readdirSync(scenario.root).some((name) => name.startsWith("dbx-mcp-signing-")));
   assert.equal(scenario.commands().at(-1).args[0], "delete-keychain");
 });
 
-test("signature survives package staging and tar repacking, while tampering and unsigned reruns fail", async () => {
+posixTest("signature survives package staging and tar repacking, while tampering and unsigned reruns fail", async () => {
   const scenario = fixture();
   await assert.rejects(verifyMcp(scenario.binary, scenario.options), /failed/);
   await signMcp(scenario.binary, scenario.options);
@@ -279,7 +284,7 @@ with zipfile.ZipFile(sys.argv[2], 'w') as archive:
   };
 }
 
-test.each(["arm64", "x64"])("macOS %s workflow stages and publishes the exact signed npm tarball", async (arch) => {
+posixTest.each(["arm64", "x64"])("macOS %s workflow stages and publishes the exact signed npm tarball", async (arch) => {
   const scenario = fixture();
   const workflowScenario = workflowFixture(scenario);
   const leg = { target: arch === "arm64" ? "aarch64-apple-darwin" : "x86_64-apple-darwin", "package-dir": `mcp-darwin-${arch}`,
@@ -300,7 +305,7 @@ test.each(["arm64", "x64"])("macOS %s workflow stages and publishes the exact si
   scenario.cleaned();
 });
 
-test.each([true, false])("npm reruns verify existing artifacts and reject unsigned ones (corrupt=%s)", async (corrupt) => {
+posixTest.each([true, false])("npm reruns verify existing artifacts and reject unsigned ones (corrupt=%s)", async (corrupt) => {
   const scenario = fixture();
   await signMcp(scenario.binary, scenario.options);
   const workflowScenario = workflowFixture(scenario, { existing: true, corrupt });
@@ -312,7 +317,7 @@ test.each([true, false])("npm reruns verify existing artifacts and reject unsign
   scenario.cleaned();
 });
 
-test("an altered new npm tarball blocks publication", async () => {
+posixTest("an altered new npm tarball blocks publication", async () => {
   const scenario = fixture();
   await signMcp(scenario.binary, scenario.options);
   const workflowScenario = workflowFixture(scenario, { corrupt: true });
@@ -323,7 +328,7 @@ test("an altered new npm tarball blocks publication", async () => {
   assert.ok(!workflowScenario.npmCommands().some((args) => args[0] === "publish"));
 });
 
-test("packaging cannot substitute a different valid signed build", async () => {
+posixTest("packaging cannot substitute a different valid signed build", async () => {
   const scenario = fixture();
   await signMcp(scenario.binary, scenario.options);
   const replacement = join(scenario.root, "different-build");
@@ -338,7 +343,7 @@ test("packaging cannot substitute a different valid signed build", async () => {
   assert.ok(!workflowScenario.npmCommands().some((args) => args[0] === "publish"));
 });
 
-test.each(["Linux", "Windows"])("%s npm publication keeps its existing path without invoking macOS tools", (os) => {
+posixTest.each(["Linux", "Windows"])("%s npm publication keeps its existing path without invoking macOS tools", (os) => {
   const scenario = fixture();
   const workflowScenario = workflowFixture(scenario);
   const result = workflowScenario.run(workflow.jobs["publish-mcp-platforms"].steps.find((step) => step.name === "Publish platform package").run,
@@ -348,7 +353,7 @@ test.each(["Linux", "Windows"])("%s npm publication keeps its existing path with
   assert.deepEqual(scenario.commands(), []);
 });
 
-test("standalone archive workflow preserves npm signatures and produces Homebrew checksums", async () => {
+posixTest("standalone archive workflow preserves npm signatures and produces Homebrew checksums", async () => {
   const scenario = fixture();
   await signMcp(scenario.binary, scenario.options);
   const workflowScenario = workflowFixture(scenario);
@@ -365,7 +370,7 @@ test("standalone archive workflow preserves npm signatures and produces Homebrew
   assert.equal(sums.status, 0, sums.stderr);
 });
 
-test("interruption waits for the signing command to stop and restores the keychain search list", async () => {
+posixTest("interruption waits for the signing command to stop and restores the keychain search list", async () => {
   const scenario = fixture({ pause: "import" });
   const controller = new AbortController();
   const result = assert.rejects(signMcp(scenario.binary, { ...scenario.options, signal: controller.signal }), /failed/);
@@ -390,7 +395,7 @@ test("all MCP build paths are covered and CLI jobs keep their original release b
   }
 });
 
-test("tool diagnostics and credential arguments are not exposed in signing errors", async () => {
+posixTest("tool diagnostics and credential arguments are not exposed in signing errors", async () => {
   const scenario = fixture({ fail: "import", diagnostic: "sensitive mocked certificate error" });
   await assert.rejects(signMcp(scenario.binary, scenario.options), (error: Error) => {
     assert.equal(error.message, "security import failed.");
@@ -400,7 +405,7 @@ test("tool diagnostics and credential arguments are not exposed in signing error
   scenario.cleaned();
 });
 
-test("standalone repacking rejects unsigned npm artifacts before producing checksums", () => {
+posixTest("standalone repacking rejects unsigned npm artifacts before producing checksums", () => {
   const scenario = fixture();
   const workflowScenario = workflowFixture(scenario);
   const result = workflowScenario.run(workflow.jobs["publish-mcp-github-release"].steps.find((step) => step.name === "Build native release archives from npm packages").run);
